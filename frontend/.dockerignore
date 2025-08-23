@@ -1,0 +1,51 @@
+# Whitelisting essential files
+!index.html
+
+# Ignore Git and local metadata
+.git
+.gitignore
+.vscode
+.idea
+*.code-workspace
+.DS_Store
+
+# Node/Frontend build artifacts
+.output/
+.parcel-cache/
+.turbo/
+dist/
+dist-ssr/
+lerna-debug.log*
+logs/
+node_modules/
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment and config files
+.env
+.env.local
+.env.*
+
+# Media, data, and large files not needed for build
+data/
+models/
+output/
+*.db
+*.sqlite3
+*.html
+*.ipynb
+*.mkv
+*.mp3
+*.mp4
+*.sh
+*.wav
+*.webm
+*.zip
+*.gguf
+
+# Docker-specific
+*.pid
+*.sock
+docker-compose.override.yml

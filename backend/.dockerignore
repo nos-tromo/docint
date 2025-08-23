@@ -1,0 +1,53 @@
+# Ignore Git and local metadata
+.git
+.gitignore
+.vscode
+.idea
+*.code-workspace
+.DS_Store
+
+# Backend build artifacts and caches
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.so
+*.egg-info/
+.log/
+.venv/
+build/
+dist/
+env/
+lib/
+venv/
+output/
+test/
+
+# Environment and config files
+.env
+
+# Media, data, and large files not needed for build
+data/
+models/
+output/
+*.csv
+*.db
+*.doc*
+*.gguf
+*.html
+*.ipynb
+*.mkv
+*.mp3
+*.mp4
+*.pdf
+*.sh
+*.sqlite3
+*.wav
+*.webm
+*.xls*
+*.zip
+
+# Docker-specific
+*.pid
+*.sock
+docker-compose.override.yml

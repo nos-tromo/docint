@@ -1,0 +1,52 @@
+services:
+  # #############################
+  # # Backend (GPU if available, else CPU)
+  # #############################
+  # wizard:
+  #   build:
+  #     context: ./backend
+  #     dockerfile: Dockerfile
+  #   volumes:
+  #     - ${HF_CACHE:-${USERPROFILE:-$HOME}/.cache/huggingface}:/root/.cache/huggingface
+  #     - ${APPDATA:-${HOME}}/nltk_data:/root/nltk_data
+  #   ports:
+  #     - "8000:8000"
+  #   environment:
+  #     - OLLAMA_HOST=http://ollama:11434
+  #     - USE_DEVICE=auto
+  #     - USER_AGENT=Mozilla/5.0 (compatible; MyRAGApp/1.0)
+
+  # #############################
+  # # Frontend
+  # #############################
+  # frontend:
+  #   build:
+  #     context: ./frontend
+  #     dockerfile: Dockerfile
+  #   ports:
+  #     - "8080:80"
+  #   depends_on:
+  #     - wizard
+
+  # #############################
+  # # Ollama Service
+  # #############################
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ${HOME}/.ollama:/root/.ollama
+
+  #############################
+  # Qdrant Vector Database
+  #############################
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ${USERPROFILE:-$HOME}/.qdrant/storage:/qdrant/storage
+      - ${USERPROFILE:-$HOME}/.qdrant/snapshots:/qdrant/snapshots
+    restart: unless-stopped

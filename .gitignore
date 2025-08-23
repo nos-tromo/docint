@@ -1,0 +1,203 @@
+# -----------------
+# Global
+# -----------------
+.DS_Store
+.env
+.mypy_cache
+.idea/
+.vscode/
+*.code-workspace
+*.bin
+*.env
+*.ipynb
+*.log
+*.pyc
+
+# files
+*.code-workspace
+*.db
+*.gguf
+*.html
+*.ipynb
+*.log
+*.mkv
+*.mp3
+*.mp4
+*.sh
+*.sqlite3
+*.wav
+*.webm
+*.zip
+
+# directories
+__pycache__
+build/
+data*/
+env/
+lib/
+models/
+output/
+test/
+uploads/
+venv/
+workbench/
+*.egg-info/
+
+# -----------------
+# Backend (Python)
+# -----------------
+
+# Compiled files and caches
+*.py[cod]
+*.so
+
+# SQLite DBs (optional)
+*.sqlite3
+*.db
+
+# -----------------
+# Frontend (Node/Vite)
+# -----------------
+
+frontend/node_modules/
+frontend/.parcel-cache/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.env.local
+frontend/.env.*
+frontend/*.local
+frontend/.turbo/
+frontend/.output/
+
+# Frontend logs
+frontend/logs
+frontend/*.log
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/pnpm-debug.log*
+frontend/lerna-debug.log*
+
+# Optional editor/IDE/project file ignores (if working in frontend separately)
+frontend/.suo
+frontend/.ntvs*
+frontend/.njsproj
+frontend/.sln
+frontend/.sw?
+
+# Global frontend output
+dist/
+build/
+
+# -----------------
+# Docker
+# -----------------
+*.pid
+*.sock
+docker-compose.override.yml
+
+
+# all hidden files and directories
+.*
+!.dockerignore
+!.gitignore
+# ==================================
+# Global
+# ==================================
+.DS_Store
+.env
+*.env
+*.log
+*.pyc
+*.pyo
+*.so
+*.bin
+*.egg-info/
+__pycache__/
+*.code-workspace
+
+# Hidden files (keep important ones)
+.*
+!.gitignore
+!.dockerignore
+
+# ==================================
+# Python Backend
+# ==================================
+.mypy_cache/
+.idea/
+.vscode/
+build/
+dist/
+venv/
+env/
+lib/
+output/
+workbench/
+uploads/
+test/
+
+# Python caches & compiled files
+*.py[cod]
+*.sqlite3
+*.db
+
+# ==================================
+# React Frontend
+# ==================================
+frontend/node_modules/
+frontend/.parcel-cache/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.turbo/
+frontend/.output/
+frontend/logs/
+frontend/*.log
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/pnpm-debug.log*
+frontend/lerna-debug.log*
+
+# Local environment files
+frontend/.env
+frontend/.env.local
+frontend/.env.*
+
+# Editor/IDE/project files (frontend-specific)
+frontend/.suo
+frontend/.ntvs*
+frontend/.njsproj
+frontend/.sln
+frontend/.sw?
+
+# ==================================
+# Build & Output (Global)
+# ==================================
+dist/
+build/
+
+# ==================================
+# Media & Data (Optional)
+# ==================================
+*.html
+*.ipynb
+*.mkv
+*.mp3
+*.mp4
+*.sh
+*.wav
+*.webm
+*.zip
+*.gguf
+data/
+models/
+
+# ==================================
+# Docker
+# ==================================
+*.pid
+*.sock
+docker-compose.override.yml
+
+!frontend/index.html
