@@ -48,10 +48,10 @@ export default function CollectionPicker({ isOpen, onClose, onAttached }: Props)
       }}
     >
       <DialogBackdrop />
-      <DialogContent>
+      <DialogContent bg="bg.panel" color="fg.default">
         <DialogHeader display="flex" justifyContent="space-between" alignItems="center">
           <Text fontWeight="bold">Select or create a collection</Text>
-          <CloseButton onClick={onClose} />
+          <CloseButton onClick={onClose} color="fg.default" />
         </DialogHeader>
         <DialogBody>
           <Stack gap={3}>
@@ -60,7 +60,7 @@ export default function CollectionPicker({ isOpen, onClose, onAttached }: Props)
               <select
                 value={mode}
                 onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
-                  setMode(e.target.value as any)
+                  setMode(e.target.value as "pick" | "create")
                 }
                 style={{
                   width: "100%",
