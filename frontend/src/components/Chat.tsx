@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Box,
   Button,
@@ -15,8 +15,18 @@ type Msg = { role: "user" | "assistant"; text: string; sources?: Source[] };
 
 export default function Chat() {
   const [q, setQ] = useState("");
-  const [msgs, setMsgs] = useState<Msg[]>([]);
+  const [msgs, setMsgs] = useState<Msg[]>(() => {
+    const stored = localStorage.getItem("chatMsgs");
+    return stored ? JSON.parse(stored) : [];
+    });
+  const [sessionId, setSessionId] = useState<string | null>(() =>
+    localStorage.getItem("sessionId"),
+  );
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    localStorage.setItem("chatMsgs", JSON.stringify(msgs));
+  }, [msgs]);
 
   const ask = async () => {
     const question = q.trim();
@@ -25,7 +35,12 @@ export default function Chat() {
     setQ("");
     setLoading(true);
     try {
-      const { answer, sources } = await askQuery(question);
+      const { answer, sources, session_id } = await askQuery(
+        question,
+        sessionId || undefined,
+      );
+      setSessionId(session_id);
+      localStorage.setItem("sessionId", session_id);
       setMsgs((m) => [...m, { role: "assistant", text: answer || "", sources }]);
     } catch (e: unknown) {
       const err = e as { response?: { data?: { detail?: string } } };
@@ -34,6 +49,13 @@ export default function Chat() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const reset = () => {
+    setMsgs([]);
+    setSessionId(null);
+    localStorage.removeItem("chatMsgs");
+    localStorage.removeItem("sessionId");
   };
 
   return (
@@ -99,6 +121,9 @@ export default function Chat() {
         />
         <Button onClick={ask} colorScheme="teal" disabled={loading || !q.trim()}>
           Send
+        </Button>
+        <Button onClick={reset} variant="outline" disabled={loading}>
+          New Session
         </Button>
       </HStack>
     </VStack>

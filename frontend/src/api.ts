@@ -7,7 +7,9 @@ export type Source = {
   text?: string;
 };
 
-const API = axios.create({ baseURL: "http://localhost:8001" });
+const API = axios.create({
+  baseURL: import.meta.env.VITE_API_URL || "http://localhost:8000",
+});
 
 export const listCollections = async (): Promise<string[]> => {
   const { data } = await API.get("/collections/list");
@@ -21,7 +23,8 @@ export const selectCollection = async (name: string) => {
 
 export const askQuery = async (
   question: string,
-): Promise<{ answer: string; sources: Source[] }> => {
-  const { data } = await API.post("/query", { question });
+  sessionId?: string,
+): Promise<{ answer: string; sources: Source[]; session_id: string }> => {
+  const { data } = await API.post("/query", { question, session_id: sessionId });
   return data;
 };

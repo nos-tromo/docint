@@ -26,11 +26,13 @@ class SelectCollectionIn(BaseModel):
 
 class QueryIn(BaseModel):
     question: str
+    session_id: str | None = None
 
 
 class QueryOut(BaseModel):
     answer: str
     sources: list[dict] = []
+    session_id: str
 
 
 @app.get("/collections/list", response_model=list[str])
@@ -58,51 +60,12 @@ def collections_select(payload: SelectCollectionIn):
 @app.post("/query", response_model=QueryOut)
 def query(payload: QueryIn):
     try:
-        res = (
-            rag.query_engine.query(payload.question)
-            if getattr(rag, "query_engine", None)
-            else rag.chat(payload.question)
-        )
-        # normalize
-        answer = ""
-        sources: list[dict] = []
-        if hasattr(res, "response"):  # LlamaIndex Response/AgentChatResponse
-            answer = str(getattr(res, "response"))
-            # try to surface sources if present
-            sn = getattr(res, "source_nodes", None)
-            if sn:
-                for n in sn:
-                    meta = (
-                        getattr(n, "metadata", {})
-                        or getattr(getattr(n, "node", None), "metadata", {})
-                        or {}
-                    )
-                    text = (
-                        getattr(n, "text", "")
-                        or getattr(getattr(n, "node", None), "text", "")
-                        or ""
-                    )
-                    sources.append(
-                        {
-                            "filename": meta.get("file_name")
-                            or meta.get("file_path")
-                            or "unknown",
-                            "filetype": meta.get("file_type") or "",
-                            "source": meta.get("source") or "",
-                            "page": meta.get("page"),
-                            "row": meta.get("row"),
-                            "text": text,
-                        }
-                    )
-        elif isinstance(res, dict):
-            answer = str(res.get("response") or res.get("answer") or "")
-            sources = res.get("sources") or []
-        elif isinstance(res, tuple):
-            answer = str(res[0]) if len(res) else ""
-            sources = res[1] if len(res) > 1 and isinstance(res[1], list) else []
-        else:
-            answer = str(res)
+        session_id = rag.start_session(payload.session_id)
+        data, _ = rag.chat(payload.question)
 
-        return {"answer": answer, "sources": sources}
+        answer = str(data.get("response") or data.get("answer") or "")
+        sources = data.get("sources") or []
+
+        return {"answer": answer, "sources": sources, "session_id": session_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
