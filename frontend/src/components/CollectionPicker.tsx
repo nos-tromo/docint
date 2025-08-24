@@ -60,7 +60,7 @@ export default function CollectionPicker({ isOpen, onClose, onAttached }: Props)
               <select
                 value={mode}
                 onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
-                  setMode(e.target.value as any)
+                  setMode(e.target.value as "pick" | "create")
                 }
                 style={{
                   width: "100%",

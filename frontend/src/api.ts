@@ -11,7 +11,9 @@ export const selectCollection = async (name: string) => {
   return data;
 };
 
-export const askQuery = async (question: string): Promise<{answer: string; sources: any[]}> => {
+export const askQuery = async (
+  question: string,
+): Promise<{ answer: string; sources: unknown[] }> => {
   const { data } = await API.post("/query", { question });
   return data;
 };

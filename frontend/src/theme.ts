@@ -2,6 +2,8 @@ import { createSystem, defineConfig, defaultConfig } from "@chakra-ui/react";
 
 const config = defineConfig({
   cssVarsRoot: ":root",
+  initialColorMode: "dark",
+  useSystemColorMode: false,
 });
 
 const system = createSystem(

@@ -19,8 +19,9 @@ export default function Chat() {
     try {
       const { answer, sources } = await askQuery(question);
       setMsgs((m) => [...m, { role: "assistant", text: answer || "", sources }]);
-    } catch (e: any) {
-      const msg = e?.response?.data?.detail ? `⚠️ ${e.response.data.detail}` : `⚠️ ${String(e)}`;
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } } };
+      const msg = err.response?.data?.detail ? `⚠️ ${err.response.data.detail}` : `⚠️ ${String(e)}`;
       setMsgs((m) => [...m, { role: "assistant", text: msg }]);
     } finally {
       setLoading(false);
