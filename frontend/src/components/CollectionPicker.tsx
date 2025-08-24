@@ -25,10 +25,21 @@ export default function CollectionPicker({ isOpen, onClose, onAttached }: Props)
   const [mode, setMode] = useState<"pick" | "create">("pick");
   const [selected, setSelected] = useState<string>("");
   const [newName, setNewName] = useState("");
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (isOpen) {
-      listCollections().then(setCollections).catch(() => setCollections([]));
+      setError(null);
+      listCollections()
+        .then((cols) => {
+          setCollections(cols);
+        })
+        .catch((err: unknown) => {
+          setError(
+            err instanceof Error ? err.message : "Failed to load collections"
+          );
+          setCollections([]);
+        });
     }
   }, [isOpen]);
 
@@ -76,6 +87,8 @@ export default function CollectionPicker({ isOpen, onClose, onAttached }: Props)
                 <option value="create">Create new</option>
               </select>
             </label>
+
+            {error && <Text color="red.400">{error}</Text>}
 
             {mode === "pick" ? (
               <label>
