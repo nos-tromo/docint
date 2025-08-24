@@ -26,6 +26,7 @@ __pycache__/
 *.mp4
 *.sh
 *.sqlite3
+*.txt
 *.wav
 *.webm
 *.zip
