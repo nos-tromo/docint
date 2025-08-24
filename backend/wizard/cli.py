@@ -1,16 +1,37 @@
-from modules.rag import RAG
+from pathlib import Path
 
-# Define the data directory and session parameters
+from wizard.modules.rag import RAG
+
+# Define paths and initialize RAG
 data_dir = "data"
-queries = [
-    "Was sind die Gründe für die Geschlechterdivergenz?",
-    # "In welchen Ländern wird das Phänomenfestgestellt?",
-    # "Warum tendieren Männer stärker als Frauen dazu, autoritäre Positionen zu unterstützen?",
-]
+q_dir = Path("helpers") / "queries.txt"
+rag = RAG()
+
+choice = input("Select existing collection? (y/n): ").strip().lower()
+col_name = input("Enter collection name: ").strip()
+if choice == 'y':
+    col_path = Path.home() / ".qdrant" / "storage" / "collections" / col_name
+    if col_name:
+        if not col_path.exists():
+            print(f"Collection path {col_path} does not exist. Exiting.")
+            exit(1)
+        print(f"Using existing collection: {col_name}")
+    else:
+        print("No collection name provided. Exiting.")
+        exit(1)
+elif choice == 'n':
+    print(f"Creating new collection: {col_name}.")
+else:
+    print("Invalid choice. Please enter 'y' or 'n'. Exiting.")
+    exit(1)
+
+
+with open(q_dir, "r", encoding="utf-8") as file:
+    queries = [line.strip() for line in file if line.strip()]
+
 print(f"Data directory: {data_dir}")
 
 # Initialize the RAG pipeline and process the documents
-rag = RAG(qdrant_collection="testdb-cli")
 rag.ingest_docs(data_dir)
 print("Documents ingested successfully.")
 
