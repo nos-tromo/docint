@@ -1,8 +1,16 @@
 import { useState } from "react";
-import { Box, Button, HStack, Input, Text, VStack, Spinner } from "@chakra-ui/react";
+import {
+  Box,
+  Button,
+  HStack,
+  Input,
+  Text,
+  VStack,
+  Spinner,
+} from "@chakra-ui/react";
 import { askQuery } from "../api";
+import type { Source } from "../api";
 
-type Source = { filename?: string; page?: number; row?: number; text?: string };
 type Msg = { role: "user" | "assistant"; text: string; sources?: Source[] };
 
 export default function Chat() {

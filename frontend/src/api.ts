@@ -1,4 +1,12 @@
 import axios from "axios";
+
+export type Source = {
+  filename?: string;
+  page?: number;
+  row?: number;
+  text?: string;
+};
+
 const API = axios.create({ baseURL: "http://localhost:8001" });
 
 export const listCollections = async (): Promise<string[]> => {
@@ -13,7 +21,7 @@ export const selectCollection = async (name: string) => {
 
 export const askQuery = async (
   question: string,
-): Promise<{ answer: string; sources: unknown[] }> => {
+): Promise<{ answer: string; sources: Source[] }> => {
   const { data } = await API.post("/query", { question });
   return data;
 };
