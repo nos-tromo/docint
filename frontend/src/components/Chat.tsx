@@ -16,16 +16,17 @@ type Msg = { role: "user" | "assistant"; text: string; sources?: Source[] };
 export default function Chat() {
   const [q, setQ] = useState("");
   const [msgs, setMsgs] = useState<Msg[]>(() => {
-    const stored = localStorage.getItem("chatMsgs");
-    return stored ? JSON.parse(stored) : [];
-    });
-  const [sessionId, setSessionId] = useState<string | null>(() =>
-    localStorage.getItem("sessionId"),
-  );
+    try {
+      const stored = localStorage.getItem("chat_msgs");
+      return stored ? (JSON.parse(stored) as Msg[]) : [];
+    } catch {
+      return [];
+    }
+  });
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    localStorage.setItem("chatMsgs", JSON.stringify(msgs));
+    localStorage.setItem("chat_msgs", JSON.stringify(msgs));
   }, [msgs]);
 
   const ask = async () => {
