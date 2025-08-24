@@ -78,7 +78,7 @@ export default function Chat() {
 
         {loading && (
           <HStack>
-            <Spinner size="sm" />
+            <Spinner size="sm" color="fg.muted" />
             <Text fontSize="sm" color="fg.muted">
               Thinking…
             </Text>
