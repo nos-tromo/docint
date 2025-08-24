@@ -23,7 +23,8 @@ export const selectCollection = async (name: string) => {
 
 export const askQuery = async (
   question: string,
-): Promise<{ answer: string; sources: Source[] }> => {
-  const { data } = await API.post("/query", { question });
+  sessionId?: string,
+): Promise<{ answer: string; sources: Source[]; session_id: string }> => {
+  const { data } = await API.post("/query", { question, session_id: sessionId });
   return data;
 };

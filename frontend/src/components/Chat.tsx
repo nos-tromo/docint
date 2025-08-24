@@ -36,7 +36,12 @@ export default function Chat() {
     setQ("");
     setLoading(true);
     try {
-      const { answer, sources } = await askQuery(question);
+      const { answer, sources, session_id } = await askQuery(
+        question,
+        sessionId || undefined,
+      );
+      setSessionId(session_id);
+      localStorage.setItem("sessionId", session_id);
       setMsgs((m) => [...m, { role: "assistant", text: answer || "", sources }]);
     } catch (e: unknown) {
       const err = e as { response?: { data?: { detail?: string } } };
@@ -45,6 +50,13 @@ export default function Chat() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const reset = () => {
+    setMsgs([]);
+    setSessionId(null);
+    localStorage.removeItem("chatMsgs");
+    localStorage.removeItem("sessionId");
   };
 
   return (
@@ -110,6 +122,9 @@ export default function Chat() {
         />
         <Button onClick={ask} colorScheme="teal" disabled={loading || !q.trim()}>
           Send
+        </Button>
+        <Button onClick={reset} variant="outline" disabled={loading}>
+          New Session
         </Button>
       </HStack>
     </VStack>
