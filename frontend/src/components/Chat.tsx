@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Box,
   Button,
@@ -15,8 +15,19 @@ type Msg = { role: "user" | "assistant"; text: string; sources?: Source[] };
 
 export default function Chat() {
   const [q, setQ] = useState("");
-  const [msgs, setMsgs] = useState<Msg[]>([]);
+  const [msgs, setMsgs] = useState<Msg[]>(() => {
+    try {
+      const stored = localStorage.getItem("chat_msgs");
+      return stored ? (JSON.parse(stored) as Msg[]) : [];
+    } catch {
+      return [];
+    }
+  });
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    localStorage.setItem("chat_msgs", JSON.stringify(msgs));
+  }, [msgs]);
 
   const ask = async () => {
     const question = q.trim();
