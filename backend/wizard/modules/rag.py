@@ -12,6 +12,7 @@ from typing import Any
 
 import pandas as pd
 import torch
+from fastembed import SparseTextEmbedding
 from helpers.unescape_unicode import unescape_unicode
 from llama_index.core import (
     Response,
@@ -132,6 +133,7 @@ class RAG:
     qdrant_host: str = QDRANT_HOST
     qdrant_port: int = 6333
     qdrant_collection: str = "default"
+    qdrant_index_dims: int = 768
 
     # --- Performance / device controls ---
     embed_device: str = "cpu"  # run embeddings on CPU to avoid GPU contention
@@ -170,8 +172,8 @@ class RAG:
     _reranker: SentenceTransformerRerank | None = field(
         default=None, init=False, repr=False
     )
-    qdrant_client: QdrantClient | None = field(default=None, init=False, repr=False)
-    qdrant_aclient: AsyncQdrantClient | None = field(
+    _qdrant_client: QdrantClient | None = field(default=None, init=False, repr=False)
+    _qdrant_aclient: AsyncQdrantClient | None = field(
         default=None, init=False, repr=False
     )
 
@@ -209,8 +211,6 @@ class RAG:
     @staticmethod
     def _list_supported_sparse_models() -> list[str]:
         try:
-            from fastembed import SparseTextEmbedding
-
             return [m["model"] for m in SparseTextEmbedding.list_supported_models()]
         except ImportError:
             return []
@@ -247,7 +247,7 @@ class RAG:
         )
         if self._embed_model is None:
             raise RuntimeError("Embedding model could not be initialized.")
-        logger.info(f"Embedding model (HF) initialized: {self.embed_model_id}")
+        logger.info("Embedding model (HF) initialized: %s", self.embed_model_id)
         return self._embed_model
 
     @property
@@ -262,7 +262,7 @@ class RAG:
                 thinking=self.thinking,
                 additional_kwargs=self.ollama_options,
             )
-            logger.info(f"Gen model (Ollama) initialized: {self.gen_model_id}")
+            logger.info("Gen model (Ollama) initialized: %s", self.gen_model_id)
         return self._gen_model
 
     @property
@@ -285,8 +285,32 @@ class RAG:
                 model=self.rerank_model_id,
                 device=self.rerank_device,
             )
-            logger.info(f"Reranker initialized: {self.rerank_model_id}")
+            logger.info("Reranker initialized: %s", self.rerank_model_id)
         return self._reranker
+
+    @property
+    def qdrant_client(self) -> QdrantClient:
+        if self._qdrant_client is None:
+            self._qdrant_client = QdrantClient(
+                host=self.qdrant_host, port=self.qdrant_port
+            )
+            logger.info(
+                f"Qdrant client initialized: {self.qdrant_host}:{self.qdrant_port}"
+            )
+        return self._qdrant_client
+
+    @property
+    def qdrant_aclient(self) -> AsyncQdrantClient:
+        if self._qdrant_aclient is None:
+            self._qdrant_aclient = AsyncQdrantClient(
+                host=self.qdrant_host, port=self.qdrant_port
+            )
+            logger.info(
+                "Qdrant async client initialized: %s: %s",
+                self.qdrant_host,
+                self.qdrant_port,
+            )
+        return self._qdrant_aclient
 
     # --- Build pieces ---
     def _create_doc_loader(self) -> None:
@@ -329,6 +353,27 @@ class RAG:
             chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap
         )
 
+    def _create_vector_store(self) -> QdrantVectorStore:
+        return QdrantVectorStore(
+            client=self.qdrant_client,
+            aclient=self.qdrant_aclient,
+            collection_name=self.qdrant_collection,
+            enable_hybrid=self.enable_hybrid,
+            fastembed_sparse_model=self.sparse_model,
+        )
+
+    def _create_storage_context(
+        self, vector_store: QdrantVectorStore
+    ) -> StorageContext:
+        return StorageContext.from_defaults(vector_store=vector_store)
+
+    def _create_index(self, storage_ctx: StorageContext) -> VectorStoreIndex:
+        return VectorStoreIndex(
+            nodes=self.nodes,
+            storage_context=storage_ctx,
+            embed_model=self.embed_model,
+        )
+
     def _docs_to_nodes(self) -> None:
         """Convert loaded documents into nodes using the appropriate parsers."""
         if self.dir_reader is None:
@@ -361,24 +406,41 @@ class RAG:
 
         self.nodes = nodes
 
+    def _probe_embedding_dimension(self) -> int:
+        """
+        Probe the embedding model with a test string to determine the output dimension.
+
+        Returns:
+            int: The dimensionality of the embedding vectors.
+        """        
+        try:
+            probe_vec = self.embed_model.get_text_embedding("dimension probe")
+            dim = (
+                len(probe_vec)
+                if isinstance(probe_vec, (list, tuple))
+                else int(getattr(probe_vec, "shape", [0])[0])
+            )
+            if not isinstance(dim, int) or dim <= 0:
+                dim = self.qdrant_index_dims  # fallback
+        except Exception:
+            dim = self.qdrant_index_dims
+        return dim
+    
     def _ensure_qdrant_collection(self, dim: int) -> None:
-        """Create or gently tune the Qdrant collection for better runtime performance.
+        """
+        Create or gently tune the Qdrant collection for better runtime performance.
         - Stores vectors and HNSW graph on disk to reduce RAM pressure
         - Uses lighter HNSW build params
         - Enables INT8 scalar quantization on vectors (lossy but fast & memory-light)
 
         This will **not** drop an existing collection. It creates the collection if missing
         and attempts safe, idempotent updates otherwise.
-        """
-        if self.qdrant_client is None:
-            self.qdrant_client = QdrantClient(
-                host=self.qdrant_host, port=self.qdrant_port
-            )
 
+        Args:
+            dim (int): Dimensionality of the vectors to be stored.
+        """
         name = self.qdrant_collection
         try:
-            # If the collection exists, try to update in-place with safe diffs
-            info = self.qdrant_client.get_collection(name)
             try:
                 self.qdrant_client.update_collection(
                     collection_name=name,
@@ -438,90 +500,25 @@ class RAG:
                     e,
                 )
 
-    def _create_index(self) -> None:
-        # Initialize (or reuse) Qdrant clients (sync + async)
-        if self.qdrant_client is None:
-            self.qdrant_client = QdrantClient(
-                host=self.qdrant_host, port=self.qdrant_port
-            )
-        if self.qdrant_aclient is None:
-            self.qdrant_aclient = AsyncQdrantClient(
-                host=self.qdrant_host, port=self.qdrant_port
-            )
-        # Ensure collection exists with performance-friendly settings
-        try:
-            probe_vec = self.embed_model.get_text_embedding("dimension probe")
-            dim = (
-                len(probe_vec)
-                if isinstance(probe_vec, (list, tuple))
-                else int(getattr(probe_vec, "shape", [0])[0])
-            )
-            if not isinstance(dim, int) or dim <= 0:
-                dim = 768  # fallback
-        except Exception:
-            dim = 768
+    def create_index(self) -> None:
+        """
+        Create the full index by loading documents, converting to nodes, and
+        setting up the Qdrant collection and vector store.
+        """        
+        dim = self._probe_embedding_dimension()
         self._ensure_qdrant_collection(dim)
 
-        # Attach Qdrant as the vector store with optional hybrid retrieval
-        vector_store = QdrantVectorStore(
-            client=self.qdrant_client,
-            aclient=self.qdrant_aclient,
-            collection_name=self.qdrant_collection,
-            enable_hybrid=self.enable_hybrid,
-            fastembed_sparse_model=self.sparse_model,
-        )
+        vector_store = self._create_vector_store()
+        storage_ctx = self._create_storage_context(vector_store)
+        self.index = self._create_index(storage_ctx)
 
-        storage_ctx = StorageContext.from_defaults(vector_store=vector_store)
-
-        # Build the index using the configured embedding model
-        self.index = VectorStoreIndex(
-            nodes=self.nodes,
-            storage_context=storage_ctx,
-            embed_model=self.embed_model,
-        )
-
-    def _create_empty_index(self) -> None:
+    def create_query_engine(self) -> None:
         """
-        Create an index attached to Qdrant without inserting nodes.
-        Useful for async ingestion with ainsert_nodes().
-        """
-        if self.qdrant_client is None:
-            self.qdrant_client = QdrantClient(
-                host=self.qdrant_host, port=self.qdrant_port
-            )
-        if self.qdrant_aclient is None:
-            self.qdrant_aclient = AsyncQdrantClient(
-                host=self.qdrant_host, port=self.qdrant_port
-            )
-        # Ensure collection exists with performance-friendly settings
-        try:
-            probe_vec = self.embed_model.get_text_embedding("dimension probe")
-            dim = (
-                len(probe_vec)
-                if isinstance(probe_vec, (list, tuple))
-                else int(getattr(probe_vec, "shape", [0])[0])
-            )
-            if not isinstance(dim, int) or dim <= 0:
-                dim = 768  # fallback
-        except Exception:
-            dim = 768
-        self._ensure_qdrant_collection(dim)
+        Create the query engine with a retriever and reranker.
 
-        vector_store = QdrantVectorStore(
-            client=self.qdrant_client,
-            aclient=self.qdrant_aclient,
-            collection_name=self.qdrant_collection,
-            enable_hybrid=self.enable_hybrid,
-            fastembed_sparse_model=self.sparse_model,
-        )
-        storage_ctx = StorageContext.from_defaults(vector_store=vector_store)
-        self.index = VectorStoreIndex.from_vector_store(
-            vector_store=vector_store,
-            storage_context=storage_ctx,
-            embed_model=self.embed_model,
-        )
-
-    def _create_query_engine(self) -> None:
+        Raises:
+            RuntimeError: If the index is not initialized.
+        """        
         if self.index is None:
             raise RuntimeError("Index is not initialized. Cannot create query engine.")
         k = min(max(self.retrieve_similarity_top_k, self.rerank_top_n * 8), 64)
@@ -691,17 +688,13 @@ class RAG:
         """Return a list of collection names. Uses Qdrant API when available; falls back to listing the host storage path."""
         if prefer_api:
             try:
-                if self.qdrant_client is None:
-                    self.qdrant_client = QdrantClient(
-                        host=self.qdrant_host, port=self.qdrant_port
-                    )
                 resp = self.qdrant_client.get_collections()
                 names = [c.name for c in getattr(resp, "collections", []) or []]
                 if names:
                     return sorted(names)
             except Exception as e:
                 logger.warning(
-                    f"Qdrant API list_collections failed, will try FS fallback: {e}"
+                    "Qdrant API list_collections failed, will try FS fallback: %s", e
                 )
         base = self._resolve_qdrant_host_dir()
         if base is None:
@@ -712,67 +705,58 @@ class RAG:
                 return []
             return sorted([p.name for p in collections_dir.iterdir() if p.is_dir()])
         except Exception as e:
-            logger.warning(f"FS fallback list_collections failed: {e}")
+            logger.warning("FS fallback list_collections failed: %s", e)
             return []
 
-    def get_collection_info(self, name: str) -> dict[str, Any]:
-        """Return lightweight info about a collection (status, vectors, on-disk flags). Uses API if possible; otherwise returns an FS-only stub."""
-        info: dict[str, Any] = {"name": name}
-        try:
-            if self.qdrant_client is None:
-                self.qdrant_client = QdrantClient(
-                    host=self.qdrant_host, port=self.qdrant_port
-                )
-            ci = self.qdrant_client.get_collection(collection_name=name)
-            info.update(
-                {
-                    "status": getattr(ci, "status", None),
-                    "vectors_count": getattr(
-                        getattr(ci, "vectors_count", None), "total", None
-                    )
-                    or getattr(ci, "vectors_count", None),
-                    "on_disk_payload": bool(
-                        getattr(
-                            getattr(ci, "payload_storage_type", None), "on_disk", False
-                        )
-                    )
-                    if hasattr(getattr(ci, "payload_storage_type", None), "on_disk")
-                    else None,
-                }
-            )
-        except Exception as e:
-            logger.warning(f"Qdrant API get_collection failed for '{name}': {e}")
-            base = self._resolve_qdrant_host_dir()
-            if base:
-                path = base / "collections" / name
-                info.update({"path": str(path), "exists_on_disk": path.exists()})
-        return info
+    # def get_collection_info(self, name: str) -> dict[str, Any]:
+    #     """
+    #     Return lightweight info about a collection (status, vectors, on-disk flags). Uses API if possible; otherwise returns an FS-only stub.
+    #     """
+    #     info: dict[str, Any] = {"name": name}
+    #     try:
+    #         ci = self.qdrant_client.get_collection(collection_name=name)
+    #         info.update(
+    #             {
+    #                 "status": getattr(ci, "status", None),
+    #                 "vectors_count": getattr(
+    #                     getattr(ci, "vectors_count", None), "total", None
+    #                 )
+    #                 or getattr(ci, "vectors_count", None),
+    #                 "on_disk_payload": bool(
+    #                     getattr(
+    #                         getattr(ci, "payload_storage_type", None), "on_disk", False
+    #                     )
+    #                 )
+    #                 if hasattr(getattr(ci, "payload_storage_type", None), "on_disk")
+    #                 else None,
+    #             }
+    #         )
+    #     except Exception as e:
+    #         logger.warning("Qdrant API get_collection failed for '%s': %s", name, e)
+    #         base = self._resolve_qdrant_host_dir()
+    #         if base:
+    #             path = base / "collections" / name
+    #             info.update({"path": str(path), "exists_on_disk": path.exists()})
+    #     return info
 
     def select_or_create_collection(self, name: str, dim: int | None = None) -> None:
-        """Switch active collection; create/tune it if missing. If `dim` is not provided, probe via the embedding model once."""
+        """
+        Switch active collection; create/tune it if missing. If `dim` is not provided, probe via 
+        the embedding model once.
+        
+        Args:
+            name (str): The name of the collection to select or create.
+            dim (int | None): The dimensionality of the vectors. If None, will be probed.
+        
+        Raises:
+            ValueError: If the collection name is empty or invalid.
+        """
         if not name or not name.strip():
             raise ValueError("Collection name cannot be empty.")
         self.qdrant_collection = name.strip()
-        if self.qdrant_client is None:
-            self.qdrant_client = QdrantClient(
-                host=self.qdrant_host, port=self.qdrant_port
-            )
-        if self.qdrant_aclient is None:
-            self.qdrant_aclient = AsyncQdrantClient(
-                host=self.qdrant_host, port=self.qdrant_port
-            )
+
         if dim is None:
-            try:
-                vec = self.embed_model.get_text_embedding("dimension probe")
-                dim = (
-                    len(vec)
-                    if isinstance(vec, (list, tuple))
-                    else int(getattr(vec, "shape", [0])[0])
-                )
-                if not isinstance(dim, int) or dim <= 0:
-                    dim = 768
-            except Exception:
-                dim = 768
+            dim = self._probe_embedding_dimension()
         self._ensure_qdrant_collection(dim)
 
     # --- Public API ---
@@ -780,14 +764,20 @@ class RAG:
         self.data_dir = Path(data_dir) if isinstance(data_dir, str) else data_dir
         self._create_doc_loader()
         self._docs_to_nodes()
-        self._create_index()
-        self._create_query_engine()
+        self.create_index()
+        self.create_query_engine()
         try:
             eff_k = getattr(self.query_engine.retriever, "similarity_top_k", None)
         except Exception:
             eff_k = None
         logger.info(
-            f"Effective retrieval k={eff_k} | top_n={self.rerank_top_n} | chunk_size={self.chunk_size} | overlap={self.chunk_overlap} | embed_device={self.embed_device} | rerank_device={self.rerank_device}"
+            "Effective retrieval k=%s | top_n=%s | chunk_size=%s | overlap=%s | embed_device=%s | rerank_device=%s",
+            eff_k,
+            self.rerank_top_n,
+            self.chunk_size,
+            self.chunk_overlap,
+            self.embed_device,
+            self.rerank_device,
         )
         logger.info("Documents ingested successfully.")
 
@@ -799,18 +789,24 @@ class RAG:
         self.data_dir = Path(data_dir) if isinstance(data_dir, str) else data_dir
         self._create_doc_loader()
         self._docs_to_nodes()
-        self._create_empty_index()
+        self.create_empty_index()
         if self.index is None:
             raise RuntimeError("Index is not initialized for async ingestion.")
         # Concurrent, non-blocking upsert into Qdrant via aclient
         await self.index.ainsert_nodes(self.nodes)
-        self._create_query_engine()
+        self.create_query_engine()
         try:
             eff_k = getattr(self.query_engine.retriever, "similarity_top_k", None)
         except Exception:
             eff_k = None
         logger.info(
-            f"Effective retrieval k={eff_k} | top_n={self.rerank_top_n} | chunk_size={self.chunk_size} | overlap={self.chunk_overlap} | embed_device={self.embed_device} | rerank_device={self.rerank_device}"
+            "Effective retrieval k=%s | top_n=%s | chunk_size=%s | overlap=%s | embed_device=%s | rerank_device=%s",
+            eff_k,
+            self.rerank_top_n,
+            self.chunk_size,
+            self.chunk_overlap,
+            self.embed_device,
+            self.rerank_device,
         )
         logger.info("Documents ingested successfully (async path).")
 
@@ -843,56 +839,45 @@ class RAG:
             raise RuntimeError("Index is not initialized. Nothing to save.")
         self.persist_dir = Path(persist_dir)
         self.index.storage_context.persist(persist_dir=self.persist_dir)
-        logger.info(f"Index saved to {self.persist_dir}")
+        logger.info("Index saved to %s", str(self.persist_dir))
 
-    def load_index(self, index_dir: str | Path | None = None) -> None:
-        """
-        Attach to Qdrant collection and build the index from the vector store only.
-        Persist dirs are ignored in this production-oriented path.
-        """
+    # def load_index(self) -> None:
+    #     """
+    #     Attach to Qdrant collection and build the index from the vector store only.
+    #     Persist dirs are ignored in this production-oriented path.
+    #     """
+    #     # Vector store backed by the existing Qdrant collection
+    #     vector_store = QdrantVectorStore(
+    #         client=self.qdrant_client,
+    #         aclient=self.qdrant_aclient,
+    #         collection_name=self.qdrant_collection,
+    #         enable_hybrid=self.enable_hybrid,
+    #         fastembed_sparse_model=self.sparse_model,
+    #     )
 
-        # Ensure Qdrant clients exist (sync + async)
-        if self.qdrant_client is None:
-            self.qdrant_client = QdrantClient(
-                host=self.qdrant_host, port=self.qdrant_port
-            )
-        if self.qdrant_aclient is None:
-            self.qdrant_aclient = AsyncQdrantClient(
-                host=self.qdrant_host, port=self.qdrant_port
-            )
+    #     storage_context = StorageContext.from_defaults(vector_store=vector_store)
+    #     try:
+    #         self.index = VectorStoreIndex.from_vector_store(
+    #             vector_store=vector_store,
+    #             storage_context=storage_context,
+    #             embed_model=self.embed_model,
+    #         )
+    #     except Exception as e:
+    #         raise RuntimeError(
+    #             f"Failed to attach to Qdrant collection '{self.qdrant_collection}': {e}"
+    #         ) from e
 
-        # Vector store backed by the existing Qdrant collection
-        vector_store = QdrantVectorStore(
-            client=self.qdrant_client,
-            aclient=self.qdrant_aclient,
-            collection_name=self.qdrant_collection,
-            enable_hybrid=self.enable_hybrid,
-            fastembed_sparse_model=self.sparse_model,
-        )
+    #     if not isinstance(self.index, VectorStoreIndex):
+    #         raise TypeError("Loaded index is not a VectorStoreIndex")
 
-        storage_context = StorageContext.from_defaults(vector_store=vector_store)
-        try:
-            self.index = VectorStoreIndex.from_vector_store(
-                vector_store=vector_store,
-                storage_context=storage_context,
-                embed_model=self.embed_model,
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to attach to Qdrant collection '{self.qdrant_collection}': {e}"
-            ) from e
-
-        if not isinstance(self.index, VectorStoreIndex):
-            raise TypeError("Loaded index is not a VectorStoreIndex")
-
-        # Create query engine
-        self._create_query_engine()
-        logger.info(
-            "Index attached to Qdrant collection '%s' (host=%s, port=%s)",
-            self.qdrant_collection,
-            self.qdrant_host,
-            self.qdrant_port,
-        )
+    #     # Create query engine
+    #     self.create_query_engine()
+    #     logger.info(
+    #         "Index attached to Qdrant collection '%s' (host=%s, port=%s)",
+    #         self.qdrant_collection,
+    #         self.qdrant_host,
+    #         self.qdrant_port,
+    #     )
 
     # --- Session store wiring ---
     def init_session_store(self, db_url: str = "sqlite:///rag_sessions.db") -> None:
@@ -1066,10 +1051,6 @@ class RAG:
             return None
         # Fallback to Qdrant payload when docstore text is unavailable
         try:
-            if self.qdrant_client is None:
-                self.qdrant_client = QdrantClient(
-                    host=self.qdrant_host, port=self.qdrant_port
-                )
             recs = self.qdrant_client.retrieve(
                 collection_name=self.qdrant_collection, ids=[node_id]
             )
@@ -1190,7 +1171,8 @@ class RAG:
                 ).to_parquet(out_dir / "citations.parquet", index=False)
         except Exception as e:
             logger.warning(
-                f"Skipping citations.parquet export (pandas/pyarrow not available?): {e}"
+                "Skipping citations.parquet export (pandas/pyarrow not available?): %s",
+                e,
             )
 
         # 4) transcript.md (human-readable)
