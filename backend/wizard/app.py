@@ -11,7 +11,7 @@ app.add_middleware(
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "*",
-    ],  # narrow later
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -50,8 +50,8 @@ def collections_select(payload: SelectCollectionIn):
         rag.select_or_create_collection(name)
         # attach index / lazy build query engine
         if getattr(rag, "index", None) is None:
-            rag._create_empty_index()
-        rag._create_query_engine()
+            rag.create_index()
+        rag.create_query_engine()
         return {"ok": True, "name": name}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
