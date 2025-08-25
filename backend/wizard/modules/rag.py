@@ -1251,12 +1251,19 @@ class RAG:
                 "Query engine has not been initialized. Call ingest_docs() first."
             )
 
-        # (Re)create engine if session changed or not started
+        # Ensure we have a session and conversation storage
         session_id = self.session_id
         if self.chat_engine is None or getattr(self, "_session_id", None) != session_id:
-            self.start_session(session_id)
+            session_id = self.start_session(session_id)
 
-        resp = self.chat_engine.chat(user_msg)
+        # Build a retrieval query that includes the rolling conversation summary
+        summary = self._get_rolling_summary(session_id)
+        if summary:
+            retrieval_query = f"{summary}\n\nUser question: {user_msg}"
+        else:
+            retrieval_query = user_msg
+
+        resp = self.query_engine.query(retrieval_query)
         data = self._extract_relevant_data(user_msg, resp)
         self._persist_turn(session_id, user_msg, resp, data)
         self._maybe_update_summary(session_id)
