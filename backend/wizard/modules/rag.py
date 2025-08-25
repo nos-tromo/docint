@@ -20,6 +20,11 @@ from llama_index.core import (
     StorageContext,
     VectorStoreIndex,
 )
+from llama_index.core.vector_stores.types import (
+    FilterCondition,
+    MetadataFilter,
+    MetadataFilters,
+)
 from llama_index.core.chat_engine import CondenseQuestionChatEngine
 from llama_index.core.embeddings import BaseEmbedding
 from llama_index.core.memory import ChatMemoryBuffer
@@ -186,6 +191,7 @@ class RAG:
     chat_memory: Any | None = field(default=None, init=False)
     _SessionMaker: Any | None = field(default=None, init=False, repr=False)
     session_id: str | None = field(default=None, init=False, repr=False)
+    doc_scope: list[str] = field(default_factory=list, init=False)
 
     def __post_init__(self):
         # Cap top_n and similarity_top_k to keep reranking/lightweight
@@ -199,6 +205,10 @@ class RAG:
         self.chunk_overlap = max(
             0, min(self.chunk_overlap, int(self.chunk_size * 0.25))
         )
+
+    def set_doc_scope(self, *tags: str) -> None:
+        """Restrict retrieval to documents whose 'category' metadata matches any tag."""
+        self.doc_scope = list(tags)
 
     # --- Static methods ---
     @staticmethod
@@ -318,6 +328,10 @@ class RAG:
             excel_sheet=self.table_excel_sheet,
             limit=self.table_row_limit,
         )
+        def _file_meta(fp: Path) -> dict[str, Any]:
+            rel = fp.relative_to(self.data_dir)
+            category = rel.parts[0] if len(rel.parts) > 1 else rel.stem
+            return {"category": category}
 
         self.dir_reader = SimpleDirectoryReader(
             input_dir=self.data_dir,
@@ -340,6 +354,7 @@ class RAG:
                     limit=self.table_row_limit,
                 ),
             },
+            file_metadata=_file_meta,
         )
         self.pdf_node_parser = DoclingNodeParser()
         self.table_node_parser = SentenceSplitter(
@@ -1251,12 +1266,26 @@ class RAG:
                 "Query engine has not been initialized. Call ingest_docs() first."
             )
 
-        # (Re)create engine if session changed or not started
+        # Ensure we have a session and conversation storage
         session_id = self.session_id
         if self.chat_engine is None or getattr(self, "_session_id", None) != session_id:
-            self.start_session(session_id)
+            session_id = self.start_session(session_id)
 
-        resp = self.chat_engine.chat(user_msg)
+        # Build a retrieval query that includes the rolling conversation summary
+        summary = self._get_rolling_summary(session_id)
+        if summary:
+            retrieval_query = f"{summary}\n\nUser question: {user_msg}"
+        else:
+            retrieval_query = user_msg
+
+        filters = None
+        if self.doc_scope:
+            filters = MetadataFilters(
+                filters=[MetadataFilter(key="category", value=t) for t in self.doc_scope],
+                condition=FilterCondition.OR,
+            )
+
+        resp = self.query_engine.query(retrieval_query, filters=filters)
         data = self._extract_relevant_data(user_msg, resp)
         self._persist_turn(session_id, user_msg, resp, data)
         self._maybe_update_summary(session_id)
