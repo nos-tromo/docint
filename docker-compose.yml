@@ -28,15 +28,15 @@ services:
   #   depends_on:
   #     - wizard
 
-  # #############################
-  # # Ollama Service
-  # #############################
-  # ollama:
-  #   image: ollama/ollama:latest
-  #   ports:
-  #     - "11434:11434"
-  #   volumes:
-  #     - ${HOME}/.ollama:/root/.ollama
+  #############################
+  # Ollama Service
+  #############################
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ${HOME}/.ollama:/root/.ollama
 
   #############################
   # Qdrant Vector Database
