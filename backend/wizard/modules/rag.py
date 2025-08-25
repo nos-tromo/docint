@@ -39,8 +39,8 @@ from qdrant_client.models import (
     Distance,
     HnswConfigDiff,
     OptimizersConfigDiff,
-    QuantizationConfig,
     ScalarQuantization,
+    ScalarQuantizationConfig,
     VectorParams,
 )
 from sqlalchemy import (
@@ -455,8 +455,8 @@ class RAG:
                     indexing_threshold=20000,
                     memmap_threshold=20000,
                 ),
-                quantization_config=QuantizationConfig(
-                    scalar=ScalarQuantization(
+                quantization_config=ScalarQuantization(
+                    scalar=ScalarQuantizationConfig(
                         type="int8",
                         quantile=0.99,
                         always_ram=False,
@@ -485,8 +485,8 @@ class RAG:
                     indexing_threshold=20000,
                     memmap_threshold=20000,
                 ),
-                quantization_config=QuantizationConfig(
-                    scalar=ScalarQuantization(
+                quantization_config=ScalarQuantization(
+                    scalar=ScalarQuantizationConfig(
                         type="int8",
                         quantile=0.99,
                         always_ram=False,
@@ -759,6 +759,16 @@ class RAG:
         if not name or not name.strip():
             raise ValueError("Collection name cannot be empty.")
         self.qdrant_collection = name.strip()
+
+        # Reset any state tied to the previously selected collection so that
+        # future queries do not use stale indexes or conversations.
+        self.docs.clear()
+        self.nodes.clear()
+        self.index = None
+        self.query_engine = None
+        self.chat_engine = None
+        self.chat_memory = None
+        self.session_id = None
 
         if dim is None:
             dim = self._probe_embedding_dimension()
