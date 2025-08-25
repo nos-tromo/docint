@@ -13,21 +13,34 @@ import type { Source } from "../api";
 
 type Msg = { role: "user" | "assistant"; text: string; sources?: Source[] };
 
-export default function Chat() {
+type Props = { collection: string | null };
+
+export default function Chat({ collection }: Props) {
   const [q, setQ] = useState("");
-  const [msgs, setMsgs] = useState<Msg[]>(() => {
-    try {
-      const stored = localStorage.getItem("chat_msgs");
-      return stored ? (JSON.parse(stored) as Msg[]) : [];
-    } catch {
-      return [];
-    }
-  });
+  const [msgs, setMsgs] = useState<Msg[]>([]);
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  const msgsKey = collection ? `chat_msgs_${collection}` : "chat_msgs";
+  const sessionKey = collection ? `sessionId_${collection}` : "sessionId";
+
   useEffect(() => {
-    localStorage.setItem("chat_msgs", JSON.stringify(msgs));
-  }, [msgs]);
+    try {
+      const stored = localStorage.getItem(msgsKey);
+      setMsgs(stored ? (JSON.parse(stored) as Msg[]) : []);
+    } catch {
+      setMsgs([]);
+    }
+    try {
+      setSessionId(localStorage.getItem(sessionKey));
+    } catch {
+      setSessionId(null);
+    }
+  }, [msgsKey, sessionKey]);
+
+  useEffect(() => {
+    localStorage.setItem(msgsKey, JSON.stringify(msgs));
+  }, [msgs, msgsKey]);
 
   const ask = async () => {
     const question = q.trim();
@@ -41,7 +54,7 @@ export default function Chat() {
         sessionId || undefined,
       );
       setSessionId(session_id);
-      localStorage.setItem("sessionId", session_id);
+      localStorage.setItem(sessionKey, session_id);
       setMsgs((m) => [...m, { role: "assistant", text: answer || "", sources }]);
     } catch (e: unknown) {
       const err = e as { response?: { data?: { detail?: string } } };
@@ -55,8 +68,8 @@ export default function Chat() {
   const reset = () => {
     setMsgs([]);
     setSessionId(null);
-    localStorage.removeItem("chatMsgs");
-    localStorage.removeItem("sessionId");
+    localStorage.removeItem(msgsKey);
+    localStorage.removeItem(sessionKey);
   };
 
   return (

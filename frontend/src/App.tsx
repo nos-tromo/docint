@@ -33,7 +33,10 @@ export default function App() {
   };
 
   const quitSession = () => {
-    localStorage.removeItem("chat_msgs");
+    if (collection) {
+      localStorage.removeItem(`chat_msgs_${collection}`);
+      localStorage.removeItem(`sessionId_${collection}`);
+    }
     localStorage.removeItem("collection");
     setCollection(null);
     setChatKey((k) => k + 1);
@@ -70,7 +73,7 @@ export default function App() {
           onAttached={attachCollection}
         />
 
-        <Chat key={chatKey} />
+        <Chat key={chatKey} collection={collection} />
       </Container>
     </Box>
   );

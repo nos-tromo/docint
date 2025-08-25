@@ -35,14 +35,7 @@ from llama_index.vector_stores.qdrant import QdrantVectorStore
 from modules.readers.table_reader import TableReader
 from qdrant_client import QdrantClient
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
-from qdrant_client.models import (
-    Distance,
-    HnswConfigDiff,
-    OptimizersConfigDiff,
-    QuantizationConfig,
-    ScalarQuantization,
-    VectorParams,
-)
+from qdrant_client.models import Distance, VectorParams
 from sqlalchemy import (
     Column,
     DateTime,
@@ -428,74 +421,34 @@ class RAG:
     
     def _ensure_qdrant_collection(self, dim: int) -> None:
         """
-        Create or gently tune the Qdrant collection for better runtime performance.
-        - Stores vectors and HNSW graph on disk to reduce RAM pressure
-        - Uses lighter HNSW build params
-        - Enables INT8 scalar quantization on vectors (lossy but fast & memory-light)
+        Ensure that the Qdrant collection exists with the expected vector dimension.
 
-        This will **not** drop an existing collection. It creates the collection if missing
-        and attempts safe, idempotent updates otherwise.
+        If the collection does not exist yet, it will be created. Existing collections
+        are left untouched.
 
         Args:
             dim (int): Dimensionality of the vectors to be stored.
         """
         name = self.qdrant_collection
+
         try:
-            try:
-                self.qdrant_client.update_collection(
-                    collection_name=name,
-                    hnsw_config=HnswConfigDiff(m=16, ef_construct=64, on_disk=True),
-                    optimizers_config=OptimizersConfigDiff(
-                        default_segment_number=2,
-                        indexing_threshold=20000,
-                        memmap_threshold=20000,
-                    ),
-                    quantization_config=QuantizationConfig(
-                        scalar=ScalarQuantization(
-                            type="int8",
-                            quantile=0.99,
-                            always_ram=False,
-                        )
-                    ),
-                )
-                logger.info(
-                    "Qdrant collection '%s' updated with on-disk HNSW & INT8 quantization.",
-                    name,
-                )
-            except Exception as e:
-                logger.warning(
-                    "Could not update existing Qdrant collection '%s': %s", name, e
-                )
+            self.qdrant_client.get_collection(name)
         except Exception:
-            # Create collection with preferred settings
             try:
                 self.qdrant_client.create_collection(
                     collection_name=name,
                     vectors_config=VectorParams(
-                        size=dim, distance=Distance.COSINE, on_disk=True
-                    ),
-                    hnsw_config=HnswConfigDiff(m=16, ef_construct=64, on_disk=True),
-                    optimizers_config=OptimizersConfigDiff(
-                        default_segment_number=2,
-                        indexing_threshold=20000,
-                        memmap_threshold=20000,
-                    ),
-                    quantization_config=QuantizationConfig(
-                        scalar=ScalarQuantization(
-                            type="int8",
-                            quantile=0.99,
-                            always_ram=False,
-                        )
+                        size=dim, distance=Distance.COSINE
                     ),
                 )
                 logger.info(
-                    "Qdrant collection '%s' created (dim=%d, on-disk vectors+HNSW, INT8 quantization).",
+                    "Qdrant collection '%s' created (dim=%d).",
                     name,
                     dim,
                 )
             except Exception as e:
                 logger.warning(
-                    "Failed to create Qdrant collection '%s' with tuned settings: %s",
+                    "Failed to create Qdrant collection '%s': %s",
                     name,
                     e,
                 )
@@ -754,6 +707,16 @@ class RAG:
         if not name or not name.strip():
             raise ValueError("Collection name cannot be empty.")
         self.qdrant_collection = name.strip()
+
+        # Reset any state tied to the previously selected collection so that
+        # future queries do not use stale indexes or conversations.
+        self.docs.clear()
+        self.nodes.clear()
+        self.index = None
+        self.query_engine = None
+        self.chat_engine = None
+        self.chat_memory = None
+        self.session_id = None
 
         if dim is None:
             dim = self._probe_embedding_dimension()
