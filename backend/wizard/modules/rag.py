@@ -440,65 +440,70 @@ class RAG:
             dim (int): Dimensionality of the vectors to be stored.
         """
         name = self.qdrant_collection
+
+        # First attempt to update an existing collection. If this fails (e.g. the
+        # collection does not exist yet or the server rejects the config), fall back
+        # to creating the collection with our preferred settings. Any errors during
+        # creation are logged but otherwise ignored so that higher-level code can
+        # decide how to proceed.
         try:
-            try:
-                self.qdrant_client.update_collection(
-                    collection_name=name,
-                    hnsw_config=HnswConfigDiff(m=16, ef_construct=64, on_disk=True),
-                    optimizers_config=OptimizersConfigDiff(
-                        default_segment_number=2,
-                        indexing_threshold=20000,
-                        memmap_threshold=20000,
-                    ),
-                    quantization_config=QuantizationConfig(
-                        scalar=ScalarQuantization(
-                            type="int8",
-                            quantile=0.99,
-                            always_ram=False,
-                        )
-                    ),
-                )
-                logger.info(
-                    "Qdrant collection '%s' updated with on-disk HNSW & INT8 quantization.",
-                    name,
-                )
-            except Exception as e:
-                logger.warning(
-                    "Could not update existing Qdrant collection '%s': %s", name, e
-                )
-        except Exception:
-            # Create collection with preferred settings
-            try:
-                self.qdrant_client.create_collection(
-                    collection_name=name,
-                    vectors_config=VectorParams(
-                        size=dim, distance=Distance.COSINE, on_disk=True
-                    ),
-                    hnsw_config=HnswConfigDiff(m=16, ef_construct=64, on_disk=True),
-                    optimizers_config=OptimizersConfigDiff(
-                        default_segment_number=2,
-                        indexing_threshold=20000,
-                        memmap_threshold=20000,
-                    ),
-                    quantization_config=QuantizationConfig(
-                        scalar=ScalarQuantization(
-                            type="int8",
-                            quantile=0.99,
-                            always_ram=False,
-                        )
-                    ),
-                )
-                logger.info(
-                    "Qdrant collection '%s' created (dim=%d, on-disk vectors+HNSW, INT8 quantization).",
-                    name,
-                    dim,
-                )
-            except Exception as e:
-                logger.warning(
-                    "Failed to create Qdrant collection '%s' with tuned settings: %s",
-                    name,
-                    e,
-                )
+            self.qdrant_client.update_collection(
+                collection_name=name,
+                hnsw_config=HnswConfigDiff(m=16, ef_construct=64, on_disk=True),
+                optimizers_config=OptimizersConfigDiff(
+                    default_segment_number=2,
+                    indexing_threshold=20000,
+                    memmap_threshold=20000,
+                ),
+                quantization_config=QuantizationConfig(
+                    scalar=ScalarQuantization(
+                        type="int8",
+                        quantile=0.99,
+                        always_ram=False,
+                    )
+                ),
+            )
+            logger.info(
+                "Qdrant collection '%s' updated with on-disk HNSW & INT8 quantization.",
+                name,
+            )
+            return
+        except Exception as e:
+            logger.warning(
+                "Could not update existing Qdrant collection '%s': %s", name, e
+            )
+
+        try:
+            self.qdrant_client.create_collection(
+                collection_name=name,
+                vectors_config=VectorParams(
+                    size=dim, distance=Distance.COSINE, on_disk=True
+                ),
+                hnsw_config=HnswConfigDiff(m=16, ef_construct=64, on_disk=True),
+                optimizers_config=OptimizersConfigDiff(
+                    default_segment_number=2,
+                    indexing_threshold=20000,
+                    memmap_threshold=20000,
+                ),
+                quantization_config=QuantizationConfig(
+                    scalar=ScalarQuantization(
+                        type="int8",
+                        quantile=0.99,
+                        always_ram=False,
+                    )
+                ),
+            )
+            logger.info(
+                "Qdrant collection '%s' created (dim=%d, on-disk vectors+HNSW, INT8 quantization).",
+                name,
+                dim,
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to create Qdrant collection '%s' with tuned settings: %s",
+                name,
+                e,
+            )
 
     def create_index(self) -> None:
         """
