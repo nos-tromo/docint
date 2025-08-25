@@ -23,6 +23,13 @@ export default function Chat() {
       return [];
     }
   });
+  const [sessionId, setSessionId] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem("sessionId");
+    } catch {
+      return null;
+    }
+  });
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -55,7 +62,7 @@ export default function Chat() {
   const reset = () => {
     setMsgs([]);
     setSessionId(null);
-    localStorage.removeItem("chatMsgs");
+    localStorage.removeItem("chat_msgs");
     localStorage.removeItem("sessionId");
   };
 
