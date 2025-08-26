@@ -149,9 +149,6 @@ class RAG:
     data_dir: Path | None = None
     persist_dir: Path | None = None
 
-    # --- Host path (optional; used only for FS fallback on local Docker)
-    qdrant_host_dir: str | None = None
-
     # --- Models ---
     embed_model_id: str = "BAAI/bge-m3"
     rerank_model_id: str = "BAAI/bge-reranker-v2-m3"
@@ -162,6 +159,7 @@ class RAG:
     qdrant_host: str = QDRANT_HOST
     qdrant_port: int = int(QDRANT_PORT)
     qdrant_collection: str = "default"
+    qdrant_host_dir: str | None = None
 
     # --- Performance / device controls ---
     embed_device: str = "cpu"  # run embeddings on CPU to avoid GPU contention
@@ -177,7 +175,6 @@ class RAG:
     temperature: float = 0.2
     request_timeout: int = 240
     thinking: bool = True
-    # Forwarded to the underlying Ollama client as extra model options
     ollama_options: dict[str, Any] | None = None
 
     # --- Reranking / retrieval ---
@@ -281,7 +278,7 @@ class RAG:
         """
         self._embed_model = HuggingFaceEmbedding(
             model_name=self.embed_model_id,
-            device=self.embed_device,
+            device=self.device,
             normalize=True,
         )
         # Move underlying model to the target device using empty tensors and reload weights
@@ -349,7 +346,7 @@ class RAG:
             self._reranker = SentenceTransformerRerank(
                 top_n=self.rerank_top_n,
                 model=self.rerank_model_id,
-                device=self.rerank_device,
+                device=self.device,
             )
             logger.info("Reranker initialized: %s", self.rerank_model_id)
         return self._reranker
@@ -771,8 +768,8 @@ class RAG:
             self.rerank_top_n,
             self.chunk_size,
             self.chunk_overlap,
-            self.embed_device,
-            self.rerank_device,
+            self.device,
+            self.device,
         )
         logger.info("Documents ingested successfully.")
 
@@ -804,8 +801,8 @@ class RAG:
             self.rerank_top_n,
             self.chunk_size,
             self.chunk_overlap,
-            self.embed_device,
-            self.rerank_device,
+            self.device,
+            self.device,
         )
         logger.info("Documents ingested successfully (async path).")
 
