@@ -22,12 +22,6 @@ uv pip install .
 uv sync
 ```
 
-
-```bash
-echo 'export USER_AGENT="Mozilla/5.0 (compatible; MyRAGApp/1.0)"' >> .venv/bin/activate
-source .venv/bin/activate
-```
-
 Run backend:
 
 ```bash
