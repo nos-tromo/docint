@@ -52,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 QDRANT_HOST = os.getenv("QDRANT_HOST", "127.0.0.1")
+QDRANT_PORT = os.getenv("QDRANT_PORT", 6333)
 
 # --- Session persistence (ORM) ---
 Base = declarative_base()
@@ -124,9 +125,8 @@ class RAG:
 
     # --- Backend controls ---
     qdrant_host: str = QDRANT_HOST
-    qdrant_port: int = 6333
+    qdrant_port: int = int(QDRANT_PORT)
     qdrant_collection: str = "default"
-    qdrant_index_dims: int = 768
 
     # --- Performance / device controls ---
     embed_device: str = "cpu"  # run embeddings on CPU to avoid GPU contention
@@ -148,8 +148,8 @@ class RAG:
     # --- Reranking / retrieval ---
     enable_hybrid: bool = True
     embed_batch_size: int = 64
-    rerank_top_n: int = 5
-    retrieve_similarity_top_k: int = rerank_top_n * 5
+    retrieve_similarity_top_k: int = 25
+    rerank_top_n: int = int(retrieve_similarity_top_k // 5)
 
     # --- TableReader config ---
     table_text_cols: list[str] | None = None
@@ -188,12 +188,6 @@ class RAG:
     session_id: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
-        # Cap top_n and similarity_top_k to keep reranking/lightweight
-        if self.rerank_top_n < 1:
-            self.rerank_top_n = 5
-        # Keep similarity_top_k in a sane range; actual k is recalculated when creating the retriever
-        if self.retrieve_similarity_top_k < self.rerank_top_n:
-            self.retrieve_similarity_top_k = self.rerank_top_n * 5
         # Bound chunk params
         self.chunk_size = max(256, min(self.chunk_size, 1024))
         self.chunk_overlap = max(
@@ -346,7 +340,7 @@ class RAG:
             chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap
         )
 
-    def _create_vector_store(self) -> QdrantVectorStore:
+    def _vector_store(self) -> QdrantVectorStore:
         return QdrantVectorStore(
             client=self.qdrant_client,
             aclient=self.qdrant_aclient,
@@ -355,12 +349,12 @@ class RAG:
             fastembed_sparse_model=self.sparse_model,
         )
 
-    def _create_storage_context(
+    def _storage_context(
         self, vector_store: QdrantVectorStore
     ) -> StorageContext:
         return StorageContext.from_defaults(vector_store=vector_store)
 
-    def _create_index(self, storage_ctx: StorageContext) -> VectorStoreIndex:
+    def _index(self, storage_ctx: StorageContext) -> VectorStoreIndex:
         return VectorStoreIndex(
             nodes=self.nodes,
             storage_context=storage_ctx,
@@ -399,71 +393,14 @@ class RAG:
 
         self.nodes = nodes
 
-    def _probe_embedding_dimension(self) -> int:
-        """
-        Probe the embedding model with a test string to determine the output dimension.
-
-        Returns:
-            int: The dimensionality of the embedding vectors.
-        """        
-        try:
-            probe_vec = self.embed_model.get_text_embedding("dimension probe")
-            dim = (
-                len(probe_vec)
-                if isinstance(probe_vec, (list, tuple))
-                else int(getattr(probe_vec, "shape", [0])[0])
-            )
-            if not isinstance(dim, int) or dim <= 0:
-                dim = self.qdrant_index_dims  # fallback
-        except Exception:
-            dim = self.qdrant_index_dims
-        return dim
-    
-    def _ensure_qdrant_collection(self, dim: int) -> None:
-        """
-        Ensure that the Qdrant collection exists with the expected vector dimension.
-
-        If the collection does not exist yet, it will be created. Existing collections
-        are left untouched.
-
-        Args:
-            dim (int): Dimensionality of the vectors to be stored.
-        """
-        name = self.qdrant_collection
-
-        try:
-            self.qdrant_client.get_collection(name)
-        except Exception:
-            try:
-                self.qdrant_client.create_collection(
-                    collection_name=name,
-                    vectors_config=VectorParams(
-                        size=dim, distance=Distance.COSINE
-                    ),
-                )
-                logger.info(
-                    "Qdrant collection '%s' created (dim=%d).",
-                    name,
-                    dim,
-                )
-            except Exception as e:
-                logger.warning(
-                    "Failed to create Qdrant collection '%s': %s",
-                    name,
-                    e,
-                )
-
     def create_index(self) -> None:
         """
         Create the full index by loading documents, converting to nodes, and
         setting up the Qdrant collection and vector store.
-        """        
-        dim = self._probe_embedding_dimension()
-        self._ensure_qdrant_collection(dim)
-
-        vector_store = self._create_vector_store()
-        storage_ctx = self._create_storage_context(vector_store)
-        self.index = self._create_index(storage_ctx)
+        """
+        vector_store = self._vector_store()
+        storage_ctx = self._storage_context(vector_store)
+        self.index = self._index(storage_ctx)
 
     def create_query_engine(self) -> None:
         """
@@ -661,45 +598,12 @@ class RAG:
             logger.warning("FS fallback list_collections failed: %s", e)
             return []
 
-    # def get_collection_info(self, name: str) -> dict[str, Any]:
-    #     """
-    #     Return lightweight info about a collection (status, vectors, on-disk flags). Uses API if possible; otherwise returns an FS-only stub.
-    #     """
-    #     info: dict[str, Any] = {"name": name}
-    #     try:
-    #         ci = self.qdrant_client.get_collection(collection_name=name)
-    #         info.update(
-    #             {
-    #                 "status": getattr(ci, "status", None),
-    #                 "vectors_count": getattr(
-    #                     getattr(ci, "vectors_count", None), "total", None
-    #                 )
-    #                 or getattr(ci, "vectors_count", None),
-    #                 "on_disk_payload": bool(
-    #                     getattr(
-    #                         getattr(ci, "payload_storage_type", None), "on_disk", False
-    #                     )
-    #                 )
-    #                 if hasattr(getattr(ci, "payload_storage_type", None), "on_disk")
-    #                 else None,
-    #             }
-    #         )
-    #     except Exception as e:
-    #         logger.warning("Qdrant API get_collection failed for '%s': %s", name, e)
-    #         base = self._resolve_qdrant_host_dir()
-    #         if base:
-    #             path = base / "collections" / name
-    #             info.update({"path": str(path), "exists_on_disk": path.exists()})
-    #     return info
-
-    def select_or_create_collection(self, name: str, dim: int | None = None) -> None:
+    def select_or_create_collection(self, name: str) -> None:
         """
-        Switch active collection; create/tune it if missing. If `dim` is not provided, probe via 
-        the embedding model once.
-        
+        Switch active collection; create/tune it if missing.
+
         Args:
             name (str): The name of the collection to select or create.
-            dim (int | None): The dimensionality of the vectors. If None, will be probed.
         
         Raises:
             ValueError: If the collection name is empty or invalid.
@@ -717,10 +621,6 @@ class RAG:
         self.chat_engine = None
         self.chat_memory = None
         self.session_id = None
-
-        if dim is None:
-            dim = self._probe_embedding_dimension()
-        self._ensure_qdrant_collection(dim)
 
     # --- Public API ---
     def ingest_docs(self, data_dir: str | Path) -> None:
@@ -803,44 +703,6 @@ class RAG:
         self.persist_dir = Path(persist_dir)
         self.index.storage_context.persist(persist_dir=self.persist_dir)
         logger.info("Index saved to %s", str(self.persist_dir))
-
-    # def load_index(self) -> None:
-    #     """
-    #     Attach to Qdrant collection and build the index from the vector store only.
-    #     Persist dirs are ignored in this production-oriented path.
-    #     """
-    #     # Vector store backed by the existing Qdrant collection
-    #     vector_store = QdrantVectorStore(
-    #         client=self.qdrant_client,
-    #         aclient=self.qdrant_aclient,
-    #         collection_name=self.qdrant_collection,
-    #         enable_hybrid=self.enable_hybrid,
-    #         fastembed_sparse_model=self.sparse_model,
-    #     )
-
-    #     storage_context = StorageContext.from_defaults(vector_store=vector_store)
-    #     try:
-    #         self.index = VectorStoreIndex.from_vector_store(
-    #             vector_store=vector_store,
-    #             storage_context=storage_context,
-    #             embed_model=self.embed_model,
-    #         )
-    #     except Exception as e:
-    #         raise RuntimeError(
-    #             f"Failed to attach to Qdrant collection '{self.qdrant_collection}': {e}"
-    #         ) from e
-
-    #     if not isinstance(self.index, VectorStoreIndex):
-    #         raise TypeError("Loaded index is not a VectorStoreIndex")
-
-    #     # Create query engine
-    #     self.create_query_engine()
-    #     logger.info(
-    #         "Index attached to Qdrant collection '%s' (host=%s, port=%s)",
-    #         self.qdrant_collection,
-    #         self.qdrant_host,
-    #         self.qdrant_port,
-    #     )
 
     # --- Session store wiring ---
     def init_session_store(self, db_url: str = "sqlite:///rag_sessions.db") -> None:
@@ -1242,8 +1104,16 @@ class RAG:
         )
         return session_id
 
-    def chat(self, user_msg: str) -> dict[str, Any]:
-        """Run one conversational turn, persist it, and return your normalized payload."""
+    def chat(self, user_msg: str) -> str:
+        """
+        Run one conversational turn, persist it, and return your normalized payload.
+
+        Args:
+            user_msg (str): The user message to process.
+
+        Returns:
+            str: The normalized response from the chat engine.
+        """
         if not user_msg.strip():
             raise ValueError("Chat prompt cannot be empty.")
         if self.query_engine is None:
@@ -1267,4 +1137,4 @@ class RAG:
         data = self._extract_relevant_data(user_msg, resp)
         self._persist_turn(session_id, user_msg, resp, data)
         self._maybe_update_summary(session_id)
-        return data, resp
+        return data
