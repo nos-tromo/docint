@@ -77,7 +77,7 @@ def query(payload: QueryIn):
             rag.create_query_engine()
 
         session_id = rag.start_session(payload.session_id)
-        data, _ = rag.chat(payload.question)
+        data = rag.chat(payload.question)
 
         answer = str(data.get("response") or data.get("answer") or "")
         sources = data.get("sources") or []
