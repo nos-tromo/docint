@@ -44,6 +44,7 @@ from sqlalchemy import (
     create_engine,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
+from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
 
 from wizard.modules.readers.table_reader import TableReader
 from wizard.utils.unescape_unicode import unescape_unicode
@@ -339,10 +340,50 @@ class RAG:
             SentenceTransformerRerank: The initialized reranker model.
         """
         if self._reranker is None:
+            class _ToEmptyCrossEncoder:
+                """Minimal cross-encoder using to_empty for device placement."""
+
+                def __init__(self, model_id: str, device: str) -> None:
+                    self.device = torch.device(device)
+                    self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+                    config = AutoConfig.from_pretrained(model_id)
+                    model = AutoModelForSequenceClassification(config)
+                    model.to_empty(self.device)
+                    tmp_model = AutoModelForSequenceClassification.from_pretrained(model_id)
+                    model.load_state_dict(tmp_model.state_dict())
+                    del tmp_model
+                    model.eval()
+                    self.model = model
+
+                def predict(
+                    self,
+                    pairs: list[tuple[str, str]],
+                    batch_size: int = 32,
+                    **_: Any,
+                ) -> list[float]:
+                    scores: list[float] = []
+                    for start in range(0, len(pairs), batch_size):
+                        batch = pairs[start : start + batch_size]
+                        a, b = zip(*batch) if batch else ([], [])
+                        inputs = self.tokenizer(
+                            list(a),
+                            list(b),
+                            padding=True,
+                            truncation=True,
+                            return_tensors="pt",
+                        )
+                        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                        with torch.inference_mode():
+                            logits = self.model(**inputs).logits.view(-1)
+                        scores.extend(logits.float().cpu().tolist())
+                    return scores
+
+            cross_encoder = _ToEmptyCrossEncoder(
+                self.rerank_model_id, self.rerank_device
+            )
             self._reranker = SentenceTransformerRerank(
                 top_n=self.rerank_top_n,
-                model=self.rerank_model_id,
-                device=self.rerank_device,
+                model=cross_encoder,
             )
             logger.info("Reranker initialized: %s", self.rerank_model_id)
         return self._reranker
