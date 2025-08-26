@@ -13,7 +13,6 @@ from typing import Any
 import pandas as pd
 import torch
 from fastembed import SparseTextEmbedding
-from helpers.unescape_unicode import unescape_unicode
 from llama_index.core import (
     Response,
     SimpleDirectoryReader,
@@ -32,10 +31,8 @@ from llama_index.llms.ollama import Ollama
 from llama_index.node_parser.docling import DoclingNodeParser
 from llama_index.readers.docling import DoclingReader
 from llama_index.vector_stores.qdrant import QdrantVectorStore
-from modules.readers.table_reader import TableReader
 from qdrant_client import QdrantClient
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Distance, VectorParams
 from sqlalchemy import (
     Column,
     DateTime,
@@ -48,6 +45,9 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
+from wizard.modules.readers.table_reader import TableReader
+from wizard.utils.unescape_unicode import unescape_unicode
+
 logger = logging.getLogger(__name__)
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
@@ -59,6 +59,13 @@ Base = declarative_base()
 
 
 class Conversation(Base):
+    """
+    Represents a user conversation session.
+
+    Args:
+        Base (declarative_base): The declarative base class for SQLAlchemy models.
+    """
+
     __tablename__ = "conversations"
     id = Column(String, primary_key=True)  # external session id
     created_at = Column(
@@ -74,6 +81,13 @@ class Conversation(Base):
 
 
 class Turn(Base):
+    """
+    Represents a user turn within a conversation.
+
+    Args:
+        Base (declarative_base): The declarative base class for SQLAlchemy models.
+    """
+
     __tablename__ = "turns"
     id = Column(Integer, primary_key=True, autoincrement=True)
     conversation_id = Column(String, ForeignKey("conversations.id"), index=True)
@@ -90,6 +104,13 @@ class Turn(Base):
 
 
 class Citation(Base):
+    """
+    Represents a citation within a turn of a conversation.
+
+    Args:
+        Base (declarative_base): The declarative base class for SQLAlchemy models.
+    """
+
     __tablename__ = "citations"
     id = Column(Integer, primary_key=True, autoincrement=True)
     turn_id = Column(Integer, ForeignKey("turns.id"), index=True)
@@ -103,7 +124,16 @@ class Citation(Base):
     turn = relationship("Turn", back_populates="citations")
 
 
-def _make_session_maker(db_url: str = "sqlite:///rag_sessions.db"):
+def _make_session_maker(db_url: str = "sqlite:///rag_sessions.db") -> sessionmaker:
+    """
+    Creates a new SQLAlchemy session maker.
+
+    Args:
+        db_url (str, optional): The database URL. Defaults to "sqlite:///rag_sessions.db".
+
+    Returns:
+        sessionmaker: The SQLAlchemy session maker.
+    """
     engine = create_engine(db_url, future=True)
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine, expire_on_commit=False)
@@ -111,9 +141,14 @@ def _make_session_maker(db_url: str = "sqlite:///rag_sessions.db"):
 
 @dataclass(slots=True)
 class RAG:
+    """
+    Represents a Retrieval-Augmented Generation (RAG) model.
+    """
+
     # --- Path setup ---
     data_dir: Path | None = None
     persist_dir: Path | None = None
+
     # --- Host path (optional; used only for FS fallback on local Docker)
     qdrant_host_dir: str | None = None
 
@@ -197,6 +232,12 @@ class RAG:
     # --- Static methods ---
     @staticmethod
     def _list_supported_sparse_models() -> list[str]:
+        """
+        Lists all supported sparse models.
+
+        Returns:
+            list[str]: A list of supported sparse model IDs.
+        """
         try:
             return [m["model"] for m in SparseTextEmbedding.list_supported_models()]
         except ImportError:
@@ -205,6 +246,12 @@ class RAG:
     # --- Properties (lazy loading) ---
     @property
     def device(self) -> str:
+        """
+        Returns the device being used for computation.
+
+        Returns:
+            str: The device being used ("cpu", "cuda", or "mps").
+        """
         if self._device is None:
             if torch.cuda.is_available():
                 self._device = "cuda"
@@ -224,8 +271,13 @@ class RAG:
     @property
     def embed_model(self) -> BaseEmbedding:
         """
-        Lazily initializes and returns the embedding model (HF or Ollama),
-        depending on `self.embed_backend`.
+        Lazily initializes and returns the embedding model.
+
+        Raises:
+            RuntimeError: If the embedding model could not be initialized.
+
+        Returns:
+            BaseEmbedding: The initialized embedding model.
         """
         self._embed_model = HuggingFaceEmbedding(
             model_name=self.embed_model_id,
@@ -239,6 +291,12 @@ class RAG:
 
     @property
     def gen_model(self) -> Ollama:
+        """
+        Lazily initializes and returns the generation model (Ollama).
+
+        Returns:
+            Ollama: The initialized generation model.
+        """
         if self._gen_model is None:
             self._gen_model = Ollama(
                 base_url=self.base_url,
@@ -254,7 +312,15 @@ class RAG:
 
     @property
     def sparse_model(self) -> str | None:
-        """Return the configured sparse model id for hybrid retrieval."""
+        """
+        Returns the configured sparse model id for hybrid retrieval.
+
+        Raises:
+            ValueError: If the sparse model is not supported.
+
+        Returns:
+            str | None: The sparse model id or None if not enabled.
+        """
         if not self.enable_hybrid:
             return None
         if self.sparse_model_id not in self._list_supported_sparse_models():
@@ -266,6 +332,12 @@ class RAG:
 
     @property
     def reranker(self) -> SentenceTransformerRerank:
+        """
+        Lazily initializes and returns the reranker model (SentenceTransformerRerank).
+
+        Returns:
+            SentenceTransformerRerank: The initialized reranker model.
+        """
         if self._reranker is None:
             self._reranker = SentenceTransformerRerank(
                 top_n=self.rerank_top_n,
@@ -277,17 +349,31 @@ class RAG:
 
     @property
     def qdrant_client(self) -> QdrantClient:
+        """
+        Lazily initializes and returns the Qdrant client.
+
+        Returns:
+            QdrantClient: The initialized Qdrant client.
+        """
         if self._qdrant_client is None:
             self._qdrant_client = QdrantClient(
                 host=self.qdrant_host, port=self.qdrant_port
             )
             logger.info(
-                f"Qdrant client initialized: {self.qdrant_host}:{self.qdrant_port}"
+                "Qdrant client initialized: %s:%s",
+                self.qdrant_host,
+                self.qdrant_port,
             )
         return self._qdrant_client
 
     @property
     def qdrant_aclient(self) -> AsyncQdrantClient:
+        """
+        Lazily initializes and returns the Qdrant async client.
+
+        Returns:
+            AsyncQdrantClient: The initialized Qdrant async client.
+        """
         if self._qdrant_aclient is None:
             self._qdrant_aclient = AsyncQdrantClient(
                 host=self.qdrant_host, port=self.qdrant_port
@@ -301,6 +387,9 @@ class RAG:
 
     # --- Build pieces ---
     def _create_doc_loader(self) -> None:
+        """
+        Creates the document loader for various file types.
+        """
         # PDF reader (Docling) as before
         pdf_reader = DoclingReader(export_type=DoclingReader.ExportType.JSON)
 
@@ -341,6 +430,12 @@ class RAG:
         )
 
     def _vector_store(self) -> QdrantVectorStore:
+        """
+        Creates the vector store for document embeddings.
+
+        Returns:
+            QdrantVectorStore: The initialized vector store.
+        """
         return QdrantVectorStore(
             client=self.qdrant_client,
             aclient=self.qdrant_aclient,
@@ -349,9 +444,16 @@ class RAG:
             fastembed_sparse_model=self.sparse_model,
         )
 
-    def _storage_context(
-        self, vector_store: QdrantVectorStore
-    ) -> StorageContext:
+    def _storage_context(self, vector_store: QdrantVectorStore) -> StorageContext:
+        """
+        Creates the storage context for document embeddings.
+
+        Args:
+            vector_store (QdrantVectorStore): The vector store for document embeddings.
+
+        Returns:
+            StorageContext: The created storage context.
+        """
         return StorageContext.from_defaults(vector_store=vector_store)
 
     def _index(self, storage_ctx: StorageContext) -> VectorStoreIndex:
@@ -362,7 +464,13 @@ class RAG:
         )
 
     def _docs_to_nodes(self) -> None:
-        """Convert loaded documents into nodes using the appropriate parsers."""
+        """
+        Converts loaded documents into nodes using the appropriate parsers.
+
+        Raises:
+            RuntimeError: If the directory reader is not initialized.
+            RuntimeError: If the node parsers are not initialized.
+        """
         if self.dir_reader is None:
             raise RuntimeError("Directory reader is not initialized.")
         self.docs = self.dir_reader.load_data()
@@ -408,7 +516,7 @@ class RAG:
 
         Raises:
             RuntimeError: If the index is not initialized.
-        """        
+        """
         if self.index is None:
             raise RuntimeError("Index is not initialized. Cannot create query engine.")
         k = min(max(self.retrieve_similarity_top_k, self.rerank_top_n * 8), 64)
@@ -559,10 +667,13 @@ class RAG:
 
     # --- Collection discovery / selection ---
     def _resolve_qdrant_host_dir(self) -> Path | None:
-        """Best-effort resolution of the host directory where Qdrant stores data.
+        """
+        Best-effort resolution of the host directory where Qdrant stores data.
         Used only as a *fallback* when we cannot reach the Qdrant API.
         Priority: explicit field -> env var -> platform default under home.
-        Returns a Path to the directory that contains the `collections/` subfolder.
+
+        Returns:
+            Path | None: The resolved path, or None if it cannot be determined.
         """
         if self.qdrant_host_dir:
             return Path(self.qdrant_host_dir)
@@ -575,7 +686,15 @@ class RAG:
         return None
 
     def list_collections(self, prefer_api: bool = True) -> list[str]:
-        """Return a list of collection names. Uses Qdrant API when available; falls back to listing the host storage path."""
+        """
+        Return a list of collection names. Uses Qdrant API when available; falls back to listing the host storage path.
+
+        Args:
+            prefer_api (bool): Whether to prefer the Qdrant API over filesystem access.
+
+        Returns:
+            list[str]: A list of collection names.
+        """
         if prefer_api:
             try:
                 resp = self.qdrant_client.get_collections()
@@ -604,7 +723,7 @@ class RAG:
 
         Args:
             name (str): The name of the collection to select or create.
-        
+
         Raises:
             ValueError: If the collection name is empty or invalid.
         """
@@ -624,6 +743,12 @@ class RAG:
 
     # --- Public API ---
     def ingest_docs(self, data_dir: str | Path) -> None:
+        """
+        Ingest documents from the specified directory into the Qdrant collection.
+
+        Args:
+            data_dir (str | Path): The directory containing the documents to ingest.
+        """
         self.data_dir = Path(data_dir) if isinstance(data_dir, str) else data_dir
         self._create_doc_loader()
         self._docs_to_nodes()
@@ -646,13 +771,17 @@ class RAG:
 
     async def asingest_docs(self, data_dir: str | Path) -> None:
         """
-        Async ingestion path: parses docs, builds an empty index, then inserts nodes concurrently.
-        Requires an event loop (e.g., FastAPI startup task or any asyncio context).
+        Asynchronously ingest documents from the specified directory into the Qdrant collection.
+
+        Args:
+            data_dir (str | Path): The directory containing the documents to ingest.
+
+        Raises:
+            RuntimeError: If the index is not initialized for async ingestion.
         """
         self.data_dir = Path(data_dir) if isinstance(data_dir, str) else data_dir
         self._create_doc_loader()
         self._docs_to_nodes()
-        self.create_empty_index()
         if self.index is None:
             raise RuntimeError("Index is not initialized for async ingestion.")
         # Concurrent, non-blocking upsert into Qdrant via aclient
@@ -674,6 +803,20 @@ class RAG:
         logger.info("Documents ingested successfully (async path).")
 
     def run_query(self, prompt: str) -> dict[str, Any]:
+        """
+        Run a query against the Qdrant collection.
+
+        Args:
+            prompt (str): The query prompt.
+
+        Raises:
+            ValueError: If the prompt is empty.
+            RuntimeError: If the query engine is not initialized.
+            TypeError: If the response is not of the expected type.
+
+        Returns:
+            dict[str, Any]: The query results.
+        """
         if not prompt.strip():
             raise ValueError("Query prompt cannot be empty.")
         if self.query_engine is None:
@@ -686,6 +829,20 @@ class RAG:
         return self._extract_relevant_data(prompt, result)
 
     async def run_query_async(self, prompt: str) -> dict[str, Any]:
+        """
+        Run a query against the Qdrant collection asynchronously.
+
+        Args:
+            prompt (str): The query prompt.
+
+        Raises:
+            ValueError: If the prompt is empty.
+            RuntimeError: If the query engine is not initialized.
+            TypeError: If the response is not of the expected type.
+
+        Returns:
+            dict[str, Any]: The query results.
+        """
         if not prompt.strip():
             raise ValueError("Query prompt cannot be empty.")
         if self.query_engine is None:
@@ -698,6 +855,15 @@ class RAG:
         return self._extract_relevant_data(prompt, result)
 
     def save_index(self, persist_dir: str | Path) -> None:
+        """
+        Save the index to the specified directory.
+
+        Args:
+            persist_dir (str | Path): The directory to save the index.
+
+        Raises:
+            RuntimeError: If the index is not initialized.
+        """
         if self.index is None:
             raise RuntimeError("Index is not initialized. Nothing to save.")
         self.persist_dir = Path(persist_dir)
@@ -706,14 +872,31 @@ class RAG:
 
     # --- Session store wiring ---
     def init_session_store(self, db_url: str = "sqlite:///rag_sessions.db") -> None:
-        """Initialize (or reinitialize) the SQLAlchemy session factory."""
+        """
+        Initialize (or reinitialize) the SQLAlchemy session factory.
+
+        Args:
+            db_url (str, optional): The database URL. Defaults to "sqlite:///rag_sessions.db".
+        """
         self._SessionMaker = _make_session_maker(db_url)
 
     def _ensure_store(self) -> None:
+        """
+        Ensure the session store is initialized.
+        """
         if self._SessionMaker is None:
             self.init_session_store()
 
-    def _load_or_create_convo(self, session_id: str):
+    def _load_or_create_convo(self, session_id: str) -> tuple[sessionmaker, Conversation]:
+        """
+        Load an existing conversation or create a new one.
+
+        Args:
+            session_id (str): The ID of the session.
+
+        Returns:
+            tuple[sessionmaker, Conversation]: The session and conversation objects.
+        """
         self._ensure_store()
         s = self._SessionMaker()
         conv = s.get(Conversation, session_id)
@@ -724,6 +907,15 @@ class RAG:
         return s, conv
 
     def _get_rolling_summary(self, session_id: str) -> str:
+        """
+        Get the rolling summary for a conversation.
+
+        Args:
+            session_id (str): The ID of the session.
+
+        Returns:
+            str: The rolling summary for the conversation.
+        """
         self._ensure_store()
         s = self._SessionMaker()
         conv = s.get(Conversation, session_id)
@@ -733,7 +925,15 @@ class RAG:
     def _persist_turn(
         self, session_id: str, user_msg: str, resp: Any, data: dict
     ) -> None:
-        """Persist conversation turn + citations in the relational store."""
+        """
+        Persist the conversation turn and its citations in the relational store.
+
+        Args:
+            session_id (str): The ID of the session.
+            user_msg (str): The user's message.
+            resp (Any): The response object.
+            data (dict): The additional data to persist.
+        """
         self._ensure_store()
         s, conv = self._load_or_create_convo(session_id)
 
@@ -809,7 +1009,13 @@ class RAG:
         s.commit()
 
     def _maybe_update_summary(self, session_id: str, every_n_turns: int = 5) -> None:
-        """Maintain a compact rolling summary to bound future context windows."""
+        """
+        Check if the conversation summary should be updated and perform the update if necessary.
+
+        Args:
+            session_id (str): The ID of the session.
+            every_n_turns (int): The interval of turns after which to update the summary.
+        """
         self._ensure_store()
         s = self._SessionMaker()
         conv = s.get(Conversation, session_id)
@@ -834,9 +1040,14 @@ class RAG:
         s.commit()
 
     def _get_node_text_by_id(self, node_id: str) -> str | None:
-        """Best-effort fetch of a node's text from the index docstore given its id.
-        Tries several access patterns to be robust across LlamaIndex versions.
-        Returns None if not found or if index/docstore are unavailable.
+        """
+        Best-effort fetch of a node's text from the index docstore given its id.
+
+        Args:
+            node_id (str): The ID of the node.
+
+        Returns:
+            str | None: The text content of the node, or None if not found.
         """
         try:
             if self.index is None:
@@ -898,12 +1109,17 @@ class RAG:
         self, session_id: str | None = None, out_dir: str | Path = "session"
     ) -> Path:
         """
-        Export a session as a portable bundle:
-        - session.json
-        - messages.jsonl
-        - citations.parquet  (if pandas/pyarrow available)
-        - transcript.md
-        - manifest.json (sha256 of each file)
+        Export the session data to the specified output directory.
+
+        Args:
+            session_id (str | None, optional): The ID of the session. Defaults to None.
+            out_dir (str | Path, optional): The output directory for the exported session. Defaults to "session".
+
+        Raises:
+            ValueError: If no conversation is found for the given session ID.
+
+        Returns:
+            Path: The path to the exported session directory.
         """
         self._ensure_store()
         s = self._SessionMaker()
@@ -1072,9 +1288,16 @@ class RAG:
 
     def start_session(self, session_id: str | None = None) -> str:
         """
-        Create/attach a chat engine with history-aware question condensation.
-        If no session_id is provided, a new UUIDv4 is generated and persisted.
-        Returns the active session_id.
+        Start a new chat session or continue an existing one.
+
+        Args:
+            session_id (str | None, optional): The ID of the session to continue. Defaults to None.
+
+        Raises:
+            RuntimeError: If the query engine has not been initialized.
+
+        Returns:
+            str: The ID of the session.
         """
         # 1) ensure a valid session id
         if not session_id:
