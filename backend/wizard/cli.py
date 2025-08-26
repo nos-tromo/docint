@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from wizard.modules.rag import RAG
+from wizard.utils.logging_cfg import setup_logging
 
 # Define paths and initialize RAG
 data_dir = "data"
