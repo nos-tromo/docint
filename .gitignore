@@ -38,7 +38,7 @@ env/
 lib/
 models/
 output/
-test/
+**/test*/
 uploads/
 venv/
 workbench/
