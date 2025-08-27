@@ -31,11 +31,14 @@ dependencies = [
     "whisperx>=3.4.2",
 ]
 
+[project.scripts]
+ingest = "wizard.utils.ingest:main"
+
 [tool.setuptools]
 include-package-data = true
 
 [tool.setuptools.packages.find]
-where = ["wizard"]
+where = ["."]
 
 [tool.uv.sources]
 wizard-test = { workspace = true }
