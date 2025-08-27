@@ -173,7 +173,7 @@ class RAG:
     base_url: str = OLLAMA_HOST
     context_window: int = -1
     temperature: float = 0.2
-    request_timeout: int = 240
+    request_timeout: int = 1200
     thinking: bool = True
     ollama_options: dict[str, Any] | None = None
 
@@ -281,16 +281,16 @@ class RAG:
             device=self.device,
             normalize=True,
         )
-        # Move underlying model to the target device using empty tensors and reload weights
-        hf_model = getattr(self._embed_model, "model", None)
-        if hf_model is None:
-            hf_model = getattr(self._embed_model, "_model", None)
-        if hf_model is None:
-            raise RuntimeError("Embedding model could not be initialized.")
-        state_dict = hf_model.state_dict()
-        hf_model.to_empty(self.embed_device)
-        hf_model.load_state_dict(state_dict)
-        logger.info("Embedding model (HF) initialized: %s", self.embed_model_id)
+        # # Move underlying model to the target device using empty tensors and reload weights
+        # hf_model = getattr(self._embed_model, "model", None)
+        # if hf_model is None:
+        #     hf_model = getattr(self._embed_model, "_model", None)
+        # if hf_model is None:
+        #     raise RuntimeError("Embedding model could not be initialized.")
+        # state_dict = hf_model.state_dict()
+        # hf_model.to_empty(self.device)
+        # hf_model.load_state_dict(state_dict)
+        # logger.info("Embedding model (HF) initialized: %s", self.embed_model_id)
         return self._embed_model
 
     @property
