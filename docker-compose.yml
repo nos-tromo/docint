@@ -1,33 +1,43 @@
+networks:
+  wizardnet:
+
 services:
   #############################
-  # Backend (default: CPU)
+  # Backend (CPU)
   #############################
   wizard:
+    profiles: ["cpu"]
+    container_name: wizard-backend-cpu
     build:
       context: ./backend
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
     environment:
-      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_URL=http://ollama-cpu:11434
       - QDRANT_URL=http://qdrant:6333
       - QDRANT_HOST_DIR=${USERPROFILE:-$HOME}/.qdrant/storage/collections
       - USE_DEVICE=auto
     depends_on:
       - qdrant
+    networks:
+      wizardnet:
+        aliases:
+          - wizard-backend
 
   #############################
-  # Backend (GPU override)
+  # Backend (GPU)
   #############################
   wizard-gpu:
     profiles: ["gpu"]
+    container_name: wizard-backend-gpu
     build:
       context: ./backend
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
     environment:
-      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_URL=http://ollama-gpu:11434
       - QDRANT_URL=http://qdrant:6333
       - QDRANT_HOST_DIR=${USERPROFILE:-$HOME}/.qdrant/storage/collections
       - USE_DEVICE=auto
@@ -40,33 +50,68 @@ services:
               capabilities: [gpu]
     depends_on:
       - qdrant
+    networks:
+      wizardnet:
+        aliases:
+          - wizard-backend
 
   #############################
   # Frontend
   #############################
   frontend:
+    container_name: wizard-frontend
     build:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
       - "8080:80"
-    depends_on:
-      - wizard
+    networks:
+      wizardnet:
 
   #############################
-  # Ollama
+  # Ollama (CPU)
   #############################
   ollama:
+    profiles: ["cpu"]
+    container_name: ollama-cpu
     image: ollama/ollama:latest
     ports:
       - "11434:11434"
     volumes:
       - ${HOME}/.ollama:/root/.ollama
+    networks:
+      wizardnet:
+
+  #############################
+  # Ollama (GPU)
+  #############################
+  ollama-gpu:
+    profiles: ["gpu"]
+    container_name: ollama-gpu
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ${HOME}/.ollama:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    runtime: nvidia
+    restart: always
+    networks:
+      wizardnet:
 
   #############################
   # Qdrant Vectorstore
   #############################
   qdrant:
+    container_name: qdrant
     image: qdrant/qdrant:latest
     ports:
       - "6333:6333"
@@ -77,3 +122,5 @@ services:
     environment:
       - QDRANT__TELEMETRY_DISABLED=true
     restart: unless-stopped
+    networks:
+      wizardnet:
