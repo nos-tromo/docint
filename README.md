@@ -1,42 +1,59 @@
 # Wizard
 
-## Frontend
+## Installation
+
+### Manual setup
+
+#### Frontend
 
 ```bash
 cd frontend
 npm install
 ```
 
-Run frontend:
-
-```bash
-npm run dev
-```
-
-## Backend
+#### Backend
 
 ```bash
 cd backend
-uv venv
-uv pip install .
 uv sync
 ```
 
-Run backend:
-
-```bash
-uv run uvicorn wizard.app:app --reload
-```
-
-## Docker setup
+### Docker
 
 Select whether to use the CPU or GPU (requires a CUDA compatible GPU and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) set up):
 
 ```bash
 # CPU
-docker compose up
+docker compose --profile cpu up
 # GPU
-docker compose up --build --gpus all
+docker compose --profile gpu up
 ```
 
-Launch app: `http://localhost:8080/`
+## Usage
+
+### Ingest documents
+
+```bash
+uv run ingest
+```
+
+### Run frontend and backend in separate shells
+
+Frontend:
+
+```bash
+cd frontend
+npm run dev
+```
+
+Backend:
+
+```bash
+uv run uvicorn wizard.app:app --reload
+```
+
+Launch the browser app: `http://localhost:5173/`.
+
+### Run via Docker
+
+Launch the browser app: `http://localhost:8080/`.
