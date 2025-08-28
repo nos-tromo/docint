@@ -1141,8 +1141,7 @@ class RAG:
             },
             "vector_store": {
                 "type": "qdrant",
-                "host": self.qdrant_host,
-                "port": self.qdrant_port,
+                "url": self.qdrant_url,
                 "collection": self.qdrant_collection,
                 "host_dir": str(self.qdrant_host_dir or ""),
             },
