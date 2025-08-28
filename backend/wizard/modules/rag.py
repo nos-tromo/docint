@@ -26,6 +26,7 @@ from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.postprocessor import SentenceTransformerRerank
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.schema import BaseNode, Document
+from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
 from llama_index.node_parser.docling import DoclingNodeParser
@@ -1304,7 +1305,12 @@ class RAG:
             token_limit=2000, chat_history=[]
         )
         if rolling:
-            self.chat_memory.put("system", f"Conversation summary so far:\n{rolling}")
+            self.chat_memory.put(
+                ChatMessage(
+                    role=MessageRole.SYSTEM,
+                    content=f"Conversation summary so far:\n{rolling}",
+                )
+            )
 
         if self.query_engine is None:
             raise RuntimeError(
