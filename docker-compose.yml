@@ -1,6 +1,6 @@
 services:
   #############################
-  # Backend
+  # Backend (default: CPU)
   #############################
   wizard:
     build:
@@ -13,7 +13,31 @@ services:
       - QDRANT_URL=http://qdrant:6333
       - QDRANT_HOST_DIR=${USERPROFILE:-$HOME}/.qdrant/storage/collections
       - USE_DEVICE=auto
+    depends_on:
+      - qdrant
+
+  #############################
+  # Backend (GPU override)
+  #############################
+  wizard-gpu:
+    profiles: ["gpu"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_HOST_DIR=${USERPROFILE:-$HOME}/.qdrant/storage/collections
+      - USE_DEVICE=auto
       - NVIDIA_VISIBLE_DEVICES=all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
     depends_on:
       - qdrant
 
