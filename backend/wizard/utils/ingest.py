@@ -19,7 +19,7 @@ def get_inputs() -> tuple[str, Path]:
         tuple[str, Path]: Qdrant collection name and data directory path.
     """
     qdrant_col = input("Enter Qdrant collection name: ").strip()
-    data_dir = Path(input("Enter path to data directory [data]: ").strip() or "data")
+    data_dir = Path(input("Enter path to data directory [default: ./backend/data]: ").strip() or "data")
     if not data_dir.is_dir():
         raise ValueError(f"Data directory does not exist: {data_dir}")
     return qdrant_col, data_dir
