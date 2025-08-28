@@ -302,6 +302,7 @@ class RAG:
                 device=self.device,
                 normalize=True,
             )
+            logger.info("Embed model initialized: %s", self.embed_model_id)
         return self._embed_model
 
     @property
