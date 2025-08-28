@@ -116,7 +116,7 @@ export default function Chat({ collection }: Props) {
           <HStack>
             <Spinner size="sm" color="fg.muted" />
             <Text fontSize="sm" color="fg.muted">
-              Thinking…
+              Searching…
             </Text>
           </HStack>
         )}
