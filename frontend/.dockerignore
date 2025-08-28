@@ -34,7 +34,6 @@ models/
 output/
 *.db
 *.sqlite3
-*.html
 *.ipynb
 *.mkv
 *.mp3
