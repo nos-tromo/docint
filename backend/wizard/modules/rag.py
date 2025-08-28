@@ -50,9 +50,9 @@ from wizard.utils.unescape_unicode import unescape_unicode
 
 logger = logging.getLogger(__name__)
 
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-QDRANT_HOST = os.getenv("QDRANT_HOST", "127.0.0.1")
-QDRANT_PORT = os.getenv("QDRANT_PORT", 6333)
+OLLAMA_URL = os.getenv("OLLAMA_URL")
+QDRANT_URL = os.getenv("QDRANT_URL")
+QDRANT_HOST_DIR = os.getenv("QDRANT_HOST_DIR")
 
 # --- Session persistence (ORM) ---
 Base = declarative_base()
@@ -155,22 +155,17 @@ class RAG:
     gen_model_id: str = "qwen3:8b"
     sparse_model_id: str = "Qdrant/bm42-all-minilm-l6-v2-attentions"
 
-    # --- Backend controls ---
-    qdrant_host: str = QDRANT_HOST
-    qdrant_port: int = int(QDRANT_PORT)
+    # --- Qdrant controls ---
+    qdrant_url: str = QDRANT_URL or "http://127.0.0.1:6333"
+    _qdrant_host_dir: Path | None = field(default=None, init=False, repr=False)
     qdrant_collection: str = "default"
-    qdrant_host_dir: str | None = None
-
-    # --- Performance / device controls ---
-    embed_device: str = "cpu"  # run embeddings on CPU to avoid GPU contention
-    rerank_device: str = "cpu"  # run cross-encoder reranker on CPU
 
     # --- Chunking controls ---
     chunk_size: int = 1024
     chunk_overlap: int = 160
 
     # --- Ollama Parameters ---
-    base_url: str = OLLAMA_HOST
+    base_url: str = OLLAMA_URL or "http://localhost:11434"
     context_window: int = -1
     temperature: float = 0.2
     request_timeout: int = 1200
@@ -242,6 +237,31 @@ class RAG:
 
     # --- Properties (lazy loading) ---
     @property
+    def qdrant_host_dir(self) -> Path:
+        """
+        Best-effort resolution of the host directory where Qdrant stores data.
+        Used only as a *fallback* when we cannot reach the Qdrant API.
+        Priority: explicit field -> env var -> platform default under home.
+
+        Raises:
+            ValueError: If the Qdrant host directory is not set.
+
+        Returns:
+            The Path representing the Qdrant host directory.
+        """
+        if self._qdrant_host_dir is None:
+            env = os.getenv("QDRANT_HOST_DIR")
+            if env:
+                self._qdrant_host_dir = Path(env)
+            else:
+                home = os.getenv("HOME") or os.getenv("USERPROFILE")
+                if home:
+                    self._qdrant_host_dir = Path(home) / ".qdrant" / "storage"
+        if self._qdrant_host_dir is None:
+            raise ValueError("Qdrant host directory is not set.")
+        return self._qdrant_host_dir
+
+    @property
     def device(self) -> str:
         """
         Returns the device being used for computation.
@@ -276,21 +296,12 @@ class RAG:
         Returns:
             BaseEmbedding: The initialized embedding model.
         """
-        self._embed_model = HuggingFaceEmbedding(
-            model_name=self.embed_model_id,
-            device=self.device,
-            normalize=True,
-        )
-        # # Move underlying model to the target device using empty tensors and reload weights
-        # hf_model = getattr(self._embed_model, "model", None)
-        # if hf_model is None:
-        #     hf_model = getattr(self._embed_model, "_model", None)
-        # if hf_model is None:
-        #     raise RuntimeError("Embedding model could not be initialized.")
-        # state_dict = hf_model.state_dict()
-        # hf_model.to_empty(self.device)
-        # hf_model.load_state_dict(state_dict)
-        # logger.info("Embedding model (HF) initialized: %s", self.embed_model_id)
+        if self._embed_model is None:
+            self._embed_model = HuggingFaceEmbedding(
+                model_name=self.embed_model_id,
+                device=self.device,
+                normalize=True,
+            )
         return self._embed_model
 
     @property
@@ -360,13 +371,10 @@ class RAG:
             QdrantClient: The initialized Qdrant client.
         """
         if self._qdrant_client is None:
-            self._qdrant_client = QdrantClient(
-                host=self.qdrant_host, port=self.qdrant_port
-            )
+            self._qdrant_client = QdrantClient(url=self.qdrant_url)
             logger.info(
-                "Qdrant client initialized: %s:%s",
-                self.qdrant_host,
-                self.qdrant_port,
+                "Qdrant client initialized: %s",
+                self.qdrant_url,
             )
         return self._qdrant_client
 
@@ -379,13 +387,10 @@ class RAG:
             AsyncQdrantClient: The initialized Qdrant async client.
         """
         if self._qdrant_aclient is None:
-            self._qdrant_aclient = AsyncQdrantClient(
-                host=self.qdrant_host, port=self.qdrant_port
-            )
+            self._qdrant_aclient = AsyncQdrantClient(url=self.qdrant_url)
             logger.info(
-                "Qdrant async client initialized: %s: %s",
-                self.qdrant_host,
-                self.qdrant_port,
+                "Qdrant async client initialized: %s",
+                self.qdrant_url,
             )
         return self._qdrant_aclient
 
@@ -670,25 +675,6 @@ class RAG:
         }
 
     # --- Collection discovery / selection ---
-    def _resolve_qdrant_host_dir(self) -> Path | None:
-        """
-        Best-effort resolution of the host directory where Qdrant stores data.
-        Used only as a *fallback* when we cannot reach the Qdrant API.
-        Priority: explicit field -> env var -> platform default under home.
-
-        Returns:
-            Path | None: The resolved path, or None if it cannot be determined.
-        """
-        if self.qdrant_host_dir:
-            return Path(self.qdrant_host_dir)
-        env = os.getenv("QDRANT_HOST_DIR") or os.getenv("QDRANT_PATH")
-        if env:
-            return Path(env)
-        home = os.getenv("HOME") or os.getenv("USERPROFILE")
-        if home:
-            return Path(home) / ".qdrant" / "storage"
-        return None
-
     def list_collections(self, prefer_api: bool = True) -> list[str]:
         """
         Return a list of collection names. Uses Qdrant API when available; falls back to listing the host storage path.
@@ -709,7 +695,7 @@ class RAG:
                 logger.warning(
                     "Qdrant API list_collections failed, will try FS fallback: %s", e
                 )
-        base = self._resolve_qdrant_host_dir()
+        base = self.qdrant_host_dir
         if base is None:
             return []
         collections_dir = base / "collections"
@@ -891,7 +877,9 @@ class RAG:
         if self._SessionMaker is None:
             self.init_session_store()
 
-    def _load_or_create_convo(self, session_id: str) -> tuple[sessionmaker, Conversation]:
+    def _load_or_create_convo(
+        self, session_id: str
+    ) -> tuple[sessionmaker, Conversation]:
         """
         Load an existing conversation or create a new one.
 
@@ -1159,7 +1147,7 @@ class RAG:
                 "host": self.qdrant_host,
                 "port": self.qdrant_port,
                 "collection": self.qdrant_collection,
-                "host_dir": str(self._resolve_qdrant_host_dir() or ""),
+                "host_dir": str(self.qdrant_host_dir or ""),
             },
         }
         (out_dir / "session.json").write_text(
