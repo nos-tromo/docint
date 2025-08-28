@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type React from "react";
 import {
   Button,
   DialogRoot,
@@ -9,7 +10,6 @@ import {
   DialogFooter,
   CloseButton,
   Stack,
-  Input,
   Text,
 } from "@chakra-ui/react";
 import { listCollections, selectCollection } from "../api";
@@ -22,9 +22,7 @@ type Props = {
 
 export default function CollectionPicker({ isOpen, onClose, onAttached }: Props) {
   const [collections, setCollections] = useState<string[]>([]);
-  const [mode, setMode] = useState<"pick" | "create">("pick");
   const [selected, setSelected] = useState<string>("");
-  const [newName, setNewName] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -36,7 +34,7 @@ export default function CollectionPicker({ isOpen, onClose, onAttached }: Props)
         })
         .catch((err: unknown) => {
           setError(
-            err instanceof Error ? err.message : "Failed to load collections"
+            err instanceof Error ? err.message : "Failed to load collections",
           );
           setCollections([]);
         });
@@ -44,7 +42,7 @@ export default function CollectionPicker({ isOpen, onClose, onAttached }: Props)
   }, [isOpen]);
 
   const attach = async () => {
-    const name = mode === "create" ? newName.trim() : selected || "default";
+    const name = selected.trim();
     if (!name) return;
     await selectCollection(name);
     onAttached(name);
@@ -61,17 +59,19 @@ export default function CollectionPicker({ isOpen, onClose, onAttached }: Props)
       <DialogBackdrop />
       <DialogContent bg="bg.panel" color="fg.default">
         <DialogHeader display="flex" justifyContent="space-between" alignItems="center">
-          <Text fontWeight="bold">Select or create a collection</Text>
+          <Text fontWeight="bold">Select a collection</Text>
           <CloseButton onClick={onClose} color="fg.default" />
         </DialogHeader>
         <DialogBody>
           <Stack gap={3}>
+            {error && <Text color="red.400">{error}</Text>}
+
             <label>
-              <Text mb="1">Mode</Text>
+              <Text mb="1">Available collections</Text>
               <select
-                value={mode}
+                value={selected}
                 onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
-                  setMode(e.target.value as "pick" | "create")
+                  setSelected(e.target.value)
                 }
                 style={{
                   width: "100%",
@@ -83,59 +83,23 @@ export default function CollectionPicker({ isOpen, onClose, onAttached }: Props)
                     "1px solid var(--chakra-colors-border-muted, rgba(255,255,255,0.16))",
                 }}
               >
-                <option value="pick">Pick existing</option>
-                <option value="create">Create new</option>
+                <option value="" disabled>
+                  Choose collection
+                </option>
+                {collections.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
               </select>
             </label>
-
-            {error && <Text color="red.400">{error}</Text>}
-
-            {mode === "pick" ? (
-              <label>
-                <Text mb="1">Existing collections</Text>
-                <select
-                  value={selected}
-                  onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
-                    setSelected(e.target.value)
-                  }
-                  style={{
-                    width: "100%",
-                    padding: "8px",
-                    background: "transparent",
-                    color: "inherit",
-                    borderRadius: "6px",
-                    border:
-                      "1px solid var(--chakra-colors-border-muted, rgba(255,255,255,0.16))",
-                  }}
-                >
-                  <option value="" disabled>
-                    Choose collection
-                  </option>
-                  {collections.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ) : (
-              <label>
-                <Text mb="1">New collection name</Text>
-                <Input
-                  placeholder="my-collection"
-                  value={newName}
-                  onChange={(e) => setNewName(e.target.value)}
-                  bg="bg.panel"
-                />
-              </label>
-            )}
           </Stack>
         </DialogBody>
         <DialogFooter>
           <Button mr={3} onClick={onClose} variant="ghost">
             Cancel
           </Button>
-          <Button onClick={attach} colorScheme="teal">
+          <Button onClick={attach} colorScheme="teal" disabled={!selected}>
             Use collection
           </Button>
         </DialogFooter>
@@ -143,3 +107,4 @@ export default function CollectionPicker({ isOpen, onClose, onAttached }: Props)
     </DialogRoot>
   );
 }
+

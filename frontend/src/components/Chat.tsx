@@ -58,7 +58,9 @@ export default function Chat({ collection }: Props) {
       setMsgs((m) => [...m, { role: "assistant", text: answer || "", sources }]);
     } catch (e: unknown) {
       const err = e as { response?: { data?: { detail?: string } } };
-      const msg = err.response?.data?.detail ? `⚠️ ${err.response.data.detail}` : `⚠️ ${String(e)}`;
+      const msg = err.response?.data?.detail
+        ? `⚠️ ${err.response.data.detail}`
+        : `⚠️ ${String(e)}`;
       setMsgs((m) => [...m, { role: "assistant", text: msg }]);
     } finally {
       setLoading(false);
@@ -143,3 +145,4 @@ export default function Chat({ collection }: Props) {
     </VStack>
   );
 }
+

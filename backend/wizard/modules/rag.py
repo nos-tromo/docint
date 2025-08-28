@@ -704,19 +704,22 @@ class RAG:
             logger.warning("FS fallback list_collections failed: %s", e)
             return []
 
-    def select_or_create_collection(self, name: str) -> None:
-        """
-        Switch active collection; create/tune it if missing.
+    def select_collection(self, name: str) -> None:
+        """Switch active collection, ensuring it already exists.
 
         Args:
-            name (str): The name of the collection to select or create.
+            name: Name of the collection to select.
 
         Raises:
-            ValueError: If the collection name is empty or invalid.
+            ValueError: If the name is empty or the collection does not exist.
         """
         if not name or not name.strip():
             raise ValueError("Collection name cannot be empty.")
-        self.qdrant_collection = name.strip()
+        name = name.strip()
+        if name not in self.list_collections():
+            raise ValueError(f"Collection '{name}' does not exist.")
+
+        self.qdrant_collection = name
 
         # Reset any state tied to the previously selected collection so that
         # future queries do not use stale indexes or conversations.
