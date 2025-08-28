@@ -14,7 +14,6 @@ services:
       - QDRANT_HOST_DIR=${USERPROFILE:-$HOME}/.qdrant/storage/collections
       - USE_DEVICE=auto
       - NVIDIA_VISIBLE_DEVICES=all
-    runtime: nvidia
     depends_on:
       - qdrant
 
