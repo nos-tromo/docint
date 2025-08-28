@@ -1,4 +1,4 @@
-# Wizard
+# Wizard Document Intelligence
 
 ## Installation
 
