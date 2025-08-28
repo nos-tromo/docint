@@ -46,7 +46,6 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 from wizard.modules.readers.table_reader import TableReader
-from wizard.utils.unescape_unicode import unescape_unicode
 
 logger = logging.getLogger(__name__)
 
@@ -580,8 +579,6 @@ class RAG:
             resp_text = re.sub(
                 r"<think>.*?</think>", "", resp_text, flags=re.DOTALL
             ).strip()
-        # normalize unicode escapes in response text
-        resp_text = unescape_unicode(resp_text)
 
         # --- normalize source_nodes ---
         source_nodes = getattr(result, "source_nodes", None)
@@ -652,7 +649,7 @@ class RAG:
             location_value = page if page is not None else row_index
 
             src = {
-                "text": unescape_unicode(getattr(node, "text", "") or ""),
+                "text": getattr(node, "text", "") or "",
                 "filename": filename,
                 "filetype": filetype,
                 "source": source_kind,
@@ -1063,16 +1060,16 @@ class RAG:
                             continue
                         text = getattr(node, "text", None)
                         if text:
-                            return unescape_unicode(text)
+                            return text
                         # Some versions store content on .get_content(), or .get_text()
                         if hasattr(node, "get_content") and callable(node.get_content):
                             t = node.get_content()
                             if isinstance(t, str) and t:
-                                return unescape_unicode(t)
+                                return t
                         if hasattr(node, "get_text") and callable(node.get_text):
                             t = node.get_text()
                             if isinstance(t, str) and t:
-                                return unescape_unicode(t)
+                                return t
                     except Exception:
                         continue
         except Exception:
@@ -1091,7 +1088,7 @@ class RAG:
                         or payload.get("content")
                     )
                     if isinstance(txt, str) and txt.strip():
-                        return unescape_unicode(txt.strip())
+                        return txt.strip()
         except Exception:
             pass
         return None
