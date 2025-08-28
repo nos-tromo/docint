@@ -1,35 +1,35 @@
 services:
-  # #############################
-  # # Backend (GPU if available, else CPU)
-  # #############################
-  # wizard:
-  #   build:
-  #     context: ./backend
-  #     dockerfile: Dockerfile
-  #   volumes:
-  #     - ${HF_CACHE:-${USERPROFILE:-$HOME}/.cache/huggingface}:/root/.cache/huggingface
-  #     - ${APPDATA:-${HOME}}/nltk_data:/root/nltk_data
-  #   ports:
-  #     - "8000:8000"
-  #   environment:
-  #     - OLLAMA_HOST=http://ollama:11434
-  #     - USE_DEVICE=auto
-  #     - USER_AGENT=Mozilla/5.0 (compatible; MyRAGApp/1.0)
-
-  # #############################
-  # # Frontend
-  # #############################
-  # frontend:
-  #   build:
-  #     context: ./frontend
-  #     dockerfile: Dockerfile
-  #   ports:
-  #     - "8080:80"
-  #   depends_on:
-  #     - wizard
+  #############################
+  # Backend
+  #############################
+  wizard:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_HOST_DIR=${USERPROFILE:-$HOME}/.qdrant/storage/collections
+      - USE_DEVICE=auto
+    depends_on:
+      - qdrant
 
   #############################
-  # Ollama Service
+  # Frontend
+  #############################
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      - wizard
+
+  #############################
+  # Ollama
   #############################
   ollama:
     image: ollama/ollama:latest
@@ -39,7 +39,7 @@ services:
       - ${HOME}/.ollama:/root/.ollama
 
   #############################
-  # Qdrant Vector Database
+  # Qdrant Vectorstore
   #############################
   qdrant:
     image: qdrant/qdrant:latest
@@ -49,4 +49,6 @@ services:
     volumes:
       - ${USERPROFILE:-$HOME}/.qdrant/storage:/qdrant/storage
       - ${USERPROFILE:-$HOME}/.qdrant/snapshots:/qdrant/snapshots
+    environment:
+      - QDRANT__TELEMETRY_DISABLED=true
     restart: unless-stopped
