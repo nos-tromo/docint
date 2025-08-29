@@ -168,7 +168,6 @@ class RAG:
     base_url: str = OLLAMA_URL or "http://localhost:11434"
     context_window: int = -1
     temperature: float = 0.2
-    request_timeout: int = 1200
     thinking: bool = True
     ollama_options: dict[str, Any] | None = None
 
@@ -319,7 +318,6 @@ class RAG:
                 model=self.gen_model_id,
                 temperature=self.temperature,
                 context_window=self.context_window,
-                request_timeout=self.request_timeout,
                 thinking=self.thinking,
                 additional_kwargs=self.ollama_options,
             )
