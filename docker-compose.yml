@@ -17,6 +17,7 @@ services:
       - "8000:8000"
     environment:
       - DATA_PATH=/app/data
+      - HF_HOME=/huggingface
       - LOG_PATH=/app/logs/backend.log
       - OLLAMA_URL=http://ollama:11434
       - QDRANT_HOST_DIR=/qdrant/storage/collections
@@ -24,6 +25,7 @@ services:
       - USE_DEVICE=auto
     volumes:
       - ${USERPROFILE:-$HOME}/wizard/data:/app/data
+      - huggingface_cache:/huggingface
       - qdrant_storage:/qdrant/storage
       - wizard_logs:/app/logs
     networks:
@@ -41,6 +43,7 @@ services:
       - "8000:8000"
     environment:
       - DATA_PATH=/app/data
+      - HF_HOME=/huggingface
       - LOG_PATH=/app/logs/backend.log
       - NVIDIA_VISIBLE_DEVICES=all
       - OLLAMA_URL=http://ollama-gpu:11434
@@ -49,6 +52,7 @@ services:
       - USE_DEVICE=auto
     volumes:
       - ${USERPROFILE:-$HOME}/wizard/data:/app/data
+      - huggingface_cache:/huggingface
       - qdrant_storage:/qdrant/storage
       - wizard_logs:/app/logs
     deploy:
@@ -130,6 +134,7 @@ services:
 # Volumes
 ##########################################################
 volumes:
+  huggingface_cache:
   ollama_models:
   qdrant_storage:
   qdrant_snapshots:
