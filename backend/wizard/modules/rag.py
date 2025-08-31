@@ -21,12 +21,12 @@ from llama_index.core import (
 )
 from llama_index.core.chat_engine import CondenseQuestionChatEngine
 from llama_index.core.embeddings import BaseEmbedding
+from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.postprocessor import SentenceTransformerRerank
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.schema import BaseNode, Document
-from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
 from llama_index.node_parser.docling import DoclingNodeParser
@@ -50,7 +50,9 @@ from wizard.modules.readers.table_reader import TableReader
 
 logger = logging.getLogger(__name__)
 
+# --- Environment variables ---
 DATA_PATH = os.getenv("DATA_PATH")
+HF_HOME = os.getenv("HF_HOME")
 OLLAMA_URL = os.getenv("OLLAMA_URL")
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_HOST_DIR = os.getenv("QDRANT_HOST_DIR")
@@ -147,8 +149,11 @@ class RAG:
     """
 
     # --- Path setup ---
-    data_dir: Path | None = Path(DATA_PATH) if DATA_PATH else Path.home() / "wizard" / "data"
+    data_dir: Path | None = (
+        Path(DATA_PATH) if DATA_PATH else Path.home() / "wizard" / "data"
+    )
     persist_dir: Path | None = None
+    hf_models_dir = HF_HOME
 
     # --- Models ---
     embed_model_id: str = "BAAI/bge-m3"
@@ -299,8 +304,9 @@ class RAG:
         if self._embed_model is None:
             self._embed_model = HuggingFaceEmbedding(
                 model_name=self.embed_model_id,
-                device=self.device,
                 normalize=True,
+                cache_folder=self.hf_models_dir,
+                device=self.device,
             )
             logger.info("Embed model initialized: %s", self.embed_model_id)
         return self._embed_model
@@ -322,7 +328,7 @@ class RAG:
                 thinking=self.thinking,
                 additional_kwargs=self.ollama_options,
             )
-            logger.info("Gen model (Ollama) initialized: %s", self.gen_model_id)
+            logger.info("Gen model initialized: %s", self.gen_model_id)
         return self._gen_model
 
     @property
