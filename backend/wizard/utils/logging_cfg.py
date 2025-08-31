@@ -1,35 +1,43 @@
-import logging.config
+import logging
+import os
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
-
-import yaml
 
 
 def setup_logging(
-    log_dir: str = ".log",
-    cfg_dir: str = "logging",
-    cfg_file: str = "logging.yaml",
+    default_log_path: str = str(
+        Path(__file__).resolve().parents[2] / ".log" / "wizard.log"
+    ),
+    max_bytes=5_000_000,
+    backup_count=3,
 ) -> None:
     """
-    Set up logging configuration for the application.
+    Set up logging with rotating file and console handlers.
 
     Args:
-        log_dir (str): Directory where log files will be stored. Defaults to ".log".
-        cfg_dir (str): Directory where the logging configuration file is located. Defaults to "logging".
-        cfg_file (str): Name of the logging configuration file. Defaults to "logging.yaml".
-
-    Raises:
-        FileNotFoundError: If the logging configuration file does not exist.
+        default_log_path (str): Path to the log file (can be overridden by LOG_PATH env variable).
+        max_bytes (int): Maximum size of each log file before rotation.
+        backup_count (int): Number of rotated backups to keep.
     """
-    log_path = Path(log_dir)
-    log_path.mkdir(parents=True, exist_ok=True)
+    log_path = os.getenv("LOG_PATH", default_log_path)
+    log_dir = Path(log_path).parent
+    log_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg_path = Path(__file__).parent / cfg_dir / cfg_file
-    if not cfg_path.exists():
-        raise FileNotFoundError("Logging configuration file not found: %s", cfg_path)
+    log_format = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+    formatter = logging.Formatter(log_format)
 
-    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    logging.config.dictConfig(cfg)
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    console_handler.setLevel(logging.INFO)
 
-    logging.info("Logging configuration loaded from %s", cfg_path)
-    logging.debug("Logging configuration: %s", cfg)
+    # File handler with rotation
+    file_handler = RotatingFileHandler(
+        log_path, maxBytes=max_bytes, backupCount=backup_count
+    )
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(logging.DEBUG)
+
+    # Root logger config
+    logging.basicConfig(level=logging.INFO, handlers=[console_handler, file_handler])
     logging.getLogger("wizard").info("Wizard logging initialized.")
