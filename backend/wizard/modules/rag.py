@@ -50,6 +50,7 @@ from wizard.modules.readers.table_reader import TableReader
 
 logger = logging.getLogger(__name__)
 
+DATA_PATH = os.getenv("DATA_PATH")
 OLLAMA_URL = os.getenv("OLLAMA_URL")
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_HOST_DIR = os.getenv("QDRANT_HOST_DIR")
@@ -146,7 +147,7 @@ class RAG:
     """
 
     # --- Path setup ---
-    data_dir: Path | None = None
+    data_dir: Path | None = Path(DATA_PATH) if DATA_PATH else Path.home() / "wizard" / "data"
     persist_dir: Path | None = None
 
     # --- Models ---
@@ -843,22 +844,6 @@ class RAG:
         if not isinstance(result, Response):
             raise TypeError(f"Expected Response, got {type(result).__name__}")
         return self._extract_relevant_data(prompt, result)
-
-    def save_index(self, persist_dir: str | Path) -> None:
-        """
-        Save the index to the specified directory.
-
-        Args:
-            persist_dir (str | Path): The directory to save the index.
-
-        Raises:
-            RuntimeError: If the index is not initialized.
-        """
-        if self.index is None:
-            raise RuntimeError("Index is not initialized. Nothing to save.")
-        self.persist_dir = Path(persist_dir)
-        self.index.storage_context.persist(persist_dir=self.persist_dir)
-        logger.info("Index saved to %s", str(self.persist_dir))
 
     # --- Session store wiring ---
     def init_session_store(self, db_url: str = "sqlite:///rag_sessions.db") -> None:
