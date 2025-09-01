@@ -52,10 +52,9 @@ logger = logging.getLogger(__name__)
 
 # --- Environment variables ---
 DATA_PATH = os.getenv("DATA_PATH")
-HF_HOME = os.getenv("HF_HOME")
 OLLAMA_URL = os.getenv("OLLAMA_URL")
-QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_HOST_DIR = os.getenv("QDRANT_HOST_DIR")
+QDRANT_URL = os.getenv("QDRANT_URL")
 
 # --- Session persistence (ORM) ---
 Base = declarative_base()
@@ -153,7 +152,6 @@ class RAG:
         Path(DATA_PATH) if DATA_PATH else Path.home() / "wizard" / "data"
     )
     persist_dir: Path | None = None
-    hf_models_dir = HF_HOME
 
     # --- Models ---
     embed_model_id: str = "BAAI/bge-m3"
@@ -305,7 +303,6 @@ class RAG:
             self._embed_model = HuggingFaceEmbedding(
                 model_name=self.embed_model_id,
                 normalize=True,
-                cache_folder=self.hf_models_dir,
                 device=self.device,
             )
             logger.info("Embed model initialized: %s", self.embed_model_id)
