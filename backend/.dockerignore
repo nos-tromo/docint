@@ -27,9 +27,9 @@ test/
 .env
 
 # Media, data, and large files not needed for build
-data/
-models/
-output/
+**/data/
+**/models/
+**/output/
 *.csv
 *.db
 *.doc*
