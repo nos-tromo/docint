@@ -28,15 +28,16 @@ def get_inputs() -> tuple[str, Path]:
     return qdrant_col, data_dir
 
 
-def ingest_docs(qdrant_col: str, data_dir: Path) -> None:
+def ingest_docs(qdrant_col: str, data_dir: Path, hybrid: bool = True) -> None:
     """
     Ingest documents from the specified directory into the Qdrant collection.
 
     Args:
         qdrant_col (str): Qdrant collection name.
         data_dir (Path): Path to the data directory.
+        hybrid (bool): Whether to enable hybrid search (default: True).
     """
-    rag = RAG(qdrant_collection=qdrant_col, enable_hybrid=True)
+    rag = RAG(qdrant_collection=qdrant_col, enable_hybrid=hybrid)
     rag.ingest_docs(data_dir)
     logger.info("Ingestion complete.")
 
