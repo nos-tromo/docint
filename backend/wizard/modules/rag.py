@@ -181,6 +181,12 @@ class RAG:
     retrieve_similarity_top_k: int = 25
     rerank_top_n: int = int(retrieve_similarity_top_k // 5)
 
+    # --- Directory reader config ---
+    reader_errors: str = "ignore"
+    reader_recursive: bool = True
+    reader_encoding: str = "utf-8"
+    reader_required_exts: list[str] = field(default_factory=lambda: [".pdf", ".csv", ".tsv", ".xlsx", ".xls", ".parquet", ".txt"])
+
     # --- TableReader config ---
     table_text_cols: list[str] | None = None
     table_metadata_cols: list[str] | None = None
@@ -200,10 +206,11 @@ class RAG:
         default=None, init=False, repr=False
     )
 
-    reader: DoclingReader | None = field(default=None, init=False)
+    pdf_reader: DoclingReader | None = field(default=None, init=False)
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
     pdf_node_parser: DoclingNodeParser | None = field(default=None, init=False)
     table_node_parser: SentenceSplitter | None = field(default=None, init=False)
+    text_node_parser: SentenceSplitter | None = field(default=None, init=False)
 
     docs: list[Document] = field(default_factory=list, init=False)
     nodes: list[BaseNode] = field(default_factory=list, init=False)
@@ -402,8 +409,8 @@ class RAG:
         """
         Creates the document loader for various file types.
         """
-        # PDF reader (Docling) as before
-        pdf_reader = DoclingReader(export_type=DoclingReader.ExportType.JSON)
+        # Doc reader for PDF
+        self.pdf_reader = DoclingReader(export_type=DoclingReader.ExportType.JSON)
 
         # Table reader for CSV/TSV/XLSX/Parquet
         table_reader = TableReader(
@@ -416,8 +423,12 @@ class RAG:
 
         self.dir_reader = SimpleDirectoryReader(
             input_dir=self.data_dir,
+            errors=self.reader_errors,
+            recursive=self.reader_recursive,
+            encoding=self.reader_encoding,
+            required_exts=self.reader_required_exts,
             file_extractor={
-                ".pdf": pdf_reader,
+                ".pdf": self.pdf_reader,
                 ".csv": table_reader,
                 ".tsv": TableReader(
                     csv_sep="\t",  # allow explicit TSV sep
@@ -438,6 +449,9 @@ class RAG:
         )
         self.pdf_node_parser = DoclingNodeParser()
         self.table_node_parser = SentenceSplitter(
+            chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap
+        )
+        self.text_node_parser = SentenceSplitter(
             chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap
         )
 
@@ -486,30 +500,53 @@ class RAG:
         if self.dir_reader is None:
             raise RuntimeError("Directory reader is not initialized.")
         self.docs = self.dir_reader.load_data()
-        if self.pdf_node_parser is None or self.table_node_parser is None:
+        if (
+            self.pdf_node_parser is None
+            or self.table_node_parser is None
+            or self.text_node_parser is None
+        ):
             raise RuntimeError("Node parsers are not initialized.")
 
-        pdf_docs, table_docs = [], []
+        pdf_docs, table_docs, text_docs = [], [], []
         for d in self.docs:
             meta = getattr(d, "metadata", {}) or {}
             file_type = (meta.get("file_type") or "").lower()
             source_kind = meta.get("source", "") or ""
+            file_path = str(meta.get("file_path") or meta.get("file_name") or "")
+            ext = file_path.lower().rsplit(".", 1)[-1] if "." in file_path else ""
 
             if source_kind == "table":
                 table_docs.append(d)
-            elif file_type.startswith("application/pdf") or str(
-                meta.get("file_path", "")
-            ).lower().endswith(".pdf"):
+            elif file_type.startswith("application/pdf") or ext == "pdf":
                 pdf_docs.append(d)
+            elif file_type.startswith("text/") or ext in {"txt", "md", "rst"}:
+                text_docs.append(d)
             else:
-                # default to pdf parser when in doubt (since DoclingReader produced these)
-                pdf_docs.append(d)
+                # fallback: try to infer by mimetype first, then extension
+                if file_type:
+                    if "pdf" in file_type:
+                        pdf_docs.append(d)
+                    elif file_type.startswith("text/"):
+                        text_docs.append(d)
+                    else:
+                        pdf_docs.append(d)
+                else:
+                    # if no mimetype metadata, fall back to extension
+                    if ext in {"txt", "md", "rst"}:
+                        text_docs.append(d)
+                    elif ext == "pdf":
+                        pdf_docs.append(d)
+                    else:
+                        # default to PDF parser when in doubt (Docling-origin docs)
+                        pdf_docs.append(d)
 
         nodes: list[BaseNode] = []
         if pdf_docs:
             nodes.extend(self.pdf_node_parser.get_nodes_from_documents(pdf_docs))
         if table_docs:
             nodes.extend(self.table_node_parser.get_nodes_from_documents(table_docs))
+        if text_docs:
+            nodes.extend(self.text_node_parser.get_nodes_from_documents(text_docs))
 
         self.nodes = nodes
 
