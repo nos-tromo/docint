@@ -104,10 +104,17 @@ export default function Chat({ collection }: Props) {
                   Sources:
                 </Text>
                 {m.sources.map((s, j) => (
-                  <Text key={j} fontSize="sm" color="fg.muted">
-                    • {s.filename || "unknown"}
-                    {s.page ? ` (p.${s.page})` : s.row ? ` (row ${s.row})` : ""}
-                  </Text>
+                  <Box key={j} fontSize="sm" color="fg.muted" mb={1}>
+                    <Text>
+                      • {s.filename || "unknown"}
+                      {s.page ? ` (p.${s.page})` : s.row ? ` (row ${s.row})` : ""}
+                    </Text>
+                    {s.text && (
+                      <Text ml={4} whiteSpace="pre-wrap" fontStyle="italic">
+                        {s.text}
+                      </Text>
+                    )}
+                  </Box>
                 ))}
               </>
             )}
@@ -145,4 +152,3 @@ export default function Chat({ collection }: Props) {
     </VStack>
   );
 }
-
