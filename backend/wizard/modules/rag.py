@@ -179,7 +179,7 @@ class RAG:
     # --- Reranking / retrieval ---
     enable_hybrid: bool = True
     embed_batch_size: int = 64
-    retrieve_similarity_top_k: int = 25
+    retrieve_similarity_top_k: int = 100
     rerank_top_n: int = int(retrieve_similarity_top_k // 5)
 
     # --- Directory reader config ---
