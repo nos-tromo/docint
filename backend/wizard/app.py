@@ -7,7 +7,7 @@ from wizard.utils.logging_cfg import setup_logging
 
 setup_logging()
 
-app = FastAPI(title="Wizard API")
+app = FastAPI(title="Wizard Document Intelligence")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -40,7 +40,15 @@ class QueryOut(BaseModel):
 
 @app.get("/collections/list", response_model=list[str])
 def collections_list() -> list[str]:
-    """List all available collections."""
+    """
+    List existing collections.
+
+    Raises:
+        HTTPException: If an error occurs while listing collections.
+
+    Returns:
+        list[str]: A list of collection names.
+    """    
     try:
         return rag.list_collections()
     except Exception as e:
@@ -49,7 +57,19 @@ def collections_list() -> list[str]:
 
 @app.post("/collections/select")
 def collections_select(payload: SelectCollectionIn) -> dict[str, str | bool]:
-    """Select an existing collection for the current session."""
+    """
+    Select a collection to use for queries.
+
+    Args:
+        payload (SelectCollectionIn): The payload containing the collection name.
+
+    Raises:
+        HTTPException: If the collection name is missing or an error occurs while selecting the collection.
+        HTTPException: If an error occurs while selecting the collection.
+
+    Returns:
+        dict[str, str | bool]: A dictionary indicating success and the selected collection name.
+    """    
     try:
         name = payload.name.strip()
         if not name:
