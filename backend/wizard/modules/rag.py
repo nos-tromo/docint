@@ -151,7 +151,6 @@ class RAG:
     data_dir: Path | None = (
         Path(DATA_PATH) if DATA_PATH else Path.home() / "wizard" / "data"
     )
-    persist_dir: Path | None = None
 
     # --- Models ---
     embed_model_id: str = "BAAI/bge-m3"
