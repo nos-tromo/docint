@@ -155,9 +155,9 @@ class RAG:
 
     # --- Models ---
     embed_model_id: str = "BAAI/bge-m3"
+    sparse_model_id: str = "Qdrant/bm42-all-minilm-l6-v2-attentions"
     rerank_model_id: str = "BAAI/bge-reranker-v2-m3"
     gen_model_id: str = "qwen3:8b"
-    sparse_model_id: str = "Qdrant/bm42-all-minilm-l6-v2-attentions"
 
     # --- Qdrant controls ---
     qdrant_url: str = QDRANT_URL or "http://127.0.0.1:6333"
@@ -313,29 +313,8 @@ class RAG:
                 normalize=True,
                 device=self.device,
             )
-            logger.info("Embed model initialized: %s", self.embed_model_id)
+            logger.info("Initializing embedding model: %s", self.embed_model_id)
         return self._embed_model
-
-    @property
-    def gen_model(self) -> Ollama:
-        """
-        Lazily initializes and returns the generation model (Ollama).
-
-        Returns:
-            Ollama: The initialized generation model.
-        """
-        if self._gen_model is None:
-            self._gen_model = Ollama(
-                model=self.gen_model_id,
-                base_url=self.base_url,
-                temperature=self.temperature,
-                context_window=self.context_window,
-                request_timeout=self.request_timeout,
-                thinking=self.thinking,
-                additional_kwargs=self.ollama_options,
-            )
-            logger.info("Gen model initialized: %s", self.gen_model_id)
-        return self._gen_model
 
     @property
     def sparse_model(self) -> str | None:
@@ -355,6 +334,7 @@ class RAG:
                 f"Sparse model {self.sparse_model_id!r} not supported. "
                 f"Supported: {self._list_supported_sparse_models()}"
             )
+        logger.info("Initializing sparse model: %s", self.sparse_model_id)
         return self.sparse_model_id
 
     @property
@@ -371,8 +351,29 @@ class RAG:
                 model=self.rerank_model_id,
                 device=self.device,
             )
-            logger.info("Reranker initialized: %s", self.rerank_model_id)
+            logger.info("Initializing reranker model: %s", self.rerank_model_id)
         return self._reranker
+
+    @property
+    def gen_model(self) -> Ollama:
+        """
+        Lazily initializes and returns the generation model (Ollama).
+
+        Returns:
+            Ollama: The initialized generation model.
+        """
+        if self._gen_model is None:
+            self._gen_model = Ollama(
+                model=self.gen_model_id,
+                base_url=self.base_url,
+                temperature=self.temperature,
+                context_window=self.context_window,
+                request_timeout=self.request_timeout,
+                thinking=self.thinking,
+                additional_kwargs=self.ollama_options,
+            )
+            logger.info("Initializing generator model: %s", self.gen_model_id)
+        return self._gen_model
 
     @property
     def qdrant_client(self) -> QdrantClient:
