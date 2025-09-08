@@ -14,6 +14,7 @@
 *.pyc
 *.pyo
 *.so
+*Zone.Identifier
 *.egg-info/
 __pycache__/
 
@@ -32,16 +33,18 @@ __pycache__/
 *.zip
 
 # directories
-build/
-data/
-env/
-lib/
-models/
-output/
+**/build/
+**/data/
+**/dist/
+**/env/
+**/lib/
+**/models/
+**/output/
+**/session/
 **/test*/
-uploads/
-venv/
-workbench/
+**/uploads/
+**/venv/
+**/workbench/
 
 # -----------------
 # Backend (Python)
