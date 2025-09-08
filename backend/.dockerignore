@@ -13,23 +13,25 @@ __pycache__/
 *.pyo
 *.so
 *.egg-info/
-.log/
-.venv/
-build/
-dist/
-env/
-lib/
-venv/
-output/
-test/
+**/.log/
+**/.venv/
+**/build/
+**/data/
+**/dist/
+**/env/
+**/lib/
+**/models/
+**/output/
+**/session/
+**/test/
+**/uploads/
+**/venv/
+**/workbench/
 
 # Environment and config files
 .env
 
 # Media, data, and large files not needed for build
-**/data/
-**/models/
-**/output/
 *.csv
 *.db
 *.doc*
