@@ -74,6 +74,39 @@ export default function Chat({ collection }: Props) {
     localStorage.removeItem(sessionKey);
   };
 
+  const exportChat = () => {
+    if (msgs.length === 0) return;
+
+    const lines = msgs.map((m) => {
+      let base = `${m.role === "assistant" ? "Assistant" : "You"}: ${m.text}`;
+      if (m.sources && m.sources.length > 0) {
+        const srcs = m.sources
+          .map(
+            (s) =>
+              `  • ${s.filename || "unknown"}${
+                s.page ? ` (p.${s.page})` : s.row ? ` (row ${s.row})` : ""
+              }${s.text ? `\n    "${s.text}"` : ""}`,
+          )
+          .join("\n");
+        base += `\nSources:\n${srcs}`;
+      }
+      return base;
+    });
+
+    const content = lines.join("\n\n");
+    const blob = new Blob([content], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    const filename = collection
+      ? `chat_${collection}.txt`
+      : "chat_export.txt";
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <VStack align="stretch" gap={3}>
       <VStack
@@ -147,6 +180,9 @@ export default function Chat({ collection }: Props) {
         </Button>
         <Button onClick={reset} variant="outline" disabled={loading}>
           New Session
+        </Button>
+        <Button onClick={exportChat} variant="outline" disabled={msgs.length === 0}>
+          Export Chat
         </Button>
       </HStack>
     </VStack>
