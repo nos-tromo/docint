@@ -76,9 +76,10 @@ export default function CollectionPicker({ isOpen, onClose, onAttached }: Props)
                 style={{
                   width: "100%",
                   padding: "8px",
-                  background: "transparent",
-                  color: "inherit",
+                  background: "var(--chakra-colors-bg-panel)",
+                  color: "var(--chakra-colors-fg-default)",
                   borderRadius: "6px",
+                  fontFamily: "system-ui, sans-serif", 
                   border:
                     "1px solid var(--chakra-colors-border-muted, rgba(255,255,255,0.16))",
                 }}
