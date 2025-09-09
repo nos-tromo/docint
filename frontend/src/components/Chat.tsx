@@ -140,7 +140,7 @@ export default function Chat({ collection }: Props) {
                   <Box key={j} fontSize="sm" color="fg.muted" mb={1}>
                     <Text>
                       • {s.filename || "unknown"}
-                      {s.page ? ` (p.${s.page})` : s.row ? ` (row ${s.row})` : ""}
+                      {s.page ? ` (page ${s.page})` : s.row ? ` (row ${s.row})` : ""}
                     </Text>
                     {s.text && (
                       <Text ml={4} whiteSpace="pre-wrap" fontStyle="italic">
