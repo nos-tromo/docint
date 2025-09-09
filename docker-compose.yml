@@ -24,6 +24,7 @@ services:
       - USE_DEVICE=auto
     volumes:
       - ${USERPROFILE:-$HOME}/wizard/data:/app/data
+      - easyocr_cache:/root/.EasyOCR
       - model_cache:/root/.cache
       - qdrant_storage:/qdrant/storage
       - wizard_logs:/app/logs
@@ -50,6 +51,7 @@ services:
       - USE_DEVICE=auto
     volumes:
       - ${USERPROFILE:-$HOME}/wizard/data:/app/data
+      - easyocr_cache:/root/.EasyOCR
       - model_cache:/root/.cache
       - qdrant_storage:/qdrant/storage
       - wizard_logs:/app/logs
@@ -132,6 +134,7 @@ services:
 # Volumes
 ##########################################################
 volumes:
+  easyocr_cache:
   model_cache:
   ollama_models:
   qdrant_snapshots:
