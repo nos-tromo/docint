@@ -27,6 +27,7 @@ __pycache__/
 *.mp4
 *.sh
 *.sqlite3
+**/queries.txt
 *.txt
 *.wav
 *.webm
@@ -38,8 +39,10 @@ __pycache__/
 **/dist/
 **/env/
 **/lib/
+**/log*/
 **/models/
 **/output/
+**/results/
 **/session/
 **/test*/
 **/uploads/
@@ -61,31 +64,30 @@ __pycache__/
 # Frontend (Node/Vite)
 # -----------------
 
-frontend/node_modules/
-frontend/.parcel-cache/
-frontend/dist/
-frontend/dist-ssr/
-frontend/.env.local
-frontend/.env.*
-frontend/*.local
-frontend/.turbo/
-frontend/.output/
+**/node_modules/
+**/.parcel-cache/
+**/dist/
+**/dist-ssr/
+**/.env.*
+**/*.local
+**/.turbo/
+**/.output/
 
 # Frontend logs
-frontend/logs/
-frontend/*.log
-frontend/npm-debug.log*
-frontend/yarn-debug.log*
-frontend/yarn-error.log*
-frontend/pnpm-debug.log*
-frontend/lerna-debug.log*
+**/logs/
+**/*.log
+**/npm-debug.log*
+**/yarn-debug.log*
+**/yarn-error.log*
+**/pnpm-debug.log*
+**/lerna-debug.log*
 
 # Optional editor/IDE/project file ignores (if working in frontend separately)
-frontend/.suo
-frontend/.ntvs*
-frontend/.njsproj
-frontend/.sln
-frontend/.sw?
+**/.suo
+**/.ntvs*
+**/.njsproj
+**/.sln
+**/.sw?
 
 # Global frontend output
 dist/
@@ -106,8 +108,8 @@ docker-compose.override.yml
 # ==================================
 # Media & Data (Optional)
 # ==================================
-data*/
-models/
+**/data*/
+**/models/
 
 # ==================================
 # Exceptions
