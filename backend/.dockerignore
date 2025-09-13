@@ -22,6 +22,7 @@ __pycache__/
 **/lib/
 **/models/
 **/output/
+**/results/
 **/session/
 **/test/
 **/uploads/
@@ -44,6 +45,7 @@ __pycache__/
 *.pdf
 *.sh
 *.sqlite3
+*.txt
 *.wav
 *.webm
 *.xls*
