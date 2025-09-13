@@ -1,65 +1,77 @@
+import json
+import logging
 from pathlib import Path
+from time import time
 
 from wizard.modules.rag import RAG
 from wizard.utils.logging_cfg import setup_logging
 
-# Define paths and initialize RAG
-data_dir = "data"
-q_dir = Path("helpers") / "queries.txt"
-rag = RAG()
+setup_logging()
+logger = logging.getLogger(__name__)
 
-choice = input("Select existing collection? (y/n): ").strip().lower()
-col_name = input("Enter collection name: ").strip()
-if choice == 'y':
-    col_path = Path.home() / ".qdrant" / "storage" / "collections" / col_name
-    if col_name:
-        if not col_path.exists():
-            print(f"Collection path {col_path} does not exist. Exiting.")
-            exit(1)
-        print(f"Using existing collection: {col_name}")
+
+def _get_col_name() -> str:
+    return input("Enter collection name: ")
+
+def _store_output(filename: str, data: dict | list, out_dir: str | Path = "results") -> None:
+    out_dir = Path(out_dir) if isinstance(out_dir, str) else out_dir
+    out_dir.mkdir(exist_ok=True)
+
+    if isinstance(data, dict):
+        with open(out_dir / f"{filename}.json", "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    elif isinstance(data, list):
+        # Detect if list elements are nodes and use .to_dict()
+        serializable = []
+        for item in data:
+            if hasattr(item, "to_dict"):  # works for LlamaIndex BaseNode
+                serializable.append(item.to_dict())
+            else:
+                serializable.append(str(item))
+
+        with open(out_dir / f"{filename}.json", "w", encoding="utf-8") as f:
+            json.dump(serializable, f, ensure_ascii=False, indent=2)
+    logger.info(f"Results stored in {out_dir / filename}.json")
+
+
+def rag_session() -> RAG:
+    logger.info("Initializing RAG session...")
+    rag = RAG(qdrant_collection=_get_col_name())
+    rag.create_index()
+    rag.create_query_engine()
+    rag.start_session()
+    return rag
+
+
+def load_queries(q_path: Path = Path("queries.txt")) -> list[str]:
+    q_path = Path(q_path).resolve()
+    if q_path.exists():
+        logger.info(f"Loading queries from {q_path}")
+        with open(q_path, "r", encoding="utf-8") as f:
+            return [line.strip() for line in f if line.strip()]
     else:
-        print("No collection name provided. Exiting.")
-        exit(1)
-elif choice == 'n':
-    print(f"Creating new collection: {col_name}.")
-else:
-    print("Invalid choice. Please enter 'y' or 'n'. Exiting.")
-    exit(1)
+        logger.info(f"Creating default query file at {q_path}")
+        default_query = "Summarize the content with a maximum of 15 sentences."
+        with open(q_path, "w", encoding="utf-8") as f:
+            f.write(default_query + "\n")
+        return [default_query]
 
 
-with open(q_dir, "r", encoding="utf-8") as file:
-    queries = [line.strip() for line in file if line.strip()]
-
-print(f"Data directory: {data_dir}")
-
-# Initialize the RAG pipeline and process the documents
-rag.ingest_docs(data_dir)
-print("Documents ingested successfully.")
-
-# Initialize the session and start it
-rag.init_session_store()
-rag.start_session()
-print("Session started successfully.")
-
-# Process the queries and print the responses
-for index, query in enumerate(queries, start=1):
+def run_query(rag: RAG, query: str, index: int) -> None:
+    logger.info(f"Running query {index}: {query}")
     result = rag.chat(query)
-    print("----------------------")
-    query = result.get("query", "No query found in response.")
-    response = result.get("response", "No response found in response.")
-    sources = [
-        source.get("text", "No source found") for source in result.get("sources", [])
-    ]
-    print(f"Query {index}: {query}")
-    print("----------------------")
-    print(f"Response {index}: {response}")
-    print("----------------------")
-    print("Sources:")
-    for index, text in enumerate(sources, start=1):
-        print(index, text)
-    print("----------------------")
-print("All queries processed successfully.")
+    timestamp = str(int(time()))
+    _store_output(f"{timestamp}_{index}_result", result)
 
-# Export the session data to a JSON file
-rag.export_session()
-print("Session data exported successfully.")
+
+def main() -> None:
+    rag = rag_session()
+    queries = load_queries()
+    for index, query in enumerate(queries, start=1):
+        run_query(rag, query, index)
+    logger.info("All queries processed.")
+
+
+if __name__ == "__main__":
+    main()
