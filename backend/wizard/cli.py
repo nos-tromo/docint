@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 def _get_col_name() -> str:
     return input("Enter collection name: ")
 
+
 def _store_output(filename: str, data: dict | list, out_dir: str | Path = "results") -> None:
     out_dir = Path(out_dir) if isinstance(out_dir, str) else out_dir
     out_dir.mkdir(exist_ok=True)
