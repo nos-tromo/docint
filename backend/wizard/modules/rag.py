@@ -7,6 +7,7 @@ import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from dotenv import load_dotenv
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,7 @@ from wizard.modules.readers.table_reader import TableReader
 logger = logging.getLogger(__name__)
 
 # --- Environment variables ---
+load_dotenv()
 DATA_PATH = os.getenv("DATA_PATH")
 OLLAMA_URL = os.getenv("OLLAMA_URL")
 QDRANT_HOST_DIR = os.getenv("QDRANT_HOST_DIR")
