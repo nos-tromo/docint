@@ -19,18 +19,21 @@
 __pycache__/
 
 # files
+*.csv
 *.db
+*.doc*
 *.gguf
 *.html
+*.ipynb
 *.mkv
 *.mp3
 *.mp4
 *.sh
 *.sqlite3
-**/queries.txt
 *.txt
 *.wav
 *.webm
+*.xls*
 *.zip
 
 # directories
