@@ -33,7 +33,7 @@ def _store_output(filename: str, data: dict | list, out_dir: str | Path = "resul
 
         with open(out_dir / f"{filename}.json", "w", encoding="utf-8") as f:
             json.dump(serializable, f, ensure_ascii=False, indent=2)
-    logger.info(f"Results stored in {out_dir / filename}.json")
+    logger.info("Results stored in %s", out_dir / f"{filename}.json")
 
 
 def rag_session() -> RAG:
@@ -48,11 +48,11 @@ def rag_session() -> RAG:
 def load_queries(q_path: Path = Path("queries.txt")) -> list[str]:
     q_path = Path(q_path).resolve()
     if q_path.exists():
-        logger.info(f"Loading queries from {q_path}")
+        logger.info("Loading queries from %s", q_path)
         with open(q_path, "r", encoding="utf-8") as f:
             return [line.strip() for line in f if line.strip()]
     else:
-        logger.info(f"Creating default query file at {q_path}")
+        logger.info("Creating default query file at %s", q_path)
         default_query = "Summarize the content with a maximum of 15 sentences."
         with open(q_path, "w", encoding="utf-8") as f:
             f.write(default_query + "\n")
@@ -60,7 +60,7 @@ def load_queries(q_path: Path = Path("queries.txt")) -> list[str]:
 
 
 def run_query(rag: RAG, query: str, index: int) -> None:
-    logger.info(f"Running query {index}: {query}")
+    logger.info("Running query %d: %s", index, query)
     result = rag.chat(query)
     timestamp = str(int(time()))
     _store_output(f"{timestamp}_{index}_result", result)
