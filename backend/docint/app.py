@@ -7,7 +7,7 @@ from docint.utils.logging_cfg import setup_logging
 
 setup_logging()
 
-app = FastAPI(title="docint Document Intelligence")
+app = FastAPI(title="Document Intelligence")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
