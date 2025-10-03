@@ -27,7 +27,7 @@ services:
       - easyocr_cache:/root/.EasyOCR
       - model_cache:/root/.cache
       - qdrant_storage:/qdrant/storage
-      - docint_logs:/app/logs
+      - docint_logs:/app/.log
     networks:
       docintnet:
 
@@ -54,7 +54,7 @@ services:
       - easyocr_cache:/root/.EasyOCR
       - model_cache:/root/.cache
       - qdrant_storage:/qdrant/storage
-      - docint_logs:/app/logs
+      - docint_logs:/app/.log
     deploy:
       resources:
         reservations:
