@@ -6,7 +6,7 @@ from pathlib import Path
 
 def setup_logging(
     default_log_path: str = str(
-        Path(__file__).resolve().parents[2] / ".log" / "wizard.log"
+        Path(__file__).resolve().parents[2] / ".log" / "docint.log"
     ),
     max_bytes=5_000_000,
     backup_count=3,
@@ -40,4 +40,4 @@ def setup_logging(
 
     # Root logger config
     logging.basicConfig(level=logging.INFO, handlers=[console_handler, file_handler])
-    logging.getLogger("wizard").info("Wizard logging initialized.")
+    logging.getLogger("docint").info("docint logging initialized.")

@@ -48,7 +48,7 @@ export default function App() {
       <Container maxW="6xl" py={10}>
         <HStack mb={6}>
           <Heading size="lg" fontFamily="heading">
-            Wizard Document Intelligence
+            Document Intelligence
           </Heading>
           <Spacer />
           <Button onClick={quitSession} variant="outline">

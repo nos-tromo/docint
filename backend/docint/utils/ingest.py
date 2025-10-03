@@ -2,8 +2,8 @@ import logging
 import os
 from pathlib import Path
 
-from wizard.modules.rag import RAG
-from wizard.utils.logging_cfg import setup_logging
+from docint.modules.rag import RAG
+from docint.utils.logging_cfg import setup_logging
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ def get_inputs() -> tuple[str, Path]:
         tuple[str, Path]: Qdrant collection name and data directory path.
     """
     qdrant_col = input("Enter Qdrant collection name: ").strip()
-    data_dir = Path(DATA_PATH) if DATA_PATH else Path.home() / "wizard" / "data"
+    data_dir = Path(DATA_PATH) if DATA_PATH else Path.home() / "docint" / "data"
     if not data_dir.is_dir():
         raise ValueError(f"Data directory does not exist: {data_dir}")
     return qdrant_col, data_dir

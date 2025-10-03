@@ -21,4 +21,4 @@ RUN uv sync --frozen --no-cache --no-dev
 
 EXPOSE 8000
 
-CMD ["uv", "run", "--", "uvicorn", "wizard.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uv", "run", "--", "uvicorn", "docint.app:app", "--host", "0.0.0.0", "--port", "8000"]

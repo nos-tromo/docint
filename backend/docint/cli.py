@@ -3,8 +3,8 @@ import logging
 from pathlib import Path
 from time import time
 
-from wizard.modules.rag import RAG
-from wizard.utils.logging_cfg import setup_logging
+from docint.modules.rag import RAG
+from docint.utils.logging_cfg import setup_logging
 
 setup_logging()
 logger = logging.getLogger(__name__)

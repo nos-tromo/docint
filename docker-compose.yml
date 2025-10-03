@@ -2,7 +2,7 @@
 # Networks
 ##########################################################
 networks:
-  wizardnet:
+  docintnet:
 
 services:
   ##########################################################
@@ -23,13 +23,13 @@ services:
       - QDRANT_URL=http://qdrant:6333
       - USE_DEVICE=auto
     volumes:
-      - ${USERPROFILE:-$HOME}/wizard/data:/app/data
+      - ${USERPROFILE:-$HOME}/docint/data:/app/data
       - easyocr_cache:/root/.EasyOCR
       - model_cache:/root/.cache
       - qdrant_storage:/qdrant/storage
-      - wizard_logs:/app/logs
+      - docint_logs:/app/logs
     networks:
-      wizardnet:
+      docintnet:
 
   ##########################################################
   # Backend (GPU)
@@ -50,11 +50,11 @@ services:
       - QDRANT_URL=http://qdrant:6333
       - USE_DEVICE=auto
     volumes:
-      - ${USERPROFILE:-$HOME}/wizard/data:/app/data
+      - ${USERPROFILE:-$HOME}/docint/data:/app/data
       - easyocr_cache:/root/.EasyOCR
       - model_cache:/root/.cache
       - qdrant_storage:/qdrant/storage
-      - wizard_logs:/app/logs
+      - docint_logs:/app/logs
     deploy:
       resources:
         reservations:
@@ -62,7 +62,7 @@ services:
             - driver: nvidia
               capabilities: [gpu]
     networks:
-      wizardnet:
+      docintnet:
 
   ##########################################################
   # Frontend
@@ -74,7 +74,7 @@ services:
     ports:
       - "8080:80"
     networks:
-      wizardnet:
+      docintnet:
 
   ##########################################################
   # Ollama (CPU)
@@ -87,7 +87,7 @@ services:
     volumes:
       - ollama_models:/root/.ollama
     networks:
-      wizardnet:
+      docintnet:
 
   ##########################################################
   # Ollama (GPU)
@@ -111,7 +111,7 @@ services:
     runtime: nvidia
     restart: always
     networks:
-      wizardnet:
+      docintnet:
 
   ##########################################################
   # Qdrant
@@ -128,7 +128,7 @@ services:
       - qdrant_storage:/qdrant/storage
     restart: unless-stopped
     networks:
-      wizardnet:
+      docintnet:
 
 ##########################################################
 # Volumes
@@ -139,4 +139,4 @@ volumes:
   ollama_models:
   qdrant_snapshots:
   qdrant_storage:
-  wizard_logs:
+  docint_logs:

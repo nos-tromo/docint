@@ -1,4 +1,4 @@
-# Wizard Document Intelligence
+# Document Intelligence
 
 ## Installation
 
@@ -49,7 +49,7 @@ npm run dev
 Backend:
 
 ```bash
-uv run uvicorn wizard.app:app --reload
+uv run uvicorn docint.app:app --reload
 ```
 
 Launch the browser app: `http://localhost:5173/`.

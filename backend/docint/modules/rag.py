@@ -47,7 +47,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
-from wizard.modules.readers.table_reader import TableReader
+from docint.modules.readers.table_reader import TableReader
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +151,7 @@ class RAG:
 
     # --- Path setup ---
     data_dir: Path | None = (
-        Path(DATA_PATH) if DATA_PATH else Path.home() / "wizard" / "data"
+        Path(DATA_PATH) if DATA_PATH else Path.home() / "docint" / "data"
     )
 
     # --- Models ---

@@ -3,7 +3,7 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "wizard"
+name = "docint"
 version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.11"
@@ -35,8 +35,8 @@ dependencies = [
 ]
 
 [project.scripts]
-cli = "wizard.cli:main"
-ingest = "wizard.utils.ingest:main"
+cli = "docint.cli:main"
+ingest = "docint.utils.ingest:main"
 
 [tool.setuptools]
 include-package-data = true
@@ -45,7 +45,7 @@ include-package-data = true
 where = ["."]
 
 [tool.uv.sources]
-wizard-dev = { workspace = true }
+docint = { workspace = true }
 torchvision = [
   { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
   { index = "pytorch-cpu", marker = "sys_platform != 'linux'" },

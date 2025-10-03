@@ -2,12 +2,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from wizard.modules.rag import RAG
-from wizard.utils.logging_cfg import setup_logging
+from docint.modules.rag import RAG
+from docint.utils.logging_cfg import setup_logging
 
 setup_logging()
 
-app = FastAPI(title="Wizard Document Intelligence")
+app = FastAPI(title="docint Document Intelligence")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
