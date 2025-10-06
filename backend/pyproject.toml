@@ -9,11 +9,12 @@ description = "Add your description here"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.116.1",
-    "fastembed-gpu>=0.7.3; platform_system == 'Linux' and platform_machine == 'x86_64'",
-    "fastembed-gpu>=0.7.3; platform_system == 'Windows' and platform_machine == 'AMD64'",
-    "fastembed>=0.7.3; platform_system == 'Darwin'",
-    "fastembed>=0.7.3; platform_system == 'Linux' and platform_machine != 'x86_64'",
-    "fastembed>=0.7.3; platform_system == 'Windows' and platform_machine != 'AMD64'",
+    "fastembed>=0.7.3",
+    # "fastembed-gpu>=0.7.3; platform_system == 'Linux' and platform_machine == 'x86_64'",
+    # "fastembed-gpu>=0.7.3; platform_system == 'Windows' and platform_machine == 'AMD64'",
+    # "fastembed>=0.7.3; platform_system == 'Darwin'",
+    # "fastembed>=0.7.3; platform_system == 'Linux' and platform_machine != 'x86_64'",
+    # "fastembed>=0.7.3; platform_system == 'Windows' and platform_machine != 'AMD64'",
     "fastparquet>=2024.11.0",
     "huggingface-hub[cli]>=0.34.3",
     "llama-index>=0.13.0",
