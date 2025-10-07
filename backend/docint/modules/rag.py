@@ -47,7 +47,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
-from docint.modules.readers.tables import TableReader
+from docint.modules.tables import TableReader
 
 logger = logging.getLogger(__name__)
 
