@@ -25,6 +25,7 @@ __pycache__/
 *.gguf
 *.html
 *.ipynb
+*.md
 *.mkv
 *.mp3
 *.mp4
