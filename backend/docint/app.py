@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from docint.modules.rag import RAG
+from docint.modules.core import RAG
 from docint.utils.logging_cfg import setup_logging
 
 setup_logging()
