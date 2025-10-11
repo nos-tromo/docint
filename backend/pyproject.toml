@@ -32,6 +32,11 @@ dependencies = [
     "uvicorn>=0.35.0",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+]
+
 [project.scripts]
 cli = "docint.cli:main"
 ingest = "docint.utils.ingest:main"
@@ -62,8 +67,3 @@ explicit = true
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
-
-[dependency-groups]
-dev = [
-    "pytest>=8.4.2",
-]
