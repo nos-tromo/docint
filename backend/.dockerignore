@@ -1,3 +1,7 @@
+# Exceptions
+!backend/tests/
+!backend/tests/**.py
+
 # Ignore Git and local metadata
 .git
 .gitignore
