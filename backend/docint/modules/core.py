@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 DATA_PATH = os.getenv("DATA_PATH")
 OLLAMA_URL = os.getenv("OLLAMA_URL")
-QDRANT_HOST_DIR = os.getenv("QDRANT_HOST_DIR")
+QDRANT_COL_DIR = os.getenv("QDRANT_COL_DIR")
 QDRANT_URL = os.getenv("QDRANT_URL")
 
 # --- Session persistence (ORM) ---
@@ -272,7 +272,7 @@ class RAG:
             The Path representing the Qdrant host directory.
         """
         if self._qdrant_host_dir is None:
-            env = os.getenv("QDRANT_HOST_DIR")
+            env = os.getenv("QDRANT_COL_DIR")
             if env:
                 self._qdrant_host_dir = Path(env)
             else:
