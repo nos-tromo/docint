@@ -17,7 +17,7 @@ services:
       - "8000:8000"
     environment:
       - DATA_PATH=/app/data
-      - LOG_PATH=/app/logs/backend.log
+      - LOG_PATH=/app/.logs/backend.log
       - OLLAMA_URL=http://ollama:11434
       - QDRANT_HOST_DIR=/qdrant/storage/collections
       - QDRANT_URL=http://qdrant:6333
@@ -43,7 +43,7 @@ services:
       - "8000:8000"
     environment:
       - DATA_PATH=/app/data
-      - LOG_PATH=/app/logs/backend.log
+      - LOG_PATH=/app/.logs/backend.log
       - NVIDIA_VISIBLE_DEVICES=all
       - OLLAMA_URL=http://ollama-gpu:11434
       - QDRANT_HOST_DIR=/qdrant/storage/collections
