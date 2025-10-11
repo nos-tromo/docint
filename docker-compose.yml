@@ -27,7 +27,14 @@ services:
       - easyocr_cache:/root/.EasyOCR
       - model_cache:/root/.cache
       - qdrant_storage:/qdrant/storage
-      - docint_logs:/app/.log
+      - docint_logs:/app/.logs
+    develop:
+      watch:
+        - action: sync
+          path: ./backend
+          target: /app
+        - action: rebuild
+          path: ./pyproject.toml
     networks:
       docintnet:
 
@@ -54,7 +61,14 @@ services:
       - easyocr_cache:/root/.EasyOCR
       - model_cache:/root/.cache
       - qdrant_storage:/qdrant/storage
-      - docint_logs:/app/.log
+      - docint_logs:/app/.logs
+    develop:
+      watch:
+        - action: sync
+          path: ./backend
+          target: /app
+        - action: rebuild
+          path: ./pyproject.toml
     deploy:
       resources:
         reservations:
