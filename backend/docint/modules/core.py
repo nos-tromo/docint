@@ -246,6 +246,7 @@ class RAG:
         self.chunk_overlap = max(
             0, min(self.chunk_overlap, int(self.chunk_size * 0.25))
         )
+        self._init_node_parsers()
 
     # --- Static methods ---
     @staticmethod
@@ -423,7 +424,19 @@ class RAG:
         return self._qdrant_aclient
 
     # --- Build pieces ---
-    def _create_doc_loader(self) -> None:
+    def _init_node_parsers(self) -> None:
+        """
+        Initializes the node parsers for different document types.
+        """        
+        self.pdf_node_parser = DoclingNodeParser()
+        self.table_node_parser = SentenceSplitter(
+            chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap
+        )
+        self.text_node_parser = SentenceSplitter(
+            chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap
+        )
+    
+    def _load_docs(self) -> None:
         """
         Creates the document loader for various file types.
         """
@@ -464,13 +477,6 @@ class RAG:
                     limit=self.table_row_limit,
                 ),
             },
-        )
-        self.pdf_node_parser = DoclingNodeParser()
-        self.table_node_parser = SentenceSplitter(
-            chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap
-        )
-        self.text_node_parser = SentenceSplitter(
-            chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap
         )
 
     def _vector_store(self) -> QdrantVectorStore:
