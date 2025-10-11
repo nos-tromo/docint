@@ -10,11 +10,28 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 
+RESULTS_DIR: Path = Path.home() / "docint" / "results"
+
+
 def _get_col_name() -> str:
+    """
+    Prompts the user to enter a collection name.
+
+    Returns:
+        str: The entered collection name.
+    """
     return input("Enter collection name: ")
 
 
-def _store_output(filename: str, data: dict | list, out_dir: str | Path = "results") -> None:
+def _store_output(filename: str, data: dict | list, out_dir: str | Path = RESULTS_DIR) -> None:
+    """
+    Stores the output data to a JSON file.
+
+    Args:
+        filename (str): The name of the output file (without extension).
+        data (dict | list): The data to store.
+        out_dir (str | Path, optional): The directory to store the output file. Defaults to RESULTS_DIR.
+    """    
     out_dir = Path(out_dir) if isinstance(out_dir, str) else out_dir
     out_dir.mkdir(exist_ok=True)
 
@@ -37,6 +54,12 @@ def _store_output(filename: str, data: dict | list, out_dir: str | Path = "resul
 
 
 def rag_session() -> RAG:
+    """
+    Initializes a Retrieval-Augmented Generation (RAG) session.
+
+    Returns:
+        RAG: The initialized RAG instance.
+    """
     logger.info("Initializing RAG session...")
     rag = RAG(qdrant_collection=_get_col_name())
     rag.create_index()
@@ -46,6 +69,15 @@ def rag_session() -> RAG:
 
 
 def load_queries(q_path: Path = Path("queries.txt")) -> list[str]:
+    """
+    Loads query strings from a text file. If the file does not exist, it creates a default one.
+
+    Args:
+        q_path (Path, optional): The path to the query file. Defaults to Path("queries.txt").
+
+    Returns:
+        list[str]: The list of query strings.
+    """
     q_path = Path(q_path).resolve()
     if q_path.exists():
         logger.info("Loading queries from %s", q_path)
@@ -60,6 +92,14 @@ def load_queries(q_path: Path = Path("queries.txt")) -> list[str]:
 
 
 def run_query(rag: RAG, query: str, index: int) -> None:
+    """
+    Runs a query against the RAG instance and stores the result.
+
+    Args:
+        rag (RAG): The RAG instance to query.
+        query (str): The query string.
+        index (int): The index of the query (for logging and output purposes).
+    """    
     logger.info("Running query %d: %s", index, query)
     result = rag.chat(query)
     timestamp = str(int(time()))
@@ -67,6 +107,9 @@ def run_query(rag: RAG, query: str, index: int) -> None:
 
 
 def main() -> None:
+    """
+    Main entry point for the CLI. Initializes the RAG session, loads queries, and processes each query.
+    """
     rag = rag_session()
     queries = load_queries()
     for index, query in enumerate(queries, start=1):
