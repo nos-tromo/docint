@@ -16,7 +16,6 @@
 *.so
 *Zone.Identifier
 *.egg-info/
-__pycache__/
 
 # files
 *.csv
@@ -38,6 +37,7 @@ __pycache__/
 *.zip
 
 # directories
+**/__pycache__/
 **/build/
 **/data/
 **/dist/
@@ -119,3 +119,5 @@ docker-compose.override.yml
 # Exceptions
 # ==================================
 !frontend/index.html
+!backend/tests/
+!backend/tests/**.py
