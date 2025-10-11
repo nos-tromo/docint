@@ -187,7 +187,17 @@ class RAG:
     reader_errors: str = "ignore"
     reader_recursive: bool = True
     reader_encoding: str = "utf-8"
-    reader_required_exts: list[str] = field(default_factory=lambda: [".pdf", ".csv", ".tsv", ".xlsx", ".xls", ".parquet", ".txt"])
+    reader_required_exts: list[str] = field(
+        default_factory=lambda: [
+            ".pdf",
+            ".csv",
+            ".tsv",
+            ".xlsx",
+            ".xls",
+            ".parquet",
+            ".txt",
+        ]
+    )
 
     # --- TableReader config ---
     table_text_cols: list[str] | None = None
