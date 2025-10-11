@@ -57,6 +57,10 @@ DATA_PATH = os.getenv("DATA_PATH")
 OLLAMA_URL = os.getenv("OLLAMA_URL")
 QDRANT_COL_DIR = os.getenv("QDRANT_COL_DIR")
 QDRANT_URL = os.getenv("QDRANT_URL")
+EMBED_MODEL: str = os.getenv("EMBED_MODEL", "BAAI/bge-m3")
+SPARSE_MODEL: str = os.getenv("SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-attentions")
+RERANK_MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+GEN_MODEL: str = os.getenv("GEN_MODEL", "qwen3:8b")
 
 # --- Session persistence (ORM) ---
 Base = declarative_base()
@@ -155,10 +159,10 @@ class RAG:
     )
 
     # --- Models ---
-    embed_model_id: str = "BAAI/bge-m3"
-    sparse_model_id: str = "Qdrant/bm42-all-minilm-l6-v2-attentions"
-    rerank_model_id: str = "BAAI/bge-reranker-v2-m3"
-    gen_model_id: str = "qwen3:8b"
+    embed_model_id: str = EMBED_MODEL
+    sparse_model_id: str = SPARSE_MODEL
+    rerank_model_id: str = RERANK_MODEL
+    gen_model_id: str = GEN_MODEL
 
     # --- Qdrant controls ---
     qdrant_url: str = QDRANT_URL or "http://127.0.0.1:6333"
