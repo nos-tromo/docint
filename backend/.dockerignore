@@ -16,7 +16,7 @@
 *.pyo
 *.so
 **/*.egg-info/
-**/.log/
+**/.logs/
 **/.pytest_cache/
 **/.venv/
 **/build/

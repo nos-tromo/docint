@@ -6,7 +6,7 @@ from pathlib import Path
 
 def setup_logging(
     default_log_path: str = str(
-        Path(__file__).resolve().parents[2] / ".log" / "docint.log"
+        Path(__file__).resolve().parents[2] / ".logs" / "docint.log"
     ),
     max_bytes=5_000_000,
     backup_count=3,

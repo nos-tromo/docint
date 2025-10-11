@@ -43,7 +43,7 @@
 **/dist/
 **/env/
 **/lib/
-**/log*/
+**/logs/
 **/models/
 **/output/
 **/results/
