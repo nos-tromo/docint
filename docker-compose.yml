@@ -23,11 +23,11 @@ services:
       - QDRANT_URL=http://qdrant:6333
       - USE_DEVICE=auto
     volumes:
+      - backend_logs:/app/.logs
       - ${USERPROFILE:-$HOME}/docint/data:/app/data
       - easyocr_cache:/root/.EasyOCR
       - model_cache:/root/.cache
       - qdrant_storage:/qdrant/storage
-      - docint_logs:/app/.logs
     develop:
       watch:
         - action: sync
@@ -57,11 +57,11 @@ services:
       - QDRANT_URL=http://qdrant:6333
       - USE_DEVICE=auto
     volumes:
+      - backend_logs:/app/.logs
       - ${USERPROFILE:-$HOME}/docint/data:/app/data
       - easyocr_cache:/root/.EasyOCR
       - model_cache:/root/.cache
       - qdrant_storage:/qdrant/storage
-      - docint_logs:/app/.logs
     develop:
       watch:
         - action: sync
@@ -148,9 +148,9 @@ services:
 # Volumes
 ##########################################################
 volumes:
+  backend_logs:
   easyocr_cache:
   model_cache:
   ollama_models:
   qdrant_snapshots:
   qdrant_storage:
-  docint_logs:
