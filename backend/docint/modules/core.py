@@ -507,7 +507,7 @@ class RAG:
             embed_model=self.embed_model,
         )
 
-    def _docs_to_nodes(self) -> None:
+    def _parse_nodes(self) -> None:
         """
         Converts loaded documents into nodes using the appropriate parsers.
 
@@ -799,8 +799,8 @@ class RAG:
             data_dir (str | Path): The directory containing the documents to ingest.
         """
         self.data_dir = Path(data_dir) if isinstance(data_dir, str) else data_dir
-        self._create_doc_loader()
-        self._docs_to_nodes()
+        self._load_docs()
+        self._parse_nodes()
         self.create_index()
         self.create_query_engine()
         try:
@@ -829,8 +829,8 @@ class RAG:
             RuntimeError: If the index is not initialized for async ingestion.
         """
         self.data_dir = Path(data_dir) if isinstance(data_dir, str) else data_dir
-        self._create_doc_loader()
-        self._docs_to_nodes()
+        self._load_docs()
+        self._parse_nodes()
         if self.index is None:
             raise RuntimeError("Index is not initialized for async ingestion.")
         # Concurrent, non-blocking upsert into Qdrant via aclient
