@@ -13,7 +13,7 @@ ENV PATH="/root/.local/bin:$PATH" \
     PYTHONIOENCODING=utf-8 \
     PYTHONUNBUFFERED=1
 
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+COPY --from=ghcr.io/astral-sh/uv:0.9.2 /uv /uvx /bin/
 
 COPY . .
 
