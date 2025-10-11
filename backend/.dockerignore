@@ -11,13 +11,13 @@
 .DS_Store
 
 # Backend build artifacts and caches
-__pycache__/
 **/__pycache__/
 *.pyc
 *.pyo
 *.so
 **/*.egg-info/
 **/.log/
+**/.pytest_cache/
 **/.venv/
 **/build/
 **/data/
@@ -28,10 +28,6 @@ __pycache__/
 **/output/
 **/results/
 **/session/
-**/test/
-**/uploads/
-**/venv/
-**/workbench/
 
 # Environment and config files
 .env
