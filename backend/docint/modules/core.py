@@ -7,12 +7,12 @@ import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from dotenv import load_dotenv
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import torch
+from dotenv import load_dotenv
 from fastembed import SparseTextEmbedding
 from llama_index.core import (
     Response,
