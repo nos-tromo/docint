@@ -101,7 +101,7 @@ def run_query(rag: RAG, query: str, index: int) -> None:
         index (int): The index of the query (for logging and output purposes).
     """    
     logger.info("Running query %d: %s", index, query)
-    result = rag.chat(query)
+    result = rag.run_query(query)
     timestamp = str(int(time()))
     _store_output(f"{timestamp}_{index}_result", result)
 
