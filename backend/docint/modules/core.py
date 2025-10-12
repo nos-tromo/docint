@@ -53,14 +53,15 @@ logger = logging.getLogger(__name__)
 
 # --- Environment variables ---
 load_dotenv()
-DATA_PATH = os.getenv("DATA_PATH")
-OLLAMA_URL = os.getenv("OLLAMA_URL")
+DATA_PATH = os.getenv("DATA_PATH", Path.home() / "docint" / "data")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 QDRANT_COL_DIR = os.getenv("QDRANT_COL_DIR")
-QDRANT_URL = os.getenv("QDRANT_URL")
+QDRANT_URL = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
 EMBED_MODEL: str = os.getenv("EMBED_MODEL", "BAAI/bge-m3")
 SPARSE_MODEL: str = os.getenv("SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-attentions")
 RERANK_MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 GEN_MODEL: str = os.getenv("GEN_MODEL", "qwen3:8b")
+RETRIEVE_SIMILARITY_TOP_K: int = int(os.getenv("RETRIEVE_SIMILARITY_TOP_K", "20"))
 
 # --- Session persistence (ORM) ---
 Base = declarative_base()
@@ -153,10 +154,8 @@ class RAG:
     Represents a Retrieval-Augmented Generation (RAG) model.
     """
 
-    # --- Path setup ---
-    data_dir: Path | None = (
-        Path(DATA_PATH) if DATA_PATH else Path.home() / "docint" / "data"
-    )
+    # --- Data path setup ---
+    data_dir: Path = Path(DATA_PATH) if not isinstance(DATA_PATH, Path) else DATA_PATH
 
     # --- Models ---
     embed_model_id: str = EMBED_MODEL
@@ -165,7 +164,7 @@ class RAG:
     gen_model_id: str = GEN_MODEL
 
     # --- Qdrant controls ---
-    qdrant_url: str = QDRANT_URL or "http://127.0.0.1:6333"
+    qdrant_url: str = QDRANT_URL
     _qdrant_host_dir: Path | None = field(default=None, init=False, repr=False)
     qdrant_collection: str = "default"
 
@@ -174,7 +173,7 @@ class RAG:
     chunk_overlap: int = 160
 
     # --- Ollama Parameters ---
-    base_url: str = OLLAMA_URL or "http://localhost:11434"
+    base_url: str = OLLAMA_URL
     context_window: int = -1
     temperature: float = 0.2
     request_timeout: int = 1200
@@ -184,7 +183,7 @@ class RAG:
     # --- Reranking / retrieval ---
     enable_hybrid: bool = True
     embed_batch_size: int = 64
-    retrieve_similarity_top_k: int = 100
+    retrieve_similarity_top_k: int = RETRIEVE_SIMILARITY_TOP_K
     rerank_top_n: int = int(retrieve_similarity_top_k // 5)
 
     # --- Directory reader config ---
