@@ -62,7 +62,7 @@ def rag_pipeline() -> RAG:
     Returns:
         RAG: The initialized RAG instance.
     """
-    logger.info("Initializing RAG session...")
+    logger.info("Initializing RAG pipeline...")
     rag = RAG(qdrant_collection=_get_col_name())
     rag.create_index()
     rag.create_query_engine()
