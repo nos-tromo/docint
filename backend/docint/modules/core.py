@@ -808,7 +808,6 @@ class RAG:
         self._load_docs()
         self._parse_nodes()
         self.create_index()
-        self.create_query_engine()
         try:
             eff_k = getattr(self.query_engine.retriever, "similarity_top_k", None)
         except Exception:
@@ -841,7 +840,6 @@ class RAG:
             raise RuntimeError("Index is not initialized for async ingestion.")
         # Concurrent, non-blocking upsert into Qdrant via aclient
         await self.index.ainsert_nodes(self.nodes)
-        self.create_query_engine()
         try:
             eff_k = getattr(self.query_engine.retriever, "similarity_top_k", None)
         except Exception:
