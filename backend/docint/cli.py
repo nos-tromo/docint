@@ -23,7 +23,9 @@ def _get_col_name() -> str:
     return input("Enter collection name: ")
 
 
-def _store_output(filename: str, data: dict | list, out_dir: str | Path = RESULTS_DIR) -> None:
+def _store_output(
+    filename: str, data: dict | list, out_dir: str | Path = RESULTS_DIR
+) -> None:
     """
     Stores the output data to a JSON file.
 
@@ -31,7 +33,7 @@ def _store_output(filename: str, data: dict | list, out_dir: str | Path = RESULT
         filename (str): The name of the output file (without extension).
         data (dict | list): The data to store.
         out_dir (str | Path, optional): The directory to store the output file. Defaults to RESULTS_DIR.
-    """    
+    """
     out_dir = Path(out_dir) if isinstance(out_dir, str) else out_dir
     out_dir.mkdir(exist_ok=True)
 
@@ -64,7 +66,6 @@ def rag_session() -> RAG:
     rag = RAG(qdrant_collection=_get_col_name())
     rag.create_index()
     rag.create_query_engine()
-    rag.start_session()
     return rag
 
 
@@ -99,7 +100,7 @@ def run_query(rag: RAG, query: str, index: int) -> None:
         rag (RAG): The RAG instance to query.
         query (str): The query string.
         index (int): The index of the query (for logging and output purposes).
-    """    
+    """
     logger.info("Running query %d: %s", index, query)
     result = rag.run_query(query)
     timestamp = str(int(time()))
@@ -113,7 +114,7 @@ def main() -> None:
     rag = rag_session()
     queries = load_queries()
     for index, query in enumerate(queries, start=1):
-        run_query(rag, query, index)
+        run_query(rag=rag, query=query, index=index)
     logger.info("All queries processed.")
 
 
