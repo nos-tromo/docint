@@ -18,7 +18,7 @@ cd backend
 uv sync
 ```
 
-### Docker
+### Docker (recommended)
 
 Select whether to use the CPU or GPU (requires a CUDA compatible GPU and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) set up):
 
@@ -29,12 +29,22 @@ docker compose --profile cpu up
 docker compose --profile gpu up
 ```
 
+Use `watch` instead of `up` for development and live sync for code changes.
+
 ## Usage
 
 ### Ingest documents
 
 ```bash
 uv run ingest
+```
+
+### Run via CLI
+
+Place a `queries.txt` file inside `backend/` to facilitate batch processing of requests (one query per line; no file provided will create a default file with a summary query).
+
+```bash
+uv run cli
 ```
 
 ### Run frontend and backend in separate shells
