@@ -599,7 +599,7 @@ class RAG:
             node_postprocessors=[self.reranker],
         )
 
-    def _extract_relevant_data(
+    def _normalize_response_data(
         self, query: str, result: Any, reason: str | None = None
     ) -> dict[str, Any]:
         """
@@ -881,7 +881,7 @@ class RAG:
         result = self.query_engine.query(prompt)
         if not isinstance(result, Response):
             raise TypeError(f"Expected Response, got {type(result).__name__}")
-        return self._extract_relevant_data(prompt, result)
+        return self._normalize_response_data(prompt, result)
 
     async def run_query_async(self, prompt: str) -> dict[str, Any]:
         """
@@ -907,7 +907,7 @@ class RAG:
         result = await self.query_engine.aquery(prompt)
         if not isinstance(result, Response):
             raise TypeError(f"Expected Response, got {type(result).__name__}")
-        return self._extract_relevant_data(prompt, result)
+        return self._normalize_response_data(prompt, result)
 
     # --- Session store wiring ---
     def init_session_store(self, db_url: str = "sqlite:///rag_sessions.db") -> None:
@@ -1402,7 +1402,7 @@ class RAG:
             retrieval_query = user_msg
 
         resp = self.query_engine.query(retrieval_query)
-        data = self._extract_relevant_data(user_msg, resp)
+        data = self._normalize_response_data(user_msg, resp)
         self._persist_turn(session_id, user_msg, resp, data)
         self._maybe_update_summary(session_id)
         return data
