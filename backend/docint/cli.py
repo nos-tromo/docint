@@ -55,7 +55,7 @@ def _store_output(
     logger.info("Results stored in %s", out_dir / f"{filename}.json")
 
 
-def rag_session() -> RAG:
+def rag_pipeline() -> RAG:
     """
     Initializes a Retrieval-Augmented Generation (RAG) session.
 
@@ -109,9 +109,9 @@ def run_query(rag: RAG, query: str, index: int) -> None:
 
 def main() -> None:
     """
-    Main entry point for the CLI. Initializes the RAG session, loads queries, and processes each query.
+    Main entry point for the CLI. Initializes the RAG pipeline, loads queries, and processes each query.
     """
-    rag = rag_session()
+    rag = rag_pipeline()
     queries = load_queries()
     for index, query in enumerate(queries, start=1):
         run_query(rag=rag, query=query, index=index)
