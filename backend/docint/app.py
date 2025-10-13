@@ -1,4 +1,8 @@
-from fastapi import FastAPI, HTTPException
+import shutil
+import tempfile
+from pathlib import Path
+
+from fastapi import File, Form, FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -36,6 +40,22 @@ class QueryOut(BaseModel):
     answer: str
     sources: list[dict] = []
     session_id: str
+
+
+class IngestResponse(BaseModel):
+    ok: bool
+    message: str
+
+
+async def _save_upload_file(upload: UploadFile, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("wb") as buffer:
+        while True:
+            chunk = await upload.read(1024 * 1024)
+            if not chunk:
+                break
+            buffer.write(chunk)
+    await upload.close()
 
 
 @app.get("/collections/list", response_model=list[str])
@@ -130,4 +150,42 @@ def query(payload: QueryIn):
     except HTTPException:
         raise
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/collections/ingest", response_model=IngestResponse)
+async def collections_ingest(
+    name: str = Form(...),
+    hybrid: bool = Form(True),
+    files: list[UploadFile] = File(...),
+):
+    try:
+        collection_name = name.strip()
+        if not collection_name:
+            raise HTTPException(status_code=400, detail="Collection name required")
+        if not files:
+            raise HTTPException(status_code=400, detail="At least one file required")
+
+        tmp_root = Path(tempfile.mkdtemp(prefix="docint_ingest_"))
+        try:
+            for upload in files:
+                filename = upload.filename or ""
+                relative_path = Path(filename)
+                safe_parts = [p for p in relative_path.parts if p not in {"", ".", ".."}]
+                if not safe_parts:
+                    raise HTTPException(
+                        status_code=400, detail="Uploaded file is missing a valid name"
+                    )
+                destination = tmp_root.joinpath(*safe_parts)
+                await _save_upload_file(upload, destination)
+
+            ingest_rag = RAG(qdrant_collection=collection_name, enable_hybrid=hybrid)
+            ingest_rag.ingest_docs(tmp_root)
+        finally:
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+        return IngestResponse(ok=True, message="Ingestion complete")
+    except HTTPException:
+        raise
+    except Exception as e:  # pragma: no cover - defensive
         raise HTTPException(status_code=500, detail=str(e))

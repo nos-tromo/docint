@@ -11,12 +11,14 @@ import {
 import { useEffect, useState } from "react";
 import CollectionPicker from "./components/CollectionPicker";
 import Chat from "./components/Chat";
+import Ingest from "./components/Ingest";
 import { selectCollection } from "./api";
 
 export default function App() {
   const { open, onOpen, onClose } = useDisclosure({ defaultOpen: true });
   const [collection, setCollection] = useState<string | null>(null);
   const [chatKey, setChatKey] = useState(0);
+  const [activeTab, setActiveTab] = useState<"chat" | "ingest">("chat");
 
   useEffect(() => {
     const stored = localStorage.getItem("collection");
@@ -43,6 +45,17 @@ export default function App() {
     onOpen();
   };
 
+  const handleIngested = async (name: string) => {
+    try {
+      await selectCollection(name);
+    } catch (error) {
+      console.error("Failed to attach ingested collection", error);
+    }
+    attachCollection(name);
+    setActiveTab("chat");
+    setChatKey((k) => k + 1);
+  };
+
   return (
     <Box bg="bg.canvas" color="fg.default" minH="100vh" fontFamily="body">
       <Container maxW="6xl" py={10}>
@@ -67,13 +80,34 @@ export default function App() {
           )}
         </Box>
 
+        <HStack justifyContent="center" mb={6} gap={3}>
+          <Button
+            variant={activeTab === "chat" ? "solid" : "outline"}
+            colorScheme="teal"
+            onClick={() => setActiveTab("chat")}
+          >
+            Chat
+          </Button>
+          <Button
+            variant={activeTab === "ingest" ? "solid" : "outline"}
+            colorScheme="teal"
+            onClick={() => setActiveTab("ingest")}
+          >
+            Ingest
+          </Button>
+        </HStack>
+
         <CollectionPicker
           isOpen={open}
           onClose={onClose}
           onAttached={attachCollection}
         />
 
-        <Chat key={chatKey} collection={collection} />
+        {activeTab === "chat" ? (
+          <Chat key={chatKey} collection={collection} />
+        ) : (
+          <Ingest onIngested={handleIngested} />
+        )}
       </Container>
     </Box>
   );

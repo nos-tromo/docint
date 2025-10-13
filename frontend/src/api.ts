@@ -28,3 +28,26 @@ export const askQuery = async (
   const { data } = await API.post("/query", { question, session_id: sessionId });
   return data;
 };
+
+export type IngestResult = { ok: boolean; message: string };
+
+export const ingestCollection = async (
+  name: string,
+  files: File[],
+  hybrid: boolean,
+): Promise<IngestResult> => {
+  const formData = new FormData();
+  formData.append("name", name);
+  formData.append("hybrid", hybrid ? "true" : "false");
+
+  files.forEach((file) => {
+    const relPath =
+      (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+    formData.append("files", file, relPath);
+  });
+
+  const { data } = await API.post("/collections/ingest", formData, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return data as IngestResult;
+};
