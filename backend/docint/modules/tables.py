@@ -96,6 +96,15 @@ class TableReader(BaseReader):
 
     # ---- helpers
     def _guess_text_cols(self, df: pd.DataFrame) -> list[str]:
+        """
+        Guess the text columns in a DataFrame based on common patterns.
+
+        Args:
+            df (pd.DataFrame): The input DataFrame.
+
+        Returns:
+            list[str]: A list of column names that are likely to contain text.
+        """
         preferred = [
             "title",
             "headline",
@@ -126,6 +135,16 @@ class TableReader(BaseReader):
         return [c for c, _ in candidates[:3]] or [df.columns[0]]
 
     def _combine_text(self, row: pd.Series, cols: list[str]) -> str:
+        """
+        Combine text from specified columns in a DataFrame row.
+
+        Args:
+            row (pd.Series): The input DataFrame row.
+            cols (list[str]): The list of column names to combine.
+
+        Returns:
+            str: The combined text from the specified columns.
+        """
         parts: list[str] = []
         for c in cols:
             v = row.get(c, "")
@@ -134,8 +153,20 @@ class TableReader(BaseReader):
             parts.append(str(v))
         return self.combine_with.join(parts).strip()
 
-    # SimpleDirectoryReader calls load_data(file=Path)
     def load_data(self, file: Path, extra_info: dict | None = None) -> list[Document]:
+        """
+        Load data from a file into a list of Document objects.
+
+        Args:
+            file (Path): The path to the file to load.
+            extra_info (dict | None, optional): Additional information to include in the Document metadata. Defaults to None.
+
+        Raises:
+            ValueError: If the file type is unsupported.
+
+        Returns:
+            list[Document]: A list of Document objects representing the loaded data.
+        """        
         file = Path(file)
         suffix = file.suffix.lower()
 
