@@ -75,8 +75,14 @@ class HybridPDFReader(BaseReader):
         if not docs:
             raise ValueError("Empty or unreadable PDF")
 
+        nonempty_docs = [
+            d for d in docs if getattr(d, "text", None) and d.text.strip()
+        ]
+        if not nonempty_docs:
+            raise ValueError("PyMuPDF produced only empty pages")
+
         normalized_docs = []
-        for d in docs:
+        for d in nonempty_docs:
             page_meta = getattr(d, "metadata", {}) or {}
             meta = self._standardize_metadata(path, page_meta)
             meta["doc_format"] = "markdown"
