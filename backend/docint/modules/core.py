@@ -192,13 +192,14 @@ class RAG:
     reader_encoding: str = "utf-8"
     reader_required_exts: list[str] = field(
         default_factory=lambda: [
-            ".pdf",
             ".csv",
-            ".tsv",
-            ".xlsx",
-            ".xls",
+            ".md",
             ".parquet",
+            ".pdf",
+            ".tsv",
             ".txt",
+            ".xls",
+            ".xlsx",
         ]
     )
 
