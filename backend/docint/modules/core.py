@@ -222,11 +222,12 @@ class RAG:
         default=None, init=False, repr=False
     )
 
-    pdf_reader: DoclingReader | None = field(default=None, init=False)
+    pdf_reader: HybridPDFReader | None = field(default=None, init=False)
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
     pdf_node_parser: DoclingNodeParser | None = field(default=None, init=False)
-    table_node_parser: SentenceSplitter | None = field(default=None, init=False)
-    text_node_parser: SentenceSplitter | None = field(default=None, init=False)
+    md_node_parser: MarkdownNodeParser | None = field(default=None, init=False)
+    semantic_node_parser: SemanticSplitterNodeParser | None = field(default=None, init=False)
+    table_node_parser: SemanticSplitterNodeParser | None = field(default=None, init=False)
 
     docs: list[Document] = field(default_factory=list, init=False)
     nodes: list[BaseNode] = field(default_factory=list, init=False)
@@ -426,23 +427,25 @@ class RAG:
     # --- Build pieces ---
     def _init_node_parsers(self) -> None:
         """
-        Initializes the node parsers for different document types.
-        """        
+        Initializes advanced, multilingual-aware node parsers for different document types.
+        """
+        # Markdown parser (for .txt, .md, .rst)
+        self.md_node_parser = MarkdownNodeParser()
+
+        # Layout-aware for Docling JSON
         self.pdf_node_parser = DoclingNodeParser()
-        self.table_node_parser = SentenceSplitter(
-            chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap
-        )
-        self.text_node_parser = SentenceSplitter(
-            chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap
+        
+        # Semantic parser for tables and text
+        self.semantic_node_parser = SemanticSplitterNodeParser(
+            embed_model=self.embed_model,
+            buffer_size=1,
+            breakpoint_percentile_threshold=95,
         )
     
     def _load_docs(self) -> None:
         """
         Creates the document loader for various file types.
         """
-        # Doc reader for PDF
-        self.pdf_reader = DoclingReader(export_type=DoclingReader.ExportType.JSON)
-
         # Table reader for CSV/TSV/XLSX/Parquet
         table_reader = TableReader(
             text_cols=self.table_text_cols,
