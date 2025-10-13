@@ -462,23 +462,23 @@ class RAG:
             encoding=self.reader_encoding,
             required_exts=self.reader_required_exts,
             file_extractor={
-                ".pdf": self.pdf_reader,
                 ".csv": table_reader,
+                ".parquet": TableReader(
+                    text_cols=self.table_text_cols or ["text"],
+                    metadata_cols=set(self.table_metadata_cols) if self.table_metadata_cols else None,
+                    id_col=self.table_id_col,
+                    limit=self.table_row_limit,
+                ),
+                ".pdf": HybridPDFReader(),
                 ".tsv": TableReader(
                     csv_sep="\t",  # allow explicit TSV sep
                     text_cols=self.table_text_cols,
-                    metadata_cols=self.table_metadata_cols,
+                    metadata_cols=set(self.table_metadata_cols) if self.table_metadata_cols else None,
                     id_col=self.table_id_col,
                     limit=self.table_row_limit,
                 ),
-                ".xlsx": table_reader,
                 ".xls": table_reader,
-                ".parquet": TableReader(
-                    text_cols=self.table_text_cols or ["text"],
-                    metadata_cols=self.table_metadata_cols,
-                    id_col=self.table_id_col,
-                    limit=self.table_row_limit,
-                ),
+                ".xlsx": table_reader,
             },
         )
 
