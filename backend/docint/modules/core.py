@@ -24,14 +24,13 @@ from llama_index.core.chat_engine import CondenseQuestionChatEngine
 from llama_index.core.embeddings import BaseEmbedding
 from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.core.memory import ChatMemoryBuffer
-from llama_index.core.node_parser import SentenceSplitter
+from llama_index.core.node_parser import MarkdownNodeParser, SemanticSplitterNodeParser
 from llama_index.core.postprocessor import SentenceTransformerRerank
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.schema import BaseNode, Document
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
 from llama_index.node_parser.docling import DoclingNodeParser
-from llama_index.readers.docling import DoclingReader
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
@@ -47,6 +46,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
+from docint.modules.documents import HybridPDFReader
 from docint.modules.tables import TableReader
 
 logger = logging.getLogger(__name__)
@@ -516,21 +516,20 @@ class RAG:
             embed_model=self.embed_model,
         )
 
-    def _parse_nodes(self) -> None:
+    def _create_nodes(self) -> None:
         """
         Converts loaded documents into nodes using the appropriate parsers.
 
         Raises:
-            RuntimeError: If the directory reader is not initialized.
-            RuntimeError: If the node parsers are not initialized.
+            RuntimeError: If the directory reader or node parsers are not initialized.
         """
         if self.dir_reader is None:
             raise RuntimeError("Directory reader is not initialized.")
         self.docs = self.dir_reader.load_data()
         if (
-            self.pdf_node_parser is None
-            or self.table_node_parser is None
-            or self.text_node_parser is None
+            self.md_node_parser is None
+            or self.pdf_node_parser is None
+            or self.semantic_node_parser is None
         ):
             raise RuntimeError("Node parsers are not initialized.")
 
@@ -549,31 +548,56 @@ class RAG:
             elif file_type.startswith("text/") or ext in {"txt", "md", "rst"}:
                 text_docs.append(d)
             else:
-                # fallback: try to infer by mimetype first, then extension
-                if file_type:
-                    if "pdf" in file_type:
-                        pdf_docs.append(d)
-                    elif file_type.startswith("text/"):
-                        text_docs.append(d)
-                    else:
-                        pdf_docs.append(d)
+                # fallback detection
+                if "pdf" in file_type or ext == "pdf":
+                    pdf_docs.append(d)
+                elif file_type.startswith("text/") or ext in {"txt", "md", "rst"}:
+                    text_docs.append(d)
                 else:
-                    # if no mimetype metadata, fall back to extension
-                    if ext in {"txt", "md", "rst"}:
-                        text_docs.append(d)
-                    elif ext == "pdf":
-                        pdf_docs.append(d)
-                    else:
-                        # default to PDF parser when in doubt (Docling-origin docs)
-                        pdf_docs.append(d)
+                    pdf_docs.append(d)
 
         nodes: list[BaseNode] = []
+
         if pdf_docs:
-            nodes.extend(self.pdf_node_parser.get_nodes_from_documents(pdf_docs))
+            def _is_docling_json(doc):
+                try:
+                    json.loads(getattr(doc, "text", "") or "")
+                    return True
+                except Exception:
+                    return False
+
+            pdf_docs_docling = [d for d in pdf_docs if _is_docling_json(d)]
+            pdf_docs_md = [d for d in pdf_docs if not _is_docling_json(d)]
+
+            if pdf_docs_docling:
+                logger.info(
+                    "Parsing %d Docling JSON PDFs with DoclingNodeParser", len(pdf_docs_docling)
+                )
+                nodes.extend(self.pdf_node_parser.get_nodes_from_documents(pdf_docs_docling))
+            if pdf_docs_md:
+                logger.info(
+                    "Parsing %d Markdown PDFs with MarkdownNodeParser", len(pdf_docs_md)
+                )
+                nodes.extend(self.md_node_parser.get_nodes_from_documents(pdf_docs_md))
+
         if table_docs:
-            nodes.extend(self.table_node_parser.get_nodes_from_documents(table_docs))
+            logger.info("Parsing %d table documents with SemanticSplitterNodeParser", len(table_docs))
+            nodes.extend(self.semantic_node_parser.get_nodes_from_documents(table_docs))
         if text_docs:
-            nodes.extend(self.text_node_parser.get_nodes_from_documents(text_docs))
+            # detect markdown by file extension or text content
+            markdown_docs = [
+                d for d in text_docs
+                if str(d.metadata.get("file_path", "")).endswith((".md", ".markdown", ".rst"))
+                or (d.text.strip().startswith("#") or "*" in d.text or "-" in d.text)
+            ]
+            plain_docs = [d for d in text_docs if d not in markdown_docs]
+
+            if markdown_docs:
+                logger.info("Parsing %d markdown documents with MarkdownNodeParser", len(markdown_docs))
+                nodes.extend(self.md_node_parser.get_nodes_from_documents(markdown_docs))
+            if plain_docs:
+                logger.info("Parsing %d plain text documents with SemanticSplitterNodeParser", len(plain_docs))
+                nodes.extend(self.semantic_node_parser.get_nodes_from_documents(plain_docs))
 
         self.nodes = nodes
 
@@ -809,7 +833,7 @@ class RAG:
         """
         self.data_dir = Path(data_dir) if isinstance(data_dir, str) else data_dir
         self._load_docs()
-        self._parse_nodes()
+        self._create_nodes()
         self.create_index()
         try:
             eff_k = getattr(self.query_engine.retriever, "similarity_top_k", None)
@@ -838,7 +862,7 @@ class RAG:
         """
         self.data_dir = Path(data_dir) if isinstance(data_dir, str) else data_dir
         self._load_docs()
-        self._parse_nodes()
+        self._create_nodes()
         if self.index is None:
             raise RuntimeError("Index is not initialized for async ingestion.")
         # Concurrent, non-blocking upsert into Qdrant via aclient
