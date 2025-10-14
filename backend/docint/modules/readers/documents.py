@@ -108,11 +108,11 @@ class HybridPDFReader(BaseReader):
         Args:
             path (Path): The file path of the document.
         """
-        docs = self.docling_reader.load_data(file=path)
+        docs = self.docling_reader.load_data(file_path)
         normalized_docs = []
         for d in docs:
             page_meta = getattr(d, "metadata", {}) or {}
-            meta = self._standardize_metadata(path, page_meta)
+            meta = self._standardize_metadata(file_path, page_meta)
             meta["doc_format"] = "json"
             # merge existing Docling metadata where available
             meta.update({k: v for k, v in page_meta.items() if k not in meta})
