@@ -30,7 +30,7 @@ services:
         - action: rebuild
           path: ./pyproject.toml
     networks:
-      docintnet:
+      - docintnet
 
   ##########################################################
   # Backend (GPU)
@@ -70,7 +70,7 @@ services:
             - driver: nvidia
               capabilities: [gpu]
     networks:
-      docintnet:
+      - docintnet
 
   ##########################################################
   # Frontend
@@ -82,7 +82,7 @@ services:
     ports:
       - "8080:80"
     networks:
-      docintnet:
+      - docintnet
 
   ##########################################################
   # Ollama (CPU)
@@ -95,7 +95,7 @@ services:
     volumes:
       - ollama_models:/root/.ollama
     networks:
-      docintnet:
+      - docintnet
 
   ##########################################################
   # Ollama (GPU)
@@ -119,7 +119,7 @@ services:
     runtime: nvidia
     restart: always
     networks:
-      docintnet:
+      - docintnet
 
   ##########################################################
   # Qdrant
@@ -136,7 +136,7 @@ services:
       - qdrant_storage:/qdrant/storage
     restart: unless-stopped
     networks:
-      docintnet:
+      - docintnet
 
 ##########################################################
 # Volumes
@@ -154,5 +154,3 @@ volumes:
 ##########################################################
 networks:
   docintnet:
-    driver: bridge
-    internal: true
