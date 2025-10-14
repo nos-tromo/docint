@@ -95,7 +95,9 @@ class HybridPDFReader(BaseReader):
             )
 
         logger.info(
-            f"[HybridPDFReader] Loaded {len(normalized_docs)} pages via PyMuPDF: {path.name}"
+            "[HybridPDFReader] Loaded %d pages via PyMuPDF: %s",
+            len(normalized_docs),
+            path.name,
         )
         return normalized_docs
 
@@ -123,7 +125,9 @@ class HybridPDFReader(BaseReader):
             )
 
         logger.info(
-            f"[HybridPDFReader] Loaded {len(normalized_docs)} pages via Docling: {path.name}"
+            "[HybridPDFReader] Loaded %d pages via Docling: %s",
+            len(normalized_docs),
+            file_path.name,
         )
         return normalized_docs
 
