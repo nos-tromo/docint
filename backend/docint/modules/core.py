@@ -46,8 +46,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
-from docint.modules.documents import HybridPDFReader
-from docint.modules.tables import TableReader
+from docint.modules.readers.documents import HybridPDFReader
+from docint.modules.readers.tables import TableReader
 
 logger = logging.getLogger(__name__)
 
