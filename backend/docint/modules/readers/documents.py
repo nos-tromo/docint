@@ -101,7 +101,7 @@ class HybridPDFReader(BaseReader):
         )
         return normalized_docs
 
-    def _from_docling(self, path: Path) -> list[Document]:
+    def _from_docling(self, file_path: Path) -> list[Document]:
         """
         Loads the document using DoclingReader (fallback) and applies metadata normalization.
 
