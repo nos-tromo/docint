@@ -156,7 +156,7 @@ class HybridPDFReader(BaseReader):
                 logger.error(
                     "[HybridPDFReader] Docling failed for %s: %s", path.name, e2
                 )
-                raise RuntimeError(f"Both PyMuPDF and Docling failed to read {path}")
+                raise RuntimeError(f"Both PyMuPDF and Docling failed to read {path}") from e2
 
         # Optionally merge extra_info into metadata
         for d in docs:
