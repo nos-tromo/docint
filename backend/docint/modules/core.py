@@ -417,26 +417,9 @@ class RAG:
         return self._qdrant_aclient
 
     # --- Build pieces ---
-    def _init_node_parsers(self) -> None:
+    def _load_doc_readers(self) -> None:
         """
-        Initializes advanced, multilingual-aware node parsers for different document types.
-        """
-        # Markdown parser (for .txt, .md, .rst)
-        self.md_node_parser = MarkdownNodeParser()
-
-        # Layout-aware for Docling JSON
-        self.docling_node_parser = DoclingNodeParser()
-        
-        # Semantic parser for tables and text
-        self.semantic_node_parser = SemanticSplitterNodeParser(
-            embed_model=self.embed_model,
-            buffer_size=self.buffer_size,
-            breakpoint_percentile_threshold=self.breakpoint_percentile_threshold,
-        )
-    
-    def _load_docs(self) -> None:
-        """
-        Creates the document loader for various file types.
+        Loads the document readers for various file types.
         """
         # Table reader for CSV/TSV/XLSX/Parquet
         table_reader = TableReader(
@@ -472,6 +455,23 @@ class RAG:
                 ".xls": table_reader,
                 ".xlsx": table_reader,
             },
+        )
+
+    def _load_node_parsers(self) -> None:
+        """
+        Initializes advanced, multilingual-aware node parsers for different document types.
+        """
+        # Markdown parser (for .txt, .md, .rst)
+        self.md_node_parser = MarkdownNodeParser()
+
+        # Layout-aware for Docling JSON
+        self.docling_node_parser = DoclingNodeParser()
+        
+        # Semantic parser for tables and text
+        self.semantic_node_parser = SemanticSplitterNodeParser(
+            embed_model=self.embed_model,
+            buffer_size=self.buffer_size,
+            breakpoint_percentile_threshold=self.breakpoint_percentile_threshold,
         )
 
     def _vector_store(self) -> QdrantVectorStore:
@@ -824,7 +824,8 @@ class RAG:
             data_dir (str | Path): The directory containing the documents to ingest.
         """
         self.data_dir = Path(data_dir) if isinstance(data_dir, str) else data_dir
-        self._load_docs()
+        self._load_doc_readers()
+        self._load_node_parsers()
         self._create_nodes()
         self.create_index()
         try:
@@ -851,7 +852,8 @@ class RAG:
             RuntimeError: If the index is not initialized for async ingestion.
         """
         self.data_dir = Path(data_dir) if isinstance(data_dir, str) else data_dir
-        self._load_docs()
+        self._load_doc_readers()
+        self._load_node_parsers()
         self._create_nodes()
         if self.index is None:
             raise RuntimeError("Index is not initialized for async ingestion.")
