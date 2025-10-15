@@ -243,10 +243,6 @@ class RAG:
 
     def __post_init__(self):
         # Bound chunk params
-        self.chunk_size = max(256, min(self.chunk_size, 1024))
-        self.chunk_overlap = max(
-            0, min(self.chunk_overlap, int(self.chunk_size * 0.25))
-        )
         self._init_node_parsers()
 
     # --- Static methods ---
