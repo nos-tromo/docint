@@ -139,24 +139,24 @@ class HybridPDFReader(BaseReader):
             file (str | Path): The file path of the document.
             **kwargs: Optional arguments like extra_info passed by SimpleDirectoryReader.
         """
-        path = Path(file) if not isinstance(file, Path) else file
+        file_path = Path(file) if not isinstance(file, Path) else file
         extra_info = kwargs.get("extra_info", {})
 
         try:
-            docs = self._from_pymupdf(path)
+            docs = self._from_pymupdf(file_path)
         except Exception as e:
             logger.warning(
                 "[HybridPDFReader] PyMuPDF failed for %s: %s → falling back to Docling",
-                path.name,
+                file_path.name,
                 e,
             )
             try:
-                docs = self._from_docling(path)
+                docs = self._from_docling(file_path)
             except Exception as e2:
                 logger.error(
-                    "[HybridPDFReader] Docling failed for %s: %s", path.name, e2
+                    "[HybridPDFReader] Docling failed for %s: %s", file_path.name, e2
                 )
-                raise RuntimeError(f"Both PyMuPDF and Docling failed to read {path}") from e2
+                raise RuntimeError(f"Both PyMuPDF and Docling failed to read {file_path}") from e2
 
         # Optionally merge extra_info into metadata
         for d in docs:
