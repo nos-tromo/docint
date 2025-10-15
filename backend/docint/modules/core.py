@@ -224,7 +224,7 @@ class RAG:
 
     pdf_reader: HybridPDFReader | None = field(default=None, init=False)
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
-    pdf_node_parser: DoclingNodeParser | None = field(default=None, init=False)
+    docling_node_parser: DoclingNodeParser | None = field(default=None, init=False)
     md_node_parser: MarkdownNodeParser | None = field(default=None, init=False)
     semantic_node_parser: SemanticSplitterNodeParser | None = field(default=None, init=False)
     table_node_parser: SemanticSplitterNodeParser | None = field(default=None, init=False)
@@ -433,7 +433,7 @@ class RAG:
         self.md_node_parser = MarkdownNodeParser()
 
         # Layout-aware for Docling JSON
-        self.pdf_node_parser = DoclingNodeParser()
+        self.docling_node_parser = DoclingNodeParser()
         
         # Semantic parser for tables and text
         self.semantic_node_parser = SemanticSplitterNodeParser(
@@ -528,7 +528,7 @@ class RAG:
         self.docs = self.dir_reader.load_data()
         if (
             self.md_node_parser is None
-            or self.pdf_node_parser is None
+            or self.docling_node_parser is None
             or self.semantic_node_parser is None
         ):
             raise RuntimeError("Node parsers are not initialized.")
@@ -573,7 +573,7 @@ class RAG:
                 logger.info(
                     "Parsing %d Docling JSON PDFs with DoclingNodeParser", len(pdf_docs_docling)
                 )
-                nodes.extend(self.pdf_node_parser.get_nodes_from_documents(pdf_docs_docling))
+                nodes.extend(self.docling_node_parser.get_nodes_from_documents(pdf_docs_docling))
             if pdf_docs_md:
                 logger.info(
                     "Parsing %d Markdown PDFs with MarkdownNodeParser", len(pdf_docs_md)
