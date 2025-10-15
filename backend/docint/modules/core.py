@@ -241,10 +241,6 @@ class RAG:
     _SessionMaker: Any | None = field(default=None, init=False, repr=False)
     session_id: str | None = field(default=None, init=False, repr=False)
 
-    def __post_init__(self):
-        # Bound chunk params
-        self._init_node_parsers()
-
     # --- Static methods ---
     @staticmethod
     def _list_supported_sparse_models() -> list[str]:
