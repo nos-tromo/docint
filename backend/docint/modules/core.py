@@ -47,6 +47,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 from docint.modules.readers.documents import HybridPDFReader
+from docint.modules.readers.json import CustomJSONReader
 from docint.modules.readers.tables import TableReader
 
 logger = logging.getLogger(__name__)
@@ -189,6 +190,8 @@ class RAG:
     reader_required_exts: list[str] = field(
         default_factory=lambda: [
             ".csv",
+            ".json",
+            ".jsonl",
             ".md",
             ".parquet",
             ".pdf",
@@ -438,6 +441,7 @@ class RAG:
             required_exts=self.reader_required_exts,
             file_extractor={
                 ".csv": table_reader,
+                ".json": CustomJSONReader(),
                 ".parquet": TableReader(
                     text_cols=self.table_text_cols or ["text"],
                     metadata_cols=set(self.table_metadata_cols) if self.table_metadata_cols else None,
@@ -467,7 +471,7 @@ class RAG:
         # Layout-aware for Docling JSON
         self.docling_node_parser = DoclingNodeParser()
         
-        # Semantic parser for tables and text
+        # Semantic parser for tables, text, and json
         self.semantic_node_parser = SemanticSplitterNodeParser(
             embed_model=self.embed_model,
             buffer_size=self.buffer_size,
@@ -525,7 +529,7 @@ class RAG:
         ):
             raise RuntimeError("Node parsers are not initialized.")
 
-        pdf_docs, table_docs, text_docs = [], [], []
+        json_docs, pdf_docs, table_docs, text_docs = [], [], [], []
         for d in self.docs:
             meta = getattr(d, "metadata", {}) or {}
             file_type = (meta.get("file_type") or "").lower()
@@ -535,6 +539,8 @@ class RAG:
 
             if source_kind == "table":
                 table_docs.append(d)
+            elif file_type in {"application/json", "application/jsonl"} or ext in {"json", "jsonl"}:
+                json_docs.append(d)
             elif file_type.startswith("application/pdf") or ext == "pdf":
                 pdf_docs.append(d)
             elif file_type.startswith("text/") or ext in {"txt", "md", "rst"}:
@@ -550,6 +556,10 @@ class RAG:
 
         nodes: list[BaseNode] = []
 
+        if json_docs:
+            logger.info("Parsing %d JSON documents with SemanticSplitterNodeParser", len(json_docs))
+            nodes.extend(self.semantic_node_parser.get_nodes_from_documents(json_docs))
+        
         if pdf_docs:
             def _is_docling_json(doc):
                 try:
@@ -575,6 +585,7 @@ class RAG:
         if table_docs:
             logger.info("Parsing %d table documents with SemanticSplitterNodeParser", len(table_docs))
             nodes.extend(self.semantic_node_parser.get_nodes_from_documents(table_docs))
+        
         if text_docs:
             # detect markdown by file extension or text content
             markdown_docs = [
