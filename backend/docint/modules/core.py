@@ -588,7 +588,7 @@ class RAG:
             markdown_docs = [
                 d for d in text_docs
                 if str(d.metadata.get("file_path", "")).endswith((".md", ".markdown", ".rst"))
-                or (d.text.strip().startswith("#") or "*" in d.text or "-" in d.text)
+                or (d.text.strip().startswith("#"))
             ]
             plain_docs = [d for d in text_docs if d not in markdown_docs]
 
