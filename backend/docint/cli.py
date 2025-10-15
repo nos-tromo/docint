@@ -35,7 +35,8 @@ def _store_output(
         out_dir (str | Path, optional): The directory to store the output file. Defaults to RESULTS_DIR.
     """
     out_dir = Path(out_dir) if isinstance(out_dir, str) else out_dir
-    out_dir.mkdir(exist_ok=True)
+    if not out_dir.exists():
+        out_dir.mkdir(exist_ok=True)
 
     if isinstance(data, dict):
         with open(out_dir / f"{filename}.json", "w", encoding="utf-8") as f:

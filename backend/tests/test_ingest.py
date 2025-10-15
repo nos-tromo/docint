@@ -7,7 +7,8 @@ import docint.utils.ingest as ingest
 
 def test_get_inputs_uses_env_path(monkeypatch, tmp_path: Path) -> None:
     home_data = tmp_path / "data"
-    home_data.mkdir()
+    if not home_data.exists():
+        home_data.mkdir()
 
     monkeypatch.setattr(ingest, "DATA_PATH", str(home_data), raising=False)
     monkeypatch.setattr("builtins.input", lambda prompt: "demo-collection")
@@ -29,7 +30,8 @@ def test_get_inputs_raises_for_missing_dir(monkeypatch, tmp_path: Path) -> None:
 
 def test_ingest_docs_invokes_rag(monkeypatch, tmp_path: Path) -> None:
     data_dir = tmp_path / "docs"
-    data_dir.mkdir()
+    if not data_dir.exists():
+        data_dir.mkdir()
 
     calls: dict[str, Path] = {}
 

@@ -21,7 +21,8 @@ def setup_logging(
     """
     log_path = os.getenv("LOG_PATH", default_log_path)
     log_dir = Path(log_path).parent
-    log_dir.mkdir(parents=True, exist_ok=True)
+    if not log_dir.exists():
+        log_dir.mkdir(parents=True, exist_ok=True)
 
     log_format = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
     formatter = logging.Formatter(log_format)

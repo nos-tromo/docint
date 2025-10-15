@@ -1198,7 +1198,8 @@ class RAG:
             raise ValueError(f"No conversation found for session_id={session_id}")
 
         out_dir = Path(out_dir) / session_id
-        out_dir.mkdir(parents=True, exist_ok=True)
+        if not out_dir.exists():
+            out_dir.mkdir(parents=True, exist_ok=True)
 
         # 1) session.json
         session_meta = {
