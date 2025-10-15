@@ -210,6 +210,10 @@ class RAG:
     table_excel_sheet: str | int | None = None
     table_row_limit: int | None = None
 
+    # --- SemanticSplitterNodeParser config ---
+    buffer_size: int = 5
+    breakpoint_percentile_threshold: int = 90
+
     # --- Runtime (lazy caches / not in repr) ---
     _device: str | None = field(default=None, init=False, repr=False)
     _embed_model: BaseEmbedding | None = field(default=None, init=False, repr=False)
@@ -438,8 +442,8 @@ class RAG:
         # Semantic parser for tables and text
         self.semantic_node_parser = SemanticSplitterNodeParser(
             embed_model=self.embed_model,
-            buffer_size=1,
-            breakpoint_percentile_threshold=95,
+            buffer_size=self.buffer_size,
+            breakpoint_percentile_threshold=self.breakpoint_percentile_threshold,
         )
     
     def _load_docs(self) -> None:
