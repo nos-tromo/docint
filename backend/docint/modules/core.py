@@ -168,10 +168,6 @@ class RAG:
     _qdrant_host_dir: Path | None = field(default=None, init=False, repr=False)
     qdrant_collection: str = "default"
 
-    # --- Chunking controls ---
-    chunk_size: int = 1024
-    chunk_overlap: int = 160
-
     # --- Ollama Parameters ---
     base_url: str = OLLAMA_URL
     context_window: int = -1
@@ -844,11 +840,9 @@ class RAG:
         except Exception:
             eff_k = None
         logger.info(
-            "Effective retrieval k=%s | top_n=%s | chunk_size=%s | overlap=%s | embed_device=%s | rerank_device=%s",
+            "Effective retrieval k=%s | top_n=%s | embed_device=%s | rerank_device=%s",
             eff_k,
             self.rerank_top_n,
-            self.chunk_size,
-            self.chunk_overlap,
             self.device,
             self.device,
         )
@@ -876,11 +870,9 @@ class RAG:
         except Exception:
             eff_k = None
         logger.info(
-            "Effective retrieval k=%s | top_n=%s | chunk_size=%s | overlap=%s | embed_device=%s | rerank_device=%s",
+            "Effective retrieval k=%s | top_n=%s | embed_device=%s | rerank_device=%s",
             eff_k,
             self.rerank_top_n,
-            self.chunk_size,
-            self.chunk_overlap,
             self.device,
             self.device,
         )
