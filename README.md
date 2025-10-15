@@ -74,3 +74,4 @@ Launch the browser app: `http://localhost:8080/`.
 - Expand GUI for ingestion
 - Add WhisperReader for audio/video
 - Add OCRReader for images
+- Implement GraphRAG
