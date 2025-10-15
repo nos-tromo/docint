@@ -613,7 +613,7 @@ class RAG:
             raise RuntimeError("Index is not initialized. Cannot create query engine.")
         k = min(max(self.retrieve_similarity_top_k, self.rerank_top_n * 8), 64)
         self.query_engine = RetrieverQueryEngine.from_args(
-            self.index.as_retriever(similarity_top_k=k),
+            retriever=self.index.as_retriever(similarity_top_k=k),
             llm=self.gen_model,
             node_postprocessors=[self.reranker],
         )
