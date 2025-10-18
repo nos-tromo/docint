@@ -59,7 +59,7 @@ QDRANT_URL = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
 EMBED_MODEL: str = os.getenv("EMBED_MODEL", "BAAI/bge-m3")
 SPARSE_MODEL: str = os.getenv("SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-attentions")
 RERANK_MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
-GEN_MODEL: str = os.getenv("GEN_MODEL", "qwen3:8b")
+GEN_MODEL: str = os.getenv("LLM", "qwen3:8b")
 RETRIEVE_SIMILARITY_TOP_K: int = int(os.getenv("RETRIEVE_SIMILARITY_TOP_K", "20"))
 
 
