@@ -25,6 +25,7 @@ dependencies = [
     "pydantic>=2.11.7",
     "pymupdf4llm>=0.0.27",
     "python-dotenv>=1.1.1",
+    "python-magic>=0.4.27",
     "qdrant-client>=1.15.1",
     "sqlalchemy>=2.0.42",
     "torch>=2.7.1",

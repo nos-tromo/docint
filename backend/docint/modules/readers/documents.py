@@ -6,6 +6,8 @@ from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from llama_index.readers.docling import DoclingReader
 
+from docint.utils.mimetype import get_mimetype
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,17 +42,18 @@ class HybridPDFReader(BaseReader):
             path (Path): The file path of the document.
             page_meta (dict | None): Optional page-specific metadata.
         """
-        filename = path.name
+        filename = file_path.name
+        mimetype = get_mimetype(file_path)
         base_meta = {
             "file_path": str(path),
             "file_name": filename,
             "filename": filename,
-            "file_type": "application/pdf",
-            "mimetype": "application/pdf",
+            "file_type": mimetype,
+            "mimetype": mimetype,
             "source": "document",
             "origin": {
                 "filename": filename,
-                "mimetype": "application/pdf",
+                "mimetype": mimetype,
             },
         }
         if page_meta and isinstance(page_meta, dict):

@@ -10,6 +10,8 @@ import pandas as pd
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 
+from docint.utils.mimetype import get_mimetype
+
 PathLike = str | Path
 CleanFn = Callable[[str], str]
 RowFilter = Callable[[dict], bool]
