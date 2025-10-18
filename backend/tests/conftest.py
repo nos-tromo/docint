@@ -46,17 +46,144 @@ def _install_pandas_stub() -> None:
     try:
         import pandas  # noqa: F401
     except ModuleNotFoundError:
+        import csv
+        from collections import OrderedDict
+
         pandas = types.ModuleType("pandas")
+
+        class Series(list):
+            def __init__(self, values, name):
+                super().__init__(values)
+                self.name = name
+
+            @property
+            def dtype(self):
+                if all(isinstance(v, (int, float)) for v in self if v is not None):
+                    return "float"
+                return "object"
+
+            def dropna(self):
+                return Series([v for v in self if v is not None], self.name)
+
+            def astype(self, target_type):
+                if target_type is str:
+                    return Series(["" if v is None else str(v) for v in self], self.name)
+                return self
+
+            def head(self, n):
+                return Series(self[:n], self.name)
+
+            class _StrAccessor:
+                def __init__(self, data):
+                    self._data = data
+
+                def len(self):
+                    return Series([len(str(v)) for v in self._data], self._data.name)
+
+            @property
+            def str(self):
+                return Series._StrAccessor(self)
+
+            def mean(self):
+                numeric = [float(v) for v in self if v is not None]
+                return sum(numeric) / len(numeric) if numeric else 0.0
 
         class DataFrame:
             def __init__(self, data=None, columns=None):
-                self._data = data or []
-                self._columns = columns or []
+                if isinstance(data, dict):
+                    columns = list(data.keys())
+                    rows = zip(*data.values())
+                    self._rows = [OrderedDict(zip(columns, row)) for row in rows]
+                elif isinstance(data, list):
+                    self._rows = [OrderedDict(row) for row in data]
+                    columns = columns or list(self._rows[0].keys()) if self._rows else []
+                else:
+                    self._rows = []
+                    columns = columns or []
+                self._columns = list(columns)
+
+            def __len__(self):
+                return len(self._rows)
+
+            @property
+            def columns(self):
+                return self._columns
+
+            def __getitem__(self, column):
+                return Series([row.get(column) for row in self._rows], column)
+
+            def iterrows(self):
+                for idx, row in enumerate(self._rows):
+                    yield idx, dict(row)
+
+            def reset_index(self, drop=True):
+                return self
+
+            def to_dict(self, orient="records"):
+                if orient == "records":
+                    return [dict(row) for row in self._rows]
+                raise NotImplementedError
+
+            def to_csv(self, path, sep=",", index=False, encoding="utf-8"):
+                with open(path, "w", newline="", encoding=encoding) as f:
+                    writer = csv.writer(f, delimiter=sep)
+                    writer.writerow(self._columns)
+                    for row in self._rows:
+                        writer.writerow([row.get(col, "") for col in self._columns])
 
             def to_parquet(self, *args, **kwargs):
                 return None
 
+        def _convert_value(value):
+            if value == "":
+                return None
+            lowered = value.lower()
+            if lowered == "true":
+                return True
+            if lowered == "false":
+                return False
+            try:
+                if "." in value:
+                    return float(value)
+                return int(value)
+            except ValueError:
+                return value
+
+        def read_csv(path, sep=",", encoding="utf-8"):
+            with open(path, newline="", encoding=encoding) as f:
+                reader = csv.reader(f, delimiter=sep)
+                rows = list(reader)
+            if not rows:
+                return DataFrame([])
+            header, *data_rows = rows
+            records = [
+                {col: _convert_value(value) for col, value in zip(header, row)}
+                for row in data_rows
+            ]
+            return DataFrame(records, columns=header)
+
+        def read_excel(path, sheet_name=0):
+            raise NotImplementedError("Excel reading is not supported in the stub")
+
+        def read_parquet(path):
+            raise NotImplementedError("Parquet reading is not supported in the stub")
+
+        class _APITypes(types.SimpleNamespace):
+            @staticmethod
+            def is_string_dtype(dtype):
+                return dtype == "object"
+
         pandas.DataFrame = DataFrame
+        pandas.Series = Series
+        pandas.read_csv = read_csv
+        pandas.read_excel = read_excel
+        pandas.read_parquet = read_parquet
+        pandas.api = types.SimpleNamespace(types=_APITypes())
+
+        def isna(value):
+            return value is None
+
+        pandas.isna = isna
         sys.modules["pandas"] = pandas
 
 
@@ -93,10 +220,19 @@ def _install_magic_stub() -> None:
     except ModuleNotFoundError:
         magic = types.ModuleType("magic")
 
-        def from_file(*args, **kwargs):
-            return "application/octet-stream"
+        class _Magic:
+            def __init__(self, mime=False):
+                self.mime = mime
 
-        magic.from_file = from_file
+            def from_file(self, *args, **kwargs):
+                path = str(args[0]) if args else ""
+                if path.endswith(".tsv"):
+                    return "text/tab-separated-values"
+                if path.endswith(".csv"):
+                    return "text/csv"
+                return "application/octet-stream"
+
+        magic.Magic = _Magic
         sys.modules["magic"] = magic
 
 

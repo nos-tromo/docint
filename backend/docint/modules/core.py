@@ -70,19 +70,20 @@ class ThresholdSentenceTransformerRerank(SentenceTransformerRerank):
         """Initialize the reranker and store the score threshold."""
 
         super().__init__(*args, **kwargs)
-        self.score_threshold = score_threshold
+        object.__setattr__(self, "_score_threshold", score_threshold)
 
     def _filter_nodes(self, nodes: list[Any]) -> list[Any]:
         """Return only nodes that meet the configured score threshold."""
 
-        if self.score_threshold is None:
+        score_threshold = getattr(self, "_score_threshold", None)
+        if score_threshold is None:
             return nodes
 
         filtered_nodes: list[Any] = []
         for node_with_score in nodes:
             score = getattr(node_with_score, "score", None)
             try:
-                keep = score is None or float(score) >= float(self.score_threshold)
+                keep = score is None or float(score) >= float(score_threshold)
             except (TypeError, ValueError):
                 keep = True
             if keep:
