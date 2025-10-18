@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy import Column, DateTime, String, Text
 from sqlalchemy.orm import relationship
 
-from docint.modules.chat.base import Base
+from docint.core.chat.base import Base
 
 
 class Conversation(Base):

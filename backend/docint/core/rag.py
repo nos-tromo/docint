@@ -40,13 +40,13 @@ from qdrant_client import QdrantClient
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from sqlalchemy.orm import sessionmaker
 
-from docint.modules.readers.documents import HybridPDFReader
-from docint.modules.readers.images import ImageReader
-from docint.modules.readers.json import CustomJSONReader
-from docint.modules.readers.tables import TableReader
-from docint.modules.chat.citation import Citation
-from docint.modules.chat.conversation import Conversation
-from docint.modules.chat.turn import Turn
+from docint.core.chat.citation import Citation
+from docint.core.chat.conversation import Conversation
+from docint.core.chat.turn import Turn
+from docint.core.readers.documents import HybridPDFReader
+from docint.core.readers.images import ImageReader
+from docint.core.readers.json import CustomJSONReader
+from docint.core.readers.tables import TableReader
 
 logger = logging.getLogger(__name__)
 

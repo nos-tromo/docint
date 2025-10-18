@@ -3,7 +3,7 @@ import types
 import pytest
 from llama_index.core import Response
 
-from docint.modules.core import RAG
+from docint.core.rag import RAG
 
 
 def test_run_query_returns_sources() -> None:

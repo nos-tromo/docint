@@ -9,7 +9,7 @@ from llama_index.core.readers.base import BaseReader
 from llama_index.core.schema import MediaResource
 from PIL import Image
 
-from docint.modules.ollama_cfg import OllamaPipeline
+from docint.core.ollama_cfg import OllamaPipeline
 from docint.utils.mimetype import get_mimetype
 
 logger = logging.getLogger(__name__)

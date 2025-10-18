@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pandas as pd
-from docint.modules.readers.tables import TableReader, basic_clean
+from docint.core.readers.tables import TableReader, basic_clean
 
 
 def test_basic_clean_collapse_whitespace() -> None:
