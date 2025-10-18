@@ -22,12 +22,16 @@
 *.db
 *.doc*
 *.gguf
+*.gif
 *.html
 *.ipynb
+*.jpeg
+*.jpg
 *.md
 *.mkv
 *.mp3
 *.mp4
+*.png
 *.sh
 *.sqlite3
 *.txt

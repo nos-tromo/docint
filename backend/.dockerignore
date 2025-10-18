@@ -37,12 +37,16 @@
 *.db
 *.doc*
 *.gguf
+*.gif
 *.html
 *.ipynb
+*.jpeg
+*.jpg
 *.mkv
 *.mp3
 *.mp4
 *.pdf
+*.png
 *.sh
 *.sqlite3
 *.txt
