@@ -91,6 +91,9 @@ class ThresholdSentenceTransformerRerank(SentenceTransformerRerank):
         return filtered_nodes
 
     def postprocess_nodes(self, nodes: list[Any], query_bundle: Any | None) -> list[Any]:
+        if query_bundle is None:
+            return self._filter_nodes(nodes)
+
         processed = nodes
         if hasattr(super(), "postprocess_nodes"):
             processed = super().postprocess_nodes(nodes, query_bundle)  # type: ignore[misc]
