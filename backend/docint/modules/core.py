@@ -24,7 +24,11 @@ from llama_index.core.chat_engine import CondenseQuestionChatEngine
 from llama_index.core.embeddings import BaseEmbedding
 from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.core.memory import ChatMemoryBuffer
-from llama_index.core.node_parser import MarkdownNodeParser, SemanticSplitterNodeParser
+from llama_index.core.node_parser import (
+    MarkdownNodeParser,
+    SemanticSplitterNodeParser,
+    SentenceSplitter,
+)
 from llama_index.core.postprocessor import SentenceTransformerRerank
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.schema import BaseNode, Document
@@ -47,6 +51,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 from docint.modules.readers.documents import HybridPDFReader
+from docint.modules.readers.images import ImageReader
 from docint.modules.readers.json import CustomJSONReader
 from docint.modules.readers.tables import TableReader
 
@@ -190,11 +195,15 @@ class RAG:
     reader_required_exts: list[str] = field(
         default_factory=lambda: [
             ".csv",
+            ".gif",
+            ".jpeg",
+            ".jpg",
             ".json",
             ".jsonl",
             ".md",
             ".parquet",
             ".pdf",
+            ".png",
             ".tsv",
             ".txt",
             ".xls",
@@ -229,8 +238,13 @@ class RAG:
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
     docling_node_parser: DoclingNodeParser | None = field(default=None, init=False)
     md_node_parser: MarkdownNodeParser | None = field(default=None, init=False)
-    semantic_node_parser: SemanticSplitterNodeParser | None = field(default=None, init=False)
-    table_node_parser: SemanticSplitterNodeParser | None = field(default=None, init=False)
+    semantic_node_parser: SemanticSplitterNodeParser | None = field(
+        default=None, init=False
+    )
+    table_node_parser: SemanticSplitterNodeParser | None = field(
+        default=None, init=False
+    )
+    sentence_splitter: SentenceSplitter = field(default_factory=SentenceSplitter, init=False)
 
     docs: list[Document] = field(default_factory=list, init=False)
     nodes: list[BaseNode] = field(default_factory=list, init=False)
@@ -243,6 +257,15 @@ class RAG:
     chat_memory: Any | None = field(default=None, init=False)
     _SessionMaker: Any | None = field(default=None, init=False, repr=False)
     session_id: str | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """
+        Post-initialization to set up any necessary components.
+        """
+        self.sentence_splitter = SentenceSplitter(
+            chunk_size=self.chunk_size,
+            chunk_overlap=self.chunk_overlap
+        )
 
     # --- Static methods ---
     @staticmethod
@@ -424,6 +447,9 @@ class RAG:
         """
         Loads the document readers for various file types.
         """
+        # Image reader for image files
+        image_reader = ImageReader()
+
         # Table reader for CSV/TSV/XLSX/Parquet
         table_reader = TableReader(
             text_cols=self.table_text_cols,
@@ -441,6 +467,9 @@ class RAG:
             required_exts=self.reader_required_exts,
             file_extractor={
                 ".csv": table_reader,
+                ".gif": image_reader,
+                ".jpeg": image_reader,
+                ".jpg": image_reader,
                 ".json": CustomJSONReader(),
                 ".parquet": TableReader(
                     text_cols=self.table_text_cols or ["text"],
@@ -449,6 +478,7 @@ class RAG:
                     limit=self.table_row_limit,
                 ),
                 ".pdf": HybridPDFReader(),
+                ".png": image_reader,
                 ".tsv": TableReader(
                     csv_sep="\t",  # allow explicit TSV sep
                     text_cols=self.table_text_cols,
@@ -529,7 +559,7 @@ class RAG:
         ):
             raise RuntimeError("Node parsers are not initialized.")
 
-        json_docs, pdf_docs, table_docs, text_docs = [], [], [], []
+        img_docs, json_docs, pdf_docs, table_docs, text_docs = [], [], [], [], []
         for d in self.docs:
             meta = getattr(d, "metadata", {}) or {}
             file_type = (meta.get("file_type") or "").lower()
@@ -537,7 +567,9 @@ class RAG:
             file_path = str(meta.get("file_path") or meta.get("file_name") or "")
             ext = file_path.lower().rsplit(".", 1)[-1] if "." in file_path else ""
 
-            if source_kind == "table":
+            if source_kind == "image" or ext in {"gif", "jpeg", "jpg", "png"}:
+                img_docs.append(d)
+            elif source_kind == "table":
                 table_docs.append(d)
             elif file_type in {"application/json", "application/jsonl"} or ext in {"json", "jsonl"}:
                 json_docs.append(d)
@@ -556,6 +588,13 @@ class RAG:
 
         nodes: list[BaseNode] = []
 
+        if img_docs:
+            logger.info(
+                "Parsing %d image documents with SemanticSplitterNodeParser",
+                len(img_docs),
+            )
+            nodes.extend(self.sentence_splitter.get_nodes_from_documents(img_docs))
+        
         if json_docs:
             logger.info("Parsing %d JSON documents with SemanticSplitterNodeParser", len(json_docs))
             nodes.extend(self.semantic_node_parser.get_nodes_from_documents(json_docs))
