@@ -386,7 +386,9 @@ class RAG:
                 ".json": CustomJSONReader(),
                 ".parquet": TableReader(
                     text_cols=self.table_text_cols or ["text"],
-                    metadata_cols=set(self.table_metadata_cols) if self.table_metadata_cols else None,
+                    metadata_cols=set(self.table_metadata_cols)
+                    if self.table_metadata_cols
+                    else None,
                     id_col=self.table_id_col,
                     limit=self.table_row_limit,
                 ),
@@ -395,7 +397,9 @@ class RAG:
                 ".tsv": TableReader(
                     csv_sep="\t",  # allow explicit TSV sep
                     text_cols=self.table_text_cols,
-                    metadata_cols=set(self.table_metadata_cols) if self.table_metadata_cols else None,
+                    metadata_cols=set(self.table_metadata_cols)
+                    if self.table_metadata_cols
+                    else None,
                     id_col=self.table_id_col,
                     limit=self.table_row_limit,
                 ),
@@ -413,7 +417,7 @@ class RAG:
 
         # Layout-aware for Docling JSON
         self.docling_node_parser = DoclingNodeParser()
-        
+
         # Semantic parser for tables, text, and json
         self.semantic_node_parser = SemanticSplitterNodeParser(
             embed_model=self.embed_model,
@@ -484,7 +488,10 @@ class RAG:
                 img_docs.append(d)
             elif source_kind == "table":
                 table_docs.append(d)
-            elif file_type in {"application/json", "application/jsonl"} or ext in {"json", "jsonl"}:
+            elif file_type in {"application/json", "application/jsonl"} or ext in {
+                "json",
+                "jsonl",
+            }:
                 json_docs.append(d)
             elif file_type.startswith("application/pdf") or ext == "pdf":
                 pdf_docs.append(d)
@@ -509,9 +516,12 @@ class RAG:
             nodes.extend(self.sentence_splitter.get_nodes_from_documents(img_docs))
         
         if json_docs:
-            logger.info("Parsing %d JSON documents with SemanticSplitterNodeParser", len(json_docs))
+            logger.info(
+                "Parsing %d JSON documents with SemanticSplitterNodeParser",
+                len(json_docs),
+            )
             nodes.extend(self.semantic_node_parser.get_nodes_from_documents(json_docs))
-        
+
         if pdf_docs:
             def _is_docling_json(doc):
                 try:
@@ -525,9 +535,12 @@ class RAG:
 
             if pdf_docs_docling:
                 logger.info(
-                    "Parsing %d Docling JSON PDFs with DoclingNodeParser", len(pdf_docs_docling)
+                    "Parsing %d Docling JSON PDFs with DoclingNodeParser",
+                    len(pdf_docs_docling),
                 )
-                nodes.extend(self.docling_node_parser.get_nodes_from_documents(pdf_docs_docling))
+                nodes.extend(
+                    self.docling_node_parser.get_nodes_from_documents(pdf_docs_docling)
+                )
             if pdf_docs_md:
                 logger.info(
                     "Parsing %d Markdown PDFs with MarkdownNodeParser", len(pdf_docs_md)
@@ -535,24 +548,40 @@ class RAG:
                 nodes.extend(self.md_node_parser.get_nodes_from_documents(pdf_docs_md))
 
         if table_docs:
-            logger.info("Parsing %d table documents with SemanticSplitterNodeParser", len(table_docs))
+            logger.info(
+                "Parsing %d table documents with SemanticSplitterNodeParser",
+                len(table_docs),
+            )
             nodes.extend(self.semantic_node_parser.get_nodes_from_documents(table_docs))
-        
+
         if text_docs:
             # detect markdown by file extension or text content
             markdown_docs = [
-                d for d in text_docs
-                if str(d.metadata.get("file_path", "")).endswith((".md", ".markdown", ".rst"))
+                d
+                for d in text_docs
+                if str(d.metadata.get("file_path", "")).endswith(
+                    (".md", ".markdown", ".rst")
+                )
                 or (d.text.strip().startswith("#"))
             ]
             plain_docs = [d for d in text_docs if d not in markdown_docs]
 
             if markdown_docs:
-                logger.info("Parsing %d markdown documents with MarkdownNodeParser", len(markdown_docs))
-                nodes.extend(self.md_node_parser.get_nodes_from_documents(markdown_docs))
+                logger.info(
+                    "Parsing %d markdown documents with MarkdownNodeParser",
+                    len(markdown_docs),
+                )
+                nodes.extend(
+                    self.md_node_parser.get_nodes_from_documents(markdown_docs)
+                )
             if plain_docs:
-                logger.info("Parsing %d plain text documents with SemanticSplitterNodeParser", len(plain_docs))
-                nodes.extend(self.semantic_node_parser.get_nodes_from_documents(plain_docs))
+                logger.info(
+                    "Parsing %d plain text documents with SemanticSplitterNodeParser",
+                    len(plain_docs),
+                )
+                nodes.extend(
+                    self.semantic_node_parser.get_nodes_from_documents(plain_docs)
+                )
 
         self.nodes = nodes
 
