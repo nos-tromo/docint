@@ -131,6 +131,10 @@ class RAG:
     buffer_size: int = 5
     breakpoint_percentile_threshold: int = 90
 
+    # --- SentenceSplitter config ---
+    chunk_size: int = 1024
+    chunk_overlap: int = 0
+
     # --- Runtime (lazy caches / not in repr) ---
     _device: str | None = field(default=None, init=False, repr=False)
     _embed_model: BaseEmbedding | None = field(default=None, init=False, repr=False)
