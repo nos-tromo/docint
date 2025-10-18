@@ -6,7 +6,7 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 
@@ -38,22 +38,15 @@ from llama_index.node_parser.docling import DoclingNodeParser
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
-from sqlalchemy import (
-    Column,
-    DateTime,
-    Float,
-    ForeignKey,
-    Integer,
-    String,
-    Text,
-    create_engine,
-)
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker
+from sqlalchemy.orm import sessionmaker
 
 from docint.modules.readers.documents import HybridPDFReader
 from docint.modules.readers.images import ImageReader
 from docint.modules.readers.json import CustomJSONReader
 from docint.modules.readers.tables import TableReader
+from docint.modules.chat.citation import Citation
+from docint.modules.chat.conversation import Conversation
+from docint.modules.chat.turn import Turn
 
 logger = logging.getLogger(__name__)
 
@@ -68,90 +61,6 @@ SPARSE_MODEL: str = os.getenv("SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-atte
 RERANK_MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 GEN_MODEL: str = os.getenv("GEN_MODEL", "qwen3:8b")
 RETRIEVE_SIMILARITY_TOP_K: int = int(os.getenv("RETRIEVE_SIMILARITY_TOP_K", "20"))
-
-# --- Session persistence (ORM) ---
-Base = declarative_base()
-
-
-class Conversation(Base):
-    """
-    Represents a user conversation session.
-
-    Args:
-        Base (declarative_base): The declarative base class for SQLAlchemy models.
-    """
-
-    __tablename__ = "conversations"
-    id = Column(String, primary_key=True)  # external session id
-    created_at = Column(
-        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
-    )
-    rolling_summary = Column(Text, default="", nullable=False)
-    turns = relationship(
-        "Turn",
-        back_populates="conversation",
-        cascade="all, delete-orphan",
-        order_by="Turn.idx",
-    )
-
-
-class Turn(Base):
-    """
-    Represents a user turn within a conversation.
-
-    Args:
-        Base (declarative_base): The declarative base class for SQLAlchemy models.
-    """
-
-    __tablename__ = "turns"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    conversation_id = Column(String, ForeignKey("conversations.id"), index=True)
-    idx = Column(Integer, nullable=False)  # 0..N
-    user_text = Column(Text, nullable=False)
-    rewritten_query = Column(Text, nullable=True)
-    model_response = Column(Text, nullable=False)
-    reasoning = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.now(timezone.utc), nullable=False)
-    conversation = relationship("Conversation", back_populates="turns")
-    citations = relationship(
-        "Citation", back_populates="turn", cascade="all, delete-orphan"
-    )
-
-
-class Citation(Base):
-    """
-    Represents a citation within a turn of a conversation.
-
-    Args:
-        Base (declarative_base): The declarative base class for SQLAlchemy models.
-    """
-
-    __tablename__ = "citations"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    turn_id = Column(Integer, ForeignKey("turns.id"), index=True)
-    node_id = Column(String, nullable=True)  # LlamaIndex node id or Qdrant point id
-    score = Column(Float, nullable=True)
-    filename = Column(String, nullable=True)
-    filetype = Column(String, nullable=True)
-    source = Column(String, nullable=True)  # "table" or ""
-    page = Column(Integer, nullable=True)
-    row = Column(Integer, nullable=True)
-    turn = relationship("Turn", back_populates="citations")
-
-
-def _make_session_maker(db_url: str = "sqlite:///rag_sessions.db") -> sessionmaker:
-    """
-    Creates a new SQLAlchemy session maker.
-
-    Args:
-        db_url (str, optional): The database URL. Defaults to "sqlite:///rag_sessions.db".
-
-    Returns:
-        sessionmaker: The SQLAlchemy session maker.
-    """
-    engine = create_engine(db_url, future=True)
-    Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine, expire_on_commit=False)
 
 
 @dataclass(slots=True)
