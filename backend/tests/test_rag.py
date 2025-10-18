@@ -6,6 +6,10 @@ from llama_index.core import Response
 from docint.modules.core import RAG
 
 
+def _make_node(score: float | None):
+    return types.SimpleNamespace(score=score)
+
+
 def test_run_query_returns_sources() -> None:
     rag = RAG()
 
@@ -70,3 +74,18 @@ def test_select_collection_resets_cached_state(monkeypatch) -> None:
     assert rag.chat_engine is None
     assert rag.chat_memory is None
     assert rag.session_id is None
+
+
+def test_rerank_threshold_filters_low_scores() -> None:
+    rag = RAG(rerank_score_threshold=0.5)
+    reranker = rag.reranker
+
+    high = _make_node(0.7)
+    low = _make_node(0.3)
+    missing = _make_node(None)
+
+    filtered = reranker.postprocess_nodes([high, low, missing], query_bundle=None)
+
+    assert high in filtered
+    assert missing in filtered  # nodes without scores are preserved
+    assert low not in filtered

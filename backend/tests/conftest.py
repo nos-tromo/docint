@@ -42,6 +42,125 @@ def _install_fastembed_stub() -> None:
         sys.modules["fastembed"] = fastembed
 
 
+def _install_pandas_stub() -> None:
+    try:
+        import pandas  # noqa: F401
+    except ModuleNotFoundError:
+        pandas = types.ModuleType("pandas")
+
+        class DataFrame:
+            def __init__(self, data=None, columns=None):
+                self._data = data or []
+                self._columns = columns or []
+
+            def to_parquet(self, *args, **kwargs):
+                return None
+
+        pandas.DataFrame = DataFrame
+        sys.modules["pandas"] = pandas
+
+
+def _install_dotenv_stub() -> None:
+    try:
+        import dotenv  # noqa: F401
+    except ModuleNotFoundError:
+        dotenv = types.ModuleType("dotenv")
+
+        def load_dotenv(*args, **kwargs):
+            return None
+
+        dotenv.load_dotenv = load_dotenv
+        sys.modules["dotenv"] = dotenv
+
+
+def _install_pymupdf_stub() -> None:
+    try:
+        import pymupdf4llm  # noqa: F401
+    except ModuleNotFoundError:
+        pymupdf4llm = types.ModuleType("pymupdf4llm")
+
+        class LlamaMarkdownReader:
+            def load_data(self, *args, **kwargs):
+                return []
+
+        pymupdf4llm.LlamaMarkdownReader = LlamaMarkdownReader
+        sys.modules["pymupdf4llm"] = pymupdf4llm
+
+
+def _install_magic_stub() -> None:
+    try:
+        import magic  # noqa: F401
+    except ModuleNotFoundError:
+        magic = types.ModuleType("magic")
+
+        def from_file(*args, **kwargs):
+            return "application/octet-stream"
+
+        magic.from_file = from_file
+        sys.modules["magic"] = magic
+
+
+def _install_pil_stub() -> None:
+    try:
+        from PIL import Image  # noqa: F401
+    except ModuleNotFoundError:
+        pil_package = types.ModuleType("PIL")
+        pil_image_module = types.ModuleType("PIL.Image")
+
+        class _StubImage:
+            def convert(self, mode="RGB"):
+                return self
+
+            def save(self, fp, format=None):
+                if hasattr(fp, "write"):
+                    fp.write(b"")
+                return None
+
+        def open(path):
+            return _StubImage()
+
+        pil_image_module.Image = _StubImage
+        pil_image_module.open = open
+        pil_package.Image = pil_image_module
+
+        sys.modules["PIL"] = pil_package
+        sys.modules["PIL.Image"] = pil_image_module
+
+
+def _install_ollama_stub() -> None:
+    try:
+        import ollama  # noqa: F401
+    except ModuleNotFoundError:
+        ollama = types.ModuleType("ollama")
+
+        def chat(*args, **kwargs):
+            return {"message": {"content": "stub"}}
+
+        ollama.chat = chat
+        sys.modules["ollama"] = ollama
+
+
+def _install_requests_stub() -> None:
+    try:
+        import requests  # noqa: F401
+    except ModuleNotFoundError:
+        requests = types.ModuleType("requests")
+
+        class _Response:
+            def __init__(self, status_code=200, data=None):
+                self.status_code = status_code
+                self._data = data or {"models": []}
+
+            def json(self):
+                return self._data
+
+        def get(*args, **kwargs):
+            return _Response()
+
+        requests.get = get
+        sys.modules["requests"] = requests
+
+
 def _install_llama_index_stub() -> None:
     try:
         import llama_index  # noqa: F401
@@ -59,12 +178,16 @@ def _install_llama_index_stub() -> None:
         class Document(BaseNode):
             def __init__(
                 self,
-                text: str,
+                text: str | None = None,
                 metadata: dict | None = None,
                 doc_id: str | None = None,
+                text_resource=None,
+                id_: str | None = None,
             ):
-                super().__init__(text=text, metadata=metadata)
+                super().__init__(text=text or "", metadata=metadata)
                 self.doc_id = doc_id
+                self.id_ = id_ or doc_id
+                self.text_resource = text_resource
 
             def to_dict(self) -> dict:
                 return {
@@ -200,6 +323,22 @@ def _install_llama_index_stub() -> None:
 
         node_parser_module.SentenceSplitter = SentenceSplitter
 
+        class MarkdownNodeParser:
+            def get_nodes_from_documents(self, documents):
+                return [
+                    BaseNode(
+                        text=getattr(doc, "text", ""),
+                        metadata=getattr(doc, "metadata", {}),
+                    )
+                    for doc in documents
+                ]
+
+        class SemanticSplitterNodeParser(MarkdownNodeParser):
+            pass
+
+        node_parser_module.MarkdownNodeParser = MarkdownNodeParser
+        node_parser_module.SemanticSplitterNodeParser = SemanticSplitterNodeParser
+
         # --- Postprocessor -----------------------------------------------
         postprocessor_module = types.ModuleType("llama_index.core.postprocessor")
 
@@ -208,8 +347,11 @@ def _install_llama_index_stub() -> None:
                 self.args = args
                 self.kwargs = kwargs
 
-            def __call__(self, nodes):
+            def postprocess_nodes(self, nodes, query_bundle=None):
                 return nodes
+
+            def __call__(self, nodes, query_bundle=None):
+                return self.postprocess_nodes(nodes, query_bundle=query_bundle)
 
         postprocessor_module.SentenceTransformerRerank = SentenceTransformerRerank
 
@@ -235,6 +377,24 @@ def _install_llama_index_stub() -> None:
                 return self.query(prompt)
 
         query_engine_module.RetrieverQueryEngine = RetrieverQueryEngine
+
+        # --- Readers -----------------------------------------------------
+        readers_core_module = types.ModuleType("llama_index.core.readers")
+        readers_base_module = types.ModuleType("llama_index.core.readers.base")
+        readers_json_module = types.ModuleType("llama_index.core.readers.json")
+
+        class BaseReader:
+            def load_data(self, *args, **kwargs):
+                return []
+
+        readers_base_module.BaseReader = BaseReader
+        readers_core_module.base = readers_base_module
+        readers_core_module.json = readers_json_module
+
+        class JSONReader(BaseReader):
+            pass
+
+        readers_json_module.JSONReader = JSONReader
 
         # --- HuggingFace embedding ---------------------------------------
         embeddings_hf_module = types.ModuleType(
@@ -322,9 +482,18 @@ def _install_llama_index_stub() -> None:
         sys.modules["llama_index.core.node_parser"] = node_parser_module
         sys.modules["llama_index.core.postprocessor"] = postprocessor_module
         sys.modules["llama_index.core.query_engine"] = query_engine_module
+        sys.modules["llama_index.core.readers"] = readers_core_module
+        sys.modules["llama_index.core.readers.base"] = readers_base_module
+        sys.modules["llama_index.core.readers.json"] = readers_json_module
+        class MediaResource:
+            def __init__(self, text: str = "", mimetype: str | None = None):
+                self.text = text
+                self.mimetype = mimetype
+
         sys.modules["llama_index.core.schema"] = types.SimpleNamespace(
             BaseNode=core_module.BaseNode,
             Document=core_module.Document,
+            MediaResource=MediaResource,
         )
         sys.modules["llama_index.embeddings.huggingface"] = embeddings_hf_module
         sys.modules["llama_index.llms.ollama"] = ollama_module
@@ -449,6 +618,13 @@ def _install_sqlalchemy_stub() -> None:
 
 _install_torch_stub()
 _install_fastembed_stub()
+_install_pandas_stub()
+_install_dotenv_stub()
+_install_pymupdf_stub()
+_install_magic_stub()
+_install_pil_stub()
+_install_ollama_stub()
+_install_requests_stub()
 _install_llama_index_stub()
 _install_qdrant_stub()
 _install_sqlalchemy_stub()

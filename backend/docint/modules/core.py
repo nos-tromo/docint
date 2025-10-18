@@ -63,6 +63,46 @@ GEN_MODEL: str = os.getenv("LLM", "qwen3:8b")
 RETRIEVE_SIMILARITY_TOP_K: int = int(os.getenv("RETRIEVE_SIMILARITY_TOP_K", "20"))
 
 
+class ThresholdSentenceTransformerRerank(SentenceTransformerRerank):
+    """SentenceTransformer-based reranker with score threshold filtering."""
+
+    def __init__(self, *args, score_threshold: float | None = None, **kwargs) -> None:
+        """Initialize the reranker and store the score threshold."""
+
+        super().__init__(*args, **kwargs)
+        self.score_threshold = score_threshold
+
+    def _filter_nodes(self, nodes: list[Any]) -> list[Any]:
+        """Return only nodes that meet the configured score threshold."""
+
+        if self.score_threshold is None:
+            return nodes
+
+        filtered_nodes: list[Any] = []
+        for node_with_score in nodes:
+            score = getattr(node_with_score, "score", None)
+            try:
+                keep = score is None or float(score) >= float(self.score_threshold)
+            except (TypeError, ValueError):
+                keep = True
+            if keep:
+                filtered_nodes.append(node_with_score)
+        return filtered_nodes
+
+    def postprocess_nodes(self, nodes: list[Any], query_bundle: Any | None) -> list[Any]:
+        processed = nodes
+        if hasattr(super(), "postprocess_nodes"):
+            processed = super().postprocess_nodes(nodes, query_bundle)  # type: ignore[misc]
+        return self._filter_nodes(processed)
+
+    def __call__(self, nodes: list[Any], *args: Any, **kwargs: Any) -> list[Any]:
+        if hasattr(super(), "__call__"):
+            processed = super().__call__(nodes, *args, **kwargs)  # type: ignore[misc]
+            return self._filter_nodes(processed)
+        query_bundle = kwargs.get("query_bundle") if kwargs else None
+        return self.postprocess_nodes(nodes, query_bundle)
+
+
 @dataclass(slots=True)
 class RAG:
     """
@@ -96,6 +136,7 @@ class RAG:
     embed_batch_size: int = 64
     retrieve_similarity_top_k: int = RETRIEVE_SIMILARITY_TOP_K
     rerank_top_n: int = int(retrieve_similarity_top_k // 5)
+    rerank_score_threshold: float | None = None
 
     # --- Directory reader config ---
     reader_errors: str = "ignore"
@@ -139,7 +180,7 @@ class RAG:
     _device: str | None = field(default=None, init=False, repr=False)
     _embed_model: BaseEmbedding | None = field(default=None, init=False, repr=False)
     _gen_model: Ollama | None = field(default=None, init=False, repr=False)
-    _reranker: SentenceTransformerRerank | None = field(
+    _reranker: ThresholdSentenceTransformerRerank | None = field(
         default=None, init=False, repr=False
     )
     _qdrant_client: QdrantClient | None = field(default=None, init=False, repr=False)
@@ -286,7 +327,7 @@ class RAG:
         return self.sparse_model_id
 
     @property
-    def reranker(self) -> SentenceTransformerRerank:
+    def reranker(self) -> ThresholdSentenceTransformerRerank:
         """
         Lazily initializes and returns the reranker model (SentenceTransformerRerank).
 
@@ -294,10 +335,11 @@ class RAG:
             SentenceTransformerRerank: The initialized reranker model.
         """
         if self._reranker is None:
-            self._reranker = SentenceTransformerRerank(
+            self._reranker = ThresholdSentenceTransformerRerank(
                 top_n=self.rerank_top_n,
                 model=self.rerank_model_id,
                 device=self.device,
+                score_threshold=self.rerank_score_threshold,
             )
             logger.info("Initializing reranker model: %s", self.rerank_model_id)
         return self._reranker
