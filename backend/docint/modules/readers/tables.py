@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import mimetypes
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -155,13 +154,13 @@ class TableReader(BaseReader):
             parts.append(str(v))
         return self.combine_with.join(parts).strip()
 
-    def load_data(self, file: Path, extra_info: dict | None = None) -> list[Document]:
+    def load_data(self, file: str | Path, **kwargs) -> list[Document]:
         """
         Load data from a file into a list of Document objects.
 
         Args:
-            file (Path): The path to the file to load.
-            extra_info (dict | None, optional): Additional information to include in the Document metadata. Defaults to None.
+            file (str | Path): The path to the file to load.
+            **kwargs: Additional keyword arguments.
 
         Raises:
             ValueError: If the file type is unsupported.
@@ -169,35 +168,34 @@ class TableReader(BaseReader):
         Returns:
             list[Document]: A list of Document objects representing the loaded data.
         """        
-        file = Path(file)
-        suffix = file.suffix.lower()
+        file_path = Path(file) if not isinstance(file, Path) else file
+        suffix = file_path.suffix.lower()
+        extra_info = kwargs.get("extra_info", {})
+        mimetype = get_mimetype(file_path)
 
         # ---- Load to DataFrame
         if suffix in {".csv", ".tsv"}:
             sep = self.csv_sep if self.csv_sep else ("\t" if suffix == ".tsv" else ",")
-            df = pd.read_csv(file, sep=sep, encoding=self.encoding)
+            df = pd.read_csv(file_path, sep=sep, encoding=self.encoding)
             ft_extras = {"csv": {"sep": sep}}
-            mimetype = "text/tab-separated-values" if sep == "\t" else "text/csv"
         elif suffix in {".xlsx", ".xls"}:
             # If excel_sheet is None, pandas would return a dict of DataFrames, which
             # breaks later when we call reset_index on it. Default to first sheet (0)
             # unless the user explicitly set a sheet name/index.
             effective_sheet = self.excel_sheet if self.excel_sheet is not None else 0
-            df = pd.read_excel(file, sheet_name=effective_sheet)
-            sheet = effective_sheet
+            df = pd.read_excel(file_path, sheet_name=effective_sheet)
+            sheet = str(effective_sheet)  # Ensure sheet is a string
             ft_extras = {"excel": {"sheet": sheet}}
-            mimetype = (
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
         elif suffix == ".parquet":
-            df = pd.read_parquet(file)
+            df = pd.read_parquet(file_path)
             ft_extras = {"parquet": {}}
-            mimetype = "application/x-parquet"
         else:
             raise ValueError(f"Unsupported table type: {suffix}")
 
         df = df.reset_index(drop=True)
         text_cols = self.text_cols or self._guess_text_cols(df)
+        if isinstance(text_cols, str):  # Ensure text_cols is a list
+            text_cols = [text_cols]
         meta_cols = (
             [c for c in df.columns if c not in set(text_cols)]
             if self.metadata_cols is None
@@ -222,8 +220,8 @@ class TableReader(BaseReader):
 
             metadata = {
                 "origin": {
-                    "filename": file.name,
-                    "filetype": mimetype or (mimetypes.guess_type(file.name)[0] or ""),
+                    "filename": file_path.name,
+                    "filetype": mimetype or "",
                 },
                 "source": "table",
                 "table": {
@@ -238,7 +236,7 @@ class TableReader(BaseReader):
                 metadata.update(extra_info)
 
             for k in meta_cols:
-                metadata[k] = row_dict.get(k)
+                metadata[k] = row_dict.get(k, "")
 
             # Only set doc_id if present; passing None triggers Pydantic validation in some versions
             if self.id_col and row_dict.get(self.id_col) is not None:
