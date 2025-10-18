@@ -34,7 +34,7 @@ class HybridPDFReader(BaseReader):
             )
         )
 
-    def _standardize_metadata(self, path: Path, page_meta: dict | None = None) -> dict:
+    def _standardize_metadata(self, file_path: Path, page_meta: dict | None = None) -> dict:
         """
         Returns a unified metadata dict compatible with both PyMuPDF and Docling outputs.
 
@@ -45,7 +45,7 @@ class HybridPDFReader(BaseReader):
         filename = file_path.name
         mimetype = get_mimetype(file_path)
         base_meta = {
-            "file_path": str(path),
+            "file_path": str(file_path),
             "file_name": filename,
             "filename": filename,
             "file_type": mimetype,
