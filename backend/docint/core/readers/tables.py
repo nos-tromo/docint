@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -15,14 +14,6 @@ from docint.utils.mimetype import get_mimetype
 PathLike = str | Path
 CleanFn = Callable[[str], str]
 RowFilter = Callable[[dict], bool]
-
-
-def basic_clean(text: str) -> str:
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = re.sub(r"\s+\n", "\n", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    text = re.sub(r"[ \t]{2,}", " ", text)
-    return text.strip()
 
 
 @dataclass(slots=True)  # add kw_only=True if you like
@@ -168,7 +159,7 @@ class TableReader(BaseReader):
 
         Returns:
             list[Document]: A list of Document objects representing the loaded data.
-        """        
+        """
         file_path = Path(file) if not isinstance(file, Path) else file
         suffix = file_path.suffix.lower()
         extra_info = kwargs.get("extra_info", {})
