@@ -108,24 +108,8 @@ class RAG:
     reader_errors: str = "ignore"
     reader_recursive: bool = True
     reader_encoding: str = "utf-8"
-    reader_required_exts: list[str] = field(
-        default_factory=lambda: [
-            ".csv",
-            ".gif",
-            ".jpeg",
-            ".jpg",
-            ".json",
-            ".jsonl",
-            ".md",
-            ".parquet",
-            ".pdf",
-            ".png",
-            ".tsv",
-            ".txt",
-            ".xls",
-            ".xlsx",
-        ]
-    )
+    reader_required_exts: list[str] = field(default_factory=list, init=False)
+    reader_required_exts_path: Path = field(default=REQUIRED_EXTS_PATH, init=False)
 
     # --- TableReader config ---
     table_text_cols: list[str] | None = None
@@ -184,6 +168,9 @@ class RAG:
         """
         Post-initialization to set up any necessary components.
         """
+        with open(self.reader_required_exts_path, "r", encoding="utf-8") as f:
+            self.reader_required_exts = [f".{line.strip()}" for line in f]
+
         self.sentence_splitter = SentenceSplitter(
             chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap
         )
