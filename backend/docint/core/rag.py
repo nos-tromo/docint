@@ -44,6 +44,7 @@ from docint.core.chat.base import _make_session_maker
 from docint.core.chat.citation import Citation
 from docint.core.chat.conversation import Conversation
 from docint.core.chat.turn import Turn
+from docint.core.readers.audio import AudioReader
 from docint.core.readers.documents import HybridPDFReader
 from docint.core.readers.images import ImageReader
 from docint.core.readers.json import CustomJSONReader
@@ -367,6 +368,9 @@ class RAG:
         """
         Loads the document readers for various file types.
         """
+        # Audio reader for audio files
+        audio_reader = AudioReader(device=self.device)
+
         # Image reader for image files
         image_reader = ImageReader()
 
@@ -386,11 +390,32 @@ class RAG:
             encoding=self.reader_encoding,
             required_exts=self.reader_required_exts,
             file_extractor={
-                ".csv": table_reader,
+                # audio files
+                ".mpeg": audio_reader,
+                ".mp3": audio_reader,
+                ".ogg": audio_reader,
+                ".wav": audio_reader,
+                ".webm": audio_reader,
+                # video files
+                ".avi": audio_reader,
+                ".flv": audio_reader,
+                ".mkv": audio_reader,
+                ".mov": audio_reader,
+                ".mpg": audio_reader,
+                ".mp4": audio_reader,
+                ".m4v": audio_reader,
+                ".wmv": audio_reader,
+                # json files
+                ".json": CustomJSONReader(),
+                # pdf files
+                ".pdf": HybridPDFReader(),
+                # image files
                 ".gif": image_reader,
                 ".jpeg": image_reader,
                 ".jpg": image_reader,
-                ".json": CustomJSONReader(),
+                ".png": image_reader,
+                # table files
+                ".csv": table_reader,
                 ".parquet": TableReader(
                     text_cols=self.table_text_cols or ["text"],
                     metadata_cols=set(self.table_metadata_cols)
@@ -399,8 +424,6 @@ class RAG:
                     id_col=self.table_id_col,
                     limit=self.table_row_limit,
                 ),
-                ".pdf": HybridPDFReader(),
-                ".png": image_reader,
                 ".tsv": TableReader(
                     csv_sep="\t",  # allow explicit TSV sep
                     text_cols=self.table_text_cols,
@@ -486,7 +509,7 @@ class RAG:
         ):
             raise RuntimeError("Node parsers are not initialized.")
 
-        img_docs, json_docs, pdf_docs, table_docs, text_docs = [], [], [], [], []
+        audio_docs, img_docs, json_docs, pdf_docs, table_docs, text_docs = [[] for _ in range(6)]
         for d in self.docs:
             meta = getattr(d, "metadata", {}) or {}
             file_type = (meta.get("file_type") or "").lower()
@@ -494,7 +517,23 @@ class RAG:
             file_path = str(meta.get("file_path") or meta.get("file_name") or "")
             ext = file_path.lower().rsplit(".", 1)[-1] if "." in file_path else ""
 
-            if source_kind == "image" or ext in {"gif", "jpeg", "jpg", "png"}:
+            if source_kind == "audio" or ext in {
+                ".avi",
+                ".flv",
+                ".mkv",
+                ".mov",
+                ".mpeg",
+                ".mpg",
+                ".mp3",
+                ".mp4",
+                ".m4v",
+                ".ogg",
+                ".wav",
+                ".webm",
+                ".wmv",
+            }:
+                audio_docs.append(d)
+            elif source_kind == "image" or ext in {"gif", "jpeg", "jpg", "png"}:
                 img_docs.append(d)
             elif source_kind == "table":
                 table_docs.append(d)
@@ -518,6 +557,13 @@ class RAG:
 
         nodes: list[BaseNode] = []
 
+        if audio_docs:
+            logger.info(
+                "Parsing %d audio documents with SemanticSplitterNodeParser",
+                len(audio_docs),
+            )
+            nodes.extend(self.semantic_node_parser.get_nodes_from_documents(audio_docs))
+        
         if img_docs:
             logger.info(
                 "Parsing %d image documents with SemanticSplitterNodeParser",
