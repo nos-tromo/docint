@@ -40,6 +40,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from sqlalchemy.orm import sessionmaker
 
+from docint.core.chat.base import _make_session_maker
 from docint.core.chat.citation import Citation
 from docint.core.chat.conversation import Conversation
 from docint.core.chat.turn import Turn
