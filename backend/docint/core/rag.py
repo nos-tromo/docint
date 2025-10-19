@@ -163,7 +163,9 @@ class RAG:
     table_node_parser: SemanticSplitterNodeParser | None = field(
         default=None, init=False
     )
-    sentence_splitter: SentenceSplitter = field(default_factory=SentenceSplitter, init=False)
+    sentence_splitter: SentenceSplitter = field(
+        default_factory=SentenceSplitter, init=False
+    )
 
     docs: list[Document] = field(default_factory=list, init=False)
     nodes: list[BaseNode] = field(default_factory=list, init=False)
@@ -182,8 +184,7 @@ class RAG:
         Post-initialization to set up any necessary components.
         """
         self.sentence_splitter = SentenceSplitter(
-            chunk_size=self.chunk_size,
-            chunk_overlap=self.chunk_overlap
+            chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap
         )
 
     # --- Static methods ---
@@ -523,7 +524,7 @@ class RAG:
                 len(img_docs),
             )
             nodes.extend(self.sentence_splitter.get_nodes_from_documents(img_docs))
-        
+
         if json_docs:
             logger.info(
                 "Parsing %d JSON documents with SemanticSplitterNodeParser",
