@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 import torch
@@ -47,6 +47,7 @@ from docint.core.readers.documents import HybridPDFReader
 from docint.core.readers.images import ImageReader
 from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.tables import TableReader
+from docint.utils.clean_text import basic_clean
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,8 @@ RERANK_MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 GEN_MODEL: str = os.getenv("LLM", "qwen3:8b")
 RETRIEVE_SIMILARITY_TOP_K: int = int(os.getenv("RETRIEVE_SIMILARITY_TOP_K", "20"))
 
+CleanFn = Callable[[str], str]
+
 
 @dataclass(slots=True)
 class RAG:
@@ -69,8 +72,9 @@ class RAG:
     Represents a Retrieval-Augmented Generation (RAG) model.
     """
 
-    # --- Data path setup ---
+    # --- Data path & cleaning setup ---
     data_dir: Path = Path(DATA_PATH) if not isinstance(DATA_PATH, Path) else DATA_PATH
+    clean_fn: CleanFn = basic_clean
 
     # --- Models ---
     embed_model_id: str = EMBED_MODEL
@@ -469,6 +473,9 @@ class RAG:
         if self.dir_reader is None:
             raise RuntimeError("Directory reader is not initialized.")
         self.docs = self.dir_reader.load_data()
+        for doc in self.docs:
+            if hasattr(doc, "text") and isinstance(doc.text, str):
+                doc = Document(text=self.clean_fn(doc.text), metadata=doc.metadata)
         if (
             self.md_node_parser is None
             or self.docling_node_parser is None
