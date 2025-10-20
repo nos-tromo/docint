@@ -10,8 +10,8 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-PROMPT_DIR: Path = Path(__file__).parent.parent / "utils" / "prompts"
-VLM = os.getenv("VLM", "qwen3-vl:235b-cloud")
+PROMPT_DIR: Path = Path(__file__).parent.parent.resolve() / "utils" / "prompts"
+VLM = os.getenv("VLM", "qwen2.5vl:7b")
 
 
 @dataclass
