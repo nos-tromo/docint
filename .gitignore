@@ -108,10 +108,8 @@ build/
 *.sock
 docker-compose.override.yml
 
-# Hidden files (keep important ones)
+# Hidden files
 .*
-!.gitignore
-!.dockerignore
 
 # ==================================
 # Media & Data (Optional)
@@ -122,6 +120,9 @@ docker-compose.override.yml
 # ==================================
 # Exceptions
 # ==================================
+!.gitignore
+!**/.dockerignore
 !frontend/index.html
 !backend/tests/
 !backend/tests/**.py
+!backend/utils/prompts/*.txt
