@@ -126,3 +126,4 @@ docker-compose.override.yml
 !backend/tests/
 !backend/tests/**.py
 !backend/utils/prompts/*.txt
+!backend/docint/core/readers/required_exts.txt
