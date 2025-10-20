@@ -1,14 +1,21 @@
-from pathlib import Path
 import mimetypes
+from pathlib import Path
 
 import magic
-
 
 _MAGIC = magic.Magic(mime=True)
 
 
 def _guess_from_extension(path: Path) -> str | None:
-    """Best-effort MIME guess based on the file extension."""
+    """
+    Best-effort MIME guess based on the file extension.
+
+    Args:
+        path (Path): The path to the file.
+
+    Returns:
+        str | None: The guessed MIME type or None if it cannot be guessed.
+    """
 
     guessed, _ = mimetypes.guess_type(str(path))
     return guessed
