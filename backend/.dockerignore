@@ -1,7 +1,3 @@
-# Exceptions
-!backend/tests/
-!backend/tests/**.py
-
 # Ignore Git and local metadata
 .git
 .gitignore
@@ -59,3 +55,12 @@
 *.pid
 *.sock
 docker-compose.override.yml
+
+# Exceptions
+!.gitignore
+!**/.dockerignore
+!frontend/index.html
+!backend/tests/
+!backend/tests/**.py
+!backend/utils/prompts/*.txt
+!docint/core/readers/required_exts.txt
