@@ -3,7 +3,7 @@ FROM nvidia/cuda:12.9.0-cudnn-runtime-ubuntu22.04
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
-    python3.11 python3.11-dev git ca-certificates \
+    python3.11 python3.11-dev git ca-certificates libmagic1 \
  && rm -rf /var/lib/apt/lists/*
 
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
