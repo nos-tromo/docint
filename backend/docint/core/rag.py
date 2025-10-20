@@ -381,6 +381,7 @@ class RAG:
                 # audio files
                 ".mpeg": audio_reader,
                 ".mp3": audio_reader,
+                ".m4a": audio_reader,
                 ".ogg": audio_reader,
                 ".wav": audio_reader,
                 ".webm": audio_reader,
