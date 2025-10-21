@@ -60,7 +60,7 @@ docker-compose.override.yml
 !.gitignore
 !**/.dockerignore
 !frontend/index.html
-!backend/tests/
-!backend/tests/**.py
-!backend/utils/prompts/*.txt
+!tests/
+!tests/**.py
 !docint/core/readers/required_exts.txt
+!docint/utils/prompts/*.txt
