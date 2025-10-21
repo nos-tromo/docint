@@ -5,6 +5,8 @@ gif
 jpeg
 jpg
 json
+jsonl
+md
 mkv
 mov
 mpeg
