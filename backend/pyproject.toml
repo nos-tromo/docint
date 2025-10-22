@@ -36,8 +36,8 @@ dependencies = [
 ]
 
 [project.scripts]
-cli = "docint.cli:main"
-ingest = "docint.utils.ingest:main"
+ingest = "docint.core.ingest:main"
+query = "docint.core.query:main"
 
 [dependency-groups]
 dev = [
