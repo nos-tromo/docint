@@ -742,9 +742,7 @@ class RAG:
                 or meta.get("file_type")
                 or ""
             )
-            source_kind = meta.get(
-                "source", "document" if filetype.startswith("application/pdf") else ""
-            )
+            source_kind = meta.get("source", "unknown")
 
             # --- page detection (PDF / Docling) ---
             page = meta.get("page_number") or meta.get("page_label") or meta.get("page")
