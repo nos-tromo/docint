@@ -488,9 +488,15 @@ class RAG:
         if self.dir_reader is None:
             raise RuntimeError("Directory reader is not initialized.")
         self.docs = self.dir_reader.load_data()
+        cleaned_docs = []
         for doc in self.docs:
             if hasattr(doc, "text") and isinstance(doc.text, str):
-                doc = Document(text=self.clean_fn(doc.text), metadata=doc.metadata)
+                cleaned_docs.append(
+                    Document(text=self.clean_fn(doc.text), metadata=doc.metadata)
+                )
+            else:
+                cleaned_docs.append(doc)
+        self.docs = cleaned_docs
         if (
             self.md_node_parser is None
             or self.docling_node_parser is None
@@ -498,7 +504,9 @@ class RAG:
         ):
             raise RuntimeError("Node parsers are not initialized.")
 
-        audio_docs, img_docs, json_docs, pdf_docs, table_docs, text_docs = [[] for _ in range(6)]
+        audio_docs, img_docs, json_docs, pdf_docs, table_docs, text_docs = [
+            [] for _ in range(6)
+        ]
         for d in self.docs:
             meta = getattr(d, "metadata", {}) or {}
             file_type = (meta.get("file_type") or "").lower()
@@ -552,7 +560,7 @@ class RAG:
                 len(audio_docs),
             )
             nodes.extend(self.semantic_node_parser.get_nodes_from_documents(audio_docs))
-        
+
         if img_docs:
             logger.info(
                 "Parsing %d image documents with SemanticSplitterNodeParser",
@@ -568,6 +576,7 @@ class RAG:
             nodes.extend(self.semantic_node_parser.get_nodes_from_documents(json_docs))
 
         if pdf_docs:
+
             def _is_docling_json(doc):
                 try:
                     json.loads(getattr(doc, "text", "") or "")
