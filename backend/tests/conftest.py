@@ -42,6 +42,61 @@ def _install_fastembed_stub() -> None:
         sys.modules["fastembed"] = fastembed
 
 
+def _install_pandas_stub() -> None:
+    try:
+        import pandas  # noqa: F401
+    except ModuleNotFoundError:
+        pandas = types.ModuleType("pandas")
+
+        class _DataFrame:
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+            def to_parquet(self, *_args, **_kwargs):
+                return None
+
+        pandas.DataFrame = _DataFrame
+        pandas.Series = _DataFrame
+        sys.modules["pandas"] = pandas
+
+
+def _install_dotenv_stub() -> None:
+    try:
+        import dotenv  # noqa: F401
+    except ModuleNotFoundError:
+        dotenv = types.ModuleType("dotenv")
+
+        def load_dotenv(*_args, **_kwargs):
+            return None
+
+        dotenv.load_dotenv = load_dotenv
+        sys.modules["dotenv"] = dotenv
+
+
+def _install_numpy_stub() -> None:
+    try:
+        import numpy  # noqa: F401
+    except ModuleNotFoundError:
+        numpy = types.ModuleType("numpy")
+
+        class floating(float):
+            def __class_getitem__(cls, _item):
+                return cls
+
+        numpy.floating = floating
+
+        class _NDArray(list):
+            def __class_getitem__(cls, _item):
+                return cls
+
+        typing_module = types.ModuleType("numpy.typing")
+        typing_module.NDArray = _NDArray
+
+        sys.modules["numpy"] = numpy
+        sys.modules["numpy.typing"] = typing_module
+
+
 def _install_llama_index_stub() -> None:
     try:
         import llama_index  # noqa: F401
@@ -531,6 +586,9 @@ def _install_whisper_stub() -> None:
 
 _install_torch_stub()
 _install_fastembed_stub()
+_install_pandas_stub()
+_install_dotenv_stub()
+_install_numpy_stub()
 _install_llama_index_stub()
 _install_qdrant_stub()
 _install_sqlalchemy_stub()

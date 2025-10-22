@@ -195,6 +195,40 @@ class RAG:
         except ImportError:
             return []
 
+    def _resolve_sparse_model_directory(self, base: Path) -> Path | None:
+        """Return the directory that contains the sparse model payload.
+
+        The lookup supports three cases:
+          1. ``base`` already points at a model snapshot (contains config files).
+          2. ``base`` is the Hugging Face cache root (``.../huggingface/hub``).
+          3. ``base`` is a repository directory inside the cache and the actual
+             snapshot lives in ``snapshots/<rev>``.
+        """
+
+        if base.is_file():
+            return None
+
+        markers = ("config.json", "sparse_config.json", "fastembed_config.json")
+        if any((base / marker).is_file() for marker in markers):
+            return base
+
+        repo_dir_name = f"models--{self.sparse_model_id.replace('/', '--')}"
+        repo_dir = base / repo_dir_name
+        if repo_dir.exists() and repo_dir.is_dir():
+            return self._resolve_sparse_model_directory(repo_dir)
+
+        snapshots_dir = base / "snapshots"
+        if snapshots_dir.exists() and snapshots_dir.is_dir():
+            for snapshot_dir in sorted(
+                (p for p in snapshots_dir.iterdir() if p.is_dir()),
+                reverse=True,
+            ):
+                resolved = self._resolve_sparse_model_directory(snapshot_dir)
+                if resolved is not None:
+                    return resolved
+
+        return None
+
     # --- Properties (lazy loading) ---
     @property
     def qdrant_host_dir(self) -> Path:
@@ -284,8 +318,15 @@ class RAG:
                 raise ValueError(
                     f"Sparse model path {expanded!s} does not exist."
                 )
-            logger.info("Initializing sparse model from path: %s", expanded)
-            return str(expanded)
+            resolved = self._resolve_sparse_model_directory(expanded)
+            if resolved is None:
+                raise ValueError(
+                    "Sparse model files not found under "
+                    f"{expanded!s}. Ensure the directory contains the downloaded "
+                    f"snapshot for {self.sparse_model_id!r}."
+                )
+            logger.info("Initializing sparse model from path: %s", resolved)
+            return str(resolved)
 
         candidate_path = Path(self.sparse_model_id).expanduser()
         if candidate_path.exists():
