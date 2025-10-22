@@ -43,11 +43,11 @@ def collections_list() -> list[str]:
     """
     List existing collections.
 
-    Raises:
-        HTTPException: If an error occurs while listing collections.
-
     Returns:
         list[str]: A list of collection names.
+
+    Raises:
+        HTTPException: If an error occurs while listing collections.
     """    
     try:
         return rag.list_collections()
@@ -63,12 +63,12 @@ def collections_select(payload: SelectCollectionIn) -> dict[str, str | bool]:
     Args:
         payload (SelectCollectionIn): The payload containing the collection name.
 
+    Returns:
+        dict[str, str | bool]: A dictionary indicating success and the selected collection name.
+
     Raises:
         HTTPException: If the collection name is missing or an error occurs while selecting the collection.
         HTTPException: If an error occurs while selecting the collection.
-
-    Returns:
-        dict[str, str | bool]: A dictionary indicating success and the selected collection name.
     """    
     try:
         name = payload.name.strip()
@@ -102,11 +102,11 @@ def query(payload: QueryIn):
     Args:
         payload (QueryIn): The query payload containing the question and session ID.
 
-    Raises:
-        HTTPException: If an error occurs while processing the query.
-
     Returns:
         QueryOut: The query response containing the answer, sources, and session ID.
+
+    Raises:
+        HTTPException: If an error occurs while processing the query.
     """
     try:
         if not rag.qdrant_collection:
