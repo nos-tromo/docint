@@ -38,7 +38,7 @@ class QueryOut(BaseModel):
     session_id: str
 
 
-@app.get("/collections/list", response_model=list[str])
+@app.get("/collections/list", response_model=list[str], tags=["Collections"])
 def collections_list() -> list[str]:
     """
     List existing collections.
@@ -55,7 +55,7 @@ def collections_list() -> list[str]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/collections/select")
+@app.post("/collections/select", tags=["Collections"])
 def collections_select(payload: SelectCollectionIn) -> dict[str, str | bool]:
     """
     Select a collection to use for queries.
@@ -94,7 +94,7 @@ def collections_select(payload: SelectCollectionIn) -> dict[str, str | bool]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/query", response_model=QueryOut)
+@app.post("/query", response_model=QueryOut, tags=["Query"])
 def query(payload: QueryIn):
     """
     Handle a query request.
