@@ -33,341 +33,498 @@ def _install_fastembed_stub() -> None:
     except ModuleNotFoundError:
         fastembed = types.ModuleType("fastembed")
 
+        class SparseEmbedding:
+            def __init__(self, indices=None, values=None):
+                self.indices = indices or []
+                self.values = values or []
+
+            def as_dict(self) -> dict[int, float]:
+                return {int(i): float(v) for i, v in zip(self.indices, self.values)}
+
         class SparseTextEmbedding:
             @staticmethod
             def list_supported_models() -> list[dict[str, str]]:
                 return [{"model": "stub-model"}]
 
+            def __init__(self, model_name: str, *args, **kwargs):
+                self.model_name = model_name
+
+            def embed(self, documents):
+                for _ in documents:
+                    yield SparseEmbedding(indices=[0], values=[1.0])
+
+            def query_embed(self, queries):
+                for _ in queries:
+                    yield SparseEmbedding(indices=[0], values=[1.0])
+
+        fastembed.SparseEmbedding = SparseEmbedding
         fastembed.SparseTextEmbedding = SparseTextEmbedding
         sys.modules["fastembed"] = fastembed
 
 
+def _install_pandas_stub() -> None:
+    try:
+        import pandas  # noqa: F401
+    except ModuleNotFoundError:
+        pandas = types.ModuleType("pandas")
+
+        class _DataFrame:
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+            def to_parquet(self, *_args, **_kwargs):
+                return None
+
+        pandas.DataFrame = _DataFrame
+        pandas.Series = _DataFrame
+        sys.modules["pandas"] = pandas
+
+
+def _install_dotenv_stub() -> None:
+    try:
+        import dotenv  # noqa: F401
+    except ModuleNotFoundError:
+        dotenv = types.ModuleType("dotenv")
+
+        def load_dotenv(*_args, **_kwargs):
+            return None
+
+        dotenv.load_dotenv = load_dotenv
+        sys.modules["dotenv"] = dotenv
+
+
+def _install_numpy_stub() -> None:
+    try:
+        import numpy  # noqa: F401
+    except ModuleNotFoundError:
+        numpy = types.ModuleType("numpy")
+
+        class floating(float):
+            def __class_getitem__(cls, _item):
+                return cls
+
+        numpy.floating = floating
+
+        class _NDArray(list):
+            def __class_getitem__(cls, _item):
+                return cls
+
+        typing_module = types.ModuleType("numpy.typing")
+        typing_module.NDArray = _NDArray
+
+        sys.modules["numpy"] = numpy
+        sys.modules["numpy.typing"] = typing_module
+
+
 def _install_llama_index_stub() -> None:
-    try:
-        import llama_index  # noqa: F401
-    except ModuleNotFoundError:
-        llama_index = types.ModuleType("llama_index")
+    llama_index = types.ModuleType("llama_index")
 
-        # --- core schema -------------------------------------------------
-        core_module = types.ModuleType("llama_index.core")
+    # --- core schema -------------------------------------------------
+    core_module = types.ModuleType("llama_index.core")
 
-        class BaseNode:
-            def __init__(self, text: str = "", metadata: dict | None = None):
-                self.text = text
-                self.metadata = metadata or {}
+    class BaseNode:
+        def __init__(self, text: str = "", metadata: dict | None = None):
+            self.text = text
+            self.metadata = metadata or {}
 
-        class Document(BaseNode):
-            def __init__(
-                self,
-                text: str,
-                metadata: dict | None = None,
-                doc_id: str | None = None,
-            ):
-                super().__init__(text=text, metadata=metadata)
-                self.doc_id = doc_id
+    class Document(BaseNode):
+        def __init__(
+            self,
+            text: str,
+            metadata: dict | None = None,
+            doc_id: str | None = None,
+        ):
+            super().__init__(text=text, metadata=metadata)
+            self.doc_id = doc_id
 
-            def to_dict(self) -> dict:
-                return {
-                    "text": self.text,
-                    "metadata": self.metadata,
-                    "doc_id": self.doc_id,
-                }
+        def to_dict(self) -> dict:
+            return {
+                "text": self.text,
+                "metadata": self.metadata,
+                "doc_id": self.doc_id,
+            }
 
-        class Response:
-            def __init__(
-                self,
-                response: str | None = None,
-                source_nodes: list | None = None,
-                metadata: dict | None = None,
-                text: str | None = None,
-            ):
-                self.response = response
-                self.source_nodes = source_nodes or []
-                self.metadata = metadata or {}
-                self.text = text
+    class Response:
+        def __init__(
+            self,
+            response: str | None = None,
+            source_nodes: list | None = None,
+            metadata: dict | None = None,
+            text: str | None = None,
+        ):
+            self.response = response
+            self.source_nodes = source_nodes or []
+            self.metadata = metadata or {}
+            self.text = text
 
-        class SimpleDirectoryReader:
-            def __init__(self, input_dir=None, **kwargs):
-                self.input_dir = input_dir
-                self.kwargs = kwargs
+    class SimpleDirectoryReader:
+        def __init__(self, input_dir=None, **kwargs):
+            self.input_dir = input_dir
+            self.kwargs = kwargs
 
-            def load_data(self):
-                return []
+        def load_data(self):
+            return []
 
-        class StorageContext:
-            def __init__(self, vector_store=None):
-                self.vector_store = vector_store
-                self.docstore = {}
+    class StorageContext:
+        def __init__(self, vector_store=None):
+            self.vector_store = vector_store
+            self.docstore = {}
 
-            @classmethod
-            def from_defaults(cls, vector_store=None):
-                return cls(vector_store=vector_store)
+        @classmethod
+        def from_defaults(cls, vector_store=None):
+            return cls(vector_store=vector_store)
 
-        class _StubRetriever:
-            def __init__(self, nodes=None):
-                self.nodes = nodes or []
-                self.similarity_top_k = None
+    class _StubRetriever:
+        def __init__(self, nodes=None):
+            self.nodes = nodes or []
+            self.similarity_top_k = None
 
-            def query(self, prompt: str):
-                return Response(
-                    response=f"stub response for: {prompt}",
-                    source_nodes=[],
+        def query(self, prompt: str):
+            return Response(
+                response=f"stub response for: {prompt}",
+                source_nodes=[],
+            )
+
+    class VectorStoreIndex:
+        def __init__(self, nodes=None, storage_context=None, embed_model=None):
+            self.nodes = list(nodes or [])
+            self.storage_context = storage_context or StorageContext()
+            self._retriever = _StubRetriever(self.nodes)
+
+        def as_retriever(self, similarity_top_k: int = 1):
+            self._retriever.similarity_top_k = similarity_top_k
+            return self._retriever
+
+        async def ainsert_nodes(self, nodes):
+            self.nodes.extend(nodes)
+    core_module.BaseNode = BaseNode
+    core_module.Document = Document
+    core_module.Response = Response
+    core_module.SimpleDirectoryReader = SimpleDirectoryReader
+    core_module.StorageContext = StorageContext
+    core_module.VectorStoreIndex = VectorStoreIndex
+    # --- Chat engine -------------------------------------------------
+    chat_engine_module = types.ModuleType("llama_index.core.chat_engine")
+
+    class CondenseQuestionChatEngine:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    chat_engine_module.CondenseQuestionChatEngine = CondenseQuestionChatEngine
+
+    # --- Embeddings --------------------------------------------------
+    embeddings_module = types.ModuleType("llama_index.core.embeddings")
+
+    class BaseEmbedding:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    embeddings_module.BaseEmbedding = BaseEmbedding
+
+    # --- LLMs --------------------------------------------------------
+    llms_module = types.ModuleType("llama_index.core.llms")
+
+    class ChatMessage:
+        def __init__(self, role: str, content: str):
+            self.role = role
+            self.content = content
+
+    class MessageRole:
+        USER = "user"
+        ASSISTANT = "assistant"
+
+    llms_module.ChatMessage = ChatMessage
+    llms_module.MessageRole = MessageRole
+
+    # --- Memory ------------------------------------------------------
+    memory_module = types.ModuleType("llama_index.core.memory")
+
+    class ChatMemoryBuffer:
+        def __init__(self, *args, **kwargs):
+            self.buffer = []
+
+        def put(self, message):
+            self.buffer.append(message)
+
+    memory_module.ChatMemoryBuffer = ChatMemoryBuffer
+
+    # --- Node parser -------------------------------------------------
+    node_parser_module = types.ModuleType("llama_index.core.node_parser")
+
+    class MarkdownNodeParser:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+        def get_nodes_from_documents(self, documents):
+            return [
+                BaseNode(
+                    text=getattr(doc, "text", ""),
+                    metadata=getattr(doc, "metadata", {}),
                 )
+                for doc in documents
+            ]
 
-        class VectorStoreIndex:
-            def __init__(self, nodes=None, storage_context=None, embed_model=None):
-                self.nodes = list(nodes or [])
-                self.storage_context = storage_context or StorageContext()
-                self._retriever = _StubRetriever(self.nodes)
+    class SemanticSplitterNodeParser:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
 
-            def as_retriever(self, similarity_top_k: int = 1):
-                self._retriever.similarity_top_k = similarity_top_k
-                return self._retriever
+        def get_nodes_from_documents(self, documents):
+            return [
+                BaseNode(
+                    text=getattr(doc, "text", ""),
+                    metadata=getattr(doc, "metadata", {}),
+                )
+                for doc in documents
+            ]
 
-            async def ainsert_nodes(self, nodes):
-                self.nodes.extend(nodes)
+    class SentenceSplitter:
+        def __init__(self, chunk_size=1024, chunk_overlap=0):
+            self.chunk_size = chunk_size
+            self.chunk_overlap = chunk_overlap
 
-        core_module.BaseNode = BaseNode
-        core_module.Document = Document
-        core_module.Response = Response
-        core_module.SimpleDirectoryReader = SimpleDirectoryReader
-        core_module.StorageContext = StorageContext
-        core_module.VectorStoreIndex = VectorStoreIndex
+        def get_nodes_from_documents(self, documents):
+            return [
+                BaseNode(
+                    text=getattr(doc, "text", ""),
+                    metadata=getattr(doc, "metadata", {}),
+                )
+                for doc in documents
+            ]
 
-        # --- Chat engine -------------------------------------------------
-        chat_engine_module = types.ModuleType("llama_index.core.chat_engine")
+    node_parser_module.MarkdownNodeParser = MarkdownNodeParser
+    node_parser_module.SemanticSplitterNodeParser = SemanticSplitterNodeParser
+    node_parser_module.SentenceSplitter = SentenceSplitter
 
-        class CondenseQuestionChatEngine:
-            def __init__(self, *args, **kwargs):
-                self.args = args
-                self.kwargs = kwargs
+    # --- Readers base -------------------------------------------------
+    readers_core_module = types.ModuleType("llama_index.core.readers")
 
-        chat_engine_module.CondenseQuestionChatEngine = CondenseQuestionChatEngine
+    class BaseReader:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
 
-        # --- Embeddings --------------------------------------------------
-        embeddings_module = types.ModuleType("llama_index.core.embeddings")
+        def load_data(self, *args, **kwargs):
+            return []
 
-        class BaseEmbedding:
-            def __init__(self, *args, **kwargs):
-                self.args = args
-                self.kwargs = kwargs
+    base_readers_module = types.ModuleType("llama_index.core.readers.base")
+    base_readers_module.BaseReader = BaseReader
 
-        embeddings_module.BaseEmbedding = BaseEmbedding
+    json_readers_module = types.ModuleType("llama_index.core.readers.json")
 
-        # --- LLMs --------------------------------------------------------
-        llms_module = types.ModuleType("llama_index.core.llms")
+    class JSONReader(BaseReader):
+        pass
 
-        class ChatMessage:
-            def __init__(self, role: str, content: str):
-                self.role = role
-                self.content = content
+    json_readers_module.JSONReader = JSONReader
 
-        class MessageRole:
-            USER = "user"
-            ASSISTANT = "assistant"
+    # --- Postprocessor -----------------------------------------------
+    postprocessor_module = types.ModuleType("llama_index.core.postprocessor")
 
-        llms_module.ChatMessage = ChatMessage
-        llms_module.MessageRole = MessageRole
+    class SentenceTransformerRerank:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
 
-        # --- Memory ------------------------------------------------------
-        memory_module = types.ModuleType("llama_index.core.memory")
+        def __call__(self, nodes):
+            return nodes
 
-        class ChatMemoryBuffer:
-            def __init__(self, *args, **kwargs):
-                self.buffer = []
+    postprocessor_module.SentenceTransformerRerank = SentenceTransformerRerank
 
-            def put(self, message):
-                self.buffer.append(message)
+    # --- Query engine ------------------------------------------------
+    query_engine_module = types.ModuleType("llama_index.core.query_engine")
 
-        memory_module.ChatMemoryBuffer = ChatMemoryBuffer
+    class RetrieverQueryEngine:
+        def __init__(self, retriever, llm=None, node_postprocessors=None):
+            self.retriever = retriever
+            self.llm = llm
+            self.node_postprocessors = node_postprocessors or []
 
-        # --- Node parser -------------------------------------------------
-        node_parser_module = types.ModuleType("llama_index.core.node_parser")
+        @classmethod
+        def from_args(cls, retriever, llm=None, node_postprocessors=None):
+            return cls(retriever, llm=llm, node_postprocessors=node_postprocessors)
 
-        class SentenceSplitter:
-            def __init__(self, chunk_size=1024, chunk_overlap=0):
-                self.chunk_size = chunk_size
-                self.chunk_overlap = chunk_overlap
+        def query(self, prompt: str):
+            if hasattr(self.retriever, "query"):
+                return self.retriever.query(prompt)
+            return Response(response="")
 
-            def get_nodes_from_documents(self, documents):
-                return [
-                    BaseNode(
-                        text=getattr(doc, "text", ""),
-                        metadata=getattr(doc, "metadata", {}),
-                    )
-                    for doc in documents
-                ]
+        async def aquery(self, prompt: str):
+            return self.query(prompt)
 
-        node_parser_module.SentenceSplitter = SentenceSplitter
+    query_engine_module.RetrieverQueryEngine = RetrieverQueryEngine
 
-        # --- Postprocessor -----------------------------------------------
-        postprocessor_module = types.ModuleType("llama_index.core.postprocessor")
+    # --- HuggingFace embedding ---------------------------------------
+    embeddings_hf_module = types.ModuleType(
+        "llama_index.embeddings.huggingface"
+    )
 
-        class SentenceTransformerRerank:
-            def __init__(self, *args, **kwargs):
-                self.args = args
-                self.kwargs = kwargs
+    class HuggingFaceEmbedding:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
 
-            def __call__(self, nodes):
-                return nodes
+    embeddings_hf_module.HuggingFaceEmbedding = HuggingFaceEmbedding
 
-        postprocessor_module.SentenceTransformerRerank = SentenceTransformerRerank
+    # --- Ollama ------------------------------------------------------
+    ollama_module = types.ModuleType("llama_index.llms.ollama")
 
-        # --- Query engine ------------------------------------------------
-        query_engine_module = types.ModuleType("llama_index.core.query_engine")
+    class Ollama:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
 
-        class RetrieverQueryEngine:
-            def __init__(self, retriever, llm=None, node_postprocessors=None):
-                self.retriever = retriever
-                self.llm = llm
-                self.node_postprocessors = node_postprocessors or []
+        def chat(self, prompt: str) -> str:
+            return f"ollama: {prompt}"
 
-            @classmethod
-            def from_args(cls, retriever, llm=None, node_postprocessors=None):
-                return cls(retriever, llm=llm, node_postprocessors=node_postprocessors)
+    ollama_module.Ollama = Ollama
 
-            def query(self, prompt: str):
-                if hasattr(self.retriever, "query"):
-                    return self.retriever.query(prompt)
-                return Response(response="")
+    # --- Docling parser/reader ---------------------------------------
+    node_parser_docling_module = types.ModuleType(
+        "llama_index.node_parser.docling"
+    )
 
-            async def aquery(self, prompt: str):
-                return self.query(prompt)
+    class DoclingNodeParser:
+        def get_nodes_from_documents(self, documents):
+            return [
+                BaseNode(
+                    text=getattr(doc, "text", ""),
+                    metadata=getattr(doc, "metadata", {}),
+                )
+                for doc in documents
+            ]
 
-        query_engine_module.RetrieverQueryEngine = RetrieverQueryEngine
+    node_parser_docling_module.DoclingNodeParser = DoclingNodeParser
 
-        # --- HuggingFace embedding ---------------------------------------
-        embeddings_hf_module = types.ModuleType(
-            "llama_index.embeddings.huggingface"
-        )
+    readers_docling_module = types.ModuleType("llama_index.readers.docling")
 
-        class HuggingFaceEmbedding:
-            def __init__(self, *args, **kwargs):
-                self.args = args
-                self.kwargs = kwargs
+    class DoclingReader:
+        class ExportType:
+            JSON = "json"
 
-        embeddings_hf_module.HuggingFaceEmbedding = HuggingFaceEmbedding
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
 
-        # --- Ollama ------------------------------------------------------
-        ollama_module = types.ModuleType("llama_index.llms.ollama")
+        def load_data(self, *args, **kwargs):
+            return []
 
-        class Ollama:
-            def __init__(self, *args, **kwargs):
-                self.args = args
-                self.kwargs = kwargs
+    readers_docling_module.DoclingReader = DoclingReader
 
-            def chat(self, prompt: str) -> str:
-                return f"ollama: {prompt}"
+    # --- Vector stores -----------------------------------------------
+    vector_store_milvus_module = types.ModuleType(
+        "llama_index.vector_stores.milvus"
+    )
 
-        ollama_module.Ollama = Ollama
+    class MilvusVectorStore:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
 
-        # --- Docling parser/reader ---------------------------------------
-        node_parser_docling_module = types.ModuleType(
-            "llama_index.node_parser.docling"
-        )
+    vector_store_milvus_module.MilvusVectorStore = MilvusVectorStore
 
-        class DoclingNodeParser:
-            def get_nodes_from_documents(self, documents):
-                return [
-                    BaseNode(
-                        text=getattr(doc, "text", ""),
-                        metadata=getattr(doc, "metadata", {}),
-                    )
-                    for doc in documents
-                ]
+    milvus_base_module = types.ModuleType("llama_index.vector_stores.milvus.base")
 
-        node_parser_docling_module.DoclingNodeParser = DoclingNodeParser
+    class IndexManagement:
+        CREATE_IF_NOT_EXISTS = "create_if_not_exists"
 
-        readers_docling_module = types.ModuleType("llama_index.readers.docling")
+    milvus_base_module.IndexManagement = IndexManagement
 
-        class DoclingReader:
-            class ExportType:
-                JSON = "json"
+    milvus_utils_module = types.ModuleType(
+        "llama_index.vector_stores.milvus.utils"
+    )
 
-            def __init__(self, *args, **kwargs):
-                self.args = args
-                self.kwargs = kwargs
+    class BaseSparseEmbeddingFunction:
+        def encode_documents(self, documents):
+            raise NotImplementedError
 
-            def load_data(self, *args, **kwargs):
-                return []
+        def encode_queries(self, queries):
+            raise NotImplementedError
 
-        readers_docling_module.DoclingReader = DoclingReader
+        async def async_encode_documents(self, documents):
+            return self.encode_documents(documents)
 
-        # --- Vector stores -----------------------------------------------
-        vector_store_qdrant_module = types.ModuleType(
-            "llama_index.vector_stores.qdrant"
-        )
+        async def async_encode_queries(self, queries):
+            return self.encode_queries(queries)
 
-        class QdrantVectorStore:
-            def __init__(self, *args, **kwargs):
-                self.args = args
-                self.kwargs = kwargs
+    milvus_utils_module.BaseSparseEmbeddingFunction = BaseSparseEmbeddingFunction
 
-        vector_store_qdrant_module.QdrantVectorStore = QdrantVectorStore
+    # Attach submodules
+    llama_index.core = core_module
+    embeddings_pkg = types.ModuleType("llama_index.embeddings")
+    embeddings_pkg.huggingface = embeddings_hf_module
+    llama_index.embeddings = embeddings_pkg
+    llama_index.llms = types.SimpleNamespace(ollama=ollama_module)
+    llama_index.node_parser = types.SimpleNamespace(docling=node_parser_docling_module)
+    llama_index.readers = types.SimpleNamespace(docling=readers_docling_module)
+    llama_index.vector_stores = types.SimpleNamespace(milvus=vector_store_milvus_module)
 
-        # Attach submodules
-        llama_index.core = core_module
-        llama_index.embeddings = types.SimpleNamespace(huggingface=embeddings_hf_module)
-        llama_index.llms = types.SimpleNamespace(ollama=ollama_module)
-        llama_index.node_parser = types.SimpleNamespace(docling=node_parser_docling_module)
-        llama_index.readers = types.SimpleNamespace(docling=readers_docling_module)
-        llama_index.vector_stores = types.SimpleNamespace(qdrant=vector_store_qdrant_module)
+    sys.modules["llama_index"] = llama_index
+    sys.modules["llama_index.core"] = core_module
+    sys.modules["llama_index.core.chat_engine"] = chat_engine_module
+    sys.modules["llama_index.core.embeddings"] = embeddings_module
+    sys.modules["llama_index.core.llms"] = llms_module
+    sys.modules["llama_index.core.memory"] = memory_module
+    sys.modules["llama_index.core.node_parser"] = node_parser_module
+    sys.modules["llama_index.core.postprocessor"] = postprocessor_module
+    sys.modules["llama_index.core.query_engine"] = query_engine_module
+    readers_core_module.base = base_readers_module
+    readers_core_module.json = json_readers_module
 
-        sys.modules["llama_index"] = llama_index
-        sys.modules["llama_index.core"] = core_module
-        sys.modules["llama_index.core.chat_engine"] = chat_engine_module
-        sys.modules["llama_index.core.embeddings"] = embeddings_module
-        sys.modules["llama_index.core.llms"] = llms_module
-        sys.modules["llama_index.core.memory"] = memory_module
-        sys.modules["llama_index.core.node_parser"] = node_parser_module
-        sys.modules["llama_index.core.postprocessor"] = postprocessor_module
-        sys.modules["llama_index.core.query_engine"] = query_engine_module
-        sys.modules["llama_index.core.schema"] = types.SimpleNamespace(
-            BaseNode=core_module.BaseNode,
-            Document=core_module.Document,
-        )
-        sys.modules["llama_index.embeddings.huggingface"] = embeddings_hf_module
-        sys.modules["llama_index.llms.ollama"] = ollama_module
-        sys.modules["llama_index.node_parser.docling"] = node_parser_docling_module
-        sys.modules["llama_index.readers.docling"] = readers_docling_module
-        sys.modules["llama_index.vector_stores.qdrant"] = vector_store_qdrant_module
+    sys.modules["llama_index.core.readers"] = readers_core_module
+    sys.modules["llama_index.core.readers.base"] = base_readers_module
+    sys.modules["llama_index.core.readers.json"] = json_readers_module
+    core_schema_module = types.ModuleType("llama_index.core.schema")
+    core_schema_module.BaseNode = core_module.BaseNode
+    core_schema_module.Document = core_module.Document
 
+    class MediaResource:
+        def __init__(self, uri: str | None = None):
+            self.uri = uri
 
-def _install_qdrant_stub() -> None:
+    core_schema_module.MediaResource = MediaResource
+
+    sys.modules["llama_index.core.schema"] = core_schema_module
+    sys.modules["llama_index.embeddings"] = embeddings_pkg
+    sys.modules["llama_index.embeddings.huggingface"] = embeddings_hf_module
+    sys.modules["llama_index.llms.ollama"] = ollama_module
+    sys.modules["llama_index.node_parser.docling"] = node_parser_docling_module
+    sys.modules["llama_index.readers.docling"] = readers_docling_module
+    sys.modules["llama_index.vector_stores.milvus"] = vector_store_milvus_module
+    sys.modules["llama_index.vector_stores.milvus.base"] = milvus_base_module
+    sys.modules["llama_index.vector_stores.milvus.utils"] = milvus_utils_module
+
+def _install_milvus_stub() -> None:
     try:
-        import qdrant_client  # noqa: F401
+        import pymilvus  # noqa: F401
     except ModuleNotFoundError:
-        qdrant_client = types.ModuleType("qdrant_client")
+        pymilvus = types.ModuleType("pymilvus")
 
-        class QdrantClient:
-            def __init__(self, url=None):
-                self.url = url
-                self._collections = []
-                self._payloads = {}
+        class MilvusClient:
+            def __init__(self, uri=None, token=None, user=None, password=None, db_name=None):
+                self.uri = uri
+                self.token = token
+                self.user = user
+                self.password = password
+                self.db_name = db_name
+                self._collections: list[str] = []
+                self._records: dict[str, list[dict]] = {}
 
-            def get_collections(self):
-                collections = [types.SimpleNamespace(name=name) for name in self._collections]
-                return types.SimpleNamespace(collections=collections)
+            def list_collections(self):
+                return list(self._collections)
 
-            def retrieve(self, collection_name=None, ids=None):
-                results = []
-                for _id in ids or []:
-                    payload = self._payloads.get(_id, {})
-                    results.append(types.SimpleNamespace(payload=payload))
-                return results
+            def get(self, collection_name=None, ids=None, output_fields=None):
+                data = self._records.get(collection_name or "", [])
+                if not ids:
+                    return data
+                id_set = {str(_id) for _id in ids}
+                return [row for row in data if str(row.get("id")) in id_set]
 
-        qdrant_client.QdrantClient = QdrantClient
-
-        async_module = types.ModuleType("qdrant_client.async_qdrant_client")
-
-        class AsyncQdrantClient:
-            def __init__(self, url=None):
-                self.url = url
-
-        async_module.AsyncQdrantClient = AsyncQdrantClient
-
-        sys.modules["qdrant_client"] = qdrant_client
-        sys.modules["qdrant_client.async_qdrant_client"] = async_module
+        pymilvus.MilvusClient = MilvusClient
+        sys.modules["pymilvus"] = pymilvus
 
 
 def _install_sqlalchemy_stub() -> None:
@@ -447,8 +604,142 @@ def _install_sqlalchemy_stub() -> None:
         sys.modules["sqlalchemy.orm"] = orm_module
 
 
+def _install_whisper_stub() -> None:
+    try:
+        import whisper  # noqa: F401
+    except ModuleNotFoundError:
+        whisper = types.ModuleType("whisper")
+
+        class Whisper:
+            def transcribe(self, *args, **kwargs):
+                return {"text": "stub transcription"}
+
+        def load_model(name: str, *args, **kwargs):
+            return Whisper()
+
+        whisper.Whisper = Whisper
+        whisper.load_model = load_model
+        sys.modules["whisper"] = whisper
+
+
 _install_torch_stub()
 _install_fastembed_stub()
+_install_pandas_stub()
+_install_dotenv_stub()
+_install_numpy_stub()
 _install_llama_index_stub()
-_install_qdrant_stub()
+_install_milvus_stub()
 _install_sqlalchemy_stub()
+_install_whisper_stub()
+
+
+def _install_magic_stub() -> None:
+    try:
+        import magic  # noqa: F401
+    except ModuleNotFoundError:
+        magic = types.ModuleType("magic")
+
+        class _Magic:
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+            def from_buffer(self, *_args, **_kwargs):
+                return "application/octet-stream"
+
+        def open(*_args, **_kwargs):
+            return _Magic()
+
+        magic.Magic = _Magic
+        magic.open = open
+        sys.modules["magic"] = magic
+
+
+_install_magic_stub()
+
+
+def _install_pymupdf4llm_stub() -> None:
+    try:
+        import pymupdf4llm  # noqa: F401
+    except ModuleNotFoundError:
+        pymupdf4llm = types.ModuleType("pymupdf4llm")
+
+        def to_markdown(*_args, **_kwargs):
+            return ""
+
+        pymupdf4llm.to_markdown = to_markdown
+        sys.modules["pymupdf4llm"] = pymupdf4llm
+
+
+_install_pymupdf4llm_stub()
+
+
+def _install_pil_stub() -> None:
+    try:
+        from PIL import Image  # type: ignore # noqa: F401
+    except ModuleNotFoundError:
+        pil_module = types.ModuleType("PIL")
+        image_module = types.ModuleType("PIL.Image")
+
+        class ImageClass:
+            @staticmethod
+            def open(*_args, **_kwargs):
+                return types.SimpleNamespace(convert=lambda mode: None)
+
+        image_module.Image = ImageClass
+        pil_module.Image = image_module
+
+        # expose class similar to Pillow
+        image_module.Image.Image = ImageClass
+        pil_module.Image.Image = ImageClass
+        sys.modules["PIL"] = pil_module
+        sys.modules["PIL.Image"] = image_module
+
+
+_install_pil_stub()
+
+
+def _install_ollama_stub() -> None:
+    try:
+        import ollama  # noqa: F401
+    except ModuleNotFoundError:
+        ollama = types.ModuleType("ollama")
+
+        class Client:
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+            def chat(self, *args, **kwargs):
+                return {"message": {"content": ""}}
+
+        ollama.Client = Client
+        sys.modules["ollama"] = ollama
+
+
+_install_ollama_stub()
+
+
+def _install_requests_stub() -> None:
+    try:
+        import requests  # noqa: F401
+    except ModuleNotFoundError:
+        requests = types.ModuleType("requests")
+
+        class Response:
+            def __init__(self, status_code: int = 200, json_data: dict | None = None):
+                self.status_code = status_code
+                self._json = json_data or {}
+
+            def json(self):
+                return self._json
+
+        def post(*_args, **_kwargs):
+            return Response()
+
+        requests.post = post
+        requests.Response = Response
+        sys.modules["requests"] = requests
+
+
+_install_requests_stub()

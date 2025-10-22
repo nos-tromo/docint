@@ -62,7 +62,7 @@ def test_select_collection_resets_cached_state(monkeypatch) -> None:
 
     rag.select_collection("alpha")
 
-    assert rag.qdrant_collection == "alpha"
+    assert rag.milvus_collection == "alpha"
     assert rag.docs == []
     assert rag.nodes == []
     assert rag.index is None
@@ -70,3 +70,48 @@ def test_select_collection_resets_cached_state(monkeypatch) -> None:
     assert rag.chat_engine is None
     assert rag.chat_memory is None
     assert rag.session_id is None
+
+
+def test_sparse_model_accepts_local_path(tmp_path) -> None:
+    rag = RAG()
+    rag.sparse_model_path = tmp_path
+
+    (tmp_path / "config.json").write_text("{}")
+
+    assert rag.sparse_model == str(tmp_path)
+
+
+def test_sparse_model_path_validation(tmp_path) -> None:
+    rag = RAG()
+    rag.sparse_model_path = tmp_path / "missing"
+
+    with pytest.raises(ValueError):
+        _ = rag.sparse_model
+
+
+def test_sparse_model_path_requires_snapshot(tmp_path) -> None:
+    rag = RAG()
+    invalid_dir = tmp_path / "empty"
+    invalid_dir.mkdir()
+
+    rag.sparse_model_path = invalid_dir
+
+    with pytest.raises(ValueError):
+        _ = rag.sparse_model
+
+
+def test_sparse_model_resolves_hf_cache_root(tmp_path) -> None:
+    rag = RAG()
+    cache_root = tmp_path / "huggingface" / "hub"
+    snapshot_dir = (
+        cache_root
+        / f"models--{rag.sparse_model_id.replace('/', '--')}"
+        / "snapshots"
+        / "1234567890abcdef"
+    )
+    snapshot_dir.mkdir(parents=True)
+    (snapshot_dir / "config.json").write_text("{}")
+
+    rag.sparse_model_path = cache_root
+
+    assert rag.sparse_model == str(snapshot_dir)

@@ -13,38 +13,38 @@ DATA_PATH = os.getenv("DATA_PATH")
 
 def get_inputs() -> tuple[str, Path]:
     """
-    Get user inputs for Qdrant collection name and data directory.
+    Get user inputs for Milvus collection name and data directory.
 
     Raises:
         ValueError: If the data directory does not exist.
 
     Returns:
-        tuple[str, Path]: Qdrant collection name and data directory path.
+        tuple[str, Path]: Milvus collection name and data directory path.
     """
-    qdrant_col = input("Enter Qdrant collection name: ").strip()
+    collection = input("Enter Milvus collection name: ").strip()
     data_dir = Path(DATA_PATH) if DATA_PATH else Path.home() / "docint" / "data"
     if not data_dir.is_dir():
         raise ValueError(f"Data directory does not exist: {data_dir}")
-    return qdrant_col, data_dir
+    return collection, data_dir
 
 
-def ingest_docs(qdrant_col: str, data_dir: Path, hybrid: bool = True) -> None:
+def ingest_docs(collection: str, data_dir: Path, hybrid: bool = True) -> None:
     """
-    Ingest documents from the specified directory into the Qdrant collection.
+    Ingest documents from the specified directory into the Milvus collection.
 
     Args:
-        qdrant_col (str): Qdrant collection name.
+        collection (str): Milvus collection name.
         data_dir (Path): Path to the data directory.
         hybrid (bool): Whether to enable hybrid search (default: True).
     """
-    rag = RAG(qdrant_collection=qdrant_col, enable_hybrid=hybrid)
+    rag = RAG(milvus_collection=collection, enable_hybrid=hybrid)
     rag.ingest_docs(data_dir)
     logger.info("Ingestion complete.")
 
 
 def main() -> None:
-    qdrant_col, data_dir = get_inputs()
-    ingest_docs(qdrant_col, data_dir)
+    collection, data_dir = get_inputs()
+    ingest_docs(collection, data_dir)
 
 
 if __name__ == "__main__":

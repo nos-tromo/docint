@@ -8,12 +8,12 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import pandas as pd
 import torch
 from dotenv import load_dotenv
-from fastembed import SparseTextEmbedding
+from fastembed import SparseEmbedding, SparseTextEmbedding
 from llama_index.core import (
     Response,
     SimpleDirectoryReader,
@@ -35,9 +35,10 @@ from llama_index.core.schema import BaseNode, Document
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
 from llama_index.node_parser.docling import DoclingNodeParser
-from llama_index.vector_stores.qdrant import QdrantVectorStore
-from qdrant_client import QdrantClient
-from qdrant_client.async_qdrant_client import AsyncQdrantClient
+from llama_index.vector_stores.milvus import MilvusVectorStore
+from llama_index.vector_stores.milvus.base import IndexManagement
+from llama_index.vector_stores.milvus.utils import BaseSparseEmbeddingFunction
+from pymilvus import MilvusClient
 from sqlalchemy.orm import sessionmaker
 
 from docint.core.chat.base import _make_session_maker
@@ -59,15 +60,70 @@ DATA_PATH: Path = Path(os.getenv("DATA_PATH", Path.home() / "docint" / "data"))
 CURRENT_DIR = Path(__file__).parent.resolve()
 REQUIRED_EXTS_PATH: Path = Path(os.getenv("REQUIRED_EXTS_PATH", CURRENT_DIR / "readers" / "required_exts.txt"))
 OLLAMA_URL: str = os.getenv("OLLAMA_URL", "http://localhost:11434")
-QDRANT_COL_DIR: str = os.getenv("QDRANT_COL_DIR", "qdrant_collections")
-QDRANT_URL: str = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
+MILVUS_URI: str = os.getenv("MILVUS_URI", "http://127.0.0.1:19530")
+MILVUS_DB_NAME: str | None = os.getenv("MILVUS_DB_NAME")
+MILVUS_COLLECTION: str = os.getenv("MILVUS_COLLECTION", "default")
+MILVUS_TOKEN: str | None = os.getenv("MILVUS_TOKEN")
+MILVUS_USERNAME: str | None = os.getenv("MILVUS_USERNAME")
+MILVUS_PASSWORD: str | None = os.getenv("MILVUS_PASSWORD")
 EMBED_MODEL: str = os.getenv("EMBED_MODEL", "BAAI/bge-m3")
 SPARSE_MODEL: str = os.getenv("SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-attentions")
+_SPARSE_MODEL_PATH = os.getenv("SPARSE_MODEL_PATH")
+SPARSE_MODEL_PATH: Path | None = (
+    Path(_SPARSE_MODEL_PATH).expanduser() if _SPARSE_MODEL_PATH else None
+)
 RERANK_MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 GEN_MODEL: str = os.getenv("LLM", "qwen3:8b")
 RETRIEVE_SIMILARITY_TOP_K: int = int(os.getenv("RETRIEVE_SIMILARITY_TOP_K", "20"))
 
 CleanFn = Callable[[str], str]
+
+
+class FastEmbedSparseEmbeddingFunction(BaseSparseEmbeddingFunction):
+    """Adapter that exposes FastEmbed sparse encoders via Milvus' sparse API."""
+
+    def __init__(self, encoder: SparseTextEmbedding) -> None:
+        self._encoder = encoder
+
+    def encode_documents(self, documents: list[str]) -> list[dict[int, float]]:
+        return self._encode(documents, self._encoder.embed)
+
+    def encode_queries(self, queries: list[str]) -> list[dict[int, float]]:
+        return self._encode(queries, self._encoder.query_embed)
+
+    async def async_encode_documents(self, documents: list[str]) -> list[dict[int, float]]:
+        return self.encode_documents(documents)
+
+    async def async_encode_queries(self, queries: list[str]) -> list[dict[int, float]]:
+        return self.encode_queries(queries)
+
+    def _encode(
+        self,
+        texts: list[str],
+        fn: Callable[[Iterable[str]], Iterable[SparseEmbedding]],
+    ) -> list[dict[int, float]]:
+        if not texts:
+            return []
+        results: list[dict[int, float]] = []
+        for embedding in fn(texts):
+            if hasattr(embedding, "as_dict"):
+                results.append(embedding.as_dict())
+            elif isinstance(embedding, dict):
+                results.append({int(k): float(v) for k, v in embedding.items()})
+            else:
+                values = getattr(embedding, "values", None)
+                indices = getattr(embedding, "indices", None)
+                if values is not None and indices is not None:
+                    try:
+                        results.append({int(i): float(v) for i, v in zip(indices, values)})
+                        continue
+                    except Exception:
+                        pass
+                raise TypeError(
+                    "Unsupported sparse embedding payload from FastEmbed: "
+                    f"{type(embedding).__name__}"
+                )
+        return results
 
 
 @dataclass(slots=True)
@@ -83,13 +139,20 @@ class RAG:
     # --- Models ---
     embed_model_id: str = EMBED_MODEL
     sparse_model_id: str = SPARSE_MODEL
+    sparse_model_path: Path | None = SPARSE_MODEL_PATH
     rerank_model_id: str = RERANK_MODEL
     gen_model_id: str = GEN_MODEL
 
-    # --- Qdrant controls ---
-    qdrant_url: str = QDRANT_URL
-    _qdrant_host_dir: Path | None = field(default=None, init=False, repr=False)
-    qdrant_collection: str = "default"
+    # --- Milvus controls ---
+    milvus_uri: str = MILVUS_URI
+    milvus_db_name: str | None = MILVUS_DB_NAME
+    milvus_collection: str = MILVUS_COLLECTION
+    milvus_token: str | None = MILVUS_TOKEN
+    milvus_username: str | None = MILVUS_USERNAME
+    milvus_password: str | None = MILVUS_PASSWORD
+    doc_id_field: str = "doc_id"
+    text_field: str = "text"
+    sparse_field: str = "sparse_embedding"
 
     # --- Ollama Parameters ---
     base_url: str = OLLAMA_URL
@@ -134,8 +197,8 @@ class RAG:
     _reranker: SentenceTransformerRerank | None = field(
         default=None, init=False, repr=False
     )
-    _qdrant_client: QdrantClient | None = field(default=None, init=False, repr=False)
-    _qdrant_aclient: AsyncQdrantClient | None = field(
+    _milvus_client: MilvusClient | None = field(default=None, init=False, repr=False)
+    _sparse_embedding_fn: BaseSparseEmbeddingFunction | None = field(
         default=None, init=False, repr=False
     )
 
@@ -190,32 +253,41 @@ class RAG:
         except ImportError:
             return []
 
+    def _resolve_sparse_model_directory(self, base: Path) -> Path | None:
+        """Return the directory that contains the sparse model payload.
+
+        The lookup supports three cases:
+          1. ``base`` already points at a model snapshot (contains config files).
+          2. ``base`` is the Hugging Face cache root (``.../huggingface/hub``).
+          3. ``base`` is a repository directory inside the cache and the actual
+             snapshot lives in ``snapshots/<rev>``.
+        """
+
+        if base.is_file():
+            return None
+
+        markers = ("config.json", "sparse_config.json", "fastembed_config.json")
+        if any((base / marker).is_file() for marker in markers):
+            return base
+
+        repo_dir_name = f"models--{self.sparse_model_id.replace('/', '--')}"
+        repo_dir = base / repo_dir_name
+        if repo_dir.exists() and repo_dir.is_dir():
+            return self._resolve_sparse_model_directory(repo_dir)
+
+        snapshots_dir = base / "snapshots"
+        if snapshots_dir.exists() and snapshots_dir.is_dir():
+            for snapshot_dir in sorted(
+                (p for p in snapshots_dir.iterdir() if p.is_dir()),
+                reverse=True,
+            ):
+                resolved = self._resolve_sparse_model_directory(snapshot_dir)
+                if resolved is not None:
+                    return resolved
+
+        return None
+
     # --- Properties (lazy loading) ---
-    @property
-    def qdrant_host_dir(self) -> Path:
-        """
-        Best-effort resolution of the host directory where Qdrant stores data.
-        Used only as a *fallback* when we cannot reach the Qdrant API.
-        Priority: explicit field -> env var -> platform default under home.
-
-        Raises:
-            ValueError: If the Qdrant host directory is not set.
-
-        Returns:
-            The Path representing the Qdrant host directory.
-        """
-        if self._qdrant_host_dir is None:
-            env = os.getenv("QDRANT_COL_DIR")
-            if env:
-                self._qdrant_host_dir = Path(env)
-            else:
-                home = os.getenv("HOME") or os.getenv("USERPROFILE")
-                if home:
-                    self._qdrant_host_dir = Path(home) / ".qdrant" / "storage"
-        if self._qdrant_host_dir is None:
-            raise ValueError("Qdrant host directory is not set.")
-        return self._qdrant_host_dir
-
     @property
     def device(self) -> str:
         """
@@ -273,6 +345,27 @@ class RAG:
         """
         if not self.enable_hybrid:
             return None
+        if self.sparse_model_path:
+            expanded = self.sparse_model_path.expanduser()
+            if not expanded.exists():
+                raise ValueError(
+                    f"Sparse model path {expanded!s} does not exist."
+                )
+            resolved = self._resolve_sparse_model_directory(expanded)
+            if resolved is None:
+                raise ValueError(
+                    "Sparse model files not found under "
+                    f"{expanded!s}. Ensure the directory contains the downloaded "
+                    f"snapshot for {self.sparse_model_id!r}."
+                )
+            logger.info("Initializing sparse model from path: %s", resolved)
+            return str(resolved)
+
+        candidate_path = Path(self.sparse_model_id).expanduser()
+        if candidate_path.exists():
+            logger.info("Initializing sparse model from path: %s", candidate_path)
+            return str(candidate_path)
+
         if self.sparse_model_id not in self._list_supported_sparse_models():
             raise ValueError(
                 f"Sparse model {self.sparse_model_id!r} not supported. "
@@ -320,36 +413,33 @@ class RAG:
         return self._gen_model
 
     @property
-    def qdrant_client(self) -> QdrantClient:
-        """
-        Lazily initializes and returns the Qdrant client.
+    def milvus_client(self) -> MilvusClient:
+        """Lazily initializes and returns the Milvus client."""
 
-        Returns:
-            QdrantClient: The initialized Qdrant client.
-        """
-        if self._qdrant_client is None:
-            self._qdrant_client = QdrantClient(url=self.qdrant_url)
-            logger.info(
-                "Qdrant client initialized: %s",
-                self.qdrant_url,
+        if self._milvus_client is None:
+            self._milvus_client = MilvusClient(
+                uri=self.milvus_uri,
+                token=self.milvus_token or "",
+                user=self.milvus_username or "",
+                password=self.milvus_password or "",
+                db_name=self.milvus_db_name or "",
             )
-        return self._qdrant_client
+            logger.info("Milvus client initialized: %s", self.milvus_uri)
+        return self._milvus_client
 
-    @property
-    def qdrant_aclient(self) -> AsyncQdrantClient:
-        """
-        Lazily initializes and returns the Qdrant async client.
-
-        Returns:
-            AsyncQdrantClient: The initialized Qdrant async client.
-        """
-        if self._qdrant_aclient is None:
-            self._qdrant_aclient = AsyncQdrantClient(url=self.qdrant_url)
-            logger.info(
-                "Qdrant async client initialized: %s",
-                self.qdrant_url,
-            )
-        return self._qdrant_aclient
+    def _get_sparse_embedding_function(
+        self,
+    ) -> BaseSparseEmbeddingFunction | None:
+        if not self.enable_hybrid:
+            return None
+        if self._sparse_embedding_fn is None:
+            model_name = self.sparse_model
+            if not model_name:
+                return None
+            logger.info("Initializing sparse embedding function for Milvus")
+            encoder = SparseTextEmbedding(model_name)
+            self._sparse_embedding_fn = FastEmbedSparseEmbeddingFunction(encoder)
+        return self._sparse_embedding_fn
 
     # --- Build pieces ---
     def _load_doc_readers(self) -> None:
@@ -444,27 +534,34 @@ class RAG:
             breakpoint_percentile_threshold=self.breakpoint_percentile_threshold,
         )
 
-    def _vector_store(self) -> QdrantVectorStore:
-        """
-        Creates the vector store for document embeddings.
+    def _vector_store(self) -> MilvusVectorStore:
+        """Create the vector store backing the RAG index."""
 
-        Returns:
-            QdrantVectorStore: The initialized vector store.
-        """
-        return QdrantVectorStore(
-            client=self.qdrant_client,
-            aclient=self.qdrant_aclient,
-            collection_name=self.qdrant_collection,
-            enable_hybrid=self.enable_hybrid,
-            fastembed_sparse_model=self.sparse_model,
+        sparse_fn = self._get_sparse_embedding_function()
+        enable_sparse = sparse_fn is not None
+
+        return MilvusVectorStore(
+            uri=self.milvus_uri,
+            token=self.milvus_token or "",
+            collection_name=self.milvus_collection,
+            db_name=self.milvus_db_name or "",
+            user=self.milvus_username or "",
+            password=self.milvus_password or "",
+            enable_sparse=enable_sparse,
+            sparse_embedding_field=self.sparse_field,
+            sparse_embedding_function=sparse_fn,
+            text_key=self.text_field,
+            doc_id_field=self.doc_id_field,
+            index_management=IndexManagement.CREATE_IF_NOT_EXISTS,
+            hybrid_ranker="RRFRanker",
         )
 
-    def _storage_context(self, vector_store: QdrantVectorStore) -> StorageContext:
+    def _storage_context(self, vector_store: MilvusVectorStore) -> StorageContext:
         """
         Creates the storage context for document embeddings.
 
         Args:
-            vector_store (QdrantVectorStore): The vector store for document embeddings.
+            vector_store (MilvusVectorStore): The vector store for document embeddings.
 
         Returns:
             StorageContext: The created storage context.
@@ -642,7 +739,7 @@ class RAG:
     def create_index(self) -> None:
         """
         Create the full index by loading documents, converting to nodes, and
-        setting up the Qdrant collection and vector store.
+        setting up the Milvus collection and vector store.
         """
         vector_store = self._vector_store()
         storage_ctx = self._storage_context(vector_store)
@@ -803,35 +900,13 @@ class RAG:
 
     # --- Collection discovery / selection ---
     def list_collections(self, prefer_api: bool = True) -> list[str]:
-        """
-        Return a list of collection names. Uses Qdrant API when available; falls back to listing the host storage path.
+        """Return the available Milvus collections for the configured database."""
 
-        Args:
-            prefer_api (bool): Whether to prefer the Qdrant API over filesystem access.
-
-        Returns:
-            list[str]: A list of collection names.
-        """
-        if prefer_api:
-            try:
-                resp = self.qdrant_client.get_collections()
-                names = [c.name for c in getattr(resp, "collections", []) or []]
-                if names:
-                    return sorted(names)
-            except Exception as e:
-                logger.warning(
-                    "Qdrant API list_collections failed, will try FS fallback: %s", e
-                )
-        base = self.qdrant_host_dir
-        if base is None:
-            return []
-        collections_dir = base / "collections"
         try:
-            if not collections_dir.exists():
-                return []
-            return sorted([p.name for p in collections_dir.iterdir() if p.is_dir()])
+            names = self.milvus_client.list_collections() or []
+            return sorted(names)
         except Exception as e:
-            logger.warning("FS fallback list_collections failed: %s", e)
+            logger.warning("Milvus list_collections failed: %s", e)
             return []
 
     def select_collection(self, name: str) -> None:
@@ -849,7 +924,7 @@ class RAG:
         if name not in self.list_collections():
             raise ValueError(f"Collection '{name}' does not exist.")
 
-        self.qdrant_collection = name
+        self.milvus_collection = name
 
         # Reset any state tied to the previously selected collection so that
         # future queries do not use stale indexes or conversations.
@@ -864,7 +939,7 @@ class RAG:
     # --- Public API ---
     def ingest_docs(self, data_dir: str | Path) -> None:
         """
-        Ingest documents from the specified directory into the Qdrant collection.
+        Ingest documents from the specified directory into the Milvus collection.
 
         Args:
             data_dir (str | Path): The directory containing the documents to ingest.
@@ -889,7 +964,7 @@ class RAG:
 
     async def asingest_docs(self, data_dir: str | Path) -> None:
         """
-        Asynchronously ingest documents from the specified directory into the Qdrant collection.
+        Asynchronously ingest documents from the specified directory into the Milvus collection.
 
         Args:
             data_dir (str | Path): The directory containing the documents to ingest.
@@ -903,7 +978,7 @@ class RAG:
         self._create_nodes()
         if self.index is None:
             raise RuntimeError("Index is not initialized for async ingestion.")
-        # Concurrent, non-blocking upsert into Qdrant via aclient
+        # Concurrent, non-blocking upsert into Milvus via the index API
         await self.index.ainsert_nodes(self.nodes)
         try:
             eff_k = getattr(self.query_engine.retriever, "similarity_top_k", None)
@@ -920,7 +995,7 @@ class RAG:
 
     def run_query(self, prompt: str) -> dict[str, Any]:
         """
-        Run a query against the Qdrant collection.
+        Run a query against the Milvus collection.
 
         Args:
             prompt (str): The query prompt.
@@ -946,7 +1021,7 @@ class RAG:
 
     async def run_query_async(self, prompt: str) -> dict[str, Any]:
         """
-        Run a query against the Qdrant collection asynchronously.
+        Run a query against the Milvus collection asynchronously.
 
         Args:
             prompt (str): The query prompt.
@@ -1187,19 +1262,21 @@ class RAG:
                         continue
         except Exception:
             return None
-        # Fallback to Qdrant payload when docstore text is unavailable
+        # Fallback to Milvus payload when docstore text is unavailable
         try:
-            recs = self.qdrant_client.retrieve(
-                collection_name=self.qdrant_collection, ids=[node_id]
+            ids: list[Any]
+            try:
+                ids = [int(node_id)]
+            except (ValueError, TypeError):
+                ids = [str(node_id)]
+            recs = self.milvus_client.get(
+                collection_name=self.milvus_collection,
+                ids=ids,
+                output_fields=[self.text_field, "chunk", "content"],
             )
-            if recs:
-                payload = getattr(recs[0], "payload", None)
-                if isinstance(payload, dict):
-                    txt = (
-                        payload.get("text")
-                        or payload.get("chunk")
-                        or payload.get("content")
-                    )
+            for rec in recs or []:
+                for key in (self.text_field, "chunk", "content"):
+                    txt = rec.get(key)
                     if isinstance(txt, str) and txt.strip():
                         return txt.strip()
         except Exception:
@@ -1254,10 +1331,10 @@ class RAG:
                 "top_n": self.rerank_top_n,
             },
             "vector_store": {
-                "type": "qdrant",
-                "url": self.qdrant_url,
-                "collection": self.qdrant_collection,
-                "host_dir": str(self.qdrant_host_dir or ""),
+                "type": "milvus",
+                "uri": self.milvus_uri,
+                "collection": self.milvus_collection,
+                "db_name": self.milvus_db_name or "",
             },
         }
         (out_dir / "session.json").write_text(

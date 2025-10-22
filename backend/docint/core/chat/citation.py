@@ -21,7 +21,7 @@ class Citation(Base):
     __tablename__ = "citations"
     id = Column(Integer, primary_key=True, autoincrement=True)
     turn_id = Column(Integer, ForeignKey("turns.id"), index=True)
-    node_id = Column(String, nullable=True)  # LlamaIndex node id or Qdrant point id
+    node_id = Column(String, nullable=True)  # LlamaIndex node id or Milvus primary key
     score = Column(Float, nullable=True)
     filename = Column(String, nullable=True)
     filetype = Column(String, nullable=True)
