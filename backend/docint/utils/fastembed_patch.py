@@ -39,6 +39,9 @@ def enable_fastembed_offline_mode(*, force: bool | None = None) -> None:
     if not _should_force_offline(force):
         return
 
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
     try:
         from fastembed.common import model_management as mm
     except Exception as exc:  # pragma: no cover - fastembed optional in tests
@@ -61,14 +64,13 @@ def enable_fastembed_offline_mode(*, force: bool | None = None) -> None:
         local_files_only: bool = False,
         **kwargs: Any,
     ) -> str:
-        kwargs["local_files_only"] = True
+        patched_kwargs = {**kwargs, "local_files_only": True}
         return original_download_files(
             cls,
             hf_source_repo,
             cache_dir,
             extra_patterns,
-            local_files_only=True,
-            **kwargs,
+            **patched_kwargs,
         )
 
     def _download_model_offline(
@@ -78,13 +80,13 @@ def enable_fastembed_offline_mode(*, force: bool | None = None) -> None:
         retries: int = 3,
         **kwargs: Any,
     ):
-        kwargs["local_files_only"] = True
+        patched_kwargs = {**kwargs, "local_files_only": True}
         return original_download_model(
             cls,
             model,
             cache_dir,
             retries=1,
-            **kwargs,
+            **patched_kwargs,
         )
 
     mm.ModelManagement.download_files_from_huggingface = classmethod(
