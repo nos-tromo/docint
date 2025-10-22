@@ -33,18 +33,20 @@ Use `watch` instead of `up` for development and live sync for code changes.
 
 ## Usage
 
-### Ingest documents
+### CLI
+
+#### Document ingestion
 
 ```bash
 uv run ingest
 ```
 
-### Run via CLI
+#### Querying
 
 Place a `queries.txt` file inside `backend/` to facilitate batch processing of requests (one query per line; no file provided will create a default file with a summary query).
 
 ```bash
-uv run cli
+uv run query
 ```
 
 ### Run frontend and backend in separate shells
