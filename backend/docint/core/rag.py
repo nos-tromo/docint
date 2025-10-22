@@ -13,6 +13,11 @@ from typing import Any, Callable
 import pandas as pd
 import torch
 from dotenv import load_dotenv
+
+from docint.utils.fastembed_patch import ensure_fastembed_offline_patch
+
+ensure_fastembed_offline_patch()
+
 from fastembed import SparseTextEmbedding
 from llama_index.core import (
     Response,
