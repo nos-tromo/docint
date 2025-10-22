@@ -13,15 +13,18 @@ services:
       - DATA_PATH=/app/data
       - LOG_PATH=/app/.logs/backend.log
       - OLLAMA_URL=http://ollama:11434
-      - QDRANT_COL_DIR=/qdrant/storage/collections
-      - QDRANT_URL=http://qdrant:6333
+      - MILVUS_URI=${MILVUS_URI:-http://milvus:19530}
+      - MILVUS_COLLECTION=${MILVUS_COLLECTION:-docint}
+      - MILVUS_DB_NAME=${MILVUS_DB_NAME:-}
+      - MILVUS_TOKEN=${MILVUS_TOKEN:-}
+      - MILVUS_USERNAME=${MILVUS_USERNAME:-}
+      - MILVUS_PASSWORD=${MILVUS_PASSWORD:-}
       - USE_DEVICE=auto
     volumes:
       - backend_logs:/app/.logs
       - ${USERPROFILE:-$HOME}/docint/data:/app/data
       - easyocr_cache:/root/.EasyOCR
       - model_cache:/root/.cache
-      - qdrant_storage:/qdrant/storage
     develop:
       watch:
         - action: sync
@@ -47,15 +50,18 @@ services:
       - LOG_PATH=/app/.logs/backend.log
       - NVIDIA_VISIBLE_DEVICES=all
       - OLLAMA_URL=http://ollama-gpu:11434
-      - QDRANT_COL_DIR=/qdrant/storage/collections
-      - QDRANT_URL=http://qdrant:6333
+      - MILVUS_URI=${MILVUS_URI:-http://milvus:19530}
+      - MILVUS_COLLECTION=${MILVUS_COLLECTION:-docint}
+      - MILVUS_DB_NAME=${MILVUS_DB_NAME:-}
+      - MILVUS_TOKEN=${MILVUS_TOKEN:-}
+      - MILVUS_USERNAME=${MILVUS_USERNAME:-}
+      - MILVUS_PASSWORD=${MILVUS_PASSWORD:-}
       - USE_DEVICE=auto
     volumes:
       - backend_logs:/app/.logs
       - ${USERPROFILE:-$HOME}/docint/data:/app/data
       - easyocr_cache:/root/.EasyOCR
       - model_cache:/root/.cache
-      - qdrant_storage:/qdrant/storage
     develop:
       watch:
         - action: sync
