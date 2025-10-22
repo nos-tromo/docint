@@ -20,7 +20,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-rag = RAG(qdrant_collection="")
+rag = RAG(milvus_collection="")
 
 
 class SelectCollectionIn(BaseModel):
@@ -109,7 +109,7 @@ def query(payload: QueryIn):
         HTTPException: If an error occurs while processing the query.
     """
     try:
-        if not rag.qdrant_collection:
+        if not rag.milvus_collection:
             raise HTTPException(status_code=400, detail="No collection selected")
 
         # Ensure the query engine exists before handling questions. If it's not

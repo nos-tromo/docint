@@ -36,8 +36,8 @@ def test_ingest_docs_invokes_rag(monkeypatch, tmp_path: Path) -> None:
     calls: dict[str, Path] = {}
 
     class DummyRAG:
-        def __init__(self, qdrant_collection: str, enable_hybrid: bool = True):
-            calls["collection"] = qdrant_collection
+        def __init__(self, milvus_collection: str, enable_hybrid: bool = True):
+            calls["collection"] = milvus_collection
             calls["hybrid"] = enable_hybrid
             self.called_with: Path | None = None
 

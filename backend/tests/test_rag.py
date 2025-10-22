@@ -1,3 +1,4 @@
+import json
 import types
 
 import pytest
@@ -72,46 +73,31 @@ def test_select_collection_resets_cached_state(monkeypatch) -> None:
     assert rag.session_id is None
 
 
-def test_sparse_model_accepts_local_path(tmp_path) -> None:
+def test_sparse_encoder_persists_vocabulary(tmp_path) -> None:
+    vocab_path = tmp_path / "vocab.json"
     rag = RAG()
-    rag.sparse_model_path = tmp_path
+    rag.sparse_vocab_path = vocab_path
 
-    (tmp_path / "config.json").write_text("{}")
+    sparse_fn = rag._get_sparse_embedding_function()
+    assert sparse_fn is not None
 
-    assert rag.sparse_model == str(tmp_path)
+    embedding = sparse_fn.encode_documents(["Alpha beta beta"])[0]
+    assert embedding
+    assert vocab_path.exists()
+
+    payload = json.loads(vocab_path.read_text())
+    assert payload["doc_count"] == 1
+    assert "beta" in payload["token_to_id"]
 
 
-def test_sparse_model_path_validation(tmp_path) -> None:
+def test_sparse_queries_ignore_unknown_tokens(tmp_path) -> None:
+    vocab_path = tmp_path / "vocab.json"
     rag = RAG()
-    rag.sparse_model_path = tmp_path / "missing"
+    rag.sparse_vocab_path = vocab_path
 
-    with pytest.raises(ValueError):
-        _ = rag.sparse_model
+    sparse_fn = rag._get_sparse_embedding_function()
+    sparse_fn.encode_documents(["seen token"])
 
+    query_embedding = sparse_fn.encode_queries(["seen unseen"])[0]
 
-def test_sparse_model_path_requires_snapshot(tmp_path) -> None:
-    rag = RAG()
-    invalid_dir = tmp_path / "empty"
-    invalid_dir.mkdir()
-
-    rag.sparse_model_path = invalid_dir
-
-    with pytest.raises(ValueError):
-        _ = rag.sparse_model
-
-
-def test_sparse_model_resolves_hf_cache_root(tmp_path) -> None:
-    rag = RAG()
-    cache_root = tmp_path / "huggingface" / "hub"
-    snapshot_dir = (
-        cache_root
-        / f"models--{rag.sparse_model_id.replace('/', '--')}"
-        / "snapshots"
-        / "1234567890abcdef"
-    )
-    snapshot_dir.mkdir(parents=True)
-    (snapshot_dir / "config.json").write_text("{}")
-
-    rag.sparse_model_path = cache_root
-
-    assert rag.sparse_model == str(snapshot_dir)
+    assert len(query_embedding) == 1

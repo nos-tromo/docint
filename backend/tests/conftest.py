@@ -27,41 +27,6 @@ def _install_torch_stub() -> None:
         sys.modules["torch"] = torch
 
 
-def _install_fastembed_stub() -> None:
-    try:
-        import fastembed  # noqa: F401
-    except ModuleNotFoundError:
-        fastembed = types.ModuleType("fastembed")
-
-        class SparseEmbedding:
-            def __init__(self, indices=None, values=None):
-                self.indices = indices or []
-                self.values = values or []
-
-            def as_dict(self) -> dict[int, float]:
-                return {int(i): float(v) for i, v in zip(self.indices, self.values)}
-
-        class SparseTextEmbedding:
-            @staticmethod
-            def list_supported_models() -> list[dict[str, str]]:
-                return [{"model": "stub-model"}]
-
-            def __init__(self, model_name: str, *args, **kwargs):
-                self.model_name = model_name
-
-            def embed(self, documents):
-                for _ in documents:
-                    yield SparseEmbedding(indices=[0], values=[1.0])
-
-            def query_embed(self, queries):
-                for _ in queries:
-                    yield SparseEmbedding(indices=[0], values=[1.0])
-
-        fastembed.SparseEmbedding = SparseEmbedding
-        fastembed.SparseTextEmbedding = SparseTextEmbedding
-        sys.modules["fastembed"] = fastembed
-
-
 def _install_pandas_stub() -> None:
     try:
         import pandas  # noqa: F401
@@ -623,7 +588,6 @@ def _install_whisper_stub() -> None:
 
 
 _install_torch_stub()
-_install_fastembed_stub()
 _install_pandas_stub()
 _install_dotenv_stub()
 _install_numpy_stub()

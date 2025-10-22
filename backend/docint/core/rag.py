@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import uuid
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import timezone
 from pathlib import Path
@@ -13,7 +15,6 @@ from typing import Any, Callable, Iterable
 import pandas as pd
 import torch
 from dotenv import load_dotenv
-from fastembed import SparseEmbedding, SparseTextEmbedding
 from llama_index.core import (
     Response,
     SimpleDirectoryReader,
@@ -67,10 +68,11 @@ MILVUS_TOKEN: str | None = os.getenv("MILVUS_TOKEN")
 MILVUS_USERNAME: str | None = os.getenv("MILVUS_USERNAME")
 MILVUS_PASSWORD: str | None = os.getenv("MILVUS_PASSWORD")
 EMBED_MODEL: str = os.getenv("EMBED_MODEL", "BAAI/bge-m3")
-SPARSE_MODEL: str = os.getenv("SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-attentions")
-_SPARSE_MODEL_PATH = os.getenv("SPARSE_MODEL_PATH")
-SPARSE_MODEL_PATH: Path | None = (
-    Path(_SPARSE_MODEL_PATH).expanduser() if _SPARSE_MODEL_PATH else None
+_SPARSE_VOCAB_PATH = os.getenv("SPARSE_VOCAB_PATH")
+SPARSE_VOCAB_PATH: Path = (
+    Path(_SPARSE_VOCAB_PATH).expanduser()
+    if _SPARSE_VOCAB_PATH
+    else (DATA_PATH / "milvus_sparse_vocab.json")
 )
 RERANK_MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 GEN_MODEL: str = os.getenv("LLM", "qwen3:8b")
@@ -79,17 +81,103 @@ RETRIEVE_SIMILARITY_TOP_K: int = int(os.getenv("RETRIEVE_SIMILARITY_TOP_K", "20"
 CleanFn = Callable[[str], str]
 
 
-class FastEmbedSparseEmbeddingFunction(BaseSparseEmbeddingFunction):
-    """Adapter that exposes FastEmbed sparse encoders via Milvus' sparse API."""
+class LocalSparseVocabulary:
+    """Maintains a persistent token vocabulary for sparse retrieval."""
 
-    def __init__(self, encoder: SparseTextEmbedding) -> None:
-        self._encoder = encoder
+    def __init__(self, storage_path: Path) -> None:
+        self.storage_path = storage_path
+        self.token_to_id: dict[str, int] = {}
+        self.token_doc_freq: dict[str, int] = {}
+        self.doc_count: int = 0
+        self._dirty = False
+        self._load()
+
+    def _load(self) -> None:
+        if not self.storage_path.exists():
+            return
+        try:
+            data = json.loads(self.storage_path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning(
+                "Failed to load sparse vocabulary from %s, starting fresh.",
+                self.storage_path,
+            )
+            return
+
+        token_to_id = data.get("token_to_id", {})
+        token_doc_freq = data.get("token_doc_freq", {})
+        doc_count = data.get("doc_count", 0)
+
+        if isinstance(token_to_id, dict) and isinstance(token_doc_freq, dict):
+            self.token_to_id = {str(k): int(v) for k, v in token_to_id.items()}
+            self.token_doc_freq = {str(k): int(v) for k, v in token_doc_freq.items()}
+        else:
+            logger.warning(
+                "Sparse vocabulary structure invalid in %s, resetting.",
+                self.storage_path,
+            )
+        if isinstance(doc_count, int) and doc_count >= 0:
+            self.doc_count = doc_count
+
+    @property
+    def dirty(self) -> bool:
+        return self._dirty
+
+    def increment_doc_count(self) -> int:
+        self.doc_count += 1
+        self._dirty = True
+        return self.doc_count
+
+    def register_document_tokens(self, tokens: Iterable[str]) -> dict[str, int]:
+        mapping: dict[str, int] = {}
+        for token in tokens:
+            token_id = self.token_to_id.get(token)
+            if token_id is None:
+                token_id = len(self.token_to_id)
+                self.token_to_id[token] = token_id
+            self.token_doc_freq[token] = self.token_doc_freq.get(token, 0) + 1
+            mapping[token] = token_id
+        if mapping:
+            self._dirty = True
+        return mapping
+
+    def lookup_tokens(self, tokens: Iterable[str]) -> dict[str, int]:
+        return {
+            token: self.token_to_id[token]
+            for token in tokens
+            if token in self.token_to_id
+        }
+
+    def doc_freq(self, token: str) -> int:
+        return self.token_doc_freq.get(token, 0)
+
+    def save(self) -> None:
+        if not self._dirty:
+            return
+        if self.storage_path.parent and not self.storage_path.parent.exists():
+            self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "doc_count": self.doc_count,
+            "token_to_id": self.token_to_id,
+            "token_doc_freq": self.token_doc_freq,
+        }
+        self.storage_path.write_text(json.dumps(payload), encoding="utf-8")
+        self._dirty = False
+
+
+class LocalSparseEmbeddingFunction(BaseSparseEmbeddingFunction):
+    """Offline sparse encoder that computes TF-IDF style weights."""
+
+    def __init__(self, vocabulary: LocalSparseVocabulary) -> None:
+        self._vocab = vocabulary
 
     def encode_documents(self, documents: list[str]) -> list[dict[int, float]]:
-        return self._encode(documents, self._encoder.embed)
+        embeddings = [self._encode(text, update_stats=True) for text in documents]
+        self._vocab.save()
+        return embeddings
 
     def encode_queries(self, queries: list[str]) -> list[dict[int, float]]:
-        return self._encode(queries, self._encoder.query_embed)
+        return [self._encode(text, update_stats=False) for text in queries]
 
     async def async_encode_documents(self, documents: list[str]) -> list[dict[int, float]]:
         return self.encode_documents(documents)
@@ -97,33 +185,37 @@ class FastEmbedSparseEmbeddingFunction(BaseSparseEmbeddingFunction):
     async def async_encode_queries(self, queries: list[str]) -> list[dict[int, float]]:
         return self.encode_queries(queries)
 
-    def _encode(
-        self,
-        texts: list[str],
-        fn: Callable[[Iterable[str]], Iterable[SparseEmbedding]],
-    ) -> list[dict[int, float]]:
-        if not texts:
-            return []
-        results: list[dict[int, float]] = []
-        for embedding in fn(texts):
-            if hasattr(embedding, "as_dict"):
-                results.append(embedding.as_dict())
-            elif isinstance(embedding, dict):
-                results.append({int(k): float(v) for k, v in embedding.items()})
-            else:
-                values = getattr(embedding, "values", None)
-                indices = getattr(embedding, "indices", None)
-                if values is not None and indices is not None:
-                    try:
-                        results.append({int(i): float(v) for i, v in zip(indices, values)})
-                        continue
-                    except Exception:
-                        pass
-                raise TypeError(
-                    "Unsupported sparse embedding payload from FastEmbed: "
-                    f"{type(embedding).__name__}"
-                )
-        return results
+    def _tokenize(self, text: str) -> list[str]:
+        return [token for token in text.lower().split() if token]
+
+    def _encode(self, text: str, update_stats: bool) -> dict[int, float]:
+        tokens = self._tokenize(text or "")
+        if not tokens:
+            if update_stats:
+                self._vocab.increment_doc_count()
+                self._vocab.save()
+            return {}
+
+        counts = Counter(tokens)
+        if update_stats:
+            doc_count = self._vocab.increment_doc_count()
+            token_map = self._vocab.register_document_tokens(counts.keys())
+            doc_total = doc_count
+        else:
+            token_map = self._vocab.lookup_tokens(counts.keys())
+            doc_total = max(self._vocab.doc_count, 1)
+
+        embedding: dict[int, float] = {}
+        total_terms = sum(counts.values())
+        for token, freq in counts.items():
+            token_id = token_map.get(token)
+            if token_id is None:
+                continue
+            doc_freq = self._vocab.doc_freq(token)
+            idf = math.log((doc_total + 1) / (doc_freq + 1)) + 1.0
+            tf = freq / total_terms
+            embedding[token_id] = tf * idf
+        return embedding
 
 
 @dataclass(slots=True)
@@ -138,8 +230,7 @@ class RAG:
 
     # --- Models ---
     embed_model_id: str = EMBED_MODEL
-    sparse_model_id: str = SPARSE_MODEL
-    sparse_model_path: Path | None = SPARSE_MODEL_PATH
+    sparse_vocab_path: Path = SPARSE_VOCAB_PATH
     rerank_model_id: str = RERANK_MODEL
     gen_model_id: str = GEN_MODEL
 
@@ -239,54 +330,6 @@ class RAG:
             chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap
         )
 
-    # --- Static methods ---
-    @staticmethod
-    def _list_supported_sparse_models() -> list[str]:
-        """
-        Lists all supported sparse models.
-
-        Returns:
-            list[str]: A list of supported sparse model IDs.
-        """
-        try:
-            return [m["model"] for m in SparseTextEmbedding.list_supported_models()]
-        except ImportError:
-            return []
-
-    def _resolve_sparse_model_directory(self, base: Path) -> Path | None:
-        """Return the directory that contains the sparse model payload.
-
-        The lookup supports three cases:
-          1. ``base`` already points at a model snapshot (contains config files).
-          2. ``base`` is the Hugging Face cache root (``.../huggingface/hub``).
-          3. ``base`` is a repository directory inside the cache and the actual
-             snapshot lives in ``snapshots/<rev>``.
-        """
-
-        if base.is_file():
-            return None
-
-        markers = ("config.json", "sparse_config.json", "fastembed_config.json")
-        if any((base / marker).is_file() for marker in markers):
-            return base
-
-        repo_dir_name = f"models--{self.sparse_model_id.replace('/', '--')}"
-        repo_dir = base / repo_dir_name
-        if repo_dir.exists() and repo_dir.is_dir():
-            return self._resolve_sparse_model_directory(repo_dir)
-
-        snapshots_dir = base / "snapshots"
-        if snapshots_dir.exists() and snapshots_dir.is_dir():
-            for snapshot_dir in sorted(
-                (p for p in snapshots_dir.iterdir() if p.is_dir()),
-                reverse=True,
-            ):
-                resolved = self._resolve_sparse_model_directory(snapshot_dir)
-                if resolved is not None:
-                    return resolved
-
-        return None
-
     # --- Properties (lazy loading) ---
     @property
     def device(self) -> str:
@@ -331,48 +374,6 @@ class RAG:
             )
             logger.info("Initializing embedding model: %s", self.embed_model_id)
         return self._embed_model
-
-    @property
-    def sparse_model(self) -> str | None:
-        """
-        Returns the configured sparse model id for hybrid retrieval.
-
-        Raises:
-            ValueError: If the sparse model is not supported.
-
-        Returns:
-            str | None: The sparse model id or None if not enabled.
-        """
-        if not self.enable_hybrid:
-            return None
-        if self.sparse_model_path:
-            expanded = self.sparse_model_path.expanduser()
-            if not expanded.exists():
-                raise ValueError(
-                    f"Sparse model path {expanded!s} does not exist."
-                )
-            resolved = self._resolve_sparse_model_directory(expanded)
-            if resolved is None:
-                raise ValueError(
-                    "Sparse model files not found under "
-                    f"{expanded!s}. Ensure the directory contains the downloaded "
-                    f"snapshot for {self.sparse_model_id!r}."
-                )
-            logger.info("Initializing sparse model from path: %s", resolved)
-            return str(resolved)
-
-        candidate_path = Path(self.sparse_model_id).expanduser()
-        if candidate_path.exists():
-            logger.info("Initializing sparse model from path: %s", candidate_path)
-            return str(candidate_path)
-
-        if self.sparse_model_id not in self._list_supported_sparse_models():
-            raise ValueError(
-                f"Sparse model {self.sparse_model_id!r} not supported. "
-                f"Supported: {self._list_supported_sparse_models()}"
-            )
-        logger.info("Initializing sparse model: %s", self.sparse_model_id)
-        return self.sparse_model_id
 
     @property
     def reranker(self) -> SentenceTransformerRerank:
@@ -433,12 +434,12 @@ class RAG:
         if not self.enable_hybrid:
             return None
         if self._sparse_embedding_fn is None:
-            model_name = self.sparse_model
-            if not model_name:
-                return None
-            logger.info("Initializing sparse embedding function for Milvus")
-            encoder = SparseTextEmbedding(model_name)
-            self._sparse_embedding_fn = FastEmbedSparseEmbeddingFunction(encoder)
+            vocab_path = self.sparse_vocab_path.expanduser()
+            logger.info(
+                "Initializing offline sparse vocabulary at %s", vocab_path
+            )
+            vocabulary = LocalSparseVocabulary(vocab_path)
+            self._sparse_embedding_fn = LocalSparseEmbeddingFunction(vocabulary)
         return self._sparse_embedding_fn
 
     # --- Build pieces ---
