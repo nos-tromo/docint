@@ -452,9 +452,9 @@ class RAG:
             QdrantVectorStore: The initialized vector store.
         """
         return QdrantVectorStore(
+            collection_name=self.qdrant_collection,
             client=self.qdrant_client,
             aclient=self.qdrant_aclient,
-            collection_name=self.qdrant_collection,
             enable_hybrid=self.enable_hybrid,
             fastembed_sparse_model=self.sparse_model,
         )
