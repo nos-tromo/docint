@@ -70,3 +70,18 @@ def test_select_collection_resets_cached_state(monkeypatch) -> None:
     assert rag.chat_engine is None
     assert rag.chat_memory is None
     assert rag.session_id is None
+
+
+def test_sparse_model_accepts_local_path(tmp_path) -> None:
+    rag = RAG()
+    rag.sparse_model_path = tmp_path
+
+    assert rag.sparse_model == str(tmp_path)
+
+
+def test_sparse_model_path_validation(tmp_path) -> None:
+    rag = RAG()
+    rag.sparse_model_path = tmp_path / "missing"
+
+    with pytest.raises(ValueError):
+        _ = rag.sparse_model

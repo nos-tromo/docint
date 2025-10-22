@@ -63,6 +63,10 @@ QDRANT_COL_DIR: str = os.getenv("QDRANT_COL_DIR", "qdrant_collections")
 QDRANT_URL: str = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
 EMBED_MODEL: str = os.getenv("EMBED_MODEL", "BAAI/bge-m3")
 SPARSE_MODEL: str = os.getenv("SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-attentions")
+_SPARSE_MODEL_PATH = os.getenv("SPARSE_MODEL_PATH")
+SPARSE_MODEL_PATH: Path | None = (
+    Path(_SPARSE_MODEL_PATH).expanduser() if _SPARSE_MODEL_PATH else None
+)
 RERANK_MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 GEN_MODEL: str = os.getenv("LLM", "qwen3:8b")
 RETRIEVE_SIMILARITY_TOP_K: int = int(os.getenv("RETRIEVE_SIMILARITY_TOP_K", "20"))
@@ -83,6 +87,7 @@ class RAG:
     # --- Models ---
     embed_model_id: str = EMBED_MODEL
     sparse_model_id: str = SPARSE_MODEL
+    sparse_model_path: Path | None = SPARSE_MODEL_PATH
     rerank_model_id: str = RERANK_MODEL
     gen_model_id: str = GEN_MODEL
 
@@ -273,6 +278,20 @@ class RAG:
         """
         if not self.enable_hybrid:
             return None
+        if self.sparse_model_path:
+            expanded = self.sparse_model_path.expanduser()
+            if not expanded.exists():
+                raise ValueError(
+                    f"Sparse model path {expanded!s} does not exist."
+                )
+            logger.info("Initializing sparse model from path: %s", expanded)
+            return str(expanded)
+
+        candidate_path = Path(self.sparse_model_id).expanduser()
+        if candidate_path.exists():
+            logger.info("Initializing sparse model from path: %s", candidate_path)
+            return str(candidate_path)
+
         if self.sparse_model_id not in self._list_supported_sparse_models():
             raise ValueError(
                 f"Sparse model {self.sparse_model_id!r} not supported. "
