@@ -1,4 +1,3 @@
-import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -6,8 +5,7 @@ from pathlib import Path
 import ollama
 import requests
 from PIL import Image
-
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 PROMPT_DIR: Path = Path(__file__).parent.parent.resolve() / "utils" / "prompts"
@@ -35,7 +33,7 @@ class OllamaPipeline:
         """
         Post-initialization to set up the Ollama host and load the system prompt.
         """
-        logger.info("Ollama host set to: %s", self.ollama_host)
+        logger.info("Ollama host set to: {}", self.ollama_host)
         self.sys_prompt = self.load_prompt()
 
     def _get_ollama_health(self) -> bool:
@@ -65,7 +63,7 @@ class OllamaPipeline:
         if not prompt_path.is_file():
             raise FileNotFoundError(f"Prompt file for keyword '{kw}' not found.")
         with open(prompt_path, "r", encoding="utf-8") as f:
-            logger.info("Loaded prompt from '%s'", prompt_path)
+            logger.info("Loaded prompt from '{}'", prompt_path)
             return f.read()
 
     def call_ollama_server(

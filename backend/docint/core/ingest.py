@@ -1,12 +1,11 @@
-import logging
 import os
 from pathlib import Path
 
 from docint.core.rag import RAG
 from docint.utils.logging_cfg import setup_logging
+from loguru import logger
 
 setup_logging()
-logger = logging.getLogger(__name__)
 
 DATA_PATH = os.getenv("DATA_PATH")
 

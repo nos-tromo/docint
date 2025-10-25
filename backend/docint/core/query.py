@@ -1,13 +1,12 @@
 import json
-import logging
 from pathlib import Path
 from time import time
 
 from docint.core.rag import RAG
 from docint.utils.logging_cfg import setup_logging
+from loguru import logger
 
 setup_logging()
-logger = logging.getLogger(__name__)
 
 
 RESULTS_DIR: Path = Path.home() / "docint" / "results"
@@ -53,7 +52,7 @@ def _store_output(
 
         with open(out_dir / f"{filename}.json", "w", encoding="utf-8") as f:
             json.dump(serializable, f, ensure_ascii=False, indent=2)
-    logger.info("Results stored in %s", out_dir / f"{filename}.json")
+    logger.info("Results stored in {}", out_dir / f"{filename}.json")
 
 
 def rag_pipeline() -> RAG:
@@ -82,11 +81,11 @@ def load_queries(q_path: Path = Path("queries.txt")) -> list[str]:
     """
     q_path = Path(q_path).resolve()
     if q_path.exists():
-        logger.info("Loading queries from %s", q_path)
+        logger.info("Loading queries from {}", q_path)
         with open(q_path, "r", encoding="utf-8") as f:
             return [line.strip() for line in f if line.strip()]
     else:
-        logger.info("Creating default query file at %s", q_path)
+        logger.info("Creating default query file at {}", q_path)
         default_query = "Summarize the content with a maximum of 15 sentences."
         with open(q_path, "w", encoding="utf-8") as f:
             f.write(default_query + "\n")
@@ -102,7 +101,7 @@ def run_query(rag: RAG, query: str, index: int) -> None:
         query (str): The query string.
         index (int): The index of the query (for logging and output purposes).
     """
-    logger.info("Running query %d: %s", index, query)
+    logger.info("Running query {}: {}", index, query)
     result = rag.run_query(query)
     timestamp = str(int(time()))
     _store_output(f"{timestamp}_{index}_result", result)

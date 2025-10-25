@@ -1,4 +1,3 @@
-import logging
 from pathlib import Path
 
 import pymupdf4llm
@@ -7,8 +6,7 @@ from llama_index.core.readers.base import BaseReader
 from llama_index.readers.docling import DoclingReader
 
 from docint.utils.mimetype import get_mimetype
-
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 
 class HybridPDFReader(BaseReader):
@@ -98,7 +96,7 @@ class HybridPDFReader(BaseReader):
             )
 
         logger.info(
-            "[HybridPDFReader] Loaded %d pages via PyMuPDF: %s",
+            "[HybridPDFReader] Loaded {} pages via PyMuPDF: {}",
             len(normalized_docs),
             path.name,
         )
@@ -128,7 +126,7 @@ class HybridPDFReader(BaseReader):
             )
 
         logger.info(
-            "[HybridPDFReader] Loaded %d pages via Docling: %s",
+            "[HybridPDFReader] Loaded {} pages via Docling: {}",
             len(normalized_docs),
             file_path.name,
         )
@@ -149,7 +147,7 @@ class HybridPDFReader(BaseReader):
             docs = self._from_pymupdf(file_path)
         except Exception as e:
             logger.warning(
-                "[HybridPDFReader] PyMuPDF failed for %s: %s → falling back to Docling",
+                "[HybridPDFReader] PyMuPDF failed for {}: {} → falling back to Docling",
                 file_path.name,
                 e,
             )
@@ -157,7 +155,7 @@ class HybridPDFReader(BaseReader):
                 docs = self._from_docling(file_path)
             except Exception as e2:
                 logger.error(
-                    "[HybridPDFReader] Docling failed for %s: %s", file_path.name, e2
+                    "[HybridPDFReader] Docling failed for {}: {}", file_path.name, e2
                 )
                 raise RuntimeError(f"Both PyMuPDF and Docling failed to read {file_path}") from e2
 

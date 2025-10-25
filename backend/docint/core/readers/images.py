@@ -1,5 +1,4 @@
 import base64
-import logging
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
@@ -11,8 +10,7 @@ from PIL import Image
 
 from docint.core.ollama_cfg import OllamaPipeline
 from docint.utils.mimetype import get_mimetype
-
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 
 @dataclass
@@ -100,7 +98,7 @@ class ImageReader(BaseReader):
         Returns:
             list[Document]: A list containing a single Document object with the processed image data.
         """
-        logger.info("[ImageReader] Loading image from %s", file)
+        logger.info("[ImageReader] Loading image from {}", file)
         file_path = Path(file) if not isinstance(file, Path) else file
         img = self._load_image(file_path)
         img_base64 = self._encode_img_to_base64(img)

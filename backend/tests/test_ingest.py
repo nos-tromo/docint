@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-import docint.utils.ingest as ingest
+import docint.core.ingest as ingest
 
 
 def test_get_inputs_uses_env_path(monkeypatch, tmp_path: Path) -> None:

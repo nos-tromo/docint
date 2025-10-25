@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -50,8 +49,7 @@ from docint.core.readers.images import ImageReader
 from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.tables import TableReader
 from docint.utils.clean_text import basic_clean
-
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 # --- Environment variables ---
 load_dotenv()
@@ -259,7 +257,7 @@ class RAG:
                 normalize=True,
                 device=self.device,
             )
-            logger.info("Initializing embedding model: %s", self.embed_model_id)
+            logger.info("Initializing embedding model: {}", self.embed_model_id)
         return self._embed_model
 
     @property
@@ -280,7 +278,7 @@ class RAG:
                 f"Sparse model {self.sparse_model_id!r} not supported. "
                 f"Supported: {self._list_supported_sparse_models()}"
             )
-        logger.info("Initializing sparse model: %s", self.sparse_model_id)
+        logger.info("Initializing sparse model: {}", self.sparse_model_id)
         return self.sparse_model_id
 
     @property
@@ -297,7 +295,7 @@ class RAG:
                 model=self.rerank_model_id,
                 device=self.device,
             )
-            logger.info("Initializing reranker model: %s", self.rerank_model_id)
+            logger.info("Initializing reranker model: {}", self.rerank_model_id)
         return self._reranker
 
     @property
@@ -318,7 +316,7 @@ class RAG:
                 thinking=self.thinking,
                 additional_kwargs=self.ollama_options,
             )
-            logger.info("Initializing generator model: %s", self.gen_model_id)
+            logger.info("Initializing generator model: {}", self.gen_model_id)
         return self._gen_model
 
     @property
@@ -332,7 +330,7 @@ class RAG:
         if self._qdrant_client is None:
             self._qdrant_client = QdrantClient(url=self.qdrant_url)
             logger.info(
-                "Qdrant client initialized: %s",
+                "Qdrant client initialized: {}",
                 self.qdrant_url,
             )
         return self._qdrant_client
@@ -348,7 +346,7 @@ class RAG:
         if self._qdrant_aclient is None:
             self._qdrant_aclient = AsyncQdrantClient(url=self.qdrant_url)
             logger.info(
-                "Qdrant async client initialized: %s",
+                "Qdrant async client initialized: {}",
                 self.qdrant_url,
             )
         return self._qdrant_aclient
@@ -558,21 +556,21 @@ class RAG:
 
         if audio_docs:
             logger.info(
-                "Parsing %d audio documents with SemanticSplitterNodeParser",
+                "Parsing {} audio documents with SemanticSplitterNodeParser",
                 len(audio_docs),
             )
             nodes.extend(self.semantic_node_parser.get_nodes_from_documents(audio_docs))
 
         if img_docs:
             logger.info(
-                "Parsing %d image documents with SemanticSplitterNodeParser",
+                "Parsing {} image documents with SemanticSplitterNodeParser",
                 len(img_docs),
             )
             nodes.extend(self.sentence_splitter.get_nodes_from_documents(img_docs))
 
         if json_docs:
             logger.info(
-                "Parsing %d JSON documents with SemanticSplitterNodeParser",
+                "Parsing {} JSON documents with SemanticSplitterNodeParser",
                 len(json_docs),
             )
             nodes.extend(self.semantic_node_parser.get_nodes_from_documents(json_docs))
@@ -591,7 +589,7 @@ class RAG:
 
             if pdf_docs_docling:
                 logger.info(
-                    "Parsing %d Docling JSON PDFs with DoclingNodeParser",
+                    "Parsing {} Docling JSON PDFs with DoclingNodeParser",
                     len(pdf_docs_docling),
                 )
                 nodes.extend(
@@ -599,13 +597,13 @@ class RAG:
                 )
             if pdf_docs_md:
                 logger.info(
-                    "Parsing %d Markdown PDFs with MarkdownNodeParser", len(pdf_docs_md)
+                    "Parsing {} Markdown PDFs with MarkdownNodeParser", len(pdf_docs_md)
                 )
                 nodes.extend(self.md_node_parser.get_nodes_from_documents(pdf_docs_md))
 
         if table_docs:
             logger.info(
-                "Parsing %d table documents with SemanticSplitterNodeParser",
+                "Parsing {} table documents with SemanticSplitterNodeParser",
                 len(table_docs),
             )
             nodes.extend(self.semantic_node_parser.get_nodes_from_documents(table_docs))
@@ -624,7 +622,7 @@ class RAG:
 
             if markdown_docs:
                 logger.info(
-                    "Parsing %d markdown documents with MarkdownNodeParser",
+                    "Parsing {} markdown documents with MarkdownNodeParser",
                     len(markdown_docs),
                 )
                 nodes.extend(
@@ -632,7 +630,7 @@ class RAG:
                 )
             if plain_docs:
                 logger.info(
-                    "Parsing %d plain text documents with SemanticSplitterNodeParser",
+                    "Parsing {} plain text documents with SemanticSplitterNodeParser",
                     len(plain_docs),
                 )
                 nodes.extend(
@@ -820,7 +818,8 @@ class RAG:
                     return sorted(names)
             except Exception as e:
                 logger.warning(
-                    "Qdrant API list_collections failed, will try FS fallback: %s", e
+                    "Qdrant API list_collections failed, will try FS fallback: {}",
+                    e,
                 )
         base = self.qdrant_host_dir
         if base is None:
@@ -831,7 +830,7 @@ class RAG:
                 return []
             return sorted([p.name for p in collections_dir.iterdir() if p.is_dir()])
         except Exception as e:
-            logger.warning("FS fallback list_collections failed: %s", e)
+            logger.warning("FS fallback list_collections failed: {}", e)
             return []
 
     def select_collection(self, name: str) -> None:
@@ -879,7 +878,7 @@ class RAG:
         except Exception:
             eff_k = None
         logger.info(
-            "Effective retrieval k=%s | top_n=%s | embed_device=%s | rerank_device=%s",
+            "Effective retrieval k={} | top_n={} | embed_device={} | rerank_device={}",
             eff_k,
             self.rerank_top_n,
             self.device,
@@ -910,7 +909,7 @@ class RAG:
         except Exception:
             eff_k = None
         logger.info(
-            "Effective retrieval k=%s | top_n=%s | embed_device=%s | rerank_device=%s",
+            "Effective retrieval k={} | top_n={} | embed_device={} | rerank_device={}",
             eff_k,
             self.rerank_top_n,
             self.device,
@@ -1314,7 +1313,7 @@ class RAG:
                 ).to_parquet(out_dir / "citations.parquet", index=False)
         except Exception as e:
             logger.warning(
-                "Skipping citations.parquet export (pandas/pyarrow not available?): %s",
+                "Skipping citations.parquet export (pandas/pyarrow not available?): {}",
                 e,
             )
 
