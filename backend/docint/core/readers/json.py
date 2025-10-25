@@ -1,4 +1,3 @@
-import logging
 from pathlib import Path
 
 from llama_index.core import Document
@@ -6,8 +5,7 @@ from llama_index.core.readers.base import BaseReader
 from llama_index.core.readers.json import JSONReader
 
 from docint.utils.mimetype import get_mimetype
-
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 
 class CustomJSONReader(BaseReader):
@@ -68,7 +66,7 @@ class CustomJSONReader(BaseReader):
         filename = file_path.name
         mimetype = get_mimetype(file_path)
 
-        logger.info("[CustomJSONReader] Loading JSON file: %s", file_path)
+        logger.info("[CustomJSONReader] Loading JSON file: {}", file_path)
 
         return self.json_reader.load_data(
             input_file=file_path,

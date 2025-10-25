@@ -1,41 +1,19 @@
-import logging
+from __future__ import annotations
+
 import os
-from collections.abc import Iterable
-from logging import Handler
-from logging.handlers import RotatingFileHandler
+import sys
 from pathlib import Path
 
+from loguru import logger
 
-def _remove_handlers(logger: logging.Logger, handlers: Iterable[Handler]) -> None:
-    """Remove specific handlers from a logger."""
-
-    for handler in handlers:
-        logger.removeHandler(handler)
-        handler.close()
+DEFAULT_ROTATION = "5 MB"
+DEFAULT_RETENTION = 3
 
 
-def setup_logging(
-    default_log_path: str | os.PathLike[str] | None = None,
-    *,
-    max_bytes: int = 5_000_000,
-    backup_count: int = 3,
-    force: bool = True,
+def _resolve_log_path(
+    default_log_path: str | os.PathLike[str] | None,
 ) -> Path:
-    """
-    Configure application logging with rotating file and console handlers.
-
-    Args:
-        default_log_path: Default path to the log file. Falls back to
-            ``<project_root>/.logs/docint.log`` when ``None``.
-        max_bytes: Maximum size of each log file before rotation.
-        backup_count: Number of rotated backups to keep.
-        force: Whether to clear existing handlers before applying the
-            configuration. This is helpful when the runtime (e.g. uvicorn)
-            installs handlers ahead of time.
-
-    Returns:
-        Path to the configured log file.
-    """
+    """Determine where log files should be written."""
 
     if default_log_path is None:
         default_log_path = (
@@ -45,52 +23,47 @@ def setup_logging(
     env_log_path = os.getenv("LOG_PATH")
     log_path = Path(env_log_path) if env_log_path else Path(default_log_path)
 
-    # Allow callers to pass a directory path instead of a full filename.
     if log_path.is_dir() or not log_path.suffix:
         log_path = log_path / "docint.log"
 
-    log_dir = log_path.parent
-    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    return log_path
 
-    log_format = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
-    formatter = logging.Formatter(log_format)
 
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    console_handler.setLevel(logging.INFO)
+def setup_logging(
+    default_log_path: str | os.PathLike[str] | None = None,
+    *,
+    rotation: str | int = DEFAULT_ROTATION,
+    retention: str | int | None = DEFAULT_RETENTION,
+    level: str = "INFO",
+    backtrace: bool = False,
+    diagnose: bool = False,
+) -> Path:
+    """Configure loguru-based logging for the application."""
 
-    file_handler = RotatingFileHandler(
-        log_path,
-        maxBytes=max_bytes,
-        backupCount=backup_count,
-        encoding="utf-8",
+    log_path = _resolve_log_path(default_log_path)
+
+    logger.remove()
+
+    logger.add(
+        sys.stderr,
+        level=level,
+        backtrace=backtrace,
+        diagnose=diagnose,
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<8} | {name} | {message}",
     )
-    file_handler.setFormatter(formatter)
-    file_handler.setLevel(logging.DEBUG)
 
-    root_logger = logging.getLogger()
+    logger.add(
+        log_path,
+        rotation=rotation,
+        retention=retention,
+        encoding="utf-8",
+        level="DEBUG",
+        backtrace=backtrace,
+        diagnose=diagnose,
+        enqueue=True,
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<8} | {name} | {message}",
+    )
 
-    if force:
-        for existing in list(root_logger.handlers):
-            root_logger.removeHandler(existing)
-    else:
-        # Remove handlers that duplicate the ones we're about to add to avoid
-        # stacking them when ``setup_logging`` is called multiple times.
-        duplicate_handlers: list[Handler] = []
-        for existing in root_logger.handlers:
-            if isinstance(existing, RotatingFileHandler):
-                if getattr(existing, "baseFilename", None) == str(log_path):
-                    duplicate_handlers.append(existing)
-            elif isinstance(existing, type(console_handler)):
-                duplicate_handlers.append(existing)
-
-        if duplicate_handlers:
-            _remove_handlers(root_logger, duplicate_handlers)
-
-    root_logger.setLevel(logging.INFO)
-    root_logger.addHandler(console_handler)
-    root_logger.addHandler(file_handler)
-
-    logging.getLogger("docint").info("docint logging initialized.")
-
+    logger.info("DocInt logging initialised")
     return log_path

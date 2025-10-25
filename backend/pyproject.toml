@@ -18,6 +18,7 @@ dependencies = [
     "llama-index-node-parser-docling>=0.4.0",
     "llama-index-readers-docling>=0.4.0",
     "llama-index-vector-stores-qdrant>=0.7.1",
+    "loguru>=0.7.2",
     "numpy>=2.3.2",
     "openai-whisper>=20250625",
     "pandas>=2.2.3",

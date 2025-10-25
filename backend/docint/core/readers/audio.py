@@ -1,4 +1,3 @@
-import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -11,8 +10,7 @@ from numpy import floating
 from numpy.typing import NDArray
 
 from docint.utils.mimetype import get_mimetype
-
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "turbo")
 
@@ -134,7 +132,7 @@ class AudioReader(BaseReader):
         Returns:
             str: The transcribed text.
         """
-        logger.info("[AudioReader] Loading audio from %s", file)
+        logger.info("[AudioReader] Loading audio from {}", file)
         file_path = Path(file) if not isinstance(file, Path) else file
         model = self._load_model()
         audio = self._load_audio(file_path)
