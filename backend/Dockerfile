@@ -8,11 +8,6 @@ RUN apt-get update && apt-get install -y \
 
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
 
-ENV PATH="/root/.local/bin:$PATH" \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONIOENCODING=utf-8 \
-    PYTHONUNBUFFERED=1
-
 COPY --from=ghcr.io/astral-sh/uv:0.9.2 /uv /uvx /bin/
 
 COPY . .

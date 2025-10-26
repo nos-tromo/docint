@@ -13,6 +13,9 @@ services:
       - DATA_PATH=/app/data
       - LOG_PATH=/app/.logs/backend.log
       - OLLAMA_URL=http://ollama:11434
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONIOENCODING=utf-8
+      - PYTHONUNBUFFERED=1
       - QDRANT_COL_DIR=/qdrant/storage/collections
       - QDRANT_URL=http://qdrant:6333
       - USE_DEVICE=auto
@@ -47,6 +50,9 @@ services:
       - LOG_PATH=/app/.logs/backend.log
       - NVIDIA_VISIBLE_DEVICES=all
       - OLLAMA_URL=http://ollama-gpu:11434
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONIOENCODING=utf-8
+      - PYTHONUNBUFFERED=1
       - QDRANT_COL_DIR=/qdrant/storage/collections
       - QDRANT_URL=http://qdrant:6333
       - USE_DEVICE=auto
