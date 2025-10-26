@@ -7,11 +7,14 @@ import {
   Text,
   HStack,
   Spacer,
+  Tabs,
+  Stack,
 } from "@chakra-ui/react";
 import { useEffect, useState } from "react";
 import CollectionPicker from "./components/CollectionPicker";
 import Chat from "./components/Chat";
 import { selectCollection } from "./api";
+import IngestionPanel from "./components/IngestionPanel";
 
 export default function App() {
   const { open, onOpen, onClose } = useDisclosure({ defaultOpen: true });
@@ -56,24 +59,43 @@ export default function App() {
           </Button>
         </HStack>
 
-        <Box mb={6} display="flex" gap={3} alignItems="center">
-          <Button onClick={onOpen} variant="outline">
-            {collection ? `Collection: ${collection}` : "Select collection"}
-          </Button>
-          {collection && (
-            <Text fontSize="sm" color="fg.muted">
-              Attached
-            </Text>
-          )}
-        </Box>
-
         <CollectionPicker
           isOpen={open}
           onClose={onClose}
           onAttached={attachCollection}
         />
 
-        <Chat key={chatKey} collection={collection} />
+        <Tabs.Root defaultValue="query" colorPalette="teal" variant="enclosed">
+          <Tabs.List>
+            <Tabs.Trigger value="query">Querying</Tabs.Trigger>
+            <Tabs.Trigger value="ingest">Ingestion</Tabs.Trigger>
+          </Tabs.List>
+          <Tabs.Content value="query" px={0}>
+            <Stack gap={6}>
+              <Box display="flex" gap={3} alignItems="center">
+                <Button onClick={onOpen} variant="outline">
+                  {collection ? `Collection: ${collection}` : "Select collection"}
+                </Button>
+                {collection && (
+                  <Text fontSize="sm" color="fg.muted">
+                    Attached
+                  </Text>
+                )}
+              </Box>
+
+              <Chat key={chatKey} collection={collection} />
+            </Stack>
+          </Tabs.Content>
+          <Tabs.Content value="ingest" px={0}>
+            <IngestionPanel
+              currentCollection={collection}
+              onCollectionAttached={(name) => {
+                attachCollection(name);
+                selectCollection(name).catch(() => {});
+              }}
+            />
+          </Tabs.Content>
+        </Tabs.Root>
       </Container>
     </Box>
   );
