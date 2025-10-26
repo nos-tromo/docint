@@ -11,7 +11,6 @@ from typing import Any, Callable
 
 import pandas as pd
 import torch
-from dotenv import load_dotenv
 from fastembed import SparseTextEmbedding
 from llama_index.core import (
     Response,
@@ -52,7 +51,6 @@ from docint.utils.clean_text import basic_clean
 from loguru import logger
 
 # --- Environment variables ---
-load_dotenv()
 DATA_PATH: Path = Path(os.getenv("DATA_PATH", Path.home() / "docint" / "data"))
 CURRENT_DIR = Path(__file__).parent.resolve()
 REQUIRED_EXTS_PATH: Path = Path(
