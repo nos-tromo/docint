@@ -55,7 +55,7 @@ export default function App() {
               <Heading size="lg" fontFamily="heading">
                 Document Intelligence
               </Heading>
-              <Text color="fg.muted">Manage and explore your collections.</Text>
+              <Text color="fg.muted">Manage and explore your data.</Text>
             </Box>
             <Spacer />
             <Button onClick={quitSession} variant="outline">
@@ -95,7 +95,7 @@ export default function App() {
                   justifyContent="center"
                   py={3}
                 >
-                  Querying
+                  Query
                 </Tabs.Trigger>
                 <Tabs.Trigger
                   value="ingest"
@@ -103,7 +103,7 @@ export default function App() {
                   justifyContent="center"
                   py={3}
                 >
-                  Ingestion
+                  Ingest
                 </Tabs.Trigger>
               </Tabs.List>
               <Tabs.Content value="query" px={{ base: 4, md: 6 }} py={6}>
