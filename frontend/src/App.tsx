@@ -114,7 +114,7 @@ export default function App() {
             </Box>
             <Spacer />
             <Button onClick={quitSession} variant="outline">
-              Quit session
+              Reset
             </Button>
           </HStack>
 
