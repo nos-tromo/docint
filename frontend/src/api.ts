@@ -28,3 +28,18 @@ export const askQuery = async (
   const { data } = await API.post("/query", { question, session_id: sessionId });
   return data;
 };
+
+export type IngestionResponse = {
+  ok: boolean;
+  collection: string;
+  data_dir: string;
+  hybrid: boolean;
+};
+
+export const ingestCollection = async (
+  collection: string,
+  hybrid: boolean,
+): Promise<IngestionResponse> => {
+  const { data } = await API.post("/ingest", { collection, hybrid });
+  return data;
+};
