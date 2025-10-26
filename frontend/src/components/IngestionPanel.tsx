@@ -110,7 +110,7 @@ export default function IngestionPanel({
         loading={isLoading}
         width="full"
       >
-        Start ingestion
+        Start
       </Button>
     </Stack>
   );
