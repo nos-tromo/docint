@@ -181,7 +181,6 @@ def ingest(payload: IngestIn) -> dict[str, object]:
             "ok": True,
             "collection": name,
             "data_dir": str(data_dir),
-            "hybrid": payload.hybrid if payload.hybrid is not None else True,
         }
     except HTTPException:
         raise
