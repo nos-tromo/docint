@@ -1,7 +1,10 @@
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from docint.core import ingest as ingest_module
 from docint.core.rag import RAG
 from docint.utils.logging_cfg import setup_logging
 
@@ -36,6 +39,11 @@ class QueryOut(BaseModel):
     answer: str
     sources: list[dict] = []
     session_id: str
+
+
+class IngestIn(BaseModel):
+    collection: str
+    hybrid: bool | None = True
 
 
 @app.get("/collections/list", response_model=list[str], tags=["Collections"])
@@ -127,6 +135,54 @@ def query(payload: QueryIn):
         sources = data.get("sources") or []
 
         return {"answer": answer, "sources": sources, "session_id": session_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _resolve_data_dir() -> Path:
+    """Return the configured data directory for ingestion."""
+
+    if ingest_module.DATA_PATH:
+        return Path(ingest_module.DATA_PATH)
+    return Path.home() / "docint" / "data"
+
+
+@app.post("/ingest", tags=["Ingestion"])
+def ingest(payload: IngestIn) -> dict[str, object]:
+    """Trigger ingestion for the requested collection using the configured data directory."""
+
+    try:
+        name = payload.collection.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Collection name required")
+
+        data_dir = _resolve_data_dir()
+        if not data_dir.is_dir():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Data directory does not exist: {data_dir}",
+            )
+
+        ingest_module.ingest_docs(name, data_dir, hybrid=payload.hybrid if payload.hybrid is not None else True)
+
+        # After ingestion, prepare the in-memory RAG instance for immediate querying.
+        rag.select_collection(name)
+        try:
+            if getattr(rag, "index", None) is None:
+                rag.create_index()
+            rag.create_query_engine()
+        except Exception:
+            # If eager preparation fails, queries will lazily prepare the engine.
+            pass
+
+        return {
+            "ok": True,
+            "collection": name,
+            "data_dir": str(data_dir),
+            "hybrid": payload.hybrid if payload.hybrid is not None else True,
+        }
     except HTTPException:
         raise
     except Exception as e:
