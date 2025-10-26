@@ -115,11 +115,16 @@ export default function IngestionPanel({
           </Box>
           <Switch.Root
             checked={hybrid}
-            onCheckedChange={(details) => setHybrid(details.checked)}
+            onCheckedChange={(details) =>
+              setHybrid((prev) =>
+                typeof details.checked === "boolean" ? details.checked : !prev,
+              )
+            }
           >
             <Switch.Control>
               <Switch.Thumb />
             </Switch.Control>
+            <Switch.HiddenInput />
           </Switch.Root>
         </Box>
       </Stack>
