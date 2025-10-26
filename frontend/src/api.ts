@@ -38,8 +38,7 @@ export type IngestionResponse = {
 
 export const ingestCollection = async (
   collection: string,
-  hybrid: boolean,
 ): Promise<IngestionResponse> => {
-  const { data } = await API.post("/ingest", { collection, hybrid });
+  const { data } = await API.post("/ingest", { collection });
   return data;
 };
