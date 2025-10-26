@@ -67,8 +67,8 @@ export default function App() {
 
         <Tabs.Root defaultValue="query" colorPalette="teal" variant="enclosed">
           <Tabs.List>
-            <Tabs.Trigger value="query">Querying</Tabs.Trigger>
-            <Tabs.Trigger value="ingest">Ingestion</Tabs.Trigger>
+            <Tabs.Trigger value="query">Query</Tabs.Trigger>
+            <Tabs.Trigger value="ingest">Ingest</Tabs.Trigger>
           </Tabs.List>
           <Tabs.Content value="query" px={0}>
             <Stack gap={6}>
