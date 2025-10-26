@@ -108,7 +108,7 @@ export default function IngestionPanel({
         onClick={submit}
         colorScheme="teal"
         loading={isLoading}
-        alignSelf="center"
+        width="full"
       >
         Start ingestion
       </Button>
