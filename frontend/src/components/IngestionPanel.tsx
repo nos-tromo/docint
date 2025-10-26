@@ -8,7 +8,6 @@ import {
   Heading,
   Input,
   Stack,
-  Switch,
   Text,
 } from "@chakra-ui/react";
 import { ingestCollection } from "../api";
@@ -25,7 +24,6 @@ export default function IngestionPanel({
   const [collection, setCollection] = useState<string>(
     currentCollection ?? "",
   );
-  const [hybrid, setHybrid] = useState(true);
   const [status, setStatus] = useState<
     | { type: "success"; message: string }
     | { type: "error"; message: string }
@@ -47,10 +45,10 @@ export default function IngestionPanel({
     try {
       setIsLoading(true);
       setStatus(null);
-      const response = await ingestCollection(name, hybrid);
+      const response = await ingestCollection(name);
       setStatus({
         type: "success",
-        message: `Ingestion complete for "${response.collection}" using ${response.hybrid ? "hybrid" : "vector"} search. Documents loaded from ${response.data_dir}.`,
+        message: `Ingestion complete for "${response.collection}". Documents loaded from ${response.data_dir}.`,
       });
       setCollection(response.collection);
       onCollectionAttached(response.collection);
@@ -104,33 +102,15 @@ export default function IngestionPanel({
             bg="bg.panel"
           />
         </Field.Root>
-        <Box display="flex" alignItems="center" justifyContent="space-between">
-          <Box>
-            <Text fontWeight="semibold" mb={0}>
-              Enable hybrid search
-            </Text>
-            <Text fontSize="sm" color="fg.muted">
-              Combines sparse and dense retrieval for improved relevance.
-            </Text>
-          </Box>
-          <Switch.Root
-            checked={hybrid}
-            onCheckedChange={(details) => setHybrid(details.checked)}
-          >
-            <Switch.Control>
-              <Switch.Thumb />
-            </Switch.Control>
-          </Switch.Root>
-        </Box>
       </Stack>
 
       <Button
         onClick={submit}
         colorScheme="teal"
         loading={isLoading}
-        alignSelf="flex-start"
+        width="full"
       >
-        Start ingestion
+        Start
       </Button>
     </Stack>
   );
