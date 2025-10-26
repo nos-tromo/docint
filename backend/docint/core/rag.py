@@ -215,6 +215,36 @@ class RAG:
         return self._qdrant_host_dir
 
     @property
+    def _fallback_to_cpu(self, reason: Exception, context: str) -> None:
+        """Force the runtime device back to CPU after a device-specific failure."""
+
+        if self._device == "cpu":
+            raise reason
+
+        logger.warning(
+            "Falling back to CPU after %s failed on %s: %s",
+            context,
+            self._device,
+            reason,
+        )
+        self._device = "cpu"
+
+    def _should_try_cpu(self, exc: Exception) -> bool:
+        """Determine if an exception warrants a retry on CPU."""
+
+        if self._device in {None, "cpu"}:
+            return False
+        message = str(exc).lower()
+        return any(
+            marker in message
+            for marker in (
+                "meta tensor",
+                "torch.nn.module.to_empty",
+                "module from meta",
+                "mps",
+            )
+        )
+
     def device(self) -> str:
         """
         Returns the device being used for computation.
@@ -250,12 +280,27 @@ class RAG:
             BaseEmbedding: The initialized embedding model.
         """
         if self._embed_model is None:
-            self._embed_model = HuggingFaceEmbedding(
-                model_name=self.embed_model_id,
-                normalize=True,
-                device=self.device,
-            )
-            logger.info("Initializing embedding model: {}", self.embed_model_id)
+            try:
+                self._embed_model = HuggingFaceEmbedding(
+                    model_name=self.embed_model_id,
+                    normalize=True,
+                    device=self.device,
+                )
+                logger.info("Initializing embedding model: {}", self.embed_model_id)
+            except RuntimeError as exc:
+                if self._should_try_cpu(exc):
+                    self._fallback_to_cpu(exc, "embedding model initialization")
+                    self._embed_model = HuggingFaceEmbedding(
+                        model_name=self.embed_model_id,
+                        normalize=True,
+                        device=self.device,
+                    )
+                    logger.info(
+                        "Re-initialized embedding model %s on CPU after device failure.",
+                        self.embed_model_id,
+                    )
+                else:
+                    raise
         return self._embed_model
 
     @property
@@ -288,12 +333,27 @@ class RAG:
             SentenceTransformerRerank: The initialized reranker model.
         """
         if self._reranker is None:
-            self._reranker = SentenceTransformerRerank(
-                top_n=self.rerank_top_n,
-                model=self.rerank_model_id,
-                device=self.device,
-            )
-            logger.info("Initializing reranker model: {}", self.rerank_model_id)
+            try:
+                self._reranker = SentenceTransformerRerank(
+                    top_n=self.rerank_top_n,
+                    model=self.rerank_model_id,
+                    device=self.device,
+                )
+                logger.info("Initializing reranker model: {}", self.rerank_model_id)
+            except RuntimeError as exc:
+                if self._should_try_cpu(exc):
+                    self._fallback_to_cpu(exc, "reranker initialization")
+                    self._reranker = SentenceTransformerRerank(
+                        top_n=self.rerank_top_n,
+                        model=self.rerank_model_id,
+                        device=self.device,
+                    )
+                    logger.info(
+                        "Re-initialized reranker model %s on CPU after device failure.",
+                        self.rerank_model_id,
+                    )
+                else:
+                    raise
         return self._reranker
 
     @property
