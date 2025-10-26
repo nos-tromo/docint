@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "docint"
 version = "0.1.0"
 description = "Proof of concept RAG application"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "fastapi>=0.116.1",
     "fastembed>=0.7.3",
