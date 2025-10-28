@@ -473,6 +473,15 @@ class RAG:
         return StorageContext.from_defaults(vector_store=vector_store)
 
     def _index(self, storage_ctx: StorageContext) -> VectorStoreIndex:
+        """
+        Creates the vector store index for document embeddings.
+
+        Args:
+            storage_ctx (StorageContext): The storage context for document embeddings.
+
+        Returns:
+            VectorStoreIndex: The created vector store index.
+        """
         return VectorStoreIndex(
             nodes=self.nodes,
             storage_context=storage_ctx,
