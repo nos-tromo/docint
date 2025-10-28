@@ -4,6 +4,7 @@ from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from llama_index.core.readers.json import JSONReader
 
+from docint.utils.hashing import ensure_file_hash
 from docint.utils.mimetype import get_mimetype
 from loguru import logger
 
@@ -69,18 +70,21 @@ class CustomJSONReader(BaseReader):
 
         logger.info("[CustomJSONReader] Loading JSON file: {}", file_path_str)
 
+        extra_info = {
+            "file_path": file_path_str,
+            "file_name": filename,
+            "filename": filename,
+            "file_type": mimetype,
+            "mimetype": mimetype,
+            "source": "json",
+            "origin": {
+                "filename": filename,
+                "mimetype": mimetype,
+            },
+        }
+        ensure_file_hash(extra_info, path=file_path)
+
         return self.json_reader.load_data(
             input_file=file_path_str,
-            extra_info={
-                "file_path": file_path_str,
-                "file_name": filename,
-                "filename": filename,
-                "file_type": mimetype,
-                "mimetype": mimetype,
-                "source": "json",
-                "origin": {
-                    "filename": filename,
-                    "mimetype": mimetype,
-                },
-            },
+            extra_info=extra_info,
         )

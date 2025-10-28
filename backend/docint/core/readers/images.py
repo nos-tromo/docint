@@ -8,6 +8,7 @@ from llama_index.core.readers.base import BaseReader
 from llama_index.core.schema import MediaResource
 from PIL import Image
 
+from docint.utils.hashing import ensure_file_hash
 from docint.utils.mimetype import get_mimetype
 from docint.utils.ollama_cfg import OllamaPipeline
 from loguru import logger
@@ -71,20 +72,23 @@ class ImageReader(BaseReader):
             raise ValueError("file_path is not set.")
         filename = file_path.name
         mimetype = get_mimetype(file_path)
+        metadata = {
+            "file_path": str(file_path),
+            "file_name": filename,
+            "filename": filename,
+            "file_type": mimetype,
+            "mimetype": mimetype,
+            "source": source,
+            "origin": {
+                "filename": filename,
+                "mimetype": mimetype,
+            },
+        }
+        ensure_file_hash(metadata, path=file_path)
+
         return Document(
             text_resource=MediaResource(text=text, mimetype=mimetype),
-            metadata={
-                "file_path": str(file_path),
-                "file_name": filename,
-                "filename": filename,
-                "file_type": mimetype,
-                "mimetype": mimetype,
-                "source": source,
-                "origin": {
-                    "filename": filename,
-                    "mimetype": mimetype,
-                },
-            },
+            metadata=metadata,
         )
 
     def load_data(self, file: str | Path, **kwargs) -> list[Document]:

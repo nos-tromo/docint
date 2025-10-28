@@ -9,6 +9,7 @@ from llama_index.core.schema import MediaResource
 from numpy import floating
 from numpy.typing import NDArray
 
+from docint.utils.hashing import ensure_file_hash
 from docint.utils.mimetype import get_mimetype
 from loguru import logger
 
@@ -106,20 +107,23 @@ class AudioReader(BaseReader):
         except Exception:
             pass
 
+        metadata = {
+            "file_path": str(file_path),
+            "file_name": filename,
+            "filename": filename,
+            "file_type": mimetype,
+            "mimetype": mimetype,
+            "source": source,
+            "origin": {
+                "filename": filename,
+                "mimetype": mimetype,
+            },
+        }
+        ensure_file_hash(metadata, path=file_path)
+
         return Document(
             text_resource=MediaResource(text=text, mimetype=mimetype),
-            metadata={
-                "file_path": str(file_path),
-                "file_name": filename,
-                "filename": filename,
-                "file_type": mimetype,
-                "mimetype": mimetype,
-                "source": source,
-                "origin": {
-                    "filename": filename,
-                    "mimetype": mimetype,
-                },
-            },
+            metadata=metadata,
         )
 
     def load_data(self, file: str | Path, **kwargs) -> list[Document]:

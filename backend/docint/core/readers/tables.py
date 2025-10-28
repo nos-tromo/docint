@@ -9,6 +9,7 @@ from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 
 from docint.utils.clean_text import basic_clean
+from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.mimetype import get_mimetype
 
 PathLike = str | Path
@@ -199,6 +200,8 @@ class TableReader(BaseReader):
         columns = list(df.columns)
         count = 0
 
+        file_hash = compute_file_hash(file_path)
+
         for i, row in df.iterrows():
             row_dict = {k: (None if pd.isna(v) else v) for k, v in row.items()}
             if self.row_filter and not self.row_filter(row_dict):
@@ -229,6 +232,8 @@ class TableReader(BaseReader):
 
             for k in meta_cols:
                 metadata[k] = row_dict.get(k, "")
+
+            ensure_file_hash(metadata, file_hash=file_hash)
 
             # Only set doc_id if present; passing None triggers Pydantic validation in some versions
             if self.id_col and row_dict.get(self.id_col) is not None:

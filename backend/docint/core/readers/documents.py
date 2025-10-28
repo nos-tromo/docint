@@ -5,6 +5,7 @@ from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from llama_index.readers.docling import DoclingReader
 
+from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.mimetype import get_mimetype
 from loguru import logger
 
@@ -82,11 +83,14 @@ class HybridPDFReader(BaseReader):
         if not nonempty_docs:
             raise ValueError("PyMuPDF produced only empty pages")
 
+        file_hash = compute_file_hash(path)
+
         normalized_docs = []
         for d in nonempty_docs:
             page_meta = getattr(d, "metadata", {}) or {}
             meta = self._standardize_metadata(path, page_meta)
             meta["doc_format"] = "markdown"
+            ensure_file_hash(meta, file_hash=file_hash)
             normalized_docs.append(
                 Document(
                     text=d.text,
@@ -110,6 +114,8 @@ class HybridPDFReader(BaseReader):
             path (Path): The file path of the document.
         """
         docs = self.docling_reader.load_data(file_path)
+        file_hash = compute_file_hash(file_path)
+
         normalized_docs = []
         for d in docs:
             page_meta = getattr(d, "metadata", {}) or {}
@@ -117,6 +123,7 @@ class HybridPDFReader(BaseReader):
             meta["doc_format"] = "json"
             # merge existing Docling metadata where available
             meta.update({k: v for k, v in page_meta.items() if k not in meta})
+            ensure_file_hash(meta, file_hash=file_hash)
             normalized_docs.append(
                 Document(
                     text=getattr(d, "text", "") or getattr(d, "text_resource", None),
