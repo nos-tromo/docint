@@ -158,7 +158,7 @@ class RAG:
     query_engine: RetrieverQueryEngine | None = field(default=None, init=False)
 
     # Chat/session runtime
-    chat_engine: RetrieverQueryEngine | None = field(default=None, init=False)
+    chat_engine: RetrieverQueryEngine | CondenseQuestionChatEngine | None = field(default=None, init=False)
     chat_memory: Any | None = field(default=None, init=False)
     _SessionMaker: Any | None = field(default=None, init=False, repr=False)
     session_id: str | None = field(default=None, init=False, repr=False)
@@ -1440,6 +1440,10 @@ class RAG:
 
         Returns:
             str: The normalized response from the chat engine.
+
+        Raises:
+            ValueError: If the user message is empty or the session ID is invalid.
+            RuntimeError: If the query engine has not been initialized.
         """
         if not user_msg.strip():
             raise ValueError("Chat prompt cannot be empty.")
@@ -1454,6 +1458,8 @@ class RAG:
             session_id = self.start_session(session_id)
 
         # Build a retrieval query that includes the rolling conversation summary
+        if session_id is None:
+            raise ValueError("Session ID cannot be None.")
         summary = self._get_rolling_summary(session_id)
         if summary:
             retrieval_query = f"{summary}\n\nUser question: {user_msg}"
