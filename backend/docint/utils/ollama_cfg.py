@@ -4,8 +4,8 @@ from pathlib import Path
 
 import ollama
 import requests
-from PIL import Image
 from loguru import logger
+from PIL import Image
 
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 PROMPT_DIR: Path = Path(__file__).parent.parent.resolve() / "utils" / "prompts"
