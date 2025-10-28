@@ -683,7 +683,7 @@ class RAG:
 
         if skipped:
             display = [name or h[:12] for h, name in skipped.items()]
-            logger.info(
+            logger.warning(
                 "Skipping {} file(s) already ingested in collection '{}': {}",
                 len(skipped),
                 self.qdrant_collection,
