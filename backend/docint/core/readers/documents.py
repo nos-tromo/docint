@@ -56,9 +56,9 @@ class HybridPDFReader(BaseReader):
         }
         if page_meta and isinstance(page_meta, dict):
             if "page" in page_meta:
-                base_meta["page_number"] = int(page_meta["page"])
+                base_meta["page_number"] = [str(page_meta["page"])]
             elif "page_number" in page_meta:
-                base_meta["page_number"] = int(page_meta["page_number"])
+                base_meta["page_number"] = [str(page_meta["page_number"])]
         return base_meta
 
     def _from_pymupdf(self, path: Path) -> list[Document]:
