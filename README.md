@@ -70,10 +70,16 @@ Launch the browser app: `http://localhost:5173/`.
 
 Launch the browser app: `http://localhost:8080/`.
 
+### Unit tests
+
+```bash
+uv run pytest
+```
+
 ## Roadmap
 
+- Expand GUI for ingestion ✅
+- Add WhisperReader for audio/video ✅
+- Add OCRReader for images ✅
 - Explicit summarization feature
-- Expand GUI for ingestion
-- Add WhisperReader for audio/video
-- Add OCRReader for images
 - Implement GraphRAG

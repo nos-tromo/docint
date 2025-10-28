@@ -473,6 +473,15 @@ class RAG:
         return StorageContext.from_defaults(vector_store=vector_store)
 
     def _index(self, storage_ctx: StorageContext) -> VectorStoreIndex:
+        """
+        Creates the vector store index for document embeddings.
+
+        Args:
+            storage_ctx (StorageContext): The storage context for document embeddings.
+
+        Returns:
+            VectorStoreIndex: The created vector store index.
+        """
         return VectorStoreIndex(
             nodes=self.nodes,
             storage_context=storage_ctx,
@@ -480,8 +489,9 @@ class RAG:
         )
 
     def _ensure_file_hash_metadata(self) -> None:
-        """Populate missing ``file_hash`` entries on loaded documents."""
-
+        """
+        Populate missing ``file_hash`` entries on loaded documents.
+        """
         if not self.docs:
             return
 
@@ -539,6 +549,149 @@ class RAG:
 
             ensure_file_hash(metadata, file_hash=digest)
 
+    @staticmethod
+    def _extract_file_hash(data: Any) -> str | None:
+        """
+        Best-effort extraction of a ``file_hash`` value from nested payloads.
+        
+        Args:
+            data (Any): The data dictionary to search for a file hash.
+        """
+
+        if not isinstance(data, dict):
+            return None
+
+        candidate = data.get("file_hash")
+        if isinstance(candidate, str) and candidate:
+            return candidate
+
+        origin = data.get("origin")
+        if isinstance(origin, dict):
+            candidate = origin.get("file_hash")
+            if isinstance(candidate, str) and candidate:
+                return candidate
+
+        for key in ("metadata", "meta", "extra_info"):
+            nested = data.get(key)
+            if isinstance(nested, dict):
+                nested_hash = RAG._extract_file_hash(nested)
+                if nested_hash:
+                    return nested_hash
+
+        for value in data.values():
+            if isinstance(value, dict):
+                nested_hash = RAG._extract_file_hash(value)
+                if nested_hash:
+                    return nested_hash
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        nested_hash = RAG._extract_file_hash(item)
+                        if nested_hash:
+                            return nested_hash
+        return None
+
+    def _get_existing_file_hashes(self) -> set[str]:
+        """
+        Fetch file hashes already stored in the active Qdrant collection.
+
+        Returns:
+            set[str]: A set of existing file hashes.
+        """
+
+        existing: set[str] = set()
+
+        try:
+            _ = self.qdrant_client
+        except Exception as exc:
+            logger.warning(
+                "Unable to initialize Qdrant client for hash lookup: {}", exc
+            )
+            return existing
+
+        offset: Any = None
+        while True:
+            try:
+                points, offset = self.qdrant_client.scroll(
+                    collection_name=self.qdrant_collection,
+                    offset=offset,
+                    limit=256,
+                    with_vectors=False,
+                    with_payload=True,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to fetch existing hashes from collection '{}': {}",
+                    self.qdrant_collection,
+                    exc,
+                )
+                break
+
+            if not points:
+                break
+
+            for point in points:
+                payload = getattr(point, "payload", None)
+                if isinstance(payload, dict):
+                    file_hash = self._extract_file_hash(payload)
+                    if file_hash:
+                        existing.add(file_hash)
+
+            if offset is None:
+                break
+
+        return existing
+
+    def _filter_docs_by_existing_hashes(self) -> None:
+        """Remove documents whose hashes already exist in the target collection."""
+
+        if not self.docs:
+            return
+
+        existing_hashes = self._get_existing_file_hashes()
+        if not existing_hashes:
+            return
+
+        filtered_docs: list[Document] = []
+        skipped: dict[str, str] = {}
+
+        for doc in self.docs:
+            metadata = getattr(doc, "metadata", {}) or {}
+            file_hash = self._extract_file_hash(metadata)
+            if not file_hash or file_hash not in existing_hashes:
+                filtered_docs.append(doc)
+                continue
+
+            filename = (
+                metadata.get("file_name")
+                or metadata.get("filename")
+                or metadata.get("file_path")
+                or metadata.get("path")
+                or metadata.get("source")
+                or ""
+            )
+            if not filename:
+                origin = metadata.get("origin")
+                if isinstance(origin, dict):
+                    filename = (
+                        origin.get("filename")
+                        or origin.get("file_path")
+                        or origin.get("path")
+                        or ""
+                    )
+            skipped[file_hash] = filename
+
+        if skipped:
+            display = [name or h[:12] for h, name in skipped.items()]
+            logger.warning(
+                "Skipping {} file(s) already ingested in collection '{}': {}",
+                len(skipped),
+                self.qdrant_collection,
+                ", ".join(sorted(display)),
+            )
+
+        self.docs = filtered_docs
+
     def _create_nodes(self) -> None:
         """
         Converts loaded documents into nodes using the appropriate parsers.
@@ -550,6 +703,7 @@ class RAG:
             raise RuntimeError("Directory reader is not initialized.")
         self.docs = self.dir_reader.load_data()
         self._ensure_file_hash_metadata()
+        self._filter_docs_by_existing_hashes()
         cleaned_docs = []
         for doc in self.docs:
             if hasattr(doc, "text") and isinstance(doc.text, str):
