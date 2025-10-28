@@ -8,7 +8,7 @@ from loguru import logger
 from PIL import Image
 
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-PROMPT_DIR: Path = Path(__file__).parent.parent.resolve() / "utils" / "prompts"
+PROMPT_DIR: Path = Path(__file__).parents[2].resolve() / "utils" / "prompts"
 VLM = os.getenv("VLM", "qwen2.5vl:7b")
 
 

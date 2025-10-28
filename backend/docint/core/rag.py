@@ -53,11 +53,9 @@ from docint.utils.hashing import compute_file_hash, ensure_file_hash
 
 # --- Environment variables ---
 DATA_PATH: Path = Path(os.getenv("DATA_PATH", Path.home() / "docint" / "data"))
-CURRENT_DIR = Path(__file__).parent.resolve()
-REQUIRED_EXTS_PATH: Path = Path(
-    os.getenv("REQUIRED_EXTS_PATH", CURRENT_DIR / "readers" / "required_exts.txt")
-)
-OLLAMA_URL: str = os.getenv("OLLAMA_URL", "http://localhost:11434")
+REQUIRED_EXTS_PATH: Path = Path(__file__).parent.resolve() / "readers" / "required_exts.txt"
+PROMPT_DIR: Path = Path(__file__).parents[2].resolve() / "utils" / "prompts"
+OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 QDRANT_COL_DIR: str = os.getenv("QDRANT_COL_DIR", "qdrant_collections")
 QDRANT_URL: str = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
 EMBED_MODEL: str = os.getenv("EMBED_MODEL", "BAAI/bge-m3")
