@@ -127,3 +127,4 @@ docker-compose.override.yml
 !backend/tests/**.py
 !backend/docint/utils/prompts/*.txt
 !backend/docint/core/readers/required_exts.txt
+!AGENTS.md
