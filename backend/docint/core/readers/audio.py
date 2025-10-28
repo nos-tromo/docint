@@ -48,17 +48,18 @@ class AudioReader(BaseReader):
             raise ValueError("Model ID is not set.")
         return whisper.load_model(self.model_id)
 
-    def _load_audio(self, file_path: Path) -> NDArray[floating[Any]]:
+    def _load_audio(self, file_path: str | Path) -> NDArray[floating[Any]]:
         """
         Load audio from a file path.
 
         Args:
-            file_path (Path): The path to the audio file.
+            file_path (str | Path): The path to the audio file.
 
         Returns:
             NDArray[floating[Any]]: The loaded audio as a NumPy array.
         """
-        return whisper.load_audio(file=file_path)
+        file = file_path if isinstance(file_path, str) else str(file_path)
+        return whisper.load_audio(file=file)
 
     def _transcribe_audio(
         self, audio: NDArray[floating[Any]], model: whisper.Whisper
