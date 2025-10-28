@@ -63,15 +63,16 @@ class CustomJSONReader(BaseReader):
                 f"Expected a .json or .jsonl file but got: {file_path.suffix}"
             )
 
+        file_path_str = str(file_path)
         filename = file_path.name
         mimetype = get_mimetype(file_path)
 
-        logger.info("[CustomJSONReader] Loading JSON file: {}", file_path)
+        logger.info("[CustomJSONReader] Loading JSON file: {}", file_path_str)
 
         return self.json_reader.load_data(
-            input_file=file_path,
+            input_file=file_path_str,
             extra_info={
-                "file_path": str(file_path),
+                "file_path": file_path_str,
                 "file_name": filename,
                 "filename": filename,
                 "file_type": mimetype,
