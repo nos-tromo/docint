@@ -93,3 +93,35 @@ def test_ensure_file_hash_metadata(tmp_path: Path) -> None:
     expected_hash = compute_file_hash(file_path)
     assert doc.metadata["file_hash"] == expected_hash
     assert doc.metadata["origin"]["file_hash"] == expected_hash
+
+
+def test_filter_docs_by_existing_hashes(monkeypatch) -> None:
+    doc_new = Document(
+        text="keep",
+        metadata={
+            "file_hash": "new-hash",
+            "file_name": "fresh.txt",
+            "origin": {"file_hash": "new-hash"},
+        },
+    )
+    doc_existing = Document(
+        text="skip",
+        metadata={
+            "file_hash": "existing-hash",
+            "file_name": "old.txt",
+            "origin": {"file_hash": "existing-hash"},
+        },
+    )
+
+    rag = RAG()
+    rag.docs = [doc_new, doc_existing]
+
+    monkeypatch.setattr(
+        RAG,
+        "_get_existing_file_hashes",
+        lambda self: {"existing-hash"},
+    )
+
+    rag._filter_docs_by_existing_hashes()
+
+    assert rag.docs == [doc_new]
