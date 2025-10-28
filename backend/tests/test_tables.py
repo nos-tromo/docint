@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 from docint.core.readers.tables import TableReader, basic_clean
+from docint.utils.hashing import compute_file_hash
 
 
 def test_basic_clean_collapse_whitespace() -> None:
@@ -39,6 +40,9 @@ def test_table_reader_loads_csv_with_selected_metadata(tmp_path: Path) -> None:
     assert first.metadata["table"]["row_index"] == 0
     assert first.metadata["origin"]["filename"] == "sample.csv"
     assert first.metadata["source"] == "table"
+    expected_hash = compute_file_hash(csv_path)
+    assert first.metadata["file_hash"] == expected_hash
+    assert first.metadata["origin"]["file_hash"] == expected_hash
     assert "extra" not in first.metadata
 
 
@@ -64,3 +68,6 @@ def test_table_reader_limit_and_row_filter(tmp_path: Path) -> None:
     assert only.metadata["flag"] is True
     assert only.metadata["table"]["row_index"] == 0
     assert only.metadata["origin"]["filetype"] == "text/tab-separated-values"
+    expected_hash = compute_file_hash(tsv_path)
+    assert only.metadata["file_hash"] == expected_hash
+    assert only.metadata["origin"]["file_hash"] == expected_hash

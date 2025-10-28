@@ -1,9 +1,11 @@
 import types
+from pathlib import Path
 
 import pytest
-from llama_index.core import Response
+from llama_index.core import Document, Response
 
 from docint.core.rag import RAG
+from docint.utils.hashing import compute_file_hash
 
 
 def test_run_query_returns_sources() -> None:
@@ -70,3 +72,24 @@ def test_select_collection_resets_cached_state(monkeypatch) -> None:
     assert rag.chat_engine is None
     assert rag.chat_memory is None
     assert rag.session_id is None
+
+
+def test_ensure_file_hash_metadata(tmp_path: Path) -> None:
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("hello world", encoding="utf-8")
+
+    doc = Document(
+        text="hello world",
+        metadata={
+            "file_path": str(file_path),
+            "origin": {"filename": file_path.name},
+        },
+    )
+
+    rag = RAG(data_dir=tmp_path)
+    rag.docs = [doc]
+    rag._ensure_file_hash_metadata()
+
+    expected_hash = compute_file_hash(file_path)
+    assert doc.metadata["file_hash"] == expected_hash
+    assert doc.metadata["origin"]["file_hash"] == expected_hash

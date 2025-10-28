@@ -34,6 +34,7 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
 from llama_index.node_parser.docling import DoclingNodeParser
 from llama_index.vector_stores.qdrant import QdrantVectorStore
+from loguru import logger
 from qdrant_client import QdrantClient
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from sqlalchemy.orm import sessionmaker
@@ -48,7 +49,7 @@ from docint.core.readers.images import ImageReader
 from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.tables import TableReader
 from docint.utils.clean_text import basic_clean
-from loguru import logger
+from docint.utils.hashing import compute_file_hash, ensure_file_hash
 
 # --- Environment variables ---
 DATA_PATH: Path = Path(os.getenv("DATA_PATH", Path.home() / "docint" / "data"))
@@ -158,7 +159,9 @@ class RAG:
     query_engine: RetrieverQueryEngine | None = field(default=None, init=False)
 
     # Chat/session runtime
-    chat_engine: RetrieverQueryEngine | CondenseQuestionChatEngine | None = field(default=None, init=False)
+    chat_engine: RetrieverQueryEngine | CondenseQuestionChatEngine | None = field(
+        default=None, init=False
+    )
     chat_memory: Any | None = field(default=None, init=False)
     _SessionMaker: Any | None = field(default=None, init=False, repr=False)
     session_id: str | None = field(default=None, init=False, repr=False)
@@ -476,6 +479,66 @@ class RAG:
             embed_model=self.embed_model,
         )
 
+    def _ensure_file_hash_metadata(self) -> None:
+        """Populate missing ``file_hash`` entries on loaded documents."""
+
+        if not self.docs:
+            return
+
+        hash_cache: dict[Path, str] = {}
+
+        for doc in self.docs:
+            metadata = getattr(doc, "metadata", None)
+            if not isinstance(metadata, dict):
+                continue
+
+            existing_hash = metadata.get("file_hash")
+            if isinstance(existing_hash, str) and existing_hash:
+                ensure_file_hash(metadata, file_hash=existing_hash)
+                continue
+
+            origin = metadata.get("origin") or {}
+            filename = (
+                metadata.get("file_name")
+                or metadata.get("filename")
+                or origin.get("filename")
+            )
+
+            path_candidates: list[Path] = []
+            path_value = metadata.get("file_path")
+            if isinstance(path_value, str) and path_value:
+                candidate = Path(path_value)
+                path_candidates.append(candidate)
+                if not candidate.is_absolute():
+                    path_candidates.append((self.data_dir / candidate).resolve())
+
+            if filename:
+                path_candidates.append((self.data_dir / filename).resolve())
+
+            resolved: Path | None = None
+            for candidate in path_candidates:
+                try:
+                    candidate_path = Path(candidate)
+                except TypeError:
+                    continue
+                if candidate_path.exists():
+                    resolved = candidate_path.resolve()
+                    break
+
+            if resolved is None:
+                continue
+
+            if resolved in hash_cache:
+                digest = hash_cache[resolved]
+            else:
+                try:
+                    digest = compute_file_hash(resolved)
+                except FileNotFoundError:
+                    continue
+                hash_cache[resolved] = digest
+
+            ensure_file_hash(metadata, file_hash=digest)
+
     def _create_nodes(self) -> None:
         """
         Converts loaded documents into nodes using the appropriate parsers.
@@ -486,6 +549,7 @@ class RAG:
         if self.dir_reader is None:
             raise RuntimeError("Directory reader is not initialized.")
         self.docs = self.dir_reader.load_data()
+        self._ensure_file_hash_metadata()
         cleaned_docs = []
         for doc in self.docs:
             if hasattr(doc, "text") and isinstance(doc.text, str):
@@ -740,6 +804,7 @@ class RAG:
                 or meta.get("file_type")
                 or ""
             )
+            file_hash = origin.get("file_hash") or meta.get("file_hash")
             source_kind = meta.get("source", "unknown")
 
             # --- page detection (PDF / Docling) ---
@@ -780,6 +845,8 @@ class RAG:
                 "filetype": filetype,
                 "source": source_kind,
             }
+            if file_hash:
+                src["file_hash"] = file_hash
             if location_label:
                 src[location_label] = location_value
 
