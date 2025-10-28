@@ -489,8 +489,9 @@ class RAG:
         )
 
     def _ensure_file_hash_metadata(self) -> None:
-        """Populate missing ``file_hash`` entries on loaded documents."""
-
+        """
+        Populate missing ``file_hash`` entries on loaded documents.
+        """
         if not self.docs:
             return
 
@@ -550,7 +551,12 @@ class RAG:
 
     @staticmethod
     def _extract_file_hash(data: Any) -> str | None:
-        """Best-effort extraction of a ``file_hash`` value from nested payloads."""
+        """
+        Best-effort extraction of a ``file_hash`` value from nested payloads.
+        
+        Args:
+            data (Any): The data dictionary to search for a file hash.
+        """
 
         if not isinstance(data, dict):
             return None
@@ -586,7 +592,12 @@ class RAG:
         return None
 
     def _get_existing_file_hashes(self) -> set[str]:
-        """Fetch file hashes already stored in the active Qdrant collection."""
+        """
+        Fetch file hashes already stored in the active Qdrant collection.
+
+        Returns:
+            set[str]: A set of existing file hashes.
+        """
 
         existing: set[str] = set()
 
