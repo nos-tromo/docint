@@ -99,13 +99,12 @@ class AudioReader(BaseReader):
         if file_path is None:
             raise ValueError("file_path is not set.")
         filename = file_path.name
-
         mimetype = get_mimetype(file_path)
 
         try:
             source = mimetype.split("/")[0]
         except Exception:
-            source = "transcript"
+            pass
 
         return Document(
             text_resource=MediaResource(text=text, mimetype=mimetype),
