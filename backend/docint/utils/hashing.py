@@ -76,6 +76,3 @@ def ensure_file_hash(
         metadata["origin"] = {"file_hash": file_hash}
 
     return file_hash
-
-
-__all__ = ["compute_file_hash", "ensure_file_hash"]
