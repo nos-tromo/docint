@@ -12,9 +12,9 @@ services:
     environment:
       - DATA_PATH=/app/data
       - LOG_PATH=/app/.logs/backend.log
-      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_HOST=http://ollama:11434
       - QDRANT_COL_DIR=/qdrant/storage/collections
-      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_HOST=http://qdrant:6333
       - USE_DEVICE=auto
     volumes:
       - backend_logs:/app/.logs
@@ -46,9 +46,9 @@ services:
       - DATA_PATH=/app/data
       - LOG_PATH=/app/.logs/backend.log
       - NVIDIA_VISIBLE_DEVICES=all
-      - OLLAMA_URL=http://ollama-gpu:11434
+      - OLLAMA_HOST=http://ollama-gpu:11434
       - QDRANT_COL_DIR=/qdrant/storage/collections
-      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_HOST=http://qdrant:6333
       - USE_DEVICE=auto
     volumes:
       - backend_logs:/app/.logs

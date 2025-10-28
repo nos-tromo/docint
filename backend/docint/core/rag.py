@@ -57,7 +57,7 @@ REQUIRED_EXTS_PATH: Path = Path(__file__).parent.resolve() / "readers" / "requir
 PROMPT_DIR: Path = Path(__file__).parents[2].resolve() / "utils" / "prompts"
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 QDRANT_COL_DIR: str = os.getenv("QDRANT_COL_DIR", "qdrant_collections")
-QDRANT_URL: str = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
+QDRANT_HOST: str = os.getenv("QDRANT_HOST", "http://127.0.0.1:6333")
 EMBED_MODEL: str = os.getenv("EMBED_MODEL", "BAAI/bge-m3")
 SPARSE_MODEL: str = os.getenv("SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-attentions")
 RERANK_MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
@@ -84,12 +84,12 @@ class RAG:
     gen_model_id: str = GEN_MODEL
 
     # --- Qdrant controls ---
-    qdrant_url: str = QDRANT_URL
+    qdrant_host: str = QDRANT_HOST
     _qdrant_host_dir: Path | None = field(default=None, init=False, repr=False)
     qdrant_collection: str = "default"
 
     # --- Ollama Parameters ---
-    base_url: str = OLLAMA_URL
+    base_url: str = OLLAMA_HOST
     context_window: int = -1
     temperature: float = 0.2
     request_timeout: int = 1200
@@ -327,10 +327,10 @@ class RAG:
             QdrantClient: The initialized Qdrant client.
         """
         if self._qdrant_client is None:
-            self._qdrant_client = QdrantClient(url=self.qdrant_url)
+            self._qdrant_client = QdrantClient(url=self.qdrant_host)
             logger.info(
                 "Qdrant client initialized: {}",
-                self.qdrant_url,
+                self.qdrant_host,
             )
         return self._qdrant_client
 
@@ -343,10 +343,10 @@ class RAG:
             AsyncQdrantClient: The initialized Qdrant async client.
         """
         if self._qdrant_aclient is None:
-            self._qdrant_aclient = AsyncQdrantClient(url=self.qdrant_url)
+            self._qdrant_aclient = AsyncQdrantClient(url=self.qdrant_host)
             logger.info(
                 "Qdrant async client initialized: {}",
-                self.qdrant_url,
+                self.qdrant_host,
             )
         return self._qdrant_aclient
 
@@ -1471,7 +1471,7 @@ class RAG:
             },
             "vector_store": {
                 "type": "qdrant",
-                "url": self.qdrant_url,
+                "url": self.qdrant_host,
                 "collection": self.qdrant_collection,
                 "host_dir": str(self.qdrant_host_dir or ""),
             },
