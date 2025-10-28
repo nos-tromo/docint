@@ -16,6 +16,8 @@ services:
       - QDRANT_COL_DIR=/qdrant/storage/collections
       - QDRANT_HOST=http://qdrant:6333
       - USE_DEVICE=auto
+    env_file:
+      - backend/.env
     volumes:
       - backend_logs:/app/.logs
       - ${USERPROFILE:-$HOME}/docint/data:/app/data
@@ -50,6 +52,8 @@ services:
       - QDRANT_COL_DIR=/qdrant/storage/collections
       - QDRANT_HOST=http://qdrant:6333
       - USE_DEVICE=auto
+    env_file:
+      - backend/.env
     volumes:
       - backend_logs:/app/.logs
       - ${USERPROFILE:-$HOME}/docint/data:/app/data
