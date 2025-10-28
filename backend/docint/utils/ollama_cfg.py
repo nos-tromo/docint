@@ -116,11 +116,11 @@ class OllamaPipeline:
             img.save(buffer, format="PNG")
             img = buffer.getvalue()
 
-        # Build message (add image only if present)
+        # Build messages (add image only if present)
         system = {"role": "system", "content": self.sys_prompt}
         user = {"role": "user", "content": prompt, "images": []}
         if img:
-            user["images"] = [img]
+            user["images"] = [img.decode("utf-8") if isinstance(img, bytes) else img]
 
         # Ensure environment variable is set for ollama library
         os.environ["OLLAMA_HOST"] = self.ollama_host
