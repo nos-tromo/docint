@@ -6,12 +6,12 @@ import whisper
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from llama_index.core.schema import MediaResource
+from loguru import logger
 from numpy import floating
 from numpy.typing import NDArray
 
 from docint.utils.hashing import ensure_file_hash
 from docint.utils.mimetype import get_mimetype
-from loguru import logger
 
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "turbo")
 

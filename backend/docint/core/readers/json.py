@@ -3,10 +3,10 @@ from pathlib import Path
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from llama_index.core.readers.json import JSONReader
+from loguru import logger
 
 from docint.utils.hashing import ensure_file_hash
 from docint.utils.mimetype import get_mimetype
-from loguru import logger
 
 
 class CustomJSONReader(BaseReader):

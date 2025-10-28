@@ -4,10 +4,10 @@ import pymupdf4llm
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from llama_index.readers.docling import DoclingReader
+from loguru import logger
 
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.mimetype import get_mimetype
-from loguru import logger
 
 
 class HybridPDFReader(BaseReader):
@@ -33,7 +33,9 @@ class HybridPDFReader(BaseReader):
             )
         )
 
-    def _standardize_metadata(self, file_path: Path, page_meta: dict | None = None) -> dict:
+    def _standardize_metadata(
+        self, file_path: Path, page_meta: dict | None = None
+    ) -> dict:
         """
         Returns a unified metadata dict compatible with both PyMuPDF and Docling outputs.
 
@@ -77,9 +79,7 @@ class HybridPDFReader(BaseReader):
         if not docs:
             raise ValueError("Empty or unreadable PDF")
 
-        nonempty_docs = [
-            d for d in docs if getattr(d, "text", None) and d.text.strip()
-        ]
+        nonempty_docs = [d for d in docs if getattr(d, "text", None) and d.text.strip()]
         if not nonempty_docs:
             raise ValueError("PyMuPDF produced only empty pages")
 
@@ -164,7 +164,9 @@ class HybridPDFReader(BaseReader):
                 logger.error(
                     "[HybridPDFReader] Docling failed for {}: {}", file_path.name, e2
                 )
-                raise RuntimeError(f"Both PyMuPDF and Docling failed to read {file_path}") from e2
+                raise RuntimeError(
+                    f"Both PyMuPDF and Docling failed to read {file_path}"
+                ) from e2
 
         # Optionally merge extra_info into metadata
         for d in docs:

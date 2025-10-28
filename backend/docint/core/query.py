@@ -2,9 +2,10 @@ import json
 from pathlib import Path
 from time import time
 
+from loguru import logger
+
 from docint.core.rag import RAG
 from docint.utils.logging_cfg import setup_logging
-from loguru import logger
 
 setup_logging()
 

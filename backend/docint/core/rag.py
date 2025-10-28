@@ -34,6 +34,7 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
 from llama_index.node_parser.docling import DoclingNodeParser
 from llama_index.vector_stores.qdrant import QdrantVectorStore
+from loguru import logger
 from qdrant_client import QdrantClient
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from sqlalchemy.orm import sessionmaker
@@ -49,7 +50,6 @@ from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.tables import TableReader
 from docint.utils.clean_text import basic_clean
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
-from loguru import logger
 
 # --- Environment variables ---
 DATA_PATH: Path = Path(os.getenv("DATA_PATH", Path.home() / "docint" / "data"))
@@ -159,7 +159,9 @@ class RAG:
     query_engine: RetrieverQueryEngine | None = field(default=None, init=False)
 
     # Chat/session runtime
-    chat_engine: RetrieverQueryEngine | CondenseQuestionChatEngine | None = field(default=None, init=False)
+    chat_engine: RetrieverQueryEngine | CondenseQuestionChatEngine | None = field(
+        default=None, init=False
+    )
     chat_memory: Any | None = field(default=None, init=False)
     _SessionMaker: Any | None = field(default=None, init=False, repr=False)
     session_id: str | None = field(default=None, init=False, repr=False)

@@ -6,12 +6,12 @@ from pathlib import Path
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from llama_index.core.schema import MediaResource
+from loguru import logger
 from PIL import Image
 
 from docint.utils.hashing import ensure_file_hash
 from docint.utils.mimetype import get_mimetype
 from docint.utils.ollama_cfg import OllamaPipeline
-from loguru import logger
 
 
 @dataclass

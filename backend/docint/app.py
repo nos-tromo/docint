@@ -56,7 +56,7 @@ def collections_list() -> list[str]:
 
     Raises:
         HTTPException: If an error occurs while listing collections.
-    """    
+    """
     try:
         return rag.list_collections()
     except Exception as e:
@@ -77,7 +77,7 @@ def collections_select(payload: SelectCollectionIn) -> dict[str, str | bool]:
     Raises:
         HTTPException: If the collection name is missing or an error occurs while selecting the collection.
         HTTPException: If an error occurs while selecting the collection.
-    """    
+    """
     try:
         name = payload.name.strip()
         if not name:
@@ -137,7 +137,7 @@ def query(payload: QueryIn):
 def _resolve_data_dir() -> Path:
     """
     Return the configured data directory for ingestion.
-    
+
     Returns:
         Path: The path to the data directory.
     """
@@ -151,7 +151,7 @@ def _resolve_data_dir() -> Path:
 def ingest(payload: IngestIn) -> dict[str, object]:
     """
     Trigger ingestion for the requested collection using the configured data directory.
-    
+
     Args:
         payload (IngestIn): The ingestion payload containing the collection name and hybrid flag.
 
@@ -174,7 +174,11 @@ def ingest(payload: IngestIn) -> dict[str, object]:
                 detail=f"Data directory does not exist: {data_dir}",
             )
 
-        ingest_module.ingest_docs(name, data_dir, hybrid=payload.hybrid if payload.hybrid is not None else True)
+        ingest_module.ingest_docs(
+            name,
+            data_dir,
+            hybrid=payload.hybrid if payload.hybrid is not None else True,
+        )
 
         # After ingestion, prepare the in-memory RAG instance for immediate querying.
         rag.select_collection(name)
