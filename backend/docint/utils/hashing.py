@@ -4,7 +4,6 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-
 _DEFAULT_CHUNK_SIZE = 1024 * 1024  # 1 MiB
 
 
@@ -23,6 +22,10 @@ def compute_file_hash(
 
     Returns:
         Hexadecimal string representing the digest.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        ValueError: If the specified hash algorithm is unsupported.
     """
 
     file_path = Path(path)
@@ -57,6 +60,9 @@ def ensure_file_hash(
 
     Returns:
         The hex digest stored in the metadata.
+
+    Raises:
+        ValueError: If neither ``file_hash`` nor ``path`` is provided.
     """
 
     if metadata is None:
