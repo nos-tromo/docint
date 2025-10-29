@@ -10,17 +10,21 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATA_PATH=/app/data
+      - DATA_PATH=/app/data/in
       - LOG_PATH=/app/.logs/backend.log
       - OLLAMA_HOST=http://ollama:11434
       - QDRANT_COL_DIR=/qdrant/storage/collections
       - QDRANT_HOST=http://qdrant:6333
+      - QUERIES_PATH=/app/data/queries.txt
+      - RESULTS_PATH=/app/data/out
       - USE_DEVICE=auto
     env_file:
-      - backend/.env
+      - .env.docker
     volumes:
-      - backend_logs:/app/.logs
       - ${USERPROFILE:-$HOME}/docint/data:/app/data
+      - ${USERPROFILE:-$HOME}/docint/data:/app/data/in
+      - ${USERPROFILE:-$HOME}/docint/results:/app/data/out
+      - backend_logs:/app/.logs
       - easyocr_cache:/root/.EasyOCR
       - model_cache:/root/.cache
       - qdrant_storage:/qdrant/storage
@@ -45,18 +49,22 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATA_PATH=/app/data
+      - DATA_PATH=/app/data/in
       - LOG_PATH=/app/.logs/backend.log
       - NVIDIA_VISIBLE_DEVICES=all
       - OLLAMA_HOST=http://ollama-gpu:11434
       - QDRANT_COL_DIR=/qdrant/storage/collections
       - QDRANT_HOST=http://qdrant:6333
+      - QUERIES_PATH=/app/data/queries.txt
+      - RESULTS_PATH=/app/data/out
       - USE_DEVICE=auto
     env_file:
-      - backend/.env
+      - .env.docker
     volumes:
-      - backend_logs:/app/.logs
       - ${USERPROFILE:-$HOME}/docint/data:/app/data
+      - ${USERPROFILE:-$HOME}/docint/data:/app/data/in
+      - ${USERPROFILE:-$HOME}/docint/results:/app/data/out
+      - backend_logs:/app/.logs
       - easyocr_cache:/root/.EasyOCR
       - model_cache:/root/.cache
       - qdrant_storage:/qdrant/storage
