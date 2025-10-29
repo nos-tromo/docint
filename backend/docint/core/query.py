@@ -30,7 +30,7 @@ def _get_col_name() -> str:
 
 
 def _store_output(
-    filename: str, data: dict | list, out_dir: str | Path = RESULTS_DIR
+    filename: str, data: dict | list, output_path: str | Path | None = None
 ) -> None:
     """
     Stores the output data to a JSON file.
@@ -38,14 +38,17 @@ def _store_output(
     Args:
         filename (str): The name of the output file (without extension).
         data (dict | list): The data to store.
-        out_dir (str | Path, optional): The directory to store the output file. Defaults to RESULTS_DIR.
+        output_path (str | Path, optional): The directory to store the output file. Defaults to RESULTS_PATH.
     """
-    out_dir = Path(out_dir) if isinstance(out_dir, str) else out_dir
-    if not out_dir.exists():
-        out_dir.mkdir(exist_ok=True)
+    if output_path is None or isinstance(output_path, str):
+        output_path = Path(str(RESULTS_PATH)).expanduser()
+
+    if not output_path.exists():
+        logger.info("Creating output directory at {}", output_path)
+        output_path.mkdir(exist_ok=True)
 
     if isinstance(data, dict):
-        with open(out_dir / f"{filename}.json", "w", encoding="utf-8") as f:
+        with open(output_path / f"{filename}.json", "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
     elif isinstance(data, list):
@@ -57,7 +60,7 @@ def _store_output(
             else:
                 serializable.append(str(item))
 
-        with open(out_dir / f"{filename}.json", "w", encoding="utf-8") as f:
+        with open(output_path / f"{filename}.json", "w", encoding="utf-8") as f:
             json.dump(serializable, f, ensure_ascii=False, indent=2)
     logger.info("Results stored in {}", output_path / f"{filename}.json")
 
