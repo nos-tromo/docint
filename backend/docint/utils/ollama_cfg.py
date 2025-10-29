@@ -28,13 +28,20 @@ class OllamaPipeline:
     ollama_host: str = field(default=OLLAMA_HOST, init=False)
     prompt_dir: Path = field(default=PROMPT_PATH, init=False)
     model_id: str = field(default=VLM, init=False)
+    _sys_prompt: str | None = field(default=None, init=False, repr=False)
 
-    def __post_init__(self):
+    @property
+    def sys_prompt(self) -> str:
         """
-        Post-initialization to set up the Ollama host and load the system prompt.
+        Get the system prompt for the Ollama API.
+
+        Returns:
+            str: The system prompt.
         """
-        logger.info("Ollama host set to: {}", self.ollama_host)
-        self.sys_prompt = self.load_prompt()
+        if self._sys_prompt is None:
+            self._sys_prompt = self.load_prompt()
+            logger.info("System prompt loaded.")
+        return self._sys_prompt
 
     def _get_ollama_health(self) -> bool:
         """
