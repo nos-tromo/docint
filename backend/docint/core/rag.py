@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 import pandas as pd
 import torch
+from dotenv import load_dotenv
 from fastembed import SparseTextEmbedding
 from llama_index.core import (
     Response,
@@ -55,9 +56,10 @@ from docint.utils.logging_cfg import setup_logging
 setup_logging()
 
 # --- Environment variables ---
+load_dotenv()
 DATA_PATH: Path = Path(os.getenv("DATA_PATH", Path.home() / "docint" / "data"))
-REQUIRED_EXTS_PATH: Path = Path(__file__).parent.resolve() / "readers" / "required_exts.txt"
 PROMPT_DIR: Path = Path(__file__).parents[2].resolve() / "utils" / "prompts"
+REQUIRED_EXTS_PATH: Path = Path(__file__).parent.resolve() / "readers" / "required_exts.txt"
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 QDRANT_COL_DIR: str = os.getenv("QDRANT_COL_DIR", "qdrant_collections")
 QDRANT_HOST: str = os.getenv("QDRANT_HOST", "http://127.0.0.1:6333")

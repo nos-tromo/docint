@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any
 
 import whisper
+from dotenv import load_dotenv
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from llama_index.core.schema import MediaResource
@@ -19,7 +20,6 @@ setup_logging()
 
 # --- Environment variables ---
 load_dotenv()
-
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "turbo")
 
 

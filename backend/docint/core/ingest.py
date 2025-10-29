@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
 from loguru import logger
 
 from docint.core.rag import RAG
@@ -8,7 +9,9 @@ from docint.utils.logging_cfg import setup_logging
 
 setup_logging()
 
-DATA_PATH = os.getenv("DATA_PATH")
+# --- Environment variables ---
+load_dotenv()
+DATA_PATH = Path(os.getenv("DATA_PATH", Path.home() / "docint" / "data")).expanduser()
 
 
 def get_inputs() -> tuple[str, Path]:

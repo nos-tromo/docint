@@ -1,7 +1,9 @@
 import json
+import os
 from pathlib import Path
 from time import time
 
+from dotenv import load_dotenv
 from loguru import logger
 
 from docint.core.rag import RAG
@@ -9,8 +11,12 @@ from docint.utils.logging_cfg import setup_logging
 
 setup_logging()
 
-
-RESULTS_DIR: Path = Path.home() / "docint" / "results"
+# --- Environment variables ---
+load_dotenv()
+QUERIES_PATH: Path = Path(
+    os.getenv("QUERIES_PATH", Path.home() / "docint" / "queries.txt")
+).expanduser()
+RESULTS_PATH: Path = Path(os.getenv("RESULTS_PATH", Path.home() / "docint" / "results")).expanduser()
 
 
 def _get_col_name() -> str:
