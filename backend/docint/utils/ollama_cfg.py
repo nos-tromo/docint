@@ -23,13 +23,6 @@ VLM = os.getenv("VLM", "qwen2.5vl:7b")
 class OllamaPipeline:
     """
     Pipeline for processing images with the Ollama API.
-
-    Raises:
-        FileNotFoundError: If the prompt file is not found.
-        RuntimeError: If the Ollama API call fails.
-
-    Returns:
-        str: The response from the Ollama API.
     """
 
     ollama_host: str = field(default=OLLAMA_HOST, init=False)
