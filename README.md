@@ -68,7 +68,14 @@ Launch the browser app: `http://localhost:5173/`.
 
 ### Run via Docker
 
-Launch the browser app: `http://localhost:8080/`.
+Launch the browser app: `http://localhost:8080/`. For further configurations, populate an `.env` file in the project's root, e.g.:
+
+```bash
+LLM=gpt-oss:120b-cloud
+RETRIEVE_SIMILARITY_TOP_K=50
+VLM=qwen3-vl:235b-cloud
+WHISPER_MODEL=turbo
+```
 
 ### Unit tests
 
