@@ -26,7 +26,7 @@ class OllamaPipeline:
     """
 
     ollama_host: str = field(default=OLLAMA_HOST, init=False)
-    prompt_dir: Path = field(default=PROMPT_DIR, init=False)
+    prompt_dir: Path = field(default=PROMPT_PATH, init=False)
     model_id: str = field(default=VLM, init=False)
 
     def __post_init__(self):
