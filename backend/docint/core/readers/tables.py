@@ -9,19 +9,16 @@ from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from loguru import logger
 
-from docint.utils.clean_text import basic_clean
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.logging_cfg import setup_logging
 from docint.utils.mimetype import get_mimetype
 
 setup_logging()
 
-PathLike = str | Path
-CleanFn = Callable[[str], str]
 RowFilter = Callable[[dict], bool]
 
 
-@dataclass(slots=True)  # add kw_only=True if you like
+@dataclass(slots=True)
 class TableReader(BaseReader):
     """
     Reads tabular data from CSV, TSV, XLSX, or Parquet files.
@@ -40,9 +37,6 @@ class TableReader(BaseReader):
             Defaults to None.
         combine_with (str, optional): String to join multiple text columns.
             Defaults to "\n".
-        clean_fn (CleanFn | None, optional): Function to clean text content.
-            If None, basic cleaning will be applied.
-            Defaults to basic_clean.
         row_filter (RowFilter | None, optional): Function to filter rows.
             If None, all rows will be included.
             Defaults to None.
@@ -73,7 +67,6 @@ class TableReader(BaseReader):
     metadata_cols: set[str] | str | None = None
     id_col: str | None = None
     combine_with: str = "\n"
-    clean_fn: CleanFn | None = basic_clean
     row_filter: RowFilter | None = None
     limit: int | None = None
     auto_text_guess: bool = True
@@ -214,8 +207,7 @@ class TableReader(BaseReader):
                 continue
 
             content = self._combine_text(row, text_cols)
-            if self.clean_fn:
-                content = self.clean_fn(content)
+
             if not content.strip():
                 continue
 
