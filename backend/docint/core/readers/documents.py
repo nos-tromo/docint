@@ -21,7 +21,7 @@ class HybridPDFReader(BaseReader):
     Ensures consistent metadata for all outputs.
     """
 
-    def __init__(self, export_type: str = "json"):
+    def __init__(self, export_type: str = "json") -> None:
         """
         Initializes the HybridPDFReader with the specified export type.
 
