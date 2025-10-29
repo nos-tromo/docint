@@ -127,8 +127,12 @@ def query(payload: QueryIn):
         session_id = rag.start_session(payload.session_id)
         data = rag.chat(payload.question)
 
-        answer = str(data.get("response") or data.get("answer") or "")
-        sources = data.get("sources") or []
+        answer = (
+            str(data.get("response") or data.get("answer") or "")
+            if isinstance(data, dict)
+            else ""
+        )
+        sources: list[dict] = data.get("sources", []) if isinstance(data, dict) else []
 
         return {"answer": answer, "sources": sources, "session_id": session_id}
     except HTTPException as e:
