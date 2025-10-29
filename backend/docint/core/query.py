@@ -81,17 +81,18 @@ def rag_pipeline() -> RAG:
     return rag
 
 
-def load_queries(q_path: Path = Path("queries.txt")) -> list[str]:
+def load_queries(q_path: str | Path | None = None) -> list[str]:
     """
-    Loads query strings from a text file. If the file does not exist, it creates a default one.
+    Loads query strings from a text file. Defaults to creating a file with a default query if none exists.
 
     Args:
-        q_path (Path, optional): The path to the query file. Defaults to Path("queries.txt").
+        q_path (Path, optional): The path to the query file. Defaults to None.
 
     Returns:
         list[str]: The list of query strings.
     """
-    q_path = Path(q_path).resolve()
+    if q_path is None or isinstance(q_path, str):
+        q_path = Path(str(QUERIES_PATH)).expanduser()
     if q_path.exists():
         logger.info("Loading queries from {}", q_path)
         with open(q_path, "r", encoding="utf-8") as f:
