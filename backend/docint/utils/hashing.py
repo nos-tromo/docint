@@ -19,7 +19,8 @@ def compute_file_hash(
     *,
     chunk_size: int = _DEFAULT_CHUNK_SIZE,
 ) -> str:
-    """Compute the hexadecimal digest for a file.
+    """
+    Compute the hexadecimal digest for a file.
 
     Args:
         path: File system path to hash.
@@ -58,7 +59,8 @@ def ensure_file_hash(
     file_hash: str | None = None,
     algorithm: str = "sha256",
 ) -> str:
-    """Attach a ``file_hash`` field to metadata (and nested ``origin``).
+    """
+    Attach a ``file_hash`` field to metadata (and nested ``origin``).
 
     Args:
         metadata: Metadata dictionary to mutate in place.
