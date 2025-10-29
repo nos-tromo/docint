@@ -37,13 +37,15 @@ Use `watch` instead of `up` for development and live sync for code changes.
 
 #### Document ingestion
 
+Place data to be ingested in `~/docint/data` before running the command below.
+
 ```bash
 uv run ingest
 ```
 
 #### Querying
 
-Place a `queries.txt` file inside `backend/` to facilitate batch processing of requests (one query per line; no file provided will create a default file with a summary query).
+Place a `queries.txt` file inside `~/docint` to facilitate batch processing of requests (one query per line; no file provided will create a default file with a summary query). Outputs will be stored to `~/docint/results`.
 
 ```bash
 uv run query
