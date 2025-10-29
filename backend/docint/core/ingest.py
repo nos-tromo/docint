@@ -14,16 +14,22 @@ load_dotenv()
 DATA_PATH = Path(os.getenv("DATA_PATH", Path.home() / "docint" / "data")).expanduser()
 
 
-def get_inputs() -> tuple[str, Path]:
+def get_inputs(data_path: Path | None = None) -> tuple[str, Path]:
     """
     Get user inputs for Qdrant collection name and data directory.
 
-    Raises:
-        ValueError: If the data directory does not exist.
+    Args:
+        data_path (Path): Path to the data directory. Defaults to None.
 
     Returns:
         tuple[str, Path]: Qdrant collection name and data directory path.
+
+    Raises:
+        ValueError: If the data directory does not exist.
     """
+    if data_path is None:
+        data_path = Path(str(DATA_PATH)).expanduser()
+
     qdrant_col = input("Enter Qdrant collection name: ").strip()
 
     if not data_path.is_dir():
