@@ -16,7 +16,9 @@ load_dotenv()
 QUERIES_PATH: Path = Path(
     os.getenv("QUERIES_PATH", Path.home() / "docint" / "queries.txt")
 ).expanduser()
-RESULTS_PATH: Path = Path(os.getenv("RESULTS_PATH", Path.home() / "docint" / "results")).expanduser()
+RESULTS_PATH: Path = Path(
+    os.getenv("RESULTS_PATH", Path.home() / "docint" / "results")
+).expanduser()
 
 
 def _get_col_name() -> str:
