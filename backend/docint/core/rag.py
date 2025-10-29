@@ -659,7 +659,9 @@ class RAG:
         return existing
 
     def _filter_docs_by_existing_hashes(self) -> None:
-        """Remove documents whose hashes already exist in the target collection."""
+        """
+        Remove documents whose hashes already exist in the target collection.
+        """
 
         if not self.docs:
             return
