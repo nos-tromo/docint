@@ -11,7 +11,14 @@ from numpy import floating
 from numpy.typing import NDArray
 
 from docint.utils.hashing import ensure_file_hash
+from docint.utils.logging_cfg import setup_logging
 from docint.utils.mimetype import get_mimetype
+
+setup_logging()
+
+
+# --- Environment variables ---
+load_dotenv()
 
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "turbo")
 
@@ -46,6 +53,7 @@ class AudioReader(BaseReader):
             ValueError: If the model ID is not set.
         """
         if self.model_id is None:
+            logger.error("ValueError: Model ID is not set.")
             raise ValueError("Model ID is not set.")
         return whisper.load_model(self.model_id)
 
@@ -98,6 +106,7 @@ class AudioReader(BaseReader):
             ValueError: If file_path is not set.
         """
         if file_path is None:
+            logger.error("ValueError: file_path is not set.")
             raise ValueError("file_path is not set.")
         filename = file_path.name
         mimetype = get_mimetype(file_path)
@@ -105,6 +114,7 @@ class AudioReader(BaseReader):
         try:
             source = mimetype.split("/")[0]
         except Exception:
+            logger.warning("ValueError: Could not determine source from mimetype: {}", mimetype)
             pass
 
         metadata = {

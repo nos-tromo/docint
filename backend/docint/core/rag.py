@@ -50,6 +50,9 @@ from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.tables import TableReader
 from docint.utils.clean_text import basic_clean
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
+from docint.utils.logging_cfg import setup_logging
+
+setup_logging()
 
 # --- Environment variables ---
 DATA_PATH: Path = Path(os.getenv("DATA_PATH", Path.home() / "docint" / "data"))
@@ -183,10 +186,14 @@ class RAG:
 
         Returns:
             list[str]: A list of supported sparse model IDs.
+
+        Raises:
+            ImportError: If fastembed is not installed.
         """
         try:
             return [m["model"] for m in SparseTextEmbedding.list_supported_models()]
         except ImportError:
+            logger.warning("ImportError: fastembed is not installed; cannot list sparse models.")
             return []
 
     # --- Properties (lazy loading) ---
@@ -197,11 +204,11 @@ class RAG:
         Used only as a *fallback* when we cannot reach the Qdrant API.
         Priority: explicit field -> env var -> platform default under home.
 
-        Raises:
-            ValueError: If the Qdrant host directory is not set.
-
         Returns:
             The Path representing the Qdrant host directory.
+
+        Raises:
+            ValueError: If the Qdrant host directory is not set.
         """
         if self._qdrant_host_dir is None:
             env = os.getenv("QDRANT_COL_DIR")
@@ -212,6 +219,7 @@ class RAG:
                 if home:
                     self._qdrant_host_dir = Path(home) / ".qdrant" / "storage"
         if self._qdrant_host_dir is None:
+            logger.error("ValueError: Qdrant host directory is not set.")
             raise ValueError("Qdrant host directory is not set.")
         return self._qdrant_host_dir
 
@@ -244,9 +252,6 @@ class RAG:
         """
         Lazily initializes and returns the embedding model.
 
-        Raises:
-            RuntimeError: If the embedding model could not be initialized.
-
         Returns:
             BaseEmbedding: The initialized embedding model.
         """
@@ -264,15 +269,20 @@ class RAG:
         """
         Returns the configured sparse model id for hybrid retrieval.
 
-        Raises:
-            ValueError: If the sparse model is not supported.
-
         Returns:
             str | None: The sparse model id or None if not enabled.
+
+        Raises:
+            ValueError: If the sparse model is not supported.
         """
         if not self.enable_hybrid:
             return None
         if self.sparse_model_id not in self._list_supported_sparse_models():
+            logger.error(
+                "ValueError: Sparse model {} not supported. Supported: {}",
+                self.sparse_model_id,
+                self._list_supported_sparse_models()
+            )
             raise ValueError(
                 f"Sparse model {self.sparse_model_id!r} not supported. "
                 f"Supported: {self._list_supported_sparse_models()}"
@@ -489,6 +499,10 @@ class RAG:
     def _ensure_file_hash_metadata(self) -> None:
         """
         Populate missing ``file_hash`` entries on loaded documents.
+
+        Raises:
+            TypeError: If a candidate file path is invalid.
+            FileNotFoundError: If the document file is not found.
         """
         if not self.docs:
             return
@@ -528,6 +542,7 @@ class RAG:
                 try:
                     candidate_path = Path(candidate)
                 except TypeError:
+                    logger.error("TypeError: Invalid candidate path '{}'", candidate)
                     continue
                 if candidate_path.exists():
                     resolved = candidate_path.resolve()
@@ -542,6 +557,7 @@ class RAG:
                 try:
                     digest = compute_file_hash(resolved)
                 except FileNotFoundError:
+                    logger.error("FileNotFoundError: File '{}' not found.", resolved)
                     continue
                 hash_cache[resolved] = digest
 
@@ -698,6 +714,7 @@ class RAG:
             RuntimeError: If the directory reader or node parsers are not initialized.
         """
         if self.dir_reader is None:
+            logger.error("RuntimeError: Directory reader is not initialized.")
             raise RuntimeError("Directory reader is not initialized.")
         self.docs = self.dir_reader.load_data()
         self._ensure_file_hash_metadata()
@@ -716,6 +733,7 @@ class RAG:
             or self.docling_node_parser is None
             or self.semantic_node_parser is None
         ):
+            logger.error("RuntimeError: Node parsers are not initialized.")
             raise RuntimeError("Node parsers are not initialized.")
 
         audio_docs, img_docs, json_docs, pdf_docs, table_docs, text_docs = [
@@ -870,6 +888,7 @@ class RAG:
             RuntimeError: If the index is not initialized.
         """
         if self.index is None:
+            logger.error("RuntimeError: Index is not initialized.")
             raise RuntimeError("Index is not initialized. Cannot create query engine.")
         k = min(max(self.retrieve_similarity_top_k, self.rerank_top_n * 8), 64)
         self.query_engine = RetrieverQueryEngine.from_args(
@@ -1060,9 +1079,11 @@ class RAG:
             ValueError: If the name is empty or the collection does not exist.
         """
         if not name or not name.strip():
+            logger.error("ValueError: Collection name cannot be empty.")
             raise ValueError("Collection name cannot be empty.")
         name = name.strip()
         if name not in self.list_collections():
+            logger.error("ValueError: Collection '{}' does not exist.", name)
             raise ValueError(f"Collection '{name}' does not exist.")
 
         self.qdrant_collection = name
@@ -1118,6 +1139,7 @@ class RAG:
         self._load_node_parsers()
         self._create_nodes()
         if self.index is None:
+            logger.error("RuntimeError: Index is not initialized for async ingestion.")
             raise RuntimeError("Index is not initialized for async ingestion.")
         # Concurrent, non-blocking upsert into Qdrant via aclient
         await self.index.ainsert_nodes(self.nodes)
@@ -1141,22 +1163,27 @@ class RAG:
         Args:
             prompt (str): The query prompt.
 
+        Returns:
+            dict[str, Any]: The query results.
+
         Raises:
             ValueError: If the prompt is empty.
             RuntimeError: If the query engine is not initialized.
             TypeError: If the response is not of the expected type.
-
-        Returns:
-            dict[str, Any]: The query results.
         """
         if not prompt.strip():
+            logger.error("ValueError: Query prompt cannot be empty.")
             raise ValueError("Query prompt cannot be empty.")
         if self.query_engine is None:
+            logger.error("RuntimeError: Query engine has not been initialized.")
             raise RuntimeError(
                 "Query engine has not been initialized. Call ingest_docs() first."
             )
         result = self.query_engine.query(prompt)
         if not isinstance(result, Response):
+            logger.error(
+                "TypeError: Expected Response, got {}.", type(result).__name__
+            )
             raise TypeError(f"Expected Response, got {type(result).__name__}")
         return self._normalize_response_data(prompt, result)
 
@@ -1167,22 +1194,27 @@ class RAG:
         Args:
             prompt (str): The query prompt.
 
+        Returns:
+            dict[str, Any]: The query results.
+
         Raises:
             ValueError: If the prompt is empty.
             RuntimeError: If the query engine is not initialized.
             TypeError: If the response is not of the expected type.
-
-        Returns:
-            dict[str, Any]: The query results.
         """
         if not prompt.strip():
+            logger.error("ValueError: Query prompt cannot be empty.")
             raise ValueError("Query prompt cannot be empty.")
         if self.query_engine is None:
+            logger.error("RuntimeError: Query engine has not been initialized.")
             raise RuntimeError(
                 "Query engine has not been initialized. Call ingest_docs()/asingest_docs() first."
             )
         result = await self.query_engine.aquery(prompt)
         if not isinstance(result, Response):
+            logger.error(
+                "TypeError: Expected Response, got {}.", type(result).__name__
+            )
             raise TypeError(f"Expected Response, got {type(result).__name__}")
         return self._normalize_response_data(prompt, result)
 
@@ -1433,11 +1465,11 @@ class RAG:
             session_id (str | None, optional): The ID of the session. Defaults to None.
             out_dir (str | Path, optional): The output directory for the exported session. Defaults to "session".
 
-        Raises:
-            ValueError: If no conversation is found for the given session ID.
-
         Returns:
             Path: The path to the exported session directory.
+
+        Raises:
+            ValueError: If no conversation is found for the given session ID.
         """
         self._ensure_store()
         s = self._SessionMaker()
@@ -1447,6 +1479,7 @@ class RAG:
 
         conv = s.get(Conversation, session_id)
         if conv is None:
+            logger.error("ValueError: No conversation found for session_id={}", session_id)
             raise ValueError(f"No conversation found for session_id={session_id}")
 
         out_dir = Path(out_dir) / session_id
@@ -1611,11 +1644,11 @@ class RAG:
         Args:
             session_id (str | None, optional): The ID of the session to continue. Defaults to None.
 
-        Raises:
-            RuntimeError: If the query engine has not been initialized.
-
         Returns:
             str: The ID of the session.
+
+        Raises:
+            RuntimeError: If the query engine has not been initialized.
         """
         # 1) ensure a valid session id
         if not session_id:
@@ -1639,6 +1672,7 @@ class RAG:
             )
 
         if self.query_engine is None:
+            logger.error("RuntimeError: Query engine has not been initialized.")
             raise RuntimeError(
                 "Query engine has not been initialized. Call ingest_docs() first."
             )
@@ -1665,8 +1699,10 @@ class RAG:
             RuntimeError: If the query engine has not been initialized.
         """
         if not user_msg.strip():
+            logger.error("ValueError: Chat prompt cannot be empty.")
             raise ValueError("Chat prompt cannot be empty.")
         if self.query_engine is None:
+            logger.error("RuntimeError: Query engine has not been initialized.")
             raise RuntimeError(
                 "Query engine has not been initialized. Call ingest_docs() first."
             )
@@ -1678,6 +1714,7 @@ class RAG:
 
         # Build a retrieval query that includes the rolling conversation summary
         if session_id is None:
+            logger.error("ValueError: Session ID cannot be None.")
             raise ValueError("Session ID cannot be None.")
         summary = self._get_rolling_summary(session_id)
         if summary:

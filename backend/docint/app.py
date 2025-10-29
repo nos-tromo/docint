@@ -2,6 +2,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from loguru import logger
 from pydantic import BaseModel
 
 from docint.core import ingest as ingest_module
@@ -60,6 +61,7 @@ def collections_list() -> list[str]:
     try:
         return rag.list_collections()
     except Exception as e:
+        logger.error("HTTPException: Error listing collections: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -81,6 +83,7 @@ def collections_select(payload: SelectCollectionIn) -> dict[str, str | bool]:
     try:
         name = payload.name.strip()
         if not name:
+            logger.error("HTTPException: Collection name required")
             raise HTTPException(status_code=400, detail="Collection name required")
         rag.select_collection(name)
 
@@ -92,9 +95,8 @@ def collections_select(payload: SelectCollectionIn) -> dict[str, str | bool]:
                 pass
 
         return {"ok": True, "name": name}
-    except HTTPException:
-        raise
-    except Exception as e:
+    except HTTPException as e:
+        logger.error("HTTPException: Error selecting collection: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -114,6 +116,7 @@ def query(payload: QueryIn):
     """
     try:
         if not rag.qdrant_collection:
+            logger.error("HTTPException: No collection selected")
             raise HTTPException(status_code=400, detail="No collection selected")
 
         if getattr(rag, "query_engine", None) is None:
@@ -128,9 +131,8 @@ def query(payload: QueryIn):
         sources = data.get("sources") or []
 
         return {"answer": answer, "sources": sources, "session_id": session_id}
-    except HTTPException:
-        raise
-    except Exception as e:
+    except HTTPException as e:
+        logger.error("HTTPException: Error processing query: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -165,10 +167,12 @@ def ingest(payload: IngestIn) -> dict[str, object]:
     try:
         name = payload.collection.strip()
         if not name:
+            logger.error("HTTPException: Collection name required")
             raise HTTPException(status_code=400, detail="Collection name required")
 
         data_dir = _resolve_data_dir()
         if not data_dir.is_dir():
+            logger.error("HTTPException: Data directory does not exist: {}", data_dir)
             raise HTTPException(
                 status_code=400,
                 detail=f"Data directory does not exist: {data_dir}",
@@ -188,6 +192,9 @@ def ingest(payload: IngestIn) -> dict[str, object]:
             rag.create_query_engine()
         except Exception:
             # If eager preparation fails, queries will lazily prepare the engine.
+            logger.warning(
+                "Exception: Failed to create query engine for collection: {}", name
+            )
             pass
 
         return {
@@ -197,6 +204,5 @@ def ingest(payload: IngestIn) -> dict[str, object]:
             "hybrid": payload.hybrid if payload.hybrid is not None else True,
         }
     except HTTPException:
-        raise
-    except Exception as e:
+        logger.error("HTTPException: Error during ingestion: {}", e)
         raise HTTPException(status_code=500, detail=str(e))

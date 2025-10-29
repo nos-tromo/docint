@@ -2,6 +2,11 @@ import mimetypes
 from pathlib import Path
 
 import magic
+from loguru import logger
+
+from docint.utils.logging_cfg import setup_logging
+
+setup_logging()
 
 _MAGIC = magic.Magic(mime=True)
 
@@ -42,4 +47,8 @@ def get_mimetype(file_path: str | Path) -> str:
         return _MAGIC.from_file(str(path))
     except Exception:
         # Fall back to a generic binary MIME type if libmagic cannot inspect the file.
+        logger.warning(
+            "Exception: Failed to determine MIME type for {}. Falling back to application/octet-stream",
+            file_path,
+        )
         return "application/octet-stream"

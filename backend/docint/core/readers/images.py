@@ -10,8 +10,11 @@ from loguru import logger
 from PIL import Image
 
 from docint.utils.hashing import ensure_file_hash
+from docint.utils.logging_cfg import setup_logging
 from docint.utils.mimetype import get_mimetype
 from docint.utils.ollama_cfg import OllamaPipeline
+
+setup_logging()
 
 
 @dataclass
@@ -69,6 +72,7 @@ class ImageReader(BaseReader):
             ValueError: If file_path is not set.
         """
         if file_path is None:
+            logger.error("ValueError: file_path is not set.")
             raise ValueError("file_path is not set.")
         filename = file_path.name
         mimetype = get_mimetype(file_path)

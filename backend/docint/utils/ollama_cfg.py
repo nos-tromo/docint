@@ -7,6 +7,12 @@ import requests
 from loguru import logger
 from PIL import Image
 
+from docint.utils.logging_cfg import setup_logging
+
+setup_logging()
+
+# --- Environment variables ---
+load_dotenv()
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 PROMPT_DIR: Path = Path(__file__).parents[2].resolve() / "utils" / "prompts"
 VLM = os.getenv("VLM", "qwen2.5vl:7b")
@@ -61,6 +67,7 @@ class OllamaPipeline:
         """
         prompt_path = self.prompt_dir / f"{kw}.txt"
         if not prompt_path.is_file():
+            logger.error("FileNotFoundError: Prompt file for keyword '{}' not found.", kw)
             raise FileNotFoundError(f"Prompt file for keyword '{kw}' not found.")
         with open(prompt_path, "r", encoding="utf-8") as f:
             logger.info("Loaded prompt from '{}'", prompt_path)
@@ -102,7 +109,7 @@ class OllamaPipeline:
         """
         if not self._get_ollama_health():
             logger.error(
-                "Ollama server does not respond. Please ensure it is running and accessible."
+                "RuntimeError: Ollama server does not respond. Please ensure it is running and accessible."
             )
             raise RuntimeError(
                 "Ollama server is not reachable. Please check your configuration."

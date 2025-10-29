@@ -22,10 +22,12 @@ def get_inputs() -> tuple[str, Path]:
         tuple[str, Path]: Qdrant collection name and data directory path.
     """
     qdrant_col = input("Enter Qdrant collection name: ").strip()
-    data_dir = Path(DATA_PATH) if DATA_PATH else Path.home() / "docint" / "data"
-    if not data_dir.is_dir():
-        raise ValueError(f"Data directory does not exist: {data_dir}")
-    return qdrant_col, data_dir
+
+    if not data_path.is_dir():
+        logger.error("ValueError: Data directory does not exist: {}", data_path)
+        raise ValueError(f"Data directory does not exist: {data_path}")
+
+    return qdrant_col, data_path
 
 
 def ingest_docs(qdrant_col: str, data_dir: Path, hybrid: bool = True) -> None:

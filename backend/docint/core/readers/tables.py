@@ -7,10 +7,14 @@ from typing import Callable
 import pandas as pd
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
+from loguru import logger
 
 from docint.utils.clean_text import basic_clean
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
+from docint.utils.logging_cfg import setup_logging
 from docint.utils.mimetype import get_mimetype
+
+setup_logging()
 
 PathLike = str | Path
 CleanFn = Callable[[str], str]
@@ -155,12 +159,13 @@ class TableReader(BaseReader):
             file (str | Path): The path to the file to load.
             **kwargs: Additional keyword arguments.
 
-        Raises:
-            ValueError: If the file type is unsupported.
-
         Returns:
             list[Document]: A list of Document objects representing the loaded data.
+
+        Raises:
+            ValueError: If the file type is unsupported.
         """
+        logger.info("[TableReader] Loading table from {}", file)
         file_path = Path(file) if not isinstance(file, Path) else file
         suffix = file_path.suffix.lower()
         extra_info = kwargs.get("extra_info", {})
@@ -183,6 +188,7 @@ class TableReader(BaseReader):
             df = pd.read_parquet(file_path)
             ft_extras = {"parquet": {}}
         else:
+            logger.error("ValueError: Unsupported table type: {}", suffix)
             raise ValueError(f"Unsupported table type: {suffix}")
 
         df = df.reset_index(drop=True)

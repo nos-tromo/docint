@@ -4,6 +4,12 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
+from docint.utils.logging_cfg import setup_logging
+
+setup_logging()
+
 _DEFAULT_CHUNK_SIZE = 1024 * 1024  # 1 MiB
 
 
@@ -30,11 +36,13 @@ def compute_file_hash(
 
     file_path = Path(path)
     if not file_path.is_file():
+        logger.error(f"FileNotFoundError: File not found for hashing: {file_path}")
         raise FileNotFoundError(f"File not found for hashing: {file_path}")
 
     try:
         hasher = hashlib.new(algorithm)
     except ValueError as exc:  # pragma: no cover - defensive guard
+        logger.error(f"ValueError: Unsupported hash algorithm: {algorithm}")
         raise ValueError(f"Unsupported hash algorithm: {algorithm}") from exc
 
     with file_path.open("rb") as fh:
@@ -70,6 +78,7 @@ def ensure_file_hash(
 
     if file_hash is None:
         if path is None:
+            logger.error("ValueError: path is required when file_hash is not provided")
             raise ValueError("path is required when file_hash is not provided")
         file_hash = compute_file_hash(path, algorithm=algorithm)
 

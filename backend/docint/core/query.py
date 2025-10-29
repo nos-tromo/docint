@@ -53,7 +53,7 @@ def _store_output(
 
         with open(out_dir / f"{filename}.json", "w", encoding="utf-8") as f:
             json.dump(serializable, f, ensure_ascii=False, indent=2)
-    logger.info("Results stored in {}", out_dir / f"{filename}.json")
+    logger.info("Results stored in {}", output_path / f"{filename}.json")
 
 
 def rag_pipeline() -> RAG:

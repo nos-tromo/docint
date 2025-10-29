@@ -8,6 +8,9 @@ from loguru import logger
 
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.mimetype import get_mimetype
+from docint.utils.logging_cfg import setup_logging
+
+setup_logging()
 
 
 class HybridPDFReader(BaseReader):
@@ -42,6 +45,9 @@ class HybridPDFReader(BaseReader):
         Args:
             path (Path): The file path of the document.
             page_meta (dict | None): Optional page-specific metadata.
+
+        Returns:
+            dict: The standardized metadata dictionary.
         """
         filename = file_path.name
         mimetype = get_mimetype(file_path)
@@ -71,16 +77,21 @@ class HybridPDFReader(BaseReader):
         Args:
             path (Path): The file path of the document.
 
+        Returns:
+            list[Document]: The list of loaded documents.
+
         Raises:
             ValueError: If the PDF is empty or unreadable.
         """
         reader = pymupdf4llm.LlamaMarkdownReader()
         docs = reader.load_data(str(path))
         if not docs:
+            logger.error("ValueError: Empty or unreadable PDF")
             raise ValueError("Empty or unreadable PDF")
 
         nonempty_docs = [d for d in docs if getattr(d, "text", None) and d.text.strip()]
         if not nonempty_docs:
+            logger.error("ValueError: PyMuPDF produced only empty pages")
             raise ValueError("PyMuPDF produced only empty pages")
 
         file_hash = compute_file_hash(path)
@@ -112,6 +123,9 @@ class HybridPDFReader(BaseReader):
 
         Args:
             path (Path): The file path of the document.
+
+        Returns:
+            list[Document]: The list of loaded documents.
         """
         docs = self.docling_reader.load_data(file_path)
         file_hash = compute_file_hash(file_path)
@@ -146,6 +160,12 @@ class HybridPDFReader(BaseReader):
         Args:
             file (str | Path): The file path of the document.
             **kwargs: Optional arguments like extra_info passed by SimpleDirectoryReader.
+
+        Returns:
+            list[Document]: The list of loaded documents.
+
+        Raises:
+            RuntimeError: If both PyMuPDF and Docling fail to read the document.
         """
         file_path = Path(file) if not isinstance(file, Path) else file
         extra_info = kwargs.get("extra_info", {})
@@ -163,6 +183,10 @@ class HybridPDFReader(BaseReader):
             except Exception as e2:
                 logger.error(
                     "[HybridPDFReader] Docling failed for {}: {}", file_path.name, e2
+                )
+                logger.error(
+                    "RuntimeError: Both PyMuPDF and Docling failed to read {}",
+                    file_path,
                 )
                 raise RuntimeError(
                     f"Both PyMuPDF and Docling failed to read {file_path}"

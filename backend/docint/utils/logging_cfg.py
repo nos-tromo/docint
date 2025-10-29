@@ -59,7 +59,6 @@ def setup_logging(
     Returns:
         Path: The path to the log file.
     """
-
     log_path = _resolve_log_path(default_log_path)
 
     logger.remove()
@@ -84,5 +83,4 @@ def setup_logging(
         format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<8} | {name} | {message}",
     )
 
-    logger.info("DocInt logging initialised")
     return log_path
