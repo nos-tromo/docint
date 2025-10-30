@@ -6,6 +6,13 @@ import docint.core.ingest as ingest
 
 
 def test_get_inputs_uses_env_path(monkeypatch, tmp_path: Path) -> None:
+    """
+    Tests that the environment path is used for data input.
+
+    Args:
+        monkeypatch (_type_): The monkeypatch fixture.
+        tmp_path (Path): The temporary directory path.
+    """
     home_data = tmp_path / "data"
     if not home_data.exists():
         home_data.mkdir()
@@ -20,6 +27,13 @@ def test_get_inputs_uses_env_path(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_get_inputs_raises_for_missing_dir(monkeypatch, tmp_path: Path) -> None:
+    """
+    Tests that a ValueError is raised when the data directory is missing.
+
+    Args:
+        monkeypatch (_type_): The monkeypatch fixture.
+        tmp_path (Path): The temporary directory path.
+    """
     missing_dir = tmp_path / "missing"
     monkeypatch.setattr(ingest, "DATA_PATH", str(missing_dir), raising=False)
     monkeypatch.setattr("builtins.input", lambda prompt: "demo")
@@ -29,6 +43,13 @@ def test_get_inputs_raises_for_missing_dir(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_ingest_docs_invokes_rag(monkeypatch, tmp_path: Path) -> None:
+    """
+    Tests that the ingest_docs function invokes the RAG model correctly.
+
+    Args:
+        monkeypatch (_type_): The monkeypatch fixture.
+        tmp_path (Path): The temporary directory path.
+    """
     data_dir = tmp_path / "docs"
     if not data_dir.exists():
         data_dir.mkdir()
@@ -36,12 +57,29 @@ def test_ingest_docs_invokes_rag(monkeypatch, tmp_path: Path) -> None:
     calls: dict[str, Path] = {}
 
     class DummyRAG:
-        def __init__(self, qdrant_collection: str, enable_hybrid: bool = True):
+        """
+        A dummy Retrieval-Augmented Generation (RAG) model for testing purposes.
+        """
+
+        def __init__(self, qdrant_collection: str, enable_hybrid: bool = True) -> None:
+            """
+            Initializes the DummyRAG model.
+
+            Args:
+                qdrant_collection (str): The name of the Qdrant collection.
+                enable_hybrid (bool, optional): Whether to enable hybrid search. Defaults to True.
+            """
             calls["collection"] = qdrant_collection
             calls["hybrid"] = enable_hybrid
             self.called_with: Path | None = None
 
         def ingest_docs(self, directory: Path) -> None:
+            """
+            Ingests documents from the specified directory.
+
+            Args:
+                directory (Path): The directory containing documents to ingest.
+            """
             self.called_with = Path(directory)
             calls["data_dir"] = self.called_with
 
