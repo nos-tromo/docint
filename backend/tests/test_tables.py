@@ -1,7 +1,9 @@
 from pathlib import Path
 
 import pandas as pd
-from docint.core.readers.tables import TableReader, basic_clean
+
+from docint.core.readers.tables import TableReader
+from docint.utils.clean_text import basic_clean
 from docint.utils.hashing import compute_file_hash
 
 
