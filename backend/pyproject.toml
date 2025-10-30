@@ -28,7 +28,6 @@ dependencies = [
   "opencv-python-headless>=4.11.0.86",
   "pandas>=2.2.3",
   "pillow>=11.3.0",
-  "pip>=25.2",
   "pyarrow>=21.0.0",
   "pydantic>=2.11.7",
   "pymupdf4llm>=0.0.27",
