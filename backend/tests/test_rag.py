@@ -9,6 +9,9 @@ from docint.utils.hashing import compute_file_hash
 
 
 def test_run_query_returns_sources() -> None:
+    """
+    Tests that the run_query method returns the expected sources.
+    """
     rag = RAG()
 
     node_metadata = {
@@ -36,6 +39,9 @@ def test_run_query_returns_sources() -> None:
 
 
 def test_run_query_requires_prompt_and_engine() -> None:
+    """
+    Tests that the run_query method requires a prompt and a query engine.
+    """
     rag = RAG()
 
     with pytest.raises(ValueError):
@@ -46,6 +52,12 @@ def test_run_query_requires_prompt_and_engine() -> None:
 
 
 def test_select_collection_resets_cached_state(monkeypatch) -> None:
+    """
+    Tests that the select_collection method resets the cached state.
+
+    Args:
+        monkeypatch (_type_): The monkeypatch fixture.
+    """
     rag = RAG()
 
     rag.docs = ["doc"]
@@ -75,6 +87,12 @@ def test_select_collection_resets_cached_state(monkeypatch) -> None:
 
 
 def test_ensure_file_hash_metadata(tmp_path: Path) -> None:
+    """
+    Tests that the file hash metadata is correctly computed and stored.
+
+    Args:
+        tmp_path (Path): The temporary directory path.
+    """
     file_path = tmp_path / "sample.txt"
     file_path.write_text("hello world", encoding="utf-8")
 
@@ -96,6 +114,13 @@ def test_ensure_file_hash_metadata(tmp_path: Path) -> None:
 
 
 def test_filter_docs_by_existing_hashes(monkeypatch) -> None:
+    """
+    Tests that the _filter_docs_by_existing_hashes method removes documents
+    that are already ingested.
+
+    Args:
+        monkeypatch (_type_): The monkeypatch fixture.
+    """
     doc_new = Document(
         text="keep",
         metadata={

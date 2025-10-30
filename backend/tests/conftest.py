@@ -3,6 +3,9 @@ import types
 
 
 def _install_torch_stub() -> None:
+    """
+    Installs a stub for the torch module.
+    """
     try:
         import torch  # noqa: F401
     except ModuleNotFoundError:
@@ -28,6 +31,9 @@ def _install_torch_stub() -> None:
 
 
 def _install_fastembed_stub() -> None:
+    """
+    Installs a stub for the fastembed module.
+    """
     try:
         import fastembed  # noqa: F401
     except ModuleNotFoundError:
@@ -43,6 +49,9 @@ def _install_fastembed_stub() -> None:
 
 
 def _install_magic_stub() -> None:
+    """
+    Installs a stub for the magic module.
+    """
     try:
         import magic  # noqa: F401
     except (ModuleNotFoundError, ImportError):
@@ -61,6 +70,9 @@ def _install_magic_stub() -> None:
 
 
 def _install_llama_index_stub() -> None:
+    """
+    Installs a stub for the llama_index module.
+    """
     try:
         import llama_index  # noqa: F401
     except ModuleNotFoundError:
@@ -255,9 +267,7 @@ def _install_llama_index_stub() -> None:
         query_engine_module.RetrieverQueryEngine = RetrieverQueryEngine
 
         # --- HuggingFace embedding ---------------------------------------
-        embeddings_hf_module = types.ModuleType(
-            "llama_index.embeddings.huggingface"
-        )
+        embeddings_hf_module = types.ModuleType("llama_index.embeddings.huggingface")
 
         class HuggingFaceEmbedding:
             def __init__(self, *args, **kwargs):
@@ -280,9 +290,7 @@ def _install_llama_index_stub() -> None:
         ollama_module.Ollama = Ollama
 
         # --- Docling parser/reader ---------------------------------------
-        node_parser_docling_module = types.ModuleType(
-            "llama_index.node_parser.docling"
-        )
+        node_parser_docling_module = types.ModuleType("llama_index.node_parser.docling")
 
         class DoclingNodeParser:
             def get_nodes_from_documents(self, documents):
@@ -327,9 +335,13 @@ def _install_llama_index_stub() -> None:
         llama_index.core = core_module
         llama_index.embeddings = types.SimpleNamespace(huggingface=embeddings_hf_module)
         llama_index.llms = types.SimpleNamespace(ollama=ollama_module)
-        llama_index.node_parser = types.SimpleNamespace(docling=node_parser_docling_module)
+        llama_index.node_parser = types.SimpleNamespace(
+            docling=node_parser_docling_module
+        )
         llama_index.readers = types.SimpleNamespace(docling=readers_docling_module)
-        llama_index.vector_stores = types.SimpleNamespace(qdrant=vector_store_qdrant_module)
+        llama_index.vector_stores = types.SimpleNamespace(
+            qdrant=vector_store_qdrant_module
+        )
 
         sys.modules["llama_index"] = llama_index
         sys.modules["llama_index.core"] = core_module
@@ -364,7 +376,9 @@ def _install_qdrant_stub() -> None:
                 self._payloads = {}
 
             def get_collections(self):
-                collections = [types.SimpleNamespace(name=name) for name in self._collections]
+                collections = [
+                    types.SimpleNamespace(name=name) for name in self._collections
+                ]
                 return types.SimpleNamespace(collections=collections)
 
             def retrieve(self, collection_name=None, ids=None):
@@ -389,6 +403,9 @@ def _install_qdrant_stub() -> None:
 
 
 def _install_sqlalchemy_stub() -> None:
+    """
+    Installs a stub for the sqlalchemy module.
+    """
     try:
         import sqlalchemy  # noqa: F401
         import sqlalchemy.orm  # noqa: F401

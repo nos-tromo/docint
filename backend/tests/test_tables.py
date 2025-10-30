@@ -8,11 +8,20 @@ from docint.utils.hashing import compute_file_hash
 
 
 def test_basic_clean_collapse_whitespace() -> None:
+    """
+    Tests that the basic_clean function collapses whitespace correctly.
+    """
     raw = "   Hello   \r\n\rWorld   \n\n\n"
     assert basic_clean(raw) == "Hello\nWorld"
 
 
 def test_table_reader_loads_csv_with_selected_metadata(tmp_path: Path) -> None:
+    """
+    Tests that the TableReader correctly loads a CSV file and extracts the specified metadata.
+
+    Args:
+        tmp_path (Path): The temporary directory path.
+    """
     df = pd.DataFrame(
         {
             "id": [1, 2],
@@ -49,6 +58,12 @@ def test_table_reader_loads_csv_with_selected_metadata(tmp_path: Path) -> None:
 
 
 def test_table_reader_limit_and_row_filter(tmp_path: Path) -> None:
+    """
+    Tests that the TableReader respects the limit and row filter.
+
+    Args:
+        tmp_path (Path): The temporary directory path.
+    """
     df = pd.DataFrame(
         {
             "text": ["keep", "skip", "also keep"],
