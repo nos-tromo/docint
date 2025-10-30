@@ -6,35 +6,39 @@ build-backend = "setuptools.build_meta"
 name = "docint"
 version = "0.1.0"
 description = "Proof of concept RAG application"
+authors = [
+  { name = "nos-tromo" }
+]
 requires-python = ">=3.11,<3.14"
+license = { text = "Apache-2.0" }
 dependencies = [
-    "fastapi>=0.116.1",
-    "fastembed>=0.7.3",
-    "fastparquet>=2024.11.0",
-    "huggingface-hub[cli]>=0.34.3",
-    "llama-index>=0.13.0",
-    "llama-index-embeddings-huggingface>=0.6.0",
-    "llama-index-llms-ollama>=0.7.0",
-    "llama-index-node-parser-docling>=0.4.0",
-    "llama-index-readers-docling>=0.4.0",
-    "llama-index-vector-stores-qdrant>=0.7.1",
-    "loguru>=0.7.2",
-    "numpy>=2.3.2",
-    "openai-whisper>=20250625",
-    "opencv-python-headless>=4.11.0.86",
-    "pandas>=2.2.3",
-    "pillow>=11.3.0",
-    "pip>=25.2",
-    "pyarrow>=21.0.0",
-    "pydantic>=2.11.7",
-    "pymupdf4llm>=0.0.27",
-    "python-dotenv>=1.1.1",
-    "python-magic>=0.4.27",
-    "qdrant-client>=1.15.1",
-    "sqlalchemy>=2.0.42",
-    "torch>=2.7.1",
-    "torchvision>=0.23.0",
-    "uvicorn>=0.35.0",
+  "fastapi>=0.116.1",
+  "fastembed>=0.7.3",
+  "fastparquet>=2024.11.0",
+  "huggingface-hub[cli]>=0.34.3",
+  "llama-index>=0.13.0",
+  "llama-index-embeddings-huggingface>=0.6.0",
+  "llama-index-llms-ollama>=0.7.0",
+  "llama-index-node-parser-docling>=0.4.0",
+  "llama-index-readers-docling>=0.4.0",
+  "llama-index-vector-stores-qdrant>=0.7.1",
+  "loguru>=0.7.2",
+  "numpy>=2.3.2",
+  "openai-whisper>=20250625",
+  "opencv-python-headless>=4.11.0.86",
+  "pandas>=2.2.3",
+  "pillow>=11.3.0",
+  "pip>=25.2",
+  "pyarrow>=21.0.0",
+  "pydantic>=2.11.7",
+  "pymupdf4llm>=0.0.27",
+  "python-dotenv>=1.1.1",
+  "python-magic>=0.4.27",
+  "qdrant-client>=1.15.1",
+  "sqlalchemy>=2.0.42",
+  "torch>=2.7.1",
+  "torchvision>=0.23.0",
+  "uvicorn>=0.35.0",
 ]
 
 [project.scripts]
