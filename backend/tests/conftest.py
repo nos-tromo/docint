@@ -42,6 +42,24 @@ def _install_fastembed_stub() -> None:
         sys.modules["fastembed"] = fastembed
 
 
+def _install_magic_stub() -> None:
+    try:
+        import magic  # noqa: F401
+    except (ModuleNotFoundError, ImportError):
+        magic = types.ModuleType("magic")
+
+        class Magic:
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+            def from_file(self, path: str) -> str:
+                return "application/octet-stream"
+
+        magic.Magic = Magic
+        sys.modules["magic"] = magic
+
+
 def _install_llama_index_stub() -> None:
     try:
         import llama_index  # noqa: F401
@@ -449,6 +467,7 @@ def _install_sqlalchemy_stub() -> None:
 
 _install_torch_stub()
 _install_fastembed_stub()
+_install_magic_stub()
 _install_llama_index_stub()
 _install_qdrant_stub()
 _install_sqlalchemy_stub()
