@@ -161,7 +161,7 @@ The application can be used both via Docker for containerized environments and d
 
 ### Additional Docker Configuration
 
-For additional configurations, populate an `.env` file in the project's root. Example:
+For additional configurations, populate an `.env.docker` file in the project's root. Example:
 
 ```bash
 LLM=gpt-oss:120b-cloud
