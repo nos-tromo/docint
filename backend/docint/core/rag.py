@@ -63,6 +63,7 @@ REQUIRED_EXTS_PATH: Path = (
     Path(__file__).parent.resolve() / "readers" / "required_exts.txt"
 )
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+OLLAMA_THINKING: str = os.getenv("OLLAMA_THINKING", "false")
 QDRANT_COL_DIR: str = os.getenv("QDRANT_COL_DIR", "qdrant_collections")
 QDRANT_HOST: str = os.getenv("QDRANT_HOST", "http://127.0.0.1:6333")
 EMBED_MODEL: str = os.getenv("EMBED_MODEL", "BAAI/bge-m3")
@@ -100,7 +101,7 @@ class RAG:
     context_window: int = -1
     temperature: float = 0.2
     request_timeout: int = 1200
-    thinking: bool = True
+    thinking: bool = bool(OLLAMA_THINKING)
     ollama_options: dict[str, Any] | None = None
 
     # --- Reranking / retrieval ---
