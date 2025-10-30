@@ -407,7 +407,8 @@ class RAG:
                 ".wmv": audio_reader,
                 # json files
                 ".json": CustomJSONReader(),
-                # pdf files
+                # document files
+                ".docx": HybridPDFReader(),
                 ".pdf": HybridPDFReader(),
                 # image files
                 ".gif": image_reader,
@@ -740,7 +741,7 @@ class RAG:
             logger.error("RuntimeError: Node parsers are not initialized.")
             raise RuntimeError("Node parsers are not initialized.")
 
-        audio_docs, img_docs, json_docs, pdf_docs, table_docs, text_docs = [
+        audio_docs, document_docs, img_docs, json_docs, table_docs, text_docs = [
             [] for _ in range(6)
         ]
         for d in self.docs:
@@ -768,25 +769,26 @@ class RAG:
                 audio_docs.append(d)
             elif source_kind == "image" or ext in {"gif", "jpeg", "jpg", "png"}:
                 img_docs.append(d)
-            elif source_kind == "table":
+            elif source_kind == "table" or ext in {"csv", "tsv"}:
                 table_docs.append(d)
-            elif file_type in {"application/json", "application/jsonl"} or ext in {
+            elif file_type.endswith(("json", "jsonl")) or ext in {
                 "json",
                 "jsonl",
             }:
                 json_docs.append(d)
-            elif file_type.startswith("application/pdf") or ext == "pdf":
-                pdf_docs.append(d)
+            elif file_type.endswith(("docx", "pdf")) or ext in {"docx", "pdf"}:
+                document_docs.append(d)
             elif file_type.startswith("text/") or ext in {"txt", "md", "rst"}:
                 text_docs.append(d)
             else:
-                # fallback detection
-                if "pdf" in file_type or ext == "pdf":
-                    pdf_docs.append(d)
-                elif file_type.startswith("text/") or ext in {"txt", "md", "rst"}:
+                if file_type.startswith("text/") or ext in {"txt", "md", "rst"}:
                     text_docs.append(d)
                 else:
-                    pdf_docs.append(d)
+                    logger.warning(
+                        "Unrecognized document type for file '{}'; treating as plain text.",
+                        file_path,
+                    )
+                    text_docs.append(d)
 
         nodes: list[BaseNode] = []
 
@@ -811,7 +813,7 @@ class RAG:
             )
             nodes.extend(self.semantic_node_parser.get_nodes_from_documents(json_docs))
 
-        if pdf_docs:
+        if document_docs:
 
             def _is_docling_json(doc):
                 try:
@@ -820,8 +822,8 @@ class RAG:
                 except Exception:
                     return False
 
-            pdf_docs_docling = [d for d in pdf_docs if _is_docling_json(d)]
-            pdf_docs_md = [d for d in pdf_docs if not _is_docling_json(d)]
+            pdf_docs_docling = [d for d in document_docs if _is_docling_json(d)]
+            pdf_docs_md = [d for d in document_docs if not _is_docling_json(d)]
 
             if pdf_docs_docling:
                 logger.info(

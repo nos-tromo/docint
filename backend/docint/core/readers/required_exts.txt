@@ -1,5 +1,6 @@
 avi
 csv
+docx
 flv
 gif
 jpeg
