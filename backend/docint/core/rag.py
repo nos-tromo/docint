@@ -59,7 +59,9 @@ setup_logging()
 load_dotenv()
 DATA_PATH: Path = Path(os.getenv("DATA_PATH", Path.home() / "docint" / "data"))
 PROMPT_DIR: Path = Path(__file__).parents[2].resolve() / "utils" / "prompts"
-REQUIRED_EXTS_PATH: Path = Path(__file__).parent.resolve() / "readers" / "required_exts.txt"
+REQUIRED_EXTS_PATH: Path = (
+    Path(__file__).parent.resolve() / "readers" / "required_exts.txt"
+)
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 QDRANT_COL_DIR: str = os.getenv("QDRANT_COL_DIR", "qdrant_collections")
 QDRANT_HOST: str = os.getenv("QDRANT_HOST", "http://127.0.0.1:6333")
@@ -195,7 +197,9 @@ class RAG:
         try:
             return [m["model"] for m in SparseTextEmbedding.list_supported_models()]
         except ImportError:
-            logger.warning("ImportError: fastembed is not installed; cannot list sparse models.")
+            logger.warning(
+                "ImportError: fastembed is not installed; cannot list sparse models."
+            )
             return []
 
     # --- Properties (lazy loading) ---
@@ -283,7 +287,7 @@ class RAG:
             logger.error(
                 "ValueError: Sparse model {} not supported. Supported: {}",
                 self.sparse_model_id,
-                self._list_supported_sparse_models()
+                self._list_supported_sparse_models(),
             )
             raise ValueError(
                 f"Sparse model {self.sparse_model_id!r} not supported. "
@@ -570,7 +574,7 @@ class RAG:
     def _extract_file_hash(data: Any) -> str | None:
         """
         Best-effort extraction of a ``file_hash`` value from nested payloads.
-        
+
         Args:
             data (Any): The data dictionary to search for a file hash.
         """
@@ -1187,9 +1191,7 @@ class RAG:
             )
         result = self.query_engine.query(prompt)
         if not isinstance(result, Response):
-            logger.error(
-                "TypeError: Expected Response, got {}.", type(result).__name__
-            )
+            logger.error("TypeError: Expected Response, got {}.", type(result).__name__)
             raise TypeError(f"Expected Response, got {type(result).__name__}")
         return self._normalize_response_data(prompt, result)
 
@@ -1218,9 +1220,7 @@ class RAG:
             )
         result = await self.query_engine.aquery(prompt)
         if not isinstance(result, Response):
-            logger.error(
-                "TypeError: Expected Response, got {}.", type(result).__name__
-            )
+            logger.error("TypeError: Expected Response, got {}.", type(result).__name__)
             raise TypeError(f"Expected Response, got {type(result).__name__}")
         return self._normalize_response_data(prompt, result)
 
@@ -1485,7 +1485,9 @@ class RAG:
 
         conv = s.get(Conversation, session_id)
         if conv is None:
-            logger.error("ValueError: No conversation found for session_id={}", session_id)
+            logger.error(
+                "ValueError: No conversation found for session_id={}", session_id
+            )
             raise ValueError(f"No conversation found for session_id={session_id}")
 
         out_dir = Path(out_dir) / session_id
