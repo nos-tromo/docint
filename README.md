@@ -1,85 +1,178 @@
 # Document Intelligence
 
+This is a proof of concept document intelligence platform offering the following features:
+
+1. **Ingestion Pipeline**
+
+   - Process and extract data from various file types, including documents, tables, images, audio, video, and JSON files.
+   - Automatically organizes and prepares data for querying.
+2. **Query Pipeline**
+
+   - Perform batch or single queries on ingested data.
+   - Customize queries for batch processing.
+   - Outputs results to a designated directory.
+3. **CLI and GUI Support**
+
+   - Use the command-line interface for ingestion and querying tasks.
+   - Access a browser-based graphical user interface for interactive workflows.
+4. **Integration with LLMs and Models**
+
+   - Utilize large language models (LLMs) and other AI models for advanced processing tasks like summarization and similarity retrieval.
+5. **Extensibility**
+
+   - Easily extend functionality with additional readers, such as OCR for images, Whisper for audio/video, and table/json enhancements.
+6. **Development and Testing**
+
+   - Run the frontend and backend independently or via Docker.
+   - Comprehensive unit testing ensures reliability.
+
 ## Installation
 
-### Manual setup
+The application can be used both via Docker for containerized environments and directly on the local machine for development and testing purposes.
 
-#### Frontend
+### Docker Setup (Recommended)
 
-```bash
-cd frontend
-npm install
-```
+1. **Ensure Docker is installed**
 
-#### Backend
+   Refer to the [Docker installation guide](https://docs.docker.com/get-docker/) if needed.
 
-```bash
-cd backend
-uv sync
-```
+2. **Choose a Profile**
 
-### Docker (recommended)
+   Decide between the CPU or GPU profile. The GPU profile requires a CUDA-compatible GPU and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) set up.
 
-Select whether to use the CPU or GPU (requires a CUDA compatible GPU and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) set up):
+3. **Start the Services**
 
-```bash
-# CPU
-docker compose --profile cpu up
-# GPU
-docker compose --profile gpu up
-```
+   ```bash
+   docker compose --profile <cpu|gpu> up
+   ```
 
-Use `watch` instead of `up` for development and live sync for code changes.
+   Use `watch` instead of `up` to enable live code synchronization for container development.
+
+---
+
+### Local Setup
+
+1. **Frontend**
+
+   To set up the frontend, navigate to the `frontend` directory and install the required dependencies:
+
+   ```bash
+   cd frontend
+   npm install
+   ```
+
+2. **Backend**
+
+   For the backend, navigate to the `backend` directory and synchronize dependencies:
+
+   ```bash
+   cd backend
+   uv sync
+   ```
 
 ## Usage
 
-### CLI
+### Ingesting Data
 
-#### Document ingestion
+1. **Data Preparation**
 
-Place data to be ingested in `~/docint/data` before running the command below.
+    Place files to be ingested in the `~/docint/data` directory. Supported file types include:
 
-```bash
-uv run ingest
-```
+    - **Documents**: `.pdf`, `.docx`, `.txt`
+    - **Tables**: `.csv`, `.xls`, `.xlsx`
+    - **Images**: `.png`, `.jpg`, `.jpeg`, `.gif`
+    - **Audio**: `.mp3`, `.wav`
+    - **Video**: `.mp4`, `.avi`
+    - **JSON**: `.json`
+    - **Other**: Additional formats supported via custom readers.
 
-#### Querying
+1. **Run the Ingestion Command**
 
-Place a `queries.txt` file inside `~/docint` to facilitate batch processing of requests (one query per line; no file provided will create a default file with a summary query). Outputs will be stored to `~/docint/results`.
+   Start the ingestion process from `backend` with:
 
-```bash
-uv run query
-```
+   ```bash
+   uv run ingest
+   ```
 
-### Run frontend and backend in separate shells
+2. **Verify the Ingestion**
 
-Frontend:
+   Check the logs or output directory to confirm the data has been organized and prepared for querying.
 
-```bash
-cd frontend
-npm run dev
-```
+---
 
-Backend:
+### Querying Data
 
-```bash
-uv run uvicorn docint.app:app --reload
-```
+1. **Prepare Your Queries**
 
-Launch the browser app: `http://localhost:5173/`.
+   Create a `queries.txt` file in the `~/docint` directory. Each line represents a single query. If no file is provided, a default summary query file will be generated.
+2. **Run the Query Command**
 
-### Run via Docker
+   Execute the following command from `backend`:
 
-Launch the browser app: `http://localhost:8080/`. For further configurations, populate an `.env` file in the project's root, e.g.:
+   ```bash
+   uv run query
+   ```
+
+3. **Review the Results**
+
+   Query results will be saved in the `~/docint/results` directory.
+
+---
+
+### [Development] Launching Frontend and Backend separately
+
+#### Frontend
+
+1. **Start the Development Server**
+
+   ```bash
+   npm run dev
+   ```
+
+2. **Access the Frontend**
+   Open your browser and navigate to `http://localhost:5173/`.
+
+#### Backend
+
+1. **Start the Backend Server**
+
+   ```bash
+   uv run uvicorn docint.app:app --reload
+   ```
+
+2. **Verify the Backend**
+
+   The backend will be available at `http://127.0.0.1:8000/`.
+
+---
+
+### Launching via Docker
+
+1. **Access the Application**
+
+   Navigate to `http://localhost:8080/` in your browser to access the GUI for ingestion and querying tasks.
+2. **Stop the Services**
+
+   ```bash
+   docker compose down
+   ```
+
+---
+
+### Additional Docker Configuration
+
+For additional configurations, populate an `.env` file in the project's root. Example:
 
 ```bash
 LLM=gpt-oss:120b-cloud
-RETRIEVE_SIMILARITY_TOP_K=50
 VLM=qwen3-vl:235b-cloud
 WHISPER_MODEL=turbo
+RETRIEVE_SIMILARITY_TOP_K=50
 ```
 
-### Unit tests
+## Unit Tests
+
+Run unit tests from `backend` to ensure functionality:
 
 ```bash
 uv run pytest
@@ -90,5 +183,6 @@ uv run pytest
 - Expand GUI for ingestion ✅
 - Add WhisperReader for audio/video ✅
 - Add OCRReader for images ✅
-- Explicit summarization feature
-- Implement GraphRAG
+- Improve table and JSON reader functionalities
+- Implement explicit summarization features
+- Develop GraphRAG
