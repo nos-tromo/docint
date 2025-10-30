@@ -16,7 +16,7 @@ setup_logging()
 load_dotenv()
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 PROMPT_PATH: Path = Path(__file__).resolve().parent / "prompts"
-VLM = os.getenv("VLM", "qwen2.5vl:7b")
+VLM = os.getenv("VLM", "qwen3-vl:8b")
 
 
 @dataclass
