@@ -64,7 +64,9 @@ class OllamaPipeline:
         """
         prompt_path = self.prompt_dir / f"{kw}.txt"
         if not prompt_path.is_file():
-            logger.error("FileNotFoundError: Prompt file for keyword '{}' not found.", kw)
+            logger.error(
+                "FileNotFoundError: Prompt file for keyword '{}' not found.", kw
+            )
             raise FileNotFoundError(f"Prompt file for keyword '{kw}' not found.")
         with open(prompt_path, "r", encoding="utf-8") as f:
             logger.info("Loaded prompt from '{}'", prompt_path)

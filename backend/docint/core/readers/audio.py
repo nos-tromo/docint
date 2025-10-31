@@ -111,7 +111,9 @@ class AudioReader(BaseReader):
         try:
             source = mimetype.split("/")[0]
         except Exception:
-            logger.warning("ValueError: Could not determine source from mimetype: {}", mimetype)
+            logger.warning(
+                "ValueError: Could not determine source from mimetype: {}", mimetype
+            )
             pass
 
         metadata = {

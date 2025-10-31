@@ -61,7 +61,10 @@ class CustomJSONReader(BaseReader):
             logger.error("FileNotFoundError: File not found: {}", file_path)
             raise FileNotFoundError(f"File not found: {file_path}")
         if file_path.suffix.lower() not in {".json", ".jsonl"}:
-            logger.error("ValueError: Expected a .json or .jsonl file but got: {}", file_path.suffix)
+            logger.error(
+                "ValueError: Expected a .json or .jsonl file but got: {}",
+                file_path.suffix,
+            )
             raise ValueError(
                 f"Expected a .json or .jsonl file but got: {file_path.suffix}"
             )
