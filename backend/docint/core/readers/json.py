@@ -6,10 +6,7 @@ from llama_index.core.readers.json import JSONReader
 from loguru import logger
 
 from docint.utils.hashing import ensure_file_hash
-from docint.utils.logging_cfg import setup_logging
 from docint.utils.mimetype import get_mimetype
-
-setup_logging()
 
 
 class CustomJSONReader(BaseReader):

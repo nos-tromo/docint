@@ -12,10 +12,7 @@ from numpy import floating
 from numpy.typing import NDArray
 
 from docint.utils.hashing import ensure_file_hash
-from docint.utils.logging_cfg import setup_logging
 from docint.utils.mimetype import get_mimetype
-
-setup_logging()
 
 
 # --- Environment variables ---

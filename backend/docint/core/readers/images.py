@@ -10,11 +10,8 @@ from loguru import logger
 from PIL import Image
 
 from docint.utils.hashing import ensure_file_hash
-from docint.utils.logging_cfg import setup_logging
 from docint.utils.mimetype import get_mimetype
 from docint.utils.ollama_cfg import OllamaPipeline
-
-setup_logging()
 
 
 @dataclass

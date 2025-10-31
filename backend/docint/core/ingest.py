@@ -7,8 +7,6 @@ from loguru import logger
 from docint.core.rag import RAG
 from docint.utils.logging_cfg import setup_logging
 
-setup_logging()
-
 # --- Environment variables ---
 load_dotenv()
 DATA_PATH = Path(os.getenv("DATA_PATH", Path.home() / "docint" / "data")).expanduser()
@@ -54,6 +52,7 @@ def ingest_docs(qdrant_col: str, data_dir: Path, hybrid: bool = True) -> None:
 
 
 def main() -> None:
+    setup_logging()
     qdrant_col, data_dir = get_inputs()
     ingest_docs(qdrant_col, data_dir)
 

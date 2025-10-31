@@ -4,12 +4,11 @@ from pathlib import Path
 from time import time
 
 from dotenv import load_dotenv
+
 from loguru import logger
 
 from docint.core.rag import RAG
 from docint.utils.logging_cfg import setup_logging
-
-setup_logging()
 
 # --- Environment variables ---
 load_dotenv()
@@ -124,6 +123,7 @@ def main() -> None:
     """
     Main entry point for the CLI. Initializes the RAG pipeline, loads queries, and processes each query.
     """
+    setup_logging()
     rag = rag_pipeline()
     queries = load_queries()
     for index, query in enumerate(queries, start=1):

@@ -5,12 +5,8 @@ from pathlib import Path
 import ollama
 import requests
 from dotenv import load_dotenv
-from loguru import logger
 from PIL import Image
-
-from docint.utils.logging_cfg import setup_logging
-
-setup_logging()
+from loguru import logger
 
 # --- Environment variables ---
 load_dotenv()
