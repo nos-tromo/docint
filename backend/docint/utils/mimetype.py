@@ -4,10 +4,6 @@ from pathlib import Path
 import magic
 from loguru import logger
 
-from docint.utils.logging_cfg import setup_logging
-
-setup_logging()
-
 _MAGIC = magic.Magic(mime=True)
 
 

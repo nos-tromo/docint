@@ -5,12 +5,8 @@ from pathlib import Path
 import ollama
 import requests
 from dotenv import load_dotenv
-from loguru import logger
 from PIL import Image
-
-from docint.utils.logging_cfg import setup_logging
-
-setup_logging()
+from loguru import logger
 
 # --- Environment variables ---
 load_dotenv()
@@ -68,7 +64,9 @@ class OllamaPipeline:
         """
         prompt_path = self.prompt_dir / f"{kw}.txt"
         if not prompt_path.is_file():
-            logger.error("FileNotFoundError: Prompt file for keyword '{}' not found.", kw)
+            logger.error(
+                "FileNotFoundError: Prompt file for keyword '{}' not found.", kw
+            )
             raise FileNotFoundError(f"Prompt file for keyword '{kw}' not found.")
         with open(prompt_path, "r", encoding="utf-8") as f:
             logger.info("Loaded prompt from '{}'", prompt_path)

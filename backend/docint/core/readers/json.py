@@ -6,10 +6,7 @@ from llama_index.core.readers.json import JSONReader
 from loguru import logger
 
 from docint.utils.hashing import ensure_file_hash
-from docint.utils.logging_cfg import setup_logging
 from docint.utils.mimetype import get_mimetype
-
-setup_logging()
 
 
 class CustomJSONReader(BaseReader):
@@ -64,7 +61,10 @@ class CustomJSONReader(BaseReader):
             logger.error("FileNotFoundError: File not found: {}", file_path)
             raise FileNotFoundError(f"File not found: {file_path}")
         if file_path.suffix.lower() not in {".json", ".jsonl"}:
-            logger.error("ValueError: Expected a .json or .jsonl file but got: {}", file_path.suffix)
+            logger.error(
+                "ValueError: Expected a .json or .jsonl file but got: {}",
+                file_path.suffix,
+            )
             raise ValueError(
                 f"Expected a .json or .jsonl file but got: {file_path.suffix}"
             )

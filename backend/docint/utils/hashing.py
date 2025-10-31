@@ -6,10 +6,6 @@ from typing import Any
 
 from loguru import logger
 
-from docint.utils.logging_cfg import setup_logging
-
-setup_logging()
-
 _DEFAULT_CHUNK_SIZE = 1024 * 1024  # 1 MiB
 
 

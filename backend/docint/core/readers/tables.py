@@ -10,10 +10,7 @@ from llama_index.core.readers.base import BaseReader
 from loguru import logger
 
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
-from docint.utils.logging_cfg import setup_logging
 from docint.utils.mimetype import get_mimetype
-
-setup_logging()
 
 RowFilter = Callable[[dict], bool]
 

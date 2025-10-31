@@ -12,10 +12,7 @@ from numpy import floating
 from numpy.typing import NDArray
 
 from docint.utils.hashing import ensure_file_hash
-from docint.utils.logging_cfg import setup_logging
 from docint.utils.mimetype import get_mimetype
-
-setup_logging()
 
 
 # --- Environment variables ---
@@ -114,7 +111,9 @@ class AudioReader(BaseReader):
         try:
             source = mimetype.split("/")[0]
         except Exception:
-            logger.warning("ValueError: Could not determine source from mimetype: {}", mimetype)
+            logger.warning(
+                "ValueError: Could not determine source from mimetype: {}", mimetype
+            )
             pass
 
         metadata = {
