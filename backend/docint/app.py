@@ -2,9 +2,9 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from loguru import logger
 from pydantic import BaseModel
 
-from loguru import logger
 from docint.core import ingest as ingest_module
 from docint.core.rag import RAG
 from docint.utils.logging_cfg import setup_logging

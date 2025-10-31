@@ -5,8 +5,8 @@ from pathlib import Path
 import ollama
 import requests
 from dotenv import load_dotenv
-from PIL import Image
 from loguru import logger
+from PIL import Image
 
 # --- Environment variables ---
 load_dotenv()
