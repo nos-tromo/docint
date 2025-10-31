@@ -233,6 +233,6 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
             "data_dir": str(data_dir),
             "hybrid": payload.hybrid if payload.hybrid is not None else True,
         }
-    except HTTPException:
+    except HTTPException as e:
         logger.error("HTTPException: Error during ingestion: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
