@@ -9,6 +9,8 @@ from docint.core import ingest as ingest_module
 from docint.core.rag import RAG
 from docint.utils.logging_cfg import setup_logging
 
+# --- Application Setup ---
+
 setup_logging()
 
 app = FastAPI(title="Document Intelligence")
@@ -27,7 +29,19 @@ app.add_middleware(
 rag = RAG(qdrant_collection="")
 
 
+# --- Pydantic models for request and response payloads ---
+
+
+class CollectionList(BaseModel):
+    collections: list[str]
+
+
 class SelectCollectionIn(BaseModel):
+    name: str
+
+
+class SelectCollectionOut(BaseModel):
+    ok: bool
     name: str
 
 
@@ -47,7 +61,17 @@ class IngestIn(BaseModel):
     hybrid: bool | None = True
 
 
-@app.get("/collections/list", response_model=list[str], tags=["Collections"])
+class IngestOut(BaseModel):
+    ok: bool
+    collection: str
+    data_dir: str
+    hybrid: bool
+
+
+# --- API Endpoints ---
+
+
+@app.get("/collections/list", response_model=CollectionList, tags=["Collections"])
 def collections_list() -> list[str]:
     """
     List existing collections.
@@ -65,8 +89,10 @@ def collections_list() -> list[str]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/collections/select", tags=["Collections"])
-def collections_select(payload: SelectCollectionIn) -> dict[str, str | bool]:
+@app.post(
+    "/collections/select", response_model=SelectCollectionOut, tags=["Collections"]
+)
+def collections_select(payload: SelectCollectionIn) -> dict[str, bool | str]:
     """
     Select a collection to use for queries.
 
@@ -74,7 +100,7 @@ def collections_select(payload: SelectCollectionIn) -> dict[str, str | bool]:
         payload (SelectCollectionIn): The payload containing the collection name.
 
     Returns:
-        dict[str, str | bool]: A dictionary indicating success and the selected collection name.
+        dict[str, bool | str]: A dictionary indicating success and the selected collection name.
 
     Raises:
         HTTPException: If the collection name is missing or an error occurs while selecting the collection.
@@ -101,7 +127,7 @@ def collections_select(payload: SelectCollectionIn) -> dict[str, str | bool]:
 
 
 @app.post("/query", response_model=QueryOut, tags=["Query"])
-def query(payload: QueryIn):
+def query(payload: QueryIn) -> dict[str, list[dict] | str]:
     """
     Handle a query request.
 
@@ -153,8 +179,8 @@ def _resolve_data_dir() -> Path:
     return Path.home() / "docint" / "data"
 
 
-@app.post("/ingest", tags=["Ingestion"])
-def ingest(payload: IngestIn) -> dict[str, object]:
+@app.post("/ingest", response_model=IngestOut, tags=["Ingestion"])
+def ingest(payload: IngestIn) -> dict[str, bool | str]:
     """
     Trigger ingestion for the requested collection using the configured data directory.
 
@@ -162,7 +188,7 @@ def ingest(payload: IngestIn) -> dict[str, object]:
         payload (IngestIn): The ingestion payload containing the collection name and hybrid flag.
 
     Returns:
-        dict[str, object]: A dictionary indicating success, collection name, data directory, and hybrid
+        dict[str, bool | str]: A dictionary indicating success, collection name, data directory, and hybrid flag.
 
     Raises:
         HTTPException: If the collection name is missing, data directory does not exist, or an error occurs during ingestion.
