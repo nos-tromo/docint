@@ -31,11 +31,6 @@ rag = RAG(qdrant_collection="")
 
 # --- Pydantic models for request and response payloads ---
 
-
-class CollectionList(BaseModel):
-    collections: list[str]
-
-
 class SelectCollectionIn(BaseModel):
     name: str
 
@@ -70,8 +65,7 @@ class IngestOut(BaseModel):
 
 # --- API Endpoints ---
 
-
-@app.get("/collections/list", response_model=CollectionList, tags=["Collections"])
+@app.get("/collections/list", response_model=list[str], tags=["Collections"])
 def collections_list() -> list[str]:
     """
     List existing collections.
