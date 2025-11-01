@@ -1445,14 +1445,18 @@ class RAG:
                         if text:
                             return text
                         # Some versions store content on .get_content(), or .get_text()
-                        if hasattr(node, "get_content") and callable(node.get_content):
+                        if (
+                            isinstance(node, BaseNode)
+                            and hasattr(node, "get_content")
+                            and callable(node.get_content)
+                        ):
                             t = node.get_content()
                             if isinstance(t, str) and t:
                                 return t
-                        if hasattr(node, "get_text") and callable(node.get_text):
-                            t = node.get_text()
-                            if isinstance(t, str) and t:
-                                return t
+                        if isinstance(node, BaseNode):
+                            text = getattr(node, "text", None)
+                            if isinstance(text, str) and text:
+                                return text
                     except Exception:
                         continue
         except Exception:
