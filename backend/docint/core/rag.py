@@ -1122,7 +1122,19 @@ class RAG:
         self._create_nodes()
         self.create_index()
         try:
-            eff_k = getattr(self.query_engine.retriever, "similarity_top_k", None)
+            eff_k = None
+            if self.query_engine is not None and hasattr(
+                self.query_engine, "retriever"
+            ):
+                eff_k = None
+                if self.query_engine is not None and hasattr(
+                    self.query_engine, "retriever"
+                ):
+                    eff_k = (
+                        getattr(self.query_engine.retriever, "similarity_top_k", None)
+                        if self.query_engine
+                        else None
+                    )
         except Exception:
             eff_k = None
         logger.info(
@@ -1154,7 +1166,11 @@ class RAG:
         # Concurrent, non-blocking upsert into Qdrant via aclient
         await self.index.ainsert_nodes(self.nodes)
         try:
-            eff_k = getattr(self.query_engine.retriever, "similarity_top_k", None)
+            eff_k = None
+            if self.query_engine is not None and hasattr(
+                self.query_engine, "retriever"
+            ):
+                eff_k = getattr(self.query_engine.retriever, "similarity_top_k", None)
         except Exception:
             eff_k = None
         logger.info(
