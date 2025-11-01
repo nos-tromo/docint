@@ -1694,12 +1694,13 @@ class RAG:
             token_limit=2000, chat_history=[]
         )
         if rolling:
-            self.chat_memory.put(
-                ChatMessage(
-                    role=MessageRole.SYSTEM,
-                    content=f"Conversation summary so far:\n{rolling}",
+            if self.chat_memory is not None:
+                self.chat_memory.put(
+                    ChatMessage(
+                        role=MessageRole.SYSTEM,
+                        content=f"Conversation summary so far:\n{rolling}",
+                    )
                 )
-            )
 
         if self.query_engine is None:
             logger.error("RuntimeError: Query engine has not been initialized.")
