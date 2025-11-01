@@ -1501,7 +1501,7 @@ class RAG:
         s = self._SessionMaker()
 
         if not session_id and self.session_id is not None:
-            session_id: str = self.session_id
+            session_id = self.session_id
 
         conv = s.get(Conversation, session_id)
         if conv is None:
