@@ -378,7 +378,9 @@ class RAG:
         # Table reader for CSV/TSV/XLSX/Parquet
         table_reader = TableReader(
             text_cols=self.table_text_cols,
-            metadata_cols=self.table_metadata_cols,
+            metadata_cols=set(self.table_metadata_cols)
+            if self.table_metadata_cols
+            else None,
             id_col=self.table_id_col,
             excel_sheet=self.table_excel_sheet,
             limit=self.table_row_limit,
