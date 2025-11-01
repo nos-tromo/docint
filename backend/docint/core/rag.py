@@ -1495,7 +1495,7 @@ class RAG:
             Path: The path to the exported session directory.
 
         Raises:
-            ValueError: If no conversation is found for the given session ID.
+            ValueError: If no conversation is found for the given session ID or the session ID is invalid.
         """
         self._ensure_store()
         s = self._SessionMaker()
@@ -1510,6 +1510,8 @@ class RAG:
             )
             raise ValueError(f"No conversation found for session_id={session_id}")
 
+        if session_id is None:
+            raise ValueError("Session ID cannot be None.")
         out_dir = Path(out_dir) / session_id
         if not out_dir.exists():
             out_dir.mkdir(parents=True, exist_ok=True)
