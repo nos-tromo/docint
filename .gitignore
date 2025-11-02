@@ -122,6 +122,7 @@ docker-compose.override.yml
 # Exceptions
 # ==================================
 !.gitignore
+!.github/
 !**/.dockerignore
 !frontend/index.html
 !backend/tests/
