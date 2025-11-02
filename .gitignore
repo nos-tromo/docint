@@ -109,7 +109,9 @@ build/
 *.sock
 docker-compose.override.yml
 
+# -----------------
 # Hidden files
+# -----------------
 .*
 
 # ==================================
