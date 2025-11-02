@@ -129,6 +129,7 @@ docker-compose.override.yml
 !.github/workflows/ci.yml
 !**/.dockerignore
 !frontend/index.html
+!backend/.pre-commit-config.yaml
 !backend/tests/
 !backend/tests/**.py
 !backend/docint/utils/prompts/*.txt
