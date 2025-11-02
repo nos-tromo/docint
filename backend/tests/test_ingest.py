@@ -15,7 +15,9 @@ def test_get_inputs_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     assert path == tmp_path
 
 
-def test_get_inputs_missing_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_get_inputs_missing_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     missing = tmp_path / "nope"
     monkeypatch.setattr("builtins.input", lambda _: "collection")
     monkeypatch.setattr(ingest, "DATA_PATH", missing)
@@ -23,7 +25,9 @@ def test_get_inputs_missing_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
         ingest.get_inputs()
 
 
-def test_ingest_docs_invokes_rag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_ingest_docs_invokes_rag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     calls = SimpleNamespace(args=None)
 
     class DummyRAG:

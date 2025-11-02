@@ -58,15 +58,17 @@ def test_normalize_response_data_extracts_sources() -> None:
 
 def test_start_session_requires_query_engine(tmp_path: Path) -> None:
     rag = RAG(qdrant_collection="test")
-    rag.init_session_store(f"sqlite:///{tmp_path/'sessions.db'}")
+    rag.init_session_store(f"sqlite:///{tmp_path / 'sessions.db'}")
     rag.query_engine = None
     with pytest.raises(RuntimeError):
         rag.start_session()
 
 
-def test_start_session_initializes_memory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_start_session_initializes_memory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     rag = RAG(qdrant_collection="test")
-    rag.init_session_store(f"sqlite:///{tmp_path/'sessions.db'}")
+    rag.init_session_store(f"sqlite:///{tmp_path / 'sessions.db'}")
     rag.index = object()
     rag.query_engine = object()
     rag._gen_model = object()
@@ -107,7 +109,9 @@ def test_chat_rejects_empty_prompt() -> None:
         rag.chat("   ")
 
 
-def test_list_supported_sparse_models_handles_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_list_supported_sparse_models_handles_import_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def broken() -> list[dict[str, str]]:
         raise ImportError("missing")
 

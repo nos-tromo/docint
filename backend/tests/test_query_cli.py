@@ -1,6 +1,5 @@
 import json
 from pathlib import Path
-from time import time
 
 import pytest
 
@@ -30,7 +29,7 @@ def test_store_output_handles_nodes(tmp_path: Path) -> None:
     class NodeWithScore:
         def __init__(self, text: str) -> None:
             self.node = Node(text)
-        
+
         def to_dict(self) -> dict[str, str]:
             return {"text": self.node.text}
 
@@ -79,7 +78,9 @@ def test_load_queries_creates_default(tmp_path: Path) -> None:
     assert target.exists()
 
 
-def test_run_query_records_results(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_run_query_records_results(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     class DummyRAG:
         def run_query(self, query: str) -> dict[str, str]:
             return {"response": query}

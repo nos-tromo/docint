@@ -1,5 +1,3 @@
-from pathlib import Path
-
 def test_guess_from_extension(tmp_path):
     from docint.utils import mimetype
 

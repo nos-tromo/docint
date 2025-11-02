@@ -1,6 +1,6 @@
 from sqlalchemy import inspect
 
-from docint.core.chat.base import Base, _make_session_maker
+from docint.core.chat.base import _make_session_maker
 from docint.core.chat.conversation import Conversation
 from docint.core.chat.turn import Turn
 from docint.core.chat.citation import Citation
@@ -19,7 +19,7 @@ def test_make_session_maker_creates_tables(tmp_path):
 
 
 def test_conversation_relationships(tmp_path):
-    maker = _make_session_maker(f"sqlite:///{tmp_path/'db.sqlite'}")
+    maker = _make_session_maker(f"sqlite:///{tmp_path / 'db.sqlite'}")
     session = maker()
     try:
         convo = Conversation(id="session-1", rolling_summary="Summary")

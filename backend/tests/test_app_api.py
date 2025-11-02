@@ -62,7 +62,9 @@ def test_collections_list_success(client: TestClient) -> None:
     assert response.json() == ["alpha", "beta"]
 
 
-def test_collections_list_failure(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+def test_collections_list_failure(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
     def raiser() -> list[str]:
         raise RuntimeError("boom")
 
@@ -72,7 +74,9 @@ def test_collections_list_failure(monkeypatch: pytest.MonkeyPatch, client: TestC
     assert response.json()["detail"] == "boom"
 
 
-def test_collections_select_success(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+def test_collections_select_success(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
     # Force lazy creation paths
     app_module.rag.index = None
     app_module.rag.query_engine = None
@@ -91,7 +95,9 @@ def test_collections_select_blank_name(client: TestClient) -> None:
     assert "Collection name required" in response.json()["detail"]
 
 
-def test_query_requires_collection(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+def test_query_requires_collection(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
     app_module.rag.qdrant_collection = ""
     response = client.post("/query", json={"question": "hi"})
     assert response.status_code == 500
@@ -112,7 +118,9 @@ def test_query_success(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> N
     assert body["session_id"] == "abc"
 
 
-def test_query_handles_missing_sources(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+def test_query_handles_missing_sources(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
     def fake_chat(question: str) -> dict[str, Any]:
         return "plain response"
 
@@ -125,7 +133,9 @@ def test_query_handles_missing_sources(monkeypatch: pytest.MonkeyPatch, client: 
     assert body["session_id"] == "generated-session"
 
 
-def test_ingest_success(monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path) -> None:
+def test_ingest_success(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path
+) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
 
@@ -152,7 +162,9 @@ def test_ingest_success(monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp
     assert called.args == ("docs", data_dir, False)
 
 
-def test_ingest_missing_directory(monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path) -> None:
+def test_ingest_missing_directory(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path
+) -> None:
     missing = tmp_path / "missing"
     monkeypatch.setattr(app_module, "_resolve_data_dir", lambda: missing)
     response = client.post("/ingest", json={"collection": "abc"})

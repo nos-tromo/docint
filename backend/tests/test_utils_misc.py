@@ -41,11 +41,11 @@ def test_ensure_file_hash_requires_inputs() -> None:
         ensure_file_hash({}, path=None, file_hash=None)
 
 
-def test_resolve_log_path_and_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_log_path_and_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     target = tmp_path / "logs"
     path = _resolve_log_path(target)
     assert path.name == "docint.log"
     logfile = setup_logging(target, level="INFO", rotation="1 MB", retention=1)
     assert logfile.exists()
-
-
