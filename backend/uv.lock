@@ -548,7 +548,7 @@ requires-dist = [
 dev = [
     { name = "pre-commit", specifier = ">=4.3.0" },
     { name = "pytest", specifier = ">=8.4.2" },
-    { name = "ruff", specifier = ">=0.14.3" },
+    { name = "ruff", specifier = "==0.14.3" },
 ]
 
 [[package]]
