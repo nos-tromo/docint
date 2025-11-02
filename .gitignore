@@ -80,6 +80,7 @@
 **/*.local
 **/.turbo/
 **/.output/
+**/coverage/
 
 # Frontend logs
 **/logs/
@@ -108,7 +109,9 @@ build/
 *.sock
 docker-compose.override.yml
 
+# -----------------
 # Hidden files
+# -----------------
 .*
 
 # ==================================
@@ -121,8 +124,12 @@ docker-compose.override.yml
 # Exceptions
 # ==================================
 !.gitignore
+!.github/
+!.github/workflows/
+!.github/workflows/ci.yml
 !**/.dockerignore
 !frontend/index.html
+!backend/.pre-commit-config.yaml
 !backend/tests/
 !backend/tests/**.py
 !backend/docint/utils/prompts/*.txt

@@ -1,92 +1,65 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import docint.core.ingest as ingest
 
 
-def test_get_inputs_uses_env_path(monkeypatch, tmp_path: Path) -> None:
-    """
-    Tests that the environment path is used for data input.
-
-    Args:
-        monkeypatch (_type_): The monkeypatch fixture.
-        tmp_path (Path): The temporary directory path.
-    """
-    home_data = tmp_path / "data"
-    if not home_data.exists():
-        home_data.mkdir()
-
-    monkeypatch.setattr(ingest, "DATA_PATH", str(home_data), raising=False)
-    monkeypatch.setattr("builtins.input", lambda prompt: "demo-collection")
-
-    collection, data_dir = ingest.get_inputs()
-
-    assert collection == "demo-collection"
-    assert data_dir == home_data
+def test_get_inputs_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("builtins.input", lambda _: "collection")
+    monkeypatch.setattr(ingest, "DATA_PATH", tmp_path)
+    (tmp_path).mkdir(exist_ok=True)
+    name, path = ingest.get_inputs()
+    assert name == "collection"
+    assert path == tmp_path
 
 
-def test_get_inputs_raises_for_missing_dir(monkeypatch, tmp_path: Path) -> None:
-    """
-    Tests that a ValueError is raised when the data directory is missing.
-
-    Args:
-        monkeypatch (_type_): The monkeypatch fixture.
-        tmp_path (Path): The temporary directory path.
-    """
-    missing_dir = tmp_path / "missing"
-    monkeypatch.setattr(ingest, "DATA_PATH", str(missing_dir), raising=False)
-    monkeypatch.setattr("builtins.input", lambda prompt: "demo")
-
+def test_get_inputs_missing_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    missing = tmp_path / "nope"
+    monkeypatch.setattr("builtins.input", lambda _: "collection")
+    monkeypatch.setattr(ingest, "DATA_PATH", missing)
     with pytest.raises(ValueError):
         ingest.get_inputs()
 
 
-def test_ingest_docs_invokes_rag(monkeypatch, tmp_path: Path) -> None:
-    """
-    Tests that the ingest_docs function invokes the RAG model correctly.
-
-    Args:
-        monkeypatch (_type_): The monkeypatch fixture.
-        tmp_path (Path): The temporary directory path.
-    """
-    data_dir = tmp_path / "docs"
-    if not data_dir.exists():
-        data_dir.mkdir()
-
-    calls: dict[str, Path] = {}
+def test_ingest_docs_invokes_rag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = SimpleNamespace(args=None)
 
     class DummyRAG:
-        """
-        A dummy Retrieval-Augmented Generation (RAG) model for testing purposes.
-        """
+        def __init__(self, qdrant_collection: str, enable_hybrid: bool) -> None:
+            calls.args = (qdrant_collection, enable_hybrid)
 
-        def __init__(self, qdrant_collection: str, enable_hybrid: bool = True) -> None:
-            """
-            Initializes the DummyRAG model.
-
-            Args:
-                qdrant_collection (str): The name of the Qdrant collection.
-                enable_hybrid (bool, optional): Whether to enable hybrid search. Defaults to True.
-            """
-            calls["collection"] = qdrant_collection
-            calls["hybrid"] = enable_hybrid
-            self.called_with: Path | None = None
-
-        def ingest_docs(self, directory: Path) -> None:
-            """
-            Ingests documents from the specified directory.
-
-            Args:
-                directory (Path): The directory containing documents to ingest.
-            """
-            self.called_with = Path(directory)
-            calls["data_dir"] = self.called_with
+        def ingest_docs(self, path: Path) -> None:  # type: ignore[override]
+            calls.path = path
 
     monkeypatch.setattr(ingest, "RAG", DummyRAG)
+    data_dir = tmp_path
+    ingest.ingest_docs("demo", data_dir, hybrid=False)
+    assert calls.args == ("demo", False)
+    assert calls.path == data_dir
 
-    ingest.ingest_docs("the-col", data_dir, hybrid=False)
 
-    assert calls["collection"] == "the-col"
-    assert calls["hybrid"] is False
-    assert calls["data_dir"] == data_dir
+def test_main_executes_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
+    order: list[str] = []
+
+    def fake_setup() -> None:
+        order.append("setup")
+
+    def fake_get() -> tuple[str, Path]:
+        order.append("inputs")
+        return "demo", Path("/tmp")
+
+    def fake_ingest(*args, **kwargs) -> None:
+        order.append("ingest")
+
+    monkeypatch.setattr(ingest, "setup_logging", fake_setup)
+    monkeypatch.setattr(ingest, "get_inputs", fake_get)
+    monkeypatch.setattr(ingest, "ingest_docs", fake_ingest)
+
+    ingest.main()
+    assert order == ["setup", "inputs", "ingest"]
