@@ -80,6 +80,7 @@
 **/*.local
 **/.turbo/
 **/.output/
+**/coverage/
 
 # Frontend logs
 **/logs/
