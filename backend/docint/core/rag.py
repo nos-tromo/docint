@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import pandas as pd
 import torch
@@ -40,6 +41,12 @@ from qdrant_client import QdrantClient
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from sqlalchemy.orm import sessionmaker
 
+from docint.core.agents import (
+    AgenticPipeline,
+    ClarificationRequiredError,
+    HierarchicalIndexer,
+    ParentChunk,
+)
 from docint.core.chat.base import _make_session_maker
 from docint.core.chat.citation import Citation
 from docint.core.chat.conversation import Conversation
@@ -92,6 +99,12 @@ class RAG:
     qdrant_host: str = QDRANT_HOST
     _qdrant_host_dir: Path | None = field(default=None, init=False, repr=False)
     qdrant_collection: str = "default"
+
+    # --- Agent / indexing controls ---
+    parent_store_dir: Path = Path(
+        os.getenv("PARENT_STORE_DIR", Path.home() / "docint" / "parents")
+    )
+    child_chunk_size: int = 500
 
     # --- Ollama Parameters ---
     base_url: str = OLLAMA_HOST
@@ -168,6 +181,16 @@ class RAG:
     chat_memory: Any | None = field(default=None, init=False)
     _SessionMaker: Any | None = field(default=None, init=False, repr=False)
     session_id: str | None = field(default=None, init=False, repr=False)
+    parent_store: dict[str, ParentChunk] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _agent_pipeline: AgenticPipeline | None = field(
+        default=None, init=False, repr=False
+    )
+    _parent_store_loaded_for: str | None = field(
+        default=None, init=False, repr=False
+    )
+    _session_id: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """
@@ -487,6 +510,71 @@ class RAG:
         """
         return StorageContext.from_defaults(vector_store=vector_store)
 
+    def _parent_store_path(self, collection: str | None = None) -> Path:
+        """Return the JSON file path for parent chunks of a collection."""
+
+        coll = collection or self.qdrant_collection
+        base = Path(str(self.parent_store_dir)).expanduser()
+        base.mkdir(parents=True, exist_ok=True)
+        return base / f"{coll}.json"
+
+    def _load_parent_store(self, collection: str | None = None) -> None:
+        """Load parent chunks from the JSON store for a collection."""
+
+        coll = collection or self.qdrant_collection
+        path = self._parent_store_path(coll)
+        if not path.exists():
+            self.parent_store = {}
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("Failed to load parent store for %s: %s", coll, exc)
+            self.parent_store = {}
+            return
+        store: dict[str, ParentChunk] = {}
+        for item in data or []:
+            if not isinstance(item, dict):
+                continue
+            identifier = str(item.get("id") or "").strip()
+            if not identifier:
+                continue
+            store[identifier] = ParentChunk(
+                id=identifier,
+                title=str(item.get("title") or ""),
+                text=str(item.get("text") or ""),
+                metadata=item.get("metadata") or {},
+            )
+        self.parent_store = store
+
+    def _ensure_parent_store_loaded(self) -> None:
+        coll = self.qdrant_collection
+        if self._parent_store_loaded_for == coll and self.parent_store:
+            return
+        self._load_parent_store(coll)
+        self._parent_store_loaded_for = coll
+
+    def attach_parent_context(
+        self, sources: Sequence[dict[str, Any]] | None
+    ) -> list[dict[str, Any]]:
+        """Attach parent chunk context to each source entry."""
+
+        if not sources:
+            return []
+        self._ensure_parent_store_loaded()
+        enriched: list[dict[str, Any]] = []
+        for src in sources:
+            entry = dict(src)
+            parent_id = entry.get("parent_id") or (entry.get("metadata", {}) or {}).get("parent_id")
+            if parent_id and parent_id in self.parent_store:
+                parent = self.parent_store[parent_id]
+                entry.setdefault("parent_id", parent.id)
+                entry.setdefault("parent_title", parent.title)
+                entry.setdefault("parent_text", parent.text)
+                entry.setdefault("parent_metadata", parent.metadata)
+            enriched.append(entry)
+        return enriched
+
     def _index(self, storage_ctx: StorageContext) -> VectorStoreIndex:
         """
         Creates the vector store index for document embeddings.
@@ -716,18 +804,16 @@ class RAG:
         self.docs = filtered_docs
 
     def _create_nodes(self) -> None:
-        """
-        Converts loaded documents into nodes using the appropriate parsers.
+        """Convert loaded documents into hierarchical parent/child chunks."""
 
-        Raises:
-            RuntimeError: If the directory reader or node parsers are not initialized.
-        """
         if self.dir_reader is None:
             logger.error("RuntimeError: Directory reader is not initialized.")
             raise RuntimeError("Directory reader is not initialized.")
+
         self.docs = self.dir_reader.load_data()
         self._ensure_file_hash_metadata()
         self._filter_docs_by_existing_hashes()
+
         cleaned_docs = []
         for doc in self.docs:
             if hasattr(doc, "text") and isinstance(doc.text, str):
@@ -736,150 +822,17 @@ class RAG:
                 )
             else:
                 cleaned_docs.append(doc)
+
         self.docs = cleaned_docs
-        if (
-            self.md_node_parser is None
-            or self.docling_node_parser is None
-            or self.semantic_node_parser is None
-        ):
-            logger.error("RuntimeError: Node parsers are not initialized.")
-            raise RuntimeError("Node parsers are not initialized.")
 
-        audio_docs, document_docs, img_docs, json_docs, table_docs, text_docs = [
-            [] for _ in range(6)
-        ]
-        for d in self.docs:
-            meta = getattr(d, "metadata", {}) or {}
-            file_type = (meta.get("file_type") or "").lower()
-            source_kind = meta.get("source", "") or ""
-            file_path = str(meta.get("file_path") or meta.get("file_name") or "")
-            ext = file_path.lower().rsplit(".", 1)[-1] if "." in file_path else ""
-
-            if source_kind == "audio" or ext in {
-                ".avi",
-                ".flv",
-                ".mkv",
-                ".mov",
-                ".mpeg",
-                ".mpg",
-                ".mp3",
-                ".mp4",
-                ".m4v",
-                ".ogg",
-                ".wav",
-                ".webm",
-                ".wmv",
-            }:
-                audio_docs.append(d)
-            elif source_kind == "image" or ext in {"gif", "jpeg", "jpg", "png"}:
-                img_docs.append(d)
-            elif source_kind == "table" or ext in {"csv", "tsv"}:
-                table_docs.append(d)
-            elif file_type.endswith(("json", "jsonl")) or ext in {
-                "json",
-                "jsonl",
-            }:
-                json_docs.append(d)
-            elif file_type.endswith(("docx", "pdf")) or ext in {"docx", "pdf"}:
-                document_docs.append(d)
-            elif file_type.startswith("text/") or ext in {"txt", "md", "rst"}:
-                text_docs.append(d)
-            else:
-                if file_type.startswith("text/") or ext in {"txt", "md", "rst"}:
-                    text_docs.append(d)
-                else:
-                    logger.warning(
-                        "Unrecognized document type for file '{}'; treating as plain text.",
-                        file_path,
-                    )
-                    text_docs.append(d)
-
-        nodes: list[BaseNode] = []
-
-        if audio_docs:
-            logger.info(
-                "Parsing {} audio documents with SemanticSplitterNodeParser",
-                len(audio_docs),
-            )
-            nodes.extend(self.semantic_node_parser.get_nodes_from_documents(audio_docs))
-
-        if img_docs:
-            logger.info(
-                "Parsing {} image documents with SemanticSplitterNodeParser",
-                len(img_docs),
-            )
-            nodes.extend(self.sentence_splitter.get_nodes_from_documents(img_docs))
-
-        if json_docs:
-            logger.info(
-                "Parsing {} JSON documents with SemanticSplitterNodeParser",
-                len(json_docs),
-            )
-            nodes.extend(self.semantic_node_parser.get_nodes_from_documents(json_docs))
-
-        if document_docs:
-
-            def _is_docling_json(doc):
-                try:
-                    json.loads(getattr(doc, "text", "") or "")
-                    return True
-                except Exception:
-                    return False
-
-            pdf_docs_docling = [d for d in document_docs if _is_docling_json(d)]
-            pdf_docs_md = [d for d in document_docs if not _is_docling_json(d)]
-
-            if pdf_docs_docling:
-                logger.info(
-                    "Parsing {} Docling JSON PDFs with DoclingNodeParser",
-                    len(pdf_docs_docling),
-                )
-                nodes.extend(
-                    self.docling_node_parser.get_nodes_from_documents(pdf_docs_docling)
-                )
-            if pdf_docs_md:
-                logger.info(
-                    "Parsing {} Markdown PDFs with MarkdownNodeParser", len(pdf_docs_md)
-                )
-                nodes.extend(self.md_node_parser.get_nodes_from_documents(pdf_docs_md))
-
-        if table_docs:
-            logger.info(
-                "Parsing {} table documents with SemanticSplitterNodeParser",
-                len(table_docs),
-            )
-            nodes.extend(self.semantic_node_parser.get_nodes_from_documents(table_docs))
-
-        if text_docs:
-            # detect markdown by file extension or text content
-            markdown_docs = [
-                d
-                for d in text_docs
-                if str(d.metadata.get("file_path", "")).endswith(
-                    (".md", ".markdown", ".rst")
-                )
-                or (d.text.strip().startswith("#"))
-            ]
-            plain_docs = [d for d in text_docs if d not in markdown_docs]
-
-            if markdown_docs:
-                logger.info(
-                    "Parsing {} markdown documents with MarkdownNodeParser",
-                    len(markdown_docs),
-                )
-                nodes.extend(
-                    self.md_node_parser.get_nodes_from_documents(markdown_docs)
-                )
-            if plain_docs:
-                logger.info(
-                    "Parsing {} plain text documents with SemanticSplitterNodeParser",
-                    len(plain_docs),
-                )
-                nodes.extend(
-                    self.semantic_node_parser.get_nodes_from_documents(plain_docs)
-                )
-
+        indexer = HierarchicalIndexer(child_chunk_size=self.child_chunk_size)
+        parent_path = self._parent_store_path(self.qdrant_collection)
+        nodes, parent_store = indexer.build(
+            self.docs, collection=self.qdrant_collection, parent_store_path=parent_path
+        )
         self.nodes = nodes
+        self.parent_store = parent_store
+        self._parent_store_loaded_for = self.qdrant_collection
 
     def create_index(self) -> None:
         """
@@ -969,6 +922,7 @@ class RAG:
             if node is None:
                 continue
             meta = getattr(node, "metadata", {}) or {}
+            payload_meta = getattr(nws, "metadata", {}) or {}
 
             # common file info (Docling puts origin here)
             origin = meta.get("origin") or {}
@@ -1031,6 +985,19 @@ class RAG:
             if location_label:
                 src[location_label] = location_value
 
+            parent_id = meta.get("parent_id") or payload_meta.get("parent_id")
+            if parent_id:
+                src["parent_id"] = parent_id
+                parent_title = meta.get("parent_title") or payload_meta.get("parent_title")
+                if parent_title:
+                    src["parent_title"] = parent_title
+                parent_order = meta.get("parent_order") or payload_meta.get("parent_order")
+                child_order = meta.get("child_order") or payload_meta.get("child_order")
+                if parent_order is not None:
+                    src["parent_order"] = parent_order
+                if child_order is not None:
+                    src["child_order"] = child_order
+
             if source_kind == "table":
                 n_rows = table_meta.get("n_rows")
                 n_cols = table_meta.get("n_cols")
@@ -1038,6 +1005,7 @@ class RAG:
 
             sources.append(src)
 
+        sources = self.attach_parent_context(sources)
         return {
             "query": query,
             "reasoning": reason,
@@ -1107,6 +1075,11 @@ class RAG:
         self.chat_engine = None
         self.chat_memory = None
         self.session_id = None
+        self._session_id = None
+        self.parent_store.clear()
+        self._parent_store_loaded_for = None
+        self._load_parent_store(name)
+        self._parent_store_loaded_for = name
 
     # --- Public API ---
     def ingest_docs(self, data_dir: str | Path) -> None:
@@ -1184,7 +1157,7 @@ class RAG:
 
     def run_query(self, prompt: str) -> dict[str, Any]:
         """
-        Run a query against the Qdrant collection.
+        Run a query against the Qdrant collection using the agentic pipeline.
 
         Args:
             prompt (str): The query prompt.
@@ -1195,7 +1168,6 @@ class RAG:
         Raises:
             ValueError: If the prompt is empty.
             RuntimeError: If the query engine is not initialized.
-            TypeError: If the response is not of the expected type.
         """
         if not prompt.strip():
             logger.error("ValueError: Query prompt cannot be empty.")
@@ -1205,40 +1177,18 @@ class RAG:
             raise RuntimeError(
                 "Query engine has not been initialized. Call ingest_docs() first."
             )
-        result = self.query_engine.query(prompt)
-        if not isinstance(result, Response):
-            logger.error("TypeError: Expected Response, got {}.", type(result).__name__)
-            raise TypeError(f"Expected Response, got {type(result).__name__}")
-        return self._normalize_response_data(prompt, result)
+        session_id = self.start_session(self.session_id)
+        pipeline = self._ensure_agent_pipeline()
+        result = pipeline.run(prompt, session_id=session_id)
+        data = result.response
+        self._persist_turn(session_id, prompt, result.raw_responses, data)
+        self._maybe_update_summary(session_id)
+        return data
 
     async def run_query_async(self, prompt: str) -> dict[str, Any]:
-        """
-        Run a query against the Qdrant collection asynchronously.
+        """Async wrapper around :meth:`run_query`."""
 
-        Args:
-            prompt (str): The query prompt.
-
-        Returns:
-            dict[str, Any]: The query results.
-
-        Raises:
-            ValueError: If the prompt is empty.
-            RuntimeError: If the query engine is not initialized.
-            TypeError: If the response is not of the expected type.
-        """
-        if not prompt.strip():
-            logger.error("ValueError: Query prompt cannot be empty.")
-            raise ValueError("Query prompt cannot be empty.")
-        if self.query_engine is None:
-            logger.error("RuntimeError: Query engine has not been initialized.")
-            raise RuntimeError(
-                "Query engine has not been initialized. Call ingest_docs()/asingest_docs() first."
-            )
-        result = await self.query_engine.aquery(prompt)
-        if not isinstance(result, Response):
-            logger.error("TypeError: Expected Response, got {}.", type(result).__name__)
-            raise TypeError(f"Expected Response, got {type(result).__name__}")
-        return self._normalize_response_data(prompt, result)
+        return self.run_query(prompt)
 
     # --- Session store wiring ---
     def init_session_store(self, db_url: str = "sqlite:///rag_sessions.db") -> None:
@@ -1278,6 +1228,46 @@ class RAG:
             s.commit()
         return s, conv
 
+    def get_recent_turns(self, session_id: str | None, limit: int = 5) -> list[dict[str, str]]:
+        """Return the most recent conversation turns for Stage 1 context."""
+
+        if limit <= 0:
+            return []
+        sid = session_id or self.session_id
+        if not sid:
+            return []
+        self._ensure_store()
+        s = self._SessionMaker()
+        conv = s.get(Conversation, sid)
+        if conv is None:
+            return []
+        turns = list(conv.turns[-limit:]) if hasattr(conv.turns, '__getitem__') else list(conv.turns)[-limit:]
+        return [
+            {"user": t.user_text or "", "assistant": t.model_response or ""} for t in turns
+        ]
+
+    def get_conversation_summary(
+        self, session_id: str | None, max_sentences: int = 3
+    ) -> str:
+        """Return a clipped rolling summary for Stage 1."""
+
+        sid = session_id or self.session_id
+        if not sid:
+            return ""
+        self._ensure_store()
+        s = self._SessionMaker()
+        conv = s.get(Conversation, sid)
+        if conv is None or not conv.rolling_summary:
+            return ""
+        return self._clip_sentences(conv.rolling_summary, max_sentences)
+
+    @staticmethod
+    def _clip_sentences(text: str, max_sentences: int) -> str:
+        sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+        if not sentences:
+            return ""
+        return " ".join(sentences[:max_sentences]).strip()
+
     def _get_rolling_summary(self, session_id: str) -> str:
         """
         Get the rolling summary for a conversation.
@@ -1303,15 +1293,28 @@ class RAG:
         Args:
             session_id (str): The ID of the session.
             user_msg (str): The user's message.
-            resp (Any): The response object.
+            resp (Any): The response object or sequence of responses.
             data (dict): The additional data to persist.
         """
         self._ensure_store()
         s, conv = self._load_or_create_convo(session_id)
 
-        # try to capture the condensed query from response metadata
-        meta = getattr(resp, "metadata", {}) or {}
-        rewritten = meta.get("query_str") or meta.get("compressed_query_str")
+        responses: Sequence[Any]
+        if isinstance(resp, Sequence) and not isinstance(resp, (str, bytes)):
+            responses = list(resp)
+        else:
+            responses = [resp]
+
+        rewritten = None
+        data_rewrites = data.get("rewritten_queries")
+        if isinstance(data_rewrites, list):
+            rewritten = "\n".join(map(str, data_rewrites))
+
+        for candidate in responses:
+            meta_candidate = getattr(candidate, "metadata", {}) or {}
+            if rewritten:
+                break
+            rewritten = meta_candidate.get("query_str") or meta_candidate.get("compressed_query_str")
 
         reasoning = data.get("reasoning")
         next_idx = len(conv.turns)
@@ -1327,56 +1330,57 @@ class RAG:
         s.flush()
 
         # citations
-        for src_node in getattr(resp, "source_nodes", []) or []:
-            # Prefer node-attached metadata
-            node = getattr(src_node, "node", None)
-            meta_node = getattr(node, "metadata", {}) or {}
+        for resp_item in responses:
+            for src_node in getattr(resp_item, "source_nodes", []) or []:
+                # Prefer node-attached metadata
+                node = getattr(src_node, "node", None)
+                meta_node = getattr(node, "metadata", {}) or {}
 
-            # Robust filename/filetype extraction across readers
-            filename = (
-                meta_node.get("file_name")
-                or meta_node.get("filename")
-                or meta_node.get("file_path")
-                or meta_node.get("source")
-                or meta_node.get("document_id")
-                or ""
-            )
-            filetype = (
-                meta_node.get("mimetype")
-                or meta_node.get("filetype")
-                or meta_node.get("content_type")
-                or ""
-            )
-            source_kind = meta_node.get("source", "")
-
-            # Common page/row hints
-            page = meta_node.get("page_label") or meta_node.get("page") or None
-            table_meta = meta_node.get("table") or {}
-            row_index = table_meta.get("row_index")
-
-            # Capture a stable node id strictly from the node object
-            node_id = None
-            if node is not None:
-                node_id = getattr(node, "node_id", None) or getattr(node, "id_", None)
-
-            score = (
-                float(getattr(src_node, "score", 0.0))
-                if hasattr(src_node, "score")
-                else None
-            )
-
-            s.add(
-                Citation(
-                    turn_id=t.id,
-                    node_id=str(node_id) if node_id is not None else None,
-                    score=score,
-                    filename=filename,
-                    filetype=filetype,
-                    source=source_kind,
-                    page=int(page) if page is not None else None,
-                    row=int(row_index) if row_index is not None else None,
+                # Robust filename/filetype extraction across readers
+                filename = (
+                    meta_node.get("file_name")
+                    or meta_node.get("filename")
+                    or meta_node.get("file_path")
+                    or meta_node.get("source")
+                    or meta_node.get("document_id")
+                    or ""
                 )
-            )
+                filetype = (
+                    meta_node.get("mimetype")
+                    or meta_node.get("filetype")
+                    or meta_node.get("content_type")
+                    or ""
+                )
+                source_kind = meta_node.get("source", "")
+
+                # Common page/row hints
+                page = meta_node.get("page_label") or meta_node.get("page") or None
+                table_meta = meta_node.get("table") or {}
+                row_index = table_meta.get("row_index")
+
+                # Capture a stable node id strictly from the node object
+                node_id = None
+                if node is not None:
+                    node_id = getattr(node, "node_id", None) or getattr(node, "id_", None)
+
+                score = (
+                    float(getattr(src_node, "score", 0.0))
+                    if hasattr(src_node, "score")
+                    else None
+                )
+
+                s.add(
+                    Citation(
+                        turn_id=t.id,
+                        node_id=str(node_id) if node_id is not None else None,
+                        score=score,
+                        filename=filename,
+                        filetype=filetype,
+                        source=source_kind,
+                        page=int(page) if page is not None else None,
+                        row=int(row_index) if row_index is not None else None,
+                    )
+                )
 
         s.commit()
 
@@ -1402,7 +1406,7 @@ class RAG:
             )
         prompt = (
             "Summarize the key facts and user intent from the following chat turns. "
-            "Keep it under 10 sentences and avoid speculation.\n\n"
+            "Keep it under 3 sentences and avoid speculation.\n\n"
             + "\n\n".join(slice_text)
         )
         # Use the same LLM to summarize
@@ -1667,6 +1671,11 @@ class RAG:
         )
         return out_dir
 
+    def _ensure_agent_pipeline(self) -> AgenticPipeline:
+        if self._agent_pipeline is None:
+            self._agent_pipeline = AgenticPipeline(self)
+        return self._agent_pipeline
+
     def start_session(self, session_id: str | None = None) -> str:
         """
         Start a new chat session or continue an existing one.
@@ -1713,22 +1722,12 @@ class RAG:
             memory=self.chat_memory,
             llm=self.gen_model,
         )
+        self._session_id = session_id
         return session_id
 
-    def chat(self, user_msg: str) -> str:
-        """
-        Run one conversational turn, persist it, and return your normalized payload.
+    def chat(self, user_msg: str) -> dict[str, Any]:
+        """Run one conversational turn and persist the agentic response."""
 
-        Args:
-            user_msg (str): The user message to process.
-
-        Returns:
-            str: The normalized response from the chat engine.
-
-        Raises:
-            ValueError: If the user message is empty or the session ID is invalid.
-            RuntimeError: If the query engine has not been initialized.
-        """
         if not user_msg.strip():
             logger.error("ValueError: Chat prompt cannot be empty.")
             raise ValueError("Chat prompt cannot be empty.")
@@ -1738,23 +1737,22 @@ class RAG:
                 "Query engine has not been initialized. Call ingest_docs() first."
             )
 
-        # Ensure we have a session and conversation storage
         session_id = self.session_id
         if self.chat_engine is None or getattr(self, "_session_id", None) != session_id:
             session_id = self.start_session(session_id)
 
-        # Build a retrieval query that includes the rolling conversation summary
         if session_id is None:
             logger.error("ValueError: Session ID cannot be None.")
             raise ValueError("Session ID cannot be None.")
-        summary = self._get_rolling_summary(session_id)
-        if summary:
-            retrieval_query = f"{summary}\n\nUser question: {user_msg}"
-        else:
-            retrieval_query = user_msg
 
-        resp = self.query_engine.query(retrieval_query)
-        data = self._normalize_response_data(user_msg, resp)
-        self._persist_turn(session_id, user_msg, resp, data)
+        pipeline = self._ensure_agent_pipeline()
+        try:
+            result = pipeline.run(user_msg, session_id=session_id)
+        except ClarificationRequiredError:
+            raise
+
+        data = result.response
+        raw_responses = result.raw_responses
+        self._persist_turn(session_id, user_msg, raw_responses, data)
         self._maybe_update_summary(session_id)
         return data

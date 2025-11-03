@@ -6,6 +6,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from docint.core import ingest as ingest_module
+from docint.core.agents import ClarificationRequiredError
 from docint.core.rag import RAG
 from docint.utils.logging_cfg import setup_logging
 
@@ -157,6 +158,9 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str]:
         sources: list[dict] = data.get("sources", []) if isinstance(data, dict) else []
 
         return {"answer": answer, "sources": sources, "session_id": session_id}
+    except ClarificationRequiredError as exc:
+        logger.info("ClarificationRequiredError: {}", exc)
+        raise HTTPException(status_code=422, detail=str(exc))
     except HTTPException as e:
         logger.error("HTTPException: Error processing query: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
