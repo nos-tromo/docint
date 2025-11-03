@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import pandas as pd
 import torch
@@ -30,7 +30,7 @@ from llama_index.core.node_parser import (
 )
 from llama_index.core.postprocessor import SentenceTransformerRerank
 from llama_index.core.query_engine import RetrieverQueryEngine
-from llama_index.core.schema import BaseNode, Document
+from llama_index.core.schema import BaseNode, Document, TextNode
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
 from llama_index.node_parser.docling import DoclingNodeParser
@@ -40,6 +40,18 @@ from qdrant_client import QdrantClient
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from sqlalchemy.orm import sessionmaker
 
+from docint.core.agentic import (
+    AgenticResponse,
+    ClarifiedQuery,
+    ConversationContext,
+    HierarchicalChunker,
+    ParentChunkRecord,
+    clarify_query,
+    combine_reasoning,
+    dump_parent_chunks,
+    load_parent_chunks,
+    summarise_conversation,
+)
 from docint.core.chat.base import _make_session_maker
 from docint.core.chat.citation import Citation
 from docint.core.chat.conversation import Conversation
@@ -168,6 +180,12 @@ class RAG:
     chat_memory: Any | None = field(default=None, init=False)
     _SessionMaker: Any | None = field(default=None, init=False, repr=False)
     session_id: str | None = field(default=None, init=False, repr=False)
+    parent_chunks: dict[str, ParentChunkRecord] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    parent_store_cache: dict[str, dict[str, Any]] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         """
@@ -745,141 +763,45 @@ class RAG:
             logger.error("RuntimeError: Node parsers are not initialized.")
             raise RuntimeError("Node parsers are not initialized.")
 
-        audio_docs, document_docs, img_docs, json_docs, table_docs, text_docs = [
-            [] for _ in range(6)
-        ]
-        for d in self.docs:
-            meta = getattr(d, "metadata", {}) or {}
-            file_type = (meta.get("file_type") or "").lower()
-            source_kind = meta.get("source", "") or ""
-            file_path = str(meta.get("file_path") or meta.get("file_name") or "")
-            ext = file_path.lower().rsplit(".", 1)[-1] if "." in file_path else ""
+        chunker = HierarchicalChunker(child_characters=500)
+        parent_chunks: list[ParentChunkRecord] = []
+        child_nodes: list[BaseNode] = []
 
-            if source_kind == "audio" or ext in {
-                ".avi",
-                ".flv",
-                ".mkv",
-                ".mov",
-                ".mpeg",
-                ".mpg",
-                ".mp3",
-                ".mp4",
-                ".m4v",
-                ".ogg",
-                ".wav",
-                ".webm",
-                ".wmv",
-            }:
-                audio_docs.append(d)
-            elif source_kind == "image" or ext in {"gif", "jpeg", "jpg", "png"}:
-                img_docs.append(d)
-            elif source_kind == "table" or ext in {"csv", "tsv"}:
-                table_docs.append(d)
-            elif file_type.endswith(("json", "jsonl")) or ext in {
-                "json",
-                "jsonl",
-            }:
-                json_docs.append(d)
-            elif file_type.endswith(("docx", "pdf")) or ext in {"docx", "pdf"}:
-                document_docs.append(d)
-            elif file_type.startswith("text/") or ext in {"txt", "md", "rst"}:
-                text_docs.append(d)
-            else:
-                if file_type.startswith("text/") or ext in {"txt", "md", "rst"}:
-                    text_docs.append(d)
-                else:
-                    logger.warning(
-                        "Unrecognized document type for file '{}'; treating as plain text.",
-                        file_path,
-                    )
-                    text_docs.append(d)
-
-        nodes: list[BaseNode] = []
-
-        if audio_docs:
-            logger.info(
-                "Parsing {} audio documents with SemanticSplitterNodeParser",
-                len(audio_docs),
+        for idx, doc in enumerate(self.docs):
+            metadata = getattr(doc, "metadata", {}) or {}
+            default_title = (
+                metadata.get("file_name")
+                or metadata.get("filename")
+                or metadata.get("file_path")
+                or f"Document {idx + 1}"
             )
-            nodes.extend(self.semantic_node_parser.get_nodes_from_documents(audio_docs))
-
-        if img_docs:
-            logger.info(
-                "Parsing {} image documents with SemanticSplitterNodeParser",
-                len(img_docs),
+            parents, children = chunker.build(
+                getattr(doc, "text", "") or "",
+                metadata,
+                default_title=str(default_title),
             )
-            nodes.extend(self.sentence_splitter.get_nodes_from_documents(img_docs))
+            if not parents:
+                continue
+            parent_chunks.extend(parents)
+            for child in children:
+                child_meta = dict(metadata)
+                child_meta.update(child.metadata)
+                child_meta["start_char"] = child.start_char
+                child_meta["end_char"] = child.end_char
+                node = TextNode(text=child.text, metadata=child_meta, id_=child.id)
+                child_nodes.append(node)
 
-        if json_docs:
-            logger.info(
-                "Parsing {} JSON documents with SemanticSplitterNodeParser",
-                len(json_docs),
+        if not child_nodes:
+            logger.error(
+                "RuntimeError: Failed to create hierarchical child chunks from the documents."
             )
-            nodes.extend(self.semantic_node_parser.get_nodes_from_documents(json_docs))
-
-        if document_docs:
-
-            def _is_docling_json(doc):
-                try:
-                    json.loads(getattr(doc, "text", "") or "")
-                    return True
-                except Exception:
-                    return False
-
-            pdf_docs_docling = [d for d in document_docs if _is_docling_json(d)]
-            pdf_docs_md = [d for d in document_docs if not _is_docling_json(d)]
-
-            if pdf_docs_docling:
-                logger.info(
-                    "Parsing {} Docling JSON PDFs with DoclingNodeParser",
-                    len(pdf_docs_docling),
-                )
-                nodes.extend(
-                    self.docling_node_parser.get_nodes_from_documents(pdf_docs_docling)
-                )
-            if pdf_docs_md:
-                logger.info(
-                    "Parsing {} Markdown PDFs with MarkdownNodeParser", len(pdf_docs_md)
-                )
-                nodes.extend(self.md_node_parser.get_nodes_from_documents(pdf_docs_md))
-
-        if table_docs:
-            logger.info(
-                "Parsing {} table documents with SemanticSplitterNodeParser",
-                len(table_docs),
+            raise RuntimeError(
+                "Failed to create hierarchical child chunks from the documents."
             )
-            nodes.extend(self.semantic_node_parser.get_nodes_from_documents(table_docs))
 
-        if text_docs:
-            # detect markdown by file extension or text content
-            markdown_docs = [
-                d
-                for d in text_docs
-                if str(d.metadata.get("file_path", "")).endswith(
-                    (".md", ".markdown", ".rst")
-                )
-                or (d.text.strip().startswith("#"))
-            ]
-            plain_docs = [d for d in text_docs if d not in markdown_docs]
-
-            if markdown_docs:
-                logger.info(
-                    "Parsing {} markdown documents with MarkdownNodeParser",
-                    len(markdown_docs),
-                )
-                nodes.extend(
-                    self.md_node_parser.get_nodes_from_documents(markdown_docs)
-                )
-            if plain_docs:
-                logger.info(
-                    "Parsing {} plain text documents with SemanticSplitterNodeParser",
-                    len(plain_docs),
-                )
-                nodes.extend(
-                    self.semantic_node_parser.get_nodes_from_documents(plain_docs)
-                )
-
-        self.nodes = nodes
+        self.parent_chunks = {parent.id: parent for parent in parent_chunks}
+        self.nodes = child_nodes
+        self._persist_parent_chunks(parent_chunks)
 
     def create_index(self) -> None:
         """
@@ -906,6 +828,228 @@ class RAG:
             llm=self.gen_model,
             node_postprocessors=[self.reranker],
         )
+
+    # --- Agentic helpers ---
+
+    def _parent_store_path(self) -> Path:
+        base = self.qdrant_host_dir / "agentic_parents"
+        base.mkdir(parents=True, exist_ok=True)
+        return base / f"{self.qdrant_collection}.json"
+
+    def _persist_parent_chunks(self, parents: Sequence[ParentChunkRecord]) -> None:
+        if not parents:
+            return
+        path = self._parent_store_path()
+        dump_parent_chunks(path, parents)
+        self.parent_store_cache = load_parent_chunks(path)
+
+    def _load_parent_chunk_map(self) -> dict[str, dict[str, Any]]:
+        if self.parent_store_cache:
+            return self.parent_store_cache
+        try:
+            path = self._parent_store_path()
+        except ValueError:
+            return {}
+        self.parent_store_cache = load_parent_chunks(path)
+        return self.parent_store_cache
+
+    def _conversation_understanding(self, session_id: str) -> ConversationContext:
+        self._ensure_store()
+        s = self._SessionMaker()
+        conv = s.get(Conversation, session_id)
+        if not conv:
+            return ConversationContext()
+        return summarise_conversation(conv.turns)
+
+    def _clarify_user_query(
+        self, question: str, context: ConversationContext
+    ) -> ClarifiedQuery:
+        clarified = clarify_query(question, context)
+        if not clarified.rewritten_query:
+            clarified.rewritten_query = question.strip()
+        return clarified
+
+    @staticmethod
+    def _shorten_text(text: str, limit: int) -> str:
+        text = text or ""
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1].rstrip() + "…"
+
+    def _deduplicate_nodes(self, nodes: Sequence[Any]) -> list[Any]:
+        deduped: list[Any] = []
+        seen: set[str] = set()
+        for node_with_score in nodes:
+            node = getattr(node_with_score, "node", None)
+            if node is None:
+                continue
+            node_id = getattr(node, "node_id", None) or getattr(node, "id_", None)
+            if node_id is None:
+                deduped.append(node_with_score)
+                continue
+            if node_id in seen:
+                continue
+            seen.add(node_id)
+            deduped.append(node_with_score)
+        return deduped
+
+    def _retrieval_sufficient(self, nodes: Sequence[Any]) -> bool:
+        if not nodes:
+            return False
+        top_score = getattr(nodes[0], "score", None)
+        if top_score is None:
+            return len(nodes) >= 2
+        try:
+            score_val = float(top_score)
+        except (TypeError, ValueError):
+            score_val = 0.0
+        return score_val >= 0.1 or len(nodes) >= 3
+
+    def _compose_context_blocks(
+        self, nodes: Sequence[Any], parent_map: dict[str, dict[str, Any]]
+    ) -> list[str]:
+        blocks: list[str] = []
+        used_parents: set[str] = set()
+        for node_with_score in nodes[: self.rerank_top_n or 3]:
+            node = getattr(node_with_score, "node", None)
+            if node is None:
+                continue
+            metadata = getattr(node, "metadata", {}) or {}
+            parent_id = metadata.get("parent_id")
+            parent_entry = parent_map.get(parent_id) if parent_id else None
+            parent_text = parent_entry.get("text") if parent_entry else ""
+            parent_title = parent_entry.get("title") if parent_entry else metadata.get(
+                "section_title", ""
+            )
+            if parent_id and parent_id in used_parents:
+                continue
+            used_parents.add(parent_id or f"child-{len(blocks)}")
+            block = (
+                f"Section: {parent_title or 'Unknown Section'}\n"
+                f"Parent excerpt: {self._shorten_text(parent_text, 700)}\n"
+                f"Child excerpt: {self._shorten_text(getattr(node, 'text', ''), 400)}"
+            )
+            blocks.append(block)
+        return blocks
+
+    def _render_agent_prompt(
+        self,
+        context: ConversationContext,
+        clarified: ClarifiedQuery,
+        active_query: str,
+        blocks: Sequence[str],
+    ) -> str:
+        context_text = "\n\n".join(blocks)
+        summary_line = context.summary or "No recent conversation context provided."
+        sub_query_line = (
+            "Sub-queries considered: " + "; ".join(clarified.sub_queries)
+            if clarified.sub_queries
+            else ""
+        )
+        return (
+            "You are an analytical assistant working with hierarchical document chunks.\n"
+            f"Conversation summary: {summary_line}\n"
+            f"Primary question: {clarified.rewritten_query}\n"
+            + (sub_query_line + "\n" if sub_query_line else "")
+            + "Use the following retrieved context to answer accurately and concisely.\n"
+            + context_text
+            + "\n\nRespond with a direct answer grounded in the provided context."
+        )
+
+    def _agentic_search_and_answer(
+        self,
+        _session_id: str,
+        user_msg: str,
+        context: ConversationContext,
+        clarified: ClarifiedQuery,
+    ) -> tuple[AgenticResponse, dict[str, Any]]:
+        if self.index is None:
+            logger.error("RuntimeError: Query engine has not been initialized.")
+            raise RuntimeError(
+                "Query engine has not been initialized. Call ingest_docs() first."
+            )
+
+        retriever = self.index.as_retriever(
+            similarity_top_k=min(max(self.retrieve_similarity_top_k, 5), 64)
+        )
+        parent_map = self._load_parent_chunk_map()
+
+        attempts = 0
+        best_nodes: list[Any] = []
+        used_query = clarified.rewritten_query
+        seen_queries: set[str] = set()
+        query_candidates = list(clarified.iter_queries())
+
+        while attempts < 3 and not best_nodes:
+            if attempts < len(query_candidates):
+                query_text = query_candidates[attempts]
+            else:
+                extra_keywords = " ".join(context.topics[:3]) if context.topics else ""
+                query_text = f"{clarified.rewritten_query} {extra_keywords}".strip()
+            if not query_text:
+                attempts += 1
+                continue
+            if query_text in seen_queries:
+                attempts += 1
+                continue
+            seen_queries.add(query_text)
+            nodes = retriever.retrieve(query_text)
+            if nodes and self.reranker is not None:
+                nodes = self.reranker.postprocess_nodes(nodes, query_str=query_text)
+            nodes = self._deduplicate_nodes(nodes or [])
+            if self._retrieval_sufficient(nodes):
+                best_nodes = list(nodes)
+                used_query = query_text
+                break
+            attempts += 1
+
+        if not best_nodes:
+            reasoning = combine_reasoning(
+                context.summary,
+                clarified.reasoning,
+                "Retrieved context was insufficient; requested clarification from the user.",
+            )
+            response_text = (
+                "I could not find enough relevant information. Could you clarify or "
+                "provide additional details?"
+            )
+            response = AgenticResponse(
+                response=response_text,
+                source_nodes=[],
+                metadata={"query_str": clarified.rewritten_query or user_msg},
+                reasoning=reasoning,
+            )
+            data = {
+                "query": clarified.rewritten_query or user_msg,
+                "response": response_text,
+                "sources": [],
+                "reasoning": reasoning,
+            }
+            return response, data
+
+        context_blocks = self._compose_context_blocks(best_nodes, parent_map)
+        prompt = self._render_agent_prompt(context, clarified, used_query, context_blocks)
+        completion = self.gen_model.complete(prompt)
+        answer_text = getattr(completion, "text", None) or getattr(
+            completion, "response", ""
+        )
+        answer_text = str(answer_text or "").strip()
+        reasoning = combine_reasoning(
+            clarified.reasoning,
+            f"Answered using {len(best_nodes)} retrieved child chunks.",
+        )
+        metadata = {
+            "query_str": clarified.rewritten_query,
+            "compressed_query_str": used_query,
+        }
+        response = AgenticResponse(
+            response=answer_text,
+            source_nodes=best_nodes,
+            metadata=metadata,
+            reasoning=reasoning,
+        )
+        data = self._normalize_response_data(clarified.rewritten_query, response, reason=reasoning)
+        return response, data
 
     def _normalize_response_data(
         self, query: str, result: Any, reason: str | None = None
@@ -1107,6 +1251,8 @@ class RAG:
         self.chat_engine = None
         self.chat_memory = None
         self.session_id = None
+        self.parent_chunks.clear()
+        self.parent_store_cache.clear()
 
     # --- Public API ---
     def ingest_docs(self, data_dir: str | Path) -> None:
@@ -1732,29 +1878,50 @@ class RAG:
         if not user_msg.strip():
             logger.error("ValueError: Chat prompt cannot be empty.")
             raise ValueError("Chat prompt cannot be empty.")
-        if self.query_engine is None:
+        if self.index is None:
             logger.error("RuntimeError: Query engine has not been initialized.")
             raise RuntimeError(
                 "Query engine has not been initialized. Call ingest_docs() first."
             )
 
-        # Ensure we have a session and conversation storage
         session_id = self.session_id
         if self.chat_engine is None or getattr(self, "_session_id", None) != session_id:
             session_id = self.start_session(session_id)
 
-        # Build a retrieval query that includes the rolling conversation summary
         if session_id is None:
             logger.error("ValueError: Session ID cannot be None.")
             raise ValueError("Session ID cannot be None.")
-        summary = self._get_rolling_summary(session_id)
-        if summary:
-            retrieval_query = f"{summary}\n\nUser question: {user_msg}"
-        else:
-            retrieval_query = user_msg
 
-        resp = self.query_engine.query(retrieval_query)
-        data = self._normalize_response_data(user_msg, resp)
-        self._persist_turn(session_id, user_msg, resp, data)
+        context = self._conversation_understanding(session_id)
+        clarified = self._clarify_user_query(user_msg, context)
+        pipeline_reasoning = combine_reasoning(context.summary, clarified.reasoning)
+
+        if clarified.needs_clarification:
+            response_text = clarified.clarification_request or (
+                "Could you clarify your question so I can assist you accurately?"
+            )
+            agent_response = AgenticResponse(
+                response=response_text,
+                source_nodes=[],
+                metadata={"query_str": clarified.rewritten_query or user_msg},
+                reasoning=pipeline_reasoning,
+            )
+            data = {
+                "query": clarified.rewritten_query or user_msg,
+                "response": response_text,
+                "sources": [],
+                "reasoning": pipeline_reasoning,
+            }
+            self._persist_turn(session_id, user_msg, agent_response, data)
+            self._maybe_update_summary(session_id)
+            return data
+
+        agent_response, data = self._agentic_search_and_answer(
+            session_id, user_msg, context, clarified
+        )
+        data_reasoning = combine_reasoning(pipeline_reasoning, data.get("reasoning", ""))
+        data["reasoning"] = data_reasoning
+        agent_response.reasoning = data_reasoning
+        self._persist_turn(session_id, user_msg, agent_response, data)
         self._maybe_update_summary(session_id)
         return data
