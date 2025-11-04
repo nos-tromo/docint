@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   Box,
   Button,
+  Collapse,
   HStack,
   Input,
   Text,
@@ -20,6 +21,7 @@ export default function Chat({ collection }: Props) {
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [expandedSources, setExpandedSources] = useState<Record<number, boolean>>({});
 
   const msgsKey = collection ? `chat_msgs_${collection}` : "chat_msgs";
   const sessionKey = collection ? `sessionId_${collection}` : "sessionId";
@@ -31,6 +33,7 @@ export default function Chat({ collection }: Props) {
     } catch {
       setMsgs([]);
     }
+    setExpandedSources({});
     try {
       setSessionId(localStorage.getItem(sessionKey));
     } catch {
@@ -70,8 +73,16 @@ export default function Chat({ collection }: Props) {
   const reset = () => {
     setMsgs([]);
     setSessionId(null);
+    setExpandedSources({});
     localStorage.removeItem(msgsKey);
     localStorage.removeItem(sessionKey);
+  };
+
+  const toggleSources = (index: number) => {
+    setExpandedSources((prev) => ({
+      ...prev,
+      [index]: !prev[index],
+    }));
   };
 
   const exportChat = () => {
@@ -133,22 +144,33 @@ export default function Chat({ collection }: Props) {
             {m.sources && m.sources.length > 0 && (
               <>
                 <Box my={2} borderTopWidth="1px" borderColor="border.muted" />
-                <Text fontSize="sm" color="fg.muted">
-                  Sources:
-                </Text>
-                {m.sources.map((s, j) => (
-                  <Box key={j} fontSize="sm" color="fg.muted" mb={1}>
-                    <Text>
-                      • {s.filename || "unknown"}
-                      {s.page ? ` (page ${s.page})` : s.row ? ` (row ${s.row})` : ""}
-                    </Text>
-                    {s.text && (
-                      <Text ml={4} whiteSpace="pre-wrap" fontStyle="italic">
-                        {s.text}
+                <Button
+                  size="xs"
+                  variant="link"
+                  colorScheme="teal"
+                  onClick={() => toggleSources(i)}
+                  aria-expanded={expandedSources[i] ?? false}
+                >
+                  {expandedSources[i] ? "Hide sources" : "Show sources"}
+                </Button>
+                <Collapse in={expandedSources[i] ?? false} animateOpacity unmountOnExit>
+                  <Text fontSize="sm" color="fg.muted" mt={2}>
+                    Sources:
+                  </Text>
+                  {m.sources.map((s, j) => (
+                    <Box key={j} fontSize="sm" color="fg.muted" mb={1}>
+                      <Text>
+                        • {s.filename || "unknown"}
+                        {s.page ? ` (page ${s.page})` : s.row ? ` (row ${s.row})` : ""}
                       </Text>
-                    )}
-                  </Box>
-                ))}
+                      {s.text && (
+                        <Text ml={4} whiteSpace="pre-wrap" fontStyle="italic">
+                          {s.text}
+                        </Text>
+                      )}
+                    </Box>
+                  ))}
+                </Collapse>
               </>
             )}
           </Box>
