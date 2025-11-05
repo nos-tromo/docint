@@ -20,20 +20,29 @@ class DummyRAGForConversation:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def get_recent_turns(self, session_id: str | None, limit: int) -> list[dict[str, str]]:
+    def get_recent_turns(
+        self, session_id: str | None, limit: int
+    ) -> list[dict[str, str]]:
         self.calls.append("turns")
         return [
             {"user": "How do I migrate?", "assistant": "Use SQL."},
             {"user": "What about rollback?", "assistant": "Apply scripts."},
         ]
 
-    def get_conversation_summary(self, session_id: str | None, max_sentences: int) -> str:
+    def get_conversation_summary(
+        self, session_id: str | None, max_sentences: int
+    ) -> str:
         self.calls.append("summary")
         return ""
 
 
 class DummyDocument:
-    def __init__(self, text: str, metadata: dict[str, object] | None = None, doc_id: str = "doc-1") -> None:
+    def __init__(
+        self,
+        text: str,
+        metadata: dict[str, object] | None = None,
+        doc_id: str = "doc-1",
+    ) -> None:
         self._text = text
         self.metadata = metadata or {}
         self.id_ = doc_id
@@ -70,11 +79,15 @@ class DummyRAGForRetrieval:
         self.queries.append(query)
         return object()
 
-    def _normalize_response_data(self, original: str, resp: object) -> dict[str, object]:
+    def _normalize_response_data(
+        self, original: str, resp: object
+    ) -> dict[str, object]:
         index = len(self.queries) - 1
         return dict(self.payloads[index])
 
-    def attach_parent_context(self, sources: list[dict[str, object]]) -> list[dict[str, object]]:
+    def attach_parent_context(
+        self, sources: list[dict[str, object]]
+    ) -> list[dict[str, object]]:
         return sources
 
 
@@ -83,11 +96,15 @@ class DummyRAGForPipeline(DummyRAGForRetrieval):
         super().__init__(payloads)
         self.conversation_calls: list[str] = []
 
-    def get_recent_turns(self, session_id: str | None, limit: int) -> list[dict[str, str]]:
+    def get_recent_turns(
+        self, session_id: str | None, limit: int
+    ) -> list[dict[str, str]]:
         self.conversation_calls.append("turns")
         return []
 
-    def get_conversation_summary(self, session_id: str | None, max_sentences: int) -> str:
+    def get_conversation_summary(
+        self, session_id: str | None, max_sentences: int
+    ) -> str:
         self.conversation_calls.append("summary")
         return "Previous discussion focused on SQL migrations."
 
@@ -125,7 +142,9 @@ def test_hierarchical_indexer_builds_and_persists_parents(tmp_path: Path) -> Non
         metadata={"path": Path("/tmp/example.md")},
     )
     parent_store_path = tmp_path / "collection.json"
-    nodes, parent_store = indexer.build([doc], collection="demo", parent_store_path=parent_store_path)
+    nodes, parent_store = indexer.build(
+        [doc], collection="demo", parent_store_path=parent_store_path
+    )
 
     assert parent_store_path.exists()
     assert len(parent_store) == 2
@@ -135,7 +154,9 @@ def test_hierarchical_indexer_builds_and_persists_parents(tmp_path: Path) -> Non
     assert "Title" in persisted and "Section" in persisted
 
 
-def test_retrieval_agent_retries_until_sufficient(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_retrieval_agent_retries_until_sufficient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     payloads = [
         {"response": "Too short", "sources": []},
         {
@@ -159,7 +180,9 @@ def test_retrieval_agent_retries_until_sufficient(monkeypatch: pytest.MonkeyPatc
     assert payload["reasoning"].startswith("Attempt")
 
 
-def test_agentic_pipeline_uses_conversation_and_retrieval(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_agentic_pipeline_uses_conversation_and_retrieval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     payloads = [
         {
             "response": "Comprehensive instructions with citations and steps for SQL migrations.",

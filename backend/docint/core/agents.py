@@ -25,7 +25,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Sequence
 
 from loguru import logger
 
@@ -33,7 +33,6 @@ try:  # Optional dependency (fast path when llama-index is available)
     from llama_index.core.schema import TextNode
 except ImportError:  # pragma: no cover - fallback for missing dependency
     TextNode = object  # type: ignore[assignment]
-
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -58,7 +57,9 @@ class ConversationContext:
 class ConversationUnderstandingAgent:
     """Summarise recent turns to maintain conversational continuity."""
 
-    def __init__(self, rag: "RAG", *, max_turns: int = 5) -> None:  # pragma: no cover - imported lazily
+    def __init__(
+        self, rag: "RAG", *, max_turns: int = 5
+    ) -> None:  # pragma: no cover - imported lazily
         self._rag = rag
         self._max_turns = max_turns
 
@@ -151,7 +152,9 @@ class QueryClarifierAgent:
 
         resolved = self._resolve_references(cleaned, context.summary)
         sub_queries = self._split_into_subqueries(resolved)
-        rewritten = [self._rewrite_for_retrieval(q, context.summary) for q in sub_queries]
+        rewritten = [
+            self._rewrite_for_retrieval(q, context.summary) for q in sub_queries
+        ]
         return ClarifiedQuery(
             original=cleaned,
             context_summary=context.summary,
@@ -216,7 +219,9 @@ class QueryClarifierAgent:
         # Split on " and " when the sentence is long enough to likely contain
         # multiple intents.
         if " and " in query.lower() and len(query) > 80:
-            segments = [seg.strip().capitalize() for seg in query.split(" and ") if seg.strip()]
+            segments = [
+                seg.strip().capitalize() for seg in query.split(" and ") if seg.strip()
+            ]
             return [seg if seg.endswith("?") else f"{seg}?" for seg in segments]
 
         return [query if query.endswith("?") else f"{query}?".replace("??", "?")]
@@ -233,7 +238,9 @@ class QueryClarifierAgent:
     @staticmethod
     def _extract_keywords(text: str) -> list[str]:
         tokens = re.findall(r"[A-Za-z0-9_-]+", text)
-        keywords = [tok for tok in tokens if tok.lower() not in STOPWORDS and len(tok) > 2]
+        keywords = [
+            tok for tok in tokens if tok.lower() not in STOPWORDS and len(tok) > 2
+        ]
         return keywords
 
 
@@ -307,7 +314,9 @@ class HierarchicalIndexer:
                     )
 
             if doc_idx and doc_idx % 100 == 0:
-                logger.info("Processed {} documents for collection '{}'.", doc_idx, collection)
+                logger.info(
+                    "Processed {} documents for collection '{}'.", doc_idx, collection
+                )
 
         self._persist_parent_store(parent_store, parent_store_path)
         return child_nodes, parent_store
@@ -350,7 +359,7 @@ class HierarchicalIndexer:
             end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
             section = text[start:end].strip()
             title = match.group(1).lstrip("# ").strip()
-            parents.append({"title": title or f"Section {idx+1}", "text": section})
+            parents.append({"title": title or f"Section {idx + 1}", "text": section})
         return parents
 
     def _chunk_text(self, text: str) -> Iterable[str]:
@@ -395,7 +404,9 @@ class RetrievalResult:
 class RetrievalAgent:
     """Run refined sub-queries and combine their responses."""
 
-    def __init__(self, rag: "RAG", clarifier: QueryClarifierAgent) -> None:  # pragma: no cover - rag imported lazily
+    def __init__(
+        self, rag: "RAG", clarifier: QueryClarifierAgent
+    ) -> None:  # pragma: no cover - rag imported lazily
         self._rag = rag
         self._clarifier = clarifier
 
@@ -452,9 +463,12 @@ class RetrievalAgent:
         while attempt < max_attempts:
             resp = self._rag.query_engine.query(refined_query)
             payload = self._rag._normalize_response_data(original, resp)
-            payload["sources"] = self._rag.attach_parent_context(payload.get("sources", []))
+            payload["sources"] = self._rag.attach_parent_context(
+                payload.get("sources", [])
+            )
             payload["reasoning"] = (
-                payload.get("reasoning") or f"Attempt {attempt + 1}: answered with agentic retrieval."
+                payload.get("reasoning")
+                or f"Attempt {attempt + 1}: answered with agentic retrieval."
             )
             if self._is_sufficient(payload):
                 return resp, payload
@@ -523,8 +537,6 @@ class AgenticPipeline:
 
 
 # NOTE: Circular imports – type checking helper
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - for mypy/pyright only
     from docint.core.rag import RAG
-

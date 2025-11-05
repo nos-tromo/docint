@@ -15,7 +15,6 @@ import torch
 from dotenv import load_dotenv
 from fastembed import SparseTextEmbedding
 from llama_index.core import (
-    Response,
     SimpleDirectoryReader,
     StorageContext,
     VectorStoreIndex,
@@ -187,9 +186,7 @@ class RAG:
     _agent_pipeline: AgenticPipeline | None = field(
         default=None, init=False, repr=False
     )
-    _parent_store_loaded_for: str | None = field(
-        default=None, init=False, repr=False
-    )
+    _parent_store_loaded_for: str | None = field(default=None, init=False, repr=False)
     _session_id: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -565,7 +562,9 @@ class RAG:
         enriched: list[dict[str, Any]] = []
         for src in sources:
             entry = dict(src)
-            parent_id = entry.get("parent_id") or (entry.get("metadata", {}) or {}).get("parent_id")
+            parent_id = entry.get("parent_id") or (entry.get("metadata", {}) or {}).get(
+                "parent_id"
+            )
             if parent_id and parent_id in self.parent_store:
                 parent = self.parent_store[parent_id]
                 entry.setdefault("parent_id", parent.id)
@@ -988,10 +987,14 @@ class RAG:
             parent_id = meta.get("parent_id") or payload_meta.get("parent_id")
             if parent_id:
                 src["parent_id"] = parent_id
-                parent_title = meta.get("parent_title") or payload_meta.get("parent_title")
+                parent_title = meta.get("parent_title") or payload_meta.get(
+                    "parent_title"
+                )
                 if parent_title:
                     src["parent_title"] = parent_title
-                parent_order = meta.get("parent_order") or payload_meta.get("parent_order")
+                parent_order = meta.get("parent_order") or payload_meta.get(
+                    "parent_order"
+                )
                 child_order = meta.get("child_order") or payload_meta.get("child_order")
                 if parent_order is not None:
                     src["parent_order"] = parent_order
@@ -1228,7 +1231,9 @@ class RAG:
             s.commit()
         return s, conv
 
-    def get_recent_turns(self, session_id: str | None, limit: int = 5) -> list[dict[str, str]]:
+    def get_recent_turns(
+        self, session_id: str | None, limit: int = 5
+    ) -> list[dict[str, str]]:
         """Return the most recent conversation turns for Stage 1 context."""
 
         if limit <= 0:
@@ -1241,9 +1246,14 @@ class RAG:
         conv = s.get(Conversation, sid)
         if conv is None:
             return []
-        turns = list(conv.turns[-limit:]) if hasattr(conv.turns, '__getitem__') else list(conv.turns)[-limit:]
+        turns = (
+            list(conv.turns[-limit:])
+            if hasattr(conv.turns, "__getitem__")
+            else list(conv.turns)[-limit:]
+        )
         return [
-            {"user": t.user_text or "", "assistant": t.model_response or ""} for t in turns
+            {"user": t.user_text or "", "assistant": t.model_response or ""}
+            for t in turns
         ]
 
     def get_conversation_summary(
@@ -1314,7 +1324,9 @@ class RAG:
             meta_candidate = getattr(candidate, "metadata", {}) or {}
             if rewritten:
                 break
-            rewritten = meta_candidate.get("query_str") or meta_candidate.get("compressed_query_str")
+            rewritten = meta_candidate.get("query_str") or meta_candidate.get(
+                "compressed_query_str"
+            )
 
         reasoning = data.get("reasoning")
         next_idx = len(conv.turns)
@@ -1361,7 +1373,9 @@ class RAG:
                 # Capture a stable node id strictly from the node object
                 node_id = None
                 if node is not None:
-                    node_id = getattr(node, "node_id", None) or getattr(node, "id_", None)
+                    node_id = getattr(node, "node_id", None) or getattr(
+                        node, "id_", None
+                    )
 
                 score = (
                     float(getattr(src_node, "score", 0.0))
