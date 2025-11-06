@@ -9,16 +9,24 @@ const getPreferredAppearance = () => {
     return "light" as const;
   }
 
-  const stored = window.localStorage.getItem("chakra-ui-color-mode");
-  if (stored === "light" || stored === "dark") {
-    return stored;
+  try {
+    const stored = window.localStorage.getItem("chakra-ui-color-mode");
+    if (stored === "light" || stored === "dark") {
+      return stored;
+    }
+  } catch {
+    // Access to localStorage can throw in private browsing or restricted contexts.
   }
 
-  if (
-    typeof window.matchMedia === "function" &&
-    window.matchMedia("(prefers-color-scheme: dark)").matches
-  ) {
-    return "dark";
+  try {
+    if (
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-color-scheme: dark)").matches
+    ) {
+      return "dark";
+    }
+  } catch {
+    // matchMedia may throw in rare environments; ignore and fall back to light.
   }
 
   return "light" as const;
