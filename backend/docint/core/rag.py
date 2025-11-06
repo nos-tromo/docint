@@ -66,7 +66,7 @@ QDRANT_HOST: str = os.getenv("QDRANT_HOST", "http://127.0.0.1:6333")
 EMBED_MODEL: str = os.getenv("EMBED_MODEL", "BAAI/bge-m3")
 SPARSE_MODEL: str = os.getenv("SPARSE_MODEL", "Qdrant/bm42-all-minilm-l6-v2-attentions")
 RERANK_MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
-GEN_MODEL: str = os.getenv("LLM", "hf.co/ibm-granite/granite-4.0-h-tiny-GGUF:Q4_K_M")
+GEN_MODEL: str = os.getenv("LLM", "granite4:7b-a1b-h")
 RETRIEVE_SIMILARITY_TOP_K: int = int(os.getenv("RETRIEVE_SIMILARITY_TOP_K", "20"))
 
 CleanFn = Callable[[str], str]
