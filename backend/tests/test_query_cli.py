@@ -1,9 +1,9 @@
 import json
 from pathlib import Path
-
-import pytest
+from typing import Any, cast
 
 import docint.core.query as query_cli
+import pytest
 
 
 def test_get_col_name(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -91,10 +91,9 @@ def test_run_query_records_results(
         calls.append((name, data))
 
     monkeypatch.setattr(query_cli, "_store_output", fake_store)
-    # rag = DummyRAG()
-    rag = query_cli.rag_pipeline()
+    rag = DummyRAG()
     monkeypatch.setattr(query_cli, "time", lambda: 1700000000)
-    query_cli.run_query(rag, "hello", index=3)
+    query_cli.run_query(cast(Any, rag), "hello", index=3)
     assert calls
     name, data = calls[0]
     assert "_3_result" in name
