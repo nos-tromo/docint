@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import timezone
@@ -116,7 +117,7 @@ class RAG:
 
     # --- TableReader config ---
     table_text_cols: list[str] | None = None
-    table_metadata_cols: list[str] | None = None
+    table_metadata_cols: list[str] | str | None = None
     table_id_col: str | None = None
     table_excel_sheet: str | int | None = None
     table_row_limit: int | None = None
@@ -378,7 +379,7 @@ class RAG:
         # Table reader for CSV/TSV/XLSX/Parquet
         table_reader = TableReader(
             text_cols=self.table_text_cols,
-            metadata_cols=set(self.table_metadata_cols)
+            metadata_cols=self.table_metadata_cols
             if self.table_metadata_cols
             else None,
             id_col=self.table_id_col,
@@ -945,8 +946,6 @@ class RAG:
 
         # strip <think>…</think> (optional)
         if resp_text.startswith("<think>"):
-            import re
-
             m = re.search(r"<think>(.*?)</think>", resp_text, flags=re.DOTALL)
             reason = (m.group(1).strip() if m else None) or reason
             resp_text = re.sub(
@@ -1268,8 +1267,14 @@ class RAG:
 
         Returns:
             tuple[sessionmaker, Conversation]: The session and conversation objects.
+
+        Raises:
+            RuntimeError: If the SessionMaker is not initialized.
         """
         self._ensure_store()
+        if self._SessionMaker is None:
+            logger.error("RuntimeError: SessionMaker is not initialized.")
+            raise RuntimeError("SessionMaker is not initialized.")
         s = self._SessionMaker()
         conv = s.get(Conversation, session_id)
         if conv is None:
@@ -1287,8 +1292,14 @@ class RAG:
 
         Returns:
             str: The rolling summary for the conversation.
+
+        Raises:
+            RuntimeError: If the SessionMaker is not initialized.
         """
         self._ensure_store()
+        if self._SessionMaker is None:
+            logger.error("RuntimeError: SessionMaker is not initialized.")
+            raise RuntimeError("SessionMaker is not initialized.")
         s = self._SessionMaker()
         conv = s.get(Conversation, session_id)
         return (conv.rolling_summary or "") if conv else ""
@@ -1387,8 +1398,14 @@ class RAG:
         Args:
             session_id (str): The ID of the session.
             every_n_turns (int): The interval of turns after which to update the summary.
+
+        Raises:
+            RuntimeError: If the SessionMaker is not initialized.
         """
         self._ensure_store()
+        if self._SessionMaker is None:
+            logger.error("RuntimeError: SessionMaker is not initialized.")
+            raise RuntimeError("SessionMaker is not initialized.")
         s = self._SessionMaker()
         conv = s.get(Conversation, session_id)
         if not conv or len(conv.turns) == 0 or (len(conv.turns) % every_n_turns) != 0:
@@ -1495,9 +1512,13 @@ class RAG:
             Path: The path to the exported session directory.
 
         Raises:
+            RuntimeError: If the SessionMaker is not initialized.
             ValueError: If no conversation is found for the given session ID or the session ID is invalid.
         """
         self._ensure_store()
+        if self._SessionMaker is None:
+            logger.error("RuntimeError: SessionMaker is not initialized.")
+            raise RuntimeError("SessionMaker is not initialized.")
         s = self._SessionMaker()
 
         if not session_id and self.session_id is not None:
@@ -1715,7 +1736,7 @@ class RAG:
         )
         return session_id
 
-    def chat(self, user_msg: str) -> str:
+    def chat(self, user_msg: str) -> dict[str, Any]:
         """
         Run one conversational turn, persist it, and return your normalized payload.
 
@@ -1754,7 +1775,7 @@ class RAG:
             retrieval_query = user_msg
 
         resp = self.query_engine.query(retrieval_query)
-        data = self._normalize_response_data(user_msg, resp)
-        self._persist_turn(session_id, user_msg, resp, data)
+        response = self._normalize_response_data(user_msg, resp)
+        self._persist_turn(session_id, user_msg, resp, response)
         self._maybe_update_summary(session_id)
-        return data
+        return response
