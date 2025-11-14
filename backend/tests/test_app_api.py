@@ -15,7 +15,7 @@ class DummyRAG:
         self.selected: list[str] = []
         self.sessions: list[Any] = []
         self.chats: list[str] = []
-        self.created_index = 0
+        self.created_index = 0  # Tracks the number of times an index is created
         self.created_query_engine = 0
 
     def list_collections(self) -> list[str]:
@@ -45,7 +45,7 @@ class DummyRAG:
 
 
 @pytest.fixture(autouse=True)
-def _patch_rag(monkeypatch: pytest.MonkeyPatch) -> None:
+def _patch_rag(monkeypatch: pytest.MonkeyPatch) -> Any | None:
     dummy = DummyRAG()
     monkeypatch.setattr(app_module, "rag", dummy)
     yield
@@ -121,7 +121,7 @@ def test_query_success(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> N
 def test_query_handles_missing_sources(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    def fake_chat(question: str) -> dict[str, Any]:
+    def fake_chat(question: str) -> str:
         return "plain response"
 
     monkeypatch.setattr(app_module.rag, "chat", fake_chat)

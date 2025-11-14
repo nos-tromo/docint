@@ -91,7 +91,8 @@ def test_run_query_records_results(
         calls.append((name, data))
 
     monkeypatch.setattr(query_cli, "_store_output", fake_store)
-    rag = DummyRAG()
+    # rag = DummyRAG()
+    rag = query_cli.rag_pipeline()
     monkeypatch.setattr(query_cli, "time", lambda: 1700000000)
     query_cli.run_query(rag, "hello", index=3)
     assert calls
