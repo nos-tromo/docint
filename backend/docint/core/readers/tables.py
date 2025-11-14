@@ -25,7 +25,7 @@ class TableReader(BaseReader):
         text_cols (list[str] | str | None, optional): Column(s) to use for text content.
             If None, will guess based on column names or content.
             Defaults to None.
-        metadata_cols (set[str] | str | None, optional): Columns to include in metadata.
+        metadata_cols (list[str] | set[str] | str | None, optional): Columns to include in metadata.
             If None, all columns except text_cols will be included.
             If a string, it will be treated as a single column name.
             Defaults to None.
@@ -61,7 +61,7 @@ class TableReader(BaseReader):
 
     # Accept either a single column name or a list; normalize in __post_init__
     text_cols: list[str] | str | None = None
-    metadata_cols: set[str] | str | None = None
+    metadata_cols: list[str] | set[str] | str | None = None
     id_col: str | None = None
     combine_with: str = "\n"
     row_filter: RowFilter | None = None
@@ -78,6 +78,8 @@ class TableReader(BaseReader):
         # convert iterables in a future refactor if needed; today we accept str|list only
         if isinstance(self.metadata_cols, str):
             self.metadata_cols = {self.metadata_cols}
+        if isinstance(self.metadata_cols, set):
+            self.metadata_cols = list(self.metadata_cols)
 
         if self.combine_with is None:
             self.combine_with = "\n"  # guardrail
