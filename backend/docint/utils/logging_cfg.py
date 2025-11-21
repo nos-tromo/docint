@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 load_dotenv()
+APP_NAME = os.getenv("APP_NAME", "docint")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_ROTATION = os.getenv("LOG_ROTATION", "5 MB")
 LOG_RETENTION = os.getenv("LOG_RETENTION", "3")
@@ -26,13 +27,15 @@ def _resolve_log_path(
         Path: The resolved log file path.
     """
     if default_log_path is None:
-        default_log_path = Path(__file__).resolve().parents[2] / ".logs" / "docint.log"
+        default_log_path = (
+            Path(__file__).resolve().parents[2] / ".logs" / f"{APP_NAME}.log"
+        )
 
     env_log_path = os.getenv("LOG_PATH")
     log_path = Path(env_log_path) if env_log_path else Path(default_log_path)
 
     if log_path.is_dir() or not log_path.suffix:
-        log_path = log_path / "docint.log"
+        log_path = log_path / f"{APP_NAME}.log"
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     return log_path
