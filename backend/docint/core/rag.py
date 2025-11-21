@@ -587,11 +587,28 @@ class RAG:
                     with_payload=True,
                 )
             except Exception as exc:
-                logger.warning(
-                    "Failed to fetch existing hashes from collection '{}': {}",
-                    self.qdrant_collection,
-                    exc,
+                # Qdrant may return a 404 when the collection does not exist;
+                # treat that case as non-fatal and log at debug level to avoid
+                # cluttering logs with expected messages for new collections.
+                msg = str(exc)
+                not_found = (
+                    "Not found" in msg
+                    or "doesn't exist" in msg
+                    or "does not exist" in msg
+                    or f"Collection `{self.qdrant_collection}`" in msg
                 )
+                if not_found:
+                    logger.debug(
+                        "Qdrant collection '%s' not found; skipping existing-hash check: %s",
+                        self.qdrant_collection,
+                        exc,
+                    )
+                else:
+                    logger.warning(
+                        "Failed to fetch existing hashes from collection '{}': {}",
+                        self.qdrant_collection,
+                        exc,
+                    )
                 break
 
             if not points:
