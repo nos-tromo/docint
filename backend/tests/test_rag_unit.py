@@ -4,7 +4,8 @@ import types
 from pathlib import Path
 
 import pytest
-from llama_index.core import Document
+from typing import cast
+from llama_index.core import Document, SimpleDirectoryReader
 
 from docint.core import rag as rag_module
 from docint.core.rag import RAG
@@ -65,7 +66,7 @@ def test_directory_ingestion_attaches_file_hash(tmp_path: Path) -> None:
     rag = RAG(data_dir=tmp_path, qdrant_collection="test")
     rag._load_doc_readers()
 
-    docs = rag.dir_reader.load_data()
+    docs = cast(SimpleDirectoryReader, rag.dir_reader).load_data()
     digest = compute_file_hash(file_path)
 
     assert docs
@@ -145,12 +146,12 @@ def test_filter_docs_skips_existing_hashes(monkeypatch: pytest.MonkeyPatch) -> N
     fresh_hash = "def"
     rag.docs = [
         Document(text="keep", metadata={"file_hash": fresh_hash, "file_name": "b.txt"}),
-        Document(text="skip", metadata={"file_hash": existing_hash, "file_name": "a.txt"}),
+        Document(
+            text="skip", metadata={"file_hash": existing_hash, "file_name": "a.txt"}
+        ),
     ]
 
-    monkeypatch.setattr(
-        RAG, "_get_existing_file_hashes", lambda self: {existing_hash}
-    )
+    monkeypatch.setattr(RAG, "_get_existing_file_hashes", lambda self: {existing_hash})
 
     rag._filter_docs_by_existing_hashes()
 
