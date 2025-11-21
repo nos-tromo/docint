@@ -31,7 +31,7 @@ def compute_file_hash(
         ValueError: If the specified hash algorithm is unsupported.
     """
 
-    file_path = Path(path)
+    file_path = Path(path) if not isinstance(path, Path) else path
     if not file_path.is_file():
         logger.error(f"FileNotFoundError: File not found for hashing: {file_path}")
         raise FileNotFoundError(f"File not found for hashing: {file_path}")
