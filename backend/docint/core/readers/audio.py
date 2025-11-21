@@ -11,7 +11,7 @@ from loguru import logger
 from numpy import floating
 from numpy.typing import NDArray
 
-from docint.utils.hashing import ensure_file_hash
+from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.mimetype import get_mimetype
 
 
@@ -86,7 +86,7 @@ class AudioReader(BaseReader):
         return whisper.transcribe(model=model, audio=audio)
 
     def _enrich_document(
-        self, file_path: Path, text: str, source: str = "transcript"
+        self, file_path: Path, text: str, source: str = "transcript", file_hash: str | None = None
     ) -> Document:
         """
         Enrich a document with metadata from the image file.
@@ -128,7 +128,11 @@ class AudioReader(BaseReader):
                 "mimetype": mimetype,
             },
         }
-        ensure_file_hash(metadata, path=file_path)
+        ensure_file_hash(
+            metadata,
+            file_hash=file_hash if file_hash is not None else None,
+            path=file_path if file_hash is None else None,
+        )
 
         return Document(
             text_resource=MediaResource(text=text, mimetype=mimetype),
@@ -147,10 +151,14 @@ class AudioReader(BaseReader):
         """
         logger.info("[AudioReader] Loading audio from {}", file)
         file_path = Path(file) if not isinstance(file, Path) else file
+        extra_info = kwargs.get("extra_info", {})
+        file_hash = extra_info.get("file_hash") if isinstance(extra_info, dict) else None
         model = self._load_model()
         audio = self._load_audio(file_path)
         self.result = self._transcribe_audio(audio, model)
         text = self.result.get("text", "")
         if self.result is None or not isinstance(text, str):
             return []
-        return [self._enrich_document(file_path, text)]
+        if file_hash is None:
+            file_hash = compute_file_hash(file_path)
+        return [self._enrich_document(file_path, text, file_hash=file_hash)]

@@ -68,7 +68,7 @@ class HybridPDFReader(BaseReader):
                 base_meta["page_number"] = [str(page_meta["page_number"])]
         return base_meta
 
-    def _from_pymupdf(self, path: Path) -> list[Document]:
+    def _from_pymupdf(self, path: Path, file_hash: str | None) -> list[Document]:
         """
         Loads the document using pymupdf4llm and applies metadata normalization.
 
@@ -92,13 +92,13 @@ class HybridPDFReader(BaseReader):
             logger.error("ValueError: PyMuPDF produced only empty pages")
             raise ValueError("PyMuPDF produced only empty pages")
 
-        file_hash = compute_file_hash(path)
-
         normalized_docs = []
         for d in nonempty_docs:
             page_meta = getattr(d, "metadata", {}) or {}
             meta = self._standardize_metadata(path, page_meta)
             meta["doc_format"] = "markdown"
+            if file_hash is None:
+                file_hash = compute_file_hash(path)
             ensure_file_hash(meta, file_hash=file_hash)
             normalized_docs.append(
                 Document(
@@ -115,7 +115,7 @@ class HybridPDFReader(BaseReader):
         )
         return normalized_docs
 
-    def _from_docling(self, file_path: Path) -> list[Document]:
+    def _from_docling(self, file_path: Path, file_hash: str | None) -> list[Document]:
         """
         Loads the document using DoclingReader (fallback) and applies metadata normalization.
 
@@ -126,8 +126,6 @@ class HybridPDFReader(BaseReader):
             list[Document]: The list of loaded documents.
         """
         docs = self.docling_reader.load_data(file_path)
-        file_hash = compute_file_hash(file_path)
-
         normalized_docs = []
         for d in docs:
             page_meta = getattr(d, "metadata", {}) or {}
@@ -135,6 +133,8 @@ class HybridPDFReader(BaseReader):
             meta["doc_format"] = "json"
             # merge existing Docling metadata where available
             meta.update({k: v for k, v in page_meta.items() if k not in meta})
+            if file_hash is None:
+                file_hash = compute_file_hash(file_path)
             ensure_file_hash(meta, file_hash=file_hash)
             normalized_docs.append(
                 Document(
@@ -167,9 +167,10 @@ class HybridPDFReader(BaseReader):
         """
         file_path = Path(file) if not isinstance(file, Path) else file
         extra_info = kwargs.get("extra_info", {})
+        file_hash = extra_info.get("file_hash") if isinstance(extra_info, dict) else None
 
         try:
-            docs = self._from_pymupdf(file_path)
+            docs = self._from_pymupdf(file_path, file_hash)
         except Exception as e:
             logger.warning(
                 "[HybridPDFReader] PyMuPDF failed for {}: {} → falling back to Docling",
@@ -177,7 +178,7 @@ class HybridPDFReader(BaseReader):
                 e,
             )
             try:
-                docs = self._from_docling(file_path)
+                docs = self._from_docling(file_path, file_hash)
             except Exception as e2:
                 logger.error(
                     "[HybridPDFReader] Docling failed for {}: {}", file_path.name, e2

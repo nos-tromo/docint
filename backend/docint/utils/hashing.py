@@ -56,7 +56,7 @@ def ensure_file_hash(
     algorithm: str = "sha256",
 ) -> str:
     """
-    Attach a ``file_hash`` field to metadata (and nested ``origin``).
+    Attach a ``file_hash`` field to metadata.
 
     Args:
         metadata: Metadata dictionary to mutate in place.
@@ -70,7 +70,6 @@ def ensure_file_hash(
     Raises:
         ValueError: If neither ``file_hash`` nor ``path`` is provided.
     """
-
     if metadata is None:
         metadata = {}
 
@@ -81,11 +80,5 @@ def ensure_file_hash(
         file_hash = compute_file_hash(path, algorithm=algorithm)
 
     metadata["file_hash"] = file_hash
-
-    origin = metadata.get("origin")
-    if isinstance(origin, dict):
-        origin["file_hash"] = file_hash
-    else:
-        metadata["origin"] = {"file_hash": file_hash}
 
     return file_hash

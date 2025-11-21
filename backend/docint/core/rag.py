@@ -51,7 +51,7 @@ from docint.core.readers.images import ImageReader
 from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.tables import TableReader
 from docint.utils.clean_text import basic_clean
-from docint.utils.hashing import compute_file_hash, ensure_file_hash
+from docint.utils.hashing import compute_file_hash
 
 # --- Environment variables ---
 load_dotenv()
@@ -387,12 +387,24 @@ class RAG:
             limit=self.table_row_limit,
         )
 
+        def _metadata_with_hash(path: Path) -> dict[str, str]:
+            resolved = path if isinstance(path, Path) else Path(path)
+            digest = compute_file_hash(resolved)
+            filename = resolved.name
+            return {
+                "file_path": str(resolved),
+                "file_name": filename,
+                "filename": filename,
+                "file_hash": digest,
+            }
+
         self.dir_reader = SimpleDirectoryReader(
             input_dir=self.data_dir,
             errors=self.reader_errors,
             recursive=self.reader_recursive,
             encoding=self.reader_encoding,
             required_exts=self.reader_required_exts,
+            file_metadata=_metadata_with_hash,
             file_extractor={
                 # audio files
                 ".mpeg": audio_reader,
@@ -504,73 +516,6 @@ class RAG:
             embed_model=self.embed_model,
         )
 
-    def _ensure_file_hash_metadata(self) -> None:
-        """
-        Populate missing ``file_hash`` entries on loaded documents.
-
-        Raises:
-            TypeError: If a candidate file path is invalid.
-            FileNotFoundError: If the document file is not found.
-        """
-        if not self.docs:
-            return
-
-        hash_cache: dict[Path, str] = {}
-
-        for doc in self.docs:
-            metadata = getattr(doc, "metadata", None)
-            if not isinstance(metadata, dict):
-                continue
-
-            existing_hash = metadata.get("file_hash")
-            if isinstance(existing_hash, str) and existing_hash:
-                ensure_file_hash(metadata, file_hash=existing_hash)
-                continue
-
-            origin = metadata.get("origin") or {}
-            filename = (
-                metadata.get("file_name")
-                or metadata.get("filename")
-                or origin.get("filename")
-            )
-
-            path_candidates: list[Path] = []
-            path_value = metadata.get("file_path")
-            if isinstance(path_value, str) and path_value:
-                candidate = Path(path_value)
-                path_candidates.append(candidate)
-                if not candidate.is_absolute():
-                    path_candidates.append((self.data_dir / candidate).resolve())
-
-            if filename:
-                path_candidates.append((self.data_dir / filename).resolve())
-
-            resolved: Path | None = None
-            for candidate in path_candidates:
-                try:
-                    candidate_path = Path(candidate)
-                except TypeError:
-                    logger.error("TypeError: Invalid candidate path '{}'", candidate)
-                    continue
-                if candidate_path.exists():
-                    resolved = candidate_path.resolve()
-                    break
-
-            if resolved is None:
-                continue
-
-            if resolved in hash_cache:
-                digest = hash_cache[resolved]
-            else:
-                try:
-                    digest = compute_file_hash(resolved)
-                except FileNotFoundError:
-                    logger.error("FileNotFoundError: File '{}' not found.", resolved)
-                    continue
-                hash_cache[resolved] = digest
-
-            ensure_file_hash(metadata, file_hash=digest)
-
     @staticmethod
     def _extract_file_hash(data: Any) -> str | None:
         """
@@ -681,7 +626,7 @@ class RAG:
 
         for doc in self.docs:
             metadata = getattr(doc, "metadata", {}) or {}
-            file_hash = self._extract_file_hash(metadata)
+            file_hash = metadata.get("file_hash") or self._extract_file_hash(metadata)
             if not file_hash or file_hash not in existing_hashes:
                 filtered_docs.append(doc)
                 continue
@@ -727,7 +672,6 @@ class RAG:
             logger.error("RuntimeError: Directory reader is not initialized.")
             raise RuntimeError("Directory reader is not initialized.")
         self.docs = self.dir_reader.load_data()
-        self._ensure_file_hash_metadata()
         self._filter_docs_by_existing_hashes()
         cleaned_docs = []
         for doc in self.docs:
