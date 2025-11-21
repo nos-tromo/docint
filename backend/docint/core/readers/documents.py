@@ -35,7 +35,10 @@ class HybridPDFReader(BaseReader):
         )
 
     def _standardize_metadata(
-        self, file_path: Path, page_meta: dict | None = None
+        self,
+        file_path: Path,
+        page_meta: dict | None = None,
+        file_hash: str | None = None,
     ) -> dict:
         """
         Returns a unified metadata dict compatible with both PyMuPDF and Docling outputs.
@@ -48,11 +51,16 @@ class HybridPDFReader(BaseReader):
             dict: The standardized metadata dictionary.
         """
         filename = file_path.name
+
+        # `file_hash` is expected to be provided by the caller (computed once per file).
+        # Do not compute it here to avoid repeated expensive IO.
+
         mimetype = get_mimetype(file_path)
         base_meta = {
             "file_path": str(file_path),
             "file_name": filename,
             "filename": filename,
+            "file_hash": file_hash,
             "file_type": mimetype,
             "mimetype": mimetype,
             "source": "document",
@@ -66,6 +74,8 @@ class HybridPDFReader(BaseReader):
                 base_meta["page_number"] = [str(page_meta["page"])]
             elif "page_number" in page_meta:
                 base_meta["page_number"] = [str(page_meta["page_number"])]
+        # Ensure the canonical file_hash is present on metadata (caller must supply it)
+        ensure_file_hash(base_meta, file_hash=file_hash)
         return base_meta
 
     def _from_pymupdf(self, path: Path, file_hash: str | None) -> list[Document]:
@@ -95,11 +105,8 @@ class HybridPDFReader(BaseReader):
         normalized_docs = []
         for d in nonempty_docs:
             page_meta = getattr(d, "metadata", {}) or {}
-            meta = self._standardize_metadata(path, page_meta)
+            meta = self._standardize_metadata(path, page_meta, file_hash=file_hash)
             meta["doc_format"] = "markdown"
-            if file_hash is None:
-                file_hash = compute_file_hash(path)
-            ensure_file_hash(meta, file_hash=file_hash)
             normalized_docs.append(
                 Document(
                     text=d.text,
@@ -129,13 +136,10 @@ class HybridPDFReader(BaseReader):
         normalized_docs = []
         for d in docs:
             page_meta = getattr(d, "metadata", {}) or {}
-            meta = self._standardize_metadata(file_path, page_meta)
+            meta = self._standardize_metadata(file_path, page_meta, file_hash=file_hash)
             meta["doc_format"] = "json"
-            # merge existing Docling metadata where available
+            # merge existing Docling metadata where available (without overwriting)
             meta.update({k: v for k, v in page_meta.items() if k not in meta})
-            if file_hash is None:
-                file_hash = compute_file_hash(file_path)
-            ensure_file_hash(meta, file_hash=file_hash)
             normalized_docs.append(
                 Document(
                     text=getattr(d, "text", "") or getattr(d, "text_resource", None),
@@ -167,7 +171,13 @@ class HybridPDFReader(BaseReader):
         """
         file_path = Path(file) if not isinstance(file, Path) else file
         extra_info = kwargs.get("extra_info", {})
-        file_hash = extra_info.get("file_hash") if isinstance(extra_info, dict) else None
+        file_hash = (
+            extra_info.get("file_hash") if isinstance(extra_info, dict) else None
+        )
+
+        # Compute the file hash once here if not supplied by the caller.
+        if file_hash is None:
+            file_hash = compute_file_hash(file_path)
 
         try:
             docs = self._from_pymupdf(file_path, file_hash)

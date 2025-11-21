@@ -86,7 +86,11 @@ class AudioReader(BaseReader):
         return whisper.transcribe(model=model, audio=audio)
 
     def _enrich_document(
-        self, file_path: Path, text: str, source: str = "transcript", file_hash: str | None = None
+        self,
+        file_path: Path,
+        text: str,
+        source: str = "transcript",
+        file_hash: str | None = None,
     ) -> Document:
         """
         Enrich a document with metadata from the image file.
@@ -95,6 +99,7 @@ class AudioReader(BaseReader):
             file_path (Path): The path to the image file.
             text (str): The text content extracted from the image.
             source (str, optional): The source type. Defaults to "transcript".
+            file_hash (str | None, optional): The hash of the audio file. Defaults to None.
 
         Returns:
             Document: The enriched document.
@@ -145,6 +150,7 @@ class AudioReader(BaseReader):
 
         Args:
             audio_file (Path): The path to the audio file.
+            **kwargs: Additional keyword arguments.
 
         Returns:
             str: The transcribed text.
@@ -152,13 +158,17 @@ class AudioReader(BaseReader):
         logger.info("[AudioReader] Loading audio from {}", file)
         file_path = Path(file) if not isinstance(file, Path) else file
         extra_info = kwargs.get("extra_info", {})
-        file_hash = extra_info.get("file_hash") if isinstance(extra_info, dict) else None
+
+        file_hash = (
+            extra_info.get("file_hash") if isinstance(extra_info, dict) else None
+        )
+        if file_hash is None:
+            file_hash = compute_file_hash(file_path)
+
         model = self._load_model()
         audio = self._load_audio(file_path)
         self.result = self._transcribe_audio(audio, model)
         text = self.result.get("text", "")
         if self.result is None or not isinstance(text, str):
             return []
-        if file_hash is None:
-            file_hash = compute_file_hash(file_path)
         return [self._enrich_document(file_path, text, file_hash=file_hash)]

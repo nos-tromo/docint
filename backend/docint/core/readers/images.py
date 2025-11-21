@@ -52,7 +52,11 @@ class ImageReader(BaseReader):
         return base64.b64encode(img_bytes).decode("utf-8")
 
     def _enrich_document(
-        self, file_path: Path, text: str, source: str = "image", file_hash: str | None = None
+        self,
+        file_path: Path,
+        text: str,
+        source: str = "image",
+        file_hash: str | None = None,
     ) -> Document:
         """
         Enrich a document with metadata from the image file.
@@ -110,7 +114,13 @@ class ImageReader(BaseReader):
         logger.info("[ImageReader] Loading image from {}", file)
         file_path = Path(file) if not isinstance(file, Path) else file
         extra_info = kwargs.get("extra_info", {})
-        file_hash = extra_info.get("file_hash") if isinstance(extra_info, dict) else None
+
+        file_hash = (
+            extra_info.get("file_hash") if isinstance(extra_info, dict) else None
+        )
+        if file_hash is None:
+            file_hash = compute_file_hash(file_path)
+
         img = self._load_image(file_path)
         img_base64 = self._encode_img_to_base64(img)
         prompt = self.ollama_pipeline.load_prompt("describe")
@@ -118,6 +128,4 @@ class ImageReader(BaseReader):
             prompt=prompt,
             img=img_base64,
         )
-        if file_hash is None:
-            file_hash = compute_file_hash(file_path)
         return [self._enrich_document(file_path, self.response, file_hash=file_hash)]

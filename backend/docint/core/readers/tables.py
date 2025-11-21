@@ -161,7 +161,12 @@ class TableReader(BaseReader):
         file_path = Path(file) if not isinstance(file, Path) else file
         suffix = file_path.suffix.lower()
         extra_info = kwargs.get("extra_info", {})
-        provided_hash = extra_info.get("file_hash") if isinstance(extra_info, dict) else None
+
+        file_hash = (
+            extra_info.get("file_hash") if isinstance(extra_info, dict) else None
+        )
+        if file_hash is None:
+            file_hash = compute_file_hash(file_path)
         mimetype = get_mimetype(file_path)
 
         # ---- Load to DataFrame
@@ -198,8 +203,6 @@ class TableReader(BaseReader):
         n_rows, n_cols = len(df), len(df.columns)
         columns = list(df.columns)
         count = 0
-
-        file_hash = provided_hash if provided_hash else compute_file_hash(file_path)
 
         for i, row in df.iterrows():
             row_dict = {k: (None if pd.isna(v) else v) for k, v in row.items()}

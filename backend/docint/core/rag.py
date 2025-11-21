@@ -387,15 +387,15 @@ class RAG:
             limit=self.table_row_limit,
         )
 
-        def _metadata_with_hash(path: Path) -> dict[str, str]:
+        def _metadata(path: str | Path) -> dict[str, str]:
             resolved = path if isinstance(path, Path) else Path(path)
-            digest = compute_file_hash(resolved)
+            file_hash = compute_file_hash(resolved)
             filename = resolved.name
             return {
                 "file_path": str(resolved),
                 "file_name": filename,
                 "filename": filename,
-                "file_hash": digest,
+                "file_hash": file_hash,
             }
 
         self.dir_reader = SimpleDirectoryReader(
@@ -404,7 +404,7 @@ class RAG:
             recursive=self.reader_recursive,
             encoding=self.reader_encoding,
             required_exts=self.reader_required_exts,
-            file_metadata=_metadata_with_hash,
+            file_metadata=_metadata,
             file_extractor={
                 # audio files
                 ".mpeg": audio_reader,
