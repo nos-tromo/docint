@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pymupdf.layout  # noqa: F401
 import pymupdf4llm
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
