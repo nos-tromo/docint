@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Box, Button, HStack, Input, Text, VStack, Spinner, IconButton } from "@chakra-ui/react";
 import { askQuery } from "../api";
 import type { Source } from "../api";
@@ -13,9 +13,23 @@ export default function Chat({ collection }: Props) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [openRefs, setOpenRefs] = useState<Record<number, boolean>>({});
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+  const copyTimeout = useRef<number | null>(null);
 
   const toggleRefs = (idx: number) =>
     setOpenRefs((prev) => ({ ...prev, [idx]: !prev[idx] }));
+
+  const handleCopy = (idx: number, text: string) => {
+    void navigator.clipboard.writeText(text).catch(() => undefined);
+    setCopiedIdx(idx);
+    if (copyTimeout.current) {
+      window.clearTimeout(copyTimeout.current);
+    }
+    copyTimeout.current = window.setTimeout(() => {
+      setCopiedIdx((current) => (current === idx ? null : current));
+      copyTimeout.current = null;
+    }, 2000);
+  };
 
   const msgsKey = collection ? `chat_msgs_${collection}` : "chat_msgs";
   const sessionKey = collection ? `sessionId_${collection}` : "sessionId";
@@ -37,6 +51,12 @@ export default function Chat({ collection }: Props) {
   useEffect(() => {
     localStorage.setItem(msgsKey, JSON.stringify(msgs));
   }, [msgs, msgsKey]);
+
+  useEffect(() => () => {
+    if (copyTimeout.current) {
+      window.clearTimeout(copyTimeout.current);
+    }
+  }, []);
 
   const ask = async () => {
     const question = q.trim();
@@ -127,13 +147,14 @@ export default function Chat({ collection }: Props) {
               </Text>
               {m.role === "assistant" && (
                 <IconButton
-                  aria-label="Copy answer"
+                  aria-label={copiedIdx === i ? "Copied" : "Copy answer"}
                   size="sm"
                   variant="ghost"
-                  onClick={() => navigator.clipboard.writeText(m.text)}
+                  onClick={() => handleCopy(i, m.text)}
+                  title={copiedIdx === i ? "Copied!" : "Copy answer"}
                 >
                   <Box as="span" fontSize="md" lineHeight={1}>
-                    📋
+                    {copiedIdx === i ? "✅" : "📋"}
                   </Box>
                 </IconButton>
               )}
