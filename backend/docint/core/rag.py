@@ -1652,6 +1652,36 @@ class RAG:
             )
             return out_dir
 
+    def summarize_collection(self, prompt: str | None = None) -> dict[str, Any]:
+        """Generate a summary of the currently selected collection.
+
+        Args:
+            prompt (str | None): Optional override for the summarization prompt.
+
+        Returns:
+            dict[str, Any]: Normalized response data containing the summary and sources.
+
+        Raises:
+            ValueError: If no collection is selected.
+        """
+
+        if not self.qdrant_collection:
+            raise ValueError("No collection selected.")
+
+        if self.query_engine is None:
+            if self.index is None:
+                self.create_index()
+            self.create_query_engine()
+
+        summary_prompt = prompt or (
+            "Provide a concise overview of the active collection. Highlight the main "
+            "topics, document types, and notable findings. Limit the response to 8 "
+            "sentences."
+        )
+
+        resp = self.query_engine.query(summary_prompt)
+        return self._normalize_response_data(summary_prompt, resp)
+
     def start_session(self, session_id: str | None = None) -> str:
         """
         Start a new chat session or continue an existing one.

@@ -27,6 +27,10 @@ app.add_middleware(
 )
 
 rag = RAG(qdrant_collection="")
+SUMMARY_PROMPT = (
+    "Provide a concise overview of the active collection. Highlight the main "
+    "topics, document types, and notable findings. Limit the response to 8 sentences."
+)
 
 
 # --- Pydantic models for request and response payloads ---
@@ -50,6 +54,11 @@ class QueryOut(BaseModel):
     answer: str
     sources: list[dict] = []
     session_id: str
+
+
+class SummarizeOut(BaseModel):
+    summary: str
+    sources: list[dict] = []
 
 
 class IngestIn(BaseModel):
@@ -159,6 +168,34 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str]:
         return {"answer": answer, "sources": sources, "session_id": session_id}
     except HTTPException as e:
         logger.error("HTTPException: Error processing query: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/summarize", response_model=SummarizeOut, tags=["Query"])
+def summarize() -> dict[str, list[dict] | str]:
+    """Generate a summary for the currently selected collection."""
+
+    try:
+        if not rag.qdrant_collection:
+            logger.error("HTTPException: No collection selected")
+            raise HTTPException(status_code=400, detail="No collection selected")
+
+        if getattr(rag, "query_engine", None) is None:
+            if getattr(rag, "index", None) is None:
+                rag.create_index()
+            rag.create_query_engine()
+
+        data = rag.summarize_collection(SUMMARY_PROMPT)
+        summary = (
+            str(data.get("response") or data.get("answer") or "")
+            if isinstance(data, dict)
+            else ""
+        )
+        sources: list[dict] = data.get("sources", []) if isinstance(data, dict) else []
+
+        return {"summary": summary, "sources": sources}
+    except HTTPException as e:
+        logger.error("HTTPException: Error generating summary: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
