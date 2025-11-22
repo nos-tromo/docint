@@ -41,17 +41,17 @@ from qdrant_client import QdrantClient
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from sqlalchemy.orm import sessionmaker
 
-from docint.core.chat.base import _make_session_maker
-from docint.core.chat.citation import Citation
-from docint.core.chat.conversation import Conversation
-from docint.core.chat.turn import Turn
+from docint.core.state.base import _make_session_maker
+from docint.core.state.citation import Citation
+from docint.core.state.conversation import Conversation
+from docint.core.state.turn import Turn
 from docint.core.readers.audio import AudioReader
 from docint.core.readers.documents import HybridPDFReader
 from docint.core.readers.images import ImageReader
 from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.tables import TableReader
 from docint.utils.clean_text import basic_clean
-from docint.utils.hashing import compute_file_hash, ensure_file_hash
+from docint.utils.hashing import compute_file_hash
 
 # --- Environment variables ---
 load_dotenv()
@@ -387,12 +387,24 @@ class RAG:
             limit=self.table_row_limit,
         )
 
+        def _metadata(path: str | Path) -> dict[str, str]:
+            resolved = path if isinstance(path, Path) else Path(path)
+            file_hash = compute_file_hash(resolved)
+            filename = resolved.name
+            return {
+                "file_path": str(resolved),
+                "file_name": filename,
+                "filename": filename,
+                "file_hash": file_hash,
+            }
+
         self.dir_reader = SimpleDirectoryReader(
             input_dir=self.data_dir,
             errors=self.reader_errors,
             recursive=self.reader_recursive,
             encoding=self.reader_encoding,
             required_exts=self.reader_required_exts,
+            file_metadata=_metadata,
             file_extractor={
                 # audio files
                 ".mpeg": audio_reader,
@@ -504,73 +516,6 @@ class RAG:
             embed_model=self.embed_model,
         )
 
-    def _ensure_file_hash_metadata(self) -> None:
-        """
-        Populate missing ``file_hash`` entries on loaded documents.
-
-        Raises:
-            TypeError: If a candidate file path is invalid.
-            FileNotFoundError: If the document file is not found.
-        """
-        if not self.docs:
-            return
-
-        hash_cache: dict[Path, str] = {}
-
-        for doc in self.docs:
-            metadata = getattr(doc, "metadata", None)
-            if not isinstance(metadata, dict):
-                continue
-
-            existing_hash = metadata.get("file_hash")
-            if isinstance(existing_hash, str) and existing_hash:
-                ensure_file_hash(metadata, file_hash=existing_hash)
-                continue
-
-            origin = metadata.get("origin") or {}
-            filename = (
-                metadata.get("file_name")
-                or metadata.get("filename")
-                or origin.get("filename")
-            )
-
-            path_candidates: list[Path] = []
-            path_value = metadata.get("file_path")
-            if isinstance(path_value, str) and path_value:
-                candidate = Path(path_value)
-                path_candidates.append(candidate)
-                if not candidate.is_absolute():
-                    path_candidates.append((self.data_dir / candidate).resolve())
-
-            if filename:
-                path_candidates.append((self.data_dir / filename).resolve())
-
-            resolved: Path | None = None
-            for candidate in path_candidates:
-                try:
-                    candidate_path = Path(candidate)
-                except TypeError:
-                    logger.error("TypeError: Invalid candidate path '{}'", candidate)
-                    continue
-                if candidate_path.exists():
-                    resolved = candidate_path.resolve()
-                    break
-
-            if resolved is None:
-                continue
-
-            if resolved in hash_cache:
-                digest = hash_cache[resolved]
-            else:
-                try:
-                    digest = compute_file_hash(resolved)
-                except FileNotFoundError:
-                    logger.error("FileNotFoundError: File '{}' not found.", resolved)
-                    continue
-                hash_cache[resolved] = digest
-
-            ensure_file_hash(metadata, file_hash=digest)
-
     @staticmethod
     def _extract_file_hash(data: Any) -> str | None:
         """
@@ -642,11 +587,28 @@ class RAG:
                     with_payload=True,
                 )
             except Exception as exc:
-                logger.warning(
-                    "Failed to fetch existing hashes from collection '{}': {}",
-                    self.qdrant_collection,
-                    exc,
+                # Qdrant may return a 404 when the collection does not exist;
+                # treat that case as non-fatal and log at debug level to avoid
+                # cluttering logs with expected messages for new collections.
+                msg = str(exc)
+                not_found = (
+                    "Not found" in msg
+                    or "doesn't exist" in msg
+                    or "does not exist" in msg
+                    or f"Collection `{self.qdrant_collection}`" in msg
                 )
+                if not_found:
+                    logger.debug(
+                        "Qdrant collection '%s' not found; skipping existing-hash check: %s",
+                        self.qdrant_collection,
+                        exc,
+                    )
+                else:
+                    logger.warning(
+                        "Failed to fetch existing hashes from collection '{}': {}",
+                        self.qdrant_collection,
+                        exc,
+                    )
                 break
 
             if not points:
@@ -681,7 +643,7 @@ class RAG:
 
         for doc in self.docs:
             metadata = getattr(doc, "metadata", {}) or {}
-            file_hash = self._extract_file_hash(metadata)
+            file_hash = metadata.get("file_hash") or self._extract_file_hash(metadata)
             if not file_hash or file_hash not in existing_hashes:
                 filtered_docs.append(doc)
                 continue
@@ -727,7 +689,6 @@ class RAG:
             logger.error("RuntimeError: Directory reader is not initialized.")
             raise RuntimeError("Directory reader is not initialized.")
         self.docs = self.dir_reader.load_data()
-        self._ensure_file_hash_metadata()
         self._filter_docs_by_existing_hashes()
         cleaned_docs = []
         for doc in self.docs:

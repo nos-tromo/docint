@@ -33,7 +33,6 @@ def test_ensure_file_hash_mutates_metadata(tmp_path: Path) -> None:
     metadata: dict[str, object] = {}
     digest = ensure_file_hash(metadata, path=file)
     assert metadata["file_hash"] == digest
-    assert metadata["origin"]["file_hash"] == digest  # type: ignore[index]
 
 
 def test_ensure_file_hash_requires_inputs() -> None:

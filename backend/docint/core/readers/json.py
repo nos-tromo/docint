@@ -5,7 +5,7 @@ from llama_index.core.readers.base import BaseReader
 from llama_index.core.readers.json import JSONReader
 from loguru import logger
 
-from docint.utils.hashing import ensure_file_hash
+from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.mimetype import get_mimetype
 
 
@@ -56,6 +56,12 @@ class CustomJSONReader(BaseReader):
             ValueError: If the file is not a valid JSON or JSONL file.
         """
         file_path = Path(file) if not isinstance(file, Path) else file
+        provided_info = kwargs.get("extra_info", {})
+        file_hash = (
+            provided_info.get("file_hash") if isinstance(provided_info, dict) else None
+        )
+        if file_hash is None:
+            file_hash = compute_file_hash(file_path)
 
         if not file_path.exists():
             logger.error("FileNotFoundError: File not found: {}", file_path)
@@ -87,7 +93,9 @@ class CustomJSONReader(BaseReader):
                 "mimetype": mimetype,
             },
         }
-        ensure_file_hash(extra_info, path=file_path)
+        if isinstance(provided_info, dict):
+            extra_info.update(provided_info)
+        ensure_file_hash(extra_info, file_hash=file_hash, path=file_path)
 
         return self.json_reader.load_data(
             input_file=file_path_str,

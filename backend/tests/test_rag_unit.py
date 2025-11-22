@@ -4,9 +4,12 @@ import types
 from pathlib import Path
 
 import pytest
+from typing import cast
+from llama_index.core import Document, SimpleDirectoryReader
 
 from docint.core import rag as rag_module
 from docint.core.rag import RAG
+from docint.utils.hashing import compute_file_hash
 
 
 class DummyNode:
@@ -54,6 +57,20 @@ def test_normalize_response_data_extracts_sources() -> None:
             "page": 3,
         }
     ]
+
+
+def test_directory_ingestion_attaches_file_hash(tmp_path: Path) -> None:
+    file_path = tmp_path / "note.txt"
+    file_path.write_text("hello world")
+
+    rag = RAG(data_dir=tmp_path, qdrant_collection="test")
+    rag._load_doc_readers()
+
+    docs = cast(SimpleDirectoryReader, rag.dir_reader).load_data()
+    digest = compute_file_hash(file_path)
+
+    assert docs
+    assert all(getattr(doc, "metadata", {}).get("file_hash") == digest for doc in docs)
 
 
 def test_start_session_requires_query_engine(tmp_path: Path) -> None:
@@ -121,3 +138,22 @@ def test_list_supported_sparse_models_handles_import_error(
         staticmethod(broken),
     )
     assert rag_module.RAG._list_supported_sparse_models() == []
+
+
+def test_filter_docs_skips_existing_hashes(monkeypatch: pytest.MonkeyPatch) -> None:
+    rag = RAG(qdrant_collection="test")
+    existing_hash = "abc"
+    fresh_hash = "def"
+    rag.docs = [
+        Document(text="keep", metadata={"file_hash": fresh_hash, "file_name": "b.txt"}),
+        Document(
+            text="skip", metadata={"file_hash": existing_hash, "file_name": "a.txt"}
+        ),
+    ]
+
+    monkeypatch.setattr(RAG, "_get_existing_file_hashes", lambda self: {existing_hash})
+
+    rag._filter_docs_by_existing_hashes()
+
+    assert len(rag.docs) == 1
+    assert rag.docs[0].metadata.get("file_hash") == fresh_hash

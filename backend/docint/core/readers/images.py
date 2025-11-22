@@ -9,7 +9,7 @@ from llama_index.core.schema import MediaResource
 from loguru import logger
 from PIL import Image
 
-from docint.utils.hashing import ensure_file_hash
+from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.mimetype import get_mimetype
 from docint.utils.ollama_cfg import OllamaPipeline
 
@@ -52,7 +52,11 @@ class ImageReader(BaseReader):
         return base64.b64encode(img_bytes).decode("utf-8")
 
     def _enrich_document(
-        self, file_path: Path, text: str, source: str = "image"
+        self,
+        file_path: Path,
+        text: str,
+        source: str = "image",
+        file_hash: str | None = None,
     ) -> Document:
         """
         Enrich a document with metadata from the image file.
@@ -85,7 +89,11 @@ class ImageReader(BaseReader):
                 "mimetype": mimetype,
             },
         }
-        ensure_file_hash(metadata, path=file_path)
+        ensure_file_hash(
+            metadata,
+            file_hash=file_hash if file_hash is not None else None,
+            path=file_path if file_hash is None else None,
+        )
 
         return Document(
             text_resource=MediaResource(text=text, mimetype=mimetype),
@@ -105,6 +113,14 @@ class ImageReader(BaseReader):
         """
         logger.info("[ImageReader] Loading image from {}", file)
         file_path = Path(file) if not isinstance(file, Path) else file
+        extra_info = kwargs.get("extra_info", {})
+
+        file_hash = (
+            extra_info.get("file_hash") if isinstance(extra_info, dict) else None
+        )
+        if file_hash is None:
+            file_hash = compute_file_hash(file_path)
+
         img = self._load_image(file_path)
         img_base64 = self._encode_img_to_base64(img)
         prompt = self.ollama_pipeline.load_prompt("describe")
@@ -112,4 +128,4 @@ class ImageReader(BaseReader):
             prompt=prompt,
             img=img_base64,
         )
-        return [self._enrich_document(file_path, self.response)]
+        return [self._enrich_document(file_path, self.response, file_hash=file_hash)]

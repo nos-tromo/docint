@@ -7,7 +7,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 
-from docint.core.chat.base import Base
+from docint.core.state.base import Base
 
 
 class Citation(Base):
