@@ -1,9 +1,9 @@
 from sqlalchemy import inspect
 
-from docint.core.chat.base import _make_session_maker
-from docint.core.chat.conversation import Conversation
-from docint.core.chat.turn import Turn
-from docint.core.chat.citation import Citation
+from docint.core.state.base import _make_session_maker
+from docint.core.state.conversation import Conversation
+from docint.core.state.turn import Turn
+from docint.core.state.citation import Citation
 
 
 def test_make_session_maker_creates_tables(tmp_path):

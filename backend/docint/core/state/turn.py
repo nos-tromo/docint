@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
-from docint.core.chat.base import Base
+from docint.core.state.base import Base
 
 
 class Turn(Base):
