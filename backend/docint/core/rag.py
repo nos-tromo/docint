@@ -7,8 +7,9 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import timezone
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import pandas as pd
 import torch
@@ -39,7 +40,7 @@ from llama_index.vector_stores.qdrant import QdrantVectorStore
 from loguru import logger
 from qdrant_client import QdrantClient
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session
 
 from docint.core.state.base import _make_session_maker
 from docint.core.state.citation import Citation
@@ -1217,32 +1218,37 @@ class RAG:
         if self._SessionMaker is None:
             self.init_session_store()
 
-    def _load_or_create_convo(
-        self, session_id: str
-    ) -> tuple[sessionmaker, Conversation]:
-        """
-        Load an existing conversation or create a new one.
-
-        Args:
-            session_id (str): The ID of the session.
-
-        Returns:
-            tuple[sessionmaker, Conversation]: The session and conversation objects.
-
-        Raises:
-            RuntimeError: If the SessionMaker is not initialized.
-        """
+    @contextmanager
+    def _session_scope(self) -> Iterator[Session]:
+        """Context manager that yields a SQLAlchemy session and closes it on exit."""
         self._ensure_store()
         if self._SessionMaker is None:
             logger.error("RuntimeError: SessionMaker is not initialized.")
             raise RuntimeError("SessionMaker is not initialized.")
-        s = self._SessionMaker()
-        conv = s.get(Conversation, session_id)
+        session = self._SessionMaker()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    def _load_or_create_convo(self, session: Session, session_id: str) -> Conversation:
+        """
+        Load an existing conversation or create a new one using the provided session.
+
+        Args:
+            session (Session): Active SQLAlchemy session.
+            session_id (str): The ID of the session.
+
+        Returns:
+            Conversation: The conversation row for the provided session id.
+
+        """
+        conv = session.get(Conversation, session_id)
         if conv is None:
             conv = Conversation(id=session_id)
-            s.add(conv)
-            s.commit()
-        return s, conv
+            session.add(conv)
+            session.commit()
+        return conv
 
     def _get_rolling_summary(self, session_id: str) -> str:
         """
@@ -1257,13 +1263,9 @@ class RAG:
         Raises:
             RuntimeError: If the SessionMaker is not initialized.
         """
-        self._ensure_store()
-        if self._SessionMaker is None:
-            logger.error("RuntimeError: SessionMaker is not initialized.")
-            raise RuntimeError("SessionMaker is not initialized.")
-        s = self._SessionMaker()
-        conv = s.get(Conversation, session_id)
-        return (conv.rolling_summary or "") if conv else ""
+        with self._session_scope() as s:
+            conv = s.get(Conversation, session_id)
+            return (conv.rolling_summary or "") if conv else ""
 
     # --- Chat session lifecycle ---
     def _persist_turn(
@@ -1278,79 +1280,81 @@ class RAG:
             resp (Any): The response object.
             data (dict): The additional data to persist.
         """
-        self._ensure_store()
-        s, conv = self._load_or_create_convo(session_id)
+        with self._session_scope() as s:
+            conv = self._load_or_create_convo(s, session_id)
 
-        # try to capture the condensed query from response metadata
-        meta = getattr(resp, "metadata", {}) or {}
-        rewritten = meta.get("query_str") or meta.get("compressed_query_str")
+            # try to capture the condensed query from response metadata
+            meta = getattr(resp, "metadata", {}) or {}
+            rewritten = meta.get("query_str") or meta.get("compressed_query_str")
 
-        reasoning = data.get("reasoning")
-        next_idx = len(conv.turns)
-        t = Turn(
-            conversation_id=conv.id,
-            idx=next_idx,
-            user_text=user_msg,
-            rewritten_query=rewritten,
-            model_response=data.get("response") or "",
-            reasoning=reasoning,
-        )
-        s.add(t)
-        s.flush()
-
-        # citations
-        for src_node in getattr(resp, "source_nodes", []) or []:
-            # Prefer node-attached metadata
-            node = getattr(src_node, "node", None)
-            meta_node = getattr(node, "metadata", {}) or {}
-
-            # Robust filename/filetype extraction across readers
-            filename = (
-                meta_node.get("file_name")
-                or meta_node.get("filename")
-                or meta_node.get("file_path")
-                or meta_node.get("source")
-                or meta_node.get("document_id")
-                or ""
+            reasoning = data.get("reasoning")
+            next_idx = len(conv.turns)
+            t = Turn(
+                conversation_id=conv.id,
+                idx=next_idx,
+                user_text=user_msg,
+                rewritten_query=rewritten,
+                model_response=data.get("response") or "",
+                reasoning=reasoning,
             )
-            filetype = (
-                meta_node.get("mimetype")
-                or meta_node.get("filetype")
-                or meta_node.get("content_type")
-                or ""
-            )
-            source_kind = meta_node.get("source", "")
+            s.add(t)
+            s.flush()
 
-            # Common page/row hints
-            page = meta_node.get("page_label") or meta_node.get("page") or None
-            table_meta = meta_node.get("table") or {}
-            row_index = table_meta.get("row_index")
+            # citations
+            for src_node in getattr(resp, "source_nodes", []) or []:
+                # Prefer node-attached metadata
+                node = getattr(src_node, "node", None)
+                meta_node = getattr(node, "metadata", {}) or {}
 
-            # Capture a stable node id strictly from the node object
-            node_id = None
-            if node is not None:
-                node_id = getattr(node, "node_id", None) or getattr(node, "id_", None)
-
-            score = (
-                float(getattr(src_node, "score", 0.0))
-                if hasattr(src_node, "score")
-                else None
-            )
-
-            s.add(
-                Citation(
-                    turn_id=t.id,
-                    node_id=str(node_id) if node_id is not None else None,
-                    score=score,
-                    filename=filename,
-                    filetype=filetype,
-                    source=source_kind,
-                    page=int(page) if page is not None else None,
-                    row=int(row_index) if row_index is not None else None,
+                # Robust filename/filetype extraction across readers
+                filename = (
+                    meta_node.get("file_name")
+                    or meta_node.get("filename")
+                    or meta_node.get("file_path")
+                    or meta_node.get("source")
+                    or meta_node.get("document_id")
+                    or ""
                 )
-            )
+                filetype = (
+                    meta_node.get("mimetype")
+                    or meta_node.get("filetype")
+                    or meta_node.get("content_type")
+                    or ""
+                )
+                source_kind = meta_node.get("source", "")
 
-        s.commit()
+                # Common page/row hints
+                page = meta_node.get("page_label") or meta_node.get("page") or None
+                table_meta = meta_node.get("table") or {}
+                row_index = table_meta.get("row_index")
+
+                # Capture a stable node id strictly from the node object
+                node_id = None
+                if node is not None:
+                    node_id = getattr(node, "node_id", None) or getattr(
+                        node, "id_", None
+                    )
+
+                score = (
+                    float(getattr(src_node, "score", 0.0))
+                    if hasattr(src_node, "score")
+                    else None
+                )
+
+                s.add(
+                    Citation(
+                        turn_id=t.id,
+                        node_id=str(node_id) if node_id is not None else None,
+                        score=score,
+                        filename=filename,
+                        filetype=filetype,
+                        source=source_kind,
+                        page=int(page) if page is not None else None,
+                        row=int(row_index) if row_index is not None else None,
+                    )
+                )
+
+            s.commit()
 
     def _maybe_update_summary(self, session_id: str, every_n_turns: int = 5) -> None:
         """
@@ -1363,31 +1367,31 @@ class RAG:
         Raises:
             RuntimeError: If the SessionMaker is not initialized.
         """
-        self._ensure_store()
-        if self._SessionMaker is None:
-            logger.error("RuntimeError: SessionMaker is not initialized.")
-            raise RuntimeError("SessionMaker is not initialized.")
-        s = self._SessionMaker()
-        conv = s.get(Conversation, session_id)
-        if not conv or len(conv.turns) == 0 or (len(conv.turns) % every_n_turns) != 0:
-            return
+        with self._session_scope() as s:
+            conv = s.get(Conversation, session_id)
+            if (
+                not conv
+                or len(conv.turns) == 0
+                or (len(conv.turns) % every_n_turns) != 0
+            ):
+                return
 
-        # Build a concise slice of the last N turns
-        slice_text = []
-        for turn in conv.turns[-every_n_turns:]:
-            slice_text.append(
-                f"User: {turn.user_text}\nAssistant: {turn.model_response}"
+            # Build a concise slice of the last N turns
+            slice_text = []
+            for turn in conv.turns[-every_n_turns:]:
+                slice_text.append(
+                    f"User: {turn.user_text}\nAssistant: {turn.model_response}"
+                )
+            prompt = (
+                "Summarize the key facts and user intent from the following chat turns. "
+                "Keep it under 10 sentences and avoid speculation.\n\n"
+                + "\n\n".join(slice_text)
             )
-        prompt = (
-            "Summarize the key facts and user intent from the following chat turns. "
-            "Keep it under 10 sentences and avoid speculation.\n\n"
-            + "\n\n".join(slice_text)
-        )
-        # Use the same LLM to summarize
-        summary_resp = self.gen_model.complete(prompt)
-        new_summary = (conv.rolling_summary + "\n" + summary_resp.text).strip()
-        conv.rolling_summary = new_summary
-        s.commit()
+            # Use the same LLM to summarize
+            summary_resp = self.gen_model.complete(prompt)
+            new_summary = (conv.rolling_summary + "\n" + summary_resp.text).strip()
+            conv.rolling_summary = new_summary
+            s.commit()
 
     def _get_node_text_by_id(self, node_id: str) -> str | None:
         """
@@ -1422,15 +1426,15 @@ class RAG:
                         text = getattr(node, "text", None)
                         if text:
                             return text
-                        # Some versions store content on .get_content(), or .get_text()
+                        # Some versions store content on helper methods
                         if (
                             isinstance(node, BaseNode)
                             and hasattr(node, "get_content")
                             and callable(node.get_content)
                         ):
-                            t = node.get_content()
-                            if isinstance(t, str) and t:
-                                return t
+                            content = node.get_content()
+                            if isinstance(content, str) and content:
+                                return content
                         if isinstance(node, BaseNode):
                             text = getattr(node, "text", None)
                             if isinstance(text, str) and text:
@@ -1439,6 +1443,7 @@ class RAG:
                         continue
         except Exception:
             return None
+
         # Fallback to Qdrant payload when docstore text is unavailable
         try:
             recs = self.qdrant_client.retrieve(
@@ -1476,178 +1481,176 @@ class RAG:
             RuntimeError: If the SessionMaker is not initialized.
             ValueError: If no conversation is found for the given session ID or the session ID is invalid.
         """
-        self._ensure_store()
-        if self._SessionMaker is None:
-            logger.error("RuntimeError: SessionMaker is not initialized.")
-            raise RuntimeError("SessionMaker is not initialized.")
-        s = self._SessionMaker()
+        with self._session_scope() as s:
+            if not session_id and self.session_id is not None:
+                session_id = self.session_id
 
-        if not session_id and self.session_id is not None:
-            session_id = self.session_id
+            if session_id is None:
+                raise ValueError("Session ID cannot be None.")
 
-        conv = s.get(Conversation, session_id)
-        if conv is None:
-            logger.error(
-                "ValueError: No conversation found for session_id={}", session_id
-            )
-            raise ValueError(f"No conversation found for session_id={session_id}")
+            conv = s.get(Conversation, session_id)
+            if conv is None:
+                logger.error(
+                    "ValueError: No conversation found for session_id={}", session_id
+                )
+                raise ValueError(f"No conversation found for session_id={session_id}")
 
-        if session_id is None:
-            raise ValueError("Session ID cannot be None.")
-        out_dir = Path(out_dir) / session_id
-        if not out_dir.exists():
-            out_dir.mkdir(parents=True, exist_ok=True)
+            out_dir = Path(out_dir) / session_id
+            if not out_dir.exists():
+                out_dir.mkdir(parents=True, exist_ok=True)
 
-        # 1) session.json
-        session_meta = {
-            "schema_version": "1.0.0",
-            "session_id": conv.id,
-            "created_at": conv.created_at.replace(tzinfo=timezone.utc).isoformat(),
-            "turn_count": len(conv.turns),
-            "rolling_summary": conv.rolling_summary or "",
-            "models": {
-                "embed_model_id": self.embed_model_id,
-                "rerank_model_id": self.rerank_model_id,
-                "gen_model_id": self.gen_model_id,
-            },
-            "retrieval": {
-                "similarity_top_k": self.retrieve_similarity_top_k,
-                "top_n": self.rerank_top_n,
-            },
-            "vector_store": {
-                "type": "qdrant",
-                "url": self.qdrant_host,
-                "collection": self.qdrant_collection,
-                "host_dir": str(self.qdrant_host_dir or ""),
-            },
-        }
-        (out_dir / "session.json").write_text(
-            json.dumps(session_meta, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-
-        # 2) messages.jsonl
-        with (out_dir / "messages.jsonl").open("w", encoding="utf-8") as f:
-            for t in conv.turns:
-                obj = {
-                    "turn_idx": t.idx,
-                    "created_at": t.created_at.replace(tzinfo=timezone.utc).isoformat(),
-                    "user_text": t.user_text,
-                    "rewritten_query": t.rewritten_query,
-                    "assistant_text": t.model_response,
-                    "reasoning": t.reasoning,
-                }
-                f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-
-        # 3) citations.parquet (optional if pandas/pyarrow present)
-        try:
-            rows = []
-            for t in conv.turns:
-                for c in t.citations:
-                    rows.append(
-                        {
-                            "turn_idx": t.idx,
-                            "node_id": c.node_id,
-                            "score": c.score,
-                            "filename": c.filename,
-                            "filetype": c.filetype,
-                            "source": c.source,
-                            "page": c.page,
-                            "row": c.row,
-                        }
-                    )
-            if rows:
-                df = pd.DataFrame(rows)
-                df.to_parquet(out_dir / "citations.parquet", index=False)
-            else:
-                # write empty parquet to preserve schema
-                pd.DataFrame(
-                    [],
-                    columns=[
-                        "turn_idx",
-                        "node_id",
-                        "score",
-                        "filename",
-                        "filetype",
-                        "source",
-                        "page",
-                        "row",
-                    ],
-                ).to_parquet(out_dir / "citations.parquet", index=False)
-        except Exception as e:
-            logger.warning(
-                "Skipping citations.parquet export (pandas/pyarrow not available?): {}",
-                e,
-            )
-
-        # 4) transcript.md (human-readable)
-        lines = ["# Transcript", f"Session: `{conv.id}`", ""]
-        if conv.rolling_summary:
-            lines += ["## Rolling Summary", "", conv.rolling_summary, ""]
-        for t in conv.turns:
-            lines += [
-                f"## Turn {t.idx}",
-                f"**User**: {t.user_text}",
-                f"**Rewritten**: {t.rewritten_query or ''}",
-                f"**Assistant**: {t.model_response}",
-            ]
-            if t.reasoning:
-                lines += [
-                    f"<details><summary>Reasoning</summary>\n\n{t.reasoning}\n\n</details>"
-                ]
-            # citations with embedded source text
-            if t.citations:
-                lines += ["**Citations (with source excerpts):**"]
-                for c in t.citations:
-                    loc = (
-                        f"page {c.page}"
-                        if c.page is not None
-                        else (f"row {c.row}" if c.row is not None else "")
-                    )
-                    header = f"- {c.filename} {loc} (score={c.score})"
-                    # Try to fetch node text via docstore
-                    excerpt = None
-                    if c.node_id:
-                        excerpt = self._get_node_text_by_id(c.node_id)
-                    if excerpt is None:
-                        excerpt = "[source text unavailable]"
-                    else:
-                        excerpt = excerpt.strip()
-                        # avoid mile-long transcript entries
-                        max_chars = 800
-                        if len(excerpt) > max_chars:
-                            excerpt = excerpt[:max_chars].rstrip() + " …"
-                    # Render as a nested blockquote in markdown for readability
-                    lines += [
-                        header,
-                        ">\n> " + "\n> ".join(excerpt.splitlines()) + "\n>",
-                    ]
-            lines += [""]
-        (out_dir / "transcript.md").write_text("\n".join(lines), encoding="utf-8")
-
-        # 5) manifest.json with checksums
-        def sha256_file(p: Path) -> str:
-            h = hashlib.sha256()
-            with p.open("rb") as fh:
-                for chunk in iter(lambda: fh.read(65536), b""):
-                    h.update(chunk)
-            return h.hexdigest()
-
-        manifest = {}
-        for name in ["session.json", "messages.jsonl", "transcript.md"]:
-            fp = out_dir / name
-            if fp.exists():
-                manifest[name] = {"sha256": sha256_file(fp), "bytes": fp.stat().st_size}
-        parquet_fp = out_dir / "citations.parquet"
-        if parquet_fp.exists():
-            manifest["citations.parquet"] = {
-                "sha256": sha256_file(parquet_fp),
-                "bytes": parquet_fp.stat().st_size,
+            # 1) session.json
+            session_meta = {
+                "schema_version": "1.0.0",
+                "session_id": conv.id,
+                "created_at": conv.created_at.replace(tzinfo=timezone.utc).isoformat(),
+                "turn_count": len(conv.turns),
+                "rolling_summary": conv.rolling_summary or "",
+                "models": {
+                    "embed_model_id": self.embed_model_id,
+                    "rerank_model_id": self.rerank_model_id,
+                    "gen_model_id": self.gen_model_id,
+                },
+                "retrieval": {
+                    "similarity_top_k": self.retrieve_similarity_top_k,
+                    "top_n": self.rerank_top_n,
+                },
+                "vector_store": {
+                    "type": "qdrant",
+                    "url": self.qdrant_host,
+                    "collection": self.qdrant_collection,
+                    "host_dir": str(self.qdrant_host_dir or ""),
+                },
             }
+            (out_dir / "session.json").write_text(
+                json.dumps(session_meta, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
 
-        (out_dir / "manifest.json").write_text(
-            json.dumps(manifest, indent=2), encoding="utf-8"
-        )
-        return out_dir
+            # 2) messages.jsonl
+            with (out_dir / "messages.jsonl").open("w", encoding="utf-8") as f:
+                for t in conv.turns:
+                    obj = {
+                        "turn_idx": t.idx,
+                        "created_at": t.created_at.replace(
+                            tzinfo=timezone.utc
+                        ).isoformat(),
+                        "user_text": t.user_text,
+                        "rewritten_query": t.rewritten_query,
+                        "assistant_text": t.model_response,
+                        "reasoning": t.reasoning,
+                    }
+                    f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+            # 3) citations.parquet (optional if pandas/pyarrow present)
+            try:
+                rows = []
+                for t in conv.turns:
+                    for c in t.citations:
+                        rows.append(
+                            {
+                                "turn_idx": t.idx,
+                                "node_id": c.node_id,
+                                "score": c.score,
+                                "filename": c.filename,
+                                "filetype": c.filetype,
+                                "source": c.source,
+                                "page": c.page,
+                                "row": c.row,
+                            }
+                        )
+                if rows:
+                    df = pd.DataFrame(rows)
+                    df.to_parquet(out_dir / "citations.parquet", index=False)
+                else:
+                    # write empty parquet to preserve schema
+                    pd.DataFrame(
+                        [],
+                        columns=[
+                            "turn_idx",
+                            "node_id",
+                            "score",
+                            "filename",
+                            "filetype",
+                            "source",
+                            "page",
+                            "row",
+                        ],
+                    ).to_parquet(out_dir / "citations.parquet", index=False)
+            except Exception as e:
+                logger.warning(
+                    "Skipping citations.parquet export (pandas/pyarrow not available?): {}",
+                    e,
+                )
+
+            # 4) transcript.md (human-readable)
+            lines = ["# Transcript", f"Session: `{conv.id}`", ""]
+            if conv.rolling_summary:
+                lines += ["## Rolling Summary", "", conv.rolling_summary, ""]
+            for t in conv.turns:
+                lines += [
+                    f"## Turn {t.idx}",
+                    f"**User**: {t.user_text}",
+                    f"**Rewritten**: {t.rewritten_query or ''}",
+                    f"**Assistant**: {t.model_response}",
+                ]
+                if t.reasoning:
+                    lines += [
+                        f"<details><summary>Reasoning</summary>\n\n{t.reasoning}\n\n</details>"
+                    ]
+                # citations with embedded source text
+                if t.citations:
+                    lines += ["**Citations (with source excerpts):**"]
+                    for c in t.citations:
+                        loc = (
+                            f"page {c.page}"
+                            if c.page is not None
+                            else (f"row {c.row}" if c.row is not None else "")
+                        )
+                        header = f"- {c.filename} {loc} (score={c.score})"
+                        excerpt = None
+                        if c.node_id:
+                            excerpt = self._get_node_text_by_id(c.node_id)
+                        if excerpt is None:
+                            excerpt = "[source text unavailable]"
+                        else:
+                            excerpt = excerpt.strip()
+                            max_chars = 800
+                            if len(excerpt) > max_chars:
+                                excerpt = excerpt[:max_chars].rstrip() + " …"
+                        lines += [
+                            header,
+                            ">\n> " + "\n> ".join(excerpt.splitlines()) + "\n>",
+                        ]
+                lines += [""]
+            (out_dir / "transcript.md").write_text("\n".join(lines), encoding="utf-8")
+
+            # 5) manifest.json with checksums
+            def sha256_file(p: Path) -> str:
+                h = hashlib.sha256()
+                with p.open("rb") as fh:
+                    for chunk in iter(lambda: fh.read(65536), b""):
+                        h.update(chunk)
+                return h.hexdigest()
+
+            manifest = {}
+            for name in ["session.json", "messages.jsonl", "transcript.md"]:
+                fp = out_dir / name
+                if fp.exists():
+                    manifest[name] = {
+                        "sha256": sha256_file(fp),
+                        "bytes": fp.stat().st_size,
+                    }
+            parquet_fp = out_dir / "citations.parquet"
+            if parquet_fp.exists():
+                manifest["citations.parquet"] = {
+                    "sha256": sha256_file(parquet_fp),
+                    "bytes": parquet_fp.stat().st_size,
+                }
+
+            (out_dir / "manifest.json").write_text(
+                json.dumps(manifest, indent=2), encoding="utf-8"
+            )
+            return out_dir
 
     def start_session(self, session_id: str | None = None) -> str:
         """
@@ -1668,7 +1671,8 @@ class RAG:
         self.session_id = session_id
 
         # 2) ensure a Conversation row exists (idempotent)
-        self._load_or_create_convo(session_id)
+        with self._session_scope() as s:
+            self._load_or_create_convo(s, session_id)
 
         # 3) seed memory from rolling summary
         rolling = self._get_rolling_summary(session_id)
