@@ -226,20 +226,20 @@ export default function App() {
                       Query
                     </Tabs.Trigger>
                     <Tabs.Trigger
-                      value="ingest"
-                      fontWeight="semibold"
-                      justifyContent="center"
-                      py={3}
-                    >
-                      Ingest
-                    </Tabs.Trigger>
-                    <Tabs.Trigger
                       value="summarize"
                       fontWeight="semibold"
                       justifyContent="center"
                       py={3}
                     >
                       Summarize
+                    </Tabs.Trigger>
+                    <Tabs.Trigger
+                      value="ingest"
+                      fontWeight="semibold"
+                      justifyContent="center"
+                      py={3}
+                    >
+                      Ingest
                     </Tabs.Trigger>
                   </Tabs.List>
                   <Tabs.Content value="query" px={{ base: 4, md: 6 }} py={6}>
