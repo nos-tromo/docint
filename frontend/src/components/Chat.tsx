@@ -19,8 +19,28 @@ export default function Chat({ collection }: Props) {
   const toggleRefs = (idx: number) =>
     setOpenRefs((prev) => ({ ...prev, [idx]: !prev[idx] }));
 
-  const handleCopy = (idx: number, text: string) => {
-    void navigator.clipboard.writeText(text).catch(() => undefined);
+  const formatMessageForCopy = (msg: Msg) => {
+    let payload = msg.text;
+    if (msg.sources && msg.sources.length > 0) {
+      const srcs = msg.sources
+        .map((s, index) => {
+          const location = s.page
+            ? ` (page ${s.page})`
+            : s.row
+            ? ` (row ${s.row})`
+            : "";
+          const text = s.text ? `\n    "${s.text}"` : "";
+          return `${index + 1}. ${s.filename || "unknown"}${location}${text}`;
+        })
+        .join("\n");
+      payload += `\n\nSources:\n${srcs}`;
+    }
+    return payload;
+  };
+
+  const handleCopy = (idx: number, msg: Msg) => {
+    const payload = formatMessageForCopy(msg);
+    void navigator.clipboard.writeText(payload).catch(() => undefined);
     setCopiedIdx(idx);
     if (copyTimeout.current) {
       window.clearTimeout(copyTimeout.current);
@@ -150,7 +170,7 @@ export default function Chat({ collection }: Props) {
                   aria-label={copiedIdx === i ? "Copied" : "Copy answer"}
                   size="sm"
                   variant="ghost"
-                  onClick={() => handleCopy(i, m.text)}
+                  onClick={() => handleCopy(i, m)}
                   title={copiedIdx === i ? "Copied!" : "Copy answer"}
                 >
                   <Box as="span" fontSize="md" lineHeight={1}>
