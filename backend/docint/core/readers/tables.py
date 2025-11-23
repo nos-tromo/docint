@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import pandas as pd
 from llama_index.core import Document
@@ -13,6 +13,7 @@ from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.mimetype import get_mimetype
 
 RowFilter = Callable[[dict], bool]
+ORIGINAL_INDEX_COL = "_original_row_index"
 
 
 @dataclass(slots=True)
@@ -164,11 +165,12 @@ class TableReader(BaseReader):
         logger.info("[TableReader] Loading table from {}", file)
         file_path = Path(file) if not isinstance(file, Path) else file
         suffix = file_path.suffix.lower()
-        extra_info = kwargs.get("extra_info", {})
-
-        file_hash = (
-            extra_info.get("file_hash") if isinstance(extra_info, dict) else None
+        extra_info_arg = kwargs.get("extra_info", {})
+        extra_info: dict[str, Any] = (
+            extra_info_arg if isinstance(extra_info_arg, dict) else {}
         )
+
+        file_hash = extra_info.get("file_hash")
         if file_hash is None:
             file_hash = compute_file_hash(file_path)
         mimetype = get_mimetype(file_path)
@@ -193,14 +195,22 @@ class TableReader(BaseReader):
             logger.error("ValueError: Unsupported table type: {}", suffix)
             raise ValueError(f"Unsupported table type: {suffix}")
 
+        row_query_applied = False
+        row_query_error: str | None = None
         if self.row_query:
             try:
                 df = df.query(self.row_query)
+                row_query_applied = True
             except Exception as exc:  # pragma: no cover - log and continue
+                row_query_error = str(exc)
                 logger.warning(
-                    "Failed to apply row_query='%s' to %s: %s", self.row_query, file_path, exc
+                    "Failed to apply row_query='%s' to %s: %s",
+                    self.row_query,
+                    file_path,
+                    exc,
                 )
 
+        df[ORIGINAL_INDEX_COL] = df.index
         df = df.reset_index(drop=True)
         text_cols = self.text_cols or self._guess_text_cols(df)
         if isinstance(text_cols, str):  # Ensure text_cols is a list
@@ -210,15 +220,22 @@ class TableReader(BaseReader):
             if self.metadata_cols is None
             else [c for c in df.columns if c in self.metadata_cols]
         )
+        if ORIGINAL_INDEX_COL in meta_cols:
+            meta_cols.remove(ORIGINAL_INDEX_COL)
 
         docs: list[Document] = []
         n_rows, n_cols = len(df), len(df.columns)
-        columns = list(df.columns)
-        column_types = {col: str(dtype) for col, dtype in df.dtypes.items()}
+        columns = [c for c in df.columns if c != ORIGINAL_INDEX_COL]
+        column_types = {
+            col: str(dtype)
+            for col, dtype in df.dtypes.items()
+            if col != ORIGINAL_INDEX_COL
+        }
         count = 0
 
         for i, row in df.iterrows():
             row_dict = {k: (None if pd.isna(v) else v) for k, v in row.items()}
+            original_row_index = row_dict.pop(ORIGINAL_INDEX_COL, None)
             if self.row_filter and not self.row_filter(row_dict):
                 continue
 
@@ -227,21 +244,27 @@ class TableReader(BaseReader):
             if not content.strip():
                 continue
 
-            metadata = {
+            table_info: dict[str, Any] = {
+                "columns": columns,
+                "column_types": column_types,
+                "n_rows": n_rows,
+                "n_cols": n_cols,
+                "row_index": i,
+                "original_row_index": original_row_index,
+                "row_query": self.row_query,
+                "row_query_applied": row_query_applied,
+                "row_limit": self.limit,
+            }
+            if row_query_error:
+                table_info["row_query_error"] = row_query_error
+
+            metadata: dict[str, Any] = {
                 "origin": {
                     "filename": file_path.name,
                     "filetype": mimetype or "",
                 },
                 "source": "table",
-                "table": {
-                    "columns": columns,
-                    "column_types": column_types,
-                    "n_rows": n_rows,
-                    "n_cols": n_cols,
-                    "row_index": i,
-                    "row_query": self.row_query,
-                    "row_limit": self.limit,
-                },
+                "table": table_info,
                 "ft": ft_extras,
             }
             if extra_info:
