@@ -57,7 +57,7 @@ from docint.utils.hashing import compute_file_hash
 # --- Environment variables ---
 load_dotenv()
 DATA_PATH: Path = Path(os.getenv("DATA_PATH", Path.home() / "docint" / "data"))
-PROMPT_DIR: Path = Path(__file__).parents[2].resolve() / "utils" / "prompts"
+PROMPT_DIR: Path = Path(__file__).parents[1].resolve() / "utils" / "prompts"
 REQUIRED_EXTS_PATH: Path = (
     Path(__file__).parent.resolve() / "readers" / "required_exts.txt"
 )
@@ -108,6 +108,12 @@ class RAG:
     embed_batch_size: int = 64
     retrieve_similarity_top_k: int = RETRIEVE_SIMILARITY_TOP_K
     rerank_top_n: int = int(retrieve_similarity_top_k // 5)
+
+    # --- Prompt config ---
+    prompt_template_path: Path | None = PROMPT_DIR
+    if prompt_template_path:
+        summarize_prompt_path: Path = PROMPT_DIR / "summarize.txt"
+    summarize_prompt: str = field(default="", init=False)
 
     # --- Directory reader config ---
     reader_errors: str = "ignore"
@@ -179,6 +185,9 @@ class RAG:
         """
         with open(self.reader_required_exts_path, "r", encoding="utf-8") as f:
             self.reader_required_exts = [f".{line.strip()}" for line in f]
+
+        with open(self.summarize_prompt_path, "r", encoding="utf-8") as f:
+            self.summarize_prompt = f.read()
 
         self.sentence_splitter = SentenceSplitter(
             chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap
@@ -1525,11 +1534,8 @@ class RAG:
                 slice_text.append(
                     f"User: {turn.user_text}\nAssistant: {turn.model_response}"
                 )
-            prompt = (
-                "Summarize the key facts and user intent from the following chat turns. "
-                "Keep it under 10 sentences and avoid speculation.\n\n"
-                + "\n\n".join(slice_text)
-            )
+            prompt = self.summarize_prompt + "\n\n".join(slice_text)
+
             # Use the same LLM to summarize
             summary_resp = self.gen_model.complete(prompt)
             existing_summary = cast(str | None, conv.rolling_summary) or ""
