@@ -31,11 +31,11 @@ class CustomJSONReader(BaseReader):
         Initializes the CustomJSONReader with specific parameters.
 
         Args:
-            levels_back (int | None, optional): _levels_back description_. Defaults to 0.
-            collapse_length (int | None, optional): _collapse_length description_. Defaults to None.
-            ensure_ascii (bool, optional): _description_. Defaults to False.
-            is_jsonl (bool, optional): _is_jsonl description_. Defaults to False.
-            clean_json (bool, optional): _clean_json description_. Defaults to True.
+            levels_back (int | None, optional): The number of levels to go back in the JSON structure. Defaults to 0.
+            collapse_length (int | None, optional): The maximum length of collapsed text. Defaults to None.
+            ensure_ascii (bool, optional): Whether to ensure ASCII encoding. Defaults to False.
+            is_jsonl (bool, optional): Whether the input is in JSONL format. Defaults to False.
+            clean_json (bool, optional): Whether to clean the JSON data. Defaults to True.
         """
         self.json_reader = JSONReader(
             levels_back=levels_back,
@@ -49,6 +49,15 @@ class CustomJSONReader(BaseReader):
         self.list_sample_size = max(list_sample_size, 0)
 
     def _sample_list_items(self, values: Sequence[Any]) -> Iterable[Any]:
+        """
+        Samples a subset of items from a list.
+
+        Args:
+            values (Sequence[Any]): The list of values to sample from.
+
+        Returns:
+            Iterable[Any]: A sampled subset of the input list.
+        """
         if self.list_sample_size == 0:
             return []
         total = len(values)
@@ -67,6 +76,16 @@ class CustomJSONReader(BaseReader):
         return sampled
 
     def _collect_nested_keys(self, data: Any, prefix: str = "") -> set[str]:
+        """
+        Collects nested keys from a JSON-like structure.
+
+        Args:
+            data (Any): The JSON-like data to inspect.
+            prefix (str, optional): The prefix for nested keys. Defaults to "".
+
+        Returns:
+            set[str]: A set of all nested keys found in the data.
+        """
         keys: set[str] = set()
         if isinstance(data, dict):
             for key, value in data.items():
@@ -79,6 +98,20 @@ class CustomJSONReader(BaseReader):
         return keys
 
     def _infer_schema(self, file_path: Path, is_jsonl: bool) -> dict[str, list[str]]:
+        """
+        Infers the schema of the JSON data by collecting nested keys.
+
+        Args:
+            file_path (Path): The path to the JSON file.
+            is_jsonl (bool): Whether the file is in JSONL format.
+
+        Returns:
+            dict[str, list[str]]: A dictionary containing inferred schema information.
+
+        Raises:
+            OSError: If there is an error reading the file.
+            json.JSONDecodeError: If the file content is not valid JSON.
+        """
         nested_keys: set[str] = set()
         try:
             if is_jsonl:

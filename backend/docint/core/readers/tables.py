@@ -77,6 +77,9 @@ class TableReader(BaseReader):
     csv_sep: str | None = None  # allow overriding delimiter
 
     def __post_init__(self) -> None:
+        """
+        Normalize configuration options.
+        """
         # Normalize config
         if isinstance(self.text_cols, str):
             self.text_cols = [self.text_cols]

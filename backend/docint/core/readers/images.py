@@ -65,6 +65,7 @@ class ImageReader(BaseReader):
             file_path (Path): The path to the image file.
             text (str): The text content extracted from the image.
             source (str, optional): The source type. Defaults to "image".
+            file_hash (str | None, optional): Pre-computed file hash. Defaults to None.
 
         Returns:
             Document: The enriched document.

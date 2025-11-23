@@ -46,6 +46,7 @@ class HybridPDFReader(BaseReader):
         Args:
             path (Path): The file path of the document.
             page_meta (dict | None): Optional page-specific metadata.
+            file_hash (str | None): Optional pre-computed file hash.
 
         Returns:
             dict: The standardized metadata dictionary.
