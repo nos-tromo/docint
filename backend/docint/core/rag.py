@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import timezone
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, cast
 
 import pandas as pd
 import torch
@@ -1161,12 +1161,13 @@ class RAG:
         if not prompt.strip():
             logger.error("ValueError: Query prompt cannot be empty.")
             raise ValueError("Query prompt cannot be empty.")
-        if self.query_engine is None:
+        engine = self.query_engine
+        if engine is None:
             logger.error("RuntimeError: Query engine has not been initialized.")
             raise RuntimeError(
                 "Query engine has not been initialized. Call ingest_docs() first."
             )
-        result = self.query_engine.query(prompt)
+        result = engine.query(prompt)
         if not isinstance(result, Response):
             logger.error("TypeError: Expected Response, got {}.", type(result).__name__)
             raise TypeError(f"Expected Response, got {type(result).__name__}")
@@ -1190,12 +1191,13 @@ class RAG:
         if not prompt.strip():
             logger.error("ValueError: Query prompt cannot be empty.")
             raise ValueError("Query prompt cannot be empty.")
-        if self.query_engine is None:
+        engine = self.query_engine
+        if engine is None:
             logger.error("RuntimeError: Query engine has not been initialized.")
             raise RuntimeError(
                 "Query engine has not been initialized. Call ingest_docs()/asingest_docs() first."
             )
-        result = await self.query_engine.aquery(prompt)
+        result = await engine.aquery(prompt)
         if not isinstance(result, Response):
             logger.error("TypeError: Expected Response, got {}.", type(result).__name__)
             raise TypeError(f"Expected Response, got {type(result).__name__}")
@@ -1265,7 +1267,10 @@ class RAG:
         """
         with self._session_scope() as s:
             conv = s.get(Conversation, session_id)
-            return (conv.rolling_summary or "") if conv else ""
+            if conv is None:
+                return ""
+            summary_text = cast(str | None, conv.rolling_summary)
+            return summary_text or ""
 
     # --- Chat session lifecycle ---
     def _persist_turn(
@@ -1389,7 +1394,8 @@ class RAG:
             )
             # Use the same LLM to summarize
             summary_resp = self.gen_model.complete(prompt)
-            new_summary = (conv.rolling_summary + "\n" + summary_resp.text).strip()
+            existing_summary = cast(str | None, conv.rolling_summary) or ""
+            new_summary = (existing_summary + "\n" + summary_resp.text).strip()
             conv.rolling_summary = new_summary
             s.commit()
 
@@ -1424,7 +1430,7 @@ class RAG:
                         if node is None:
                             continue
                         text = getattr(node, "text", None)
-                        if text:
+                        if isinstance(text, str) and text:
                             return text
                         # Some versions store content on helper methods
                         if (
@@ -1499,13 +1505,15 @@ class RAG:
             if not out_dir.exists():
                 out_dir.mkdir(parents=True, exist_ok=True)
 
+            rolling_summary = cast(str | None, conv.rolling_summary) or ""
+
             # 1) session.json
             session_meta = {
                 "schema_version": "1.0.0",
                 "session_id": conv.id,
                 "created_at": conv.created_at.replace(tzinfo=timezone.utc).isoformat(),
                 "turn_count": len(conv.turns),
-                "rolling_summary": conv.rolling_summary or "",
+                "rolling_summary": rolling_summary,
                 "models": {
                     "embed_model_id": self.embed_model_id,
                     "rerank_model_id": self.rerank_model_id,
@@ -1543,7 +1551,7 @@ class RAG:
 
             # 3) citations.parquet (optional if pandas/pyarrow present)
             try:
-                rows = []
+                rows: list[dict[str, Any]] = []
                 for t in conv.turns:
                     for c in t.citations:
                         rows.append(
@@ -1563,19 +1571,22 @@ class RAG:
                     df.to_parquet(out_dir / "citations.parquet", index=False)
                 else:
                     # write empty parquet to preserve schema
-                    pd.DataFrame(
-                        [],
-                        columns=[
-                            "turn_idx",
-                            "node_id",
-                            "score",
-                            "filename",
-                            "filetype",
-                            "source",
-                            "page",
-                            "row",
-                        ],
-                    ).to_parquet(out_dir / "citations.parquet", index=False)
+                    empty_columns: list[str] = [
+                        "turn_idx",
+                        "node_id",
+                        "score",
+                        "filename",
+                        "filetype",
+                        "source",
+                        "page",
+                        "row",
+                    ]
+                    empty_source: dict[str, list[Any]] = {
+                        col: [] for col in empty_columns
+                    }
+                    pd.DataFrame(empty_source).to_parquet(
+                        out_dir / "citations.parquet", index=False
+                    )
             except Exception as e:
                 logger.warning(
                     "Skipping citations.parquet export (pandas/pyarrow not available?): {}",
@@ -1583,9 +1594,10 @@ class RAG:
                 )
 
             # 4) transcript.md (human-readable)
-            lines = ["# Transcript", f"Session: `{conv.id}`", ""]
-            if conv.rolling_summary:
-                lines += ["## Rolling Summary", "", conv.rolling_summary, ""]
+            conv_id = str(conv.id)
+            lines = ["# Transcript", f"Session: `{conv_id}`", ""]
+            if rolling_summary:
+                lines += ["## Rolling Summary", "", rolling_summary, ""]
             for t in conv.turns:
                 lines += [
                     f"## Turn {t.idx}",
@@ -1652,6 +1664,39 @@ class RAG:
             )
             return out_dir
 
+    def summarize_collection(self, prompt: str | None = None) -> dict[str, Any]:
+        """Generate a summary of the currently selected collection.
+
+        Args:
+            prompt (str | None): Optional override for the summarization prompt.
+
+        Returns:
+            dict[str, Any]: Normalized response data containing the summary and sources.
+
+        Raises:
+            ValueError: If no collection is selected.
+        """
+
+        if not self.qdrant_collection:
+            raise ValueError("No collection selected.")
+
+        if self.query_engine is None:
+            if self.index is None:
+                self.create_index()
+            self.create_query_engine()
+        engine = self.query_engine
+        if engine is None:
+            raise RuntimeError("Query engine failed to initialize for summarization.")
+
+        summary_prompt = prompt or (
+            "Provide a concise overview of the active collection. Highlight the main "
+            "topics, document types, and notable findings. Limit the response to 8 "
+            "sentences."
+        )
+
+        resp = engine.query(summary_prompt)
+        return self._normalize_response_data(summary_prompt, resp)
+
     def start_session(self, session_id: str | None = None) -> str:
         """
         Start a new chat session or continue an existing one.
@@ -1688,14 +1733,15 @@ class RAG:
                     )
                 )
 
-        if self.query_engine is None:
+        engine = self.query_engine
+        if engine is None:
             logger.error("RuntimeError: Query engine has not been initialized.")
             raise RuntimeError(
                 "Query engine has not been initialized. Call ingest_docs() first."
             )
 
         self.chat_engine = CondenseQuestionChatEngine.from_defaults(
-            query_engine=self.query_engine,  # reuse retriever + reranker
+            query_engine=engine,  # reuse retriever + reranker
             memory=self.chat_memory,
             llm=self.gen_model,
         )
@@ -1718,7 +1764,8 @@ class RAG:
         if not user_msg.strip():
             logger.error("ValueError: Chat prompt cannot be empty.")
             raise ValueError("Chat prompt cannot be empty.")
-        if self.query_engine is None:
+        engine = self.query_engine
+        if engine is None:
             logger.error("RuntimeError: Query engine has not been initialized.")
             raise RuntimeError(
                 "Query engine has not been initialized. Call ingest_docs() first."
@@ -1739,7 +1786,7 @@ class RAG:
         else:
             retrieval_query = user_msg
 
-        resp = self.query_engine.query(retrieval_query)
+        resp = engine.query(retrieval_query)
         response = self._normalize_response_data(user_msg, resp)
         self._persist_turn(session_id, user_msg, resp, response)
         self._maybe_update_summary(session_id)

@@ -29,6 +29,16 @@ export const askQuery = async (
   return data;
 };
 
+export type SummaryResponse = {
+  summary: string;
+  sources: Source[];
+};
+
+export const summarizeCollection = async (): Promise<SummaryResponse> => {
+  const { data } = await API.post("/summarize");
+  return data;
+};
+
 export type IngestionResponse = {
   ok: boolean;
   collection: string;
