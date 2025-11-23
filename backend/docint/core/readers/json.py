@@ -1,6 +1,7 @@
 import json
+import random
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Sequence
 
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
@@ -23,6 +24,8 @@ class CustomJSONReader(BaseReader):
         ensure_ascii: bool = False,
         is_jsonl: bool = False,
         clean_json: bool = True,
+        schema_sample_size: int = 200,
+        list_sample_size: int = 50,
     ) -> None:
         """
         Initializes the CustomJSONReader with specific parameters.
@@ -42,6 +45,26 @@ class CustomJSONReader(BaseReader):
             clean_json=clean_json,
         )
         self.is_jsonl = is_jsonl
+        self.schema_sample_size = max(schema_sample_size, 0)
+        self.list_sample_size = max(list_sample_size, 0)
+
+    def _sample_list_items(self, values: Sequence[Any]) -> Iterable[Any]:
+        if self.list_sample_size == 0:
+            return []
+        total = len(values)
+        if total <= self.list_sample_size:
+            return values
+        if self.list_sample_size == 1:
+            return [values[0]]
+        step = total / float(self.list_sample_size)
+        sampled: list[Any] = []
+        position = 0.0
+        for _ in range(self.list_sample_size):
+            sampled.append(values[int(position)])
+            position += step
+            if position >= total:
+                break
+        return sampled
 
     def _collect_nested_keys(self, data: Any, prefix: str = "") -> set[str]:
         keys: set[str] = set()
@@ -51,7 +74,7 @@ class CustomJSONReader(BaseReader):
                 keys.add(path)
                 keys.update(self._collect_nested_keys(value, path))
         elif isinstance(data, list):
-            for item in data[:50]:
+            for item in self._sample_list_items(data):
                 keys.update(self._collect_nested_keys(item, prefix))
         return keys
 
@@ -59,23 +82,30 @@ class CustomJSONReader(BaseReader):
         nested_keys: set[str] = set()
         try:
             if is_jsonl:
+                rng = random.Random(file_path.stat().st_size)
+                reservoir: list[Any] = []
                 with file_path.open("r", encoding="utf-8") as handle:
                     for idx, line in enumerate(handle):
-                        if idx >= 200:
-                            break
                         try:
                             payload = json.loads(line)
                         except json.JSONDecodeError:
                             continue
-                        nested_keys.update(self._collect_nested_keys(payload))
+                        if self.schema_sample_size <= 0:
+                            break
+                        if len(reservoir) < self.schema_sample_size:
+                            reservoir.append(payload)
+                        else:
+                            j = rng.randint(0, idx)
+                            if j < self.schema_sample_size:
+                                reservoir[j] = payload
+                for sample in reservoir:
+                    nested_keys.update(self._collect_nested_keys(sample))
             else:
                 with file_path.open("r", encoding="utf-8") as handle:
                     payload = json.load(handle)
                     nested_keys.update(self._collect_nested_keys(payload))
         except (OSError, json.JSONDecodeError) as exc:
-            logger.warning(
-                "Unable to infer JSON schema for %s: %s", file_path, exc
-            )
+            logger.warning("Unable to infer JSON schema for %s: %s", file_path, exc)
         return {"nested_keys": sorted(nested_keys)}
 
     def load_data(self, file: str | Path, **kwargs) -> list[Document]:
