@@ -10,6 +10,7 @@ import {
   Stack,
   Alert,
   VStack,
+  Spinner,
 } from "@chakra-ui/react";
 import { useCallback, useEffect, useState } from "react";
 import CollectionSidebar from "./components/CollectionSidebar";
@@ -30,6 +31,7 @@ export default function App() {
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [summaryError, setSummaryError] = useState<string | null>(null);
   const [summarizing, setSummarizing] = useState(false);
+  const [summarySourcesOpen, setSummarySourcesOpen] = useState(false);
 
   const [availableCollections, setAvailableCollections] = useState<string[]>([]);
   const [collectionsError, setCollectionsError] = useState<string | null>(null);
@@ -73,6 +75,7 @@ export default function App() {
     localStorage.setItem("collection", name);
     setSummary(null);
     setSummaryError(null);
+    setSummarySourcesOpen(false);
   };
 
   const handleSelectCollection = async (name: string) => {
@@ -102,6 +105,7 @@ export default function App() {
     setSelectionError(null);
     setSummary(null);
     setSummaryError(null);
+    setSummarySourcesOpen(false);
   };
 
   const handleCollectionAttached = async (name: string) => {
@@ -131,12 +135,16 @@ export default function App() {
     </VStack>
   );
 
+  const toggleSummarySources = () =>
+    setSummarySourcesOpen((open) => !open);
+
   const runSummary = async () => {
     if (!collection || summarizing) return;
     setSummaryError(null);
     setSummarizing(true);
     try {
       const result = await summarizeCollection();
+      setSummarySourcesOpen(false);
       setSummary(result);
     } catch (err: unknown) {
       setSummaryError(
@@ -321,6 +329,13 @@ export default function App() {
                             )}
                           </HStack>
 
+                          {summarizing && (
+                            <HStack gap={2} color="fg.muted" fontSize="sm">
+                              <Spinner size="sm" />
+                              <Text>Summarizing…</Text>
+                            </HStack>
+                          )}
+
                           <Box
                             borderWidth="1px"
                             borderColor="border.muted"
@@ -333,12 +348,34 @@ export default function App() {
                                 <Text fontWeight="semibold">Summary</Text>
                                 <Text whiteSpace="pre-wrap">{summary.summary}</Text>
                                 {summary.sources.length > 0 && (
-                                  <Box>
-                                    <Text fontWeight="semibold" mb={2}>
-                                      Sources
-                                    </Text>
-                                    {renderSources(summary.sources)}
-                                  </Box>
+                                  <>
+                                    <Box
+                                      my={2}
+                                      borderTopWidth="1px"
+                                      borderColor="border.muted"
+                                    />
+                                    <HStack
+                                      gap={2}
+                                      cursor="pointer"
+                                      onClick={toggleSummarySources}
+                                      role="button"
+                                      tabIndex={0}
+                                      onKeyDown={(e) =>
+                                        (e.key === "Enter" || e.key === " ") &&
+                                        toggleSummarySources()
+                                      }
+                                    >
+                                      <Text as="span" color="fg.muted" fontWeight="bold">
+                                        {summarySourcesOpen ? "▾" : "▸"}
+                                      </Text>
+                                      <Text fontSize="sm" color="fg.muted" fontWeight="medium">
+                                        Sources ({summary.sources.length})
+                                      </Text>
+                                    </HStack>
+                                    {summarySourcesOpen && (
+                                      <Box mt={2}>{renderSources(summary.sources)}</Box>
+                                    )}
+                                  </>
                                 )}
                               </Stack>
                             ) : (
