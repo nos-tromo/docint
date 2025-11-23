@@ -12,7 +12,6 @@ _DEFAULT_CHUNK_SIZE = 1024 * 1024  # 1 MiB
 def compute_file_hash(
     path: str | Path,
     algorithm: str = "sha256",
-    *,
     chunk_size: int = _DEFAULT_CHUNK_SIZE,
 ) -> str:
     """
@@ -50,7 +49,6 @@ def compute_file_hash(
 
 def ensure_file_hash(
     metadata: dict[str, Any] | None,
-    *,
     path: str | Path | None = None,
     file_hash: str | None = None,
     algorithm: str = "sha256",
