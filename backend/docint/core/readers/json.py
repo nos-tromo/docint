@@ -1,4 +1,6 @@
+import json
 from pathlib import Path
+from typing import Any
 
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
@@ -39,6 +41,42 @@ class CustomJSONReader(BaseReader):
             is_jsonl=is_jsonl,
             clean_json=clean_json,
         )
+        self.is_jsonl = is_jsonl
+
+    def _collect_nested_keys(self, data: Any, prefix: str = "") -> set[str]:
+        keys: set[str] = set()
+        if isinstance(data, dict):
+            for key, value in data.items():
+                path = f"{prefix}.{key}" if prefix else key
+                keys.add(path)
+                keys.update(self._collect_nested_keys(value, path))
+        elif isinstance(data, list):
+            for item in data[:50]:
+                keys.update(self._collect_nested_keys(item, prefix))
+        return keys
+
+    def _infer_schema(self, file_path: Path, is_jsonl: bool) -> dict[str, list[str]]:
+        nested_keys: set[str] = set()
+        try:
+            if is_jsonl:
+                with file_path.open("r", encoding="utf-8") as handle:
+                    for idx, line in enumerate(handle):
+                        if idx >= 200:
+                            break
+                        try:
+                            payload = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        nested_keys.update(self._collect_nested_keys(payload))
+            else:
+                with file_path.open("r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                    nested_keys.update(self._collect_nested_keys(payload))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "Unable to infer JSON schema for %s: %s", file_path, exc
+            )
+        return {"nested_keys": sorted(nested_keys)}
 
     def load_data(self, file: str | Path, **kwargs) -> list[Document]:
         """
@@ -81,6 +119,8 @@ class CustomJSONReader(BaseReader):
 
         logger.info("[CustomJSONReader] Loading JSON file: {}", file_path_str)
 
+        schema_info = self._infer_schema(file_path, self.is_jsonl)
+
         extra_info = {
             "file_path": file_path_str,
             "file_name": filename,
@@ -92,6 +132,7 @@ class CustomJSONReader(BaseReader):
                 "filename": filename,
                 "mimetype": mimetype,
             },
+            "schema": schema_info,
         }
         if isinstance(provided_info, dict):
             extra_info.update(provided_info)

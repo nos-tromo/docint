@@ -64,6 +64,8 @@ class SummarizeOut(BaseModel):
 class IngestIn(BaseModel):
     collection: str
     hybrid: bool | None = True
+    table_row_limit: int | None = None
+    table_row_filter: str | None = None
 
 
 class IngestOut(BaseModel):
@@ -245,6 +247,8 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
             name,
             data_dir,
             hybrid=payload.hybrid if payload.hybrid is not None else True,
+            table_row_limit=payload.table_row_limit,
+            table_row_filter=payload.table_row_filter,
         )
 
         # After ingestion, prepare the in-memory RAG instance for immediate querying.

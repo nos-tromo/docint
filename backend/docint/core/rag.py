@@ -122,6 +122,7 @@ class RAG:
     table_id_col: str | None = None
     table_excel_sheet: str | int | None = None
     table_row_limit: int | None = None
+    table_row_filter: str | None = None
 
     # --- SemanticSplitterNodeParser config ---
     buffer_size: int = 5
@@ -386,6 +387,7 @@ class RAG:
             id_col=self.table_id_col,
             excel_sheet=self.table_excel_sheet,
             limit=self.table_row_limit,
+            row_query=self.table_row_filter,
         )
 
         def _metadata(path: str | Path) -> dict[str, str]:
@@ -442,6 +444,7 @@ class RAG:
                     else None,
                     id_col=self.table_id_col,
                     limit=self.table_row_limit,
+                    row_query=self.table_row_filter,
                 ),
                 ".tsv": TableReader(
                     csv_sep="\t",  # allow explicit TSV sep
@@ -451,6 +454,7 @@ class RAG:
                     else None,
                     id_col=self.table_id_col,
                     limit=self.table_row_limit,
+                    row_query=self.table_row_filter,
                 ),
                 ".xls": table_reader,
                 ".xlsx": table_reader,

@@ -37,6 +37,9 @@ class TableReader(BaseReader):
         row_filter (RowFilter | None, optional): Function to filter rows.
             If None, all rows will be included.
             Defaults to None.
+        row_query (str | None, optional): Pandas-style query applied before iterating rows.
+            If provided, rows that do not satisfy the expression are excluded.
+            Defaults to None.
         limit (int | None, optional): Maximum number of rows to read.
             If None, all rows will be read.
             Defaults to None.
@@ -66,6 +69,7 @@ class TableReader(BaseReader):
     combine_with: str = "\n"
     row_filter: RowFilter | None = None
     limit: int | None = None
+    row_query: str | None = None
     auto_text_guess: bool = True
     encoding: str = "utf-8"
     excel_sheet: str | int | None = None  # for XLSX
@@ -189,6 +193,14 @@ class TableReader(BaseReader):
             logger.error("ValueError: Unsupported table type: {}", suffix)
             raise ValueError(f"Unsupported table type: {suffix}")
 
+        if self.row_query:
+            try:
+                df = df.query(self.row_query)
+            except Exception as exc:  # pragma: no cover - log and continue
+                logger.warning(
+                    "Failed to apply row_query='%s' to %s: %s", self.row_query, file_path, exc
+                )
+
         df = df.reset_index(drop=True)
         text_cols = self.text_cols or self._guess_text_cols(df)
         if isinstance(text_cols, str):  # Ensure text_cols is a list
@@ -202,6 +214,7 @@ class TableReader(BaseReader):
         docs: list[Document] = []
         n_rows, n_cols = len(df), len(df.columns)
         columns = list(df.columns)
+        column_types = {col: str(dtype) for col, dtype in df.dtypes.items()}
         count = 0
 
         for i, row in df.iterrows():
@@ -222,9 +235,12 @@ class TableReader(BaseReader):
                 "source": "table",
                 "table": {
                     "columns": columns,
+                    "column_types": column_types,
                     "n_rows": n_rows,
                     "n_cols": n_cols,
                     "row_index": i,
+                    "row_query": self.row_query,
+                    "row_limit": self.limit,
                 },
                 "ft": ft_extras,
             }
