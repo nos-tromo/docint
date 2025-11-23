@@ -141,8 +141,21 @@ def test_ingest_success(
 
     called = types.SimpleNamespace(args=None)
 
-    def fake_ingest(collection: str, path, hybrid: bool = True) -> None:
-        called.args = (collection, path, hybrid)
+    def fake_ingest(
+        collection: str,
+        path,
+        hybrid: bool = True,
+        *,
+        table_row_limit: int | None = None,
+        table_row_filter: str | None = None,
+    ) -> None:
+        called.args = (
+            collection,
+            path,
+            hybrid,
+            table_row_limit,
+            table_row_filter,
+        )
 
     monkeypatch.setattr(app_module, "_resolve_data_dir", lambda: data_dir)
     monkeypatch.setattr(app_module.ingest_module, "ingest_docs", fake_ingest)
@@ -159,7 +172,7 @@ def test_ingest_success(
         "data_dir": str(data_dir),
         "hybrid": False,
     }
-    assert called.args == ("docs", data_dir, False)
+    assert called.args == ("docs", data_dir, False, None, None)
 
 
 def test_ingest_missing_directory(
