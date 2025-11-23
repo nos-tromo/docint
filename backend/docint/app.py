@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from docint.core import ingest as ingest_module
 from docint.core.rag import RAG
@@ -64,7 +64,7 @@ class SummarizeOut(BaseModel):
 class IngestIn(BaseModel):
     collection: str
     hybrid: bool | None = True
-    table_row_limit: int | None = None
+    table_row_limit: int | None = Field(default=None, gt=0)
     table_row_filter: str | None = None
 
 
