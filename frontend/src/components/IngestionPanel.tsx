@@ -57,6 +57,13 @@ export default function IngestionPanel({
           });
           return;
         }
+        if (parsed <= 0) {
+          setStatus({
+            type: "error",
+            message: "Table row limit must be a positive number.",
+          });
+          return;
+        }
         rowLimit = parsed;
       }
 
@@ -140,7 +147,7 @@ export default function IngestionPanel({
           <Input
             value={tableRowFilter}
             onChange={(event) => setTableRowFilter(event.target.value)}
-            placeholder="e.g. status == \"active\" and amount > 100"
+            placeholder={"e.g. status == \"active\" and amount > 100"}
             bg="bg.panel"
           />
           <Field.HelperText color="fg.muted">
