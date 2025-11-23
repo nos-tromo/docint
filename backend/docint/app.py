@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from docint.core import ingest as ingest_module
 from docint.core.rag import RAG
@@ -64,6 +64,8 @@ class SummarizeOut(BaseModel):
 class IngestIn(BaseModel):
     collection: str
     hybrid: bool | None = True
+    table_row_limit: int | None = Field(default=None, gt=0)
+    table_row_filter: str | None = None
 
 
 class IngestOut(BaseModel):
@@ -245,6 +247,8 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
             name,
             data_dir,
             hybrid=payload.hybrid if payload.hybrid is not None else True,
+            table_row_limit=payload.table_row_limit,
+            table_row_filter=payload.table_row_filter,
         )
 
         # After ingestion, prepare the in-memory RAG instance for immediate querying.

@@ -122,6 +122,7 @@ class RAG:
     table_id_col: str | None = None
     table_excel_sheet: str | int | None = None
     table_row_limit: int | None = None
+    table_row_filter: str | None = None
 
     # --- SemanticSplitterNodeParser config ---
     buffer_size: int = 5
@@ -130,6 +131,7 @@ class RAG:
     # --- SentenceSplitter config ---
     chunk_size: int = 1024
     chunk_overlap: int = 0
+    semantic_splitter_char_limit: int = 20000
 
     # --- Runtime (lazy caches / not in repr) ---
     _device: str | None = field(default=None, init=False, repr=False)
@@ -386,6 +388,7 @@ class RAG:
             id_col=self.table_id_col,
             excel_sheet=self.table_excel_sheet,
             limit=self.table_row_limit,
+            row_query=self.table_row_filter,
         )
 
         def _metadata(path: str | Path) -> dict[str, str]:
@@ -442,6 +445,7 @@ class RAG:
                     else None,
                     id_col=self.table_id_col,
                     limit=self.table_row_limit,
+                    row_query=self.table_row_filter,
                 ),
                 ".tsv": TableReader(
                     csv_sep="\t",  # allow explicit TSV sep
@@ -451,6 +455,7 @@ class RAG:
                     else None,
                     id_col=self.table_id_col,
                     limit=self.table_row_limit,
+                    row_query=self.table_row_filter,
                 ),
                 ".xls": table_reader,
                 ".xlsx": table_reader,
@@ -679,6 +684,141 @@ class RAG:
 
         self.docs = filtered_docs
 
+    def _partition_large_docs(
+        self, docs: list[Document]
+    ) -> tuple[list[Document], list[Document]]:
+        """
+        Split documents into ones that are safe for semantic splitting and
+        ones that must be chunked aggressively to avoid huge embeddings.
+
+        Args:
+            docs (list[Document]): The documents to partition.
+
+        Returns:
+            tuple[list[Document], list[Document]]: A tuple containing two lists:
+                - The first list contains documents safe for semantic splitting.
+                - The second list contains documents that exceed the character limit
+                  and should be chunked with the sentence splitter.
+        """
+
+        if not docs:
+            return [], []
+
+        limit = max(self.semantic_splitter_char_limit, self.chunk_size)
+        semantic_docs: list[Document] = []
+        oversized_docs: list[Document] = []
+
+        for doc in docs:
+            text = getattr(doc, "text", None)
+            if text and len(text) > limit:
+                oversized_docs.append(doc)
+            else:
+                semantic_docs.append(doc)
+
+        return semantic_docs, oversized_docs
+
+    def _explode_oversized_documents(self, docs: list[Document]) -> list[Document]:
+        """Split each oversized document into smaller pseudo-documents.
+
+        This avoids giving the sentence splitter multi-megabyte blobs that can
+        stall the tokenizer, while preserving the original metadata for later
+        attribution.
+        """
+
+        if not docs:
+            return []
+
+        limit = max(self.semantic_splitter_char_limit, self.chunk_size)
+        overlap = max(int(limit * 0.05), 0)
+        stride = max(limit - overlap, 1)
+        exploded: list[Document] = []
+
+        for doc in docs:
+            text = getattr(doc, "text", None)
+            if not text or len(text) <= limit:
+                exploded.append(doc)
+                continue
+
+            meta = dict(getattr(doc, "metadata", {}) or {})
+            for start in range(0, len(text), stride):
+                end = min(len(text), start + limit)
+                segment_meta = dict(meta)
+                segment_meta["segment_start"] = start
+                segment_meta["segment_end"] = end
+                exploded.append(Document(text=text[start:end], metadata=segment_meta))
+                if end >= len(text):
+                    break
+
+        return exploded
+
+    def _semantic_nodes_with_fallback(
+        self, docs: list[Document], doc_label: str
+    ) -> list[BaseNode]:
+        """
+        Use the semantic splitter when possible, otherwise fall back to
+        the sentence splitter for oversized or error-prone documents.
+
+        Args:
+            docs (list[Document]): The documents to process.
+            doc_label (str): A label for the document type (for logging).
+
+        Returns:
+            list[BaseNode]: The resulting list of nodes.
+
+        Raises:
+            RuntimeError: If the semantic splitter is not initialized.
+        """
+
+        if not docs:
+            return []
+
+        if self.semantic_node_parser is None:
+            logger.error("Semantic splitter is not initialized.")
+            raise RuntimeError("Semantic splitter is not initialized.")
+
+        semantic_docs, oversized_docs = self._partition_large_docs(docs)
+        nodes: list[BaseNode] = []
+
+        if semantic_docs:
+            try:
+                nodes.extend(
+                    self.semantic_node_parser.get_nodes_from_documents(semantic_docs)
+                )
+            except RuntimeError as exc:
+                message = str(exc).lower()
+                if "buffer size" not in message and "mps" not in message:
+                    raise
+                logger.warning(
+                    (
+                        "Semantic splitter failed for {} {} document(s); "
+                        "retrying with sentence-based chunks. Error: {}"
+                    ),
+                    len(semantic_docs),
+                    doc_label,
+                    exc,
+                )
+                fallback_docs = self._explode_oversized_documents(semantic_docs)
+                nodes.extend(
+                    self.sentence_splitter.get_nodes_from_documents(fallback_docs)
+                )
+
+        if oversized_docs:
+            limit = max(self.semantic_splitter_char_limit, self.chunk_size)
+            exploded_docs = self._explode_oversized_documents(oversized_docs)
+            logger.info(
+                (
+                    "Chunking {} {} document(s) ({} expanded segments) over {} chars "
+                    "with SentenceSplitter"
+                ),
+                len(oversized_docs),
+                doc_label,
+                len(exploded_docs),
+                limit,
+            )
+            nodes.extend(self.sentence_splitter.get_nodes_from_documents(exploded_docs))
+
+        return nodes
+
     def _create_nodes(self) -> None:
         """
         Converts loaded documents into nodes using the appropriate parsers.
@@ -764,7 +904,7 @@ class RAG:
                 "Parsing {} audio documents with SemanticSplitterNodeParser",
                 len(audio_docs),
             )
-            nodes.extend(self.semantic_node_parser.get_nodes_from_documents(audio_docs))
+            nodes.extend(self._semantic_nodes_with_fallback(audio_docs, "audio"))
 
         if img_docs:
             logger.info(
@@ -778,7 +918,7 @@ class RAG:
                 "Parsing {} JSON documents with SemanticSplitterNodeParser",
                 len(json_docs),
             )
-            nodes.extend(self.semantic_node_parser.get_nodes_from_documents(json_docs))
+            nodes.extend(self._semantic_nodes_with_fallback(json_docs, "JSON"))
 
         if document_docs:
 
@@ -811,7 +951,7 @@ class RAG:
                 "Parsing {} table documents with SemanticSplitterNodeParser",
                 len(table_docs),
             )
-            nodes.extend(self.semantic_node_parser.get_nodes_from_documents(table_docs))
+            nodes.extend(self._semantic_nodes_with_fallback(table_docs, "table"))
 
         if text_docs:
             # detect markdown by file extension or text content
@@ -838,9 +978,7 @@ class RAG:
                     "Parsing {} plain text documents with SemanticSplitterNodeParser",
                     len(plain_docs),
                 )
-                nodes.extend(
-                    self.semantic_node_parser.get_nodes_from_documents(plain_docs)
-                )
+                nodes.extend(self._semantic_nodes_with_fallback(plain_docs, "text"))
 
         self.nodes = nodes
 

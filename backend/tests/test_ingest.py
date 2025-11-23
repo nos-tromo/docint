@@ -31,8 +31,19 @@ def test_ingest_docs_invokes_rag(
     calls = SimpleNamespace(args=None)
 
     class DummyRAG:
-        def __init__(self, qdrant_collection: str, enable_hybrid: bool) -> None:
-            calls.args = (qdrant_collection, enable_hybrid)
+        def __init__(
+            self,
+            qdrant_collection: str,
+            enable_hybrid: bool,
+            table_row_limit: int | None = None,
+            table_row_filter: str | None = None,
+        ) -> None:
+            calls.args = (
+                qdrant_collection,
+                enable_hybrid,
+                table_row_limit,
+                table_row_filter,
+            )
 
         def ingest_docs(self, path: Path) -> None:  # type: ignore[override]
             calls.path = path
@@ -40,7 +51,7 @@ def test_ingest_docs_invokes_rag(
     monkeypatch.setattr(ingest, "RAG", DummyRAG)
     data_dir = tmp_path
     ingest.ingest_docs("demo", data_dir, hybrid=False)
-    assert calls.args == ("demo", False)
+    assert calls.args == ("demo", False, None, None)
     assert calls.path == data_dir
 
 

@@ -46,9 +46,23 @@ export type IngestionResponse = {
   hybrid: boolean;
 };
 
+export type IngestionOptions = {
+  tableRowLimit?: number | null;
+  tableRowFilter?: string | null;
+};
+
 export const ingestCollection = async (
   collection: string,
+  options?: IngestionOptions,
 ): Promise<IngestionResponse> => {
-  const { data } = await API.post("/ingest", { collection });
+  const payload: Record<string, unknown> = { collection };
+  if (options?.tableRowLimit !== undefined && options.tableRowLimit !== null) {
+    payload.table_row_limit = options.tableRowLimit;
+  }
+  if (options?.tableRowFilter && options.tableRowFilter.trim().length > 0) {
+    payload.table_row_filter = options.tableRowFilter.trim();
+  }
+
+  const { data } = await API.post("/ingest", payload);
   return data;
 };

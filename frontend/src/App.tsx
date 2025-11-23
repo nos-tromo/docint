@@ -317,8 +317,7 @@ export default function App() {
                             <Button
                               onClick={runSummary}
                               colorScheme="teal"
-                              isLoading={summarizing}
-                              loadingText="Summarizing"
+                              loading={summarizing}
                             >
                               Generate summary
                             </Button>

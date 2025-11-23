@@ -30,6 +30,8 @@ export default function IngestionPanel({
     | null
   >(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [tableRowLimit, setTableRowLimit] = useState<string>("");
+  const [tableRowFilter, setTableRowFilter] = useState<string>("");
 
   useEffect(() => {
     setCollection(currentCollection ?? "");
@@ -45,7 +47,30 @@ export default function IngestionPanel({
     try {
       setIsLoading(true);
       setStatus(null);
-      const response = await ingestCollection(name);
+      let rowLimit: number | null = null;
+      if (tableRowLimit.trim()) {
+        const parsed = Number(tableRowLimit.trim());
+        if (Number.isNaN(parsed)) {
+          setStatus({
+            type: "error",
+            message: "Table row limit must be a valid number.",
+          });
+          return;
+        }
+        if (parsed <= 0) {
+          setStatus({
+            type: "error",
+            message: "Table row limit must be a positive number.",
+          });
+          return;
+        }
+        rowLimit = parsed;
+      }
+
+      const response = await ingestCollection(name, {
+        tableRowLimit: rowLimit,
+        tableRowFilter: tableRowFilter.trim() || null,
+      });
       setStatus({
         type: "success",
         message: `Ingestion complete for "${response.collection}". Documents loaded from ${response.data_dir}.`,
@@ -101,6 +126,33 @@ export default function IngestionPanel({
             placeholder="e.g. invoices-2024"
             bg="bg.panel"
           />
+        </Field.Root>
+
+        <Field.Root>
+          <Field.Label fontWeight="semibold">Table row limit</Field.Label>
+          <Input
+            type="number"
+            value={tableRowLimit}
+            onChange={(event) => setTableRowLimit(event.target.value)}
+            placeholder="Optional maximum number of rows"
+            bg="bg.panel"
+          />
+          <Field.HelperText color="fg.muted">
+            Applies to CSV, TSV, Excel, and Parquet files during ingestion.
+          </Field.HelperText>
+        </Field.Root>
+
+        <Field.Root>
+          <Field.Label fontWeight="semibold">Table row filter</Field.Label>
+          <Input
+            value={tableRowFilter}
+            onChange={(event) => setTableRowFilter(event.target.value)}
+            placeholder={"e.g. status == \"active\" and amount > 100"}
+            bg="bg.panel"
+          />
+          <Field.HelperText color="fg.muted">
+            Optional pandas-style query applied before ingesting table rows.
+          </Field.HelperText>
         </Field.Root>
       </Stack>
 
