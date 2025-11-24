@@ -5,12 +5,15 @@ import {
   Box,
   Button,
   Field,
+  Flex,
+  HStack,
   Heading,
   Input,
+  Progress,
   Stack,
   Text,
 } from "@chakra-ui/react";
-import { ingestCollection } from "../api";
+import { ingestCollection, uploadAndIngest, type UploadEvent } from "../api";
 
 type Props = {
   currentCollection: string | null;
@@ -32,6 +35,9 @@ export default function IngestionPanel({
   const [isLoading, setIsLoading] = useState(false);
   const [tableRowLimit, setTableRowLimit] = useState<string>("");
   const [tableRowFilter, setTableRowFilter] = useState<string>("");
+  const [files, setFiles] = useState<File[]>([]);
+  const [progress, setProgress] = useState<UploadEvent[]>([]);
+  const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
 
   useEffect(() => {
     setCollection(currentCollection ?? "");
@@ -47,6 +53,8 @@ export default function IngestionPanel({
     try {
       setIsLoading(true);
       setStatus(null);
+      setProgress([]);
+      setUploadProgress({});
       let rowLimit: number | null = null;
       if (tableRowLimit.trim()) {
         const parsed = Number(tableRowLimit.trim());
@@ -67,16 +75,43 @@ export default function IngestionPanel({
         rowLimit = parsed;
       }
 
-      const response = await ingestCollection(name, {
-        tableRowLimit: rowLimit,
-        tableRowFilter: tableRowFilter.trim() || null,
-      });
-      setStatus({
-        type: "success",
-        message: `Ingestion complete for "${response.collection}". Documents loaded from ${response.data_dir}.`,
-      });
-      setCollection(response.collection);
-      onCollectionAttached(response.collection);
+      if (files.length > 0) {
+        await uploadAndIngest(
+          name,
+          files,
+          {
+            tableRowLimit: rowLimit,
+            tableRowFilter: tableRowFilter.trim() || null,
+          },
+          (event) => {
+            setProgress((current) => [...current, event]);
+            if (event.type === "upload_progress") {
+              const filename = String(event.payload.filename ?? "");
+              const bytes = Number(event.payload.bytes_written ?? 0);
+              setUploadProgress((current) => ({
+                ...current,
+                [filename]: bytes,
+              }));
+            }
+          },
+        );
+        setStatus({
+          type: "success",
+          message: `Ingestion complete for "${name}" from uploaded files.`,
+        });
+        onCollectionAttached(name);
+      } else {
+        const response = await ingestCollection(name, {
+          tableRowLimit: rowLimit,
+          tableRowFilter: tableRowFilter.trim() || null,
+        });
+        setStatus({
+          type: "success",
+          message: `Ingestion complete for "${response.collection}". Documents loaded from ${response.data_dir}.`,
+        });
+        setCollection(response.collection);
+        onCollectionAttached(response.collection);
+      }
     } catch (error: unknown) {
       let message = "Failed to ingest documents. Please try again.";
       if (typeof error === "object" && error !== null) {
@@ -154,6 +189,34 @@ export default function IngestionPanel({
             Optional pandas-style query applied before ingesting table rows.
           </Field.HelperText>
         </Field.Root>
+
+        <Field.Root>
+          <Field.Label fontWeight="semibold">Upload files</Field.Label>
+          <Input
+            type="file"
+            multiple
+            onChange={(event) => {
+              const selected = event.target.files;
+              setFiles(selected ? Array.from(selected) : []);
+            }}
+            bg="bg.panel"
+          />
+          <Field.HelperText color="fg.muted">
+            Uploaded files are stored in a temporary collection folder before ingestion.
+          </Field.HelperText>
+          {files.length > 0 && (
+            <Stack gap={1} mt={2} fontSize="sm" color="fg.muted">
+              {files.map((file) => (
+                <HStack key={file.name} justify="space-between">
+                  <Text>{file.name}</Text>
+                  {uploadProgress[file.name] && (
+                    <Text>{`${Math.round(uploadProgress[file.name] / 1024)} KB`}</Text>
+                  )}
+                </HStack>
+              ))}
+            </Stack>
+          )}
+        </Field.Root>
       </Stack>
 
       <Button
@@ -164,6 +227,55 @@ export default function IngestionPanel({
       >
         Start
       </Button>
+
+      {progress.length > 0 && (
+        <Box borderWidth="1px" borderColor="border.muted" borderRadius="md" p={3}>
+          <Text fontWeight="bold" mb={2}>
+            Upload progress
+          </Text>
+          <Stack gap={2}>
+            {progress.map((event, idx) => {
+              const label = (() => {
+                switch (event.type) {
+                  case "start":
+                    return "Starting upload";
+                  case "upload_progress":
+                    return `Uploading ${event.payload.filename ?? "file"}`;
+                  case "file_saved":
+                    return `Saved ${(event.payload.filename as string) || "file"}`;
+                  case "ingestion_started":
+                    return "Ingestion started";
+                  case "ingestion_complete":
+                    return "Ingestion complete";
+                  case "error":
+                    return String(event.payload.message || "Upload failed");
+                  default:
+                    return "";
+                }
+              })();
+              const percent = (() => {
+                if (event.type !== "upload_progress") return undefined;
+                const bytes = Number(event.payload.bytes_written ?? 0);
+                // Without content-length we display a lightweight spinner-like progress bar.
+                return Math.min(100, Math.max(10, Math.round(bytes / 1024)));
+              })();
+              return (
+                <Stack key={`${event.type}-${idx}`} gap={1}>
+                  <Flex justify="space-between" align="center">
+                    <Text fontSize="sm">{label}</Text>
+                    {event.type === "upload_progress" && (
+                      <Text fontSize="xs" color="fg.muted">
+                        {`${Math.round(Number(event.payload.bytes_written ?? 0) / 1024)} KB`}
+                      </Text>
+                    )}
+                  </Flex>
+                  {percent !== undefined && <Progress value={percent} size="xs" />}
+                </Stack>
+              );
+            })}
+          </Stack>
+        </Box>
+      )}
     </Stack>
   );
 }

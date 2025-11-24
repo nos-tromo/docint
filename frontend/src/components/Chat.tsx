@@ -1,11 +1,106 @@
 import { useEffect, useRef, useState } from "react";
-import { Box, Button, HStack, Input, Text, VStack, Spinner, IconButton } from "@chakra-ui/react";
+import {
+  Box,
+  Button,
+  HStack,
+  IconButton,
+  Input,
+  Spinner,
+  Text,
+  VStack,
+} from "@chakra-ui/react";
 import { askQuery } from "../api";
 import type { Source } from "../api";
 
 type Msg = { role: "user" | "assistant"; text: string; sources?: Source[] };
 
 type Props = { collection: string | null };
+
+const SourceCard = ({ source }: { source: Source }) => {
+  const [isVisible, setIsVisible] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          setIsVisible(true);
+          observer.disconnect();
+        }
+      });
+    });
+    if (ref.current) {
+      observer.observe(ref.current);
+    }
+    return () => observer.disconnect();
+  }, []);
+
+  const location = source.page
+    ? `Page ${source.page}`
+    : source.row
+      ? `Row ${source.row}`
+      : null;
+
+  const previewText = source.preview_text || source.text || "";
+  const previewUrl = source.preview_url || source.document_url;
+  const showImage =
+    isVisible &&
+    previewUrl &&
+    typeof source.filetype === "string" &&
+    source.filetype.toLowerCase().startsWith("image");
+
+  return (
+    <Box
+      ref={ref}
+      borderWidth="1px"
+      borderColor="border.muted"
+      borderRadius="md"
+      p={3}
+      bg="bg.panel"
+    >
+      <HStack justify="space-between" align="flex-start">
+        <Text fontWeight="semibold">{source.filename || "Unknown source"}</Text>
+        {location && (
+          <Text fontSize="xs" color="fg.muted">
+            {location}
+          </Text>
+        )}
+      </HStack>
+
+      {previewText && (
+        <Text mt={2} fontSize="sm" color="fg.muted" noOfLines={4} whiteSpace="pre-wrap">
+          {previewText}
+        </Text>
+      )}
+
+      {showImage && previewUrl && (
+        <Box mt={2} overflow="hidden" borderRadius="sm">
+          <Box
+            as="img"
+            src={previewUrl}
+            alt={`Preview of ${source.filename || "source"}`}
+            loading="lazy"
+            style={{ width: "100%", maxHeight: 200, objectFit: "cover" }}
+          />
+        </Box>
+      )}
+
+      {previewUrl && (
+        <Button
+          as="a"
+          href={previewUrl}
+          target="_blank"
+          rel="noreferrer"
+          size="sm"
+          variant="outline"
+          colorScheme="teal"
+          mt={3}
+        >
+          Open document
+        </Button>
+      )}
+    </Box>
+  );
+};
 
 export default function Chat({ collection }: Props) {
   const [q, setQ] = useState("");
@@ -202,25 +297,11 @@ export default function Chat({ collection }: Props) {
                   </Text>
                 </HStack>
                 {!!openRefs[i] && (
-                  <Box mt={2}>
+                  <VStack mt={3} align="stretch" gap={3}>
                     {m.sources.map((s, j) => (
-                      <Box key={j} fontSize="sm" color="fg.muted" mb={1}>
-                        <Text>
-                          • {s.filename || "unknown"}
-                          {s.page
-                            ? ` (page ${s.page})`
-                            : s.row
-                            ? ` (row ${s.row})`
-                            : ""}
-                        </Text>
-                        {s.text && (
-                          <Text ml={4} whiteSpace="pre-wrap" fontStyle="italic">
-                            {s.text}
-                          </Text>
-                        )}
-                      </Box>
+                      <SourceCard key={`${s.file_hash || j}-${j}`} source={s} />
                     ))}
-                  </Box>
+                  </VStack>
                 )}
               </>
             )}
