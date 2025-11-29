@@ -273,12 +273,29 @@ class RAG:
             BaseEmbedding: The initialized embedding model.
         """
         if self._embed_model is None:
-            self._embed_model = HuggingFaceEmbedding(
-                model_name=self.embed_model_id,
-                normalize=True,
-                device=self.device,
-            )
-            logger.info("Initializing embedding model: {}", self.embed_model_id)
+            try:
+                model = HuggingFaceEmbedding(
+                    model_name=self.embed_model_id,
+                    normalize=True,
+                    device=self.device,
+                )
+                # Trigger warmup to detect potential MPS/meta-tensor issues immediately
+                model.get_text_embedding("warmup")
+                self._embed_model = model
+                logger.info("Initializing embedding model: {}", self.embed_model_id)
+            except Exception as e:
+                if self.device == "mps" and "meta tensor" in str(e):
+                    logger.warning(
+                        "MPS meta-tensor error detected. Falling back to CPU for embeddings. Error: {}",
+                        e,
+                    )
+                    self._embed_model = HuggingFaceEmbedding(
+                        model_name=self.embed_model_id,
+                        normalize=True,
+                        device="cpu",
+                    )
+                else:
+                    raise
         return self._embed_model
 
     @property
