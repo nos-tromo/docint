@@ -1,15 +1,12 @@
 import { useEffect, useState } from "react";
 import type { AxiosError } from "axios";
 import {
-  Alert,
   Box,
   Button,
-  Field,
   Flex,
   HStack,
   Heading,
   Input,
-  Progress,
   Stack,
   Text,
 } from "@chakra-ui/react";
@@ -143,28 +140,36 @@ export default function IngestionPanel({
       </Box>
 
       {status && (
-        <Alert.Root status={status.type} borderRadius="md">
-          <Alert.Indicator />
-          <Alert.Content>
-            <Alert.Title textTransform="capitalize">{status.type}</Alert.Title>
-            <Alert.Description>{status.message}</Alert.Description>
-          </Alert.Content>
-        </Alert.Root>
+        <Box
+          p={4}
+          borderRadius="md"
+          bg={status.type === "error" ? "red.50" : "green.50"}
+          color={status.type === "error" ? "red.800" : "green.800"}
+          borderWidth="1px"
+          borderColor={status.type === "error" ? "red.200" : "green.200"}
+        >
+          <Stack gap={1}>
+            <Text fontWeight="bold" textTransform="capitalize">
+              {status.type}
+            </Text>
+            <Text>{status.message}</Text>
+          </Stack>
+        </Box>
       )}
 
       <Stack gap={4}>
-        <Field.Root>
-          <Field.Label fontWeight="semibold">Collection name</Field.Label>
+        <Box>
+          <Text fontWeight="semibold" mb={1}>Collection name</Text>
           <Input
             value={collection}
             onChange={(event) => setCollection(event.target.value)}
             placeholder="e.g. invoices-2024"
             bg="bg.panel"
           />
-        </Field.Root>
+        </Box>
 
-        <Field.Root>
-          <Field.Label fontWeight="semibold">Table row limit</Field.Label>
+        <Box>
+          <Text fontWeight="semibold" mb={1}>Table row limit</Text>
           <Input
             type="number"
             value={tableRowLimit}
@@ -172,26 +177,26 @@ export default function IngestionPanel({
             placeholder="Optional maximum number of rows"
             bg="bg.panel"
           />
-          <Field.HelperText color="fg.muted">
+          <Text fontSize="sm" color="fg.muted" mt={1}>
             Applies to CSV, TSV, Excel, and Parquet files during ingestion.
-          </Field.HelperText>
-        </Field.Root>
+          </Text>
+        </Box>
 
-        <Field.Root>
-          <Field.Label fontWeight="semibold">Table row filter</Field.Label>
+        <Box>
+          <Text fontWeight="semibold" mb={1}>Table row filter</Text>
           <Input
             value={tableRowFilter}
             onChange={(event) => setTableRowFilter(event.target.value)}
-            placeholder={"e.g. status == \"active\" and amount > 100"}
+            placeholder={'e.g. status == "active" and amount > 100'}
             bg="bg.panel"
           />
-          <Field.HelperText color="fg.muted">
+          <Text fontSize="sm" color="fg.muted" mt={1}>
             Optional pandas-style query applied before ingesting table rows.
-          </Field.HelperText>
-        </Field.Root>
+          </Text>
+        </Box>
 
-        <Field.Root>
-          <Field.Label fontWeight="semibold">Upload files</Field.Label>
+        <Box>
+          <Text fontWeight="semibold" mb={1}>Upload files</Text>
           <Input
             type="file"
             multiple
@@ -200,10 +205,11 @@ export default function IngestionPanel({
               setFiles(selected ? Array.from(selected) : []);
             }}
             bg="bg.panel"
+            p={1}
           />
-          <Field.HelperText color="fg.muted">
+          <Text fontSize="sm" color="fg.muted" mt={1}>
             Uploaded files are stored in a temporary collection folder before ingestion.
-          </Field.HelperText>
+          </Text>
           {files.length > 0 && (
             <Stack gap={1} mt={2} fontSize="sm" color="fg.muted">
               {files.map((file) => (
@@ -216,7 +222,7 @@ export default function IngestionPanel({
               ))}
             </Stack>
           )}
-        </Field.Root>
+        </Box>
       </Stack>
 
       <Button
@@ -269,7 +275,22 @@ export default function IngestionPanel({
                       </Text>
                     )}
                   </Flex>
-                  {percent !== undefined && <Progress value={percent} size="xs" />}
+                  {percent !== undefined && (
+                    <Box
+                      h="4px"
+                      w="full"
+                      bg="gray.100"
+                      borderRadius="full"
+                      overflow="hidden"
+                    >
+                      <Box
+                        h="full"
+                        bg="teal.500"
+                        w={`${percent}%`}
+                        transition="width 0.2s"
+                      />
+                    </Box>
+                  )}
                 </Stack>
               );
             })}
