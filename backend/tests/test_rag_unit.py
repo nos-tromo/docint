@@ -47,16 +47,26 @@ def test_normalize_response_data_extracts_sources() -> None:
     normalized = rag._normalize_response_data("query", result)
     assert normalized["response"] == "Answer"
     assert normalized["reasoning"] == "reason"
-    assert normalized["sources"] == [
-        {
-            "text": "Example text",
-            "filename": "doc.pdf",
-            "filetype": "application/pdf",
-            "source": "document",
-            "file_hash": "abc",
-            "page": 3,
-        }
-    ]
+
+    sources = normalized["sources"]
+    assert len(sources) == 1
+    first_source = sources[0]
+
+    expected = {
+        "text": "Example text",
+        "filename": "doc.pdf",
+        "filetype": "application/pdf",
+        "source": "document",
+        "file_hash": "abc",
+        "page": 3,
+    }
+    for key, value in expected.items():
+        assert first_source.get(key) == value
+
+    # ensure preview helpers are attached when file hashes are present
+    assert first_source.get("preview_text") == "Example text"
+    assert first_source.get("preview_url")
+    assert first_source.get("document_url") == first_source.get("preview_url")
 
 
 def test_directory_ingestion_attaches_file_hash(tmp_path: Path) -> None:
