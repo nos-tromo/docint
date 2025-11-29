@@ -231,7 +231,9 @@ def _collection_root(collection: str) -> Path:
     return base / "collections" / collection
 
 
-def _record_file_index(collection: str, file_hash: str, path: Path, content_type: str | None) -> None:
+def _record_file_index(
+    collection: str, file_hash: str, path: Path, content_type: str | None
+) -> None:
     """Persist a simple hash → path mapping for later previews."""
 
     collection_root = _collection_root(collection)
@@ -422,9 +424,9 @@ async def ingest_upload(
                 ingest_module.ingest_docs,
                 name,
                 batch_dir,
-                hybrid=hybrid if hybrid is not None else True,
-                table_row_limit=table_row_limit,
-                table_row_filter=table_row_filter,
+                hybrid if hybrid is not None else True,
+                table_row_limit,
+                table_row_filter,
             )
             rag.select_collection(name)
             try:
