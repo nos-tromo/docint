@@ -4,6 +4,7 @@ import {
   Button,
   HStack,
   IconButton,
+  Image,
   Input,
   Spinner,
   Text,
@@ -67,33 +68,31 @@ const SourceCard = ({ source }: { source: Source }) => {
       </HStack>
 
       {previewText && (
-        <Text mt={2} fontSize="sm" color="fg.muted" noOfLines={4} whiteSpace="pre-wrap">
+        <Text mt={2} fontSize="sm" color="fg.muted" lineClamp={4} whiteSpace="pre-wrap">
           {previewText}
         </Text>
       )}
 
       {showImage && previewUrl && (
         <Box mt={2} overflow="hidden" borderRadius="sm">
-          <Box
-            as="img"
+          <Image
             src={previewUrl}
             alt={`Preview of ${source.filename || "source"}`}
             loading="lazy"
-            style={{ width: "100%", maxHeight: 200, objectFit: "cover" }}
+            width="100%"
+            maxHeight={200}
+            objectFit="cover"
           />
         </Box>
       )}
 
       {previewUrl && (
         <Button
-          as="a"
-          href={previewUrl}
-          target="_blank"
-          rel="noreferrer"
           size="sm"
           variant="outline"
           colorScheme="teal"
           mt={3}
+          onClick={() => window.open(previewUrl, "_blank", "noopener,noreferrer")}
         >
           Open document
         </Button>
