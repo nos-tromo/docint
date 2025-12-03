@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import docint.core.ingest as ingest
+import docint.cli.ingest as ingest
 
 
 def test_get_inputs_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -28,7 +28,7 @@ def test_get_inputs_missing_dir(
 def test_ingest_docs_invokes_rag(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    calls = SimpleNamespace(args=None)
+    calls = SimpleNamespace(args=None, build_query_engine=None, path=None)
 
     class DummyRAG:
         def __init__(
@@ -45,14 +45,16 @@ def test_ingest_docs_invokes_rag(
                 table_row_filter,
             )
 
-        def ingest_docs(self, path: Path) -> None:  # type: ignore[override]
+        def ingest_docs(self, path: Path, *, build_query_engine: bool = True) -> None:  # type: ignore[override]
             calls.path = path
+            calls.build_query_engine = build_query_engine
 
     monkeypatch.setattr(ingest, "RAG", DummyRAG)
     data_dir = tmp_path
     ingest.ingest_docs("demo", data_dir, hybrid=False)
     assert calls.args == ("demo", False, None, None)
     assert calls.path == data_dir
+    assert calls.build_query_engine is False
 
 
 def test_main_executes_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:

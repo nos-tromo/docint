@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from docint.core import ingest as ingest_module
+from docint.cli import ingest as ingest_module
 from docint.core.rag import RAG
 from docint.utils.hashing import compute_file_hash
 from docint.utils.logging_cfg import setup_logging

@@ -72,9 +72,9 @@ class HybridPDFReader(BaseReader):
         }
         if page_meta and isinstance(page_meta, dict):
             if "page" in page_meta:
-                base_meta["page_number"] = [str(page_meta["page"])]
+                base_meta["page_number"] = str(page_meta["page"])
             elif "page_number" in page_meta:
-                base_meta["page_number"] = [str(page_meta["page_number"])]
+                base_meta["page_number"] = str(page_meta["page_number"])
         # Ensure the canonical file_hash is present on metadata (caller must supply it)
         ensure_file_hash(base_meta, file_hash=file_hash)
         return base_meta

@@ -55,7 +55,7 @@ def _store_output(
         # Detect if list elements are nodes and use .to_dict()
         serializable = []
         for item in data:
-            if hasattr(item, "to_dict"):  # works for LlamaIndex BaseNode
+            if hasattr(item, "to_dict"):
                 serializable.append(item.to_dict())
             else:
                 serializable.append(str(item))

@@ -53,6 +53,10 @@ def ingest_docs(
         hybrid (bool): Whether to enable hybrid search (default: True).
         table_row_limit (int | None): Optional limit applied to tabular rows.
         table_row_filter (str | None): Optional pandas-compatible query string to filter rows.
+
+    Notes:
+        The CLI skips query engine creation so that large generation and reranker models
+        are not loaded unnecessarily during ingestion jobs.
     """
     rag = RAG(
         qdrant_collection=qdrant_col,
@@ -60,7 +64,8 @@ def ingest_docs(
         table_row_limit=table_row_limit,
         table_row_filter=table_row_filter,
     )
-    rag.ingest_docs(data_dir)
+    # Avoid loading chat/query models during offline ingestion jobs.
+    rag.ingest_docs(data_dir, build_query_engine=False)
     logger.info("Ingestion complete.")
 
 

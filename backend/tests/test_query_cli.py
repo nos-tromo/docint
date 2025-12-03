@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
-import docint.core.query as query_cli
+import docint.cli.query as query_cli
 import pytest
 
 
