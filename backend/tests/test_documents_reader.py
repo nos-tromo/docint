@@ -2,11 +2,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 
-from docint.core.readers.documents import HybridPDFReader
-
-
-def _make_dummy_page(text: str, page: int = 1, id_: str | None = None):
-    return SimpleNamespace(text=text, metadata={"page": page}, id_=(id_ or f"p{page}"))
+from docint.core.readers.documents import CustomDoclingReader
 
 
 def test_file_hash_computed_once_when_no_extra_info(
@@ -24,24 +20,31 @@ def test_file_hash_computed_once_when_no_extra_info(
         fake_compute_file_hash,
     )
 
-    # Patch the PyMuPDF reader to return two pages
-    class DummyReader:
+    # Mock DoclingReader
+    class DummyDoclingReader:
+        class ExportType:
+            JSON = "json"
+            MARKDOWN = "markdown"
+
+        def __init__(self, export_type=None):
+            pass
+
         def load_data(self, path):
             return [
-                _make_dummy_page("page1", page=1),
-                _make_dummy_page("page2", page=2),
+                SimpleNamespace(text="page1", metadata={"page": 1}, id_="doc1"),
+                SimpleNamespace(text="page2", metadata={"page": 2}, id_="doc2"),
             ]
 
     monkeypatch.setattr(
-        "docint.core.readers.documents.pymupdf4llm.LlamaMarkdownReader",
-        DummyReader,
+        "docint.core.readers.documents.DoclingReader",
+        DummyDoclingReader,
     )
 
     # Create a dummy file to represent the PDF
     p = tmp_path / "doc.pdf"
     p.write_bytes(b"dummy pdf content")
 
-    r = HybridPDFReader()
+    r = CustomDoclingReader()
     docs = r.load_data(p)
 
     # Ensure file_hash was computed once and attached to both pages
@@ -49,6 +52,8 @@ def test_file_hash_computed_once_when_no_extra_info(
     assert len(docs) == 2
     assert docs[0].metadata["file_hash"] == "deadbeef"
     assert docs[1].metadata["file_hash"] == "deadbeef"
+    assert docs[0].text == "page1"
+    assert docs[1].text == "page2"
 
 
 def test_file_hash_respects_extra_info_and_not_recomputed(
@@ -65,21 +70,30 @@ def test_file_hash_respects_extra_info_and_not_recomputed(
         fake_compute_file_hash,
     )
 
-    class DummyReader:
+    # Mock DoclingReader
+    class DummyDoclingReader:
+        class ExportType:
+            JSON = "json"
+            MARKDOWN = "markdown"
+
+        def __init__(self, export_type=None):
+            pass
+
         def load_data(self, path):
-            return [_make_dummy_page("only", page=1)]
+            return [SimpleNamespace(text="only", metadata={"page": 1}, id_="doc3")]
 
     monkeypatch.setattr(
-        "docint.core.readers.documents.pymupdf4llm.LlamaMarkdownReader",
-        DummyReader,
+        "docint.core.readers.documents.DoclingReader",
+        DummyDoclingReader,
     )
 
     p = tmp_path / "doc2.pdf"
     p.write_bytes(b"another content")
 
-    r = HybridPDFReader()
+    r = CustomDoclingReader()
     docs = r.load_data(p, extra_info={"file_hash": "explicit-hash"})
 
     # compute_file_hash should not be called because extra_info supplied it
     assert calls["count"] == 0
     assert docs[0].metadata["file_hash"] == "explicit-hash"
+    assert docs[0].text == "only"

@@ -17,7 +17,7 @@ from llama_index.node_parser.docling import DoclingNodeParser
 from loguru import logger
 
 from docint.core.readers.audio import AudioReader
-from docint.core.readers.documents import HybridPDFReader
+from docint.core.readers.documents import CustomDoclingReader
 from docint.core.readers.images import ImageReader
 from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.tables import TableReader
@@ -139,8 +139,8 @@ class DocumentIngestionPipeline:
                 ".m4v": audio_reader,
                 ".wmv": audio_reader,
                 ".json": CustomJSONReader(),
-                ".docx": HybridPDFReader(),
-                ".pdf": HybridPDFReader(),
+                ".docx": CustomDoclingReader(),
+                ".pdf": CustomDoclingReader(),
                 ".gif": image_reader,
                 ".jpeg": image_reader,
                 ".jpg": image_reader,
