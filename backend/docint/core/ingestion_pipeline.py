@@ -73,12 +73,55 @@ class DocumentIngestionPipeline:
 
         docs = self.dir_reader.load_data()
         docs = self._attach_clean_text(docs)
+        docs = self._ensure_file_hashes(docs)
         docs = self._filter_docs_by_existing_hashes(docs, existing_hashes)
         nodes = self._create_nodes(docs)
 
         self.docs = docs
         self.nodes = nodes
         return docs, nodes
+
+    def _ensure_file_hashes(self, docs: list[Document]) -> list[Document]:
+        """
+        Ensure every document has a file_hash in its metadata.
+        Computes it from the file path if missing.
+        """
+        # Cache hashes by path to avoid re-reading the same file multiple times
+        path_hash_map: dict[str, str] = {}
+
+        for doc in docs:
+            if "file_hash" in doc.metadata and doc.metadata["file_hash"]:
+                continue
+
+            # Try to find the file path
+            file_path = (
+                doc.metadata.get("file_path")
+                or doc.metadata.get("path")
+                or doc.metadata.get("filename")
+            )
+
+            if not file_path:
+                continue
+
+            file_path_str = str(file_path)
+
+            # Use cached hash if available
+            if file_path_str in path_hash_map:
+                doc.metadata["file_hash"] = path_hash_map[file_path_str]
+                continue
+
+            # Compute and cache
+            try:
+                # Only compute if file exists
+                p = Path(file_path_str)
+                if p.is_file():
+                    f_hash = compute_file_hash(p)
+                    doc.metadata["file_hash"] = f_hash
+                    path_hash_map[file_path_str] = f_hash
+            except Exception as e:
+                logger.warning(f"Could not compute hash for {file_path}: {e}")
+
+        return docs
 
     def _attach_clean_text(self, docs: Iterable[Document]) -> list[Document]:
         cleaned: list[Document] = []
