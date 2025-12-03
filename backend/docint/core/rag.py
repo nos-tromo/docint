@@ -275,11 +275,14 @@ class RAG:
                         "MPS meta-tensor error detected. Falling back to CPU for embeddings. Error: {}",
                         e,
                     )
+                    self._device = "cpu"
                     self._embed_model = HuggingFaceEmbedding(
                         model_name=self.embed_model_id,
                         normalize=True,
                         device="cpu",
                     )
+                    # Trigger warmup to ensure CPU fallback is working
+                    self._embed_model.get_text_embedding("warmup")
                 else:
                     raise
         return self._embed_model
