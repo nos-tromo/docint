@@ -59,6 +59,7 @@ class DocumentIngestionPipeline:
     )
     docs: list[Document] = field(default_factory=list, init=False)
     nodes: list[BaseNode] = field(default_factory=list, init=False)
+    file_hash_cache: dict[str, str] = field(default_factory=dict, init=False)
 
     def build(
         self, existing_hashes: set[str] | None = None
@@ -71,15 +72,58 @@ class DocumentIngestionPipeline:
         if self.dir_reader is None:
             raise RuntimeError("Directory reader failed to initialize.")
 
+        # Pre-filter files based on existing hashes to avoid unnecessary processing
+        if existing_hashes:
+            self._filter_input_files(existing_hashes)
+
         docs = self.dir_reader.load_data()
         docs = self._attach_clean_text(docs)
         docs = self._ensure_file_hashes(docs)
+        # We still keep this filter as a safety net, though pre-filtering should catch most
         docs = self._filter_docs_by_existing_hashes(docs, existing_hashes)
         nodes = self._create_nodes(docs)
 
         self.docs = docs
         self.nodes = nodes
         return docs, nodes
+
+    def _filter_input_files(self, existing_hashes: set[str]) -> None:
+        """
+        Filter self.dir_reader.input_files based on existing hashes.
+        Populates self.file_hash_cache.
+        """
+        if not self.dir_reader or not self.dir_reader.input_files:
+            return
+
+        filtered_files: list[Path] = []
+        skipped_count = 0
+
+        for file_path in self.dir_reader.input_files:
+            path_str = str(file_path)
+            try:
+                # Compute hash (or get from cache if we ever re-run)
+                if path_str in self.file_hash_cache:
+                    f_hash = self.file_hash_cache[path_str]
+                else:
+                    f_hash = compute_file_hash(file_path)
+                    self.file_hash_cache[path_str] = f_hash
+
+                if f_hash in existing_hashes:
+                    skipped_count += 1
+                    continue
+
+                filtered_files.append(file_path)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to compute hash for {file_path}, skipping pre-filter: {e}"
+                )
+                filtered_files.append(file_path)
+
+        if skipped_count > 0:
+            logger.info(
+                f"Skipping {skipped_count} files that already exist in the collection."
+            )
+            self.dir_reader.input_files = filtered_files
 
     def _ensure_file_hashes(self, docs: list[Document]) -> list[Document]:
         """
@@ -150,10 +194,17 @@ class DocumentIngestionPipeline:
 
         def _metadata(path: str | Path) -> dict[str, str]:
             resolved = path if isinstance(path, Path) else Path(path)
-            file_hash = compute_file_hash(resolved)
+            path_str = str(resolved)
+
+            if path_str in self.file_hash_cache:
+                file_hash = self.file_hash_cache[path_str]
+            else:
+                file_hash = compute_file_hash(resolved)
+                self.file_hash_cache[path_str] = file_hash
+
             filename = resolved.name
             return {
-                "file_path": str(resolved),
+                "file_path": path_str,
                 "file_name": filename,
                 "filename": filename,
                 "file_hash": file_hash,
