@@ -11,7 +11,6 @@ dependencies = [
   "fastapi>=0.116.1",
   "fastembed>=0.7.3",
   "fastparquet>=2024.11.0",
-  "huggingface-hub[cli]>=0.34.3",
   "llama-index>=0.13.0",
   "llama-index-embeddings-huggingface>=0.6.0",
   "llama-index-llms-ollama>=0.7.0",
@@ -44,6 +43,7 @@ query = "docint.cli.query:main"
 
 [dependency-groups]
 dev = [
+    "huggingface-hub[cli]>=0.36.0",
     "mypy>=1.18.2",
     "pre-commit>=4.3.0",
     "pytest>=8.4.2",
