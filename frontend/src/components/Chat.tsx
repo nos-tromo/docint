@@ -42,7 +42,15 @@ const SourceCard = ({ source }: { source: Source }) => {
       : null;
 
   const previewText = source.preview_text || source.text || "";
-  const previewUrl = source.preview_url || source.document_url;
+  
+  const baseUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
+  const rawUrl = source.preview_url || source.document_url;
+  const previewUrl = rawUrl
+    ? rawUrl.startsWith("http")
+      ? rawUrl
+      : `${baseUrl}${rawUrl}`
+    : undefined;
+
   const showImage =
     isVisible &&
     previewUrl &&

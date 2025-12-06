@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
+from qdrant_client import models
 
 from docint.cli import ingest as ingest_module
 from docint.core.rag import RAG
@@ -395,5 +396,81 @@ async def ingest_upload(
 @app.get("/sources/preview", tags=["Sources"])
 def preview_source(collection: str, file_hash: str) -> FileResponse:
     """Serve a previously ingested source file for preview purposes."""
-    # Since we no longer persist source files on the host, previews are unavailable.
-    raise HTTPException(status_code=404, detail="Source file preview not available")
+    try:
+        # 1. Query Qdrant for the file path associated with this hash
+        points, _ = rag.qdrant_client.scroll(
+            collection_name=collection,
+            scroll_filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="file_hash",
+                        match=models.MatchValue(value=file_hash),
+                    )
+                ]
+            ),
+            limit=1,
+            with_payload=True,
+        )
+
+        if not points:
+            # Fallback: try checking 'metadata.file_hash' just in case
+            points, _ = rag.qdrant_client.scroll(
+                collection_name=collection,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="metadata.file_hash",
+                            match=models.MatchValue(value=file_hash),
+                        )
+                    ]
+                ),
+                limit=1,
+                with_payload=True,
+            )
+
+        if not points:
+            raise HTTPException(
+                status_code=404, detail="File hash not found in collection"
+            )
+
+        payload = points[0].payload or {}
+
+        # 2. Extract file path from payload
+        # It could be in 'file_path', 'metadata.file_path', 'origin.file_path', etc.
+        file_path_str = (
+            payload.get("file_path")
+            or payload.get("path")
+            or (payload.get("metadata") or {}).get("file_path")
+            or (payload.get("origin") or {}).get("file_path")
+        )
+
+        if not file_path_str:
+            raise HTTPException(
+                status_code=404, detail="File path not found in metadata"
+            )
+
+        path = Path(file_path_str)
+        if not path.exists() or not path.is_file():
+            logger.warning("Preview failed. File not found at: {}", path)
+
+            # Fallback: Check if the file exists in the default data directory
+            # This helps when paths mismatch (e.g. ingestion on host, running in Docker)
+            filename = path.name
+            data_dir = _resolve_data_dir()
+            alt_path = data_dir / filename
+
+            if alt_path.exists() and alt_path.is_file():
+                logger.info("Found file at alternative path: {}", alt_path)
+                return FileResponse(alt_path)
+
+            raise HTTPException(
+                status_code=404, detail=f"Source file not found on server at {path}"
+            )
+
+        return FileResponse(path)
+
+    except Exception as e:
+        logger.error("Error retrieving source preview: {}", e)
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=str(e))
