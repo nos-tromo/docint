@@ -28,7 +28,9 @@ CleanFn = Callable[[str], str]
 
 @dataclass(slots=True)
 class DocumentIngestionPipeline:
-    """Encapsulates document loading, cleaning, and node construction."""
+    """
+    Encapsulates document loading, cleaning, and node construction.
+    """
 
     data_dir: Path
     clean_fn: CleanFn
@@ -64,7 +66,18 @@ class DocumentIngestionPipeline:
     def build(
         self, existing_hashes: set[str] | None = None
     ) -> tuple[list[Document], list[BaseNode]]:
-        """Execute the full ingestion pipeline and return cleaned docs + nodes."""
+        """
+        Execute the full ingestion pipeline and return cleaned docs + nodes.
+
+        Args:
+            existing_hashes (set[str] | None): A set of existing document hashes to filter out already processed documents.
+
+        Returns:
+            tuple[list[Document], list[BaseNode]]: The cleaned documents and their corresponding nodes.
+
+        Raises:
+            RuntimeError: If the directory reader fails to initialize.
+        """
 
         self._load_doc_readers()
         self._load_node_parsers()
@@ -89,8 +102,10 @@ class DocumentIngestionPipeline:
 
     def _filter_input_files(self, existing_hashes: set[str]) -> None:
         """
-        Filter self.dir_reader.input_files based on existing hashes.
-        Populates self.file_hash_cache.
+        Filter self.dir_reader.input_files based on existing hashes. Populates self.file_hash_cache.
+
+        Args:
+            existing_hashes (set[str]): A set of existing document hashes to filter out already processed documents.
         """
         if not self.dir_reader or not self.dir_reader.input_files:
             return
@@ -127,8 +142,16 @@ class DocumentIngestionPipeline:
 
     def _ensure_file_hashes(self, docs: list[Document]) -> list[Document]:
         """
-        Ensure every document has a file_hash in its metadata.
-        Computes it from the file path if missing.
+        Ensure every document has a file_hash in its metadata. Computes it from the file path if missing.
+
+        Args:
+            docs (list[Document]): The list of documents to process.
+
+        Returns:
+            list[Document]: The list of documents with ensured file_hash metadata.
+
+        Raises:
+            RuntimeError: If the file hash computation fails.
         """
         # Cache hashes by path to avoid re-reading the same file multiple times
         path_hash_map: dict[str, str] = {}
@@ -168,6 +191,15 @@ class DocumentIngestionPipeline:
         return docs
 
     def _attach_clean_text(self, docs: Iterable[Document]) -> list[Document]:
+        """
+        Attach cleaned text to each document.
+
+        Args:
+            docs (Iterable[Document]): The documents to process.
+
+        Returns:
+            list[Document]: The documents with cleaned text.
+        """
         cleaned: list[Document] = []
         for doc in docs:
             if hasattr(doc, "text") and isinstance(doc.text, str):
@@ -179,6 +211,9 @@ class DocumentIngestionPipeline:
         return cleaned
 
     def _load_doc_readers(self) -> None:
+        """
+        Load document readers for various file types.
+        """
         audio_reader = AudioReader(device=self.device)
         image_reader = ImageReader()
         table_reader = TableReader(
@@ -193,6 +228,15 @@ class DocumentIngestionPipeline:
         )
 
         def _metadata(path: str | Path) -> dict[str, str]:
+            """
+            Get metadata for a file.
+
+            Args:
+                path (str | Path): The path to the file.
+
+            Returns:
+                dict[str, str]: Metadata including file path, name, and hash.
+            """
             resolved = path if isinstance(path, Path) else Path(path)
             path_str = str(resolved)
 
@@ -265,6 +309,12 @@ class DocumentIngestionPipeline:
         )
 
     def _load_node_parsers(self) -> None:
+        """
+        Load document parsers for various file types.
+
+        Raises:
+            RuntimeError: If embed model factory is not provided.
+        """
         self.md_node_parser = MarkdownNodeParser()
         self.docling_node_parser = DoclingNodeParser()
         if self.embed_model_factory is None:
@@ -278,6 +328,16 @@ class DocumentIngestionPipeline:
     def _filter_docs_by_existing_hashes(
         self, docs: Iterable[Document], existing_hashes: set[str] | None
     ) -> list[Document]:
+        """
+        Filter documents by their existing hashes.
+
+        Args:
+            docs (Iterable[Document]): The documents to filter.
+            existing_hashes (set[str] | None): The set of existing document hashes.
+
+        Returns:
+            list[Document]: The filtered list of documents.
+        """
         if not existing_hashes:
             return list(docs)
 
@@ -319,6 +379,18 @@ class DocumentIngestionPipeline:
         return filtered
 
     def _create_nodes(self, docs: list[Document]) -> list[BaseNode]:
+        """
+        Create nodes from the provided documents.
+
+        Args:
+            docs (list[Document]): The documents to process.
+
+        Returns:
+            list[BaseNode]: The created nodes.
+
+        Raises:
+            RuntimeError: If node parsers are not initialized.
+        """
         if (
             self.md_node_parser is None
             or self.docling_node_parser is None
@@ -459,6 +531,15 @@ class DocumentIngestionPipeline:
     def _partition_large_docs(
         self, docs: list[Document]
     ) -> tuple[list[Document], list[Document]]:
+        """
+        Partition documents into semantic and oversized categories.
+
+        Args:
+            docs (list[Document]): The documents to partition.
+
+        Returns:
+            tuple[list[Document], list[Document]]: The semantic documents and oversized documents.
+        """
         if not docs:
             return [], []
         limit = max(self.semantic_splitter_char_limit, self.chunk_size)
@@ -473,6 +554,15 @@ class DocumentIngestionPipeline:
         return semantic_docs, oversized_docs
 
     def _explode_oversized_documents(self, docs: list[Document]) -> list[Document]:
+        """
+        Explode oversized documents into smaller segments.
+
+        Args:
+            docs (list[Document]): The documents to explode.
+
+        Returns:
+            list[Document]: The exploded documents.
+        """
         if not docs:
             return []
         limit = max(self.semantic_splitter_char_limit, self.chunk_size)
@@ -498,6 +588,19 @@ class DocumentIngestionPipeline:
     def _semantic_nodes_with_fallback(
         self, docs: list[Document], doc_label: str
     ) -> list[BaseNode]:
+        """
+        Create semantic nodes from documents with fallback options.
+
+        Args:
+            docs (list[Document]): The documents to process.
+            doc_label (str): The label for the document type.
+
+        Returns:
+            list[BaseNode]: The created nodes.
+
+        Raises:
+            RuntimeError: If the semantic node parser is not initialized.
+        """
         if not docs:
             return []
         if self.semantic_node_parser is None:
@@ -546,6 +649,15 @@ class DocumentIngestionPipeline:
 
     @staticmethod
     def _extract_file_hash(data: dict | None) -> str | None:
+        """
+        Extract the file hash from the given data.
+
+        Args:
+            data (dict | None): The input data.
+
+        Returns:
+            str | None: The extracted file hash, or None if not found.
+        """
         if not isinstance(data, dict):
             return None
         candidate = data.get("file_hash")

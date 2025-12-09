@@ -41,8 +41,16 @@ SUMMARY_PROMPT = (
 
 
 def _format_sse(event: str, data: dict[str, Any]) -> str:
-    """Return a serialized Server-Sent Event payload."""
+    """
+    Return a serialized Server-Sent Event payload.
 
+    Args:
+        event (str): The event type.
+        data (dict[str, Any]): The event data.
+
+    Returns:
+        str: The formatted SSE string.
+    """
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
@@ -188,7 +196,15 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str]:
 
 @app.post("/summarize", response_model=SummarizeOut, tags=["Query"])
 def summarize() -> dict[str, list[dict] | str]:
-    """Generate a summary for the currently selected collection."""
+    """
+    Generate a summary for the currently selected collection.
+
+    Returns:
+        dict[str, list[dict] | str]: A dictionary containing the summary and sources.
+
+    Raises:
+        HTTPException: If an error occurs while generating the summary.
+    """
 
     try:
         if not rag.qdrant_collection:
@@ -296,7 +312,23 @@ async def ingest_upload(
     table_row_limit: int | None = Form(default=None, gt=0),
     table_row_filter: str | None = Form(default=None),
 ) -> StreamingResponse:
-    """Upload files for ingestion and stream progress as SSE events."""
+    """
+    Upload files for ingestion and stream progress as SSE events.
+
+    Args:
+        collection (str): The name of the collection to ingest into.
+        files (list[UploadFile]): The list of files to upload.
+        hybrid (bool | None): Whether to enable hybrid search (default: True).
+        table_row_limit (int | None): Optional limit applied to tabular rows.
+        table_row_filter (str | None): Optional pandas-compatible query string to filter rows.
+
+    Returns:
+        StreamingResponse: A streaming response that yields SSE events during ingestion.
+
+    Raises:
+        HTTPException: If the collection name is missing or no files are provided.
+        HTTPException: If an error occurs during file upload.
+    """
 
     name = collection.strip()
     if not name:
@@ -395,7 +427,19 @@ async def ingest_upload(
 
 @app.get("/sources/preview", tags=["Sources"])
 def preview_source(collection: str, file_hash: str) -> FileResponse:
-    """Serve a previously ingested source file for preview purposes."""
+    """
+    Serve a previously ingested source file for preview purposes.
+
+    Args:
+        collection (str): The name of the collection.
+        file_hash (str): The hash of the file to preview.
+
+    Returns:
+        FileResponse: A response containing the requested file.
+
+    Raises:
+        HTTPException: If an error occurs while retrieving the source preview.
+    """
     try:
         # 1. Query Qdrant for the file path associated with this hash
         points, _ = rag.qdrant_client.scroll(

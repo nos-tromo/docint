@@ -29,7 +29,9 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True)
 class SessionManager:
-    """Owns chat session state, persistence, and exports."""
+    """
+    Owns chat session state, persistence, and exports.
+    """
 
     rag: RAG
     chat_engine: RetrieverQueryEngine | CondenseQuestionChatEngine | None = field(
@@ -40,14 +42,35 @@ class SessionManager:
     _SessionMaker: Any | None = field(default=None, init=False, repr=False)
 
     def init_session_store(self, db_url: str = "sqlite:///rag_sessions.db") -> None:
+        """
+        Initialize the session store.
+
+        Args:
+            db_url (str, optional): The database URL. Defaults to "sqlite:///rag_sessions.db".
+        """
         self._SessionMaker = _make_session_maker(db_url)
 
     def reset_runtime(self) -> None:
+        """
+        Reset the runtime state.
+        """
         self.session_id = None
         self.chat_engine = None
         self.chat_memory = None
 
     def start_session(self, requested_id: str | None = None) -> str:
+        """
+        Start a new chat session.
+
+        Args:
+            requested_id (str | None, optional): The ID of the session to start. Defaults to None.
+
+        Returns:
+            str: The ID of the started session.
+
+        Raises:
+            RuntimeError: If the session cannot be started.
+        """
         if not requested_id:
             requested_id = str(uuid.uuid4())
         self.session_id = requested_id
@@ -82,6 +105,19 @@ class SessionManager:
         return requested_id
 
     def chat(self, user_msg: str) -> dict[str, Any]:
+        """
+        Handle a chat message from the user.
+
+        Args:
+            user_msg (str): The message from the user.
+
+        Returns:
+            dict[str, Any]: The response data.
+
+        Raises:
+            ValueError: If the user message is empty.
+            RuntimeError: If the query engine has not been initialized.
+        """
         if not user_msg.strip():
             logger.error("ValueError: Chat prompt cannot be empty.")
             raise ValueError("Chat prompt cannot be empty.")
@@ -111,6 +147,20 @@ class SessionManager:
     def export_session(
         self, session_id: str | None = None, out_dir: str | Path = "session"
     ) -> Path:
+        """
+        Export the chat session to a directory.
+
+        Args:
+            session_id (str | None, optional): The ID of the session to export. Defaults to None.
+            out_dir (str | Path, optional): The output directory. Defaults to "session".
+
+        Returns:
+            Path: The path to the exported session directory.
+
+        Raises:
+            ValueError: If the session ID is None or the session does not exist.
+            RuntimeError: If the session store is not initialized.
+        """
         with self._session_scope() as s:
             if not session_id and self.session_id is not None:
                 session_id = self.session_id
@@ -174,11 +224,23 @@ class SessionManager:
             return out_dir
 
     def init_session_store_if_needed(self) -> None:
+        """
+        Initialize the session store if it has not been initialized yet.
+        """
         if self._SessionMaker is None:
             self.init_session_store()
 
     @contextmanager
     def _session_scope(self) -> Iterator[Session]:
+        """
+        Provide a transactional scope around a series of operations.
+
+        Yields:
+            Iterator[Session]: A new database session.
+
+        Raises:
+            RuntimeError: If the SessionMaker is not initialized.
+        """
         self.init_session_store_if_needed()
         if self._SessionMaker is None:
             raise RuntimeError("SessionMaker is not initialized.")
@@ -189,6 +251,16 @@ class SessionManager:
             session.close()
 
     def _load_or_create_convo(self, session: Session, session_id: str) -> Conversation:
+        """
+        Load an existing conversation or create a new one.
+
+        Args:
+            session (Session): The database session.
+            session_id (str): The ID of the session.
+
+        Returns:
+            Conversation: The loaded or created conversation.
+        """
         conv = session.get(Conversation, session_id)
         if conv is None:
             conv = Conversation(id=session_id)
@@ -197,6 +269,15 @@ class SessionManager:
         return conv
 
     def _get_rolling_summary(self, session_id: str) -> str:
+        """
+        Get the rolling summary for a conversation.
+
+        Args:
+            session_id (str): The ID of the session.
+
+        Returns:
+            str: The rolling summary for the conversation.
+        """
         with self._session_scope() as s:
             conv = s.get(Conversation, session_id)
             if conv is None:
@@ -207,6 +288,15 @@ class SessionManager:
     def _persist_turn(
         self, session_id: str, user_msg: str, resp: Any, data: dict
     ) -> None:
+        """
+        Persist a user message and the assistant's response in the database.
+
+        Args:
+            session_id (str): The ID of the session.
+            user_msg (str): The user message.
+            resp (Any): The assistant's response.
+            data (dict): Additional data to persist.
+        """
         with self._session_scope() as s:
             conv = self._load_or_create_convo(s, session_id)
 
@@ -275,6 +365,13 @@ class SessionManager:
             s.commit()
 
     def _maybe_update_summary(self, session_id: str, every_n_turns: int = 5) -> None:
+        """
+        Update the rolling summary for a conversation if the conditions are met.
+
+        Args:
+            session_id (str): The ID of the session.
+            every_n_turns (int, optional): The frequency of updates. Defaults to 5.
+        """
         with self._session_scope() as s:
             conv = s.get(Conversation, session_id)
             if (
@@ -298,6 +395,13 @@ class SessionManager:
             s.commit()
 
     def _export_citations(self, out_dir: Path, conv: Conversation) -> None:
+        """
+        Export citations from a conversation to a Parquet file.
+
+        Args:
+            out_dir (Path): The output directory.
+            conv (Conversation): The conversation object.
+        """
         try:
             rows: list[dict[str, Any]] = []
             for t in conv.turns:
@@ -341,6 +445,14 @@ class SessionManager:
     def _export_transcript(
         self, out_dir: Path, conv: Conversation, rolling_summary: str
     ) -> None:
+        """
+        Export the conversation transcript to a Markdown file.
+
+        Args:
+            out_dir (Path): The output directory.
+            conv (Conversation): The conversation object.
+            rolling_summary (str): The rolling summary of the conversation.
+        """
         conv_id = str(conv.id)
         lines = ["# Transcript", f"Session: `{conv_id}`", ""]
         if rolling_summary:
@@ -383,6 +495,13 @@ class SessionManager:
         (out_dir / "transcript.md").write_text("\n".join(lines), encoding="utf-8")
 
     def _write_manifest(self, out_dir: Path) -> None:
+        """
+        Write a manifest file for the exported conversation data.
+
+        Args:
+            out_dir (Path): The output directory.
+        """
+
         def sha256_file(p: Path) -> str:
             h = hashlib.sha256()
             with p.open("rb") as fh:
@@ -409,6 +528,15 @@ class SessionManager:
         )
 
     def _get_node_text_by_id(self, node_id: str) -> str | None:
+        """
+        Retrieve the text content of a node by its ID.
+
+        Args:
+            node_id (str): The ID of the node.
+
+        Returns:
+            str | None: The text content of the node, or None if not found.
+        """
         try:
             index = self.rag.index
             if index is None:

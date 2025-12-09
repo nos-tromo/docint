@@ -157,27 +157,66 @@ class RAG:
 
     @property
     def session_id(self) -> str | None:
-        return self.sessions.session_id
+        """
+        Get the current session ID.
+
+        Returns:
+            str | None: The current session ID.
+        """
+        return self.sessions.session_id if self.sessions else None
 
     @session_id.setter
     def session_id(self, value: str | None) -> None:
-        self.sessions.session_id = value
+        """
+        Set the current session ID.
+
+        Args:
+            value (str | None): The new session ID.
+        """
+        if self.sessions is not None:
+            self.sessions.session_id = value
 
     @property
-    def chat_engine(self) -> RetrieverQueryEngine | None:
-        return self.sessions.chat_engine
+    def chat_engine(self) -> Any | None:
+        """
+        Get the current chat engine.
+
+        Returns:
+            Any | None: The current chat engine.
+        """
+        return self.sessions.chat_engine if self.sessions else None
 
     @chat_engine.setter
-    def chat_engine(self, value: RetrieverQueryEngine | None) -> None:
-        self.sessions.chat_engine = value
+    def chat_engine(self, value: Any | None) -> None:
+        """
+        Set the current chat engine.
+
+        Args:
+            value (Any | None): The new chat engine.
+        """
+        if self.sessions is not None:
+            self.sessions.chat_engine = value
 
     @property
     def chat_memory(self) -> Any | None:
-        return self.sessions.chat_memory
+        """
+        Get the current chat memory.
+
+        Returns:
+            Any | None: The current chat memory.
+        """
+        return self.sessions.chat_memory if self.sessions else None
 
     @chat_memory.setter
     def chat_memory(self, value: Any | None) -> None:
-        self.sessions.chat_memory = value
+        """
+        Set the current chat memory.
+
+        Args:
+            value (Any | None): The new chat memory.
+        """
+        if self.sessions is not None:
+            self.sessions.chat_memory = value
 
     # --- Static methods ---
     @staticmethod
@@ -257,6 +296,9 @@ class RAG:
 
         Returns:
             BaseEmbedding: The initialized embedding model.
+
+        Raises:
+            ValueError: If embed_model_id is None.
         """
         if self._embed_model is None:
             try:
@@ -296,7 +338,8 @@ class RAG:
             str | None: The sparse model id or None if not enabled.
 
         Raises:
-            ValueError: If the sparse model is not supported.
+            ValueError: If the sparse model is None or not supported.
+            ImportError: If fastembed is not installed when hybrid search is enabled.
         """
         if not self.enable_hybrid:
             return None
@@ -337,6 +380,9 @@ class RAG:
 
         Returns:
             Ollama: The initialized generation model.
+
+        Raises:
+            ValueError: If gen_model_id is None.
         """
         if self._gen_model is None:
             self._gen_model = Ollama(
@@ -412,7 +458,12 @@ class RAG:
         return StorageContext.from_defaults(vector_store=vector_store)
 
     def _build_ingestion_pipeline(self) -> DocumentIngestionPipeline:
-        """Instantiate a document ingestion pipeline using current settings."""
+        """
+        Instantiate a document ingestion pipeline using current settings.
+
+        Returns:
+            DocumentIngestionPipeline: The instantiated ingestion pipeline.
+        """
 
         return DocumentIngestionPipeline(
             data_dir=self.data_dir,
@@ -460,6 +511,9 @@ class RAG:
 
         Args:
             data (Any): The data dictionary to search for a file hash.
+
+        Returns:
+            str | None: The extracted file hash, or None if not found.
         """
 
         if not isinstance(data, dict):
@@ -564,7 +618,9 @@ class RAG:
         return existing
 
     def create_index(self) -> None:
-        """Materialize a VectorStoreIndex for the nodes currently in memory."""
+        """
+        Materialize a VectorStoreIndex for the nodes currently in memory.
+        """
         vector_store = self._vector_store()
         storage_ctx = self._storage_context(vector_store)
         self.index = self._index(storage_ctx)
@@ -769,7 +825,8 @@ class RAG:
             return []
 
     def select_collection(self, name: str) -> None:
-        """Switch active collection, ensuring it already exists.
+        """
+        Switch active collection, ensuring it already exists.
 
         Args:
             name: Name of the collection to select.
@@ -953,29 +1010,70 @@ class RAG:
 
     # --- Session integration ---
     def init_session_store(self, db_url: str = "sqlite:///rag_sessions.db") -> None:
-        """Initialize the relational session store via SessionManager."""
+        """
+        Initialize the relational session store via SessionManager.
+
+        Args:
+            db_url (str): The database URL for the session store.
+        """
+        if self.sessions is None:
+            self.sessions = SessionManager(self)
         self.sessions.init_session_store(db_url)
 
     def reset_session_state(self) -> None:
-        """Clear cached chat state so future sessions start fresh."""
-        self.sessions.reset_runtime()
+        """
+        Clear cached chat state so future sessions start fresh.
+        """
+        if self.sessions is not None:
+            self.sessions.reset_runtime()
 
     def export_session(
         self, session_id: str | None = None, out_dir: str | Path = "session"
     ) -> Path:
-        """Delegate session export to SessionManager."""
+        """
+        Delegate session export to SessionManager.
+
+        Args:
+            session_id (str | None): The session ID to export. If None, exports the
+                current session.
+            out_dir (str | Path): The output directory for the exported session.
+
+        Returns:
+            Path: The path to the exported session file.
+        """
+        if self.sessions is None:
+            self.sessions = SessionManager(self)
         return self.sessions.export_session(session_id=session_id, out_dir=out_dir)
 
     def start_session(self, session_id: str | None = None) -> str:
-        """Start or resume a chat session through SessionManager."""
+        """
+        Start or resume a chat session through SessionManager.
+
+        Args:
+            session_id (str | None): The session ID to start or resume. If None,
+                a new session is created.
+        """
+        if self.sessions is None:
+            self.sessions = SessionManager(self)
         return self.sessions.start_session(session_id)
 
     def chat(self, user_msg: str) -> dict[str, Any]:
-        """Proxy chat turns to SessionManager."""
+        """
+        Proxy chat turns to SessionManager.
+
+        Args:
+            user_msg (str): The user's chat message.
+
+        Returns:
+            dict[str, Any]: The chat response data.
+        """
+        if self.sessions is None:
+            self.sessions = SessionManager(self)
         return self.sessions.chat(user_msg)
 
     def summarize_collection(self, prompt: str | None = None) -> dict[str, Any]:
-        """Generate a summary of the currently selected collection.
+        """
+        Generate a summary of the currently selected collection.
 
         Args:
             prompt (str | None): Optional override for the summarization prompt.
