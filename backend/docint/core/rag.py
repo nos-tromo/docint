@@ -141,7 +141,7 @@ class RAG:
 
     index: VectorStoreIndex | None = field(default=None, init=False)
     query_engine: RetrieverQueryEngine | None = field(default=None, init=False)
-    sessions: SessionManager = field(default=None, init=False, repr=False)
+    sessions: SessionManager | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """
