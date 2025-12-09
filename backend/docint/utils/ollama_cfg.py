@@ -158,3 +158,40 @@ class OllamaPipeline:
             },
         )
         return response["message"]["content"].strip()
+
+    @staticmethod
+    def ensure_model(model_name: str, host: str = OLLAMA_HOST) -> None:
+        """
+        Ensure that the specified model is available on the Ollama server.
+        If not, it attempts to pull the model.
+
+        Args:
+            model_name (str): The name of the model to check/pull.
+            host (str): The Ollama host URL.
+        """
+        try:
+            client = ollama.Client(host=host)
+            models_response = client.list()
+            existing_models = [m["model"] for m in models_response.get("models", [])]
+
+            # Check if model exists
+            if (
+                model_name in existing_models
+                or f"{model_name}:latest" in existing_models
+            ):
+                logger.info("Model '{}' is already available.", model_name)
+                return
+
+            logger.info("Model '{}' not found. Pulling...", model_name)
+
+            # Stream the pull progress
+            for progress in client.pull(model_name, stream=True):
+                if "completed" in progress and "total" in progress:
+                    percent = (progress["completed"] / progress["total"]) * 100
+                    if int(percent) % 10 == 0:  # Log every 10%
+                        logger.debug("Pulling {}: {:.1f}%", model_name, percent)
+
+            logger.info("Successfully pulled model '{}'.", model_name)
+
+        except Exception as e:
+            logger.error("Failed to ensure model '{}': {}", model_name, e)
