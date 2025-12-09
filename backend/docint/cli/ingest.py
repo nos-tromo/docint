@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from docint.core.rag import RAG
+from docint.utils.env_cfg import set_offline_env
 from docint.utils.logging_cfg import setup_logging
 
 # --- Environment variables ---
@@ -71,6 +72,7 @@ def ingest_docs(
 
 def main() -> None:
     setup_logging()
+    set_offline_env()
     qdrant_col, data_dir = get_inputs()
     ingest_docs(qdrant_col, data_dir)
 

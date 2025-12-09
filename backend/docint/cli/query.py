@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from docint.core.rag import RAG
+from docint.utils.env_cfg import set_offline_env
 from docint.utils.logging_cfg import setup_logging
 
 # --- Environment variables ---
@@ -123,6 +124,7 @@ def main() -> None:
     Main entry point for the CLI. Initializes the RAG pipeline, loads queries, and processes each query.
     """
     setup_logging()
+    set_offline_env()
     rag = rag_pipeline()
     queries = load_queries()
     for index, query in enumerate(queries, start=1):

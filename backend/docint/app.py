@@ -14,10 +14,11 @@ from starlette.middleware.cors import CORSMiddleware
 from docint.cli import ingest as ingest_module
 from docint.core.rag import RAG
 from docint.utils.hashing import compute_file_hash
+from docint.utils.env_cfg import set_offline_env
 from docint.utils.logging_cfg import setup_logging
 
 # --- Application Setup ---
-
+set_offline_env()
 setup_logging()
 
 app = FastAPI(title="Document Intelligence")
