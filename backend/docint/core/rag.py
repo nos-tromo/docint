@@ -37,14 +37,12 @@ from docint.utils.clean_text import basic_clean
 load_dotenv()
 
 OLLAMA_THINKING: str = os.getenv("OLLAMA_THINKING", "false")
-QDRANT_COL_DIR: str = os.getenv("QDRANT_COL_DIR", "qdrant_collections")
-QDRANT_HOST: str = os.getenv("QDRANT_HOST", "http://127.0.0.1:6333")
 RETRIEVE_SIMILARITY_TOP_K: int = int(os.getenv("RETRIEVE_SIMILARITY_TOP_K", "20"))
 
 CleanFn = Callable[[str], str]
 
 
-@dataclass(slots=True)
+@dataclass
 class RAG:
     """
     Represents a Retrieval-Augmented Generation (RAG) model.
@@ -423,11 +421,14 @@ class RAG:
             Ollama: The initialized generation model.
 
         Raises:
-            ValueError: If gen_model_id is None.
+            ValueError: If gen_model_id or base_url is None.
         """
         if self._gen_model is None:
             if self.gen_model_id is None:
                 raise ValueError("gen_model_id cannot be None")
+
+            if self.base_url is None:
+                raise ValueError("base_url cannot be None for Ollama model")
 
             self._gen_model = Ollama(
                 model=self.gen_model_id,
