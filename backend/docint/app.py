@@ -14,7 +14,7 @@ from starlette.middleware.cors import CORSMiddleware
 from docint.cli import ingest as ingest_module
 from docint.core.rag import RAG
 from docint.utils.hashing import compute_file_hash
-from docint.utils.env_cfg import set_offline_env
+from docint.utils.env_cfg import load_path_env, set_offline_env
 from docint.utils.logging_cfg import setup_logging
 
 # --- Application Setup ---
@@ -239,9 +239,7 @@ def _resolve_data_dir() -> Path:
         Path: The path to the data directory.
     """
 
-    if ingest_module.DATA_PATH:
-        return Path(ingest_module.DATA_PATH)
-    return Path.home() / "docint" / "data"
+    return load_path_env().data
 
 
 @app.post("/ingest", response_model=IngestOut, tags=["Ingestion"])

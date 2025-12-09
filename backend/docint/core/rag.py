@@ -29,20 +29,13 @@ from qdrant_client.async_qdrant_client import AsyncQdrantClient
 
 from docint.core.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.session_manager import SessionManager
-from docint.utils.env_cfg import load_model_env, load_path_env
+from docint.utils.env_cfg import load_host_env, load_model_env, load_path_env
 from docint.utils.model_cfg import resolve_model_path
 from docint.utils.clean_text import basic_clean
 
 # --- Environment variables ---
 load_dotenv()
 
-DATA_PATH: Path = Path(os.getenv("DATA_PATH", Path.home() / "docint" / "data"))
-PROMPT_DIR: Path = Path(__file__).parents[1].resolve() / "utils" / "prompts"
-
-REQUIRED_EXTS_PATH: Path = (
-    Path(__file__).parent.resolve() / "readers" / "required_exts.txt"
-)
-OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_THINKING: str = os.getenv("OLLAMA_THINKING", "false")
 QDRANT_COL_DIR: str = os.getenv("QDRANT_COL_DIR", "qdrant_collections")
 QDRANT_HOST: str = os.getenv("QDRANT_HOST", "http://127.0.0.1:6333")
@@ -58,12 +51,12 @@ class RAG:
     """
 
     # --- Data path & cleaning setup ---
-    data_dir: Path = Path(DATA_PATH) if not isinstance(DATA_PATH, Path) else DATA_PATH
+    data_dir: Path | None = field(default=None, init=False)
     clean_fn: CleanFn = basic_clean
 
-    # --- Hugging Face model cache ---
-    hf_hub_cache: Path | None = field(default=None)
-    xdg_cache_home: Path | None = field(default=None)
+    # --- Path setup ---
+    hf_hub_cache: Path | None = field(default=None, init=False)
+    xdg_cache_home: Path | None = field(default=None, init=False)
 
     # --- Models ---
     embed_model_id: str | None = field(default=None)
@@ -71,12 +64,12 @@ class RAG:
     gen_model_id: str | None = field(default=None)
 
     # --- Qdrant controls ---
-    qdrant_host: str = QDRANT_HOST
-    _qdrant_host_dir: Path | None = field(default=None, init=False, repr=False)
+    qdrant_host: str | None = field(default=None, init=False)
+    _qdrant_col_dir: Path | None = field(default=None, init=False, repr=False)
     qdrant_collection: str = "default"
 
     # --- Ollama parameters ---
-    base_url: str = OLLAMA_HOST
+    base_url: str | None = field(default=None, init=False)
     context_window: int = -1
     temperature: float = 0.2
     request_timeout: int = 1200
@@ -90,9 +83,8 @@ class RAG:
     rerank_top_n: int = int(retrieve_similarity_top_k // 5)
 
     # --- Prompt config ---
-    prompt_template_path: Path | None = PROMPT_DIR
-    if prompt_template_path:
-        summarize_prompt_path: Path = PROMPT_DIR / "summarize.txt"
+    prompt_dir: Path | None = field(default=None, init=False)
+    summarize_prompt_path: Path | None = field(default=None, init=False)
     summarize_prompt: str = field(default="", init=False)
 
     # --- Directory reader config ---
@@ -100,7 +92,7 @@ class RAG:
     reader_recursive: bool = True
     reader_encoding: str = "utf-8"
     reader_required_exts: list[str] = field(default_factory=list, init=False)
-    reader_required_exts_path: Path = field(default=REQUIRED_EXTS_PATH, init=False)
+    reader_required_exts_path: Path | None = field(default=None, init=False)
 
     # --- TableReader config ---
     table_text_cols: list[str] | None = None
@@ -144,13 +136,25 @@ class RAG:
     def __post_init__(self) -> None:
         """
         Post-initialization to set up any necessary components.
+
+        Raises:
+            ValueError: If summarize_prompt_path is not set.
         """
-        # --- Hugging Face model cache ---
+        # --- Host config ---
+        host_config = load_host_env()
+        self.base_url = host_config.ollama
+        self.qdrant_host = host_config.qdrant
+
+        # --- Path config ---
         path_config = load_path_env()
+        self.data_dir = path_config.data
+        self.prompt_dir = path_config.prompts
+        self._qdrant_col_dir = path_config.qdrant_collections
+        self.reader_required_exts_path = path_config.required_exts
         self.hf_hub_cache = path_config.hf_hub_cache
         self.xdg_cache_home = path_config.xdg_cache_home
 
-        # --- RAG models ---
+        # --- Model config ---
         model_config = load_model_env()
         self.embed_model_id = model_config.embed_model
         self.sparse_model_id = model_config.sparse_model
@@ -159,6 +163,16 @@ class RAG:
         with open(self.reader_required_exts_path, "r", encoding="utf-8") as f:
             self.reader_required_exts = [f".{line.strip()}" for line in f]
 
+        if self.prompt_dir:
+            self.summarize_prompt_path: Path = self.prompt_dir / "summarize.txt"
+
+        if self.summarize_prompt_path is None:
+            logger.error(
+                "ValueError: summarize_prompt_path is not set. Cannot load summarize prompt."
+            )
+            raise ValueError(
+                "summarize_prompt_path is not set. Cannot load summarize prompt."
+            )
         with open(self.summarize_prompt_path, "r", encoding="utf-8") as f:
             self.summarize_prompt = f.read()
 
@@ -252,7 +266,7 @@ class RAG:
 
     # --- Properties (lazy loading) ---
     @property
-    def qdrant_host_dir(self) -> Path:
+    def qdrant_col_dir(self) -> Path:
         """
         Best-effort resolution of the host directory where Qdrant stores data.
         Used only as a *fallback* when we cannot reach the Qdrant API.
@@ -264,18 +278,18 @@ class RAG:
         Raises:
             ValueError: If the Qdrant host directory is not set.
         """
-        if self._qdrant_host_dir is None:
-            env = os.getenv("QDRANT_COL_DIR")
+        if self._qdrant_col_dir is None:
+            env = load_path_env().qdrant_collections
             if env:
-                self._qdrant_host_dir = Path(env)
+                self._qdrant_col_dir = Path(env) if not env.is_absolute() else env
             else:
                 home = os.getenv("HOME") or os.getenv("USERPROFILE")
                 if home:
-                    self._qdrant_host_dir = Path(home) / ".qdrant" / "storage"
-        if self._qdrant_host_dir is None:
+                    self._qdrant_col_dir = Path(home) / ".qdrant" / "storage"
+        if self._qdrant_col_dir is None:
             logger.error("ValueError: Qdrant host directory is not set.")
             raise ValueError("Qdrant host directory is not set.")
-        return self._qdrant_host_dir
+        return self._qdrant_col_dir
 
     @property
     def device(self) -> str:
@@ -509,7 +523,13 @@ class RAG:
 
         Returns:
             DocumentIngestionPipeline: The instantiated ingestion pipeline.
+
+        Raises:
+            ValueError: If data_dir is None.
         """
+        if self.data_dir is None:
+            logger.error("ValueError: data_dir cannot be None for ingestion pipeline.")
+            raise ValueError("data_dir cannot be None for ingestion pipeline.")
 
         return DocumentIngestionPipeline(
             data_dir=self.data_dir,
@@ -858,7 +878,7 @@ class RAG:
                     "Qdrant API list_collections failed, will try FS fallback: {}",
                     e,
                 )
-        base = self.qdrant_host_dir
+        base = self.qdrant_col_dir
         if base is None:
             return []
         collections_dir = base / "collections"
