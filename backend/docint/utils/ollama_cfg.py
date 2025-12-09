@@ -27,7 +27,7 @@ class OllamaPipeline:
         self.model_id = load_model_env().vision_model
         logger.info("OllamaPipeline initialized with model: {}", self.model_id)
         self.prompt_dir = load_path_env().prompts
-        self.ollama_host = load_host_env().ollama
+        self.ollama_host = load_host_env().ollama_host
 
     @property
     def sys_prompt(self) -> str:
@@ -171,7 +171,7 @@ class OllamaPipeline:
             model_name (str): The name of the model to check/pull.
         """
         try:
-            ollama_host = load_host_env().ollama
+            ollama_host = load_host_env().ollama_host
             client = ollama.Client(host=ollama_host)
             models_response = client.list()
             existing_models = [m["model"] for m in models_response.get("models", [])]

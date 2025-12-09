@@ -12,18 +12,18 @@ setup_logging()
 
 
 @dataclass(frozen=True)
+class HostConfig:
+    ollama_host: str
+    qdrant_host: str
+
+
+@dataclass(frozen=True)
 class ModelConfig:
     embed_model: str
     sparse_model: str
     gen_model: str
     vision_model: str
     whisper_model: str
-
-
-@dataclass(frozen=True)
-class HostConfig:
-    ollama: str
-    qdrant: str
 
 
 @dataclass(frozen=True)
@@ -46,8 +46,8 @@ def load_host_env() -> HostConfig:
         HostConfig: Dataclass containing host configuration.
     """
     return HostConfig(
-        ollama=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-        qdrant=os.getenv("QDRANT_HOST", "http://localhost:6333"),
+        ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
+        qdrant_host=os.getenv("QDRANT_HOST", "http://localhost:6333"),
     )
 
 
@@ -123,11 +123,15 @@ def set_offline_env() -> None:
     Call this function before importing `transformers` or `llama_index` to ensure
     the offline mode is applied correctly.
     """
+    docint_offline = os.getenv("DOCINT_OFFLINE", "1").lower() in {"1", "true", "yes"}
 
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    os.environ["TRANSFORMERS_OFFLINE"] = "1"
-    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
-    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-    os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-    os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-    logger.info("Set Hugging Face libraries to offline mode.")
+    if docint_offline:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+        os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+        os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+        os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+        logger.info("Set Hugging Face libraries to offline mode.")
+    else:
+        logger.info("Hugging Face libraries are in online mode.")
