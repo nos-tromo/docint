@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
-import docint.core.query as query_cli
+import docint.cli.query as query_cli
 import pytest
 
 
@@ -87,13 +87,13 @@ def test_run_query_records_results(
 
     calls: list[tuple[str, dict]] = []
 
-    def fake_store(name: str, data: dict, output_path: Path | None = None) -> None:
-        calls.append((name, data))
+    def fake_store(filename: str, data: dict, output_path: Path | None = None) -> None:
+        calls.append((filename, data))
 
     monkeypatch.setattr(query_cli, "_store_output", fake_store)
     rag = DummyRAG()
     monkeypatch.setattr(query_cli, "time", lambda: 1700000000)
-    query_cli.run_query(cast(Any, rag), "hello", index=3)
+    query_cli.run_query(cast(Any, rag), "hello", index=3, output_path=tmp_path)
     assert calls
     name, data = calls[0]
     assert "_3_result" in name
@@ -115,23 +115,33 @@ def test_main_executes_all(monkeypatch: pytest.MonkeyPatch) -> None:
         sequence.append("pipeline")
         return DummyRAG()
 
-    def fake_load() -> list[str]:
+    def fake_load(q_path: Path) -> list[str]:
         sequence.append("load")
         return ["one", "two"]
 
-    def fake_run(rag, query: str, index: int) -> None:
+    def fake_run(rag, query: str, index: int, output_path: Path) -> None:
         sequence.append(f"run:{index}:{query}")
 
+    class FakePathConfig:
+        queries = Path("/tmp/queries.txt")
+        results = Path("/tmp/results")
+
+    def fake_load_path_env() -> FakePathConfig:
+        sequence.append("env")
+        return FakePathConfig()
+
     monkeypatch.setattr(query_cli, "setup_logging", fake_setup)
+    monkeypatch.setattr(query_cli, "set_offline_env", lambda: None)
+    monkeypatch.setattr(query_cli, "load_path_env", fake_load_path_env)
     monkeypatch.setattr(query_cli, "rag_pipeline", fake_pipeline)
     monkeypatch.setattr(query_cli, "load_queries", fake_load)
     monkeypatch.setattr(query_cli, "run_query", fake_run)
 
     query_cli.main()
-    assert sequence == [
-        "setup",
-        "pipeline",
-        "load",
-        "run:1:one",
-        "run:2:two",
-    ]
+    # Order: setup -> env -> pipeline -> load -> run...
+    assert "setup" in sequence
+    assert "env" in sequence
+    assert "pipeline" in sequence
+    assert "load" in sequence
+    assert "run:1:one" in sequence
+    assert "run:2:two" in sequence

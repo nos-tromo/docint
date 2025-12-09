@@ -1,5 +1,5 @@
 import json
-import os
+import sys
 from pathlib import Path
 from time import time
 
@@ -7,16 +7,8 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from docint.core.rag import RAG
+from docint.utils.env_cfg import load_path_env, set_offline_env
 from docint.utils.logging_cfg import setup_logging
-
-# --- Environment variables ---
-load_dotenv()
-QUERIES_PATH: Path = Path(
-    os.getenv("QUERIES_PATH", Path.home() / "docint" / "queries.txt")
-).expanduser()
-RESULTS_PATH: Path = Path(
-    os.getenv("RESULTS_PATH", Path.home() / "docint" / "results")
-).expanduser()
 
 
 def _get_col_name() -> str:
@@ -29,19 +21,17 @@ def _get_col_name() -> str:
     return input("Enter collection name: ")
 
 
-def _store_output(
-    filename: str, data: dict | list, output_path: str | Path | None = None
-) -> None:
+def _store_output(filename: str, data: dict | list, output_path: str | Path) -> None:
     """
     Stores the output data to a JSON file.
 
     Args:
         filename (str): The name of the output file (without extension).
         data (dict | list): The data to store.
-        output_path (str | Path, optional): The directory to store the output file. Defaults to RESULTS_PATH.
+        output_path (str | Path): The directory to store the output file.
     """
-    if output_path is None or isinstance(output_path, str):
-        output_path = Path(str(RESULTS_PATH)).expanduser()
+    if not isinstance(output_path, Path):
+        output_path = Path(output_path).expanduser()
 
     if not output_path.exists():
         logger.info("Creating output directory at {}", output_path)
@@ -55,7 +45,7 @@ def _store_output(
         # Detect if list elements are nodes and use .to_dict()
         serializable = []
         for item in data:
-            if hasattr(item, "to_dict"):  # works for LlamaIndex BaseNode
+            if hasattr(item, "to_dict"):
                 serializable.append(item.to_dict())
             else:
                 serializable.append(str(item))
@@ -79,18 +69,19 @@ def rag_pipeline() -> RAG:
     return rag
 
 
-def load_queries(q_path: str | Path | None = None) -> list[str]:
+def load_queries(q_path: str | Path) -> list[str]:
     """
     Loads query strings from a text file. Defaults to creating a file with a default query if none exists.
 
     Args:
-        q_path (Path, optional): The path to the query file. Defaults to None.
+        q_path (str | Path): The path to the query text file.
 
     Returns:
         list[str]: The list of query strings.
     """
-    if q_path is None or isinstance(q_path, str):
-        q_path = Path(str(QUERIES_PATH)).expanduser()
+    if not isinstance(q_path, Path):
+        q_path = Path(q_path).expanduser()
+
     if q_path.exists():
         logger.info("Loading queries from {}", q_path)
         with open(q_path, "r", encoding="utf-8") as f:
@@ -103,7 +94,7 @@ def load_queries(q_path: str | Path | None = None) -> list[str]:
         return [default_query]
 
 
-def run_query(rag: RAG, query: str, index: int) -> None:
+def run_query(rag: RAG, query: str, index: int, output_path: str | Path) -> None:
     """
     Runs a query against the RAG instance and stores the result.
 
@@ -111,24 +102,31 @@ def run_query(rag: RAG, query: str, index: int) -> None:
         rag (RAG): The RAG instance to query.
         query (str): The query string.
         index (int): The index of the query (for logging and output purposes).
+        output_path (str | Path): The directory to store the output file.
     """
     logger.info("Running query {}: {}", index, query)
     result = rag.run_query(query)
     timestamp = str(int(time()))
-    _store_output(f"{timestamp}_{index}_result", result)
+    _store_output(
+        filename=f"{timestamp}_{index}_result", data=result, output_path=output_path
+    )
 
 
 def main() -> None:
     """
     Main entry point for the CLI. Initializes the RAG pipeline, loads queries, and processes each query.
     """
+    load_dotenv()
     setup_logging()
+    set_offline_env()
     rag = rag_pipeline()
-    queries = load_queries()
+    path_config = load_path_env()
+    queries = load_queries(q_path=path_config.queries)
     for index, query in enumerate(queries, start=1):
-        run_query(rag=rag, query=query, index=index)
+        run_query(rag=rag, query=query, index=index, output_path=path_config.results)
     logger.info("All queries processed.")
 
 
 if __name__ == "__main__":
+    sys.path.append(str(Path(__file__).parents[2].resolve()))
     main()

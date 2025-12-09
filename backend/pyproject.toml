@@ -6,12 +6,11 @@ authors = [
   { name = "nos-tromo" }
 ]
 requires-python = ">=3.11,<3.14"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 dependencies = [
   "fastapi>=0.116.1",
   "fastembed>=0.7.3",
   "fastparquet>=2024.11.0",
-  "huggingface-hub[cli]>=0.34.3",
   "llama-index>=0.13.0",
   "llama-index-embeddings-huggingface>=0.6.0",
   "llama-index-llms-ollama>=0.7.0",
@@ -26,8 +25,6 @@ dependencies = [
   "pillow>=11.3.0",
   "pyarrow>=21.0.0",
   "pydantic>=2.11.7",
-  "pymupdf-layout>=1.26.6",
-  "pymupdf4llm>=0.0.27",
   "python-dotenv>=1.1.1",
   "python-magic>=0.4.27",
   "python-multipart>=0.0.20",
@@ -39,16 +36,25 @@ dependencies = [
 ]
 
 [project.scripts]
-ingest = "docint.core.ingest:main"
-query = "docint.core.query:main"
+ingest = "docint.cli.ingest:main"
+query = "docint.cli.query:main"
+load_models = "docint.utils.model_cfg:main"
 
 [dependency-groups]
 dev = [
+    "huggingface-hub[cli]>=0.36.0",
     "mypy>=1.18.2",
     "pre-commit>=4.3.0",
     "pytest>=8.4.2",
     "ruff==0.14.3",
 ]
+
+[build-system]
+requires = ["setuptools>=75.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["docint"]
 
 [tool.uv]
 package = true

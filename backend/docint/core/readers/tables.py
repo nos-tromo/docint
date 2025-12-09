@@ -207,7 +207,7 @@ class TableReader(BaseReader):
             except Exception as exc:  # pragma: no cover - log and continue
                 row_query_error = str(exc)
                 logger.warning(
-                    "Failed to apply row_query='%s' to %s: %s",
+                    "Failed to apply row_query='{}' to {}: {}",
                     self.row_query,
                     file_path,
                     exc,

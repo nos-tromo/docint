@@ -138,7 +138,7 @@ class CustomJSONReader(BaseReader):
                     payload = json.load(handle)
                     nested_keys.update(self._collect_nested_keys(payload))
         except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("Unable to infer JSON schema for %s: %s", file_path, exc)
+            logger.warning("Unable to infer JSON schema for {}: {}", file_path, exc)
         return {"nested_keys": sorted(nested_keys)}
 
     def load_data(self, file: str | Path, **kwargs) -> list[Document]:

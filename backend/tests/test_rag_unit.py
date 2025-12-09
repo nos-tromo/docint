@@ -4,8 +4,7 @@ import types
 from pathlib import Path
 
 import pytest
-from typing import cast
-from llama_index.core import Document, SimpleDirectoryReader
+from llama_index.core import Document
 
 from docint.core import rag as rag_module
 from docint.core.rag import RAG
@@ -73,10 +72,10 @@ def test_directory_ingestion_attaches_file_hash(tmp_path: Path) -> None:
     file_path = tmp_path / "note.txt"
     file_path.write_text("hello world")
 
-    rag = RAG(data_dir=tmp_path, qdrant_collection="test")
-    rag._load_doc_readers()
-
-    docs = cast(SimpleDirectoryReader, rag.dir_reader).load_data()
+    rag = RAG(qdrant_collection="test")
+    rag.data_dir = tmp_path
+    pipeline = rag._build_ingestion_pipeline()
+    docs, _ = pipeline.build(existing_hashes=None)
     digest = compute_file_hash(file_path)
 
     assert docs
@@ -116,13 +115,11 @@ def test_start_session_initializes_memory(
             return cls(**kwargs)
 
     monkeypatch.setattr(
-        rag_module,
-        "ChatMemoryBuffer",
+        "docint.core.session_manager.ChatMemoryBuffer",
         types.SimpleNamespace(from_defaults=lambda **_: FakeMemory()),
     )
     monkeypatch.setattr(
-        rag_module,
-        "CondenseQuestionChatEngine",
+        "docint.core.session_manager.CondenseQuestionChatEngine",
         types.SimpleNamespace(from_defaults=lambda **kwargs: FakeChatEngine(**kwargs)),
     )
     session_id = rag.start_session("abc")
@@ -152,18 +149,17 @@ def test_list_supported_sparse_models_handles_import_error(
 
 def test_filter_docs_skips_existing_hashes(monkeypatch: pytest.MonkeyPatch) -> None:
     rag = RAG(qdrant_collection="test")
+    pipeline = rag._build_ingestion_pipeline()
     existing_hash = "abc"
     fresh_hash = "def"
-    rag.docs = [
+    docs = [
         Document(text="keep", metadata={"file_hash": fresh_hash, "file_name": "b.txt"}),
         Document(
             text="skip", metadata={"file_hash": existing_hash, "file_name": "a.txt"}
         ),
     ]
 
-    monkeypatch.setattr(RAG, "_get_existing_file_hashes", lambda self: {existing_hash})
+    filtered = pipeline._filter_docs_by_existing_hashes(docs, {existing_hash})
 
-    rag._filter_docs_by_existing_hashes()
-
-    assert len(rag.docs) == 1
-    assert rag.docs[0].metadata.get("file_hash") == fresh_hash
+    assert len(filtered) == 1
+    assert filtered[0].metadata.get("file_hash") == fresh_hash

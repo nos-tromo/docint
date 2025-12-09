@@ -1,4 +1,3 @@
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -8,11 +7,9 @@ from dotenv import load_dotenv
 from loguru import logger
 from PIL import Image
 
-# --- Environment variables ---
+from docint.utils.env_cfg import load_host_env, load_model_env, load_path_env
+
 load_dotenv()
-OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-PROMPT_PATH: Path = Path(__file__).resolve().parent / "prompts"
-VLM = os.getenv("VLM", "qwen3-vl:8b")
 
 
 @dataclass
@@ -21,10 +18,16 @@ class OllamaPipeline:
     Pipeline for processing images with the Ollama API.
     """
 
-    ollama_host: str = field(default=OLLAMA_HOST, init=False)
-    prompt_dir: Path = field(default=PROMPT_PATH, init=False)
-    model_id: str = field(default=VLM, init=False)
+    ollama_host: str | None = field(default=None, init=False)
+    prompt_dir: Path | None = field(default=None, init=False)
+    model_id: str | None = field(default=None, init=False)
     _sys_prompt: str | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self):
+        self.model_id = load_model_env().vision_model
+        logger.info("OllamaPipeline initialized with model: {}", self.model_id)
+        self.prompt_dir = load_path_env().prompts
+        self.ollama_host = load_host_env().ollama
 
     @property
     def sys_prompt(self) -> str:
@@ -60,8 +63,13 @@ class OllamaPipeline:
             str: The content of the prompt file.
 
         Raises:
+            RuntimeError: If the prompt directory is not set.
             FileNotFoundError: If the prompt file for the given keyword does not exist.
         """
+        if self.prompt_dir is None:
+            logger.error("RuntimeError: Prompt directory is not set.")
+            raise RuntimeError("Prompt directory is not set.")
+
         prompt_path = self.prompt_dir / f"{kw}.txt"
         if not prompt_path.is_file():
             logger.error(
@@ -128,8 +136,11 @@ class OllamaPipeline:
         if img:
             user["images"] = [img.decode("utf-8") if isinstance(img, bytes) else img]
 
-        # Ensure environment variable is set for ollama library
-        os.environ["OLLAMA_HOST"] = self.ollama_host
+        # Ensure model id is set for ollama library
+        if not self.model_id:
+            logger.error("RuntimeError: Model ID is not set.")
+            raise RuntimeError("Model ID must be a valid string.")
+
         response = ollama.chat(
             model=self.model_id,
             think=think,
@@ -149,3 +160,40 @@ class OllamaPipeline:
             },
         )
         return response["message"]["content"].strip()
+
+    @staticmethod
+    def ensure_model(model_name: str) -> None:
+        """
+        Ensure that the specified model is available on the Ollama server.
+        If not, it attempts to pull the model.
+
+        Args:
+            model_name (str): The name of the model to check/pull.
+        """
+        try:
+            ollama_host = load_host_env().ollama
+            client = ollama.Client(host=ollama_host)
+            models_response = client.list()
+            existing_models = [m["model"] for m in models_response.get("models", [])]
+
+            # Check if model exists
+            if (
+                model_name in existing_models
+                or f"{model_name}:latest" in existing_models
+            ):
+                logger.info("Model '{}' is already available.", model_name)
+                return
+
+            logger.info("Model '{}' not found. Pulling...", model_name)
+
+            # Stream the pull progress
+            for progress in client.pull(model_name, stream=True):
+                if "completed" in progress and "total" in progress:
+                    percent = (progress["completed"] / progress["total"]) * 100
+                    if int(percent) % 10 == 0:  # Log every 10%
+                        logger.debug("Pulling {}: {:.1f}%", model_name, percent)
+
+            logger.info("Successfully pulled model '{}'.", model_name)
+
+        except Exception as e:
+            logger.error("Failed to ensure model '{}': {}", model_name, e)
