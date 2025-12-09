@@ -38,6 +38,7 @@ dependencies = [
 [project.scripts]
 ingest = "docint.cli.ingest:main"
 query = "docint.cli.query:main"
+load_models = "docint.utils.model_cfg:main"
 
 [dependency-groups]
 dev = [
