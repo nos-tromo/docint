@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +17,6 @@ from docint.utils.mimetype import get_mimetype
 
 # --- Environment variables ---
 load_dotenv()
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "turbo")
 
 
 class AudioReader(BaseReader):

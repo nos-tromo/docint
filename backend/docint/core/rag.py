@@ -77,7 +77,7 @@ class RAG:
     _qdrant_host_dir: Path | None = field(default=None, init=False, repr=False)
     qdrant_collection: str = "default"
 
-    # --- Ollama Parameters ---
+    # --- Ollama parameters ---
     base_url: str = OLLAMA_HOST
     context_window: int = -1
     temperature: float = 0.2

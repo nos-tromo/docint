@@ -14,7 +14,6 @@ from docint.utils.env_cfg import load_model_env
 load_dotenv()
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 PROMPT_PATH: Path = Path(__file__).resolve().parent / "prompts"
-VLM = os.getenv("VLM", "qwen3-vl:8b")
 
 
 @dataclass
@@ -25,7 +24,7 @@ class OllamaPipeline:
 
     ollama_host: str = field(default=OLLAMA_HOST, init=False)
     prompt_dir: Path = field(default=PROMPT_PATH, init=False)
-    model_id: str = field(default=VLM, init=False)
+    model_id: str | None = field(default=None, init=False)
     _sys_prompt: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
@@ -136,6 +135,10 @@ class OllamaPipeline:
 
         # Ensure environment variable is set for ollama library
         os.environ["OLLAMA_HOST"] = self.ollama_host
+        if not self.model_id:
+            logger.error("RuntimeError: Model ID is not set.")
+            raise RuntimeError("Model ID must be a valid string.")
+
         response = ollama.chat(
             model=self.model_id,
             think=think,
