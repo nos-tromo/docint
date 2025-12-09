@@ -10,7 +10,6 @@ from docint.utils.env_cfg import set_offline_env
 from docint.utils.logging_cfg import setup_logging
 
 # --- Environment variables ---
-load_dotenv()
 DATA_PATH = Path(os.getenv("DATA_PATH", Path.home() / "docint" / "data")).expanduser()
 
 
@@ -72,6 +71,7 @@ def ingest_docs(
 
 
 def main() -> None:
+    load_dotenv()
     setup_logging()
     set_offline_env()
     qdrant_col, data_dir = get_inputs()

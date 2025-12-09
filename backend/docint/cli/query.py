@@ -12,7 +12,6 @@ from docint.utils.env_cfg import set_offline_env
 from docint.utils.logging_cfg import setup_logging
 
 # --- Environment variables ---
-load_dotenv()
 QUERIES_PATH: Path = Path(
     os.getenv("QUERIES_PATH", Path.home() / "docint" / "queries.txt")
 ).expanduser()
@@ -124,6 +123,7 @@ def main() -> None:
     """
     Main entry point for the CLI. Initializes the RAG pipeline, loads queries, and processes each query.
     """
+    load_dotenv()
     setup_logging()
     set_offline_env()
     rag = rag_pipeline()
