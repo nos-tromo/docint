@@ -14,5 +14,6 @@ repos:
           - --disable-error-code=import-untyped
           - --disable-error-code=attr-defined
           - --disable-error-code=assignment
+          - --no-incremental
         additional_dependencies:
           - types-requests
