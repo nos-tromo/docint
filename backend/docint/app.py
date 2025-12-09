@@ -5,11 +5,11 @@ from typing import Any, AsyncIterator
 
 import anyio
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 from qdrant_client import models
+from starlette.middleware.cors import CORSMiddleware
 
 from docint.cli import ingest as ingest_module
 from docint.core.rag import RAG
