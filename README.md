@@ -18,6 +18,7 @@ This is a proof of concept document intelligence platform offering the following
 4. **Integration with LLMs and Models**
 
    - Utilize large language models (LLMs) and other AI models for advanced processing tasks like summarization and similarity retrieval.
+   - **Offline-First**: Models are cached locally, allowing the system to run without an active internet connection after initial setup.
 5. **Extensibility**
 
    - Easily extend functionality with additional readers, such as OCR for images, Whisper for audio/video, and table/json enhancements.
@@ -70,6 +71,25 @@ The application can be used both via Docker for containerized environments and d
    uv sync
    ```
 
+3. **Download Models**
+
+   Pre-download the required models to your local cache to enable offline functionality:
+
+   ```bash
+   uv run load_models
+   ```
+
+## Configuration
+
+The application is configured via environment variables. Key variables include:
+
+- `DOCINT_OFFLINE`: Set to `true` to force offline mode (fails if models aren't cached).
+- `LLM`: Name of the Ollama model to use (default: `granite4:7b-a1b-h`).
+- `EMBED_MODEL`: HuggingFace embedding model ID (default: `BAAI/bge-m3`).
+- `SPARSE_MODEL`: Sparse embedding model ID (default: `Qdrant/all_miniLM_L6_v2_with_attentions`).
+
+See `backend/docint/utils/env_cfg.py` for the full list of configuration options and defaults.
+
 ## Usage
 
 ### Ingesting Data
@@ -94,7 +114,7 @@ The application can be used both via Docker for containerized environments and d
    uv run ingest
    ```
 
-2. **Verify the Ingestion**
+1. **Verify the Ingestion**
 
    Check the logs or output directory to confirm the data has been organized and prepared for querying.
 
@@ -164,8 +184,11 @@ The application can be used both via Docker for containerized environments and d
 For additional configurations, populate an `.env.docker` file in the project's root. Example:
 
 ```bash
-LLM=gpt-oss:120b-cloud
-VLM=qwen3-vl:235b-cloud
+DOCINT_OFFLINE=true
+EMBED_MODEL=BAAI/bge-m3
+SPARSE_MODEL=Qdrant/all_miniLM_L6_v2_with_attentions
+LLM=granite4:7b-a1b-h
+VLM=qwen3-vl:8b
 WHISPER_MODEL=turbo
 RETRIEVE_SIMILARITY_TOP_K=50
 ```
