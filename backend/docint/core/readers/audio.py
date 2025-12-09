@@ -11,6 +11,7 @@ from loguru import logger
 from numpy import floating
 from numpy.typing import NDArray
 
+from docint.utils.env_cfg import load_model_env
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.mimetype import get_mimetype
 
@@ -36,7 +37,7 @@ class AudioReader(BaseReader):
             device (str | None, optional): The device to use for inference. Defaults to "cpu".
         """
         self.device: str | None = device
-        self.model_id: str = WHISPER_MODEL
+        self.model_id: str = load_model_env().whisper_model
         self.result: dict[str, str | list[Any]] | None = None
 
     def _load_model(self) -> whisper.Whisper:

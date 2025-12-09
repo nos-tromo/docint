@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 from loguru import logger
 from PIL import Image
 
+from docint.utils.env_cfg import load_model_env
+
 # --- Environment variables ---
 load_dotenv()
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
@@ -25,6 +27,10 @@ class OllamaPipeline:
     prompt_dir: Path = field(default=PROMPT_PATH, init=False)
     model_id: str = field(default=VLM, init=False)
     _sys_prompt: str | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self):
+        self.model_id = load_model_env().vision_model
+        logger.info("OllamaPipeline initialized with model: {}", self.model_id)
 
     @property
     def sys_prompt(self) -> str:

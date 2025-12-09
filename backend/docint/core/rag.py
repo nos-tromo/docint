@@ -29,6 +29,8 @@ from qdrant_client.async_qdrant_client import AsyncQdrantClient
 
 from docint.core.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.session_manager import SessionManager
+from docint.utils.env_cfg import load_model_env, load_path_env
+from docint.utils.model_cfg import resolve_model_path
 from docint.utils.clean_text import basic_clean
 
 # --- Environment variables ---
@@ -61,11 +63,14 @@ class RAG:
     data_dir: Path = Path(DATA_PATH) if not isinstance(DATA_PATH, Path) else DATA_PATH
     clean_fn: CleanFn = basic_clean
 
+    # --- Hugging Face model cache ---
+    hf_hub_cache: Path | None = field(default=None)
+    xdg_cache_home: Path | None = field(default=None)
+
     # --- Models ---
-    embed_model_id: str = EMBED_MODEL
-    sparse_model_id: str = SPARSE_MODEL
-    rerank_model_id: str = RERANK_MODEL
-    gen_model_id: str = GEN_MODEL
+    embed_model_id: str | None = field(default=None)
+    sparse_model_id: str | None = field(default=None)
+    gen_model_id: str | None = field(default=None)
 
     # --- Qdrant controls ---
     qdrant_host: str = QDRANT_HOST
@@ -144,6 +149,17 @@ class RAG:
         """
         Post-initialization to set up any necessary components.
         """
+        # --- Hugging Face model cache ---
+        path_config = load_path_env()
+        self.hf_hub_cache = path_config.hf_hub_cache
+        self.xdg_cache_home = path_config.xdg_cache_home
+
+        # --- RAG models ---
+        model_config = load_model_env()
+        self.embed_model_id = model_config.embed_model
+        self.sparse_model_id = model_config.sparse_model
+        self.gen_model_id = model_config.gen_model
+
         with open(self.reader_required_exts_path, "r", encoding="utf-8") as f:
             self.reader_required_exts = [f".{line.strip()}" for line in f]
 
@@ -301,9 +317,17 @@ class RAG:
             ValueError: If embed_model_id is None.
         """
         if self._embed_model is None:
+            if self.embed_model_id is None:
+                raise ValueError("embed_model_id cannot be None")
+            resolved_model = resolve_model_path(
+                self.embed_model_id, self.hf_hub_cache or Path()
+            )
+            if resolved_model != self.embed_model_id:
+                logger.info("Using local model path: {}", resolved_model)
+
             try:
                 model = HuggingFaceEmbedding(
-                    model_name=self.embed_model_id,
+                    model_name=resolved_model,
                     normalize=True,
                     device=self.device,
                 )
@@ -319,7 +343,7 @@ class RAG:
                     )
                     self._device = "cpu"
                     self._embed_model = HuggingFaceEmbedding(
-                        model_name=self.embed_model_id,
+                        model_name=resolved_model,
                         normalize=True,
                         device="cpu",
                     )
@@ -343,35 +367,42 @@ class RAG:
         """
         if not self.enable_hybrid:
             return None
-        if self.sparse_model_id not in self._list_supported_sparse_models():
-            logger.error(
-                "ValueError: Sparse model {} not supported. Supported: {}",
-                self.sparse_model_id,
-                self._list_supported_sparse_models(),
-            )
-            raise ValueError(
-                f"Sparse model {self.sparse_model_id!r} not supported. "
-                f"Supported: {self._list_supported_sparse_models()}"
-            )
-        logger.info("Initializing sparse model: {}", self.sparse_model_id)
-        return self.sparse_model_id
 
-    @property
-    def reranker(self) -> SentenceTransformerRerank:
-        """
-        Lazily initializes and returns the reranker model (SentenceTransformerRerank).
+        if self.sparse_model_id is None:
+            raise ValueError("sparse_model_id is None")
 
-        Returns:
-            SentenceTransformerRerank: The initialized reranker model.
-        """
-        if self._reranker is None:
-            self._reranker = SentenceTransformerRerank(
-                top_n=self.rerank_top_n,
-                model=self.rerank_model_id,
-                device=self.device,
+        try:
+            supported_models = SparseTextEmbedding.list_supported_models()
+        except ImportError:
+            raise ImportError(
+                "fastembed is not installed, but hybrid search is enabled."
             )
-            logger.info("Initializing reranker model: {}", self.rerank_model_id)
-        return self._reranker
+
+        # Check if the configured ID is directly supported
+        supported_ids = [m["model"] for m in supported_models]
+        if self.sparse_model_id in supported_ids:
+            return self.sparse_model_id
+
+        # Check if it matches a source HF repo (mapping logic)
+        for model_desc in supported_models:
+            sources = model_desc.get("sources")
+            if sources and sources.get("hf") == self.sparse_model_id:
+                logger.info(
+                    "Mapped sparse model {} to its source {}",
+                    self.sparse_model_id,
+                    model_desc["model"],
+                )
+                return model_desc["model"]
+
+        logger.error(
+            "ValueError: Sparse model {} not supported. Supported: {}",
+            self.sparse_model_id,
+            supported_ids,
+        )
+        raise ValueError(
+            f"Sparse model {self.sparse_model_id!r} not supported. "
+            f"Supported: {supported_ids}"
+        )
 
     @property
     def gen_model(self) -> Ollama:
