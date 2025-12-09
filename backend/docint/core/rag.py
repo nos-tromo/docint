@@ -414,6 +414,9 @@ class RAG:
             ValueError: If gen_model_id is None.
         """
         if self._gen_model is None:
+            if self.gen_model_id is None:
+                raise ValueError("gen_model_id cannot be None")
+
             self._gen_model = Ollama(
                 model=self.gen_model_id,
                 base_url=self.base_url,
