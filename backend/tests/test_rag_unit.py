@@ -72,7 +72,8 @@ def test_directory_ingestion_attaches_file_hash(tmp_path: Path) -> None:
     file_path = tmp_path / "note.txt"
     file_path.write_text("hello world")
 
-    rag = RAG(data_dir=tmp_path, qdrant_collection="test")
+    rag = RAG(qdrant_collection="test")
+    rag.data_dir = tmp_path
     pipeline = rag._build_ingestion_pipeline()
     docs, _ = pipeline.build(existing_hashes=None)
     digest = compute_file_hash(file_path)
