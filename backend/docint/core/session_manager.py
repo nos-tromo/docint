@@ -186,7 +186,8 @@ class SessionManager:
                 "rolling_summary": rolling_summary,
                 "models": {
                     "embed_model_id": self.rag.embed_model_id,
-                    "rerank_model_id": self.rag.rerank_model_id,
+                    "sparse_model_id": self.rag.sparse_model_id,
+                    "rerank_model_id": self.rag.gen_model_id,
                     "gen_model_id": self.rag.gen_model_id,
                 },
                 "retrieval": {
@@ -197,7 +198,7 @@ class SessionManager:
                     "type": "qdrant",
                     "url": self.rag.qdrant_host,
                     "collection": self.rag.qdrant_collection,
-                    "host_dir": str(self.rag.qdrant_host_dir or ""),
+                    "host_dir": str(self.rag.qdrant_col_dir or ""),
                 },
             }
             (out_dir / "session.json").write_text(
