@@ -17,7 +17,7 @@ from llama_index.core import (
 )
 from llama_index.core.embeddings import BaseEmbedding
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.core.postprocessor import SentenceTransformerRerank
+from llama_index.core.postprocessor import LLMRerank
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.schema import BaseNode, Document
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
@@ -125,9 +125,7 @@ class RAG:
     _device: str | None = field(default=None, init=False, repr=False)
     _embed_model: BaseEmbedding | None = field(default=None, init=False, repr=False)
     _gen_model: Ollama | None = field(default=None, init=False, repr=False)
-    _reranker: SentenceTransformerRerank | None = field(
-        default=None, init=False, repr=False
-    )
+    _reranker: LLMRerank | None = field(default=None, init=False, repr=False)
     _qdrant_client: QdrantClient | None = field(default=None, init=False, repr=False)
     _qdrant_aclient: AsyncQdrantClient | None = field(
         default=None, init=False, repr=False
@@ -427,6 +425,22 @@ class RAG:
             )
             logger.info("Initializing generator model: {}", self.gen_model_id)
         return self._gen_model
+
+    @property
+    def reranker(self) -> LLMRerank:
+        """
+        Lazily initializes and returns the reranker model (LLMRerank).
+
+        Returns:
+            LLMRerank: The initialized reranker model.
+        """
+        if self._reranker is None:
+            self._reranker = LLMRerank(
+                top_n=self.rerank_top_n,
+                llm=self.gen_model,
+            )
+            logger.info("Initializing LLM reranker with model: {}", self.gen_model_id)
+        return self._reranker
 
     @property
     def qdrant_client(self) -> QdrantClient:
