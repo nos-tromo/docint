@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 from pathlib import Path
 from time import time
 
@@ -133,4 +134,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    sys.path.append(str(Path(__file__).parents[2].resolve()))
     main()

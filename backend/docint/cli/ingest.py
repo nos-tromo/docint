@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -78,4 +79,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    sys.path.append(str(Path(__file__).parents[2].resolve()))
     main()
