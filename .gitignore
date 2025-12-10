@@ -1,6 +1,6 @@
-# -----------------
+# ==================================
 # Global
-# -----------------
+# ==================================
 .DS_Store
 .env
 .mypy_cache
@@ -13,6 +13,7 @@
 *.log
 *.pyc
 *.pyo
+*.py[cod]
 *.so
 *Zone.Identifier
 *.egg-info/
@@ -56,45 +57,17 @@
 **/venv/
 **/workbench/
 
-# -----------------
-# Backend (Python)
-# -----------------
-
-# Compiled files and caches
-*.py[cod]
-
-# SQLite DBs (optional)
-*.sqlite3
-*.db
-
-# Optional editor/IDE/project file ignores (if working in frontend separately)
-**/.suo
-**/.ntvs*
-**/.njsproj
-**/.sln
-**/.sw?
-
-# Global frontend output
-dist/
-build/
-
-# -----------------
+# ==================================
 # Docker
-# -----------------
+# ==================================
 *.pid
 *.sock
 docker-compose.override.yml
 
-# -----------------
+# ==================================
 # Hidden files
-# -----------------
+# ==================================
 .*
-
-# ==================================
-# Media & Data (Optional)
-# ==================================
-**/data*/
-**/models/
 
 # ==================================
 # Exceptions
@@ -106,4 +79,5 @@ docker-compose.override.yml
 !.dockerignore
 !.env.docker.example
 !.pre-commit-config.yaml
+!**/required_exts.txt
 !AGENTS.md

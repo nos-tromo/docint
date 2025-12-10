@@ -59,8 +59,5 @@ docker-compose.override.yml
 # Exceptions
 !.gitignore
 !**/.dockerignore
-!frontend/index.html
-!tests/
-!tests/**.py
-!docint/core/readers/required_exts.txt
+!**/required_exts.txt
 !docint/utils/prompts/*.txt
