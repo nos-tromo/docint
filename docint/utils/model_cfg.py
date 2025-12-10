@@ -2,6 +2,11 @@ import sys
 from pathlib import Path
 
 import whisper
+from docling.models.code_formula_model import CodeFormulaModel
+from docling.models.document_picture_classifier import DocumentPictureClassifier
+from docling.models.layout_model import LayoutModel
+from docling.models.rapid_ocr_model import RapidOcrModel
+from docling.models.table_structure_model import TableStructureModel
 from dotenv import load_dotenv
 from huggingface_hub import snapshot_download
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
@@ -41,6 +46,43 @@ def resolve_model_path(model_name: str, cache_folder: Path) -> str:
                 if snapshot_path.exists():
                     return str(snapshot_path)
     return model_name
+
+
+def load_docling_models() -> None:
+    """
+    Preloads Docling models to the HuggingFace cache.
+
+    We invoke the `download_models` static method of each model class directly.
+    This ensures that we use the exact same logic (repo_id, revision, local_dir)
+    that the runtime uses when initializing these models.
+
+    Note: RapidOCR uses a custom cache location, while others default to the
+    standard HF cache when no local_dir is provided.
+    """
+    try:
+        # 1. RapidOCR (Custom cache location)
+        # Note: RapidOCR requires a backend argument. We use "onnxruntime" as it's the default.
+        RapidOcrModel.download_models(backend="onnxruntime", progress=True)
+        logger.info("Loaded RapidOCR model")
+
+        # 2. Layout Model (Standard HF cache)
+        LayoutModel.download_models(progress=True)
+        logger.info("Loaded Layout model")
+
+        # 3. Table Structure Model (Standard HF cache)
+        TableStructureModel.download_models(progress=True)
+        logger.info("Loaded Table Structure model")
+
+        # 4. Code/Formula Model (Standard HF cache)
+        CodeFormulaModel.download_models(progress=True)
+        logger.info("Loaded Code/Formula model")
+
+        # 5. Picture Classifier (Standard HF cache)
+        DocumentPictureClassifier.download_models(progress=True)
+        logger.info("Loaded Picture Classifier model")
+
+    except Exception as e:
+        logger.warning("Failed to download Docling models: {}", e)
 
 
 def load_hf_model(
@@ -114,6 +156,8 @@ def main() -> None:
         logger.info("{}: {}", model, getattr(models, model))
 
     # Load the app's models
+    load_docling_models()
+
     load_hf_model(
         model_id=models.embed_model,
         cache_folder=paths.hf_hub_cache,
