@@ -100,39 +100,79 @@ class CustomDoclingReader(BaseReader):
         if file_hash is None:
             file_hash = compute_file_hash(file_path)
 
+        docs = []
         try:
             docs = self.docling_reader.load_data(file_path)
-            normalized_docs = []
-            for d in docs:
-                page_meta = getattr(d, "metadata", {}) or {}
-                meta = self._standardize_metadata(
-                    file_path, page_meta, file_hash=file_hash
-                )
-                meta["doc_format"] = "json"
-                # merge existing Docling metadata where available (without overwriting)
-                meta.update({k: v for k, v in page_meta.items() if k not in meta})
-                normalized_docs.append(
-                    Document(
-                        text=getattr(d, "text", "")
-                        or getattr(d, "text_resource", None),
-                        metadata=meta,
-                        id_=getattr(d, "id_", None),
-                    )
-                )
-
-            logger.info(
-                "[CustomDoclingReader] Loaded {} pages via Docling: {}",
-                len(normalized_docs),
-                file_path.name,
-            )
         except Exception as e:
-            logger.error(
-                "[CustomDoclingReader] Docling failed for {}: {}", file_path.name, e
+            # Attempt PDF repair if Docling fails
+            if get_mimetype(file_path) == "application/pdf":
+                logger.warning(
+                    "[CustomDoclingReader] Docling failed for {}, attempting repair with pypdf...",
+                    file_path.name,
+                )
+                try:
+                    import tempfile
+
+                    import pypdf
+
+                    with tempfile.NamedTemporaryFile(
+                        suffix=".pdf", delete=False
+                    ) as tmp:
+                        tmp_path = Path(tmp.name)
+
+                    try:
+                        # Repair: Read with pypdf and write to new file
+                        reader = pypdf.PdfReader(file_path)
+                        writer = pypdf.PdfWriter()
+                        for page in reader.pages:
+                            writer.add_page(page)
+                        writer.write(tmp_path)
+
+                        # Retry Docling with repaired file
+                        docs = self.docling_reader.load_data(tmp_path)
+                        logger.info(
+                            "[CustomDoclingReader] Successfully loaded repaired PDF: {}",
+                            file_path.name,
+                        )
+                    finally:
+                        if tmp_path.exists():
+                            tmp_path.unlink()
+                except Exception as repair_error:
+                    logger.error(
+                        "[CustomDoclingReader] Repair failed for {}: {}",
+                        file_path.name,
+                        repair_error,
+                    )
+                    raise RuntimeError(f"Docling failed to read {file_path}") from e
+            else:
+                logger.error(
+                    "[CustomDoclingReader] Docling failed for {}: {}", file_path.name, e
+                )
+                raise RuntimeError(f"Docling failed to read {file_path}") from e
+
+        normalized_docs = []
+        for d in docs:
+            page_meta = getattr(d, "metadata", {}) or {}
+            meta = self._standardize_metadata(file_path, page_meta, file_hash=file_hash)
+            meta["doc_format"] = "json"
+            # merge existing Docling metadata where available (without overwriting)
+            meta.update({k: v for k, v in page_meta.items() if k not in meta})
+            normalized_docs.append(
+                Document(
+                    text=getattr(d, "text", "") or getattr(d, "text_resource", None),
+                    metadata=meta,
+                    id_=getattr(d, "id_", None),
+                )
             )
-            raise RuntimeError(f"Docling failed to read {file_path}") from e
 
         # Optionally merge extra_info into metadata
         for d in normalized_docs:
             if extra_info:
                 d.metadata.update(extra_info)
+
+        logger.info(
+            "[CustomDoclingReader] Loaded {} pages via Docling: {}",
+            len(normalized_docs),
+            file_path.name,
+        )
         return normalized_docs
