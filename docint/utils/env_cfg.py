@@ -94,7 +94,7 @@ def load_path_env() -> PathConfig:
         qdrant_collections=Path(
             os.getenv("QDRANT_COL_DIR", "qdrant_collections")
         ).expanduser(),
-        required_exts=package_dir / "core" / "readers" / "required_exts.txt",
+        required_exts=package_dir / "utils" / "required_exts.txt",
         xdg_cache_home=Path(
             os.getenv("XDG_CACHE_HOME", xdg_cache_home_dir)
         ).expanduser(),
