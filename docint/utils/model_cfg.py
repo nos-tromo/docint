@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+import whisper
 from dotenv import load_dotenv
 from huggingface_hub import snapshot_download
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
@@ -87,6 +88,17 @@ def load_ollama_model(model_id: str, kw: str) -> None:
     logger.info("Loaded {} model: {}", kw, model_id)
 
 
+def load_whisper_model(model_id: str) -> None:
+    """
+    Loads and returns the Whisper model.
+
+    Args:
+        model_id (str): The name of the model to load.
+    """
+    whisper.load_model("turbo")
+    logger.info("Loaded whisper model: {}", model_id)
+
+
 def main() -> None:
     """
     Main function to verify configuration loading.
@@ -110,6 +122,8 @@ def main() -> None:
     )
     load_ollama_model(models.gen_model, "generator")
     load_ollama_model(models.vision_model, "vision")
+
+    load_whisper_model(models.whisper_model)
 
 
 if __name__ == "__main__":
