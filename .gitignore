@@ -79,5 +79,6 @@ docker-compose.override.yml
 !.dockerignore
 !.env.docker.example
 !.pre-commit-config.yaml
+!**/prompts/*.txt
 !**/required_exts.txt
 !AGENTS.md
