@@ -13,7 +13,7 @@ WORKDIR /app
 
 # Install essential system packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libmagic1 \
+    ca-certificates libmagic1 libgl1 \
  && rm -rf /var/lib/apt/lists/*
 
 # Install system dependencies
@@ -25,6 +25,11 @@ COPY pyproject.toml uv.lock ./
 # Install dependencies (without the project itself)
 RUN uv sync --frozen --no-cache --no-dev --no-install-project
 
+# Copy the files needed for model downloading to cache this layer and preload models
+COPY docint/__init__.py docint/
+COPY docint/utils/ docint/utils/
+RUN uv run python -m docint.utils.model_cfg
+
 # Copy the rest of the application code
 COPY . .
 
@@ -33,4 +38,4 @@ RUN uv sync --frozen --no-cache --no-dev
 
 # Expose the application port and define the default command
 EXPOSE 8000
-CMD ["uv", "run", "--", "uvicorn", "docint.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uv run load-models && uv run uvicorn docint.core.api:app --host 0.0.0.0 --port 8000"]
