@@ -61,7 +61,13 @@ The application can be used both via Docker for containerized environments and d
 
 ### Local Setup
 
-1. **Install Dependencies**
+1. **Start Infrastructure Services**
+
+   Ensure that **Ollama** and **Qdrant** are running locally or are accessible via network.
+   - **Ollama**: Must be running (default: `http://localhost:11434`).
+   - **Qdrant**: Must be running (default: `http://localhost:6333`).
+
+2. **Install Dependencies**
 
    Navigate to the project root and synchronize dependencies:
 
@@ -69,26 +75,31 @@ The application can be used both via Docker for containerized environments and d
    uv sync
    ```
 
-2. **Download Models**
+3. **Download Models**
 
-   Pre-download the required models to your local cache to enable offline functionality:
+   Pre-download the required models to your local cache to enable offline functionality.
+   *Note: Ollama must be running for this step to pull the LLM/VLM models.*
 
    ```bash
    uv run load-models
    ```
 
-3. **Run the Application**
+4. **Run the Application**
 
-   Start the Streamlit application (frontend + backend logic):
+   The application consists of a backend API and a Streamlit frontend. You need to run both.
 
-   ```bash
-   uv run docint
-   ```
-
-   Or run the backend API separately if needed:
+   **Start the Backend:**
 
    ```bash
    uv run uvicorn docint.core.api:app --reload
+   ```
+
+   **Start the Frontend:**
+
+   In a new terminal window:
+
+   ```bash
+   uv run docint
    ```
 
 ## Configuration
@@ -174,7 +185,7 @@ See `docint/utils/env_cfg.py` for the full list of configuration options and def
 
 2. **Verify the Backend**
 
-   The backend will be available at `http://127.0.0.1:8000/`.
+   The backend will be available at `http://localhost:8000/docs`.
 
 ---
 
