@@ -36,7 +36,7 @@ from docint.utils.clean_text import basic_clean
 # --- Environment variables ---
 load_dotenv()
 
-OLLAMA_THINKING: str = os.getenv("OLLAMA_THINKING", "false")
+OLLAMA_THINKING: bool = os.getenv("OLLAMA_THINKING", "true").lower() == "true"
 RETRIEVE_SIMILARITY_TOP_K: int = int(os.getenv("RETRIEVE_SIMILARITY_TOP_K", "20"))
 
 CleanFn = Callable[[str], str]
@@ -71,7 +71,7 @@ class RAG:
     context_window: int = -1
     temperature: float = 0.2
     request_timeout: int = 1200
-    thinking: bool = bool(OLLAMA_THINKING)
+    thinking: bool = OLLAMA_THINKING
     ollama_options: dict[str, Any] | None = None
 
     # --- Reranking / retrieval ---
@@ -727,6 +727,11 @@ class RAG:
         - source_nodes (list[NodeWithScore])
         - metadata differences
 
+        Args:
+            query (str): The original query string.
+            result (Any): The response object from the query engine.
+            reason (str | None): Optional reasoning string.
+
         Returns:
             dict[str, Any]: A dictionary containing:
             - 'query': The original query string.
@@ -741,7 +746,6 @@ class RAG:
                 - 'row': Optional row index if the source is a table.
             - 'table_info': Optional dictionary with 'n_rows' and 'n_cols' for table sources.
         """
-
         # --- normalize response text ---
         resp_text = None
         if hasattr(result, "response") and isinstance(result.response, str):
@@ -754,11 +758,14 @@ class RAG:
             resp_text = ""
 
         # strip <think>…</think> (optional)
-        if resp_text.startswith("<think>"):
-            m = re.search(r"<think>(.*?)</think>", resp_text, flags=re.DOTALL)
+        logger.debug("Raw response text (first 500 chars): {}", resp_text[:500])
+        m = re.search(
+            r"<think>(.*?)</think>", resp_text, flags=re.DOTALL | re.IGNORECASE
+        )
+        if m:
             reason = (m.group(1).strip() if m else None) or reason
             resp_text = re.sub(
-                r"<think>.*?</think>", "", resp_text, flags=re.DOTALL
+                r"<think>.*?</think>", "", resp_text, flags=re.DOTALL | re.IGNORECASE
             ).strip()
 
         # --- normalize source_nodes ---
