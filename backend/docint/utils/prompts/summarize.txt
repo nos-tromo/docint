@@ -1,1 +1,0 @@
-Summarize the key facts and user intent from the following chat turns. Keep it under 10 sentences and avoid speculation.
