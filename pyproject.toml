@@ -8,6 +8,7 @@ authors = [
 requires-python = ">=3.11,<3.14"
 license = "Apache-2.0"
 dependencies = [
+  "docling>=2.64.1",
   "fastapi>=0.116.1",
   "fastembed>=0.7.3",
   "fastparquet>=2024.11.0",
@@ -26,6 +27,7 @@ dependencies = [
   "pillow>=11.3.0",
   "pyarrow>=21.0.0",
   "pydantic>=2.11.7",
+  "pypdf>=6.4.1",
   "python-dotenv>=1.1.1",
   "python-magic>=0.4.27",
   "python-multipart>=0.0.20",
