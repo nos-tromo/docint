@@ -75,7 +75,11 @@ def test_directory_ingestion_attaches_file_hash(tmp_path: Path) -> None:
     rag = RAG(qdrant_collection="test")
     rag.data_dir = tmp_path
     pipeline = rag._build_ingestion_pipeline()
-    docs, _ = pipeline.build(existing_hashes=None)
+
+    docs = []
+    for batch_docs, _ in pipeline.build(existing_hashes=None):
+        docs.extend(batch_docs)
+
     digest = compute_file_hash(file_path)
 
     assert docs
