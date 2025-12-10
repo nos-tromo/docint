@@ -52,7 +52,6 @@
 **/output/
 **/results/
 **/session/
-**/test*/
 **/uploads/
 **/venv/
 **/workbench/
@@ -67,29 +66,6 @@
 # SQLite DBs (optional)
 *.sqlite3
 *.db
-
-# -----------------
-# Frontend (Node/Vite)
-# -----------------
-
-**/node_modules/
-**/.parcel-cache/
-**/dist/
-**/dist-ssr/
-**/.env.*
-**/*.local
-**/.turbo/
-**/.output/
-**/coverage/
-
-# Frontend logs
-**/logs/
-**/*.log
-**/npm-debug.log*
-**/yarn-debug.log*
-**/yarn-error.log*
-**/pnpm-debug.log*
-**/lerna-debug.log*
 
 # Optional editor/IDE/project file ignores (if working in frontend separately)
 **/.suo
@@ -127,11 +103,7 @@ docker-compose.override.yml
 !.github/
 !.github/workflows/
 !.github/workflows/ci.yml
-!**/.dockerignore
-!frontend/index.html
-!backend/.pre-commit-config.yaml
-!backend/tests/
-!backend/tests/**.py
-!backend/docint/utils/prompts/*.txt
-!backend/docint/core/readers/required_exts.txt
+!.dockerignore
+!.env.docker.example
+!.pre-commit-config.yaml
 !AGENTS.md
