@@ -103,13 +103,17 @@ def main() -> None:
     """
     Main function to verify configuration loading.
     """
+    # Load configurations
     paths = load_path_env()
     models = load_model_env()
 
-    logger.info("Paths: {}", paths)
-    logger.info("Models: {}", models)
+    # Log the loaded configurations
+    for path in paths.__dataclass_fields__.keys():
+        logger.info("{} path: {}", path, getattr(paths, path))
+    for model in models.__dataclass_fields__.keys():
+        logger.info("{}: {}", model, getattr(models, model))
 
-    # Load the RAG models
+    # Load the app's models
     load_hf_model(
         model_id=models.embed_model,
         cache_folder=paths.hf_hub_cache,
@@ -120,6 +124,7 @@ def main() -> None:
         cache_folder=paths.hf_hub_cache,
         kw="sparse",
     )
+
     load_ollama_model(models.gen_model, "generator")
     load_ollama_model(models.vision_model, "vision")
 
