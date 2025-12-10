@@ -65,15 +65,15 @@ class DocumentIngestionPipeline:
 
     def build(
         self, existing_hashes: set[str] | None = None
-    ) -> tuple[list[Document], list[BaseNode]]:
+    ) -> Iterable[tuple[list[Document], list[BaseNode]]]:
         """
-        Execute the full ingestion pipeline and return cleaned docs + nodes.
+        Execute the full ingestion pipeline and yield batches of cleaned docs + nodes.
 
         Args:
             existing_hashes (set[str] | None): A set of existing document hashes to filter out already processed documents.
 
-        Returns:
-            tuple[list[Document], list[BaseNode]]: The cleaned documents and their corresponding nodes.
+        Yields:
+            tuple[list[Document], list[BaseNode]]: A batch of cleaned documents and their corresponding nodes.
 
         Raises:
             RuntimeError: If the directory reader fails to initialize.
@@ -89,15 +89,36 @@ class DocumentIngestionPipeline:
         if existing_hashes:
             self._filter_input_files(existing_hashes)
 
-        docs = self.dir_reader.load_data()
+        # Process in batches
+        current_docs: list[Document] = []
+        files_processed = 0
+
+        # iter_data() yields List[Document] per file
+        for file_docs in self.dir_reader.iter_data():
+            current_docs.extend(file_docs)
+            files_processed += 1
+
+            if files_processed >= self.buffer_size:
+                yield self._process_batch(current_docs, existing_hashes)
+                current_docs = []
+                files_processed = 0
+
+        if current_docs:
+            yield self._process_batch(current_docs, existing_hashes)
+
+    def _process_batch(
+        self, docs: list[Document], existing_hashes: set[str] | None
+    ) -> tuple[list[Document], list[BaseNode]]:
         docs = self._attach_clean_text(docs)
         docs = self._ensure_file_hashes(docs)
         # We still keep this filter as a safety net, though pre-filtering should catch most
         docs = self._filter_docs_by_existing_hashes(docs, existing_hashes)
         nodes = self._create_nodes(docs)
 
+        # Update internal state (optional, but useful for debugging last batch)
         self.docs = docs
         self.nodes = nodes
+
         return docs, nodes
 
     def _filter_input_files(self, existing_hashes: set[str]) -> None:
