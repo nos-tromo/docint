@@ -686,11 +686,19 @@ class RAG:
 
     def create_index(self) -> None:
         """
-        Materialize a VectorStoreIndex for the nodes currently in memory.
+        Materialize a VectorStoreIndex.
+        If nodes are present in memory, create from nodes.
+        Otherwise, load from vector store.
         """
         vector_store = self._vector_store()
         storage_ctx = self._storage_context(vector_store)
-        self.index = self._index(storage_ctx)
+
+        if self.nodes:
+            self.index = self._index(storage_ctx)
+        else:
+            self.index = VectorStoreIndex.from_vector_store(
+                vector_store=vector_store, embed_model=self.embed_model
+            )
 
     def create_query_engine(self) -> None:
         """
@@ -934,12 +942,25 @@ class RAG:
         """
         self.data_dir = Path(data_dir) if isinstance(data_dir, str) else data_dir
         pipeline = self._build_ingestion_pipeline()
-        docs, nodes = pipeline.build(self._get_existing_file_hashes())
-        self.dir_reader = pipeline.dir_reader
-        self.docs = docs
-        self.nodes = nodes
 
-        self.create_index()
+        # Initialize index (load existing or create new wrapper)
+        vector_store = self._vector_store()
+        # We use from_vector_store to attach to the store.
+        # If the store is empty, it will be populated as we insert nodes.
+        self.index = VectorStoreIndex.from_vector_store(
+            vector_store=vector_store, embed_model=self.embed_model
+        )
+
+        # Process batches from the pipeline generator
+        for docs, nodes in pipeline.build(self._get_existing_file_hashes()):
+            if nodes:
+                self.index.insert_nodes(nodes)
+
+        self.dir_reader = pipeline.dir_reader
+        # Clear memory-heavy lists as we've persisted them to the vector store
+        self.docs = []
+        self.nodes = []
+
         if build_query_engine:
             self.create_query_engine()
         else:
@@ -981,15 +1002,22 @@ class RAG:
         """
         self.data_dir = Path(data_dir) if isinstance(data_dir, str) else data_dir
         pipeline = self._build_ingestion_pipeline()
-        docs, nodes = pipeline.build(self._get_existing_file_hashes())
+
+        # Initialize index
+        vector_store = self._vector_store()
+        self.index = VectorStoreIndex.from_vector_store(
+            vector_store=vector_store, embed_model=self.embed_model
+        )
+
+        # Process batches
+        for docs, nodes in pipeline.build(self._get_existing_file_hashes()):
+            if nodes:
+                await self.index.ainsert_nodes(nodes)
+
         self.dir_reader = pipeline.dir_reader
-        self.docs = docs
-        self.nodes = nodes
-        if self.index is None:
-            logger.error("RuntimeError: Index is not initialized for async ingestion.")
-            raise RuntimeError("Index is not initialized for async ingestion.")
-        # Concurrent, non-blocking upsert into Qdrant via aclient
-        await self.index.ainsert_nodes(self.nodes)
+        self.docs = []
+        self.nodes = []
+
         if build_query_engine:
             if self.query_engine is None:
                 self.create_query_engine()
@@ -1171,3 +1199,17 @@ class RAG:
 
         resp = engine.query(summary_prompt)
         return self._normalize_response_data(summary_prompt, resp)
+
+    def unload_models(self) -> None:
+        """
+        Unload models to free up memory.
+        """
+        self._embed_model = None
+        self._gen_model = None
+        self._reranker = None
+        import gc
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        logger.info("Models unloaded and memory cleared.")
