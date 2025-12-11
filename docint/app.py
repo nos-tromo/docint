@@ -30,6 +30,8 @@ def setup_app():
         st.session_state.session_id = None
     if "selected_collection" not in st.session_state:
         st.session_state.selected_collection = ""
+    if "preview_url" not in st.session_state:
+        st.session_state.preview_url = None
 
 
 def render_sidebar():
@@ -199,22 +201,30 @@ def render_chat() -> None:
 
     if not st.session_state.selected_collection:
         st.info("Please select or create a collection from the sidebar to start.")
+        return
+
+    if st.session_state.preview_url:
+        col1, col2 = st.columns([1, 1])
     else:
+        col1 = st.container()
+        col2 = None
+
+    with col1:
         st.caption(f"Current Collection: {st.session_state.selected_collection}")
 
         # Display history
-        for msg in st.session_state.messages:
+        for i, msg in enumerate(st.session_state.messages):
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-                # Display reasoning if available (custom field we might add)
+                # Display reasoning if available
                 if "reasoning" in msg and msg["reasoning"]:
                     with st.expander("Reasoning"):
                         st.markdown(msg["reasoning"])
 
                 if "sources" in msg and msg["sources"]:
                     with st.expander("View Sources"):
-                        for src in msg["sources"]:
+                        for j, src in enumerate(msg["sources"]):
                             # Construct preview
                             loc = ""
                             if src.get("page"):
@@ -222,44 +232,85 @@ def render_chat() -> None:
                             if src.get("row"):
                                 loc += f" (Row {src['row']})"
 
-                            st.markdown(f"**{src.get('filename')}{loc}**")
+                            score = ""
+                            if src.get("score"):
+                                score = f" - Score: {src['score']:.2f}"
+
+                            st.markdown(f"**{src.get('filename')}{loc}**{score}")
                             st.caption(src.get("preview_text", ""))
 
-                            # If we had a way to serve the file preview, we'd link it here
-                            # But Streamlit runs on a different port, so we'd need to proxy or link to backend
                             if src.get("file_hash"):
                                 link = f"{API_URL}/sources/preview?collection={st.session_state.selected_collection}&file_hash={src['file_hash']}"
+                                if st.button("Preview", key=f"btn_{i}_{j}"):
+                                    st.session_state.preview_url = link
+                                    st.rerun()
                                 st.markdown(f"[Download/View Original]({link})")
                             st.divider()
 
-        # Chat Input
-        if prompt := st.chat_input("Ask a question..."):
-            # 1. User message
-            st.session_state.messages.append({"role": "user", "content": prompt})
+    if col2:
+        with col2:
+            # st.subheader("Document Preview")
+            st.markdown(
+                f'<iframe src="{st.session_state.preview_url}" width="100%" height="800px" style="border:1px solid #ccc; border-radius:5px;"></iframe>',
+                unsafe_allow_html=True,
+            )
+            if st.button("Close Preview"):
+                st.session_state.preview_url = None
+                st.rerun()
+
+    # Chat Input
+    if prompt := st.chat_input("Ask a question..."):
+        # 1. User message
+        st.session_state.messages.append({"role": "user", "content": prompt})
+
+        with col1:
             with st.chat_message("user"):
                 st.markdown(prompt)
 
             # 2. Bot response
             with st.chat_message("assistant"):
-                with st.spinner("Thinking..."):
-                    payload = {
-                        "question": prompt,
-                        "session_id": st.session_state.session_id,
-                    }
-                    try:
-                        resp = requests.post(f"{API_URL}/query", json=payload)
+                # Placeholder for answer
+                answer_placeholder = st.empty()
+                full_answer = ""
+                sources = []
+                reasoning = None
+
+                payload = {
+                    "question": prompt,
+                    "session_id": st.session_state.session_id,
+                }
+                try:
+                    with requests.post(
+                        f"{API_URL}/stream_query", json=payload, stream=True
+                    ) as resp:
                         if resp.status_code == 200:
-                            data = resp.json()
+                            for line in resp.iter_lines():
+                                if line:
+                                    decoded_line = line.decode("utf-8")
+                                    if decoded_line.startswith("data: "):
+                                        data_str = decoded_line[6:]
+                                        try:
+                                            data = json.loads(data_str)
+                                            if "token" in data:
+                                                full_answer += data["token"]
+                                                answer_placeholder.markdown(
+                                                    full_answer + "▌"
+                                                )
+                                            elif "sources" in data:
+                                                # End of stream metadata
+                                                sources = data.get("sources", [])
+                                                reasoning = data.get("reasoning")
+                                                st.session_state.session_id = data.get(
+                                                    "session_id"
+                                                )
+                                            elif "error" in data:
+                                                st.error(
+                                                    f"Stream error: {data['error']}"
+                                                )
+                                        except json.JSONDecodeError:
+                                            pass
 
-                            answer = data["answer"]
-                            sources = data.get("sources", [])
-                            reasoning = data.get(
-                                "reasoning"
-                            )  # If backend returns it (we added it recently!)
-
-                            st.session_state.session_id = data.get("session_id")
-
-                            st.markdown(answer)
+                            answer_placeholder.markdown(full_answer)
 
                             if reasoning:
                                 with st.expander("Reasoning"):
@@ -267,14 +318,20 @@ def render_chat() -> None:
 
                             if sources:
                                 with st.expander("View Sources"):
-                                    for src in sources:
+                                    for j, src in enumerate(sources):
                                         loc = ""
                                         if src.get("page"):
                                             loc += f" (Page {src['page']})"
                                         if src.get("row"):
                                             loc += f" (Row {src['row']})"
 
-                                        st.markdown(f"**{src.get('filename')}{loc}**")
+                                        score = ""
+                                        if src.get("score"):
+                                            score = f" - Score: {src['score']:.2f}"
+
+                                        st.markdown(
+                                            f"**{src.get('filename')}{loc}**{score}"
+                                        )
                                         st.caption(src.get("preview_text", ""))
                                         if src.get("file_hash"):
                                             link = f"{API_URL}/sources/preview?collection={st.session_state.selected_collection}&file_hash={src['file_hash']}"
@@ -286,18 +343,19 @@ def render_chat() -> None:
                             # 3. Save bot message
                             msg_entry = {
                                 "role": "assistant",
-                                "content": answer,
+                                "content": full_answer,
                                 "sources": sources,
                             }
                             if reasoning:
                                 msg_entry["reasoning"] = reasoning
                             st.session_state.messages.append(msg_entry)
+                            st.rerun()
                         else:
                             logger.error(f"Query failed: {resp.text}")
                             st.error(f"Query failed: {resp.text}")
-                    except Exception as e:
-                        logger.error(f"Error: {e}")
-                        st.error(f"Error: {e}")
+                except Exception as e:
+                    logger.error(f"Error: {e}")
+                    st.error(f"Error: {e}")
 
 
 def main():
