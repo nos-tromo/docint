@@ -23,6 +23,32 @@ def setup_app():
     set_offline_env()
     setup_logging()
     st.set_page_config(page_title="DocInt", layout="wide")
+    st.title("Document Intelligence")
+
+    # Custom CSS to spread tabs evenly
+    st.markdown(
+        """
+        <style>
+            .stTabs [data-baseweb="tab-list"] {
+                gap: 2px;
+            }
+            .stTabs [data-baseweb="tab"] {
+                height: 50px;
+                white-space: pre-wrap;
+                background-color: transparent;
+                border-radius: 4px 4px 0px 0px;
+                gap: 1px;
+                padding-top: 10px;
+                padding-bottom: 10px;
+                flex: 1;
+            }
+            .stTabs [data-baseweb="tab"] p {
+                font-size: 1.1rem !important;
+            }
+        </style>
+    """,
+        unsafe_allow_html=True,
+    )
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -39,9 +65,10 @@ def render_sidebar():
     Render the sidebar controls.
     """
     with st.sidebar:
-        st.header("Configuration")
+        # Add top padding so sidebar content starts lower
+        st.markdown("<div style='height:61px'></div>", unsafe_allow_html=True)
 
-        # 1. Collection Selection
+        # Collection Selection
         try:
             resp = requests.get(f"{API_URL}/collections/list")
             if resp.status_code == 200:
@@ -52,7 +79,9 @@ def render_sidebar():
                     index = cols.index(st.session_state.selected_collection)
 
                 selected = st.selectbox(
-                    "Collection", cols, index=index if cols else None
+                    "Collection",
+                    [col.strip() for col in cols],
+                    index=index if cols else None,
                 )
 
                 if selected and selected != st.session_state.selected_collection:
@@ -79,125 +108,193 @@ def render_sidebar():
 
         st.divider()
 
-        # 2. Ingestion
-        st.subheader("Ingestion")
+        # Session Management
+        st.subheader("Chat History")
 
-        # New collection input
-        new_col = st.text_input("New Collection Name")
-        target_col = new_col if new_col else st.session_state.selected_collection
+        # New Chat Button
+        if st.button(
+            "➕ New Chat",
+            use_container_width=True,
+            type="primary" if st.session_state.session_id is None else "secondary",
+        ):
+            st.session_state.session_id = None
+            st.session_state.messages = []
+            st.rerun()
 
-        uploaded_files = st.file_uploader(
-            "Upload Documents", accept_multiple_files=True
-        )
+        try:
+            resp = requests.get(f"{API_URL}/sessions/list")
+            if resp.status_code == 200:
+                sessions = resp.json().get("sessions", [])
 
-        with st.expander("Advanced Options"):
-            hybrid_search = st.checkbox("Hybrid Search", value=True)
-            table_row_limit = st.number_input(
-                "Table Row Limit", min_value=0, value=0, help="0 for no limit"
-            )
-            table_row_filter = st.text_input(
-                "Table Row Filter", help="Pandas query string"
-            )
+                for s in sessions:
+                    # Determine button type based on active session
+                    b_type = (
+                        "primary"
+                        if s["id"] == st.session_state.session_id
+                        else "secondary"
+                    )
 
-        if uploaded_files and st.button("Upload & Ingest"):
-            if not target_col:
-                logger.error("No target collection specified.")
-                st.error("Please select or enter a collection name.")
-            else:
-                with st.status("Processing...", expanded=True) as status:
-                    files = [("files", (f.name, f, f.type)) for f in uploaded_files]
-                    data = {
-                        "collection": target_col,
-                        "hybrid": str(hybrid_search),
-                    }
-                    if table_row_limit > 0:
-                        data["table_row_limit"] = str(table_row_limit)
-                    if table_row_filter:
-                        data["table_row_filter"] = table_row_filter
-
-                    try:
-                        # Use stream=True to handle SSE if possible, or just wait for response
-                        # Since requests doesn't parse SSE automatically, we'll just read lines
-                        response = requests.post(
-                            f"{API_URL}/ingest/upload",
-                            data=data,
-                            files=files,
-                            stream=True,
-                        )
-
-                        if response.status_code == 200:
-                            for line in response.iter_lines():
-                                if line:
-                                    decoded_line = line.decode("utf-8")
-                                    if decoded_line.startswith("data: "):
-                                        event_data = json.loads(decoded_line[6:])
-                                        # We could update status here based on event type
-                                        # But for now, just logging or simple updates
-                                        if "filename" in event_data:
-                                            logger.info(
-                                                f"Processed {event_data['filename']}"
-                                            )
-                                            status.write(
-                                                f"Processed {event_data['filename']}"
-                                            )
-                                        if "message" in event_data:  # Error
-                                            logger.error(
-                                                f"Error: {event_data['message']}"
-                                            )
-                                            status.write(
-                                                f"Error: {event_data['message']}"
-                                            )
-
-                            status.update(
-                                label="Ingestion complete!",
-                                state="complete",
-                                expanded=False,
+                    if st.button(
+                        s["title"],
+                        key=f"sess_{s['id']}",
+                        use_container_width=True,
+                        type=b_type,
+                    ):
+                        if st.session_state.session_id != s["id"]:
+                            st.session_state.session_id = s["id"]
+                            # Load History
+                            h_resp = requests.get(
+                                f"{API_URL}/sessions/{s['id']}/history"
                             )
-                            st.success("Ingestion complete!")
-                            # Refresh collections list if new one was created
-                            if new_col:
-                                st.rerun()
-                        else:
-                            status.update(label="Ingestion failed", state="error")
-                            logger.error(f"Ingestion failed: {response.text}")
-                            st.error(f"Ingestion failed: {response.text}")
-                    except Exception as e:
-                        status.update(label="Error", state="error")
-                        logger.error(f"Error during ingestion: {e}")
-                        st.error(f"Error during ingestion: {e}")
-
-        st.divider()
-        if st.button("Summarize Collection"):
-            if not st.session_state.selected_collection:
-                logger.error("No collection selected.")
-                st.error("No collection selected.")
-            else:
-                with st.spinner("Generating summary..."):
-                    try:
-                        resp = requests.post(f"{API_URL}/summarize")
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            st.session_state.messages.append(
-                                {
-                                    "role": "assistant",
-                                    "content": f"**Summary:** {data['summary']}",
-                                    "sources": data.get("sources", []),
-                                }
-                            )
+                            if h_resp.status_code == 200:
+                                st.session_state.messages = h_resp.json().get(
+                                    "messages", []
+                                )
                             st.rerun()
-                        else:
-                            logger.error(f"Summarization failed: {resp.text}")
-                            st.error(f"Summarization failed: {resp.text}")
-                    except Exception as e:
-                        logger.error(f"Error: {e}")
-                        st.error(f"Error: {e}")
+
+                # Delete button for active session
+                if st.session_state.session_id is not None:
+                    st.divider()
+                    if st.button(
+                        "🗑️ Delete Current Chat",
+                        type="secondary",
+                        use_container_width=True,
+                    ):
+                        requests.delete(
+                            f"{API_URL}/sessions/{st.session_state.session_id}"
+                        )
+                        st.session_state.session_id = None
+                        st.session_state.messages = []
+                        st.rerun()
+
+            else:
+                st.error("Failed to load sessions")
+
+        except Exception as e:
+            logger.warning(f"Failed to fetch sessions: {e}")
+
+
+def render_ingestion():
+    """
+    Render the ingestion interface.
+    """
+    st.header("Ingestion")
+
+    # New collection input
+    new_col = st.text_input("New Collection Name")
+    target_col = new_col if new_col else st.session_state.selected_collection
+
+    uploaded_files = st.file_uploader("Upload Documents", accept_multiple_files=True)
+
+    with st.expander("Advanced Options"):
+        table_row_limit = st.number_input(
+            "Table Row Limit", min_value=0, value=0, help="0 for no limit"
+        )
+        table_row_filter = st.text_input("Table Row Filter", help="Pandas query string")
+
+    if uploaded_files and st.button("Upload & Ingest"):
+        if not target_col:
+            logger.error("No target collection specified.")
+            st.error("Please select or enter a collection name.")
+        else:
+            with st.status("Processing...", expanded=True) as status:
+                files = [("files", (f.name, f, f.type)) for f in uploaded_files]
+                data = {
+                    "collection": target_col,
+                    "hybrid": "True",
+                }
+                if table_row_limit > 0:
+                    data["table_row_limit"] = str(table_row_limit)
+                if table_row_filter:
+                    data["table_row_filter"] = table_row_filter
+
+                try:
+                    # Use stream=True to handle SSE if possible, or just wait for response
+                    # Since requests doesn't parse SSE automatically, we'll just read lines
+                    response = requests.post(
+                        f"{API_URL}/ingest/upload",
+                        data=data,
+                        files=files,
+                        stream=True,
+                    )
+
+                    if response.status_code == 200:
+                        for line in response.iter_lines():
+                            if line:
+                                decoded_line = line.decode("utf-8")
+                                if decoded_line.startswith("data: "):
+                                    event_data = json.loads(decoded_line[6:])
+                                    # We could update status here based on event type
+                                    # But for now, just logging or simple updates
+                                    if "filename" in event_data:
+                                        logger.info(
+                                            f"Processed {event_data['filename']}"
+                                        )
+                                        status.write(
+                                            f"Processed {event_data['filename']}"
+                                        )
+                                    if "message" in event_data:  # Error
+                                        logger.error(f"Error: {event_data['message']}")
+                                        status.write(f"Error: {event_data['message']}")
+
+                        status.update(
+                            label="Ingestion complete!",
+                            state="complete",
+                            expanded=False,
+                        )
+                        st.success("Ingestion complete!")
+                        # Refresh collections list if new one was created
+                        if new_col:
+                            st.rerun()
+                    else:
+                        status.update(label="Ingestion failed", state="error")
+                        logger.error(f"Ingestion failed: {response.text}")
+                        st.error(f"Ingestion failed: {response.text}")
+                except Exception as e:
+                    status.update(label="Error", state="error")
+                    logger.error(f"Error during ingestion: {e}")
+                    st.error(f"Error during ingestion: {e}")
+
+
+def render_analysis():
+    """
+    Render the analysis interface.
+    """
+    st.header("Analysis")
+    st.info("Generate summaries and insights from your collection.")
+
+    if st.button("Summarize Collection"):
+        if not st.session_state.selected_collection:
+            logger.error("No collection selected.")
+            st.error("No collection selected.")
+        else:
+            with st.spinner("Generating summary..."):
+                try:
+                    resp = requests.post(f"{API_URL}/summarize")
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        st.markdown(
+                            f"### Summary of {st.session_state.selected_collection}"
+                        )
+                        st.markdown(data["summary"])
+
+                        if data.get("sources"):
+                            with st.expander("Sources used for summary"):
+                                for src in data["sources"]:
+                                    st.markdown(f"- {src.get('filename')}")
+                    else:
+                        logger.error(f"Summarization failed: {resp.text}")
+                        st.error(f"Summarization failed: {resp.text}")
+                except Exception as e:
+                    logger.error(f"Error: {e}")
+                    st.error(f"Error: {e}")
 
 
 def render_chat() -> None:
     """
     Render the main chat interface.
     """
-    st.title("Document Intelligence")
+    st.header("Chat with your Documents")
 
     if not st.session_state.selected_collection:
         st.info("Please select or create a collection from the sidebar to start.")
@@ -361,7 +458,19 @@ def render_chat() -> None:
 def main():
     setup_app()
     render_sidebar()
-    render_chat()
+
+    tab_chat, tab_ingest, tab_analysis = st.tabs(
+        ["💬 Chat", "📥 Ingest", "📊 Analysis"]
+    )
+
+    with tab_chat:
+        render_chat()
+
+    with tab_ingest:
+        render_ingestion()
+
+    with tab_analysis:
+        render_analysis()
 
 
 # ---- Streamlit CLI wrapper ----------------------------------------------- #
