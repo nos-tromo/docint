@@ -162,7 +162,7 @@ class RAG:
             self.reader_required_exts = [f".{line.strip()}" for line in f]
 
         if self.prompt_dir:
-            self.summarize_prompt_path: Path = self.prompt_dir / "summarize.txt"
+            self.summarize_prompt_path = self.prompt_dir / "summarize.txt"
 
         if self.summarize_prompt_path is None:
             logger.error(
@@ -849,6 +849,7 @@ class RAG:
                 "filename": filename,
                 "filetype": filetype,
                 "source": source_kind,
+                "score": getattr(nws, "score", None),
             }
             if file_hash:
                 src["file_hash"] = file_hash
@@ -1172,6 +1173,20 @@ class RAG:
         if self.sessions is None:
             self.sessions = SessionManager(self)
         return self.sessions.chat(user_msg)
+
+    def stream_chat(self, user_msg: str) -> Any:
+        """
+        Proxy stream chat turns to SessionManager.
+
+        Args:
+            user_msg (str): The user's chat message.
+
+        Returns:
+            Any: A generator yielding response chunks.
+        """
+        if self.sessions is None:
+            self.sessions = SessionManager(self)
+        return self.sessions.stream_chat(user_msg)
 
     def summarize_collection(self, prompt: str | None = None) -> dict[str, Any]:
         """
