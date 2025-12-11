@@ -97,6 +97,14 @@ class IngestOut(BaseModel):
     hybrid: bool
 
 
+class SessionListOut(BaseModel):
+    sessions: list[dict]
+
+
+class SessionHistoryOut(BaseModel):
+    messages: list[dict]
+
+
 # --- API Endpoints ---
 
 
@@ -266,6 +274,94 @@ def summarize() -> dict[str, list[dict] | str]:
         return {"summary": summary, "sources": sources}
     except HTTPException as e:
         logger.error("HTTPException: Error generating summary: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/sessions/list", response_model=SessionListOut, tags=["Sessions"])
+def list_sessions() -> dict[str, list[dict]]:
+    """
+    List all available chat sessions.
+
+    Returns:
+        dict[str, list[dict]]: A dictionary containing the list of sessions.
+
+    Raises:
+        ValueError: If the session manager is not initialized.
+        HTTPException: If an error occurs while listing sessions.
+    """
+    try:
+        if rag.sessions is None:
+            rag.start_session()  # Initialize session manager if needed
+
+        if rag.sessions is None:
+            raise ValueError("Session manager not initialized")
+
+        sessions = rag.sessions.list_sessions()
+        return {"sessions": sessions}
+    except Exception as e:
+        logger.error(f"Error listing sessions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/sessions/{session_id}/history",
+    response_model=SessionHistoryOut,
+    tags=["Sessions"],
+)
+def get_session_history(session_id: str) -> dict[str, list[dict]]:
+    """
+    Get history for a specific session.
+
+    Args:
+        session_id (str): The ID of the session.
+
+    Returns:
+        dict[str, list[dict]]: A dictionary containing the session messages.
+
+    Raises:
+        ValueError: If the session manager is not initialized.
+        HTTPException: If an error occurs while fetching session history.
+    """
+    try:
+        if rag.sessions is None:
+            rag.start_session()
+
+        if rag.sessions is None:
+            raise ValueError("Session manager not initialized")
+
+        messages = rag.sessions.get_session_history(session_id)
+        return {"messages": messages}
+    except Exception as e:
+        logger.error(f"Error fetching history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/sessions/{session_id}", tags=["Sessions"])
+def delete_session(session_id: str) -> dict[str, bool]:
+    """
+    Delete a session.
+
+    Args:
+        session_id (str): The ID of the session to delete.
+
+    Returns:
+        dict[str, bool]: A dictionary indicating whether the deletion was successful.
+
+    Raises:
+        ValueError: If the session manager is not initialized.
+        HTTPException: If an error occurs while deleting the session.
+    """
+    try:
+        if rag.sessions is None:
+            rag.start_session()
+
+        if rag.sessions is None:
+            raise ValueError("Session manager not initialized")
+
+        success = rag.sessions.delete_session(session_id)
+        return {"ok": success}
+    except Exception as e:
+        logger.error(f"Error deleting session: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
