@@ -8,6 +8,45 @@ from fastapi.testclient import TestClient
 import docint.core.api as api_module
 
 
+class DummySessionManager:
+    """
+    Dummy session manager for testing purposes.
+    """
+
+    def list_sessions(self) -> list[dict[str, Any]]:
+        """
+        List all sessions.
+
+        Returns:
+            list[dict[str, Any]]: A list of session dictionaries.
+        """
+        return [{"id": "123", "created_at": "2023-01-01", "title": "Test Chat"}]
+
+    def get_session_history(self, session_id: str) -> list[dict[str, Any]]:
+        """
+        Get the message history for a session.
+
+        Args:
+            session_id (str): The ID of the session.
+
+        Returns:
+            list[dict[str, Any]]: A list of message dictionaries.
+        """
+        return [{"role": "user", "content": "hi"}]
+
+    def delete_session(self, session_id: str) -> bool:
+        """
+        Delete a session by ID.
+
+        Args:
+            session_id (str): The ID of the session.
+
+        Returns:
+            bool: True if the session was successfully deleted, False otherwise.
+        """
+        return True
+
+
 class DummyRAG:
     """
     Dummy Retrieval-Augmented Generation (RAG) class for testing purposes.
@@ -21,7 +60,7 @@ class DummyRAG:
         self.index = object()
         self.query_engine = object()
         self.selected: list[str] = []
-        self.sessions: list[Any] = []
+        self.sessions = DummySessionManager()
         self.chats: list[str] = []
         self.created_index = 0  # Tracks the number of times an index is created
         self.created_query_engine = 0
@@ -71,7 +110,6 @@ class DummyRAG:
         Returns:
             str: The session ID.
         """
-        self.sessions.append(session_id)
         return session_id or "generated-session"
 
     def chat(self, question: str) -> dict[str, Any]:
@@ -289,6 +327,28 @@ def test_ingest_success(
         "hybrid": False,
     }
     assert called.args == ("docs", data_dir, False, None, None)
+
+
+def test_sessions_endpoints(client: TestClient) -> None:
+    """Test session management endpoints."""
+    # List
+    resp = client.get("/sessions/list")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["sessions"]) == 1
+    assert data["sessions"][0]["id"] == "123"
+
+    # History
+    resp = client.get("/sessions/123/history")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["messages"]) == 1
+    assert data["messages"][0]["content"] == "hi"
+
+    # Delete
+    resp = client.delete("/sessions/123")
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
 
 
 def test_ingest_missing_directory(
