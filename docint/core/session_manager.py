@@ -511,6 +511,107 @@ class SessionManager:
                 e,
             )
 
+    def list_sessions(self) -> list[dict[str, Any]]:
+        """
+        List all sessions ordered by creation date (descending).
+
+        Returns:
+            list[dict[str, Any]]: A list of session dictionaries.
+        """
+        with self._session_scope() as s:
+            convs = s.query(Conversation).order_by(Conversation.created_at.desc()).all()
+            results = []
+            for c in convs:
+                title = "New Chat"
+                if c.turns:
+                    first_turn = c.turns[0]
+                    title = (
+                        first_turn.user_text[:50] + "..."
+                        if len(first_turn.user_text) > 50
+                        else first_turn.user_text
+                    )
+
+                results.append(
+                    {
+                        "id": c.id,
+                        "created_at": c.created_at.isoformat(),
+                        "title": title,
+                    }
+                )
+            return results
+
+    def get_session_history(self, session_id: str) -> list[dict[str, Any]]:
+        """
+        Get the full message history for a session.
+
+        Args:
+            session_id (str): The ID of the session.
+
+        Returns:
+            list[dict[str, Any]]: A list of message dictionaries.
+        """
+        with self._session_scope() as s:
+            conv = s.query(Conversation).filter_by(id=session_id).first()
+            if not conv:
+                return []
+
+            messages = []
+            for t in conv.turns:
+                # User message
+                messages.append({"role": "user", "content": t.user_text})
+
+                # Assistant message
+                sources = []
+                for c in t.citations:
+                    text_val = ""
+                    if c.node_id:
+                        try:
+                            text_val = self._get_node_text_by_id(c.node_id) or ""
+                        except Exception:
+                            pass
+
+                    src = {
+                        "text": text_val,
+                        "preview_text": text_val[:280].strip() if text_val else "",
+                        "filename": c.filename,
+                        "filetype": c.filetype,
+                        "source": c.source,
+                        "score": c.score,
+                        "page": c.page,
+                        "row": c.row,
+                        # file_hash is missing in DB, so we can't link it
+                    }
+                    sources.append(src)
+
+                msg_entry = {
+                    "role": "assistant",
+                    "content": t.model_response,
+                    "sources": sources,
+                }
+                if t.reasoning:
+                    msg_entry["reasoning"] = t.reasoning
+                messages.append(msg_entry)
+
+            return messages
+
+    def delete_session(self, session_id: str) -> bool:
+        """
+        Delete a session.
+
+        Args:
+            session_id (str): The ID of the session to delete.
+
+        Returns:
+            bool: True if deleted, False otherwise.
+        """
+        with self._session_scope() as s:
+            conv = s.query(Conversation).filter_by(id=session_id).first()
+            if conv:
+                s.delete(conv)
+                s.commit()
+                return True
+            return False
+
     def _export_transcript(
         self, out_dir: Path, conv: Conversation, rolling_summary: str
     ) -> None:
