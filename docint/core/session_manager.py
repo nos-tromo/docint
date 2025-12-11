@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterator, TYPE_CHECKING, cast
 
 import pandas as pd
+from llama_index.core import Response
 from llama_index.core.chat_engine import CondenseQuestionChatEngine
 from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.core.memory import ChatMemoryBuffer
@@ -143,6 +144,73 @@ class SessionManager:
         self._persist_turn(session_id, user_msg, resp, response)
         self._maybe_update_summary(session_id)
         return response
+
+    def stream_chat(self, user_msg: str) -> Iterator[str | dict]:
+        """
+        Handle a streaming chat message from the user.
+
+        Args:
+            user_msg (str): The message from the user.
+
+        Yields:
+            str | dict: Chunks of text, followed by a dict with metadata.
+
+        Raises:
+            ValueError: If the user message is empty.
+            RuntimeError: If the index has not been initialized.
+        """
+        if not user_msg.strip():
+            logger.error("ValueError: Chat prompt cannot be empty.")
+            raise ValueError("Chat prompt cannot be empty.")
+
+        # Ensure index exists
+        if self.rag.index is None:
+            self.rag.create_index()
+
+        if self.rag.index is None:
+            raise RuntimeError("Index not initialized")
+
+        # Create a temporary streaming engine
+        k = min(max(self.rag.retrieve_similarity_top_k, self.rag.rerank_top_n * 8), 64)
+        streaming_engine = RetrieverQueryEngine.from_args(
+            retriever=self.rag.index.as_retriever(similarity_top_k=k),
+            llm=self.rag.gen_model,
+            node_postprocessors=[self.rag.reranker],
+            streaming=True,
+        )
+
+        session_id = self.session_id
+        if self.chat_engine is None or session_id is None:
+            session_id = self.start_session(session_id)
+
+        summary = self._get_rolling_summary(session_id)
+        retrieval_query = (
+            f"{summary}\n\nUser question: {user_msg}" if summary else user_msg
+        )
+
+        response = streaming_engine.query(retrieval_query)
+
+        full_text = ""
+        # response.response_gen is the generator
+        for token in response.response_gen:
+            full_text += token
+            yield token
+
+        # Create a Response object to reuse normalization logic
+        final_response = Response(
+            response=full_text, source_nodes=response.source_nodes
+        )
+
+        normalized = self.rag._normalize_response_data(user_msg, final_response)
+        self._persist_turn(session_id, user_msg, final_response, normalized)
+        self._maybe_update_summary(session_id)
+
+        # Yield metadata
+        yield {
+            "sources": normalized.get("sources", []),
+            "session_id": session_id,
+            "reasoning": normalized.get("reasoning"),
+        }
 
     def export_session(
         self, session_id: str | None = None, out_dir: str | Path = "session"

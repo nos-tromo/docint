@@ -195,6 +195,44 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/stream_query", tags=["Query"])
+async def stream_query(payload: QueryIn) -> StreamingResponse:
+    """
+    Handle a streaming query request.
+
+    Args:
+        payload (QueryIn): The query payload containing the question and session ID.
+
+    Returns:
+        StreamingResponse: A streaming response that yields SSE events during the query.
+
+    Raises:
+        HTTPException: If an error occurs while processing the streaming query.
+    """
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+
+    # Ensure index exists
+    if getattr(rag, "index", None) is None:
+        rag.create_index()
+
+    rag.start_session(payload.session_id)
+
+    async def event_generator():
+        try:
+            # Iterate over the sync generator
+            for chunk in rag.stream_chat(payload.question):
+                if isinstance(chunk, str):
+                    yield f"data: {json.dumps({'token': chunk})}\n\n"
+                elif isinstance(chunk, dict):
+                    yield f"data: {json.dumps(chunk)}\n\n"
+        except Exception as e:
+            logger.error(f"Stream error: {e}")
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
 @app.post("/summarize", response_model=SummarizeOut, tags=["Query"])
 def summarize() -> dict[str, list[dict] | str]:
     """
