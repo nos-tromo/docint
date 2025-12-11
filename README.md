@@ -37,11 +37,19 @@ The application can be used both via Docker for containerized environments and d
 
    Refer to the [Docker installation guide](https://docs.docker.com/get-docker/) if needed.
 
-2. **Choose a Profile**
+2. **Configure Environment**
+
+   Create the Docker environment file from the example:
+
+   ```bash
+   cp .env.docker.example .env.docker
+   ```
+
+3. **Choose a Profile**
 
    Decide between the CPU or GPU profile. The GPU profile requires a CUDA-compatible GPU and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) set up.
 
-3. **Start the Services**
+4. **Start the Services**
 
    ```bash
    docker compose --profile <cpu|gpu> up
@@ -53,30 +61,45 @@ The application can be used both via Docker for containerized environments and d
 
 ### Local Setup
 
-1. **Frontend**
+1. **Start Infrastructure Services**
 
-   To set up the frontend, navigate to the `frontend` directory and install the required dependencies:
+   Ensure that **Ollama** and **Qdrant** are running locally or are accessible via network.
+   - **Ollama**: Must be running (default: `http://localhost:11434`).
+   - **Qdrant**: Must be running (default: `http://localhost:6333`).
 
-   ```bash
-   cd frontend
-   npm install
-   ```
+2. **Install Dependencies**
 
-2. **Backend**
-
-   For the backend, navigate to the `backend` directory and synchronize dependencies:
+   Navigate to the project root and synchronize dependencies:
 
    ```bash
-   cd backend
    uv sync
    ```
 
 3. **Download Models**
 
-   Pre-download the required models to your local cache to enable offline functionality:
+   Pre-download the required models to your local cache to enable offline functionality.
+   *Note: Ollama must be running for this step to pull the LLM/VLM models.*
 
    ```bash
-   uv run load_models
+   uv run load-models
+   ```
+
+4. **Run the Application**
+
+   The application consists of a backend API and a Streamlit frontend. You need to run both.
+
+   **Start the Backend:**
+
+   ```bash
+   uv run uvicorn docint.core.api:app --reload
+   ```
+
+   **Start the Frontend:**
+
+   In a new terminal window:
+
+   ```bash
+   uv run docint
    ```
 
 ## Configuration
@@ -88,7 +111,7 @@ The application is configured via environment variables. Key variables include:
 - `EMBED_MODEL`: HuggingFace embedding model ID (default: `BAAI/bge-m3`).
 - `SPARSE_MODEL`: Sparse embedding model ID (default: `Qdrant/all_miniLM_L6_v2_with_attentions`).
 
-See `backend/docint/utils/env_cfg.py` for the full list of configuration options and defaults.
+See `docint/utils/env_cfg.py` for the full list of configuration options and defaults.
 
 ## Usage
 
@@ -108,7 +131,7 @@ See `backend/docint/utils/env_cfg.py` for the full list of configuration options
 
 1. **Run the Ingestion Command**
 
-   Start the ingestion process from `backend` with:
+   Start the ingestion process with:
 
    ```bash
    uv run ingest
@@ -127,7 +150,7 @@ See `backend/docint/utils/env_cfg.py` for the full list of configuration options
    Create a `queries.txt` file in the `~/docint` directory. Each line represents a single query. If no file is provided, a default summary query file will be generated.
 2. **Run the Query Command**
 
-   Execute the following command from `backend`:
+   Execute the following command:
 
    ```bash
    uv run query
@@ -141,28 +164,28 @@ See `backend/docint/utils/env_cfg.py` for the full list of configuration options
 
 ### [Development] Launching Frontend and Backend separately
 
-#### Frontend
+#### Frontend (Streamlit)
 
 1. **Start the Development Server**
 
    ```bash
-   npm run dev
+   uv run streamlit run docint/app.py
    ```
 
 2. **Access the Frontend**
-   Open your browser and navigate to `http://localhost:5173/`.
+   Open your browser and navigate to `http://localhost:8501/`.
 
-#### Backend
+#### Backend (FastAPI)
 
 1. **Start the Backend Server**
 
    ```bash
-   uv run uvicorn docint.app:app --reload
+   uv run uvicorn docint.core.api:app --reload
    ```
 
 2. **Verify the Backend**
 
-   The backend will be available at `http://127.0.0.1:8000/`.
+   The backend will be available at `http://localhost:8000/docs`.
 
 ---
 
@@ -170,7 +193,7 @@ See `backend/docint/utils/env_cfg.py` for the full list of configuration options
 
 1. **Access the Application**
 
-   Navigate to `http://localhost:8080/` in your browser to access the GUI for ingestion and querying tasks.
+   Navigate to `http://localhost:8501/` in your browser to access the GUI for ingestion and querying tasks.
 2. **Stop the Services**
 
    ```bash
@@ -195,17 +218,8 @@ RETRIEVE_SIMILARITY_TOP_K=50
 
 ## Unit Tests
 
-Run unit tests from `backend` to ensure functionality:
+Run unit tests to ensure functionality:
 
 ```bash
 uv run pytest
 ```
-
-## Roadmap
-
-- Expand GUI for ingestion ✅
-- Add WhisperReader for audio/video ✅
-- Add OCRReader for images ✅
-- Improve table and JSON reader functionalities
-- Implement explicit summarization features
-- Develop GraphRAG

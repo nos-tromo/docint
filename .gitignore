@@ -1,6 +1,6 @@
-# -----------------
+# ==================================
 # Global
-# -----------------
+# ==================================
 .DS_Store
 .env
 .mypy_cache
@@ -13,6 +13,7 @@
 *.log
 *.pyc
 *.pyo
+*.py[cod]
 *.so
 *Zone.Identifier
 *.egg-info/
@@ -52,73 +53,21 @@
 **/output/
 **/results/
 **/session/
-**/test*/
 **/uploads/
 **/venv/
 **/workbench/
 
-# -----------------
-# Backend (Python)
-# -----------------
-
-# Compiled files and caches
-*.py[cod]
-
-# SQLite DBs (optional)
-*.sqlite3
-*.db
-
-# -----------------
-# Frontend (Node/Vite)
-# -----------------
-
-**/node_modules/
-**/.parcel-cache/
-**/dist/
-**/dist-ssr/
-**/.env.*
-**/*.local
-**/.turbo/
-**/.output/
-**/coverage/
-
-# Frontend logs
-**/logs/
-**/*.log
-**/npm-debug.log*
-**/yarn-debug.log*
-**/yarn-error.log*
-**/pnpm-debug.log*
-**/lerna-debug.log*
-
-# Optional editor/IDE/project file ignores (if working in frontend separately)
-**/.suo
-**/.ntvs*
-**/.njsproj
-**/.sln
-**/.sw?
-
-# Global frontend output
-dist/
-build/
-
-# -----------------
+# ==================================
 # Docker
-# -----------------
+# ==================================
 *.pid
 *.sock
 docker-compose.override.yml
 
-# -----------------
+# ==================================
 # Hidden files
-# -----------------
+# ==================================
 .*
-
-# ==================================
-# Media & Data (Optional)
-# ==================================
-**/data*/
-**/models/
 
 # ==================================
 # Exceptions
@@ -127,11 +76,9 @@ docker-compose.override.yml
 !.github/
 !.github/workflows/
 !.github/workflows/ci.yml
-!**/.dockerignore
-!frontend/index.html
-!backend/.pre-commit-config.yaml
-!backend/tests/
-!backend/tests/**.py
-!backend/docint/utils/prompts/*.txt
-!backend/docint/core/readers/required_exts.txt
+!.dockerignore
+!.env.docker.example
+!.pre-commit-config.yaml
+!**/prompts/*.txt
+!**/required_exts.txt
 !AGENTS.md
