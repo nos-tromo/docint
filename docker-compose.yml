@@ -107,7 +107,8 @@ services:
     ports:
       - "8501:8501"
     environment:
-      - API_URL=http://backend:8000
+      - BACKEND_HOST=http://backend:8000
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
     develop:
       watch:
         - action: sync
