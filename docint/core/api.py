@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, cast
 
 import anyio
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -12,32 +12,30 @@ from starlette.middleware.cors import CORSMiddleware
 
 from docint.cli import ingest as ingest_module
 from docint.core.rag import RAG
+from docint.utils.env_cfg import load_host_env, load_path_env, set_offline_env
 from docint.utils.hashing import compute_file_hash
-from docint.utils.env_cfg import load_path_env, set_offline_env
 from docint.utils.logging_cfg import setup_logging
+from docint.utils.ollama_cfg import OllamaPipeline
 
 # --- Application Setup ---
 set_offline_env()
 setup_logging()
 
+# Load allowed origins from environment or default to Streamlit's default ports
+allowed_origins = load_host_env().cors_allowed_origins.split(",")
+
 app = FastAPI(title="Document Intelligence")
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "*",
-    ],
+    middleware_class=cast(Any, CORSMiddleware),
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 rag = RAG(qdrant_collection="")
-SUMMARY_PROMPT = (
-    "Provide a concise overview of the active collection. Highlight the main "
-    "topics, document types, and notable findings. Limit the response to 8 sentences."
-)
+
+SUMMARY_PROMPT = OllamaPipeline().load_prompt(kw="summarize")
 
 
 def _format_sse(event: str, data: dict[str, Any]) -> str:
