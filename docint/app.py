@@ -64,7 +64,7 @@ def render_sidebar():
     """
     with st.sidebar:
         # Add top padding so sidebar content starts lower
-        st.markdown("<div style='height:61px'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:59px'></div>", unsafe_allow_html=True)
 
         # Collection Selection
         try:
