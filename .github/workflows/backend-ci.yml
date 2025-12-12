@@ -1,0 +1,56 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main, tests]
+    paths-ignore:
+      - 'docint/app.py'
+      - 'Dockerfile.frontend'
+      - 'tests/test_streamlit.py'
+      - '.github/workflows/frontend-ci.yml'
+  pull_request:
+    branches: [main, tests]
+    paths-ignore:
+      - 'docint/app.py'
+      - 'Dockerfile.frontend'
+      - 'tests/test_streamlit.py'
+      - '.github/workflows/frontend-ci.yml'
+
+jobs:
+  test-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .venv
+            ~/.cache/uv
+          key: ${{ runner.os }}-uv-${{ hashFiles('uv.lock') }}
+      - uses: astral-sh/setup-uv@v3
+      - name: Sync dependencies
+        run: uv sync --group dev
+      - name: Run tests
+        run: uv run pytest
+
+  build-backend-image:
+    needs: test-backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.backend
+          push: false
+          tags: docint-backend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
