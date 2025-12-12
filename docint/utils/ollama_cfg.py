@@ -15,7 +15,7 @@ load_dotenv()
 @dataclass
 class OllamaPipeline:
     """
-    Pipeline for processing images with the Ollama API.
+    Pipeline for summarization and image processing with the Ollama API.
     """
 
     ollama_host: str | None = field(default=None, init=False)
@@ -25,7 +25,6 @@ class OllamaPipeline:
 
     def __post_init__(self):
         self.model_id = load_model_env().vision_model
-        logger.info("OllamaPipeline initialized with model: {}", self.model_id)
         self.prompt_dir = load_path_env().prompts
         self.ollama_host = load_host_env().ollama_host
 
