@@ -21,14 +21,10 @@ COPY pyproject.toml uv.lock ./
 # Install dependencies (without the project itself)
 RUN uv sync --frozen --no-cache --no-dev --no-install-project
 
-# Copy the files needed for model downloading to cache this layer and preload models
-COPY docint/__init__.py docint/
-COPY docint/utils/ docint/utils/
-RUN uv run python -m docint.utils.model_cfg
-
 COPY . .
 
 RUN uv sync --frozen --no-cache --no-dev
 
 EXPOSE 8000
+
 CMD ["sh", "-c", "uv run load-models && uv run uvicorn docint.core.api:app --host 0.0.0.0 --port 8000"]

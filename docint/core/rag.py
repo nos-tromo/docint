@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import os
 import re
 from dataclasses import dataclass, field
@@ -30,8 +31,8 @@ from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from docint.core.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.session_manager import SessionManager
 from docint.utils.env_cfg import load_host_env, load_model_env, load_path_env
-from docint.utils.model_cfg import resolve_model_path
 from docint.utils.clean_text import basic_clean
+from docint.utils.model_cfg import resolve_model_path
 
 # --- Environment variables ---
 load_dotenv()
@@ -162,7 +163,7 @@ class RAG:
             self.reader_required_exts = [f".{line.strip()}" for line in f]
 
         if self.prompt_dir:
-            self.summarize_prompt_path: Path = self.prompt_dir / "summarize.txt"
+            self.summarize_prompt_path = self.prompt_dir / "summarize.txt"
 
         if self.summarize_prompt_path is None:
             logger.error(
@@ -849,6 +850,7 @@ class RAG:
                 "filename": filename,
                 "filetype": filetype,
                 "source": source_kind,
+                "score": getattr(nws, "score", None),
             }
             if file_hash:
                 src["file_hash"] = file_hash
@@ -897,7 +899,7 @@ class RAG:
         base = self.qdrant_col_dir
         if base is None:
             return []
-        collections_dir = base / "collections"
+        collections_dir = base
         try:
             if not collections_dir.exists():
                 return []
@@ -1173,18 +1175,30 @@ class RAG:
             self.sessions = SessionManager(self)
         return self.sessions.chat(user_msg)
 
-    def summarize_collection(self, prompt: str | None = None) -> dict[str, Any]:
+    def stream_chat(self, user_msg: str) -> Any:
         """
-        Generate a summary of the currently selected collection.
+        Proxy stream chat turns to SessionManager.
 
         Args:
-            prompt (str | None): Optional override for the summarization prompt.
+            user_msg (str): The user's chat message.
+
+        Returns:
+            Any: A generator yielding response chunks.
+        """
+        if self.sessions is None:
+            self.sessions = SessionManager(self)
+        return self.sessions.stream_chat(user_msg)
+
+    def summarize_collection(self) -> dict[str, Any]:
+        """
+        Generate a summary of the currently selected collection.
 
         Returns:
             dict[str, Any]: Normalized response data containing the summary and sources.
 
         Raises:
             ValueError: If no collection is selected.
+            RuntimeError: If the query engine is not initialized for summarization.
         """
 
         if not self.qdrant_collection:
@@ -1198,14 +1212,57 @@ class RAG:
         if engine is None:
             raise RuntimeError("Query engine failed to initialize for summarization.")
 
-        summary_prompt = prompt or (
-            "Provide a concise overview of the active collection. Highlight the main "
-            "topics, document types, and notable findings. Limit the response to 8 "
-            "sentences."
+        resp = engine.query(self.summarize_prompt)
+        return self._normalize_response_data(self.summarize_prompt, resp)
+
+    def stream_summarize_collection(self) -> Any:
+        """
+        Generate a streaming summary of the currently selected collection.
+
+        Yields:
+            str | dict: Chunks of text, followed by a dict with metadata.
+
+        Raises:
+            ValueError: If no collection is selected.
+            RuntimeError: If the index is not initialized for streaming summarization.
+        """
+        if not self.qdrant_collection:
+            raise ValueError("No collection selected.")
+
+        if self.index is None:
+            self.create_index()
+        if self.index is None:
+            raise RuntimeError(
+                "Index failed to initialize for streaming summarization."
+            )
+
+        # Create a temporary streaming engine for summarization
+        k = min(max(self.retrieve_similarity_top_k, self.rerank_top_n * 8), 64)
+        retriever = self.index.as_retriever(similarity_top_k=k)
+        streaming_engine = RetrieverQueryEngine.from_args(
+            retriever=retriever,
+            llm=self.gen_model,
+            node_postprocessors=[self.reranker],
+            streaming=True,
         )
 
-        resp = engine.query(summary_prompt)
-        return self._normalize_response_data(summary_prompt, resp)
+        response = streaming_engine.query(self.summarize_prompt)
+
+        full_text = ""
+        for token in response.response_gen:
+            full_text += token
+            yield token
+
+        # Create a Response object to reuse normalization logic
+        final_response = Response(
+            response=full_text,
+            source_nodes=response.source_nodes,
+            metadata=response.metadata,
+        )
+        normalized = self._normalize_response_data(
+            self.summarize_prompt, final_response
+        )
+        yield normalized
 
     def unload_models(self) -> None:
         """
@@ -1214,7 +1271,6 @@ class RAG:
         self._embed_model = None
         self._gen_model = None
         self._reranker = None
-        import gc
 
         gc.collect()
         if torch.cuda.is_available():

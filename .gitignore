@@ -32,6 +32,7 @@
 *.mkv
 *.mp3
 *.mp4
+*.pdf
 *.png
 *.sh
 *.sqlite3
@@ -51,6 +52,7 @@
 **/logs/
 **/models/
 **/output/
+**/qdrant*/
 **/results/
 **/session/
 **/uploads/

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterator, TYPE_CHECKING, cast
 
 import pandas as pd
+from llama_index.core import Response
 from llama_index.core.chat_engine import CondenseQuestionChatEngine
 from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.core.memory import ChatMemoryBuffer
@@ -143,6 +144,73 @@ class SessionManager:
         self._persist_turn(session_id, user_msg, resp, response)
         self._maybe_update_summary(session_id)
         return response
+
+    def stream_chat(self, user_msg: str) -> Iterator[str | dict]:
+        """
+        Handle a streaming chat message from the user.
+
+        Args:
+            user_msg (str): The message from the user.
+
+        Yields:
+            str | dict: Chunks of text, followed by a dict with metadata.
+
+        Raises:
+            ValueError: If the user message is empty.
+            RuntimeError: If the index has not been initialized.
+        """
+        if not user_msg.strip():
+            logger.error("ValueError: Chat prompt cannot be empty.")
+            raise ValueError("Chat prompt cannot be empty.")
+
+        # Ensure index exists
+        if self.rag.index is None:
+            self.rag.create_index()
+
+        if self.rag.index is None:
+            raise RuntimeError("Index not initialized")
+
+        # Create a temporary streaming engine
+        k = min(max(self.rag.retrieve_similarity_top_k, self.rag.rerank_top_n * 8), 64)
+        streaming_engine = RetrieverQueryEngine.from_args(
+            retriever=self.rag.index.as_retriever(similarity_top_k=k),
+            llm=self.rag.gen_model,
+            node_postprocessors=[self.rag.reranker],
+            streaming=True,
+        )
+
+        session_id = self.session_id
+        if self.chat_engine is None or session_id is None:
+            session_id = self.start_session(session_id)
+
+        summary = self._get_rolling_summary(session_id)
+        retrieval_query = (
+            f"{summary}\n\nUser question: {user_msg}" if summary else user_msg
+        )
+
+        response = streaming_engine.query(retrieval_query)
+
+        full_text = ""
+        # response.response_gen is the generator
+        for token in response.response_gen:
+            full_text += token
+            yield token
+
+        # Create a Response object to reuse normalization logic
+        final_response = Response(
+            response=full_text, source_nodes=response.source_nodes
+        )
+
+        normalized = self.rag._normalize_response_data(user_msg, final_response)
+        self._persist_turn(session_id, user_msg, final_response, normalized)
+        self._maybe_update_summary(session_id)
+
+        # Yield metadata
+        yield {
+            "sources": normalized.get("sources", []),
+            "session_id": session_id,
+            "reasoning": normalized.get("reasoning"),
+        }
 
     def export_session(
         self, session_id: str | None = None, out_dir: str | Path = "session"
@@ -334,6 +402,7 @@ class SessionManager:
                     or meta_node.get("content_type")
                     or ""
                 )
+                file_hash = meta_node.get("file_hash")
                 source_kind = meta_node.get("source", "")
                 page = meta_node.get("page_label") or meta_node.get("page") or None
                 table_meta = meta_node.get("table") or {}
@@ -356,6 +425,7 @@ class SessionManager:
                         node_id=str(node_id) if node_id is not None else None,
                         score=score,
                         filename=filename,
+                        file_hash=file_hash,
                         filetype=filetype,
                         source=source_kind,
                         page=int(page) if page is not None else None,
@@ -442,6 +512,107 @@ class SessionManager:
                 "Skipping citations.parquet export (pandas/pyarrow not available?): {}",
                 e,
             )
+
+    def list_sessions(self) -> list[dict[str, Any]]:
+        """
+        List all sessions ordered by creation date (descending).
+
+        Returns:
+            list[dict[str, Any]]: A list of session dictionaries.
+        """
+        with self._session_scope() as s:
+            convs = s.query(Conversation).order_by(Conversation.created_at.desc()).all()
+            results = []
+            for c in convs:
+                title = "New Chat"
+                if c.turns:
+                    first_turn = c.turns[0]
+                    title = (
+                        first_turn.user_text[:50] + "..."
+                        if len(first_turn.user_text) > 50
+                        else first_turn.user_text
+                    )
+
+                results.append(
+                    {
+                        "id": c.id,
+                        "created_at": c.created_at.isoformat(),
+                        "title": title,
+                    }
+                )
+            return results
+
+    def get_session_history(self, session_id: str) -> list[dict[str, Any]]:
+        """
+        Get the full message history for a session.
+
+        Args:
+            session_id (str): The ID of the session.
+
+        Returns:
+            list[dict[str, Any]]: A list of message dictionaries.
+        """
+        with self._session_scope() as s:
+            conv = s.query(Conversation).filter_by(id=session_id).first()
+            if not conv:
+                return []
+
+            messages = []
+            for t in conv.turns:
+                # User message
+                messages.append({"role": "user", "content": t.user_text})
+
+                # Assistant message
+                sources = []
+                for c in t.citations:
+                    text_val = ""
+                    if c.node_id:
+                        try:
+                            text_val = self._get_node_text_by_id(c.node_id) or ""
+                        except Exception:
+                            pass
+
+                    src = {
+                        "text": text_val,
+                        "preview_text": text_val[:280].strip() if text_val else "",
+                        "filename": c.filename,
+                        "filetype": c.filetype,
+                        "source": c.source,
+                        "score": c.score,
+                        "page": c.page,
+                        "row": c.row,
+                        "file_hash": c.file_hash,
+                    }
+                    sources.append(src)
+
+                msg_entry = {
+                    "role": "assistant",
+                    "content": t.model_response,
+                    "sources": sources,
+                }
+                if t.reasoning:
+                    msg_entry["reasoning"] = t.reasoning
+                messages.append(msg_entry)
+
+            return messages
+
+    def delete_session(self, session_id: str) -> bool:
+        """
+        Delete a session.
+
+        Args:
+            session_id (str): The ID of the session to delete.
+
+        Returns:
+            bool: True if deleted, False otherwise.
+        """
+        with self._session_scope() as s:
+            conv = s.query(Conversation).filter_by(id=session_id).first()
+            if conv:
+                s.delete(conv)
+                s.commit()
+                return True
+            return False
 
     def _export_transcript(
         self, out_dir: Path, conv: Conversation, rolling_summary: str
@@ -569,9 +740,8 @@ class SessionManager:
                         content = node.get_content()
                         if isinstance(content, str) and content:
                             return content
-            return None
         except Exception:
-            return None
+            pass
 
         try:
             recs = self.rag.qdrant_client.retrieve(

@@ -12,18 +12,46 @@ from docint.utils.hashing import compute_file_hash
 
 
 class DummyNode:
+    """
+    A dummy node class to simulate LlamaIndex nodes.
+    """
+
     def __init__(self, text: str, metadata: dict[str, object]) -> None:
+        """
+        Initializes a DummyNode with text and metadata.
+
+        Args:
+            text (str): The text content of the node.
+            metadata (dict[str, object]): Metadata associated with the node.
+        """
         self.text = text
         self.metadata = metadata
 
 
 class DummyNodeWithScore:
+    """
+    A dummy node with score class to simulate LlamaIndex nodes with scores.
+    """
+
     def __init__(self, node: DummyNode) -> None:
+        """
+        Initializes a DummyNodeWithScore with a DummyNode.
+
+        Args:
+            node (DummyNode): The dummy node associated with this score.
+        """
         self.node = node
 
 
 class DummyResponse:
     def __init__(self, text: str, nodes: list[DummyNodeWithScore]):
+        """
+        Initializes a DummyResponse with text and source nodes.
+
+        Args:
+            text (str): The response text.
+            nodes (list[DummyNodeWithScore]): The source nodes associated with the response.
+        """
         self.response = text
         self.source_nodes = nodes
 

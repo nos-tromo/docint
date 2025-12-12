@@ -13,12 +13,22 @@ setup_logging()
 
 @dataclass(frozen=True)
 class HostConfig:
+    """
+    Dataclass for host configuration.
+    """
+
+    backend_host: str
     ollama_host: str
     qdrant_host: str
+    cors_allowed_origins: str
 
 
 @dataclass(frozen=True)
 class ModelConfig:
+    """
+    Dataclass for model configuration.
+    """
+
     embed_model: str
     sparse_model: str
     gen_model: str
@@ -28,6 +38,10 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class PathConfig:
+    """
+    Dataclass for path configuration.
+    """
+
     data: Path
     queries: Path
     results: Path
@@ -44,10 +58,18 @@ def load_host_env() -> HostConfig:
 
     Returns:
         HostConfig: Dataclass containing host configuration.
+        - backend_host (str): The backend host URL.
+        - ollama_host (str): The Ollama host URL.
+        - qdrant_host (str): The Qdrant host URL.
+        - cors_allowed_origins (str): Comma-separated list of allowed CORS origins.
     """
     return HostConfig(
+        backend_host=os.getenv("BACKEND_HOST", "http://localhost:8000"),
         ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
         qdrant_host=os.getenv("QDRANT_HOST", "http://localhost:6333"),
+        cors_allowed_origins=os.getenv(
+            "CORS_ALLOWED_ORIGINS", "http://localhost:8501,http://127.0.0.1:8501"
+        ),
     )
 
 
@@ -57,6 +79,11 @@ def load_model_env() -> ModelConfig:
 
     Returns:
         ModelConfig: Dataclass containing model configuration.
+        - embed_model (str): The embedding model identifier.
+        - sparse_model (str): The sparse model identifier.
+        - gen_model (str): The generation model identifier.
+        - vision_model (str): The vision model identifier.
+        - whisper_model (str): The Whisper model identifier.
     """
     return ModelConfig(
         embed_model=os.getenv("EMBED_MODEL", "BAAI/bge-m3"),
@@ -75,6 +102,14 @@ def load_path_env() -> PathConfig:
 
     Returns:
         PathConfig: Dataclass containing path configuration.
+        - data (Path): Path to the data directory.
+        - queries (Path): Path to the queries file.
+        - results (Path): Path to the results directory.
+        - prompts (Path): Path to the prompts directory.
+        - qdrant_collections (Path): Path to the Qdrant collections directory.
+        - required_exts (Path): Path to the required extensions file.
+        - xdg_cache_home (Path): Path to the XDG cache home directory.
+        - hf_hub_cache (Path): Path to the Hugging Face Hub cache directory.
     """
     home_dir = Path.home()
     docint_data_dir: Path = home_dir / "docint"

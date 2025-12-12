@@ -24,6 +24,7 @@ class Citation(Base):
     node_id = Column(String, nullable=True)  # LlamaIndex node id or Qdrant point id
     score = Column(Float, nullable=True)
     filename = Column(String, nullable=True)
+    file_hash = Column(String, nullable=True)
     filetype = Column(String, nullable=True)
     source = Column(String, nullable=True)  # "table" or ""
     page = Column(Integer, nullable=True)

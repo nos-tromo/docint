@@ -16,5 +16,4 @@ COPY docint/ docint/
 
 EXPOSE 8501
 
-# Run the application
 CMD ["streamlit", "run", "docint/app.py", "--server.address", "0.0.0.0"]

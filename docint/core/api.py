@@ -1,7 +1,6 @@
 import json
-import tempfile
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, cast
 
 import anyio
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -13,32 +12,27 @@ from starlette.middleware.cors import CORSMiddleware
 
 from docint.cli import ingest as ingest_module
 from docint.core.rag import RAG
+from docint.utils.env_cfg import load_host_env, load_path_env, set_offline_env
 from docint.utils.hashing import compute_file_hash
-from docint.utils.env_cfg import load_path_env, set_offline_env
 from docint.utils.logging_cfg import setup_logging
 
 # --- Application Setup ---
 set_offline_env()
 setup_logging()
 
+# Load allowed origins from environment or default to Streamlit's default ports
+allowed_origins = load_host_env().cors_allowed_origins.split(",")
+
 app = FastAPI(title="Document Intelligence")
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "*",
-    ],
+    middleware_class=cast(Any, CORSMiddleware),
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 rag = RAG(qdrant_collection="")
-SUMMARY_PROMPT = (
-    "Provide a concise overview of the active collection. Highlight the main "
-    "topics, document types, and notable findings. Limit the response to 8 sentences."
-)
 
 
 def _format_sse(event: str, data: dict[str, Any]) -> str:
@@ -95,6 +89,14 @@ class IngestOut(BaseModel):
     collection: str
     data_dir: str
     hybrid: bool
+
+
+class SessionListOut(BaseModel):
+    sessions: list[dict]
+
+
+class SessionHistoryOut(BaseModel):
+    messages: list[dict]
 
 
 # --- API Endpoints ---
@@ -195,6 +197,53 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/stream_query", tags=["Query"])
+async def stream_query(payload: QueryIn) -> StreamingResponse:
+    """
+    Handle a streaming query request.
+
+    Args:
+        payload (QueryIn): The query payload containing the question and session ID.
+
+    Returns:
+        StreamingResponse: A streaming response that yields SSE events during the query.
+
+    Raises:
+        HTTPException: If an error occurs while processing the streaming query.
+    """
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+
+    # Ensure index exists
+    if getattr(rag, "index", None) is None:
+        rag.create_index()
+
+    rag.start_session(payload.session_id)
+
+    async def event_generator() -> AsyncIterator[str]:
+        """
+        Generate SSE events for the streaming query.
+
+        Returns:
+            AsyncIterator[str]: An asynchronous iterator yielding SSE events.
+
+        Yields:
+            Iterator[AsyncIterator[str]]: An asynchronous iterator yielding SSE events.
+        """
+        try:
+            # Iterate over the sync generator
+            for chunk in rag.stream_chat(payload.question):
+                if isinstance(chunk, str):
+                    yield f"data: {json.dumps({'token': chunk})}\n\n"
+                elif isinstance(chunk, dict):
+                    yield f"data: {json.dumps(chunk)}\n\n"
+        except Exception as e:
+            logger.error(f"Stream error: {e}")
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
 @app.post("/summarize", response_model=SummarizeOut, tags=["Query"])
 def summarize() -> dict[str, list[dict] | str]:
     """
@@ -217,7 +266,7 @@ def summarize() -> dict[str, list[dict] | str]:
                 rag.create_index()
             rag.create_query_engine()
 
-        data = rag.summarize_collection(SUMMARY_PROMPT)
+        data = rag.summarize_collection()
         summary = (
             str(data.get("response") or data.get("answer") or "")
             if isinstance(data, dict)
@@ -228,6 +277,122 @@ def summarize() -> dict[str, list[dict] | str]:
         return {"summary": summary, "sources": sources}
     except HTTPException as e:
         logger.error("HTTPException: Error generating summary: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/summarize/stream", tags=["Query"])
+async def summarize_stream() -> StreamingResponse:
+    """
+    Generate a streaming summary for the currently selected collection.
+
+    Returns:
+        StreamingResponse: A streaming response that yields SSE events during summarization.
+
+    Raises:
+        HTTPException: If an error occurs while generating the summary.
+    """
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+
+    async def event_generator():
+        try:
+            for chunk in rag.stream_summarize_collection():
+                if isinstance(chunk, str):
+                    yield f"data: {json.dumps({'token': chunk})}\n\n"
+                elif isinstance(chunk, dict):
+                    yield f"data: {json.dumps(chunk)}\n\n"
+        except Exception as e:
+            logger.error(f"Stream error: {e}")
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.get("/sessions/list", response_model=SessionListOut, tags=["Sessions"])
+def list_sessions() -> dict[str, list[dict]]:
+    """
+    List all available chat sessions.
+
+    Returns:
+        dict[str, list[dict]]: A dictionary containing the list of sessions.
+
+    Raises:
+        ValueError: If the session manager is not initialized.
+        HTTPException: If an error occurs while listing sessions.
+    """
+    try:
+        if rag.sessions is None:
+            rag.start_session()  # Initialize session manager if needed
+
+        if rag.sessions is None:
+            raise ValueError("Session manager not initialized")
+
+        sessions = rag.sessions.list_sessions()
+        return {"sessions": sessions}
+    except Exception as e:
+        logger.error(f"Error listing sessions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/sessions/{session_id}/history",
+    response_model=SessionHistoryOut,
+    tags=["Sessions"],
+)
+def get_session_history(session_id: str) -> dict[str, list[dict]]:
+    """
+    Get history for a specific session.
+
+    Args:
+        session_id (str): The ID of the session.
+
+    Returns:
+        dict[str, list[dict]]: A dictionary containing the session messages.
+
+    Raises:
+        ValueError: If the session manager is not initialized.
+        HTTPException: If an error occurs while fetching session history.
+    """
+    try:
+        if rag.sessions is None:
+            rag.start_session()
+
+        if rag.sessions is None:
+            raise ValueError("Session manager not initialized")
+
+        messages = rag.sessions.get_session_history(session_id)
+        return {"messages": messages}
+    except Exception as e:
+        logger.error(f"Error fetching history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/sessions/{session_id}", tags=["Sessions"])
+def delete_session(session_id: str) -> dict[str, bool]:
+    """
+    Delete a session.
+
+    Args:
+        session_id (str): The ID of the session to delete.
+
+    Returns:
+        dict[str, bool]: A dictionary indicating whether the deletion was successful.
+
+    Raises:
+        ValueError: If the session manager is not initialized.
+        HTTPException: If an error occurs while deleting the session.
+    """
+    try:
+        if rag.sessions is None:
+            rag.start_session()
+
+        if rag.sessions is None:
+            raise ValueError("Session manager not initialized")
+
+        success = rag.sessions.delete_session(session_id)
+        return {"ok": success}
+    except Exception as e:
+        logger.error(f"Error deleting session: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -337,89 +502,91 @@ async def ingest_upload(
         logger.error("HTTPException: At least one file is required for upload")
         raise HTTPException(status_code=400, detail="At least one file is required")
 
-    # We use a temporary directory for uploads to avoid persisting files on the host.
-    # The files are ingested into Qdrant and then discarded.
+    # We use a persistent directory for uploads to support previewing files later.
+    # The files are ingested into Qdrant and kept in the collection directory.
 
     async def event_stream() -> AsyncIterator[str]:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            batch_dir = Path(tmp_dir)
+        # Use the Qdrant collections directory to store source files
+        # This keeps vectors and source data in the same volume
+        qdrant_col_dir = load_path_env().qdrant_collections
+        # We use a 'sources' subdirectory to avoid conflicting with Qdrant's internal files
+        batch_dir = qdrant_col_dir / name / "sources"
+        batch_dir.mkdir(parents=True, exist_ok=True)
 
-            yield _format_sse(
-                "start",
-                {
-                    "collection": name,
-                    "target_dir": "temporary_ingestion_buffer",
-                    "files": [f.filename for f in files],
-                },
-            )
+        yield _format_sse(
+            "start",
+            {
+                "collection": name,
+                "target_dir": str(batch_dir),
+                "files": [f.filename for f in files],
+            },
+        )
 
-            for upload in files:
-                filename = Path(upload.filename or "upload").name
-                dest = batch_dir / filename
-                bytes_written = 0
-                try:
-                    with dest.open("wb") as buffer:
-                        while True:
-                            chunk = await upload.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            buffer.write(chunk)
-                            bytes_written += len(chunk)
-                            yield _format_sse(
-                                "upload_progress",
-                                {"filename": filename, "bytes_written": bytes_written},
-                            )
-
-                    # We calculate hash but don't store the file index anymore
-                    file_hash = compute_file_hash(dest)
-                    yield _format_sse(
-                        "file_saved",
-                        {
-                            "filename": filename,
-                            "file_hash": file_hash,
-                            "path": str(dest),  # This path is temp
-                        },
-                    )
-                except (
-                    Exception
-                ) as exc:  # pragma: no cover - streamed errors are logged
-                    logger.error("Error saving uploaded file {}: {}", filename, exc)
-                    yield _format_sse(
-                        "error",
-                        {"message": f"Failed to save {filename}: {exc}"},
-                    )
-                    return
-
-            yield _format_sse("ingestion_started", {"collection": name})
+        for upload in files:
+            filename = Path(upload.filename or "upload").name
+            dest = batch_dir / filename
+            bytes_written = 0
             try:
-                await anyio.to_thread.run_sync(
-                    ingest_module.ingest_docs,
-                    name,
-                    batch_dir,
-                    hybrid if hybrid is not None else True,
-                    table_row_limit,
-                    table_row_filter,
-                )
-                rag.select_collection(name)
-                try:
-                    if getattr(rag, "index", None) is None:
-                        rag.create_index()
-                    rag.create_query_engine()
-                except Exception:
-                    logger.warning(
-                        "Exception: Failed to create query engine for collection: {}",
-                        name,
-                    )
+                with dest.open("wb") as buffer:
+                    while True:
+                        chunk = await upload.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        buffer.write(chunk)
+                        bytes_written += len(chunk)
+                        yield _format_sse(
+                            "upload_progress",
+                            {"filename": filename, "bytes_written": bytes_written},
+                        )
+
+                # We calculate hash but don't store the file index anymore
+                file_hash = compute_file_hash(dest)
                 yield _format_sse(
-                    "ingestion_complete",
-                    {"collection": name, "data_dir": "temporary_ingestion_buffer"},
+                    "file_saved",
+                    {
+                        "filename": filename,
+                        "file_hash": file_hash,
+                        "path": str(dest),
+                    },
                 )
             except Exception as exc:  # pragma: no cover - streamed errors are logged
-                logger.error("Error during streamed ingestion: {}", exc)
+                logger.error("Error saving uploaded file {}: {}", filename, exc)
                 yield _format_sse(
                     "error",
-                    {"message": f"Ingestion failed: {exc}"},
+                    {"message": f"Failed to save {filename}: {exc}"},
                 )
+                return
+
+        yield _format_sse("ingestion_started", {"collection": name})
+        try:
+            await anyio.to_thread.run_sync(
+                ingest_module.ingest_docs,
+                name,
+                batch_dir,
+                hybrid if hybrid is not None else True,
+                table_row_limit,
+                table_row_filter,
+            )
+            rag.select_collection(name)
+            try:
+                if getattr(rag, "index", None) is None:
+                    rag.create_index()
+                rag.create_query_engine()
+            except Exception:
+                logger.warning(
+                    "Exception: Failed to create query engine for collection: {}",
+                    name,
+                )
+            yield _format_sse(
+                "ingestion_complete",
+                {"collection": name, "data_dir": str(batch_dir)},
+            )
+        except Exception as exc:  # pragma: no cover - streamed errors are logged
+            logger.error("Error during streamed ingestion: {}", exc)
+            yield _format_sse(
+                "error",
+                {"message": f"Ingestion failed: {exc}"},
+            )
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -439,8 +606,10 @@ def preview_source(collection: str, file_hash: str) -> FileResponse:
     Raises:
         HTTPException: If an error occurs while retrieving the source preview.
     """
+    file_path_str = None
+
+    # 1. Try to resolve filename via Qdrant
     try:
-        # 1. Query Qdrant for the file path associated with this hash
         points, _ = rag.qdrant_client.scroll(
             collection_name=collection,
             scroll_filter=models.Filter(
@@ -471,49 +640,56 @@ def preview_source(collection: str, file_hash: str) -> FileResponse:
                 with_payload=True,
             )
 
-        if not points:
-            raise HTTPException(
-                status_code=404, detail="File hash not found in collection"
+        if points:
+            payload = points[0].payload or {}
+            file_path_str = (
+                payload.get("file_path")
+                or payload.get("path")
+                or (payload.get("metadata") or {}).get("file_path")
+                or (payload.get("origin") or {}).get("file_path")
             )
-
-        payload = points[0].payload or {}
-
-        # 2. Extract file path from payload
-        # It could be in 'file_path', 'metadata.file_path', 'origin.file_path', etc.
-        file_path_str = (
-            payload.get("file_path")
-            or payload.get("path")
-            or (payload.get("metadata") or {}).get("file_path")
-            or (payload.get("origin") or {}).get("file_path")
-        )
-
-        if not file_path_str:
-            raise HTTPException(
-                status_code=404, detail="File path not found in metadata"
-            )
-
-        path = Path(file_path_str)
-        if not path.exists() or not path.is_file():
-            logger.warning("Preview failed. File not found at: {}", path)
-
-            # Fallback: Check if the file exists in the default data directory
-            # This helps when paths mismatch (e.g. ingestion on host, running in Docker)
-            filename = path.name
-            data_dir = _resolve_data_dir()
-            alt_path = data_dir / filename
-
-            if alt_path.exists() and alt_path.is_file():
-                logger.info("Found file at alternative path: {}", alt_path)
-                return FileResponse(alt_path)
-
-            raise HTTPException(
-                status_code=404, detail=f"Source file not found on server at {path}"
-            )
-
-        return FileResponse(path)
-
     except Exception as e:
-        logger.error("Error retrieving source preview: {}", e)
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.warning("Failed to query Qdrant for file preview: {}", e)
+
+    # 2. If we found a path from Qdrant, try to use it
+    if file_path_str:
+        path = Path(file_path_str)
+        if path.exists() and path.is_file():
+            return FileResponse(path)
+
+        # Fallback: Check if the file exists in the default data directory
+        filename = path.name
+        data_dir = _resolve_data_dir()
+        alt_path = data_dir / filename
+
+        if alt_path.exists() and alt_path.is_file():
+            logger.info("Found file at alternative path: {}", alt_path)
+            return FileResponse(alt_path)
+
+        # Check qdrant_collections/collection/sources/filename
+        qdrant_col_dir = load_path_env().qdrant_collections
+        col_path = qdrant_col_dir / collection / "sources" / filename
+        if col_path.exists() and col_path.is_file():
+            logger.info("Found file at collection path: {}", col_path)
+            return FileResponse(col_path)
+
+    # 3. Fallback: Scan the sources directory for a matching hash
+    # This handles cases where Qdrant is down or the file path in Qdrant is invalid
+    try:
+        qdrant_col_dir = load_path_env().qdrant_collections
+        sources_dir = qdrant_col_dir / collection / "sources"
+
+        if sources_dir.exists():
+            logger.info("Scanning sources directory for file hash: {}", file_hash)
+            for file_path in sources_dir.iterdir():
+                if file_path.is_file() and not file_path.name.startswith("."):
+                    try:
+                        if compute_file_hash(file_path) == file_hash:
+                            logger.info("Found file via hash scan: {}", file_path)
+                            return FileResponse(file_path)
+                    except Exception:
+                        continue
+    except Exception as e:
+        logger.error("Error scanning sources directory: {}", e)
+
+    raise HTTPException(status_code=404, detail="File not found")
