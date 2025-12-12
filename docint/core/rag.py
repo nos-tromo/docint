@@ -431,9 +431,12 @@ class RAG:
             if self.base_url is None:
                 raise ValueError("base_url cannot be None for Ollama model")
 
+            # Ensure base_url is clean (no trailing slash)
+            base_url = self.base_url.rstrip("/")
+
             self._gen_model = Ollama(
                 model=self.gen_model_id,
-                base_url=self.base_url,
+                base_url=base_url,
                 temperature=self.temperature,
                 context_window=self.context_window,
                 request_timeout=self.request_timeout,
