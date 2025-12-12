@@ -572,8 +572,10 @@ def preview_source(collection: str, file_hash: str) -> FileResponse:
     Raises:
         HTTPException: If an error occurs while retrieving the source preview.
     """
+    file_path_str = None
+
+    # 1. Try to resolve filename via Qdrant
     try:
-        # 1. Query Qdrant for the file path associated with this hash
         points, _ = rag.qdrant_client.scroll(
             collection_name=collection,
             scroll_filter=models.Filter(
@@ -604,56 +606,56 @@ def preview_source(collection: str, file_hash: str) -> FileResponse:
                 with_payload=True,
             )
 
-        if not points:
-            raise HTTPException(
-                status_code=404, detail="File hash not found in collection"
+        if points:
+            payload = points[0].payload or {}
+            file_path_str = (
+                payload.get("file_path")
+                or payload.get("path")
+                or (payload.get("metadata") or {}).get("file_path")
+                or (payload.get("origin") or {}).get("file_path")
             )
-
-        payload = points[0].payload or {}
-
-        # 2. Extract file path from payload
-        # It could be in 'file_path', 'metadata.file_path', 'origin.file_path', etc.
-        file_path_str = (
-            payload.get("file_path")
-            or payload.get("path")
-            or (payload.get("metadata") or {}).get("file_path")
-            or (payload.get("origin") or {}).get("file_path")
-        )
-
-        if not file_path_str:
-            raise HTTPException(
-                status_code=404, detail="File path not found in metadata"
-            )
-
-        path = Path(file_path_str)
-        if not path.exists() or not path.is_file():
-            logger.warning("Preview failed. File not found at: {}", path)
-
-            # Fallback: Check if the file exists in the default data directory
-            # This helps when paths mismatch (e.g. ingestion on host, running in Docker)
-            filename = path.name
-            data_dir = _resolve_data_dir()
-            alt_path = data_dir / filename
-
-            if alt_path.exists() and alt_path.is_file():
-                logger.info("Found file at alternative path: {}", alt_path)
-                return FileResponse(alt_path)
-
-            # Check qdrant_collections/collection/sources/filename
-            qdrant_col_dir = load_path_env().qdrant_collections
-            col_path = qdrant_col_dir / collection / "sources" / filename
-            if col_path.exists() and col_path.is_file():
-                logger.info("Found file at collection path: {}", col_path)
-                return FileResponse(col_path)
-
-            raise HTTPException(
-                status_code=404, detail=f"Source file not found on server at {path}"
-            )
-
-        return FileResponse(path)
-
     except Exception as e:
-        logger.error("Error retrieving source preview: {}", e)
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.warning("Failed to query Qdrant for file preview: {}", e)
+
+    # 2. If we found a path from Qdrant, try to use it
+    if file_path_str:
+        path = Path(file_path_str)
+        if path.exists() and path.is_file():
+            return FileResponse(path)
+
+        # Fallback: Check if the file exists in the default data directory
+        filename = path.name
+        data_dir = _resolve_data_dir()
+        alt_path = data_dir / filename
+
+        if alt_path.exists() and alt_path.is_file():
+            logger.info("Found file at alternative path: {}", alt_path)
+            return FileResponse(alt_path)
+
+        # Check qdrant_collections/collection/sources/filename
+        qdrant_col_dir = load_path_env().qdrant_collections
+        col_path = qdrant_col_dir / collection / "sources" / filename
+        if col_path.exists() and col_path.is_file():
+            logger.info("Found file at collection path: {}", col_path)
+            return FileResponse(col_path)
+
+    # 3. Fallback: Scan the sources directory for a matching hash
+    # This handles cases where Qdrant is down or the file path in Qdrant is invalid
+    try:
+        qdrant_col_dir = load_path_env().qdrant_collections
+        sources_dir = qdrant_col_dir / collection / "sources"
+
+        if sources_dir.exists():
+            logger.info("Scanning sources directory for file hash: {}", file_hash)
+            for file_path in sources_dir.iterdir():
+                if file_path.is_file() and not file_path.name.startswith("."):
+                    try:
+                        if compute_file_hash(file_path) == file_hash:
+                            logger.info("Found file via hash scan: {}", file_path)
+                            return FileResponse(file_path)
+                    except Exception:
+                        continue
+    except Exception as e:
+        logger.error("Error scanning sources directory: {}", e)
+
+    raise HTTPException(status_code=404, detail="File not found")
