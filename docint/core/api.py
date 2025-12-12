@@ -260,7 +260,7 @@ def summarize() -> dict[str, list[dict] | str]:
                 rag.create_index()
             rag.create_query_engine()
 
-        data = rag.summarize_collection(SUMMARY_PROMPT)
+        data = rag.summarize_collection()
         summary = (
             str(data.get("response") or data.get("answer") or "")
             if isinstance(data, dict)
@@ -272,6 +272,34 @@ def summarize() -> dict[str, list[dict] | str]:
     except HTTPException as e:
         logger.error("HTTPException: Error generating summary: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/summarize/stream", tags=["Query"])
+async def summarize_stream() -> StreamingResponse:
+    """
+    Generate a streaming summary for the currently selected collection.
+
+    Returns:
+        StreamingResponse: A streaming response that yields SSE events during summarization.
+
+    Raises:
+        HTTPException: If an error occurs while generating the summary.
+    """
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+
+    async def event_generator():
+        try:
+            for chunk in rag.stream_summarize_collection():
+                if isinstance(chunk, str):
+                    yield f"data: {json.dumps({'token': chunk})}\n\n"
+                elif isinstance(chunk, dict):
+                    yield f"data: {json.dumps(chunk)}\n\n"
+        except Exception as e:
+            logger.error(f"Stream error: {e}")
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.get("/sessions/list", response_model=SessionListOut, tags=["Sessions"])

@@ -266,20 +266,56 @@ def render_analysis():
             logger.error("No collection selected.")
             st.error("No collection selected.")
         else:
-            with st.spinner("Generating summary..."):
-                try:
-                    resp = requests.post(f"{BACKEND_HOST}/summarize")
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        st.markdown(
-                            f"### Summary of {st.session_state.selected_collection}"
-                        )
-                        st.markdown(data["summary"])
+            st.markdown(f"### Summary of {st.session_state.selected_collection}")
+            summary_placeholder = st.empty()
+            full_summary = ""
 
-                        if data.get("sources"):
+            with st.spinner("Thinking..."):
+                try:
+                    resp = requests.post(
+                        f"{BACKEND_HOST}/summarize/stream", stream=True
+                    )
+                    if resp.status_code == 200:
+                        sources = []
+                        for line in resp.iter_lines():
+                            if line:
+                                decoded_line = line.decode("utf-8")
+                                if decoded_line.startswith("data: "):
+                                    data = json.loads(decoded_line[6:])
+                                    if "token" in data:
+                                        full_summary += data["token"]
+                                        summary_placeholder.markdown(full_summary + "▌")
+                                    elif "sources" in data:
+                                        sources = data["sources"]
+                                    elif "error" in data:
+                                        st.error(f"Error: {data['error']}")
+
+                        summary_placeholder.markdown(full_summary)
+
+                        if sources:
                             with st.expander("Sources used for summary"):
-                                for src in data["sources"]:
-                                    st.markdown(f"- {src.get('filename')}")
+                                for j, src in enumerate(sources):
+                                    loc = ""
+                                    if src.get("page"):
+                                        loc += f" (Page {src['page']})"
+                                    if src.get("row"):
+                                        loc += f" (Row {src['row']})"
+
+                                    score = ""
+                                    if src.get("score"):
+                                        score = f" - Score: {src['score']:.2f}"
+
+                                    st.markdown(
+                                        f"**{src.get('filename')}{loc}**{score}"
+                                    )
+                                    st.caption(src.get("preview_text", ""))
+                                    if src.get("file_hash"):
+                                        link = f"{BACKEND_HOST}/sources/preview?collection={st.session_state.selected_collection}&file_hash={src['file_hash']}"
+                                        st.markdown(
+                                            f'<a href="{link}" target="_blank">Download/View Original</a>',
+                                            unsafe_allow_html=True,
+                                        )
+                                    st.divider()
                     else:
                         logger.error(f"Summarization failed: {resp.text}")
                         st.error(f"Summarization failed: {resp.text}")
