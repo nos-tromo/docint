@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import os
 import re
 from dataclasses import dataclass, field
@@ -1229,7 +1230,6 @@ class RAG:
         self._embed_model = None
         self._gen_model = None
         self._reranker = None
-        import gc
 
         gc.collect()
         if torch.cuda.is_available():
