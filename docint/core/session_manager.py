@@ -402,6 +402,7 @@ class SessionManager:
                     or meta_node.get("content_type")
                     or ""
                 )
+                file_hash = meta_node.get("file_hash")
                 source_kind = meta_node.get("source", "")
                 page = meta_node.get("page_label") or meta_node.get("page") or None
                 table_meta = meta_node.get("table") or {}
@@ -424,6 +425,7 @@ class SessionManager:
                         node_id=str(node_id) if node_id is not None else None,
                         score=score,
                         filename=filename,
+                        file_hash=file_hash,
                         filetype=filetype,
                         source=source_kind,
                         page=int(page) if page is not None else None,
@@ -579,7 +581,7 @@ class SessionManager:
                         "score": c.score,
                         "page": c.page,
                         "row": c.row,
-                        # file_hash is missing in DB, so we can't link it
+                        "file_hash": c.file_hash,
                     }
                     sources.append(src)
 
@@ -738,9 +740,8 @@ class SessionManager:
                         content = node.get_content()
                         if isinstance(content, str) and content:
                             return content
-            return None
         except Exception:
-            return None
+            pass
 
         try:
             recs = self.rag.qdrant_client.retrieve(
