@@ -15,7 +15,6 @@ from docint.core.rag import RAG
 from docint.utils.env_cfg import load_host_env, load_path_env, set_offline_env
 from docint.utils.hashing import compute_file_hash
 from docint.utils.logging_cfg import setup_logging
-from docint.utils.ollama_cfg import OllamaPipeline
 
 # --- Application Setup ---
 set_offline_env()
@@ -34,8 +33,6 @@ app.add_middleware(
 )
 
 rag = RAG(qdrant_collection="")
-
-SUMMARY_PROMPT = OllamaPipeline().load_prompt(kw="summarize")
 
 
 def _format_sse(event: str, data: dict[str, Any]) -> str:
