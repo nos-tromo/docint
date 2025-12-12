@@ -1,5 +1,4 @@
 import json
-import tempfile
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -471,89 +470,91 @@ async def ingest_upload(
         logger.error("HTTPException: At least one file is required for upload")
         raise HTTPException(status_code=400, detail="At least one file is required")
 
-    # We use a temporary directory for uploads to avoid persisting files on the host.
-    # The files are ingested into Qdrant and then discarded.
+    # We use a persistent directory for uploads to support previewing files later.
+    # The files are ingested into Qdrant and kept in the collection directory.
 
     async def event_stream() -> AsyncIterator[str]:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            batch_dir = Path(tmp_dir)
+        # Use the Qdrant collections directory to store source files
+        # This keeps vectors and source data in the same volume
+        qdrant_col_dir = load_path_env().qdrant_collections
+        # We use a 'sources' subdirectory to avoid conflicting with Qdrant's internal files
+        batch_dir = qdrant_col_dir / name / "sources"
+        batch_dir.mkdir(parents=True, exist_ok=True)
 
-            yield _format_sse(
-                "start",
-                {
-                    "collection": name,
-                    "target_dir": "temporary_ingestion_buffer",
-                    "files": [f.filename for f in files],
-                },
-            )
+        yield _format_sse(
+            "start",
+            {
+                "collection": name,
+                "target_dir": str(batch_dir),
+                "files": [f.filename for f in files],
+            },
+        )
 
-            for upload in files:
-                filename = Path(upload.filename or "upload").name
-                dest = batch_dir / filename
-                bytes_written = 0
-                try:
-                    with dest.open("wb") as buffer:
-                        while True:
-                            chunk = await upload.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            buffer.write(chunk)
-                            bytes_written += len(chunk)
-                            yield _format_sse(
-                                "upload_progress",
-                                {"filename": filename, "bytes_written": bytes_written},
-                            )
-
-                    # We calculate hash but don't store the file index anymore
-                    file_hash = compute_file_hash(dest)
-                    yield _format_sse(
-                        "file_saved",
-                        {
-                            "filename": filename,
-                            "file_hash": file_hash,
-                            "path": str(dest),  # This path is temp
-                        },
-                    )
-                except (
-                    Exception
-                ) as exc:  # pragma: no cover - streamed errors are logged
-                    logger.error("Error saving uploaded file {}: {}", filename, exc)
-                    yield _format_sse(
-                        "error",
-                        {"message": f"Failed to save {filename}: {exc}"},
-                    )
-                    return
-
-            yield _format_sse("ingestion_started", {"collection": name})
+        for upload in files:
+            filename = Path(upload.filename or "upload").name
+            dest = batch_dir / filename
+            bytes_written = 0
             try:
-                await anyio.to_thread.run_sync(
-                    ingest_module.ingest_docs,
-                    name,
-                    batch_dir,
-                    hybrid if hybrid is not None else True,
-                    table_row_limit,
-                    table_row_filter,
-                )
-                rag.select_collection(name)
-                try:
-                    if getattr(rag, "index", None) is None:
-                        rag.create_index()
-                    rag.create_query_engine()
-                except Exception:
-                    logger.warning(
-                        "Exception: Failed to create query engine for collection: {}",
-                        name,
-                    )
+                with dest.open("wb") as buffer:
+                    while True:
+                        chunk = await upload.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        buffer.write(chunk)
+                        bytes_written += len(chunk)
+                        yield _format_sse(
+                            "upload_progress",
+                            {"filename": filename, "bytes_written": bytes_written},
+                        )
+
+                # We calculate hash but don't store the file index anymore
+                file_hash = compute_file_hash(dest)
                 yield _format_sse(
-                    "ingestion_complete",
-                    {"collection": name, "data_dir": "temporary_ingestion_buffer"},
+                    "file_saved",
+                    {
+                        "filename": filename,
+                        "file_hash": file_hash,
+                        "path": str(dest),
+                    },
                 )
             except Exception as exc:  # pragma: no cover - streamed errors are logged
-                logger.error("Error during streamed ingestion: {}", exc)
+                logger.error("Error saving uploaded file {}: {}", filename, exc)
                 yield _format_sse(
                     "error",
-                    {"message": f"Ingestion failed: {exc}"},
+                    {"message": f"Failed to save {filename}: {exc}"},
                 )
+                return
+
+        yield _format_sse("ingestion_started", {"collection": name})
+        try:
+            await anyio.to_thread.run_sync(
+                ingest_module.ingest_docs,
+                name,
+                batch_dir,
+                hybrid if hybrid is not None else True,
+                table_row_limit,
+                table_row_filter,
+            )
+            rag.select_collection(name)
+            try:
+                if getattr(rag, "index", None) is None:
+                    rag.create_index()
+                rag.create_query_engine()
+            except Exception:
+                logger.warning(
+                    "Exception: Failed to create query engine for collection: {}",
+                    name,
+                )
+            yield _format_sse(
+                "ingestion_complete",
+                {"collection": name, "data_dir": str(batch_dir)},
+            )
+        except Exception as exc:  # pragma: no cover - streamed errors are logged
+            logger.error("Error during streamed ingestion: {}", exc)
+            yield _format_sse(
+                "error",
+                {"message": f"Ingestion failed: {exc}"},
+            )
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -639,6 +640,13 @@ def preview_source(collection: str, file_hash: str) -> FileResponse:
             if alt_path.exists() and alt_path.is_file():
                 logger.info("Found file at alternative path: {}", alt_path)
                 return FileResponse(alt_path)
+
+            # Check qdrant_collections/collection/sources/filename
+            qdrant_col_dir = load_path_env().qdrant_collections
+            col_path = qdrant_col_dir / collection / "sources" / filename
+            if col_path.exists() and col_path.is_file():
+                logger.info("Found file at collection path: {}", col_path)
+                return FileResponse(col_path)
 
             raise HTTPException(
                 status_code=404, detail=f"Source file not found on server at {path}"
