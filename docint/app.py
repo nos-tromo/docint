@@ -1,5 +1,4 @@
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -9,11 +8,10 @@ from loguru import logger
 from streamlit.runtime import exists
 from streamlit.web import cli as st_cli
 
-from docint.utils.env_cfg import set_offline_env
+from docint.utils.env_cfg import load_host_env, set_offline_env
 from docint.utils.logging_cfg import setup_logging
 
-# Configuration
-API_URL = os.getenv("API_URL", "http://localhost:8000")
+BACKEND_HOST = load_host_env().backend_host
 
 
 def setup_app():
@@ -70,7 +68,7 @@ def render_sidebar():
 
         # Collection Selection
         try:
-            resp = requests.get(f"{API_URL}/collections/list")
+            resp = requests.get(f"{BACKEND_HOST}/collections/list")
             if resp.status_code == 200:
                 cols = resp.json()
                 # If we have a selected collection in state, try to keep it selected
@@ -87,7 +85,7 @@ def render_sidebar():
                 if selected and selected != st.session_state.selected_collection:
                     # Notify backend of selection
                     r = requests.post(
-                        f"{API_URL}/collections/select", json={"name": selected}
+                        f"{BACKEND_HOST}/collections/select", json={"name": selected}
                     )
                     if r.status_code == 200:
                         st.session_state.selected_collection = selected
@@ -122,7 +120,7 @@ def render_sidebar():
             st.rerun()
 
         try:
-            resp = requests.get(f"{API_URL}/sessions/list")
+            resp = requests.get(f"{BACKEND_HOST}/sessions/list")
             if resp.status_code == 200:
                 sessions = resp.json().get("sessions", [])
 
@@ -144,7 +142,7 @@ def render_sidebar():
                             st.session_state.session_id = s["id"]
                             # Load History
                             h_resp = requests.get(
-                                f"{API_URL}/sessions/{s['id']}/history"
+                                f"{BACKEND_HOST}/sessions/{s['id']}/history"
                             )
                             if h_resp.status_code == 200:
                                 st.session_state.messages = h_resp.json().get(
@@ -161,7 +159,7 @@ def render_sidebar():
                         use_container_width=True,
                     ):
                         requests.delete(
-                            f"{API_URL}/sessions/{st.session_state.session_id}"
+                            f"{BACKEND_HOST}/sessions/{st.session_state.session_id}"
                         )
                         st.session_state.session_id = None
                         st.session_state.messages = []
@@ -212,7 +210,7 @@ def render_ingestion():
                     # Use stream=True to handle SSE if possible, or just wait for response
                     # Since requests doesn't parse SSE automatically, we'll just read lines
                     response = requests.post(
-                        f"{API_URL}/ingest/upload",
+                        f"{BACKEND_HOST}/ingest/upload",
                         data=data,
                         files=files,
                         stream=True,
@@ -270,7 +268,7 @@ def render_analysis():
         else:
             with st.spinner("Generating summary..."):
                 try:
-                    resp = requests.post(f"{API_URL}/summarize")
+                    resp = requests.post(f"{BACKEND_HOST}/summarize")
                     if resp.status_code == 200:
                         data = resp.json()
                         st.markdown(
@@ -330,7 +328,7 @@ def render_chat() -> None:
                         st.caption(src.get("preview_text", ""))
 
                         if src.get("file_hash"):
-                            link = f"{API_URL}/sources/preview?collection={st.session_state.selected_collection}&file_hash={src['file_hash']}"
+                            link = f"{BACKEND_HOST}/sources/preview?collection={st.session_state.selected_collection}&file_hash={src['file_hash']}"
                             st.markdown(
                                 f'<a href="{link}" target="_blank">Download/View Original</a>',
                                 unsafe_allow_html=True,
@@ -359,7 +357,7 @@ def render_chat() -> None:
             }
             try:
                 with requests.post(
-                    f"{API_URL}/stream_query", json=payload, stream=True
+                    f"{BACKEND_HOST}/stream_query", json=payload, stream=True
                 ) as resp:
                     if resp.status_code == 200:
                         lines = resp.iter_lines()
@@ -427,7 +425,7 @@ def render_chat() -> None:
                                     )
                                     st.caption(src.get("preview_text", ""))
                                     if src.get("file_hash"):
-                                        link = f"{API_URL}/sources/preview?collection={st.session_state.selected_collection}&file_hash={src['file_hash']}"
+                                        link = f"{BACKEND_HOST}/sources/preview?collection={st.session_state.selected_collection}&file_hash={src['file_hash']}"
                                         st.markdown(
                                             f'<a href="{link}" target="_blank">Download/View Original</a>',
                                             unsafe_allow_html=True,
