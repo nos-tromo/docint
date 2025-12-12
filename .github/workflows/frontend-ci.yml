@@ -1,0 +1,62 @@
+name: Frontend CI
+
+on:
+  push:
+    branches: [main, tests]
+    paths:
+      - 'docint/app.py'
+      - 'docint/utils/**'
+      - 'Dockerfile.frontend'
+      - 'tests/test_streamlit.py'
+      - '.github/workflows/frontend-ci.yml'
+  pull_request:
+    branches: [main, tests]
+    paths:
+      - 'docint/app.py'
+      - 'docint/utils/**'
+      - 'Dockerfile.frontend'
+      - 'tests/test_streamlit.py'
+      - '.github/workflows/frontend-ci.yml'
+
+jobs:
+  test-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install only the lightweight dependencies needed for the frontend
+          # This ensures we don't accidentally introduce heavy backend dependencies
+          pip install streamlit requests loguru python-dotenv pytest
+          
+      - name: Run Streamlit tests
+        run: |
+          # Add current directory to PYTHONPATH so docint package can be imported
+          export PYTHONPATH=$PYTHONPATH:.
+          pytest tests/test_streamlit.py
+
+  build-frontend-image:
+    needs: test-frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.frontend
+          push: false
+          tags: docint-frontend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
