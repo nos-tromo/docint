@@ -1,14 +1,22 @@
-import pytest
+from typing import Generator
 from unittest.mock import MagicMock
-from docint.core.session_manager import SessionManager
-from docint.core.state.base import Base
+
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from docint.core.session_manager import SessionManager
+from docint.core.state.base import Base
+
 
 @pytest.fixture
-def session_manager():
-    # Setup in-memory DB
+def session_manager() -> Generator[SessionManager, None, None]:
+    """
+    Fixture to create a SessionManager with an in-memory SQLite database.
+
+    Returns:
+        Generator[SessionManager, None, None]: The SessionManager instance.
+    """
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     SessionMaker = sessionmaker(bind=engine)
@@ -18,10 +26,19 @@ def session_manager():
 
     sm = SessionManager(rag=rag_mock)
     sm._SessionMaker = SessionMaker
-    return sm
+    yield sm
+    engine.dispose()
 
 
-def test_persist_and_retrieve_citation_with_hash(session_manager):
+def test_persist_and_retrieve_citation_with_hash(
+    session_manager: SessionManager,
+) -> None:
+    """
+    Test persisting and retrieving a turn with citations that include file_hash.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+    """
     session_id = "test_session"
     user_msg = "hello"
 
