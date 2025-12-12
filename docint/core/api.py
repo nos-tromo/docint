@@ -220,7 +220,16 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
 
     rag.start_session(payload.session_id)
 
-    async def event_generator():
+    async def event_generator() -> AsyncIterator[str]:
+        """
+        Generate SSE events for the streaming query.
+
+        Returns:
+            AsyncIterator[str]: An asynchronous iterator yielding SSE events.
+
+        Yields:
+            Iterator[AsyncIterator[str]]: An asynchronous iterator yielding SSE events.
+        """
         try:
             # Iterate over the sync generator
             for chunk in rag.stream_chat(payload.question):
