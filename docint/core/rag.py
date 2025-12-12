@@ -31,8 +31,8 @@ from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from docint.core.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.session_manager import SessionManager
 from docint.utils.env_cfg import load_host_env, load_model_env, load_path_env
-from docint.utils.model_cfg import resolve_model_path
 from docint.utils.clean_text import basic_clean
+from docint.utils.model_cfg import resolve_model_path
 
 # --- Environment variables ---
 load_dotenv()
