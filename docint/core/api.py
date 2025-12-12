@@ -32,6 +32,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+QDRANT_COL_DIR = load_path_env().qdrant_collections
 rag = RAG(qdrant_collection="")
 
 
@@ -508,7 +509,7 @@ async def ingest_upload(
     async def event_stream() -> AsyncIterator[str]:
         # Use the Qdrant collections directory to store source files
         # This keeps vectors and source data in the same volume
-        qdrant_col_dir = load_path_env().qdrant_collections
+        qdrant_col_dir = QDRANT_COL_DIR
         # We use a 'sources' subdirectory to avoid conflicting with Qdrant's internal files
         batch_dir = qdrant_col_dir / name / "sources"
         batch_dir.mkdir(parents=True, exist_ok=True)
@@ -607,6 +608,7 @@ def preview_source(collection: str, file_hash: str) -> FileResponse:
         HTTPException: If an error occurs while retrieving the source preview.
     """
     file_path_str = None
+    qdrant_col_dir = QDRANT_COL_DIR
 
     # 1. Try to resolve filename via Qdrant
     try:
@@ -667,7 +669,6 @@ def preview_source(collection: str, file_hash: str) -> FileResponse:
             return FileResponse(alt_path)
 
         # Check qdrant_collections/collection/sources/filename
-        qdrant_col_dir = load_path_env().qdrant_collections
         col_path = qdrant_col_dir / collection / "sources" / filename
         if col_path.exists() and col_path.is_file():
             logger.info("Found file at collection path: {}", col_path)
@@ -676,7 +677,6 @@ def preview_source(collection: str, file_hash: str) -> FileResponse:
     # 3. Fallback: Scan the sources directory for a matching hash
     # This handles cases where Qdrant is down or the file path in Qdrant is invalid
     try:
-        qdrant_col_dir = load_path_env().qdrant_collections
         sources_dir = qdrant_col_dir / collection / "sources"
 
         if sources_dir.exists():
