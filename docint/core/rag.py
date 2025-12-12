@@ -898,7 +898,7 @@ class RAG:
         base = self.qdrant_col_dir
         if base is None:
             return []
-        collections_dir = base / "collections"
+        collections_dir = base
         try:
             if not collections_dir.exists():
                 return []
