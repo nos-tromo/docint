@@ -42,7 +42,9 @@ services:
       ollama:
         condition: service_healthy
     networks:
-      - docintnet
+      docintnet:
+        aliases:
+          - backend-api
 
   ##########################################################
   # Backend (GPU)
@@ -94,7 +96,9 @@ services:
       ollama-gpu:
         condition: service_healthy
     networks:
-      - docintnet
+      docintnet:
+        aliases:
+          - backend-api
 
   ##########################################################
   # Frontend (Streamlit)
