@@ -43,6 +43,7 @@ class PathConfig:
     """
 
     data: Path
+    logs: Path
     queries: Path
     results: Path
     prompts: Path
@@ -114,11 +115,15 @@ def load_path_env() -> PathConfig:
     home_dir = Path.home()
     docint_data_dir: Path = home_dir / "docint"
     package_dir: Path = Path(__file__).parents[1].resolve()
+    project_root: Path = package_dir.parents[1].resolve()
     xdg_cache_home_dir: Path = home_dir / ".cache"
     hf_hub_cache_dir: Path = xdg_cache_home_dir / "huggingface" / "hub"
 
     return PathConfig(
         data=Path(os.getenv("DATA_PATH", docint_data_dir / "data")).expanduser(),
+        logs=Path(
+            os.getenv("LOGS_PATH", project_root / ".logs" / "docint.log")
+        ).expanduser(),
         queries=Path(
             os.getenv("QUERIES_PATH", docint_data_dir / "queries.txt")
         ).expanduser(),
