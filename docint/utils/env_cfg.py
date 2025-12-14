@@ -132,7 +132,7 @@ def load_path_env() -> PathConfig:
         ).expanduser(),
         prompts=package_dir / "utils" / "prompts",
         qdrant_collections=Path(
-            os.getenv("QDRANT_COL_DIR", "qdrant_collections")
+            os.getenv("QDRANT_COL_DIR", "qdrant_storage")
         ).expanduser(),
         required_exts=package_dir / "utils" / "required_exts.txt",
         xdg_cache_home=Path(
