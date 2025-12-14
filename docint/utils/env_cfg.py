@@ -5,10 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from loguru import logger
 
-from docint.utils.logging_cfg import setup_logging
-
 load_dotenv()
-setup_logging()
 
 
 @dataclass(frozen=True)
