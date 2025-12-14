@@ -27,8 +27,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-QDRANT_COL_DIR = load_path_env().qdrant_collections
 rag = RAG(qdrant_collection="")
+
+
+# --- Helper Functions ---
+
+
+def _resolve_data_dir() -> Path:
+    """
+    Return the configured data directory for ingestion.
+
+    Returns:
+        Path: The path to the data directory.
+    """
+
+    return load_path_env().data
+
+
+def _resolve_qdrant_col_dir() -> Path:
+    """
+    Return the configured Qdrant collections directory.
+
+    Returns:
+        Path: The path to the Qdrant collections directory.
+    """
+    return load_path_env().qdrant_collections
 
 
 def _format_sse(event: str, data: dict[str, Any]) -> str:
@@ -392,17 +415,6 @@ def delete_session(session_id: str) -> dict[str, bool]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _resolve_data_dir() -> Path:
-    """
-    Return the configured data directory for ingestion.
-
-    Returns:
-        Path: The path to the data directory.
-    """
-
-    return load_path_env().data
-
-
 @app.post("/ingest", response_model=IngestOut, tags=["Ingestion"])
 def ingest(payload: IngestIn) -> dict[str, bool | str]:
     """
@@ -504,7 +516,7 @@ async def ingest_upload(
     async def event_stream() -> AsyncIterator[str]:
         # Use the Qdrant collections directory to store source files
         # This keeps vectors and source data in the same volume
-        qdrant_col_dir = QDRANT_COL_DIR
+        qdrant_col_dir = _resolve_qdrant_col_dir()
         # We use a 'sources' subdirectory to avoid conflicting with Qdrant's internal files
         batch_dir = qdrant_col_dir / name / "sources"
         batch_dir.mkdir(parents=True, exist_ok=True)
@@ -603,7 +615,7 @@ def preview_source(collection: str, file_hash: str) -> FileResponse:
         HTTPException: If an error occurs while retrieving the source preview.
     """
     file_path_str = None
-    qdrant_col_dir = QDRANT_COL_DIR
+    qdrant_col_dir = _resolve_qdrant_col_dir()
 
     # 1. Try to resolve filename via Qdrant
     try:
