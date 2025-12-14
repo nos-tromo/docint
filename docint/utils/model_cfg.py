@@ -156,22 +156,28 @@ def main() -> None:
         logger.info("{}: {}", model, getattr(models, model))
 
     # Load the app's models
+    # docling
     load_docling_models()
 
-    load_hf_model(
-        model_id=models.embed_model,
-        cache_folder=paths.hf_hub_cache,
-        kw="embedding",
-    )
-    load_hf_model(
-        model_id=models.sparse_model,
-        cache_folder=paths.hf_hub_cache,
-        kw="sparse",
-    )
+    # hugging face
+    for model_id, kw in [
+        (models.embed_model, "embedding"),
+        (models.sparse_model, "sparse"),
+    ]:
+        load_hf_model(
+            model_id=model_id,
+            cache_folder=paths.hf_hub_cache,
+            kw=kw,
+        )
 
-    load_ollama_model(models.gen_model, "generator")
-    load_ollama_model(models.vision_model, "vision")
+    # ollama
+    for model, kw in [
+        (models.gen_model, "generator"),
+        (models.vision_model, "vision"),
+    ]:
+        load_ollama_model(model, kw)
 
+    # whisper
     load_whisper_model(models.whisper_model)
 
 
