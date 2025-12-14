@@ -66,8 +66,8 @@ def load_host_env() -> HostConfig:
         ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
         qdrant_host=os.getenv("QDRANT_HOST", "http://localhost:6333"),
         cors_allowed_origins=os.getenv(
-            "CORS_ALLOWED_ORIGINS", "http://localhost:8501,http://127.0.0.1:8501"
-        ),
+            "CORS_ALLOWED_ORIGINS", ""
+        ),  # , "http://localhost:8501,http://127.0.0.1:8501"),
     )
 
 
