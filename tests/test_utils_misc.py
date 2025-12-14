@@ -6,7 +6,8 @@ import pytest
 
 from docint.utils.clean_text import basic_clean
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
-from docint.utils.logging_cfg import _resolve_log_path, setup_logging
+from docint.utils.logging_cfg import setup_logging
+from loguru import logger
 
 
 def test_basic_clean_normalizes_whitespace() -> None:
@@ -64,18 +65,22 @@ def test_ensure_file_hash_requires_inputs() -> None:
         ensure_file_hash({}, path=None, file_hash=None)
 
 
-def test_resolve_log_path_and_setup(
+def test_setup_logging_respects_env_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    Test that _resolve_log_path resolves the log path and setup_logging creates the log file.
+    setup_logging should honor LOGS_PATH and create the log file.
 
     Args:
-        tmp_path (Path): The temporary path fixture.
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path (Path): Temporary directory.
+        monkeypatch (pytest.MonkeyPatch): Fixture to override environment.
     """
-    target = tmp_path / "logs"
-    path = _resolve_log_path(target)
-    assert path.name == "docint.log"
-    logfile = setup_logging(target, level="INFO", rotation="1 MB", retention=1)
-    assert logfile.exists()
+    log_file = tmp_path / "logs" / "docint.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("LOGS_PATH", str(log_file))
+
+    resolved = setup_logging(rotation="1 MB", retention=1)
+    logger.debug("create log entry for file")
+
+    assert resolved == log_file
+    assert log_file.exists()
