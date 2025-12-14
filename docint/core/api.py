@@ -514,6 +514,15 @@ async def ingest_upload(
     # The files are ingested into Qdrant and kept in the collection directory.
 
     async def event_stream() -> AsyncIterator[str]:
+        """
+        Stream SSE events during the ingestion process.
+
+        Returns:
+            AsyncIterator[str]: A stream of Server-Sent Events (SSE) as strings.
+
+        Yields:
+            Iterator[AsyncIterator[str]]: A stream of SSE events during the ingestion process.
+        """
         # Use the Qdrant collections directory to store source files
         # This keeps vectors and source data in the same volume
         qdrant_col_dir = _resolve_qdrant_col_dir()
