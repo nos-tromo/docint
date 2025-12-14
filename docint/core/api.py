@@ -12,13 +12,8 @@ from starlette.middleware.cors import CORSMiddleware
 
 from docint.cli import ingest as ingest_module
 from docint.core.rag import RAG
-from docint.utils.env_cfg import load_host_env, load_path_env, set_offline_env
+from docint.utils.env_cfg import load_host_env, load_path_env
 from docint.utils.hashing import compute_file_hash
-from docint.utils.logging_cfg import setup_logging
-
-# --- Application Setup ---
-set_offline_env()
-setup_logging()
 
 # Load allowed origins from environment or default to Streamlit's default ports
 allowed_origins = load_host_env().cors_allowed_origins.split(",")
