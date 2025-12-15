@@ -180,6 +180,8 @@ def main() -> None:
     # whisper
     load_whisper_model(models.whisper_model)
 
+    logger.info("All models loaded successfully.")
+
 
 if __name__ == "__main__":
     sys.path.append(str(Path(__file__).parents[2].resolve()))
