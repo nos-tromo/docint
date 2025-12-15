@@ -37,7 +37,7 @@ def setup_logging(
 
     logger.add(
         sink=sys.stderr,
-        level="WARNING",
+        level="INFO",
         backtrace=backtrace,
         diagnose=diagnose,
         format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<8} | {name} | {message}",
