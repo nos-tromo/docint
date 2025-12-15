@@ -70,8 +70,8 @@ def load_host_env() -> HostConfig:
         ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
         qdrant_host=os.getenv("QDRANT_HOST", "http://localhost:6333"),
         cors_allowed_origins=os.getenv(
-            "CORS_ALLOWED_ORIGINS", ""
-        ),  # , "http://localhost:8501,http://127.0.0.1:8501"),
+            "CORS_ALLOWED_ORIGINS", "http://localhost:8501,http://127.0.0.1:8501"
+        ),
     )
 
 
@@ -92,7 +92,7 @@ def load_model_env() -> ModelConfig:
         sparse_model=os.getenv(
             "SPARSE_MODEL", "Qdrant/all_miniLM_L6_v2_with_attentions"
         ),
-        gen_model=os.getenv("LLM", "granite4:7b-a1b-h"),
+        gen_model=os.getenv("LLM", "qwen3:8b"),
         vision_model=os.getenv("VLM", "qwen3-vl:8b"),
         whisper_model=os.getenv("WHISPER_MODEL", "turbo"),
     )
