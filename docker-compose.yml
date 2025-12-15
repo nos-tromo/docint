@@ -12,7 +12,7 @@ services:
     environment:
       - DATA_PATH=/app/data
       - LOG_PATH=/app/.logs/backend.log
-      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_HOST=http://ollama-net:11434
       - QDRANT_COL_DIR=/qdrant/storage/collections
       - QDRANT_HOST=http://qdrant:6333
       - QDRANT_SRC_DIR=/qdrant/storage/sources
@@ -24,10 +24,10 @@ services:
     volumes:
       - ${USERPROFILE:-$HOME}/docint/data:/app/data
       - ${USERPROFILE:-$HOME}/docint/results:/app/results
-      - backend_logs:/app/.logs
-      - easyocr_cache:/root/.EasyOCR
-      - model_cache:/root/.cache
-      - qdrant_storage:/qdrant/storage
+      - backend-logs:/app/.logs
+      - easyocr-cache:/root/.EasyOCR
+      - model-cache:/root/.cache
+      - qdrant-storage:/qdrant/storage
     develop:
       watch:
         - action: sync
@@ -42,9 +42,9 @@ services:
       ollama:
         condition: service_healthy
     networks:
-      docintnet:
+      docint-net:
         aliases:
-          - backend-api
+          - backend-net
 
   ##########################################################
   # Backend (GPU)
@@ -60,7 +60,7 @@ services:
       - DATA_PATH=/app/data/in
       - LOG_PATH=/app/.logs/backend.log
       - NVIDIA_VISIBLE_DEVICES=all
-      - OLLAMA_HOST=http://ollama-gpu:11434
+      - OLLAMA_HOST=http://ollama-net:11434
       - QDRANT_COL_DIR=/qdrant/storage/collections
       - QDRANT_HOST=http://qdrant:6333
       - QDRANT_SRC_DIR=/qdrant/storage/sources
@@ -73,10 +73,10 @@ services:
       - ${USERPROFILE:-$HOME}/docint/data:/app/data
       - ${USERPROFILE:-$HOME}/docint/data:/app/data/in
       - ${USERPROFILE:-$HOME}/docint/results:/app/data/out
-      - backend_logs:/app/.logs
-      - easyocr_cache:/root/.EasyOCR
-      - model_cache:/root/.cache
-      - qdrant_storage:/qdrant/storage
+      - backend-logs:/app/.logs
+      - easyocr-cache:/root/.EasyOCR
+      - model-cache:/root/.cache
+      - qdrant-storage:/qdrant/storage
     develop:
       watch:
         - action: sync
@@ -97,9 +97,9 @@ services:
       ollama-gpu:
         condition: service_healthy
     networks:
-      docintnet:
+      docint-net:
         aliases:
-          - backend-api
+          - backend-net
 
   ##########################################################
   # Frontend (Streamlit)
@@ -112,7 +112,7 @@ services:
     ports:
       - "8501:8501"
     environment:
-      - BACKEND_HOST=http://backend:8000
+      - BACKEND_HOST=http://backend-net:8000
       - BACKEND_PUBLIC_HOST=http://localhost:8000
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
     develop:
@@ -123,7 +123,7 @@ services:
     depends_on:
       - backend
     networks:
-      - docintnet
+      - docint-net
 
   ##########################################################
   # Ollama (CPU)
@@ -134,14 +134,16 @@ services:
     ports:
       - "11434:11434"
     volumes:
-      - ollama_models:/root/.ollama
+      - ollama-models:/root/.ollama
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 5s
       timeout: 10s
       retries: 5
     networks:
-      - docintnet
+      docint-net:
+        aliases:
+          - ollama-net
 
   ##########################################################
   # Ollama (GPU)
@@ -154,7 +156,7 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
     volumes:
-      - ollama_models:/root/.ollama
+      - ollama-models:/root/.ollama
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 5s
@@ -170,7 +172,9 @@ services:
     runtime: nvidia
     restart: always
     networks:
-      - docintnet
+      docint-net:
+        aliases:
+          - ollama-net
 
   ##########################################################
   # Qdrant
@@ -183,25 +187,25 @@ services:
     environment:
       - QDRANT__TELEMETRY_DISABLED=true
     volumes:
-      - qdrant_snapshots:/qdrant/snapshots
-      - qdrant_storage:/qdrant/storage
+      - qdrant-snapshots:/qdrant/snapshots
+      - qdrant-storage:/qdrant/storage
     restart: unless-stopped
     networks:
-      - docintnet
+      - docint-net
 
 ##########################################################
 # Volumes
 ##########################################################
 volumes:
-  backend_logs:
-  easyocr_cache:
-  model_cache:
-  ollama_models:
-  qdrant_snapshots:
-  qdrant_storage:
+  backend-logs:
+  easyocr-cache:
+  model-cache:
+  ollama-models:
+  qdrant-snapshots:
+  qdrant-storage:
 
 ##########################################################
 # Networks
 ##########################################################
 networks:
-  docintnet:
+  docint-net:
