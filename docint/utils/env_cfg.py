@@ -15,6 +15,7 @@ class HostConfig:
     """
 
     backend_host: str
+    backend_public_host: str
     ollama_host: str
     qdrant_host: str
     cors_allowed_origins: str
@@ -45,6 +46,7 @@ class PathConfig:
     results: Path
     prompts: Path
     qdrant_collections: Path
+    qdrant_sources: Path
     required_exts: Path
     xdg_cache_home: Path
     hf_hub_cache: Path
@@ -57,12 +59,14 @@ def load_host_env() -> HostConfig:
     Returns:
         HostConfig: Dataclass containing host configuration.
         - backend_host (str): The backend host URL.
+        - backend_public_host (str): The public backend host URL.
         - ollama_host (str): The Ollama host URL.
         - qdrant_host (str): The Qdrant host URL.
         - cors_allowed_origins (str): Comma-separated list of allowed CORS origins.
     """
     return HostConfig(
         backend_host=os.getenv("BACKEND_HOST", "http://localhost:8000"),
+        backend_public_host=os.getenv("BACKEND_PUBLIC_HOST", "http://localhost:8000"),
         ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
         qdrant_host=os.getenv("QDRANT_HOST", "http://localhost:6333"),
         cors_allowed_origins=os.getenv(
@@ -101,10 +105,12 @@ def load_path_env() -> PathConfig:
     Returns:
         PathConfig: Dataclass containing path configuration.
         - data (Path): Path to the data directory.
+        - logs (Path): Path to the logs file.
         - queries (Path): Path to the queries file.
         - results (Path): Path to the results directory.
         - prompts (Path): Path to the prompts directory.
         - qdrant_collections (Path): Path to the Qdrant collections directory.
+        - qdrant_sources (Path): Path to the Qdrant sources directory.
         - required_exts (Path): Path to the required extensions file.
         - xdg_cache_home (Path): Path to the XDG cache home directory.
         - hf_hub_cache (Path): Path to the Hugging Face Hub cache directory.
@@ -115,6 +121,22 @@ def load_path_env() -> PathConfig:
     project_root: Path = package_dir.parents[1].resolve()
     xdg_cache_home_dir: Path = home_dir / ".cache"
     hf_hub_cache_dir: Path = xdg_cache_home_dir / "huggingface" / "hub"
+
+    qdrant_collections = Path(
+        os.getenv("QDRANT_COL_DIR", "qdrant_storage")
+    ).expanduser()
+    qdrant_sources_env = os.getenv("QDRANT_SRC_DIR")
+
+    # Default sources root alongside Qdrant storage; fall back to a "sources" sibling.
+    if qdrant_sources_env:
+        qdrant_sources = Path(qdrant_sources_env).expanduser()
+    else:
+        default_sources_base = (
+            qdrant_collections.parent
+            if qdrant_collections.parent != Path(".")
+            else qdrant_collections
+        )
+        qdrant_sources = (default_sources_base / "sources").expanduser()
 
     return PathConfig(
         data=Path(os.getenv("DATA_PATH", docint_data_dir / "data")).expanduser(),
@@ -128,9 +150,8 @@ def load_path_env() -> PathConfig:
             os.getenv("RESULTS_PATH", docint_data_dir / "results")
         ).expanduser(),
         prompts=package_dir / "utils" / "prompts",
-        qdrant_collections=Path(
-            os.getenv("QDRANT_COL_DIR", "qdrant_storage")
-        ).expanduser(),
+        qdrant_collections=qdrant_collections,
+        qdrant_sources=qdrant_sources,
         required_exts=package_dir / "utils" / "required_exts.txt",
         xdg_cache_home=Path(
             os.getenv("XDG_CACHE_HOME", xdg_cache_home_dir)
