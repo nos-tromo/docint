@@ -48,6 +48,7 @@ def ingest_docs(
     )
     # Avoid loading chat/query models during offline ingestion jobs.
     rag.ingest_docs(data_dir, build_query_engine=False)
+    rag.unload_models()
     logger.info("Ingestion complete.")
 
 

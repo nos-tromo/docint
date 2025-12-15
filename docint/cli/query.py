@@ -124,6 +124,7 @@ def main() -> None:
     queries = load_queries(q_path=path_config.queries)
     for index, query in enumerate(queries, start=1):
         run_query(rag=rag, query=query, index=index, output_path=path_config.results)
+    rag.unload_models()
     logger.info("All queries processed.")
 
 
