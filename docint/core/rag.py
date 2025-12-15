@@ -31,6 +31,7 @@ from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from docint.core.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.session_manager import SessionManager
 from docint.utils.env_cfg import load_host_env, load_model_env, load_path_env
+from docint.utils.storage import stage_sources_to_qdrant
 from docint.utils.clean_text import basic_clean
 from docint.utils.model_cfg import resolve_model_path
 
@@ -65,6 +66,7 @@ class RAG:
     # --- Qdrant controls ---
     qdrant_host: str | None = field(default=None, init=False)
     _qdrant_col_dir: Path | None = field(default=None, init=False, repr=False)
+    _qdrant_src_dir: Path | None = field(default=None, init=False, repr=False)
     qdrant_collection: str = "default"
 
     # --- Ollama parameters ---
@@ -149,6 +151,7 @@ class RAG:
         self.data_dir = path_config.data
         self.prompt_dir = path_config.prompts
         self._qdrant_col_dir = path_config.qdrant_collections
+        self._qdrant_src_dir = path_config.qdrant_sources
         self.reader_required_exts_path = path_config.required_exts
         self.hf_hub_cache = path_config.hf_hub_cache
         self.xdg_cache_home = path_config.xdg_cache_home
@@ -284,11 +287,41 @@ class RAG:
             else:
                 home = os.getenv("HOME") or os.getenv("USERPROFILE")
                 if home:
-                    self._qdrant_col_dir = Path(home) / ".qdrant" / "storage"
+                    self._qdrant_col_dir = (
+                        Path(home) / ".qdrant" / "storage" / "collections"
+                    )
         if self._qdrant_col_dir is None:
             logger.error("ValueError: Qdrant host directory is not set.")
             raise ValueError("Qdrant host directory is not set.")
         return self._qdrant_col_dir
+
+    @property
+    def qdrant_src_dir(self) -> Path:
+        """
+        Best-effort resolution of the host directory where Qdrant stores source data.
+        Used only as a *fallback* when we cannot reach the Qdrant API.
+        Priority: explicit field -> env var -> platform default under home.
+
+        Returns:
+            The Path representing the Qdrant source host directory.
+
+        Raises:
+            ValueError: If the Qdrant source host directory is not set.
+        """
+        if self._qdrant_src_dir is None:
+            env = load_path_env().qdrant_sources
+            if env:
+                self._qdrant_src_dir = Path(env) if not env.is_absolute() else env
+            else:
+                home = os.getenv("HOME") or os.getenv("USERPROFILE")
+                if home:
+                    self._qdrant_src_dir = (
+                        Path(home) / ".qdrant" / "storage" / "sources"
+                    )
+        if self._qdrant_src_dir is None:
+            logger.error("ValueError: Qdrant source host directory is not set.")
+            raise ValueError("Qdrant source host directory is not set.")
+        return self._qdrant_src_dir
 
     @property
     def device(self) -> str:
@@ -796,29 +829,38 @@ class RAG:
                 or meta.get("file_name")
                 or meta.get("filename")
                 or meta.get("file_path")
-                or ""
             )
             filetype = (
-                origin.get("mimetype")
+                origin.get("filetype")
+                or origin.get("mimetype")
+                or meta.get("filetype")
                 or meta.get("mimetype")
                 or meta.get("file_type")
-                or ""
+                or meta.get("file_format")
             )
-            file_hash = origin.get("file_hash") or meta.get("file_hash")
-            source_kind = meta.get("source", "unknown")
+            source_kind = (
+                meta.get("source") or meta.get("source_type") or meta.get("reader")
+            )
+            file_hash = (
+                origin.get("file_hash")
+                or meta.get("file_hash")
+                or self._extract_file_hash(meta)
+            )
 
-            # --- page detection (PDF / Docling) ---
-            page = meta.get("page_number") or meta.get("page_label") or meta.get("page")
-            if page is None:
-                # try doc_items → prov → page_no
-                doc_items = meta.get("doc_items") or []
-                for item in doc_items:
-                    for prov in item.get("prov", []) or []:
-                        if isinstance(prov, dict) and "page_no" in prov:
-                            page = prov.get("page_no")
+            # page detection
+            page = (
+                meta.get("page")
+                or meta.get("page_number")
+                or origin.get("page")
+                or origin.get("page_number")
+            )
+            provenance = meta.get("provenance") or meta.get("provenances") or []
+            if page is None and isinstance(provenance, list):
+                for prov in provenance:
+                    if isinstance(prov, dict):
+                        page = prov.get("page_no")
+                        if page is not None:
                             break
-                    if page is not None:
-                        break
             try:
                 page = int(page) if page is not None else None
             except Exception:
@@ -939,6 +981,25 @@ class RAG:
         self.query_engine = None
         self.reset_session_state()
 
+    def _prepare_sources_dir(self, data_dir: Path) -> Path:
+        """
+        Ensure source files live under qdrant_src_dir/<collection> for preview and persistence.
+
+        If the provided data_dir is already under that path, it is returned as-is.
+        Otherwise, files/directories are copied into the target.
+
+        Args:
+            data_dir (Path): The original data directory.
+
+        Returns:
+            Path: The path to the staged sources directory.
+        """
+        if not self.qdrant_collection:
+            return data_dir
+        return stage_sources_to_qdrant(
+            data_dir, self.qdrant_collection, self.qdrant_src_dir
+        )
+
     # --- Public API ---
     def ingest_docs(
         self, data_dir: str | Path, *, build_query_engine: bool = True
@@ -952,7 +1013,10 @@ class RAG:
                 ingestion. Disable when running headless ingestion jobs to avoid
                 loading large reranker/generation models. Defaults to True.
         """
-        self.data_dir = Path(data_dir) if isinstance(data_dir, str) else data_dir
+        prepared_dir = self._prepare_sources_dir(
+            Path(data_dir) if isinstance(data_dir, str) else data_dir
+        )
+        self.data_dir = prepared_dir
         pipeline = self._build_ingestion_pipeline()
 
         # Initialize index (load existing or create new wrapper)
@@ -1012,7 +1076,10 @@ class RAG:
         Raises:
             RuntimeError: If the index is not initialized for async ingestion.
         """
-        self.data_dir = Path(data_dir) if isinstance(data_dir, str) else data_dir
+        prepared_dir = self._prepare_sources_dir(
+            Path(data_dir) if isinstance(data_dir, str) else data_dir
+        )
+        self.data_dir = prepared_dir
         pipeline = self._build_ingestion_pipeline()
 
         # Initialize index
@@ -1252,15 +1319,21 @@ class RAG:
         response = streaming_engine.query(self.summarize_prompt)
 
         full_text = ""
-        for token in response.response_gen:
-            full_text += token
-            yield token
+        tokens = getattr(response, "response_gen", None)
+        if tokens is not None:
+            for token in tokens:
+                full_text += token
+                yield token
+        else:
+            resp_value = getattr(response, "response", None)
+            if isinstance(resp_value, str):
+                full_text = resp_value
 
         # Create a Response object to reuse normalization logic
         final_response = Response(
             response=full_text,
-            source_nodes=response.source_nodes,
-            metadata=response.metadata,
+            source_nodes=getattr(response, "source_nodes", []) or [],
+            metadata=getattr(response, "metadata", {}) or {},
         )
         normalized = self._normalize_response_data(
             self.summarize_prompt, final_response
