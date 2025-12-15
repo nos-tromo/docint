@@ -10,20 +10,20 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATA_PATH=/app/data/in
+      - DATA_PATH=/app/data
       - LOG_PATH=/app/.logs/backend.log
       - OLLAMA_HOST=http://ollama:11434
       - QDRANT_COL_DIR=/qdrant/storage/collections
       - QDRANT_HOST=http://qdrant:6333
+      - QDRANT_SRC_DIR=/qdrant/storage/sources
       - QUERIES_PATH=/app/data/queries.txt
-      - RESULTS_PATH=/app/data/out
+      - RESULTS_PATH=/app/results
       - USE_DEVICE=auto
     env_file:
       - .env.docker
     volumes:
       - ${USERPROFILE:-$HOME}/docint/data:/app/data
-      - ${USERPROFILE:-$HOME}/docint/data:/app/data/in
-      - ${USERPROFILE:-$HOME}/docint/results:/app/data/out
+      - ${USERPROFILE:-$HOME}/docint/results:/app/results
       - backend_logs:/app/.logs
       - easyocr_cache:/root/.EasyOCR
       - model_cache:/root/.cache
@@ -42,7 +42,9 @@ services:
       ollama:
         condition: service_healthy
     networks:
-      - docintnet
+      docintnet:
+        aliases:
+          - backend-api
 
   ##########################################################
   # Backend (GPU)
@@ -61,6 +63,7 @@ services:
       - OLLAMA_HOST=http://ollama-gpu:11434
       - QDRANT_COL_DIR=/qdrant/storage/collections
       - QDRANT_HOST=http://qdrant:6333
+      - QDRANT_SRC_DIR=/qdrant/storage/sources
       - QUERIES_PATH=/app/data/queries.txt
       - RESULTS_PATH=/app/data/out
       - USE_DEVICE=auto
@@ -94,7 +97,9 @@ services:
       ollama-gpu:
         condition: service_healthy
     networks:
-      - docintnet
+      docintnet:
+        aliases:
+          - backend-api
 
   ##########################################################
   # Frontend (Streamlit)
@@ -108,6 +113,7 @@ services:
       - "8501:8501"
     environment:
       - BACKEND_HOST=http://backend:8000
+      - BACKEND_PUBLIC_HOST=http://localhost:8000
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
     develop:
       watch:

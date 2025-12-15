@@ -12,8 +12,11 @@
 *.pyo
 *.so
 **/*.egg-info/
+**/.github/
 **/.logs/
+**/.mypy_cache/
 **/.pytest_cache/
+**/.ruff_cache/
 **/.venv/
 **/build/
 **/data/
@@ -22,13 +25,16 @@
 **/lib/
 **/models/
 **/output/
+**/qdrant*/
 **/results/
 **/session/
 
 # Environment and config files
 .env
+AGENTS.md
 
 # Media, data, and large files not needed for build
+.DS_Store
 *.csv
 *.db
 *.doc*
@@ -38,6 +44,7 @@
 *.ipynb
 *.jpeg
 *.jpg
+*.log
 *.mkv
 *.mp3
 *.mp4

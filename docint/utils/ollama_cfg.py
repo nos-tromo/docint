@@ -140,7 +140,8 @@ class OllamaPipeline:
             logger.error("RuntimeError: Model ID is not set.")
             raise RuntimeError("Model ID must be a valid string.")
 
-        response = ollama.chat(
+        client = ollama.Client(host=self.ollama_host)
+        response = client.chat(
             model=self.model_id,
             think=think,
             messages=[system, user],
