@@ -83,6 +83,10 @@ def test_ingest_docs_invokes_rag(
             calls.path = path
             calls.build_query_engine = build_query_engine
 
+        def unload_models(self) -> None:
+            # No-op for test double
+            return None
+
     monkeypatch.setattr(ingest, "RAG", DummyRAG)
     data_dir = tmp_path
     ingest.ingest_docs("demo", data_dir, hybrid=False)

@@ -134,6 +134,10 @@ def test_main_executes_all(monkeypatch: pytest.MonkeyPatch) -> None:
             sequence.append(f"query:{q}")
             return {"response": q}
 
+        def unload_models(self) -> None:
+            # No-op for test double
+            return None
+
     def fake_setup() -> None:
         sequence.append("setup")
 
