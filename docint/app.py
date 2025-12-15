@@ -11,7 +11,9 @@ from streamlit.web import cli as st_cli
 from docint.utils.env_cfg import load_host_env, set_offline_env
 from docint.utils.logging_cfg import setup_logging
 
-BACKEND_HOST = load_host_env().backend_host
+host_cfg = load_host_env()
+BACKEND_HOST = host_cfg.backend_host
+BACKEND_PUBLIC_HOST = host_cfg.backend_public_host or BACKEND_HOST
 
 
 def setup_app():
@@ -310,7 +312,7 @@ def render_analysis():
                                     )
                                     st.caption(src.get("preview_text", ""))
                                     if src.get("file_hash"):
-                                        link = f"{BACKEND_HOST}/sources/preview?collection={st.session_state.selected_collection}&file_hash={src['file_hash']}"
+                                        link = f"{BACKEND_PUBLIC_HOST}/sources/preview?collection={st.session_state.selected_collection}&file_hash={src['file_hash']}"
                                         st.markdown(
                                             f'<a href="{link}" target="_blank">Download/View Original</a>',
                                             unsafe_allow_html=True,
@@ -364,7 +366,7 @@ def render_chat() -> None:
                         st.caption(src.get("preview_text", ""))
 
                         if src.get("file_hash"):
-                            link = f"{BACKEND_HOST}/sources/preview?collection={st.session_state.selected_collection}&file_hash={src['file_hash']}"
+                            link = f"{BACKEND_PUBLIC_HOST}/sources/preview?collection={st.session_state.selected_collection}&file_hash={src['file_hash']}"
                             st.markdown(
                                 f'<a href="{link}" target="_blank">Download/View Original</a>',
                                 unsafe_allow_html=True,
@@ -461,7 +463,7 @@ def render_chat() -> None:
                                     )
                                     st.caption(src.get("preview_text", ""))
                                     if src.get("file_hash"):
-                                        link = f"{BACKEND_HOST}/sources/preview?collection={st.session_state.selected_collection}&file_hash={src['file_hash']}"
+                                        link = f"{BACKEND_PUBLIC_HOST}/sources/preview?collection={st.session_state.selected_collection}&file_hash={src['file_hash']}"
                                         st.markdown(
                                             f'<a href="{link}" target="_blank">Download/View Original</a>',
                                             unsafe_allow_html=True,
