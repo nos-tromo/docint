@@ -116,11 +116,11 @@ def load_path_env() -> PathConfig:
         - hf_hub_cache (Path): Path to the Hugging Face Hub cache directory.
     """
     home_dir = Path.home()
-    docint_data_dir: Path = home_dir / "docint"
-    package_dir: Path = Path(__file__).parents[1].resolve()
-    project_root: Path = package_dir.parents[1].resolve()
     xdg_cache_home_dir: Path = home_dir / ".cache"
     hf_hub_cache_dir: Path = xdg_cache_home_dir / "huggingface" / "hub"
+    data_dir: Path = home_dir / "docint"
+    project_root: Path = Path(__file__).parents[2].resolve()
+    utils_dir: Path = project_root / "docint" / "utils"
 
     qdrant_collections = Path(
         os.getenv("QDRANT_COL_DIR", "qdrant_storage")
@@ -139,20 +139,16 @@ def load_path_env() -> PathConfig:
         qdrant_sources = (default_sources_base / "sources").expanduser()
 
     return PathConfig(
-        data=Path(os.getenv("DATA_PATH", docint_data_dir / "data")).expanduser(),
+        data=Path(os.getenv("DATA_PATH", data_dir / "data")).expanduser(),
         logs=Path(
             os.getenv("LOGS_PATH", project_root / ".logs" / "docint.log")
         ).expanduser(),
-        queries=Path(
-            os.getenv("QUERIES_PATH", docint_data_dir / "queries.txt")
-        ).expanduser(),
-        results=Path(
-            os.getenv("RESULTS_PATH", docint_data_dir / "results")
-        ).expanduser(),
-        prompts=package_dir / "utils" / "prompts",
+        queries=Path(os.getenv("QUERIES_PATH", data_dir / "queries.txt")).expanduser(),
+        results=Path(os.getenv("RESULTS_PATH", data_dir / "results")).expanduser(),
+        prompts=utils_dir / "prompts",
         qdrant_collections=qdrant_collections,
         qdrant_sources=qdrant_sources,
-        required_exts=package_dir / "utils" / "required_exts.txt",
+        required_exts=utils_dir / "required_exts.txt",
         xdg_cache_home=Path(
             os.getenv("XDG_CACHE_HOME", xdg_cache_home_dir)
         ).expanduser(),
