@@ -24,7 +24,7 @@ services:
     volumes:
       - ${USERPROFILE:-$HOME}/docint/data:/app/data
       - ${USERPROFILE:-$HOME}/docint/results:/app/results
-      - backend-logs:/app/.logs
+      - docint-logs:/app/.logs
       - easyocr-cache:/root/.EasyOCR
       - model-cache:/root/.cache
       - qdrant-storage:/qdrant/storage
@@ -73,7 +73,7 @@ services:
       - ${USERPROFILE:-$HOME}/docint/data:/app/data
       - ${USERPROFILE:-$HOME}/docint/data:/app/data/in
       - ${USERPROFILE:-$HOME}/docint/results:/app/data/out
-      - backend-logs:/app/.logs
+      - docint-logs:/app/.logs
       - easyocr-cache:/root/.EasyOCR
       - model-cache:/root/.cache
       - qdrant-storage:/qdrant/storage
@@ -114,7 +114,12 @@ services:
     environment:
       - BACKEND_HOST=http://backend-net:8000
       - BACKEND_PUBLIC_HOST=http://localhost:8000
+      - LOG_PATH=/app/.logs/frontend.log
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+    volumes:
+      - ${USERPROFILE:-$HOME}/docint/data:/app/data
+      - ${USERPROFILE:-$HOME}/docint/results:/app/results
+      - docint-logs:/app/.logs
     develop:
       watch:
         - action: sync
@@ -197,7 +202,7 @@ services:
 # Volumes
 ##########################################################
 volumes:
-  backend-logs:
+  docint-logs:
   easyocr-cache:
   model-cache:
   ollama-models:
