@@ -141,7 +141,7 @@ def load_path_env() -> PathConfig:
     return PathConfig(
         data=Path(os.getenv("DATA_PATH", data_dir / "data")).expanduser(),
         logs=Path(
-            os.getenv("LOGS_PATH", project_root / ".logs" / "docint.log")
+            os.getenv("LOG_PATH", project_root / ".logs" / "docint.log")
         ).expanduser(),
         queries=Path(os.getenv("QUERIES_PATH", data_dir / "queries.txt")).expanduser(),
         results=Path(os.getenv("RESULTS_PATH", data_dir / "results")).expanduser(),

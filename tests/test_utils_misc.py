@@ -69,7 +69,7 @@ def test_setup_logging_respects_env_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    setup_logging should honor LOGS_PATH and create the log file.
+    setup_logging should honor LOG_PATH and create the log file.
 
     Args:
         tmp_path (Path): Temporary directory.
@@ -77,7 +77,7 @@ def test_setup_logging_respects_env_path(
     """
     log_file = tmp_path / "logs" / "docint.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("LOGS_PATH", str(log_file))
+    monkeypatch.setenv("LOG_PATH", str(log_file))
 
     resolved = setup_logging(rotation="1 MB", retention=1)
     logger.debug("create log entry for file")
