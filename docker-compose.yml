@@ -28,16 +28,6 @@ services:
       - easyocr-cache:/root/.EasyOCR
       - model-cache:/root/.cache
       - qdrant-storage:/qdrant/storage
-    develop:
-      watch:
-        - action: sync
-          path: ./docint
-          target: /app/docint
-        - action: sync
-          path: ./docint/app.py
-          target: /app/docint/app.py
-        - action: rebuild
-          path: ./pyproject.toml
     depends_on:
       ollama:
         condition: service_healthy
@@ -77,16 +67,6 @@ services:
       - easyocr-cache:/root/.EasyOCR
       - model-cache:/root/.cache
       - qdrant-storage:/qdrant/storage
-    develop:
-      watch:
-        - action: sync
-          path: ./docint
-          target: /app/docint
-        - action: sync
-          path: ./docint/app.py
-          target: /app/docint/app.py
-        - action: rebuild
-          path: ./pyproject.toml
     deploy:
       resources:
         reservations:
@@ -120,13 +100,6 @@ services:
       - ${USERPROFILE:-$HOME}/docint/data:/app/data
       - ${USERPROFILE:-$HOME}/docint/results:/app/results
       - docint-logs:/app/.logs
-    develop:
-      watch:
-        - action: sync
-          path: ./docint/app.py
-          target: /app/docint/app.py
-    depends_on:
-      - backend
     networks:
       - docint-net
 
