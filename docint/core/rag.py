@@ -161,6 +161,7 @@ class RAG:
         self.embed_model_id = model_config.embed_model
         self.sparse_model_id = model_config.sparse_model
         self.gen_model_id = model_config.gen_model
+        self.context_window = model_config.ollama_ctx_window
 
         with open(self.reader_required_exts_path, "r", encoding="utf-8") as f:
             self.reader_required_exts = [f".{line.strip()}" for line in f]
@@ -795,7 +796,6 @@ class RAG:
             resp_text = ""
 
         # strip <think>…</think> (optional)
-        logger.debug("Raw response text (first 500 chars): {}", resp_text[:500])
         m = re.search(
             r"<think>(.*?)</think>", resp_text, flags=re.DOTALL | re.IGNORECASE
         )
