@@ -61,8 +61,7 @@ services:
       - .env.docker
     volumes:
       - ${USERPROFILE:-$HOME}/docint/data:/app/data
-      - ${USERPROFILE:-$HOME}/docint/data:/app/data/in
-      - ${USERPROFILE:-$HOME}/docint/results:/app/data/out
+      - ${USERPROFILE:-$HOME}/docint/results:/app/results
       - docint-logs:/app/.logs
       - easyocr-cache:/root/.EasyOCR
       - model-cache:/root/.cache
