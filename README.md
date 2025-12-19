@@ -108,8 +108,11 @@ The application is configured via environment variables. Key variables include:
 
 - `DOCINT_OFFLINE`: Set to `true` to force offline mode (fails if models aren't cached).
 - `LLM`: Name of the Ollama model to use (default: `granite4:7b-a1b-h`).
+- `OLLAMA_CTX_WINDOW`: Max context tokens to assume for the Ollama model without calling `ollama show` (default: `8192`).
 - `EMBED_MODEL`: HuggingFace embedding model ID (default: `BAAI/bge-m3`).
 - `SPARSE_MODEL`: Sparse embedding model ID (default: `Qdrant/all_miniLM_L6_v2_with_attentions`).
+- `ENABLE_IE`: Enable entity/relation extraction during ingestion (default: `false`).
+- `IE_MAX_CHARS`: Characters per node to send to the extractor (default: `800`).
 
 See `docint/utils/env_cfg.py` for the full list of configuration options and defaults.
 

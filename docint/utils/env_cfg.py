@@ -36,6 +36,16 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
+class IEConfig:
+    """
+    Dataclass for information extraction configuration.
+    """
+
+    enabled: bool
+    max_chars: int
+
+
+@dataclass(frozen=True)
 class PathConfig:
     """
     Dataclass for path configuration.
@@ -98,6 +108,27 @@ def load_model_env() -> ModelConfig:
         vision_model=os.getenv("VLM", "qwen3-vl:8b"),
         whisper_model=os.getenv("WHISPER_MODEL", "turbo"),
         ollama_ctx_window=int(os.getenv("OLLAMA_CTX_WINDOW", "8192")),
+    )
+
+
+def load_ie_env() -> IEConfig:
+    """
+    Loads information extraction configuration from environment variables or defaults.
+
+    Returns:
+        IEConfig: Dataclass containing IE configuration.
+        - enabled (bool): Whether to run entity/relation extraction during ingestion.
+        - max_chars (int): Maximum characters from each node to send to the extractor.
+    """
+
+    def _as_bool(val: str | None, default: bool = False) -> bool:
+        if val is None:
+            return default
+        return val.lower() in {"1", "true", "yes", "on"}
+
+    return IEConfig(
+        enabled=_as_bool(os.getenv("ENABLE_IE"), True),
+        max_chars=int(os.getenv("IE_MAX_CHARS", "800")),
     )
 
 

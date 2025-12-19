@@ -16,6 +16,40 @@ BACKEND_HOST = host_cfg.backend_host
 BACKEND_PUBLIC_HOST = host_cfg.backend_public_host or BACKEND_HOST
 
 
+def _render_entities_relations(src: dict) -> None:
+    """
+    Render entities and relations from the source dictionary.
+
+    Args:
+        src (dict): Source dictionary containing entities and relations.
+    """
+    entities = src.get("entities") or []
+    relations = src.get("relations") or []
+    if entities:
+        st.caption("Entities")
+        st.markdown(
+            ", ".join(
+                [
+                    f"**{e.get('text', '').strip()}**"
+                    + (f" ({e.get('type')})" if e.get("type") else "")
+                    for e in entities
+                    if isinstance(e, dict) and e.get("text")
+                ]
+            )
+        )
+    if relations:
+        st.caption("Relations")
+        for rel in relations:
+            if not isinstance(rel, dict):
+                continue
+            head = rel.get("head")
+            tail = rel.get("tail")
+            label = rel.get("label")
+            if not head or not tail:
+                continue
+            st.markdown(f"- **{head}** — _{label or 'rel'}_ → **{tail}**")
+
+
 def setup_app():
     """
     Initialize application state and configuration.
@@ -311,6 +345,7 @@ def render_analysis():
                                         f"**{src.get('filename')}{loc}**{score}"
                                     )
                                     st.caption(src.get("preview_text", ""))
+                                    _render_entities_relations(src)
                                     if src.get("file_hash"):
                                         link = f"{BACKEND_PUBLIC_HOST}/sources/preview?collection={st.session_state.selected_collection}&file_hash={src['file_hash']}"
                                         st.markdown(
@@ -371,6 +406,7 @@ def render_chat() -> None:
                                 f'<a href="{link}" target="_blank">Download/View Original</a>',
                                 unsafe_allow_html=True,
                             )
+                        _render_entities_relations(src)
                         st.divider()
 
     # Chat Input
@@ -468,6 +504,7 @@ def render_chat() -> None:
                                             f'<a href="{link}" target="_blank">Download/View Original</a>',
                                             unsafe_allow_html=True,
                                         )
+                                    _render_entities_relations(src)
                                     st.divider()
 
                         # 3. Save bot message

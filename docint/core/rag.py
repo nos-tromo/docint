@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -30,7 +31,12 @@ from qdrant_client.async_qdrant_client import AsyncQdrantClient
 
 from docint.core.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.session_manager import SessionManager
-from docint.utils.env_cfg import load_host_env, load_model_env, load_path_env
+from docint.utils.env_cfg import (
+    load_host_env,
+    load_ie_env,
+    load_model_env,
+    load_path_env,
+)
 from docint.utils.storage import stage_sources_to_qdrant
 from docint.utils.clean_text import basic_clean
 from docint.utils.model_cfg import resolve_model_path
@@ -76,6 +82,10 @@ class RAG:
     request_timeout: int = 1200
     thinking: bool = OLLAMA_THINKING
     ollama_options: dict[str, Any] | None = None
+
+    # --- Information extraction ---
+    enable_ie: bool = False
+    ie_max_chars: int = 800
 
     # --- Reranking / retrieval ---
     enable_hybrid: bool = True
@@ -162,6 +172,10 @@ class RAG:
         self.sparse_model_id = model_config.sparse_model
         self.gen_model_id = model_config.gen_model
         self.context_window = model_config.ollama_ctx_window
+
+        ie_config = load_ie_env()
+        self.enable_ie = ie_config.enabled
+        self.ie_max_chars = ie_config.max_chars
 
         with open(self.reader_required_exts_path, "r", encoding="utf-8") as f:
             self.reader_required_exts = [f".{line.strip()}" for line in f]
@@ -556,6 +570,94 @@ class RAG:
         """
         return StorageContext.from_defaults(vector_store=vector_store)
 
+    # --- Information extraction helpers ---
+    @staticmethod
+    def _parse_ie_payload(raw: str) -> dict[str, Any]:
+        """
+        Parses the raw text response from the IE model into a JSON payload.
+
+        Args:
+            raw (str): Raw text response from the IE model.
+
+        Returns:
+            dict[str, Any]: Parsed JSON payload.
+        """
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+        try:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                return json.loads(raw[start : end + 1])
+        except Exception:
+            return {}
+        return {}
+
+    def _ie_extract(self, text: str) -> tuple[list[dict], list[dict]]:
+        """
+        Performs information extraction on the given text.
+
+        Args:
+            text (str): Text to perform information extraction on.
+
+        Returns:
+            tuple[list[dict], list[dict]]: Extracted entities and relations.
+        """
+        snippet = text[: self.ie_max_chars]
+        prompt = (
+            "Extract entities and relations from the text. Return JSON with keys 'entities' and 'relations'. "
+            'Entities: list of {"text", "type", "score"}; Relations: list of {"head", "tail", "label", "score"}. '
+            "Use short type labels (PERSON, ORG, LOC, DATE, MISC). If nothing is found, use empty lists.\n\n"
+            f"TEXT:\n{snippet}"
+        )
+
+        try:
+            resp = self.gen_model.complete(prompt)
+            raw = resp.text if hasattr(resp, "text") else str(resp)
+        except Exception as exc:  # pragma: no cover - model failures are runtime
+            logger.warning("IE extraction request failed: {}", exc)
+            return [], []
+
+        payload = self._parse_ie_payload(raw) if isinstance(raw, str) else {}
+        entities_raw = payload.get("entities") if isinstance(payload, dict) else []
+        relations_raw = payload.get("relations") if isinstance(payload, dict) else []
+
+        entities: list[dict] = []
+        for ent in entities_raw or []:
+            if not isinstance(ent, dict):
+                continue
+            text_val = str(ent.get("text") or ent.get("name") or "").strip()
+            if not text_val:
+                continue
+            entities.append(
+                {
+                    "text": text_val,
+                    "type": ent.get("type") or ent.get("label"),
+                    "score": ent.get("score"),
+                }
+            )
+
+        relations: list[dict] = []
+        for rel in relations_raw or []:
+            if not isinstance(rel, dict):
+                continue
+            head = str(rel.get("head") or rel.get("subject") or "").strip()
+            tail = str(rel.get("tail") or rel.get("object") or "").strip()
+            if not head or not tail:
+                continue
+            relations.append(
+                {
+                    "head": head,
+                    "tail": tail,
+                    "label": rel.get("label") or rel.get("type"),
+                    "score": rel.get("score"),
+                }
+            )
+
+        return entities, relations
+
     def _build_ingestion_pipeline(self) -> DocumentIngestionPipeline:
         """
         Instantiate a document ingestion pipeline using current settings.
@@ -591,6 +693,7 @@ class RAG:
             chunk_size=self.chunk_size,
             chunk_overlap=self.chunk_overlap,
             semantic_splitter_char_limit=self.semantic_splitter_char_limit,
+            entity_extractor=self._ie_extract if self.enable_ie else None,
         )
 
     def _index(self, storage_ctx: StorageContext) -> VectorStoreIndex:
@@ -897,6 +1000,12 @@ class RAG:
                 "source": source_kind,
                 "score": getattr(nws, "score", None),
             }
+            entities = meta.get("entities") or origin.get("entities")
+            relations = meta.get("relations") or origin.get("relations")
+            if entities:
+                src["entities"] = entities
+            if relations:
+                src["relations"] = relations
             if file_hash:
                 src["file_hash"] = file_hash
             if preview_url:

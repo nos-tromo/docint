@@ -52,6 +52,7 @@ class DocumentIngestionPipeline:
     chunk_size: int = 1024
     chunk_overlap: int = 0
     semantic_splitter_char_limit: int = 20000
+    entity_extractor: Callable[[str], tuple[list[dict], list[dict]]] | None = None
 
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
     md_node_parser: MarkdownNodeParser | None = field(default=None, init=False)
@@ -549,6 +550,24 @@ class DocumentIngestionPipeline:
                     len(plain_docs),
                 )
                 nodes.extend(self._semantic_nodes_with_fallback(plain_docs, "text"))
+
+        if self.entity_extractor:
+            for node in nodes:
+                text_value = getattr(node, "text", "") or ""
+                if not text_value.strip():
+                    continue
+                try:
+                    ents, rels = self.entity_extractor(text_value)
+                except Exception as exc:  # pragma: no cover - extractor errors logged
+                    logger.warning("Entity extractor failed: {}", exc)
+                    continue
+                if ents or rels:
+                    meta = dict(getattr(node, "metadata", {}) or {})
+                    if ents:
+                        meta["entities"] = ents
+                    if rels:
+                        meta["relations"] = rels
+                    node.metadata = meta
 
         return nodes
 
