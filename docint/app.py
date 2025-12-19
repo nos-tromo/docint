@@ -1,6 +1,7 @@
 import json
 import sys
 from pathlib import Path
+from typing import Any, Iterable, Tuple
 
 import requests
 import streamlit as st
@@ -16,38 +17,279 @@ BACKEND_HOST = host_cfg.backend_host
 BACKEND_PUBLIC_HOST = host_cfg.backend_public_host or BACKEND_HOST
 
 
-def _render_entities_relations(src: dict) -> None:
+def _format_score(score: Any) -> str:
+    """Format score values for display."""
+    try:
+        return f"{float(score):.2f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _normalize_entities(entities: Iterable[Any] | None) -> list[dict[str, Any]]:
     """
-    Render entities and relations from the source dictionary.
+    Return sanitized entity payloads.
 
     Args:
-        src (dict): Source dictionary containing entities and relations.
+        entities: Iterable of entity dicts or None.
+
+    Returns:
+        List of normalized entity dicts.
     """
-    entities = src.get("entities") or []
-    relations = src.get("relations") or []
-    if entities:
-        st.caption("Entities")
-        st.markdown(
-            ", ".join(
-                [
-                    f"**{e.get('text', '').strip()}**"
-                    + (f" ({e.get('type')})" if e.get("type") else "")
-                    for e in entities
-                    if isinstance(e, dict) and e.get("text")
-                ]
-            )
+    normalized: list[dict[str, Any]] = []
+    for ent in entities or []:
+        if not isinstance(ent, dict):
+            continue
+        text_val = str(ent.get("text") or "").strip()
+        if not text_val:
+            continue
+        normalized.append(
+            {
+                "text": text_val,
+                "type": ent.get("type") or ent.get("label"),
+                "score": ent.get("score"),
+            }
         )
-    if relations:
-        st.caption("Relations")
+    return normalized
+
+
+def _normalize_relations(relations: Iterable[Any] | None) -> list[dict[str, Any]]:
+    """
+    Return sanitized relation payloads.
+
+    Args:
+        relations: Iterable of relation dicts or None.
+
+    Returns:
+        List of normalized relation dicts.
+    """
+    normalized: list[dict[str, Any]] = []
+    for rel in relations or []:
+        if not isinstance(rel, dict):
+            continue
+        head = str(rel.get("head") or rel.get("subject") or "").strip()
+        tail = str(rel.get("tail") or rel.get("object") or "").strip()
+        if not head or not tail:
+            continue
+        normalized.append(
+            {
+                "head": head,
+                "tail": tail,
+                "label": rel.get("label") or rel.get("type"),
+                "score": rel.get("score"),
+            }
+        )
+    return normalized
+
+
+def _source_label(src: dict) -> str:
+    """
+    Build a compact label for a source row.
+
+    Args:
+        src: Source dictionary with possible keys 'filename', 'file_path', 'page', 'row'.
+
+    Returns:
+        A string label representing the source.
+    """
+    filename_val = src.get("filename") or src.get("file_path") or "Unknown"
+    filename = str(filename_val).strip() or "Unknown"
+    parts: list[str] = []
+    if src.get("page"):
+        parts.append(f"p{src['page']}")
+    if src.get("row"):
+        parts.append(f"row {src['row']}")
+    return f"{filename} ({', '.join(parts)})" if parts else filename
+
+
+def _aggregate_ie(
+    sources: Iterable[dict] | None,
+) -> Tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Aggregate entities and relations across source payloads.
+
+    Args:
+        sources: Iterable of source dictionaries containing 'entities' and 'relations'.
+
+    Returns:
+        A tuple containing two lists:
+        - List of aggregated entity dictionaries.
+        - List of aggregated relation dictionaries.
+    """
+
+    entity_index: dict[tuple[str, str], dict[str, Any]] = {}
+    relation_index: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+    for src in sources or []:
+        if not isinstance(src, dict):
+            continue
+        label = _source_label(src)
+        entities = _normalize_entities(src.get("entities"))
+        relations = _normalize_relations(src.get("relations"))
+
+        for ent in entities:
+            text_val = str(ent.get("text") or "")
+            type_val = str(ent.get("type") or "")
+            ent_key: tuple[str, str] = (text_val.lower(), type_val.lower())
+            if ent_key not in entity_index:
+                entity_index[ent_key] = {
+                    "text": text_val,
+                    "type": ent.get("type"),
+                    "best_score": ent.get("score"),
+                    "count": 0,
+                    "files": set(),
+                    "occurrences": [],
+                }
+            entry = entity_index[ent_key]
+            entry["count"] += 1
+            entry["files"].add(label)
+            if ent.get("score") is not None:
+                prev = entry.get("best_score")
+                entry["best_score"] = (
+                    max(prev, ent["score"]) if prev is not None else ent["score"]
+                )
+            entry["occurrences"].append({"source": label, "score": ent.get("score")})
+
         for rel in relations:
-            if not isinstance(rel, dict):
-                continue
-            head = rel.get("head")
-            tail = rel.get("tail")
-            label = rel.get("label")
-            if not head or not tail:
-                continue
-            st.markdown(f"- **{head}** — _{label or 'rel'}_ → **{tail}**")
+            head_val = str(rel.get("head") or "")
+            label_val = str(rel.get("label") or "")
+            tail_val = str(rel.get("tail") or "")
+            rel_key: tuple[str, str, str] = (
+                head_val.lower(),
+                label_val.lower(),
+                tail_val.lower(),
+            )
+            if rel_key not in relation_index:
+                relation_index[rel_key] = {
+                    "head": head_val,
+                    "tail": tail_val,
+                    "label": rel.get("label"),
+                    "best_score": rel.get("score"),
+                    "count": 0,
+                    "files": set(),
+                    "occurrences": [],
+                }
+            entry = relation_index[rel_key]
+            entry["count"] += 1
+            entry["files"].add(label)
+            if rel.get("score") is not None:
+                prev = entry.get("best_score")
+                entry["best_score"] = (
+                    max(prev, rel["score"]) if prev is not None else rel["score"]
+                )
+            entry["occurrences"].append({"source": label, "score": rel.get("score")})
+
+    entities_sorted: list[dict[str, Any]] = sorted(
+        [{**v, "files": sorted(v["files"])} for v in entity_index.values()],
+        key=lambda item: (
+            -int(item.get("count", 0) or 0),
+            str(item.get("text") or "").lower(),
+        ),
+    )
+    relations_sorted: list[dict[str, Any]] = sorted(
+        [{**v, "files": sorted(v["files"])} for v in relation_index.values()],
+        key=lambda item: (
+            -int(item.get("count", 0) or 0),
+            str(item.get("head") or "").lower(),
+            str(item.get("label") or ""),
+        ),
+    )
+    return entities_sorted, relations_sorted
+
+
+def _render_entities_relations(src: dict[str, Any]) -> None:
+    """
+    Render entities and relations for a single source.
+    
+    Args:
+        src: Source dictionary containing 'entities' and 'relations'.
+    """
+    entities = _normalize_entities(src.get("entities"))
+    relations = _normalize_relations(src.get("relations"))
+
+    if not entities and not relations:
+        return
+
+    col_entities, col_relations = st.columns(2)
+    if entities:
+        with col_entities:
+            st.caption("Entities")
+            for ent in entities:
+                score = _format_score(ent.get("score"))
+                label = ent.get("type") or "Unlabeled"
+                st.markdown(f"- **{ent['text']}** ({label}) — score {score}")
+
+    if relations:
+        with col_relations:
+            st.caption("Relations")
+            for rel in relations:
+                score = _format_score(rel.get("score"))
+                label = rel.get("label") or "rel"
+                st.markdown(
+                    f"- **{rel['head']}** — _{label}_ → **{rel['tail']}** (score {score})"
+                )
+
+
+def _render_ie_overview(sources: list[dict[str, Any]]) -> None:
+    """
+    Show aggregated IE results for a set of sources.
+    
+    Args:
+        sources: List of source dictionaries containing 'entities' and 'relations'.
+    """
+    entities, relations = _aggregate_ie(sources)
+
+    metrics = st.columns(2)
+    metrics[0].metric("Unique entities", len(entities))
+    metrics[1].metric("Unique relations", len(relations))
+
+    if entities:
+        st.markdown("#### Entities")
+        st.dataframe(
+            {
+                "Entity": [e["text"] for e in entities],
+                "Type": [e.get("type") or "Unlabeled" for e in entities],
+                "Mentions": [e["count"] for e in entities],
+                "Best score": [_format_score(e.get("best_score")) for e in entities],
+                "Sources": [", ".join(e["files"]) for e in entities],
+            },
+            width="stretch",
+            hide_index=True,
+        )
+        for ent in entities:
+            with st.expander(
+                f"{ent['text']} ({ent.get('type') or 'Unlabeled'}) — {ent['count']} mention(s)"
+            ):
+                for occ in ent["occurrences"]:
+                    st.markdown(
+                        f"- {occ['source']} (score {_format_score(occ.get('score'))})"
+                    )
+    else:
+        st.caption("No entities detected.")
+
+    if relations:
+        st.markdown("#### Relations")
+        st.dataframe(
+            {
+                "Head": [r["head"] for r in relations],
+                "Label": [r.get("label") or "rel" for r in relations],
+                "Tail": [r["tail"] for r in relations],
+                "Mentions": [r["count"] for r in relations],
+                "Best score": [_format_score(r.get("best_score")) for r in relations],
+                "Sources": [", ".join(r["files"]) for r in relations],
+            },
+            width="stretch",
+            hide_index=True,
+        )
+        for rel in relations:
+            with st.expander(
+                f"{rel['head']} — {rel.get('label') or 'rel'} → {rel['tail']} ({rel['count']} mention(s))"
+            ):
+                for occ in rel["occurrences"]:
+                    st.markdown(
+                        f"- {occ['source']} (score {_format_score(occ.get('score'))})"
+                    )
+    else:
+        st.caption("No relations detected.")
 
 
 def setup_app():
@@ -148,7 +390,7 @@ def render_sidebar():
         # New Chat Button
         if st.button(
             "➕ New Chat",
-            use_container_width=True,
+            width="stretch",
             type="primary" if st.session_state.session_id is None else "secondary",
         ):
             st.session_state.session_id = None
@@ -171,7 +413,7 @@ def render_sidebar():
                     if st.button(
                         s["title"],
                         key=f"sess_{s['id']}",
-                        use_container_width=True,
+                        width="stretch",
                         type=b_type,
                     ):
                         if st.session_state.session_id != s["id"]:
@@ -192,7 +434,7 @@ def render_sidebar():
                     if st.button(
                         "🗑️ Delete Current Chat",
                         type="secondary",
-                        use_container_width=True,
+                        width="stretch",
                     ):
                         requests.delete(
                             f"{BACKEND_HOST}/sessions/{st.session_state.session_id}"
@@ -297,12 +539,12 @@ def render_analysis():
     st.header("Analysis")
     st.info("Generate summaries and insights from your collection.")
 
-    if st.button("Summarize Collection"):
+    if st.button("Run analysis"):
         if not st.session_state.selected_collection:
             logger.error("No collection selected.")
             st.error("No collection selected.")
         else:
-            st.markdown(f"### Summary of {st.session_state.selected_collection}")
+            st.markdown(f"### Summary of '{st.session_state.selected_collection}'")
             summary_placeholder = st.empty()
             full_summary = ""
 
@@ -353,6 +595,9 @@ def render_analysis():
                                             unsafe_allow_html=True,
                                         )
                                     st.divider()
+
+                            st.markdown("### Information Extraction")
+                            _render_ie_overview(sources)
                     else:
                         logger.error(f"Summarization failed: {resp.text}")
                         st.error(f"Summarization failed: {resp.text}")
@@ -408,6 +653,9 @@ def render_chat() -> None:
                             )
                         _render_entities_relations(src)
                         st.divider()
+
+                    st.markdown("**Information Extraction Overview**")
+                    _render_ie_overview(msg["sources"])
 
     # Chat Input
     if prompt := st.chat_input("Ask a question..."):
@@ -506,6 +754,9 @@ def render_chat() -> None:
                                         )
                                     _render_entities_relations(src)
                                     st.divider()
+
+                            st.markdown("**Information Extraction Overview**")
+                            _render_ie_overview(sources)
 
                         # 3. Save bot message
                         msg_entry = {
