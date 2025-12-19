@@ -127,7 +127,7 @@ def load_ie_env() -> IEConfig:
         return val.lower() in {"1", "true", "yes", "on"}
 
     return IEConfig(
-        enabled=_as_bool(os.getenv("ENABLE_IE"), True),
+        enabled=_as_bool(os.getenv("ENABLE_IE"), False),
         max_chars=int(os.getenv("IE_MAX_CHARS", "800")),
     )
 
