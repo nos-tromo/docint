@@ -656,9 +656,15 @@ class RAG:
 
         return entities, relations
 
-    def _build_ingestion_pipeline(self) -> DocumentIngestionPipeline:
+    def _build_ingestion_pipeline(
+        self, progress_callback: Callable[[str], None] | None = None
+    ) -> DocumentIngestionPipeline:
         """
         Instantiate a document ingestion pipeline using current settings.
+
+        Args:
+            progress_callback (Callable[[str], None] | None): Optional callback for
+                reporting ingestion progress.
 
         Returns:
             DocumentIngestionPipeline: The instantiated ingestion pipeline.
@@ -692,6 +698,7 @@ class RAG:
             chunk_overlap=self.chunk_overlap,
             semantic_splitter_char_limit=self.semantic_splitter_char_limit,
             entity_extractor=self._ie_extract if self.enable_ie else None,
+            progress_callback=progress_callback,
         )
 
     def _index(self, storage_ctx: StorageContext) -> VectorStoreIndex:
@@ -962,6 +969,23 @@ class RAG:
                         page = prov.get("page_no")
                         if page is not None:
                             break
+
+            # doc_items detection (Docling)
+            if page is None:
+                doc_items = meta.get("doc_items")
+                if isinstance(doc_items, list):
+                    for item in doc_items:
+                        if isinstance(item, dict):
+                            provs = item.get("prov")
+                            if isinstance(provs, list):
+                                for p in provs:
+                                    if isinstance(p, dict):
+                                        page = p.get("page_no")
+                                        if page is not None:
+                                            break
+                        if page is not None:
+                            break
+
             try:
                 page = int(page) if page is not None else None
             except Exception:
@@ -1109,7 +1133,11 @@ class RAG:
 
     # --- Public API ---
     def ingest_docs(
-        self, data_dir: str | Path, *, build_query_engine: bool = True
+        self,
+        data_dir: str | Path,
+        *,
+        build_query_engine: bool = True,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> None:
         """
         Ingest documents from the specified directory into the Qdrant collection.
@@ -1119,12 +1147,14 @@ class RAG:
             build_query_engine (bool): Whether to eagerly build the query engine after
                 ingestion. Disable when running headless ingestion jobs to avoid
                 loading large reranker/generation models. Defaults to True.
+            progress_callback (Callable[[str], None] | None): Optional callback for
+                reporting ingestion progress.
         """
         prepared_dir = self._prepare_sources_dir(
             Path(data_dir) if isinstance(data_dir, str) else data_dir
         )
         self.data_dir = prepared_dir
-        pipeline = self._build_ingestion_pipeline()
+        pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
 
         # Initialize index (load existing or create new wrapper)
         vector_store = self._vector_store()
@@ -1170,7 +1200,11 @@ class RAG:
         logger.info("Documents ingested successfully.")
 
     async def asingest_docs(
-        self, data_dir: str | Path, *, build_query_engine: bool = True
+        self,
+        data_dir: str | Path,
+        *,
+        build_query_engine: bool = True,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> None:
         """
         Asynchronously ingest documents from the specified directory into the Qdrant collection.
@@ -1179,6 +1213,8 @@ class RAG:
             data_dir (str | Path): The directory containing the documents to ingest.
             build_query_engine (bool): Whether to build the query engine immediately
                 after ingestion. Defaults to True.
+            progress_callback (Callable[[str], None] | None): Optional callback for
+                reporting ingestion progress.
 
         Raises:
             RuntimeError: If the index is not initialized for async ingestion.
@@ -1187,7 +1223,7 @@ class RAG:
             Path(data_dir) if isinstance(data_dir, str) else data_dir
         )
         self.data_dir = prepared_dir
-        pipeline = self._build_ingestion_pipeline()
+        pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
 
         # Initialize index
         vector_store = self._vector_store()

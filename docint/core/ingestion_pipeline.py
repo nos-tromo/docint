@@ -53,6 +53,7 @@ class DocumentIngestionPipeline:
     chunk_overlap: int = 0
     semantic_splitter_char_limit: int = 20000
     entity_extractor: Callable[[str], tuple[list[dict], list[dict]]] | None = None
+    progress_callback: Callable[[str], None] | None = None
 
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
     md_node_parser: MarkdownNodeParser | None = field(default=None, init=False)
@@ -552,7 +553,12 @@ class DocumentIngestionPipeline:
                 nodes.extend(self._semantic_nodes_with_fallback(plain_docs, "text"))
 
         if self.entity_extractor:
-            for node in nodes:
+            total_nodes = len(nodes)
+            for i, node in enumerate(nodes):
+                if self.progress_callback:
+                    self.progress_callback(
+                        f"Extracting entities from chunk {i + 1} of {total_nodes}"
+                    )
                 text_value = getattr(node, "text", "") or ""
                 if not text_value.strip():
                     continue
