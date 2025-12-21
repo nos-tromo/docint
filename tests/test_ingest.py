@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Callable
 
 import pytest
 
@@ -79,7 +80,21 @@ def test_ingest_docs_invokes_rag(
                 table_row_filter,
             )
 
-        def ingest_docs(self, path: Path, *, build_query_engine: bool = True) -> None:  # type: ignore[override]
+        def ingest_docs(
+            self,
+            path: Path,
+            *,
+            build_query_engine: bool = True,
+            progress_callback: Callable[[str], None] | None = None,
+        ) -> None:  # type: ignore[override]
+            """
+            Placeholder ingest_docs method for the test double.
+
+            Args:
+                path (Path): _description_
+                build_query_engine (bool, optional): _description_. Defaults to True.
+                progress_callback (Callable[[str], None] | None, optional): _description_. Defaults to None.
+            """            
             calls.path = path
             calls.build_query_engine = build_query_engine
 
