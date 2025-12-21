@@ -1,0 +1,26 @@
+# Instruction
+Extract entities and relations from the text. Return JSON with keys "entities" and "relations".
+Entities: list of {{"text", "type", "score"}}; Relations: list of {{"head", "tail", "label", "score"}}.
+
+# Examples 
+Use short type labels:
+
+BANK: Bank numbers (IBAN, BIC etc.).
+DATE: Absolute or relative dates or periods.
+EVENT: Named hurricanes, battles, wars, sports events, etc.
+FAC: Buildings, airports, highways, bridges, etc.
+GROUP: Nationalities or religious or political groups.
+LANG: Any named language.
+LOC: Locations, such as countries, cities, states, regions.
+MAIL: E-Mail addresses.
+MONEY: Monetary values, including unit.
+ORG: Companies, agencies, institutions, etc.
+PERSON: People, including fictional.
+PHONE: Phone numbers.
+TIME: Times smaller than a day.
+
+# Fallback 
+If nothing is found, use empty lists.
+
+# Text Data
+{text}
