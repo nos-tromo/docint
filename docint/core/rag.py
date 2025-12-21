@@ -1483,6 +1483,89 @@ class RAG:
         )
         yield normalized
 
+    def get_collection_ie(self) -> list[dict[str, Any]]:
+        """
+        Fetch all nodes from the current collection and return their IE metadata.
+
+        Returns:
+            list[dict[str, Any]]: A list of source metadata dictionaries containing IE data.
+        """
+        if not self.qdrant_collection:
+            return []
+
+        sources = []
+        offset = None
+        while True:
+            try:
+                points, offset = self.qdrant_client.scroll(
+                    collection_name=self.qdrant_collection,
+                    limit=100,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to scroll collection '{}': {}", self.qdrant_collection, exc
+                )
+                break
+
+            if not points:
+                break
+
+            for point in points:
+                payload = getattr(point, "payload", None)
+                if isinstance(payload, dict):
+                    # We only care about nodes that have IE data
+                    if "entities" in payload or "relations" in payload:
+                        # Normalize payload to match what _normalize_response_data produces
+                        # so that _render_ie_overview in app.py can handle it.
+
+                        # Extract filename/filetype/etc.
+                        origin = payload.get("origin") or {}
+                        filename = (
+                            origin.get("filename")
+                            or payload.get("file_name")
+                            or payload.get("filename")
+                            or payload.get("file_path")
+                        )
+
+                        # Extract page number
+                        page = (
+                            payload.get("page")
+                            or payload.get("page_number")
+                            or origin.get("page_no")
+                        )
+                        if page is None:
+                            doc_items = payload.get("doc_items")
+                            if isinstance(doc_items, list):
+                                for item in doc_items:
+                                    if isinstance(item, dict):
+                                        provs = item.get("prov")
+                                        if isinstance(provs, list):
+                                            for p in provs:
+                                                if isinstance(p, dict):
+                                                    page = p.get("page_no")
+                                                    if page is not None:
+                                                        break
+                                    if page is not None:
+                                        break
+
+                        sources.append(
+                            {
+                                "filename": filename,
+                                "entities": payload.get("entities", []),
+                                "relations": payload.get("relations", []),
+                                "page": page,
+                                "row": payload.get("table", {}).get("row_index"),
+                            }
+                        )
+
+            if offset is None:
+                break
+
+        return sources
+
     def unload_models(self) -> None:
         """
         Unload models to free up memory.
