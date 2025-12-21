@@ -86,31 +86,6 @@ def load_host_env() -> HostConfig:
     )
 
 
-def load_model_env() -> ModelConfig:
-    """
-    Loads model configuration from environment variables or defaults.
-
-    Returns:
-        ModelConfig: Dataclass containing model configuration.
-        - embed_model (str): The embedding model identifier.
-        - sparse_model (str): The sparse model identifier.
-        - gen_model (str): The generation model identifier.
-        - vision_model (str): The vision model identifier.
-        - whisper_model (str): The Whisper model identifier.
-        - ollama_ctx_window (int): The context window size for Ollama.
-    """
-    return ModelConfig(
-        embed_model=os.getenv("EMBED_MODEL", "BAAI/bge-m3"),
-        sparse_model=os.getenv(
-            "SPARSE_MODEL", "Qdrant/all_miniLM_L6_v2_with_attentions"
-        ),
-        gen_model=os.getenv("LLM", "qwen3:8b"),
-        vision_model=os.getenv("VLM", "qwen3-vl:8b"),
-        whisper_model=os.getenv("WHISPER_MODEL", "turbo"),
-        ollama_ctx_window=int(os.getenv("OLLAMA_CTX_WINDOW", "8192")),
-    )
-
-
 def load_ie_env() -> IEConfig:
     """
     Loads information extraction configuration from environment variables or defaults.
@@ -129,6 +104,31 @@ def load_ie_env() -> IEConfig:
     return IEConfig(
         enabled=_as_bool(os.getenv("ENABLE_IE"), False),
         max_chars=int(os.getenv("IE_MAX_CHARS", "800")),
+    )
+
+
+def load_model_env() -> ModelConfig:
+    """
+    Loads model configuration from environment variables or defaults.
+
+    Returns:
+        ModelConfig: Dataclass containing model configuration.
+        - embed_model (str): The embedding model identifier.
+        - sparse_model (str): The sparse model identifier.
+        - gen_model (str): The generation model identifier.
+        - vision_model (str): The vision model identifier.
+        - whisper_model (str): The Whisper model identifier.
+        - ollama_ctx_window (int): The context window size for Ollama.
+    """
+    return ModelConfig(
+        embed_model=os.getenv("EMBED_MODEL", "BAAI/bge-m3"),
+        sparse_model=os.getenv(
+            "SPARSE_MODEL", "Qdrant/all_miniLM_L6_v2_with_attentions"
+        ),
+        gen_model=os.getenv("LLM", "gemma3n:e4b"),
+        vision_model=os.getenv("VLM", "qwen3-vl:8b"),
+        whisper_model=os.getenv("WHISPER_MODEL", "turbo"),
+        ollama_ctx_window=int(os.getenv("OLLAMA_CTX_WINDOW", "8192")),
     )
 
 
