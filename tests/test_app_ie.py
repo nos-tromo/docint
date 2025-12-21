@@ -1,3 +1,5 @@
+from typing import Any
+
 from docint import app
 
 
@@ -5,8 +7,8 @@ def test_aggregate_ie_deduplicates_and_tracks_sources() -> None:
     """
     Tests that the _aggregate_ie method correctly deduplicates entities and relations,
     aggregates their counts and best scores, and tracks the source files and locations.
-    """    
-    sources = [
+    """
+    sources: list[dict[str, Any]] = [
         {
             "filename": "docA.pdf",
             "page": 1,
