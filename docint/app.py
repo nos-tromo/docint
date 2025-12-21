@@ -334,6 +334,8 @@ def setup_app() -> None:
         st.session_state.selected_collection = ""
     if "preview_url" not in st.session_state:
         st.session_state.preview_url = None
+    if "chat_running" not in st.session_state:
+        st.session_state.chat_running = False
 
 
 def render_sidebar() -> None:
@@ -782,8 +784,20 @@ def render_chat() -> None:
                     st.markdown("**Information Extraction Overview**")
                     _render_ie_overview(msg["sources"])
 
+    def stop_generation():
+        st.session_state.chat_running = False
+        if st.session_state.get("current_answer"):
+            st.session_state.messages.append(
+                {"role": "assistant", "content": st.session_state.current_answer}
+            )
+            del st.session_state.current_answer
+
+    def _start_chat():
+        st.session_state.chat_running = True
+        st.session_state.current_answer = ""
+
     # Chat Input
-    if prompt := st.chat_input("Ask a question..."):
+    if prompt := st.chat_input("Ask a question...", on_submit=_start_chat):
         # 1. User message
         st.session_state.messages.append({"role": "user", "content": prompt})
 
@@ -792,8 +806,17 @@ def render_chat() -> None:
 
         # 2. Bot response
         with st.chat_message("assistant"):
-            # Placeholder for answer
-            answer_placeholder = st.empty()
+            # Layout for Stop button
+            c1, c2 = st.columns([0.85, 0.15])
+            with c2:
+                if st.session_state.get("chat_running"):
+                    st.button(
+                        "⏹️ Stop", on_click=stop_generation, help="Stop Generation"
+                    )
+
+            with c1:
+                # Placeholder for answer
+                answer_placeholder = st.empty()
             full_answer = ""
             sources = []
             reasoning = None
@@ -811,11 +834,12 @@ def render_chat() -> None:
                         first_line = None
 
                         # Show spinner while waiting for the first chunk
-                        with st.spinner("Thinking..."):
-                            try:
-                                first_line = next(lines)
-                            except StopIteration:
-                                pass
+                        with c1:
+                            with st.spinner("Thinking..."):
+                                try:
+                                    first_line = next(lines)
+                                except StopIteration:
+                                    pass
 
                         def process_line(line):
                             nonlocal full_answer, sources, reasoning
@@ -827,6 +851,9 @@ def render_chat() -> None:
                                         data = json.loads(data_str)
                                         if "token" in data:
                                             full_answer += data["token"]
+                                            st.session_state.current_answer = (
+                                                full_answer
+                                            )
                                             answer_placeholder.markdown(
                                                 full_answer + "▌"
                                             )
@@ -892,11 +919,14 @@ def render_chat() -> None:
                         if reasoning:
                             msg_entry["reasoning"] = reasoning
                         st.session_state.messages.append(msg_entry)
+                        st.session_state.chat_running = False
                         st.rerun()
                     else:
+                        st.session_state.chat_running = False
                         logger.error(f"Query failed: {resp.text}")
                         st.error(f"Query failed: {resp.text}")
             except Exception as e:
+                st.session_state.chat_running = False
                 logger.error(f"Error: {e}")
                 st.error(f"Error: {e}")
 
