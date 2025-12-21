@@ -469,10 +469,7 @@ def render_ingestion() -> None:
     uploaded_files = st.file_uploader("Upload Documents", accept_multiple_files=True)
 
     with st.expander("Advanced Options"):
-        table_row_limit = st.number_input(
-            "Table Row Limit", min_value=0, value=0, help="0 for no limit"
-        )
-        table_row_filter = st.text_input("Table Row Filter", help="Pandas query string")
+        enable_ie = st.checkbox("Run Information Extraction", value=True)
 
     def _render_ingest_summary(summary: dict[str, Any] | None) -> None:
         """
@@ -514,10 +511,8 @@ def render_ingestion() -> None:
                 "collection": target_col,
                 "hybrid": "True",
             }
-            if table_row_limit > 0:
-                data["table_row_limit"] = str(table_row_limit)
-            if table_row_filter:
-                data["table_row_filter"] = table_row_filter
+            if enable_ie is not None:
+                data["enable_ie"] = str(enable_ie)
 
             file_status: dict[str, str] = {f.name: "Queued" for f in uploaded_files}
             events: list[str] = []
