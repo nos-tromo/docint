@@ -601,6 +601,16 @@ def render_ingestion() -> None:
                             stage = event_data.get("stage") or event_data.get("status")
                             message = event_data.get("message")
 
+                            if stage == "ingestion_progress" and message:
+                                # Special case for granular progress - replace last if it was also progress
+                                if events and events[-1].startswith("• Extracting"):
+                                    events[-1] = f"• {message}"
+                                else:
+                                    events.append(f"• {message}")
+                                render_board("Processing")
+                                render_feed()
+                                continue
+
                             if filename:
                                 file_status[filename] = stage or "Processing"
                             if message:
@@ -647,7 +657,8 @@ def render_ingestion() -> None:
                             state="complete",
                             expanded=False,
                         )
-                        if new_col:
+                        if target_col:
+                            st.session_state.selected_collection = target_col
                             st.rerun()
                     else:
                         status.update(label="Ingestion failed", state="error")
@@ -697,13 +708,19 @@ def render_analysis() -> None:
 
                         summary_placeholder.markdown(full_summary)
 
+                        # Download button for analysis
+                        analysis_text = (
+                            f"COLLECTION: {st.session_state.selected_collection}\n\n"
+                        )
+                        analysis_text += f"SUMMARY:\n{full_summary}\n\n"
+
                         if sources:
                             with st.expander("Sources used for summary"):
                                 for j, src in enumerate(sources):
                                     loc = ""
-                                    if src.get("page"):
+                                    if src.get("page") is not None:
                                         loc += f" (Page {src['page']})"
-                                    if src.get("row"):
+                                    if src.get("row") is not None:
                                         loc += f" (Row {src['row']})"
 
                                     score = ""
@@ -723,8 +740,39 @@ def render_analysis() -> None:
                                         )
                                     st.divider()
 
-                            st.markdown("### Information Extraction")
-                            _render_ie_overview(sources)
+                        # Fetch and aggregate IE for the whole collection
+                        st.markdown("---")
+                        st.markdown("### Collection-wide Information Extraction")
+                        with st.spinner(
+                            "Aggregating entities and relations from entire collection..."
+                        ):
+                            ie_resp = requests.get(f"{BACKEND_HOST}/collections/ie")
+                            if ie_resp.status_code == 200:
+                                all_ie_sources = ie_resp.json().get("sources", [])
+                                if all_ie_sources:
+                                    _render_ie_overview(all_ie_sources)
+
+                                    # Add IE to download text
+                                    entities, relations = _aggregate_ie(all_ie_sources)
+                                    analysis_text += "ENTITIES:\n"
+                                    for ent in entities:
+                                        analysis_text += f"- {ent['text']} ({ent.get('type', 'Unlabeled')}): {ent['count']} mentions in {', '.join(ent['files'])}\n"
+                                    analysis_text += "\nRELATIONS:\n"
+                                    for rel in relations:
+                                        analysis_text += f"- {rel['head']} --[{rel.get('label', 'rel')}]--> {rel['tail']}: {rel['count']} mentions in {', '.join(rel['files'])}\n"
+                                else:
+                                    st.info(
+                                        "No entities or relations found in this collection."
+                                    )
+                            else:
+                                st.error("Failed to fetch collection-wide IE data.")
+
+                        st.download_button(
+                            label="📥 Download Analysis (.txt)",
+                            data=analysis_text,
+                            file_name=f"analysis_{st.session_state.selected_collection}.txt",
+                            mime="text/plain",
+                        )
                     else:
                         logger.error(f"Summarization failed: {resp.text}")
                         st.error(f"Summarization failed: {resp.text}")
@@ -745,6 +793,21 @@ def render_chat() -> None:
 
     st.caption(f"Current Collection: {st.session_state.selected_collection}")
 
+    # Download button for chat
+    if st.session_state.messages:
+        chat_text = ""
+        for msg in st.session_state.messages:
+            chat_text += f"{msg['role'].upper()}: {msg['content']}\n\n"
+            if "reasoning" in msg and msg["reasoning"]:
+                chat_text += f"REASONING: {msg['reasoning']}\n\n"
+
+        st.download_button(
+            label="📥 Download Chat (.txt)",
+            data=chat_text,
+            file_name=f"chat_{st.session_state.session_id or 'session'}.txt",
+            mime="text/plain",
+        )
+
     # Display history
     for i, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
@@ -760,9 +823,9 @@ def render_chat() -> None:
                     for j, src in enumerate(msg["sources"]):
                         # Construct preview
                         loc = ""
-                        if src.get("page"):
+                        if src.get("page") is not None:
                             loc += f" (Page {src['page']})"
-                        if src.get("row"):
+                        if src.get("row") is not None:
                             loc += f" (Row {src['row']})"
 
                         score = ""
@@ -873,6 +936,8 @@ def render_chat() -> None:
                             process_line(first_line)
 
                         for line in lines:
+                            if not st.session_state.get("chat_running"):
+                                break
                             process_line(line)
 
                         answer_placeholder.markdown(full_answer)
@@ -885,9 +950,9 @@ def render_chat() -> None:
                             with st.expander("View Sources"):
                                 for j, src in enumerate(sources):
                                     loc = ""
-                                    if src.get("page"):
+                                    if src.get("page") is not None:
                                         loc += f" (Page {src['page']})"
-                                    if src.get("row"):
+                                    if src.get("row") is not None:
                                         loc += f" (Row {src['row']})"
 
                                     score = ""
