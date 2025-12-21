@@ -37,9 +37,10 @@ from docint.utils.env_cfg import (
     load_model_env,
     load_path_env,
 )
-from docint.utils.storage import stage_sources_to_qdrant
 from docint.utils.clean_text import basic_clean
 from docint.utils.model_cfg import resolve_model_path
+from docint.utils.ollama_cfg import OllamaPipeline
+from docint.utils.storage import stage_sources_to_qdrant
 
 # --- Environment variables ---
 load_dotenv()
@@ -48,6 +49,7 @@ OLLAMA_THINKING: bool = os.getenv("OLLAMA_THINKING", "true").lower() == "true"
 RETRIEVE_SIMILARITY_TOP_K: int = int(os.getenv("RETRIEVE_SIMILARITY_TOP_K", "20"))
 
 CleanFn = Callable[[str], str]
+NER_PROMPT = OllamaPipeline().load_prompt(kw="ner")
 
 
 @dataclass
@@ -86,6 +88,7 @@ class RAG:
     # --- Information extraction ---
     enable_ie: bool = False
     ie_max_chars: int = 800
+    ner_prompt: str = NER_PROMPT
 
     # --- Reranking / retrieval ---
     enable_hybrid: bool = True
@@ -606,12 +609,7 @@ class RAG:
             tuple[list[dict], list[dict]]: Extracted entities and relations.
         """
         snippet = text[: self.ie_max_chars]
-        prompt = (
-            "Extract entities and relations from the text. Return JSON with keys 'entities' and 'relations'. "
-            'Entities: list of {"text", "type", "score"}; Relations: list of {"head", "tail", "label", "score"}. '
-            "Use short type labels (PERSON, ORG, LOC, DATE, MISC). If nothing is found, use empty lists.\n\n"
-            f"TEXT:\n{snippet}"
-        )
+        prompt = self.ner_prompt.format(text=snippet)
 
         try:
             resp = self.gen_model.complete(prompt)
