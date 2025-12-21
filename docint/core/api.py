@@ -110,8 +110,6 @@ class SummarizeOut(BaseModel):
 class IngestIn(BaseModel):
     collection: str
     hybrid: bool | None = True
-    table_row_limit: int | None = Field(default=None, gt=0)
-    table_row_filter: str | None = None
 
 
 class IngestOut(BaseModel):
@@ -480,8 +478,6 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
             name,
             data_dir,
             hybrid=payload.hybrid if payload.hybrid is not None else True,
-            table_row_limit=payload.table_row_limit,
-            table_row_filter=payload.table_row_filter,
         )
 
         # After ingestion, prepare the in-memory RAG instance for immediate querying.
@@ -513,8 +509,6 @@ async def ingest_upload(
     collection: str = Form(...),
     files: list[UploadFile] = File(...),
     hybrid: bool | None = Form(True),
-    table_row_limit: int | None = Form(default=None, gt=0),
-    table_row_filter: str | None = Form(default=None),
 ) -> StreamingResponse:
     """
     Upload files for ingestion and stream progress as SSE events.
@@ -523,8 +517,6 @@ async def ingest_upload(
         collection (str): The name of the collection to ingest into.
         files (list[UploadFile]): The list of files to upload.
         hybrid (bool | None): Whether to enable hybrid search (default: True).
-        table_row_limit (int | None): Optional limit applied to tabular rows.
-        table_row_filter (str | None): Optional pandas-compatible query string to filter rows.
 
     Returns:
         StreamingResponse: A streaming response that yields SSE events during ingestion.
