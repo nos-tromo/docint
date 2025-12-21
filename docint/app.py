@@ -199,7 +199,7 @@ def _aggregate_ie(
 def _render_entities_relations(src: dict[str, Any]) -> None:
     """
     Render entities and relations for a single source.
-    
+
     Args:
         src: Source dictionary containing 'entities' and 'relations'.
     """
@@ -232,7 +232,7 @@ def _render_entities_relations(src: dict[str, Any]) -> None:
 def _render_ie_overview(sources: list[dict[str, Any]]) -> None:
     """
     Show aggregated IE results for a set of sources.
-    
+
     Args:
         sources: List of source dictionaries containing 'entities' and 'relations'.
     """
@@ -292,7 +292,7 @@ def _render_ie_overview(sources: list[dict[str, Any]]) -> None:
         st.caption("No relations detected.")
 
 
-def setup_app():
+def setup_app() -> None:
     """
     Initialize application state and configuration.
     """
@@ -336,7 +336,7 @@ def setup_app():
         st.session_state.preview_url = None
 
 
-def render_sidebar():
+def render_sidebar() -> None:
     """
     Render the sidebar controls.
     """
@@ -450,11 +450,17 @@ def render_sidebar():
             logger.warning(f"Failed to fetch sessions: {e}")
 
 
-def render_ingestion():
+def render_ingestion() -> None:
     """
     Render the ingestion interface.
+
+    Raises:
+        JSONDecodeError: If the response from the backend cannot be decoded.
     """
     st.header("Ingestion")
+
+    if "ingest_summary" not in st.session_state:
+        st.session_state.ingest_summary = None
 
     # New collection input
     new_col = st.text_input("New Collection Name")
@@ -468,25 +474,111 @@ def render_ingestion():
         )
         table_row_filter = st.text_input("Table Row Filter", help="Pandas query string")
 
+    def _render_ingest_summary(summary: dict[str, Any] | None) -> None:
+        """
+        Render ingestion summary.
+
+        Args:
+            summary (dict[str, Any] | None): Ingestion summary data.
+        """
+        if not summary:
+            return
+        with st.container():
+            st.subheader("Last ingestion summary")
+            cols = st.columns(3)
+            cols[0].metric("Total", summary.get("total", 0))
+            cols[1].metric("Succeeded", summary.get("done", 0))
+            cols[2].metric("Errors", summary.get("errors", 0))
+
+            pills = [
+                f"{name} — {status}"
+                for name, status in sorted(summary.get("file_status", {}).items())
+            ]
+            if pills:
+                st.markdown("\n".join(pills))
+
+            events = summary.get("events") or []
+            if events:
+                st.caption("Recent events")
+                st.markdown("\n".join(events[-8:]))
+
+    _render_ingest_summary(st.session_state.ingest_summary)
+
     if uploaded_files and st.button("Upload & Ingest"):
         if not target_col:
             logger.error("No target collection specified.")
             st.error("Please select or enter a collection name.")
         else:
-            with st.status("Processing...", expanded=True) as status:
-                files = [("files", (f.name, f, f.type)) for f in uploaded_files]
-                data = {
-                    "collection": target_col,
-                    "hybrid": "True",
-                }
-                if table_row_limit > 0:
-                    data["table_row_limit"] = str(table_row_limit)
-                if table_row_filter:
-                    data["table_row_filter"] = table_row_filter
+            files = [("files", (f.name, f, f.type)) for f in uploaded_files]
+            data = {
+                "collection": target_col,
+                "hybrid": "True",
+            }
+            if table_row_limit > 0:
+                data["table_row_limit"] = str(table_row_limit)
+            if table_row_filter:
+                data["table_row_filter"] = table_row_filter
 
+            file_status: dict[str, str] = {f.name: "Queued" for f in uploaded_files}
+            events: list[str] = []
+            summary: dict[str, int] = {"processed": 0, "errors": 0}
+
+            header_ph = st.empty()
+            progress = st.progress(0.0, text="Starting upload...")
+            board_ph = st.empty()
+            feed_ph = st.empty()
+            summary_ph = st.empty()
+
+            def render_board(current_stage: str) -> None:
+                """
+                Render per-file pills, counts, and progress.
+
+                Args:
+                    current_stage: Current overall stage label.
+                """
+                total = len(file_status) or 1
+                done = sum(
+                    1 for s in file_status.values() if s in {"Processed", "Done"}
+                )
+                errs = sum(1 for s in file_status.values() if s == "Error")
+                progress.progress(
+                    done / total,
+                    text=f"{current_stage} • {done}/{total} done • {errs} errors",
+                )
+
+                with header_ph.container():
+                    cols = st.columns(3)
+                    cols[0].metric("Total files", total)
+                    cols[1].metric("Processed", done)
+                    cols[2].metric("Errors", errs)
+
+                pill_map = {
+                    "Queued": "⏳",
+                    "Uploading": "📤",
+                    "Processing": "⚙️",
+                    "IE": "🔍",
+                    "Processed": "✅",
+                    "Done": "✅",
+                    "Error": "❌",
+                }
+                pill_rows = [
+                    f"{pill_map.get(state, '•')} **{name}** — {state}"
+                    for name, state in sorted(file_status.items())
+                ]
+                board_ph.markdown("\n".join(pill_rows))
+
+            def render_feed() -> None:
+                """
+                Render recent event feed.
+                """
+                if not events:
+                    return
+                feed_ph.markdown("\n".join(events[-8:]))
+
+            render_board("Starting upload")
+
+            with st.status("Ingestion in progress", expanded=True) as status:
                 try:
-                    # Use stream=True to handle SSE if possible, or just wait for response
-                    # Since requests doesn't parse SSE automatically, we'll just read lines
                     response = requests.post(
                         f"{BACKEND_HOST}/ingest/upload",
                         data=data,
@@ -496,30 +588,68 @@ def render_ingestion():
 
                     if response.status_code == 200:
                         for line in response.iter_lines():
-                            if line:
-                                decoded_line = line.decode("utf-8")
-                                if decoded_line.startswith("data: "):
-                                    event_data = json.loads(decoded_line[6:])
-                                    # We could update status here based on event type
-                                    # But for now, just logging or simple updates
-                                    if "filename" in event_data:
-                                        logger.info(
-                                            f"Processed {event_data['filename']}"
-                                        )
-                                        status.write(
-                                            f"Processed {event_data['filename']}"
-                                        )
-                                    if "message" in event_data:  # Error
-                                        logger.error(f"Error: {event_data['message']}")
-                                        status.write(f"Error: {event_data['message']}")
+                            if not line:
+                                continue
+                            decoded_line = line.decode("utf-8")
+                            if not decoded_line.startswith("data: "):
+                                continue
+                            try:
+                                event_data = json.loads(decoded_line[6:])
+                            except json.JSONDecodeError:
+                                continue
+
+                            filename = event_data.get("filename") or event_data.get(
+                                "file"
+                            )
+                            stage = event_data.get("stage") or event_data.get("status")
+                            message = event_data.get("message")
+
+                            if filename:
+                                file_status[filename] = stage or "Processing"
+                            if message:
+                                events.append(
+                                    f"• {filename + ': ' if filename else ''}{message}"
+                                )
+                            elif stage and filename:
+                                events.append(f"• {filename}: {stage}")
+                            render_board(stage or "Processing")
+                            render_feed()
+
+                            if filename and message and "error" in message.lower():
+                                file_status[filename] = "Error"
+                                summary["errors"] += 1
+
+                            if stage and stage.lower() in {"processed", "done"}:
+                                summary["processed"] += 1
+
+                        # Mark remaining as done
+                        for name in file_status:
+                            if file_status[name] not in {"Processed", "Done", "Error"}:
+                                file_status[name] = "Done"
+                        render_board("Complete")
+
+                        total = len(file_status)
+                        errs = sum(1 for s in file_status.values() if s == "Error")
+                        done = sum(
+                            1
+                            for s in file_status.values()
+                            if s in {"Processed", "Done"}
+                        )
+                        st.session_state.ingest_summary = {
+                            "total": total,
+                            "done": done,
+                            "errors": errs,
+                            "file_status": dict(file_status),
+                            "events": events[-20:],
+                        }
+                        with summary_ph.container():
+                            _render_ingest_summary(st.session_state.ingest_summary)
 
                         status.update(
                             label="Ingestion complete!",
                             state="complete",
                             expanded=False,
                         )
-                        st.success("Ingestion complete!")
-                        # Refresh collections list if new one was created
                         if new_col:
                             st.rerun()
                     else:
@@ -532,7 +662,7 @@ def render_ingestion():
                     st.error(f"Error during ingestion: {e}")
 
 
-def render_analysis():
+def render_analysis() -> None:
     """
     Render the analysis interface.
     """
@@ -776,7 +906,7 @@ def render_chat() -> None:
                 st.error(f"Error: {e}")
 
 
-def main():
+def main() -> None:
     setup_app()
     render_sidebar()
 
