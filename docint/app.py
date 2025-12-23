@@ -94,9 +94,9 @@ def _source_label(src: dict) -> str:
     filename_val = src.get("filename") or src.get("file_path") or "Unknown"
     filename = str(filename_val).strip() or "Unknown"
     parts: list[str] = []
-    if src.get("page"):
+    if src.get("page") is not None:
         parts.append(f"p{src['page']}")
-    if src.get("row"):
+    if src.get("row") is not None:
         parts.append(f"row {src['row']}")
     return f"{filename} ({', '.join(parts)})" if parts else filename
 
