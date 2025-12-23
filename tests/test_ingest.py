@@ -148,7 +148,7 @@ def test_ingest_docs_invokes_rag(
     monkeypatch.setattr(ingest, "RAG", DummyRAG)
     data_dir = tmp_path
     ingest.ingest_docs("demo", data_dir, hybrid=False)
-    assert calls.args == ("demo", False, None, None)
+    assert calls.args == ("demo", False)
     assert calls.path == data_dir
     assert calls.build_query_engine is False
 
