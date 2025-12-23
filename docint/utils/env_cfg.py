@@ -138,7 +138,7 @@ def load_model_env() -> ModelConfig:
         sparse_model=os.getenv(
             "SPARSE_MODEL", "Qdrant/all_miniLM_L6_v2_with_attentions"
         ),
-        gen_model=os.getenv("LLM", "qwen3:14b"),
+        gen_model=os.getenv("LLM", "gpt-oss:20b"),
         vision_model=os.getenv("VLM", "qwen3-vl:8b"),
         whisper_model=os.getenv("WHISPER_MODEL", "turbo"),
     )
