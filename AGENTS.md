@@ -14,7 +14,8 @@ These instructions apply to the entire `docint` repository unless a directory in
 
 - Prefer incremental, focused changes and keep commits logically scoped.
 - **Test Synchronization**: Every modification to functional code must be accompanied by corresponding updates to the test suite. Ensure that new features are covered by tests and that existing tests are updated to reflect behavioral changes.
-- Preserve or improve existing typing, docstrings, and inline documentation. When adding new public functions or classes, include type hints and docstrings that explain non-obvious behavior.
+- Preserve or improve existing typing, docstrings, and inline documentation. When adding new functions or classes, include type hints and docstrings that explain non-obvious behavior.
+- Use Google-style docstrings consistently when adding or modifying docstrings.
 - When modifying behavior that affects both backend and frontend, document the change in `README.md` or other relevant docs so the manual workflow remains accurate.
 
 ## Backend (Python / FastAPI)
