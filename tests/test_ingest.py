@@ -1,10 +1,14 @@
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable
+from typing import Any, Callable, cast
 
 import pytest
 
 import docint.cli.ingest as ingest
+from docint.core.ingestion_pipeline import DocumentIngestionPipeline
+from llama_index.core import Document
+from llama_index.core.embeddings import BaseEmbedding
+from llama_index.core.node_parser import SentenceSplitter
 
 
 def test_get_collection(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -29,19 +33,41 @@ def test_main_executes_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
     order: list[str] = []
 
     def fake_setup() -> None:
+        """
+        Fake setup_logging function to track execution order.
+        """
         order.append("setup")
 
     def fake_get_collection() -> str:
+        """
+        Fake get_collection function to track execution order.
+
+        Returns:
+            str: The name of the collection.
+        """
         order.append("collection")
         return "demo"
 
     def fake_ingest(*args, **kwargs) -> None:
+        """
+        Fake ingest_docs function to track execution order.
+        """
         order.append("ingest")
 
     class FakePathConfig:
+        """
+        Fake PathConfig dataclass for testing.
+        """
+
         data = Path("/tmp")
 
     def fake_load_path_env() -> FakePathConfig:
+        """
+        Fake load_path_env function to track execution order.
+
+        Returns:
+            FakePathConfig: The fake path configuration.
+        """
         order.append("env")
         return FakePathConfig()
 
@@ -63,21 +89,35 @@ def test_main_executes_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_ingest_docs_invokes_rag(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """
+    Test that ingest_docs invokes RAG with correct parameters.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path (Path): Temporary directory path for the test.
+    """
     calls = SimpleNamespace(args=None, build_query_engine=None, path=None)
 
     class DummyRAG:
+        """
+        Dummy RAG class for testing.
+        """
+
         def __init__(
             self,
             qdrant_collection: str,
             enable_hybrid: bool,
-            table_row_limit: int | None = None,
-            table_row_filter: str | None = None,
         ) -> None:
+            """
+            Placeholder __init__ method for the test double.
+
+            Args:
+                qdrant_collection (str): The name of the Qdrant collection.
+                enable_hybrid (bool): Whether hybrid search is enabled.
+            """
             calls.args = (
                 qdrant_collection,
                 enable_hybrid,
-                table_row_limit,
-                table_row_filter,
             )
 
         def ingest_docs(
@@ -111,3 +151,95 @@ def test_ingest_docs_invokes_rag(
     assert calls.args == ("demo", False, None, None)
     assert calls.path == data_dir
     assert calls.build_query_engine is False
+
+
+def _make_pipeline(
+    tmp_path: Path, entity_extractor
+) -> tuple[DocumentIngestionPipeline, list]:
+    """
+    Helper to create a pipeline with stubbed parsers and preset nodes.
+
+    Args:
+        tmp_path (Path): Temporary directory path for the pipeline.
+        entity_extractor (Callable[[str], tuple[list[dict], list[dict]]]):
+            The entity extractor function to use in the pipeline.
+
+    Returns:
+        tuple[DocumentIngestionPipeline, list]: The created pipeline and the list of dummy nodes
+    """
+    dummy_nodes: list = []
+    pipeline = DocumentIngestionPipeline(
+        data_dir=tmp_path,
+        clean_fn=lambda x: x,
+        sentence_splitter=SentenceSplitter(chunk_size=50, chunk_overlap=0),
+        embed_model_factory=lambda: cast(BaseEmbedding, SimpleNamespace()),
+        entity_extractor=entity_extractor,
+    )  # type: ignore[arg-type]
+
+    # Minimal parser stubs to satisfy _create_nodes preconditions
+    pipeline.md_node_parser = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
+    )  # type: ignore[assignment]
+    pipeline.docling_node_parser = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
+    )  # type: ignore[assignment]
+    pipeline.semantic_node_parser = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
+    )  # type: ignore[assignment]
+    return pipeline, dummy_nodes
+
+
+def test_entity_extractor_attaches_metadata(tmp_path: Path) -> None:
+    """
+    Test that the entity extractor is called and its results are attached to node metadata.
+
+    Args:
+        tmp_path (Path): Temporary directory path for the test.
+    """
+    calls: list[str] = []
+
+    def extractor(text: str):
+        calls.append(text)
+        return ([{"text": "foo"}], [{"head": "a", "tail": "b"}])
+
+    pipeline, dummy_nodes = _make_pipeline(tmp_path, extractor)
+    dummy_nodes.append(SimpleNamespace(text="Hello world", metadata={"existing": 1}))
+
+    docs = [Document(text="Doc", metadata={"file_path": "sample.txt"})]
+    nodes = pipeline._create_nodes(docs)
+
+    assert calls == ["Hello world"]
+    assert len(nodes) == 1
+    assert nodes[0].metadata["entities"] == [{"text": "foo"}]
+    assert nodes[0].metadata["relations"] == [{"head": "a", "tail": "b"}]
+    assert nodes[0].metadata["existing"] == 1
+
+
+def test_entity_extractor_handles_exceptions(tmp_path: Path) -> None:
+    """
+    Test that exceptions in the entity extractor are handled gracefully.
+
+    Args:
+        tmp_path (Path): Temporary directory path for the test.
+    """
+
+    def bad_extractor(text: str):
+        """
+        Placeholder extractor that raises an exception.
+
+        Args:
+            text (str): The input text to extract entities and relations from.
+
+        Raises:
+            RuntimeError: Always raises a RuntimeError to simulate a failure.
+        """
+        raise RuntimeError("boom")
+
+    pipeline, dummy_nodes = _make_pipeline(tmp_path, bad_extractor)
+    dummy_nodes.append(SimpleNamespace(text="Hello", metadata={}))
+
+    docs = [Document(text="Doc", metadata={"file_path": "sample.txt"})]
+    nodes = pipeline._create_nodes(docs)
+
+    assert len(nodes) == 1
+    assert nodes[0].metadata == {}
