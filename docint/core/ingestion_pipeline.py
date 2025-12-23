@@ -45,8 +45,6 @@ class DocumentIngestionPipeline:
     table_metadata_cols: list[str] | str | None = None
     table_id_col: str | None = None
     table_excel_sheet: str | int | None = None
-    table_row_limit: int | None = None
-    table_row_filter: str | None = None
     buffer_size: int = 5
     breakpoint_percentile_threshold: int = 90
     chunk_size: int = 1024
@@ -249,8 +247,6 @@ class DocumentIngestionPipeline:
             else None,
             id_col=self.table_id_col,
             excel_sheet=self.table_excel_sheet,
-            limit=self.table_row_limit,
-            row_query=self.table_row_filter,
         )
 
         def _metadata(path: str | Path) -> dict[str, str]:
@@ -316,8 +312,6 @@ class DocumentIngestionPipeline:
                     if self.table_metadata_cols
                     else None,
                     id_col=self.table_id_col,
-                    limit=self.table_row_limit,
-                    row_query=self.table_row_filter,
                 ),
                 ".tsv": TableReader(
                     csv_sep="\t",
@@ -326,8 +320,6 @@ class DocumentIngestionPipeline:
                     if self.table_metadata_cols
                     else None,
                     id_col=self.table_id_col,
-                    limit=self.table_row_limit,
-                    row_query=self.table_row_filter,
                 ),
                 ".xls": table_reader,
                 ".xlsx": table_reader,

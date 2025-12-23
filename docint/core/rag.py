@@ -116,8 +116,6 @@ class RAG:
     table_metadata_cols: list[str] | str | None = None
     table_id_col: str | None = None
     table_excel_sheet: str | int | None = None
-    table_row_limit: int | None = None
-    table_row_filter: str | None = None
 
     # --- SemanticSplitterNodeParser config ---
     buffer_size: int = 5
@@ -713,8 +711,6 @@ class RAG:
             table_metadata_cols=self.table_metadata_cols,
             table_id_col=self.table_id_col,
             table_excel_sheet=self.table_excel_sheet,
-            table_row_limit=self.table_row_limit,
-            table_row_filter=self.table_row_filter,
             buffer_size=self.buffer_size,
             breakpoint_percentile_threshold=self.breakpoint_percentile_threshold,
             chunk_size=self.chunk_size,

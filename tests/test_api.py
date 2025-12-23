@@ -375,16 +375,11 @@ def test_ingest_success(
         collection: str,
         path,
         hybrid: bool = True,
-        *,
-        table_row_limit: int | None = None,
-        table_row_filter: str | None = None,
     ) -> None:
         called.args = (
             collection,
             path,
             hybrid,
-            table_row_limit,
-            table_row_filter,
         )
 
     monkeypatch.setattr(api_module, "_resolve_data_dir", lambda: data_dir)
