@@ -470,9 +470,6 @@ def render_ingestion() -> None:
 
     uploaded_files = st.file_uploader("Upload Documents", accept_multiple_files=True)
 
-    with st.expander("Advanced Options"):
-        enable_ie = st.checkbox("Run Information Extraction", value=True)
-
     def _render_ingest_summary(summary: dict[str, Any] | None) -> None:
         """
         Render ingestion summary.
@@ -513,8 +510,6 @@ def render_ingestion() -> None:
                 "collection": target_col,
                 "hybrid": "True",
             }
-            if enable_ie is not None:
-                data["enable_ie"] = str(enable_ie)
 
             file_status: dict[str, str] = {f.name: "Queued" for f in uploaded_files}
             events: list[str] = []
