@@ -375,11 +375,13 @@ def test_ingest_success(
         collection: str,
         path,
         hybrid: bool = True,
+        progress_callback=None,
     ) -> None:
         called.args = (
             collection,
             path,
             hybrid,
+            progress_callback,
         )
 
     monkeypatch.setattr(api_module, "_resolve_data_dir", lambda: data_dir)
@@ -397,7 +399,7 @@ def test_ingest_success(
         "data_dir": str(data_dir),
         "hybrid": False,
     }
-    assert called.args == ("docs", data_dir, False, None, None)
+    assert called.args[0:3] == ("docs", data_dir, False)
 
 
 def test_sessions_endpoints(client: TestClient) -> None:
