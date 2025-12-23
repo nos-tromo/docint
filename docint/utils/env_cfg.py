@@ -22,6 +22,16 @@ class HostConfig:
 
 
 @dataclass(frozen=True)
+class InformationExtractionConfig:
+    """
+    Dataclass for information extraction configuration.
+    """
+
+    enabled: bool
+    max_chars: int
+
+
+@dataclass(frozen=True)
 class ModelConfig:
     """
     Dataclass for model configuration.
@@ -32,17 +42,21 @@ class ModelConfig:
     gen_model: str
     vision_model: str
     whisper_model: str
-    ollama_ctx_window: int
 
 
 @dataclass(frozen=True)
-class IEConfig:
+class OllamaConfig:
     """
-    Dataclass for information extraction configuration.
+    Dataclass for Ollama configuration.
     """
 
-    enabled: bool
-    max_chars: int
+    ctx_window: int
+    request_timeout: int
+    seed: int
+    temperature: float
+    thinking: bool
+    top_k: int
+    top_p: float
 
 
 @dataclass(frozen=True)
@@ -86,7 +100,7 @@ def load_host_env() -> HostConfig:
     )
 
 
-def load_ie_env() -> IEConfig:
+def load_ie_env() -> InformationExtractionConfig:
     """
     Loads information extraction configuration from environment variables or defaults.
 
@@ -101,7 +115,7 @@ def load_ie_env() -> IEConfig:
             return default
         return val.lower() in {"1", "true", "yes", "on"}
 
-    return IEConfig(
+    return InformationExtractionConfig(
         enabled=_as_bool(os.getenv("ENABLE_IE"), False),
         max_chars=int(os.getenv("IE_MAX_CHARS", "800")),
     )
@@ -118,17 +132,46 @@ def load_model_env() -> ModelConfig:
         - gen_model (str): The generation model identifier.
         - vision_model (str): The vision model identifier.
         - whisper_model (str): The Whisper model identifier.
-        - ollama_ctx_window (int): The context window size for Ollama.
     """
     return ModelConfig(
         embed_model=os.getenv("EMBED_MODEL", "BAAI/bge-m3"),
         sparse_model=os.getenv(
             "SPARSE_MODEL", "Qdrant/all_miniLM_L6_v2_with_attentions"
         ),
-        gen_model=os.getenv("LLM", "gemma3n:e4b"),
+        gen_model=os.getenv("LLM", "qwen3:14b"),
         vision_model=os.getenv("VLM", "qwen3-vl:8b"),
         whisper_model=os.getenv("WHISPER_MODEL", "turbo"),
-        ollama_ctx_window=int(os.getenv("OLLAMA_CTX_WINDOW", "8192")),
+    )
+
+
+def load_ollama_env() -> OllamaConfig:
+    """
+    Loads Ollama configuration from environment variables or defaults.
+
+    Returns:
+        OllamaConfig: Dataclass containing Ollama configuration.
+        - ctx_window (int): The context window size.
+        - request_timeout (int): The request timeout in seconds.
+        - seed (int): The random seed for generation.
+        - temperature (float): The temperature setting for generation.
+        - thinking (bool): Whether to enable thinking mode.
+        - top_k (int): The top_k setting for generation.
+        - top_p (float): The top_p setting for generation.
+    """
+    return OllamaConfig(
+        ctx_window=int(os.getenv("OLLAMA_CTX_WINDOW", "8192")),
+        request_timeout=int(os.getenv("OLLAMA_REQUEST_TIMEOUT", "1200")),
+        seed=int(os.getenv("OLLAMA_SEED", "42")),
+        temperature=float(os.getenv("OLLAMA_TEMPERATURE", "0.0")),
+        thinking=os.getenv("OLLAMA_THINKING", "true").lower()
+        in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        },
+        top_k=int(os.getenv("OLLAMA_TOP_K", "1")),
+        top_p=float(os.getenv("OLLAMA_TOP_P", "0")),
     )
 
 
