@@ -35,6 +35,7 @@ from docint.utils.env_cfg import (
     load_host_env,
     load_ie_env,
     load_model_env,
+    load_ollama_env,
     load_path_env,
 )
 from docint.utils.clean_text import basic_clean
@@ -45,7 +46,6 @@ from docint.utils.storage import stage_sources_to_qdrant
 # --- Environment variables ---
 load_dotenv()
 
-OLLAMA_THINKING: bool = os.getenv("OLLAMA_THINKING", "true").lower() == "true"
 RETRIEVE_SIMILARITY_TOP_K: int = int(os.getenv("RETRIEVE_SIMILARITY_TOP_K", "20"))
 
 CleanFn = Callable[[str], str]
@@ -78,12 +78,15 @@ class RAG:
     qdrant_collection: str = "default"
 
     # --- Ollama parameters ---
-    base_url: str | None = field(default=None, init=False)
-    context_window: int = -1
-    temperature: float = 0.2
-    request_timeout: int = 1200
-    thinking: bool = OLLAMA_THINKING
-    ollama_options: dict[str, Any] | None = None
+    ollama_host: str | None = field(default=None, init=False)
+    ollama_ctx_window: int | None = field(default=None, init=False)
+    ollama_request_timeout: int | None = field(default=None, init=False)
+    ollama_seed: int | None = field(default=None, init=False)
+    ollama_temperature: float | None = field(default=None, init=False)
+    ollama_thinking: bool = False
+    ollama_top_k: int | None = field(default=None, init=False)
+    ollama_top_p: float | None = field(default=None, init=False)
+    ollama_options: dict[str, Any] | None = field(default=None, init=False)
 
     # --- Information extraction ---
     enable_ie: bool = False
@@ -156,8 +159,13 @@ class RAG:
         """
         # --- Host config ---
         host_config = load_host_env()
-        self.base_url = host_config.ollama_host
+        self.ollama_host = host_config.ollama_host
         self.qdrant_host = host_config.qdrant_host
+
+        # --- Information Extraction config ---
+        ie_config = load_ie_env()
+        self.enable_ie = ie_config.enabled
+        self.ie_max_chars = ie_config.max_chars
 
         # --- Path config ---
         path_config = load_path_env()
@@ -174,11 +182,21 @@ class RAG:
         self.embed_model_id = model_config.embed_model
         self.sparse_model_id = model_config.sparse_model
         self.gen_model_id = model_config.gen_model
-        self.context_window = model_config.ollama_ctx_window
 
-        ie_config = load_ie_env()
-        self.enable_ie = ie_config.enabled
-        self.ie_max_chars = ie_config.max_chars
+        # --- Ollama config ---
+        ollama_config = load_ollama_env()
+        self.ollama_ctx_window = ollama_config.ctx_window
+        self.ollama_request_timeout = ollama_config.request_timeout
+        self.ollama_seed = ollama_config.seed
+        self.ollama_temperature = ollama_config.temperature
+        self.ollama_thinking = ollama_config.thinking
+        self.ollama_top_k = ollama_config.top_k
+        self.ollama_top_p = ollama_config.top_p
+        self.ollama_options = {
+            "seed": self.ollama_seed,
+            "top_k": self.ollama_top_k,
+            "top_p": self.ollama_top_p,
+        }
 
         with open(self.reader_required_exts_path, "r", encoding="utf-8") as f:
             self.reader_required_exts = [f".{line.strip()}" for line in f]
@@ -473,25 +491,30 @@ class RAG:
             Ollama: The initialized generation model.
 
         Raises:
-            ValueError: If gen_model_id or base_url is None.
+            ValueError: If gen_model_id, ollama_ctx_window, or ollama_host is None.
         """
         if self._gen_model is None:
             if self.gen_model_id is None:
                 raise ValueError("gen_model_id cannot be None")
+            if self.ollama_ctx_window is None:
+                raise ValueError("ollama_ctx_window cannot be None for Ollama model")
+            if self.ollama_host is None:
+                raise ValueError("ollama_host cannot be None for Ollama model")
+            if self.ollama_options is None:
+                self.ollama_options = {}
+            if self.ollama_seed is not None:
+                self.ollama_options["seed"] = 42
 
-            if self.base_url is None:
-                raise ValueError("base_url cannot be None for Ollama model")
-
-            # Ensure base_url is clean (no trailing slash)
-            base_url = self.base_url.rstrip("/")
+            # Ensure ollama_host is clean (no trailing slash)
+            ollama_host = self.ollama_host.rstrip("/")
 
             self._gen_model = Ollama(
                 model=self.gen_model_id,
-                base_url=base_url,
-                temperature=self.temperature,
-                context_window=self.context_window,
-                request_timeout=self.request_timeout,
-                thinking=self.thinking,
+                base_url=ollama_host,
+                temperature=self.ollama_temperature,
+                context_window=self.ollama_ctx_window,
+                request_timeout=self.ollama_request_timeout,
+                thinking=self.ollama_thinking,
                 additional_kwargs=self.ollama_options,
             )
             logger.info("Initializing generator model: {}", self.gen_model_id)
