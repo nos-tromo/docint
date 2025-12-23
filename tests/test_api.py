@@ -64,6 +64,7 @@ class DummyRAG:
         self.chats: list[str] = []
         self.created_index = 0  # Tracks the number of times an index is created
         self.created_query_engine = 0
+        self.ie_sources: list[dict[str, Any]] = []
 
     def list_collections(self) -> list[str]:
         """
@@ -113,8 +114,26 @@ class DummyRAG:
         return session_id or "generated-session"
 
     def chat(self, question: str) -> dict[str, Any]:
+        """
+        Chat with the RAG system.
+
+        Args:
+            question (str): The question to ask the RAG system.
+
+        Returns:
+            dict[str, Any]: The response from the RAG system.
+        """
         self.chats.append(question)
         return {"response": "answer", "sources": [{"id": 1}]}
+
+    def get_collection_ie(self) -> list[dict[str, Any]]:
+        """
+        Get information extraction data for the selected collection.
+
+        Returns:
+            list[dict[str, Any]]: Information extraction data for the selected collection.
+        """
+        return self.ie_sources
 
 
 @pytest.fixture(autouse=True)
@@ -208,6 +227,63 @@ def test_collections_select_blank_name(client: TestClient) -> None:
     response = client.post("/collections/select", json={"name": "   "})
     assert response.status_code == 500
     assert "Collection name required" in response.json()["detail"]
+
+
+def test_collections_ie_success(client: TestClient) -> None:
+    """
+    Test the successful retrieval of information extraction data.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    api_module.rag.ie_sources = [
+        {"filename": "doc1.pdf", "page": 1, "row": 2, "entities": [], "relations": []}
+    ]
+    response = client.get("/collections/ie")
+    assert response.status_code == 200
+    assert response.json() == {"sources": api_module.rag.ie_sources}
+
+
+def test_collections_ie_requires_selection(client: TestClient) -> None:
+    """
+    Test that information extraction requires a collection to be selected.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    api_module.rag.qdrant_collection = ""
+    response = client.get("/collections/ie")
+    assert response.status_code == 400
+    assert "No collection selected" in response.json()["detail"]
+
+
+def test_collections_ie_failure(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """
+    Test the failed retrieval of information extraction data.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+
+    def raiser() -> list[dict[str, Any]]:
+        """
+        Get information extraction data for the selected collection.
+
+        Raises:
+            RuntimeError: If there is an error retrieving the information extraction data.
+
+        Returns:
+            list[dict[str, Any]]: Information extraction data for the selected collection.
+        """
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(api_module.rag, "get_collection_ie", raiser)
+    response = client.get("/collections/ie")
+    assert response.status_code == 500
+    assert response.json()["detail"] == "boom"
 
 
 def test_query_requires_collection(

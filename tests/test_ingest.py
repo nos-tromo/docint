@@ -91,10 +91,13 @@ def test_ingest_docs_invokes_rag(
             Placeholder ingest_docs method for the test double.
 
             Args:
-                path (Path): _description_
-                build_query_engine (bool, optional): _description_. Defaults to True.
-                progress_callback (Callable[[str], None] | None, optional): _description_. Defaults to None.
-            """            
+                path (Path): The directory or file path containing documents to ingest.
+                build_query_engine (bool, optional): Whether to build a query engine after
+                    ingestion completes. Defaults to True.
+                progress_callback (Callable[[str], None] | None, optional): Optional callback
+                    that receives progress updates as status messages during ingestion.
+                    Defaults to None.
+            """
             calls.path = path
             calls.build_query_engine = build_query_engine
 
