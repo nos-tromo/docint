@@ -310,8 +310,8 @@ def test_query_success(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> N
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         client (TestClient): The TestClient instance.
     """
-    api_module.rag.index = object()
-    api_module.rag.query_engine = object()
+    api_module.rag.index = None
+    api_module.rag.query_engine = None
     response = client.post(
         "/query",
         json={"question": "What?", "session_id": "abc"},
