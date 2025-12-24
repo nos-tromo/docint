@@ -107,8 +107,7 @@ The application can be used both via Docker for containerized environments and d
 The application is configured via environment variables. Key variables include:
 
 - `DOCINT_OFFLINE`: Set to `true` to force offline mode (fails if models aren't cached).
-- `LLM`: Name of the Ollama model to use (default: `granite4:7b-a1b-h`).
-- `OLLAMA_CTX_WINDOW`: Max context tokens to assume for the Ollama model without calling `ollama show` (default: `8192`).
+- `LLM`: Name of the Ollama model to use (default: `gpt-oss:20b`).
 - `EMBED_MODEL`: HuggingFace embedding model ID (default: `BAAI/bge-m3`).
 - `SPARSE_MODEL`: Sparse embedding model ID (default: `Qdrant/all_miniLM_L6_v2_with_attentions`).
 - `ENABLE_IE`: Enable entity/relation extraction during ingestion (default: `false`).
@@ -213,10 +212,10 @@ For additional configurations, populate an `.env.docker` file in the project's r
 DOCINT_OFFLINE=true
 EMBED_MODEL=BAAI/bge-m3
 SPARSE_MODEL=Qdrant/all_miniLM_L6_v2_with_attentions
-LLM=granite4:7b-a1b-h
+LLM=gpt-oss:20b
 VLM=qwen3-vl:8b
 WHISPER_MODEL=turbo
-RETRIEVE_SIMILARITY_TOP_K=50
+ENABLE_IE=true
 ```
 
 ## Unit Tests
