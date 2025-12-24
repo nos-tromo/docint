@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, AsyncIterator, cast
@@ -6,7 +7,7 @@ import anyio
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from qdrant_client import models
 from starlette.middleware.cors import CORSMiddleware
 
@@ -109,8 +110,6 @@ class SummarizeOut(BaseModel):
 class IngestIn(BaseModel):
     collection: str
     hybrid: bool | None = True
-    table_row_limit: int | None = Field(default=None, gt=0)
-    table_row_filter: str | None = None
 
 
 class IngestOut(BaseModel):
@@ -337,6 +336,27 @@ async def summarize_stream() -> StreamingResponse:
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+@app.get("/collections/ie", tags=["Query"])
+def get_collection_ie() -> dict[str, list[dict]]:
+    """
+    Get all IE data (entities and relations) for the currently selected collection.
+
+    Returns:
+        dict[str, list[dict]]: A dictionary containing the list of IE sources.
+
+    Raises:
+        HTTPException: If no collection is selected or an error occurs.
+    """
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+    try:
+        sources = rag.get_collection_ie()
+        return {"sources": sources}
+    except Exception as e:
+        logger.error(f"Error fetching collection IE: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/sessions/list", response_model=SessionListOut, tags=["Sessions"])
 def list_sessions() -> dict[str, list[dict]]:
     """
@@ -458,8 +478,6 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
             name,
             data_dir,
             hybrid=payload.hybrid if payload.hybrid is not None else True,
-            table_row_limit=payload.table_row_limit,
-            table_row_filter=payload.table_row_filter,
         )
 
         # After ingestion, prepare the in-memory RAG instance for immediate querying.
@@ -491,8 +509,6 @@ async def ingest_upload(
     collection: str = Form(...),
     files: list[UploadFile] = File(...),
     hybrid: bool | None = Form(True),
-    table_row_limit: int | None = Form(default=None, gt=0),
-    table_row_filter: str | None = Form(default=None),
 ) -> StreamingResponse:
     """
     Upload files for ingestion and stream progress as SSE events.
@@ -501,8 +517,6 @@ async def ingest_upload(
         collection (str): The name of the collection to ingest into.
         files (list[UploadFile]): The list of files to upload.
         hybrid (bool | None): Whether to enable hybrid search (default: True).
-        table_row_limit (int | None): Optional limit applied to tabular rows.
-        table_row_filter (str | None): Optional pandas-compatible query string to filter rows.
 
     Returns:
         StreamingResponse: A streaming response that yields SSE events during ingestion.
@@ -584,14 +598,35 @@ async def ingest_upload(
 
         yield _format_sse("ingestion_started", {"collection": name})
         try:
-            await anyio.to_thread.run_sync(
-                ingest_module.ingest_docs,
-                name,
-                batch_dir,
-                hybrid if hybrid is not None else True,
-                table_row_limit,
-                table_row_filter,
-            )
+            queue: asyncio.Queue[str | None | Exception] = asyncio.Queue()
+            loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
+
+            def progress_callback(msg: str):
+                loop.call_soon_threadsafe(queue.put_nowait, msg)
+
+            async def run_ingestion():
+                try:
+                    await anyio.to_thread.run_sync(
+                        ingest_module.ingest_docs,
+                        name,
+                        batch_dir,
+                        hybrid if hybrid is not None else True,
+                        progress_callback,
+                    )
+                    loop.call_soon_threadsafe(queue.put_nowait, None)
+                except Exception as e:
+                    loop.call_soon_threadsafe(queue.put_nowait, e)
+
+            asyncio.create_task(run_ingestion())
+
+            while True:
+                msg = await queue.get()
+                if msg is None:
+                    break
+                if isinstance(msg, Exception):
+                    raise msg
+                yield _format_sse("ingestion_progress", {"message": msg})
+
             rag.select_collection(name)
             try:
                 if getattr(rag, "index", None) is None:

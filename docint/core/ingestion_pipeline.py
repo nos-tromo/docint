@@ -45,13 +45,13 @@ class DocumentIngestionPipeline:
     table_metadata_cols: list[str] | str | None = None
     table_id_col: str | None = None
     table_excel_sheet: str | int | None = None
-    table_row_limit: int | None = None
-    table_row_filter: str | None = None
     buffer_size: int = 5
     breakpoint_percentile_threshold: int = 90
     chunk_size: int = 1024
     chunk_overlap: int = 0
     semantic_splitter_char_limit: int = 20000
+    entity_extractor: Callable[[str], tuple[list[dict], list[dict]]] | None = None
+    progress_callback: Callable[[str], None] | None = None
 
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
     md_node_parser: MarkdownNodeParser | None = field(default=None, init=False)
@@ -247,8 +247,6 @@ class DocumentIngestionPipeline:
             else None,
             id_col=self.table_id_col,
             excel_sheet=self.table_excel_sheet,
-            limit=self.table_row_limit,
-            row_query=self.table_row_filter,
         )
 
         def _metadata(path: str | Path) -> dict[str, str]:
@@ -314,8 +312,6 @@ class DocumentIngestionPipeline:
                     if self.table_metadata_cols
                     else None,
                     id_col=self.table_id_col,
-                    limit=self.table_row_limit,
-                    row_query=self.table_row_filter,
                 ),
                 ".tsv": TableReader(
                     csv_sep="\t",
@@ -324,8 +320,6 @@ class DocumentIngestionPipeline:
                     if self.table_metadata_cols
                     else None,
                     id_col=self.table_id_col,
-                    limit=self.table_row_limit,
-                    row_query=self.table_row_filter,
                 ),
                 ".xls": table_reader,
                 ".xlsx": table_reader,
@@ -549,6 +543,29 @@ class DocumentIngestionPipeline:
                     len(plain_docs),
                 )
                 nodes.extend(self._semantic_nodes_with_fallback(plain_docs, "text"))
+
+        if self.entity_extractor:
+            total_nodes = len(nodes)
+            for i, node in enumerate(nodes):
+                if self.progress_callback:
+                    self.progress_callback(
+                        f"Extracting entities from chunk {i + 1} of {total_nodes}"
+                    )
+                text_value = getattr(node, "text", "") or ""
+                if not text_value.strip():
+                    continue
+                try:
+                    ents, rels = self.entity_extractor(text_value)
+                except Exception as exc:  # pragma: no cover - extractor errors logged
+                    logger.warning("Entity extractor failed: {}", exc)
+                    continue
+                if ents or rels:
+                    meta = dict(getattr(node, "metadata", {}) or {})
+                    if ents:
+                        meta["entities"] = ents
+                    if rels:
+                        meta["relations"] = rels
+                    node.metadata = meta
 
         return nodes
 

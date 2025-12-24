@@ -1,6 +1,7 @@
 import json
 import sys
 from pathlib import Path
+from typing import Any, Iterable, Tuple
 
 import requests
 import streamlit as st
@@ -16,7 +17,282 @@ BACKEND_HOST = host_cfg.backend_host
 BACKEND_PUBLIC_HOST = host_cfg.backend_public_host or BACKEND_HOST
 
 
-def setup_app():
+def _format_score(score: Any) -> str:
+    """Format score values for display."""
+    try:
+        return f"{float(score):.2f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _normalize_entities(entities: Iterable[Any] | None) -> list[dict[str, Any]]:
+    """
+    Return sanitized entity payloads.
+
+    Args:
+        entities: Iterable of entity dicts or None.
+
+    Returns:
+        List of normalized entity dicts.
+    """
+    normalized: list[dict[str, Any]] = []
+    for ent in entities or []:
+        if not isinstance(ent, dict):
+            continue
+        text_val = str(ent.get("text") or "").strip()
+        if not text_val:
+            continue
+        normalized.append(
+            {
+                "text": text_val,
+                "type": ent.get("type") or ent.get("label"),
+                "score": ent.get("score"),
+            }
+        )
+    return normalized
+
+
+def _normalize_relations(relations: Iterable[Any] | None) -> list[dict[str, Any]]:
+    """
+    Return sanitized relation payloads.
+
+    Args:
+        relations: Iterable of relation dicts or None.
+
+    Returns:
+        List of normalized relation dicts.
+    """
+    normalized: list[dict[str, Any]] = []
+    for rel in relations or []:
+        if not isinstance(rel, dict):
+            continue
+        head = str(rel.get("head") or rel.get("subject") or "").strip()
+        tail = str(rel.get("tail") or rel.get("object") or "").strip()
+        if not head or not tail:
+            continue
+        normalized.append(
+            {
+                "head": head,
+                "tail": tail,
+                "label": rel.get("label") or rel.get("type"),
+                "score": rel.get("score"),
+            }
+        )
+    return normalized
+
+
+def _source_label(src: dict) -> str:
+    """
+    Build a compact label for a source row.
+
+    Args:
+        src: Source dictionary with possible keys 'filename', 'file_path', 'page', 'row'.
+
+    Returns:
+        A string label representing the source.
+    """
+    filename_val = src.get("filename") or src.get("file_path") or "Unknown"
+    filename = str(filename_val).strip() or "Unknown"
+    parts: list[str] = []
+    if src.get("page") is not None:
+        parts.append(f"p{src['page']}")
+    if src.get("row") is not None:
+        parts.append(f"row {src['row']}")
+    return f"{filename} ({', '.join(parts)})" if parts else filename
+
+
+def _aggregate_ie(
+    sources: Iterable[dict] | None,
+) -> Tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Aggregate entities and relations across source payloads.
+
+    Args:
+        sources: Iterable of source dictionaries containing 'entities' and 'relations'.
+
+    Returns:
+        A tuple containing two lists:
+        - List of aggregated entity dictionaries.
+        - List of aggregated relation dictionaries.
+    """
+
+    entity_index: dict[tuple[str, str], dict[str, Any]] = {}
+    relation_index: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+    for src in sources or []:
+        if not isinstance(src, dict):
+            continue
+        label = _source_label(src)
+        entities = _normalize_entities(src.get("entities"))
+        relations = _normalize_relations(src.get("relations"))
+
+        for ent in entities:
+            text_val = str(ent.get("text") or "")
+            type_val = str(ent.get("type") or "")
+            ent_key: tuple[str, str] = (text_val.lower(), type_val.lower())
+            if ent_key not in entity_index:
+                entity_index[ent_key] = {
+                    "text": text_val,
+                    "type": ent.get("type"),
+                    "best_score": ent.get("score"),
+                    "count": 0,
+                    "files": set(),
+                    "occurrences": [],
+                }
+            entry = entity_index[ent_key]
+            entry["count"] += 1
+            entry["files"].add(label)
+            if ent.get("score") is not None:
+                prev = entry.get("best_score")
+                entry["best_score"] = (
+                    max(prev, ent["score"]) if prev is not None else ent["score"]
+                )
+            entry["occurrences"].append({"source": label, "score": ent.get("score")})
+
+        for rel in relations:
+            head_val = str(rel.get("head") or "")
+            label_val = str(rel.get("label") or "")
+            tail_val = str(rel.get("tail") or "")
+            rel_key: tuple[str, str, str] = (
+                head_val.lower(),
+                label_val.lower(),
+                tail_val.lower(),
+            )
+            if rel_key not in relation_index:
+                relation_index[rel_key] = {
+                    "head": head_val,
+                    "tail": tail_val,
+                    "label": rel.get("label"),
+                    "best_score": rel.get("score"),
+                    "count": 0,
+                    "files": set(),
+                    "occurrences": [],
+                }
+            entry = relation_index[rel_key]
+            entry["count"] += 1
+            entry["files"].add(label)
+            if rel.get("score") is not None:
+                prev = entry.get("best_score")
+                entry["best_score"] = (
+                    max(prev, rel["score"]) if prev is not None else rel["score"]
+                )
+            entry["occurrences"].append({"source": label, "score": rel.get("score")})
+
+    entities_sorted: list[dict[str, Any]] = sorted(
+        [{**v, "files": sorted(v["files"])} for v in entity_index.values()],
+        key=lambda item: (
+            -int(item.get("count", 0) or 0),
+            str(item.get("text") or "").lower(),
+        ),
+    )
+    relations_sorted: list[dict[str, Any]] = sorted(
+        [{**v, "files": sorted(v["files"])} for v in relation_index.values()],
+        key=lambda item: (
+            -int(item.get("count", 0) or 0),
+            str(item.get("head") or "").lower(),
+            str(item.get("label") or ""),
+        ),
+    )
+    return entities_sorted, relations_sorted
+
+
+def _render_entities_relations(src: dict[str, Any]) -> None:
+    """
+    Render entities and relations for a single source.
+
+    Args:
+        src: Source dictionary containing 'entities' and 'relations'.
+    """
+    entities = _normalize_entities(src.get("entities"))
+    relations = _normalize_relations(src.get("relations"))
+
+    if not entities and not relations:
+        return
+
+    col_entities, col_relations = st.columns(2)
+    if entities:
+        with col_entities:
+            st.caption("Entities")
+            for ent in entities:
+                score = _format_score(ent.get("score"))
+                label = ent.get("type") or "Unlabeled"
+                st.markdown(f"- **{ent['text']}** ({label}) — score {score}")
+
+    if relations:
+        with col_relations:
+            st.caption("Relations")
+            for rel in relations:
+                score = _format_score(rel.get("score"))
+                label = rel.get("label") or "rel"
+                st.markdown(
+                    f"- **{rel['head']}** — _{label}_ → **{rel['tail']}** (score {score})"
+                )
+
+
+def _render_ie_overview(sources: list[dict[str, Any]]) -> None:
+    """
+    Show aggregated IE results for a set of sources.
+
+    Args:
+        sources: List of source dictionaries containing 'entities' and 'relations'.
+    """
+    entities, relations = _aggregate_ie(sources)
+
+    metrics = st.columns(2)
+    metrics[0].metric("Unique entities", len(entities))
+    metrics[1].metric("Unique relations", len(relations))
+
+    if entities:
+        st.markdown("#### Entities")
+        st.dataframe(
+            {
+                "Entity": [e["text"] for e in entities],
+                "Type": [e.get("type") or "Unlabeled" for e in entities],
+                "Mentions": [e["count"] for e in entities],
+                "Best score": [_format_score(e.get("best_score")) for e in entities],
+                "Sources": [", ".join(e["files"]) for e in entities],
+            },
+            width="stretch",
+            hide_index=True,
+        )
+        for ent in entities:
+            with st.expander(
+                f"{ent['text']} ({ent.get('type') or 'Unlabeled'}) — {ent['count']} mention(s)"
+            ):
+                for occ in ent["occurrences"]:
+                    st.markdown(
+                        f"- {occ['source']} (score {_format_score(occ.get('score'))})"
+                    )
+    else:
+        st.caption("No entities detected.")
+
+    if relations:
+        st.markdown("#### Relations")
+        st.dataframe(
+            {
+                "Head": [r["head"] for r in relations],
+                "Label": [r.get("label") or "rel" for r in relations],
+                "Tail": [r["tail"] for r in relations],
+                "Mentions": [r["count"] for r in relations],
+                "Best score": [_format_score(r.get("best_score")) for r in relations],
+                "Sources": [", ".join(r["files"]) for r in relations],
+            },
+            width="stretch",
+            hide_index=True,
+        )
+        for rel in relations:
+            with st.expander(
+                f"{rel['head']} — {rel.get('label') or 'rel'} → {rel['tail']} ({rel['count']} mention(s))"
+            ):
+                for occ in rel["occurrences"]:
+                    st.markdown(
+                        f"- {occ['source']} (score {_format_score(occ.get('score'))})"
+                    )
+    else:
+        st.caption("No relations detected.")
+
+
+def setup_app() -> None:
     """
     Initialize application state and configuration.
     """
@@ -58,9 +334,11 @@ def setup_app():
         st.session_state.selected_collection = ""
     if "preview_url" not in st.session_state:
         st.session_state.preview_url = None
+    if "chat_running" not in st.session_state:
+        st.session_state.chat_running = False
 
 
-def render_sidebar():
+def render_sidebar() -> None:
     """
     Render the sidebar controls.
     """
@@ -114,7 +392,7 @@ def render_sidebar():
         # New Chat Button
         if st.button(
             "➕ New Chat",
-            use_container_width=True,
+            width="stretch",
             type="primary" if st.session_state.session_id is None else "secondary",
         ):
             st.session_state.session_id = None
@@ -137,7 +415,7 @@ def render_sidebar():
                     if st.button(
                         s["title"],
                         key=f"sess_{s['id']}",
-                        use_container_width=True,
+                        width="stretch",
                         type=b_type,
                     ):
                         if st.session_state.session_id != s["id"]:
@@ -158,7 +436,7 @@ def render_sidebar():
                     if st.button(
                         "🗑️ Delete Current Chat",
                         type="secondary",
-                        use_container_width=True,
+                        width="stretch",
                     ):
                         requests.delete(
                             f"{BACKEND_HOST}/sessions/{st.session_state.session_id}"
@@ -174,11 +452,17 @@ def render_sidebar():
             logger.warning(f"Failed to fetch sessions: {e}")
 
 
-def render_ingestion():
+def render_ingestion() -> None:
     """
     Render the ingestion interface.
+
+    Raises:
+        JSONDecodeError: If the response from the backend cannot be decoded.
     """
     st.header("Ingestion")
+
+    if "ingest_summary" not in st.session_state:
+        st.session_state.ingest_summary = None
 
     # New collection input
     new_col = st.text_input("New Collection Name")
@@ -186,31 +470,107 @@ def render_ingestion():
 
     uploaded_files = st.file_uploader("Upload Documents", accept_multiple_files=True)
 
-    with st.expander("Advanced Options"):
-        table_row_limit = st.number_input(
-            "Table Row Limit", min_value=0, value=0, help="0 for no limit"
-        )
-        table_row_filter = st.text_input("Table Row Filter", help="Pandas query string")
+    def _render_ingest_summary(summary: dict[str, Any] | None) -> None:
+        """
+        Render ingestion summary.
+
+        Args:
+            summary (dict[str, Any] | None): Ingestion summary data.
+        """
+        if not summary:
+            return
+        with st.container():
+            st.subheader("Last ingestion summary")
+            cols = st.columns(3)
+            cols[0].metric("Total", summary.get("total", 0))
+            cols[1].metric("Succeeded", summary.get("done", 0))
+            cols[2].metric("Errors", summary.get("errors", 0))
+
+            pills = [
+                f"{name} — {status}"
+                for name, status in sorted(summary.get("file_status", {}).items())
+            ]
+            if pills:
+                st.markdown("\n".join(pills))
+
+            events = summary.get("events") or []
+            if events:
+                st.caption("Recent events")
+                st.markdown("\n".join(events[-8:]))
+
+    _render_ingest_summary(st.session_state.ingest_summary)
 
     if uploaded_files and st.button("Upload & Ingest"):
         if not target_col:
             logger.error("No target collection specified.")
             st.error("Please select or enter a collection name.")
         else:
-            with st.status("Processing...", expanded=True) as status:
-                files = [("files", (f.name, f, f.type)) for f in uploaded_files]
-                data = {
-                    "collection": target_col,
-                    "hybrid": "True",
-                }
-                if table_row_limit > 0:
-                    data["table_row_limit"] = str(table_row_limit)
-                if table_row_filter:
-                    data["table_row_filter"] = table_row_filter
+            files = [("files", (f.name, f, f.type)) for f in uploaded_files]
+            data = {
+                "collection": target_col,
+                "hybrid": "True",
+            }
 
+            file_status: dict[str, str] = {f.name: "Queued" for f in uploaded_files}
+            events: list[str] = []
+            summary: dict[str, int] = {"processed": 0, "errors": 0}
+
+            header_ph = st.empty()
+            progress = st.progress(0.0, text="Starting upload...")
+            board_ph = st.empty()
+            feed_ph = st.empty()
+            summary_ph = st.empty()
+
+            def render_board(current_stage: str) -> None:
+                """
+                Render per-file pills, counts, and progress.
+
+                Args:
+                    current_stage: Current overall stage label.
+                """
+                total = len(file_status) or 1
+                done = sum(
+                    1 for s in file_status.values() if s in {"Processed", "Done"}
+                )
+                errs = sum(1 for s in file_status.values() if s == "Error")
+                progress.progress(
+                    done / total,
+                    text=f"{current_stage} • {done}/{total} done • {errs} errors",
+                )
+
+                with header_ph.container():
+                    cols = st.columns(3)
+                    cols[0].metric("Total files", total)
+                    cols[1].metric("Processed", done)
+                    cols[2].metric("Errors", errs)
+
+                pill_map = {
+                    "Queued": "⏳",
+                    "Uploading": "📤",
+                    "Processing": "⚙️",
+                    "IE": "🔍",
+                    "Processed": "✅",
+                    "Done": "✅",
+                    "Error": "❌",
+                }
+                pill_rows = [
+                    f"{pill_map.get(state, '•')} **{name}** — {state}"
+                    for name, state in sorted(file_status.items())
+                ]
+                board_ph.markdown("\n".join(pill_rows))
+
+            def render_feed() -> None:
+                """
+                Render recent event feed.
+                """
+                if not events:
+                    return
+                feed_ph.markdown("\n".join(events[-8:]))
+
+            render_board("Starting upload")
+
+            with st.status("Ingestion in progress", expanded=True) as status:
                 try:
-                    # Use stream=True to handle SSE if possible, or just wait for response
-                    # Since requests doesn't parse SSE automatically, we'll just read lines
                     response = requests.post(
                         f"{BACKEND_HOST}/ingest/upload",
                         data=data,
@@ -220,31 +580,80 @@ def render_ingestion():
 
                     if response.status_code == 200:
                         for line in response.iter_lines():
-                            if line:
-                                decoded_line = line.decode("utf-8")
-                                if decoded_line.startswith("data: "):
-                                    event_data = json.loads(decoded_line[6:])
-                                    # We could update status here based on event type
-                                    # But for now, just logging or simple updates
-                                    if "filename" in event_data:
-                                        logger.info(
-                                            f"Processed {event_data['filename']}"
-                                        )
-                                        status.write(
-                                            f"Processed {event_data['filename']}"
-                                        )
-                                    if "message" in event_data:  # Error
-                                        logger.error(f"Error: {event_data['message']}")
-                                        status.write(f"Error: {event_data['message']}")
+                            if not line:
+                                continue
+                            decoded_line = line.decode("utf-8")
+                            if not decoded_line.startswith("data: "):
+                                continue
+                            try:
+                                event_data = json.loads(decoded_line[6:])
+                            except json.JSONDecodeError:
+                                continue
+
+                            filename = event_data.get("filename") or event_data.get(
+                                "file"
+                            )
+                            stage = event_data.get("stage") or event_data.get("status")
+                            message = event_data.get("message")
+
+                            if stage == "ingestion_progress" and message:
+                                # Special case for granular progress - replace last if it was also progress
+                                if events and events[-1].startswith("• Extracting"):
+                                    events[-1] = f"• {message}"
+                                else:
+                                    events.append(f"• {message}")
+                                render_board("Processing")
+                                render_feed()
+                                continue
+
+                            if filename:
+                                file_status[filename] = stage or "Processing"
+                            if message:
+                                events.append(
+                                    f"• {filename + ': ' if filename else ''}{message}"
+                                )
+                            elif stage and filename:
+                                events.append(f"• {filename}: {stage}")
+                            render_board(stage or "Processing")
+                            render_feed()
+
+                            if filename and message and "error" in message.lower():
+                                file_status[filename] = "Error"
+                                summary["errors"] += 1
+
+                            if stage and stage.lower() in {"processed", "done"}:
+                                summary["processed"] += 1
+
+                        # Mark remaining as done
+                        for name in file_status:
+                            if file_status[name] not in {"Processed", "Done", "Error"}:
+                                file_status[name] = "Done"
+                        render_board("Complete")
+
+                        total = len(file_status)
+                        errs = sum(1 for s in file_status.values() if s == "Error")
+                        done = sum(
+                            1
+                            for s in file_status.values()
+                            if s in {"Processed", "Done"}
+                        )
+                        st.session_state.ingest_summary = {
+                            "total": total,
+                            "done": done,
+                            "errors": errs,
+                            "file_status": dict(file_status),
+                            "events": events[-20:],
+                        }
+                        with summary_ph.container():
+                            _render_ingest_summary(st.session_state.ingest_summary)
 
                         status.update(
                             label="Ingestion complete!",
                             state="complete",
                             expanded=False,
                         )
-                        st.success("Ingestion complete!")
-                        # Refresh collections list if new one was created
-                        if new_col:
+                        if target_col:
+                            st.session_state.selected_collection = target_col
                             st.rerun()
                     else:
                         status.update(label="Ingestion failed", state="error")
@@ -256,19 +665,19 @@ def render_ingestion():
                     st.error(f"Error during ingestion: {e}")
 
 
-def render_analysis():
+def render_analysis() -> None:
     """
     Render the analysis interface.
     """
     st.header("Analysis")
     st.info("Generate summaries and insights from your collection.")
 
-    if st.button("Summarize Collection"):
+    if st.button("Run analysis"):
         if not st.session_state.selected_collection:
             logger.error("No collection selected.")
             st.error("No collection selected.")
         else:
-            st.markdown(f"### Summary of {st.session_state.selected_collection}")
+            st.markdown(f"### Summary of '{st.session_state.selected_collection}'")
             summary_placeholder = st.empty()
             full_summary = ""
 
@@ -294,13 +703,19 @@ def render_analysis():
 
                         summary_placeholder.markdown(full_summary)
 
+                        # Download button for analysis
+                        analysis_text = (
+                            f"COLLECTION: {st.session_state.selected_collection}\n\n"
+                        )
+                        analysis_text += f"SUMMARY:\n{full_summary}\n\n"
+
                         if sources:
                             with st.expander("Sources used for summary"):
                                 for j, src in enumerate(sources):
                                     loc = ""
-                                    if src.get("page"):
+                                    if src.get("page") is not None:
                                         loc += f" (Page {src['page']})"
-                                    if src.get("row"):
+                                    if src.get("row") is not None:
                                         loc += f" (Row {src['row']})"
 
                                     score = ""
@@ -311,6 +726,7 @@ def render_analysis():
                                         f"**{src.get('filename')}{loc}**{score}"
                                     )
                                     st.caption(src.get("preview_text", ""))
+                                    _render_entities_relations(src)
                                     if src.get("file_hash"):
                                         link = f"{BACKEND_PUBLIC_HOST}/sources/preview?collection={st.session_state.selected_collection}&file_hash={src['file_hash']}"
                                         st.markdown(
@@ -318,6 +734,40 @@ def render_analysis():
                                             unsafe_allow_html=True,
                                         )
                                     st.divider()
+
+                        # Fetch and aggregate IE for the whole collection
+                        st.markdown("---")
+                        st.markdown("### Collection-wide Information Extraction")
+                        with st.spinner(
+                            "Aggregating entities and relations from entire collection..."
+                        ):
+                            ie_resp = requests.get(f"{BACKEND_HOST}/collections/ie")
+                            if ie_resp.status_code == 200:
+                                all_ie_sources = ie_resp.json().get("sources", [])
+                                if all_ie_sources:
+                                    _render_ie_overview(all_ie_sources)
+
+                                    # Add IE to download text
+                                    entities, relations = _aggregate_ie(all_ie_sources)
+                                    analysis_text += "ENTITIES:\n"
+                                    for ent in entities:
+                                        analysis_text += f"- {ent['text']} ({ent.get('type', 'Unlabeled')}): {ent['count']} mentions in {', '.join(ent['files'])}\n"
+                                    analysis_text += "\nRELATIONS:\n"
+                                    for rel in relations:
+                                        analysis_text += f"- {rel['head']} --[{rel.get('label', 'rel')}]--> {rel['tail']}: {rel['count']} mentions in {', '.join(rel['files'])}\n"
+                                else:
+                                    st.info(
+                                        "No entities or relations found in this collection."
+                                    )
+                            else:
+                                st.error("Failed to fetch collection-wide IE data.")
+
+                        st.download_button(
+                            label="📥 Download Analysis (.txt)",
+                            data=analysis_text,
+                            file_name=f"analysis_{st.session_state.selected_collection}.txt",
+                            mime="text/plain",
+                        )
                     else:
                         logger.error(f"Summarization failed: {resp.text}")
                         st.error(f"Summarization failed: {resp.text}")
@@ -338,6 +788,21 @@ def render_chat() -> None:
 
     st.caption(f"Current Collection: {st.session_state.selected_collection}")
 
+    # Download button for chat
+    if st.session_state.messages:
+        chat_text = ""
+        for msg in st.session_state.messages:
+            chat_text += f"{msg['role'].upper()}: {msg['content']}\n\n"
+            if "reasoning" in msg and msg["reasoning"]:
+                chat_text += f"REASONING: {msg['reasoning']}\n\n"
+
+        st.download_button(
+            label="📥 Download Chat (.txt)",
+            data=chat_text,
+            file_name=f"chat_{st.session_state.session_id or 'session'}.txt",
+            mime="text/plain",
+        )
+
     # Display history
     for i, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
@@ -353,9 +818,9 @@ def render_chat() -> None:
                     for j, src in enumerate(msg["sources"]):
                         # Construct preview
                         loc = ""
-                        if src.get("page"):
+                        if src.get("page") is not None:
                             loc += f" (Page {src['page']})"
-                        if src.get("row"):
+                        if src.get("row") is not None:
                             loc += f" (Row {src['row']})"
 
                         score = ""
@@ -371,10 +836,26 @@ def render_chat() -> None:
                                 f'<a href="{link}" target="_blank">Download/View Original</a>',
                                 unsafe_allow_html=True,
                             )
+                        _render_entities_relations(src)
                         st.divider()
 
+                    st.markdown("**Information Extraction Overview**")
+                    _render_ie_overview(msg["sources"])
+
+    def stop_generation():
+        st.session_state.chat_running = False
+        if st.session_state.get("current_answer"):
+            st.session_state.messages.append(
+                {"role": "assistant", "content": st.session_state.current_answer}
+            )
+            del st.session_state.current_answer
+
+    def _start_chat():
+        st.session_state.chat_running = True
+        st.session_state.current_answer = ""
+
     # Chat Input
-    if prompt := st.chat_input("Ask a question..."):
+    if prompt := st.chat_input("Ask a question...", on_submit=_start_chat):
         # 1. User message
         st.session_state.messages.append({"role": "user", "content": prompt})
 
@@ -383,8 +864,17 @@ def render_chat() -> None:
 
         # 2. Bot response
         with st.chat_message("assistant"):
-            # Placeholder for answer
-            answer_placeholder = st.empty()
+            # Layout for Stop button
+            c1, c2 = st.columns([0.85, 0.15])
+            with c2:
+                if st.session_state.get("chat_running"):
+                    st.button(
+                        "⏹️ Stop", on_click=stop_generation, help="Stop Generation"
+                    )
+
+            with c1:
+                # Placeholder for answer
+                answer_placeholder = st.empty()
             full_answer = ""
             sources = []
             reasoning = None
@@ -402,11 +892,12 @@ def render_chat() -> None:
                         first_line = None
 
                         # Show spinner while waiting for the first chunk
-                        with st.spinner("Thinking..."):
-                            try:
-                                first_line = next(lines)
-                            except StopIteration:
-                                pass
+                        with c1:
+                            with st.spinner("Thinking..."):
+                                try:
+                                    first_line = next(lines)
+                                except StopIteration:
+                                    pass
 
                         def process_line(line):
                             nonlocal full_answer, sources, reasoning
@@ -418,6 +909,9 @@ def render_chat() -> None:
                                         data = json.loads(data_str)
                                         if "token" in data:
                                             full_answer += data["token"]
+                                            st.session_state.current_answer = (
+                                                full_answer
+                                            )
                                             answer_placeholder.markdown(
                                                 full_answer + "▌"
                                             )
@@ -437,6 +931,8 @@ def render_chat() -> None:
                             process_line(first_line)
 
                         for line in lines:
+                            if not st.session_state.get("chat_running"):
+                                break
                             process_line(line)
 
                         answer_placeholder.markdown(full_answer)
@@ -449,9 +945,9 @@ def render_chat() -> None:
                             with st.expander("View Sources"):
                                 for j, src in enumerate(sources):
                                     loc = ""
-                                    if src.get("page"):
+                                    if src.get("page") is not None:
                                         loc += f" (Page {src['page']})"
-                                    if src.get("row"):
+                                    if src.get("row") is not None:
                                         loc += f" (Row {src['row']})"
 
                                     score = ""
@@ -468,7 +964,11 @@ def render_chat() -> None:
                                             f'<a href="{link}" target="_blank">Download/View Original</a>',
                                             unsafe_allow_html=True,
                                         )
+                                    _render_entities_relations(src)
                                     st.divider()
+
+                            st.markdown("**Information Extraction Overview**")
+                            _render_ie_overview(sources)
 
                         # 3. Save bot message
                         msg_entry = {
@@ -479,16 +979,19 @@ def render_chat() -> None:
                         if reasoning:
                             msg_entry["reasoning"] = reasoning
                         st.session_state.messages.append(msg_entry)
+                        st.session_state.chat_running = False
                         st.rerun()
                     else:
+                        st.session_state.chat_running = False
                         logger.error(f"Query failed: {resp.text}")
                         st.error(f"Query failed: {resp.text}")
             except Exception as e:
+                st.session_state.chat_running = False
                 logger.error(f"Error: {e}")
                 st.error(f"Error: {e}")
 
 
-def main():
+def main() -> None:
     setup_app()
     render_sidebar()
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -30,18 +31,25 @@ from qdrant_client.async_qdrant_client import AsyncQdrantClient
 
 from docint.core.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.session_manager import SessionManager
-from docint.utils.env_cfg import load_host_env, load_model_env, load_path_env
-from docint.utils.storage import stage_sources_to_qdrant
+from docint.utils.env_cfg import (
+    load_host_env,
+    load_ie_env,
+    load_model_env,
+    load_ollama_env,
+    load_path_env,
+)
 from docint.utils.clean_text import basic_clean
 from docint.utils.model_cfg import resolve_model_path
+from docint.utils.ollama_cfg import OllamaPipeline
+from docint.utils.storage import stage_sources_to_qdrant
 
 # --- Environment variables ---
 load_dotenv()
 
-OLLAMA_THINKING: bool = os.getenv("OLLAMA_THINKING", "true").lower() == "true"
 RETRIEVE_SIMILARITY_TOP_K: int = int(os.getenv("RETRIEVE_SIMILARITY_TOP_K", "20"))
 
 CleanFn = Callable[[str], str]
+NER_PROMPT = OllamaPipeline().load_prompt(kw="ner")
 
 
 @dataclass
@@ -70,12 +78,20 @@ class RAG:
     qdrant_collection: str = "default"
 
     # --- Ollama parameters ---
-    base_url: str | None = field(default=None, init=False)
-    context_window: int = -1
-    temperature: float = 0.2
-    request_timeout: int = 1200
-    thinking: bool = OLLAMA_THINKING
-    ollama_options: dict[str, Any] | None = None
+    ollama_host: str | None = field(default=None, init=False)
+    ollama_ctx_window: int | None = field(default=None, init=False)
+    ollama_request_timeout: int | None = field(default=None, init=False)
+    ollama_seed: int | None = field(default=None, init=False)
+    ollama_temperature: float | None = field(default=None, init=False)
+    ollama_thinking: bool = False
+    ollama_top_k: int | None = field(default=None, init=False)
+    ollama_top_p: float | None = field(default=None, init=False)
+    ollama_options: dict[str, Any] | None = field(default=None, init=False)
+
+    # --- Information extraction ---
+    enable_ie: bool = False
+    ie_max_chars: int = 800
+    ner_prompt: str = NER_PROMPT
 
     # --- Reranking / retrieval ---
     enable_hybrid: bool = True
@@ -100,8 +116,6 @@ class RAG:
     table_metadata_cols: list[str] | str | None = None
     table_id_col: str | None = None
     table_excel_sheet: str | int | None = None
-    table_row_limit: int | None = None
-    table_row_filter: str | None = None
 
     # --- SemanticSplitterNodeParser config ---
     buffer_size: int = 5
@@ -143,8 +157,13 @@ class RAG:
         """
         # --- Host config ---
         host_config = load_host_env()
-        self.base_url = host_config.ollama_host
+        self.ollama_host = host_config.ollama_host
         self.qdrant_host = host_config.qdrant_host
+
+        # --- Information Extraction config ---
+        ie_config = load_ie_env()
+        self.enable_ie = ie_config.enabled
+        self.ie_max_chars = ie_config.max_chars
 
         # --- Path config ---
         path_config = load_path_env()
@@ -161,7 +180,21 @@ class RAG:
         self.embed_model_id = model_config.embed_model
         self.sparse_model_id = model_config.sparse_model
         self.gen_model_id = model_config.gen_model
-        self.context_window = model_config.ollama_ctx_window
+
+        # --- Ollama config ---
+        ollama_config = load_ollama_env()
+        self.ollama_ctx_window = ollama_config.ctx_window
+        self.ollama_request_timeout = ollama_config.request_timeout
+        self.ollama_seed = ollama_config.seed
+        self.ollama_temperature = ollama_config.temperature
+        self.ollama_thinking = ollama_config.thinking
+        self.ollama_top_k = ollama_config.top_k
+        self.ollama_top_p = ollama_config.top_p
+        self.ollama_options = {
+            "seed": self.ollama_seed,
+            "top_k": self.ollama_top_k,
+            "top_p": self.ollama_top_p,
+        }
 
         with open(self.reader_required_exts_path, "r", encoding="utf-8") as f:
             self.reader_required_exts = [f".{line.strip()}" for line in f]
@@ -456,25 +489,30 @@ class RAG:
             Ollama: The initialized generation model.
 
         Raises:
-            ValueError: If gen_model_id or base_url is None.
+            ValueError: If gen_model_id, ollama_ctx_window, or ollama_host is None.
         """
         if self._gen_model is None:
             if self.gen_model_id is None:
                 raise ValueError("gen_model_id cannot be None")
+            if self.ollama_ctx_window is None:
+                raise ValueError("ollama_ctx_window cannot be None for Ollama model")
+            if self.ollama_host is None:
+                raise ValueError("ollama_host cannot be None for Ollama model")
+            if self.ollama_options is None:
+                self.ollama_options = {}
+            if self.ollama_seed is not None:
+                self.ollama_options["seed"] = 42
 
-            if self.base_url is None:
-                raise ValueError("base_url cannot be None for Ollama model")
-
-            # Ensure base_url is clean (no trailing slash)
-            base_url = self.base_url.rstrip("/")
+            # Ensure ollama_host is clean (no trailing slash)
+            ollama_host = self.ollama_host.rstrip("/")
 
             self._gen_model = Ollama(
                 model=self.gen_model_id,
-                base_url=base_url,
-                temperature=self.temperature,
-                context_window=self.context_window,
-                request_timeout=self.request_timeout,
-                thinking=self.thinking,
+                base_url=ollama_host,
+                temperature=self.ollama_temperature,
+                context_window=self.ollama_ctx_window,
+                request_timeout=self.ollama_request_timeout,
+                thinking=self.ollama_thinking,
                 additional_kwargs=self.ollama_options,
             )
             logger.info("Initializing generator model: {}", self.gen_model_id)
@@ -556,9 +594,98 @@ class RAG:
         """
         return StorageContext.from_defaults(vector_store=vector_store)
 
-    def _build_ingestion_pipeline(self) -> DocumentIngestionPipeline:
+    # --- Information extraction helpers ---
+    @staticmethod
+    def _parse_ie_payload(raw: str) -> dict[str, Any]:
+        """
+        Parses the raw text response from the IE model into a JSON payload.
+
+        Args:
+            raw (str): Raw text response from the IE model.
+
+        Returns:
+            dict[str, Any]: Parsed JSON payload.
+        """
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+        try:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                return json.loads(raw[start : end + 1])
+        except Exception:
+            return {}
+        return {}
+
+    def _ie_extract(self, text: str) -> tuple[list[dict], list[dict]]:
+        """
+        Performs information extraction on the given text.
+
+        Args:
+            text (str): Text to perform information extraction on.
+
+        Returns:
+            tuple[list[dict], list[dict]]: Extracted entities and relations.
+        """
+        snippet = text[: self.ie_max_chars]
+        prompt = self.ner_prompt.format(text=snippet)
+
+        try:
+            resp = self.gen_model.complete(prompt)
+            raw = resp.text if hasattr(resp, "text") else str(resp)
+        except Exception as exc:  # pragma: no cover - model failures are runtime
+            logger.warning("IE extraction request failed: {}", exc)
+            return [], []
+
+        payload = self._parse_ie_payload(raw) if isinstance(raw, str) else {}
+        entities_raw = payload.get("entities") if isinstance(payload, dict) else []
+        relations_raw = payload.get("relations") if isinstance(payload, dict) else []
+
+        entities: list[dict] = []
+        for ent in entities_raw or []:
+            if not isinstance(ent, dict):
+                continue
+            text_val = str(ent.get("text") or ent.get("name") or "").strip()
+            if not text_val:
+                continue
+            entities.append(
+                {
+                    "text": text_val,
+                    "type": ent.get("type") or ent.get("label"),
+                    "score": ent.get("score"),
+                }
+            )
+
+        relations: list[dict] = []
+        for rel in relations_raw or []:
+            if not isinstance(rel, dict):
+                continue
+            head = str(rel.get("head") or rel.get("subject") or "").strip()
+            tail = str(rel.get("tail") or rel.get("object") or "").strip()
+            if not head or not tail:
+                continue
+            relations.append(
+                {
+                    "head": head,
+                    "tail": tail,
+                    "label": rel.get("label") or rel.get("type"),
+                    "score": rel.get("score"),
+                }
+            )
+
+        return entities, relations
+
+    def _build_ingestion_pipeline(
+        self, progress_callback: Callable[[str], None] | None = None
+    ) -> DocumentIngestionPipeline:
         """
         Instantiate a document ingestion pipeline using current settings.
+
+        Args:
+            progress_callback (Callable[[str], None] | None): Optional callback for
+                reporting ingestion progress.
 
         Returns:
             DocumentIngestionPipeline: The instantiated ingestion pipeline.
@@ -584,13 +711,13 @@ class RAG:
             table_metadata_cols=self.table_metadata_cols,
             table_id_col=self.table_id_col,
             table_excel_sheet=self.table_excel_sheet,
-            table_row_limit=self.table_row_limit,
-            table_row_filter=self.table_row_filter,
             buffer_size=self.buffer_size,
             breakpoint_percentile_threshold=self.breakpoint_percentile_threshold,
             chunk_size=self.chunk_size,
             chunk_overlap=self.chunk_overlap,
             semantic_splitter_char_limit=self.semantic_splitter_char_limit,
+            entity_extractor=self._ie_extract if self.enable_ie else None,
+            progress_callback=progress_callback,
         )
 
     def _index(self, storage_ctx: StorageContext) -> VectorStoreIndex:
@@ -861,6 +988,23 @@ class RAG:
                         page = prov.get("page_no")
                         if page is not None:
                             break
+
+            # doc_items detection (Docling)
+            if page is None:
+                doc_items = meta.get("doc_items")
+                if isinstance(doc_items, list):
+                    for item in doc_items:
+                        if isinstance(item, dict):
+                            provs = item.get("prov")
+                            if isinstance(provs, list):
+                                for p in provs:
+                                    if isinstance(p, dict):
+                                        page = p.get("page_no")
+                                        if page is not None:
+                                            break
+                        if page is not None:
+                            break
+
             try:
                 page = int(page) if page is not None else None
             except Exception:
@@ -897,6 +1041,12 @@ class RAG:
                 "source": source_kind,
                 "score": getattr(nws, "score", None),
             }
+            entities = meta.get("entities") or origin.get("entities")
+            relations = meta.get("relations") or origin.get("relations")
+            if entities:
+                src["entities"] = entities
+            if relations:
+                src["relations"] = relations
             if file_hash:
                 src["file_hash"] = file_hash
             if preview_url:
@@ -1002,7 +1152,11 @@ class RAG:
 
     # --- Public API ---
     def ingest_docs(
-        self, data_dir: str | Path, *, build_query_engine: bool = True
+        self,
+        data_dir: str | Path,
+        *,
+        build_query_engine: bool = True,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> None:
         """
         Ingest documents from the specified directory into the Qdrant collection.
@@ -1012,12 +1166,14 @@ class RAG:
             build_query_engine (bool): Whether to eagerly build the query engine after
                 ingestion. Disable when running headless ingestion jobs to avoid
                 loading large reranker/generation models. Defaults to True.
+            progress_callback (Callable[[str], None] | None): Optional callback for
+                reporting ingestion progress.
         """
         prepared_dir = self._prepare_sources_dir(
             Path(data_dir) if isinstance(data_dir, str) else data_dir
         )
         self.data_dir = prepared_dir
-        pipeline = self._build_ingestion_pipeline()
+        pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
 
         # Initialize index (load existing or create new wrapper)
         vector_store = self._vector_store()
@@ -1063,7 +1219,11 @@ class RAG:
         logger.info("Documents ingested successfully.")
 
     async def asingest_docs(
-        self, data_dir: str | Path, *, build_query_engine: bool = True
+        self,
+        data_dir: str | Path,
+        *,
+        build_query_engine: bool = True,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> None:
         """
         Asynchronously ingest documents from the specified directory into the Qdrant collection.
@@ -1072,6 +1232,8 @@ class RAG:
             data_dir (str | Path): The directory containing the documents to ingest.
             build_query_engine (bool): Whether to build the query engine immediately
                 after ingestion. Defaults to True.
+            progress_callback (Callable[[str], None] | None): Optional callback for
+                reporting ingestion progress.
 
         Raises:
             RuntimeError: If the index is not initialized for async ingestion.
@@ -1080,7 +1242,7 @@ class RAG:
             Path(data_dir) if isinstance(data_dir, str) else data_dir
         )
         self.data_dir = prepared_dir
-        pipeline = self._build_ingestion_pipeline()
+        pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
 
         # Initialize index
         vector_store = self._vector_store()
@@ -1339,6 +1501,89 @@ class RAG:
             self.summarize_prompt, final_response
         )
         yield normalized
+
+    def get_collection_ie(self) -> list[dict[str, Any]]:
+        """
+        Fetch all nodes from the current collection and return their IE metadata.
+
+        Returns:
+            list[dict[str, Any]]: A list of source metadata dictionaries containing IE data.
+        """
+        if not self.qdrant_collection:
+            return []
+
+        sources = []
+        offset = None
+        while True:
+            try:
+                points, offset = self.qdrant_client.scroll(
+                    collection_name=self.qdrant_collection,
+                    limit=100,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to scroll collection '{}': {}", self.qdrant_collection, exc
+                )
+                break
+
+            if not points:
+                break
+
+            for point in points:
+                payload = getattr(point, "payload", None)
+                if isinstance(payload, dict):
+                    # We only care about nodes that have IE data
+                    if "entities" in payload or "relations" in payload:
+                        # Normalize payload to match what _normalize_response_data produces
+                        # so that _render_ie_overview in app.py can handle it.
+
+                        # Extract filename/filetype/etc.
+                        origin = payload.get("origin") or {}
+                        filename = (
+                            origin.get("filename")
+                            or payload.get("file_name")
+                            or payload.get("filename")
+                            or payload.get("file_path")
+                        )
+
+                        # Extract page number
+                        page = (
+                            payload.get("page")
+                            or payload.get("page_number")
+                            or origin.get("page_no")
+                        )
+                        if page is None:
+                            doc_items = payload.get("doc_items")
+                            if isinstance(doc_items, list):
+                                for item in doc_items:
+                                    if isinstance(item, dict):
+                                        provs = item.get("prov")
+                                        if isinstance(provs, list):
+                                            for p in provs:
+                                                if isinstance(p, dict):
+                                                    page = p.get("page_no")
+                                                    if page is not None:
+                                                        break
+                                    if page is not None:
+                                        break
+
+                        sources.append(
+                            {
+                                "filename": filename,
+                                "entities": payload.get("entities", []),
+                                "relations": payload.get("relations", []),
+                                "page": page,
+                                "row": payload.get("table", {}).get("row_index"),
+                            }
+                        )
+
+            if offset is None:
+                break
+
+        return sources
 
     def unload_models(self) -> None:
         """
