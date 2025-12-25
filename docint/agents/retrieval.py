@@ -21,7 +21,7 @@ class RAGRetrievalAgent(RetrievalAgent):
 
         Args:
             rag (RAG): The RAG instance to use for retrieval.
-        """        
+        """
         self.rag = rag
 
     def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
@@ -29,7 +29,7 @@ class RAGRetrievalAgent(RetrievalAgent):
         Invoke the appropriate tool based on intent; default to RAG chat.
         Args:
             request (RetrievalRequest): The retrieval request containing the turn and analysis.
-            
+
         Returns:
             RetrievalResult: The result of the retrieval or generation step.
         """
@@ -85,12 +85,10 @@ class RAGRetrievalAgent(RetrievalAgent):
             latency_ms=latency,
         )
 
-    def _filter_ie_sources(
-        self, sources: list[dict], entities: dict
-    ) -> list[dict]:
+    def _filter_ie_sources(self, sources: list[dict], entities: dict) -> list[dict]:
         """
         Filter IE sources using simple entity/page heuristics.
-        
+
         Args:
             sources (list[dict]): The list of IE sources.
             entities (dict): Extracted entities from the user input.
@@ -113,7 +111,7 @@ class RAGRetrievalAgent(RetrievalAgent):
 
             Returns:
                 bool: True if the source matches the page or query, False otherwise.
-            """            
+            """
             if page and str(src.get("page") or "") == page:
                 return True
             fname = str(src.get("filename") or "").lower()

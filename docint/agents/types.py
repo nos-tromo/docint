@@ -82,7 +82,7 @@ class UnderstandingAgent(Protocol):
     def analyze(self, turn: Turn) -> IntentAnalysis:  # pragma: no cover - interface
         """
         Analyze a turn and return intent/entities/confidence.
-        
+
         Returns:
             IntentAnalysis: The result of the analysis.
         """
@@ -99,7 +99,7 @@ class ClarificationAgent(Protocol):
     ) -> ClarificationRequest:  # pragma: no cover - interface
         """
         Return a clarification request for the user.
-        
+
         Args:
             turn (Turn): The current turn in the conversation.
             analysis (IntentAnalysis): The result of intent analysis.
@@ -120,7 +120,7 @@ class RetrievalAgent(Protocol):
     ) -> RetrievalResult:  # pragma: no cover - interface
         """
         Return retrieval results for the turn and analysis.
-        
+
         Args:
             request (RetrievalRequest): The retrieval request containing the turn and analysis.
 
@@ -140,7 +140,7 @@ class ResponseAgent(Protocol):
     ) -> RetrievalResult:  # pragma: no cover - interface
         """
         Optionally post-process retrieval output before returning.
-        
+
         Args:
             result (RetrievalResult): The retrieval result to finalize.
             turn (Turn): The current turn in the conversation.

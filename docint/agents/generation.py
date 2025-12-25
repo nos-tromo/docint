@@ -12,7 +12,7 @@ class PassthroughResponseAgent(ResponseAgent):
     def finalize(self, result: RetrievalResult, turn: Turn) -> RetrievalResult:
         """
         Return retrieval results unchanged.
-        
+
         Args:
             result (RetrievalResult): The retrieval result to finalize.
             turn (Turn): The current turn in the conversation.

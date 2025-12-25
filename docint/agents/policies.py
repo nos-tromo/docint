@@ -28,7 +28,7 @@ class ClarificationPolicy:
 
         Args:
             config (ClarificationConfig | None, optional): Configuration for clarification. Defaults to None.
-        """        
+        """
         self.config = config or ClarificationConfig()
 
     def evaluate(

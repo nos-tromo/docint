@@ -23,7 +23,7 @@ class SimpleClarificationAgent(ClarificationAgent):
         Args:
             prompt (str | None, optional): The clarification prompt to use. Defaults to None.
             required_entities (list[str] | None, optional): List of required entities to check for. Defaults to None.
-        """        
+        """
         self.prompt = prompt or "Could you clarify what you need?"
         self.required_entities = required_entities or ["query"]
 
@@ -37,7 +37,7 @@ class SimpleClarificationAgent(ClarificationAgent):
 
         Returns:
             ClarificationRequest: The constructed clarification request.
-        """        
+        """
         missing = [k for k in self.required_entities if k not in analysis.entities]
         detail = (
             f"Missing details: {', '.join(missing)}" if missing else analysis.reason
