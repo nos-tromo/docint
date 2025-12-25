@@ -222,6 +222,13 @@ def collections_select(payload: SelectCollectionIn) -> dict[str, bool | str]:
             except Exception:
                 pass
 
+        # Pre-warm IE cache if enabled
+        if getattr(rag, "enable_ie", False):
+            try:
+                rag.get_collection_ie(refresh=True)
+            except Exception:
+                logger.warning("Could not pre-warm IE cache for collection '{}'.", name)
+
         return {"ok": True, "name": name}
     except HTTPException as e:
         logger.error("HTTPException: Error selecting collection: {}", e)
@@ -580,6 +587,16 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
             if getattr(rag, "index", None) is None:
                 rag.create_index()
             rag.create_query_engine()
+
+            # Pre-warm IE cache if enabled
+            if getattr(rag, "enable_ie", False):
+                try:
+                    rag.get_collection_ie(refresh=True)
+                except Exception:
+                    logger.warning(
+                        "Exception: Failed to pre-warm IE cache for collection: {}",
+                        name,
+                    )
         except Exception:
             # If eager preparation fails, queries will lazily prepare the engine.
             logger.warning(

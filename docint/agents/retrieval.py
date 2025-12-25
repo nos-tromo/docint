@@ -25,7 +25,8 @@ class RAGRetrievalAgent(RetrievalAgent):
         start = time.monotonic()
 
         if intent in {"ie", "extract"}:
-            sources = self.rag.get_collection_ie()
+            raw_sources = self.rag.get_collection_ie()
+            sources = self._filter_ie_sources(raw_sources, analysis.entities)
             latency = (time.monotonic() - start) * 1000
             return RetrievalResult(
                 answer="IE results attached",
@@ -68,3 +69,47 @@ class RAGRetrievalAgent(RetrievalAgent):
             tool_used="rag_chat",
             latency_ms=latency,
         )
+
+    def _filter_ie_sources(
+        self, sources: list[dict], entities: dict
+    ) -> list[dict]:
+        """
+        Filter IE sources using simple entity/page heuristics.
+        
+        Args:
+            sources (list[dict]): The list of IE sources.
+            entities (dict): Extracted entities from the user input.
+
+        Returns:
+            list[dict]: Filtered list of sources.
+        """
+        if not sources or not entities:
+            return sources
+
+        query = str(entities.get("query") or "").lower()
+        page = str(entities.get("page") or "").strip()
+
+        def match(src: dict) -> bool:
+            """
+            Determine if a source matches the given page or query.
+
+            Args:
+                src (dict): The source dictionary to check.
+
+            Returns:
+                bool: True if the source matches the page or query, False otherwise.
+            """            
+            if page and str(src.get("page") or "") == page:
+                return True
+            fname = str(src.get("filename") or "").lower()
+            if query and query in fname:
+                return True
+            ents = src.get("entities") or []
+            for ent in ents:
+                text = str(ent.get("text") or "").lower()
+                if query and query in text:
+                    return True
+            return False
+
+        filtered = [s for s in sources if match(s)]
+        return filtered or sources

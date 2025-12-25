@@ -1503,7 +1503,7 @@ class RAG:
         )
         yield normalized
 
-    def get_collection_ie(self) -> list[dict[str, Any]]:
+    def get_collection_ie(self, refresh: bool = False) -> list[dict[str, Any]]:
         """
         Fetch all nodes from the current collection and return their IE metadata.
 
@@ -1512,6 +1512,9 @@ class RAG:
         """
         if not self.qdrant_collection:
             return []
+
+        if self.ie_sources and not refresh:
+            return self.ie_sources
 
         if self.ie_sources:
             return self.ie_sources
