@@ -11,10 +11,11 @@ This is a proof of concept document intelligence platform offering the following
    - Perform batch or single queries on ingested data.
    - Customize queries for batch processing.
    - Outputs results to a designated directory.
-3. **CLI and GUI Support**
+3. **CLI, API, and GUI Support**
 
-   - Use the command-line interface for ingestion and querying tasks.
-   - Access a browser-based graphical user interface for interactive workflows.
+   - Use the CLI for ingestion and querying tasks.
+   - Use the FastAPI service for programmatic access (`/query`, `/collections/*`, `/agent/chat`, `/agent/chat/stream`).
+   - Use the Streamlit UI for interactive workflows.
 4. **Integration with LLMs and Models**
 
    - Utilize large language models (LLMs) and other AI models for advanced processing tasks like summarization and similarity retrieval.
@@ -24,8 +25,8 @@ This is a proof of concept document intelligence platform offering the following
    - Easily extend functionality with additional readers, such as OCR for images, Whisper for audio/video, and table/json enhancements.
 6. **Development and Testing**
 
-   - Run the frontend and backend independently or via Docker.
-   - Comprehensive unit testing ensures reliability.
+   - Run the API and Streamlit UI independently or via Docker.
+   - Comprehensive unit testing and pre-commit (ruff, mypy) ensure reliability.
 
 ## Installation
 
@@ -86,7 +87,7 @@ The application can be used both via Docker for containerized environments and d
 
 4. **Run the Application**
 
-   The application consists of a backend API and a Streamlit frontend. You need to run both.
+   The application consists of a FastAPI backend and a Streamlit UI. You can run both locally.
 
    **Start the Backend:**
 
@@ -94,7 +95,7 @@ The application can be used both via Docker for containerized environments and d
    uv run uvicorn docint.core.api:app --reload
    ```
 
-   **Start the Frontend:**
+   **Start the Streamlit UI:**
 
    In a new terminal window:
 
@@ -164,9 +165,9 @@ See `docint/utils/env_cfg.py` for the full list of configuration options and def
 
 ---
 
-### [Development] Launching Frontend and Backend separately
+### [Development] Launching UI and Backend separately
 
-#### Frontend (Streamlit)
+#### Streamlit UI
 
 1. **Start the Development Server**
 
@@ -220,8 +221,9 @@ ENABLE_IE=true
 
 ## Unit Tests
 
-Run unit tests to ensure functionality:
+Run unit tests and pre-commit checks to ensure functionality and lint/type quality:
 
 ```bash
 uv run pytest
+uv run pre-commit run --all-files
 ```

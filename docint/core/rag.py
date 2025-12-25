@@ -92,6 +92,7 @@ class RAG:
     enable_ie: bool = False
     ie_max_chars: int = 800
     ner_prompt: str = NER_PROMPT
+    ie_sources: list[dict[str, Any]] = field(default_factory=list, init=False)
 
     # --- Reranking / retrieval ---
     enable_hybrid: bool = True
@@ -1512,6 +1513,9 @@ class RAG:
         if not self.qdrant_collection:
             return []
 
+        if self.ie_sources:
+            return self.ie_sources
+
         sources = []
         offset = None
         while True:
@@ -1583,6 +1587,7 @@ class RAG:
             if offset is None:
                 break
 
+        self.ie_sources = sources
         return sources
 
     def unload_models(self) -> None:

@@ -6,8 +6,8 @@ These instructions apply to the entire `docint` repository unless a directory in
 
 ## Project overview
 
-- The backend lives in `backend/` and exposes a FastAPI application along with ingestion utilities and a lightweight RAG implementation.
-- The frontend lives in `frontend/` and is a Vite/React TypeScript project that uses Chakra UI components.
+- The codebase lives under `docint/` and exposes a FastAPI application, ingestion utilities, a lightweight RAG implementation, and an agentic orchestration layer.
+- The UI is a Streamlit app (served via `uv run docint` or `uv run streamlit run docint/app.py`).
 - Docker and docker-compose files are provided for running the stack end-to-end; during development we usually run the services directly (see `README.md`).
 
 ## General expectations
@@ -25,15 +25,15 @@ These instructions apply to the entire `docint` repository unless a directory in
 - Run unit tests with `uv run pytest` from the `backend/` directory. Add or update tests alongside backend changes when possible.
 - Follow the existing style in `backend/docint/`: organize imports by standard library, third party, and local modules; avoid wildcard imports; prefer explicit exceptions over broad `except Exception` unless the surrounding code already requires it.
 
-## Frontend (React / TypeScript)
+## Frontend (Streamlit)
 
-- New components should be written in TypeScript (`.tsx`) and leverage Chakra UI primitives where appropriate. Maintain accessibility attributes already present in neighboring components.
-- Keep state management simple (React hooks) unless there is a clear benefit to introducing additional libraries.
-- Run `npm run lint` from the `frontend/` directory before submitting changes. For production-oriented changes also ensure `npm run build` succeeds.
-- Asset paths and API endpoints are centralized under `frontend/src`; reuse existing helper utilities for network requests instead of duplicating logic.
+- The Streamlit app entry point is `docint/app.py`; keep interactions minimal and prefer calling FastAPI endpoints for business logic.
+- Maintain existing accessibility cues and avoid embedding heavy logic in the UI; move logic to the API/agents where practical.
+- When changing Streamlit UI flows, ensure the corresponding FastAPI/agent endpoints support the interaction and add/adjust tests when feasible.
 
 ## Testing and verification checklist
 
+- Always finish a task by running the relevant tests and the full pre-commit suite (`uv run pytest` + `uv run pre-commit run --all-files` to cover ruff and mypy).
 - Backend changes: `cd backend && uv run pytest`.
 - Frontend changes: `cd frontend && npm run lint` (and `npm run build` when touching build-affecting files).
 - Docker changes: if you modify Dockerfiles or `docker-compose.yml`, ensure the relevant service still builds locally (`docker compose build <service>`).

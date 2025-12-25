@@ -1,6 +1,6 @@
 import types
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -45,6 +45,12 @@ class DummySessionManager:
             bool: True if the session was successfully deleted, False otherwise.
         """
         return True
+
+    def get_agent_context(self, session_id: str):
+        class Ctx:
+            clarifications = 0
+
+        return Ctx()
 
 
 class DummyRAG:
@@ -125,6 +131,10 @@ class DummyRAG:
         """
         self.chats.append(question)
         return {"response": "answer", "sources": [{"id": 1}]}
+
+    def stream_chat(self, question: str):
+        yield "chunk"
+        yield {"sources": [{"id": 1}], "session_id": "generated-session"}
 
     def get_collection_ie(self) -> list[dict[str, Any]]:
         """
@@ -212,9 +222,10 @@ def test_collections_select_success(
     assert response.status_code == 200
     payload = response.json()
     assert payload == {"ok": True, "name": "gamma"}
-    assert api_module.rag.qdrant_collection == "gamma"
-    assert api_module.rag.created_index == 1
-    assert api_module.rag.created_query_engine == 1
+    rag = cast(Any, api_module.rag)
+    assert rag.qdrant_collection == "gamma"
+    assert rag.created_index == 1  # type: ignore[attr-defined]
+    assert rag.created_query_engine == 1  # type: ignore[attr-defined]
 
 
 def test_collections_select_blank_name(client: TestClient) -> None:
@@ -242,6 +253,77 @@ def test_collections_ie_success(client: TestClient) -> None:
     response = client.get("/collections/ie")
     assert response.status_code == 200
     assert response.json() == {"sources": api_module.rag.ie_sources}
+
+
+def test_agent_chat_answers(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Agent chat should return an answer when confidence is sufficient."""
+
+    def fake_chat(question: str) -> dict[str, Any]:
+        return {"response": f"echo:{question}", "sources": [{"id": 1}]}
+
+    monkeypatch.setattr(api_module.rag, "chat", fake_chat)
+
+    payload = {"message": "hello"}
+    response = client.post("/agent/chat", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "answer"
+    assert data["answer"] == "echo:hello"
+    assert data["sources"] == [{"id": 1}]
+    assert data["session_id"] == "generated-session"
+    assert data["intent"] is not None
+    assert data["confidence"] is not None
+
+
+def test_agent_chat_clarifies(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Agent chat should request clarification when policy requires it."""
+
+    monkeypatch.setattr(
+        api_module,
+        "_clarification_policy",
+        api_module.ClarificationPolicy(
+            api_module.ClarificationConfig(
+                confidence_threshold=1.0, require_entities=True
+            )
+        ),
+    )  # type: ignore[arg-type]
+
+    payload = {"message": "hello"}
+    response = client.post("/agent/chat", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "clarification"
+    assert data["message"]
+    assert data["intent"] is not None
+    assert data["confidence"] is not None
+
+
+def test_agent_chat_stream_clarifies(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Streaming endpoint should emit clarification event when policy demands it."""
+
+    monkeypatch.setattr(
+        api_module,
+        "_clarification_policy",
+        api_module.ClarificationPolicy(
+            api_module.ClarificationConfig(
+                confidence_threshold=1.0, require_entities=True
+            )
+        ),
+    )  # type: ignore[arg-type]
+
+    with client.stream("POST", "/agent/chat/stream", json={"message": "hello"}) as resp:
+        assert resp.status_code == 200
+        text = "".join([chunk.decode() for chunk in resp.iter_raw()])
+    assert "clarification" in text
+    assert "status" in text
 
 
 def test_collections_ie_requires_selection(client: TestClient) -> None:
