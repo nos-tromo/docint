@@ -18,7 +18,7 @@ class SimpleClarificationAgent(ClarificationAgent):
         self, prompt: str | None = None, required_entities: list[str] | None = None
     ) -> None:
         """
-            Initialize the SimpleClarificationAgent.
+        Initialize the SimpleClarificationAgent.
 
         Args:
             prompt (str | None, optional): The clarification prompt to use. Defaults to None.
