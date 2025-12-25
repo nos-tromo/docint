@@ -3,9 +3,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
 from loguru import logger
 
 from docint.utils.env_cfg import load_path_env
+
+load_dotenv()
 
 
 def setup_logging(
