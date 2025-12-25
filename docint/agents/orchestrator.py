@@ -15,7 +15,10 @@ from docint.agents.types import (
 
 
 class AgentOrchestrator:
-    """Coordinate agents for a single conversational turn."""
+    """
+    Coordinate agents for a single conversational turn.
+    Handles understanding, clarification, and retrieval in sequence.
+    """
 
     def __init__(
         self,
@@ -24,6 +27,15 @@ class AgentOrchestrator:
         retriever: RetrievalAgent,
         policy: ClarificationPolicy | None = None,
     ) -> None:
+        """
+        Initialize the AgentOrchestrator.
+
+        Args:
+            understanding (UnderstandingAgent): The agent responsible for understanding user input.
+            clarifier (ClarificationAgent): The agent responsible for handling clarifications.
+            retriever (RetrievalAgent): The agent responsible for retrieving information.
+            policy (ClarificationPolicy | None, optional): The policy to decide when clarification is needed. Defaults to None.
+        """        
         self.understanding = understanding
         self.clarifier = clarifier
         self.retriever = retriever

@@ -1,7 +1,6 @@
 """Retrieval agents that bridge to RAG."""
 
 import time
-
 from typing import TYPE_CHECKING
 
 from docint.agents.types import RetrievalAgent, RetrievalRequest, RetrievalResult
@@ -11,13 +10,29 @@ if TYPE_CHECKING:
 
 
 class RAGRetrievalAgent(RetrievalAgent):
-    """Adapter that uses the existing RAG pipeline for retrieval/response."""
+    """
+    Adapter that uses the existing RAG pipeline for retrieval/response.
+    Depending on the intent detected in the turn, it may invoke different tools.
+    """
 
     def __init__(self, rag: "RAG"):
+        """
+        Initialize the RAGRetrievalAgent.
+
+        Args:
+            rag (RAG): The RAG instance to use for retrieval.
+        """        
         self.rag = rag
 
     def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
-        """Invoke the appropriate tool based on intent; default to RAG chat."""
+        """
+        Invoke the appropriate tool based on intent; default to RAG chat.
+        Args:
+            request (RetrievalRequest): The retrieval request containing the turn and analysis.
+            
+        Returns:
+            RetrievalResult: The result of the retrieval or generation step.
+        """
         turn = request.turn
         session_id = self.rag.start_session(turn.session_id)
         analysis = request.analysis

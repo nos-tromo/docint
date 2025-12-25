@@ -7,7 +7,9 @@ from docint.agents.types import ClarificationRequest, IntentAnalysis
 
 @dataclass
 class ClarificationConfig:
-    """Configuration for clarification routing."""
+    """
+    Configuration for clarification routing.
+    """
 
     confidence_threshold: float = 0.5
     require_entities: bool = True
@@ -16,9 +18,17 @@ class ClarificationConfig:
 
 @dataclass
 class ClarificationPolicy:
-    """Threshold-based clarification policy with limits."""
+    """
+    Threshold-based clarification policy with limits.
+    """
 
     def __init__(self, config: ClarificationConfig | None = None) -> None:
+        """
+        Initialize the ClarificationPolicy.
+
+        Args:
+            config (ClarificationConfig | None, optional): Configuration for clarification. Defaults to None.
+        """        
         self.config = config or ClarificationConfig()
 
     def evaluate(

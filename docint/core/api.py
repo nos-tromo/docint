@@ -46,7 +46,12 @@ _clarification_policy = ClarificationPolicy(ClarificationConfig())
 
 
 def _build_orchestrator() -> AgentOrchestrator:
-    """Construct an orchestrator bound to the current RAG instance."""
+    """
+    Construct an orchestrator bound to the current RAG instance.
+    
+    Returns:
+        AgentOrchestrator: The constructed agent orchestrator.
+    """
     retrieval_agent = RAGRetrievalAgent(rag)
     return AgentOrchestrator(
         understanding=_understanding_agent,
@@ -617,7 +622,15 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
 
 @app.post("/agent/chat/stream", tags=["Agent"])
 async def agent_chat_stream(payload: AgentChatIn) -> StreamingResponse:
-    """Streaming variant of agent chat with token events and final metadata."""
+    """
+    Streaming variant of agent chat with token events and final metadata.
+    
+    Args:
+        payload (AgentChatIn): Message and optional session id.
+
+    Returns:
+        StreamingResponse: SSE stream with clarification or answer tokens and metadata.
+    """
 
     async def event_generator():
         if not rag.qdrant_collection:
@@ -765,10 +778,19 @@ async def ingest_upload(
             queue: asyncio.Queue[str | None | Exception] = asyncio.Queue()
             loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
 
-            def progress_callback(msg: str):
+            def progress_callback(msg: str) -> None:
+                """
+                Callback function to report progress during ingestion.
+
+                Args:
+                    msg (str): Progress message to be reported.
+                """                
                 loop.call_soon_threadsafe(queue.put_nowait, msg)
 
-            async def run_ingestion():
+            async def run_ingestion() -> None:
+                """
+                Run the ingestion process in a separate thread.
+                """                
                 try:
                     await anyio.to_thread.run_sync(
                         ingest_module.ingest_docs,
