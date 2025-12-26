@@ -2,7 +2,6 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from dotenv import load_dotenv
 from loguru import logger
 
 from docint.core.rag import RAG
@@ -54,7 +53,9 @@ def ingest_docs(
 
 
 def main() -> None:
-    load_dotenv()
+    """
+    Main function for the ingestion CLI.
+    """
     setup_logging()
     set_offline_env()
     data_path = load_path_env().data

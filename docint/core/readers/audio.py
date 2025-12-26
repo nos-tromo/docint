@@ -2,7 +2,6 @@ from pathlib import Path
 from typing import Any
 
 import whisper
-from dotenv import load_dotenv
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from llama_index.core.schema import MediaResource
@@ -13,8 +12,6 @@ from numpy.typing import NDArray
 from docint.utils.env_cfg import load_model_env
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.mimetype import get_mimetype
-
-load_dotenv()
 
 
 class AudioReader(BaseReader):

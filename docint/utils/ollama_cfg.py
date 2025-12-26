@@ -3,13 +3,10 @@ from pathlib import Path
 
 import ollama
 import requests
-from dotenv import load_dotenv
 from loguru import logger
 from PIL import Image
 
 from docint.utils.env_cfg import load_host_env, load_model_env, load_path_env
-
-load_dotenv()
 
 
 @dataclass

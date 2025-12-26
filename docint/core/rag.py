@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 import torch
-from dotenv import load_dotenv
 from fastembed import SparseTextEmbedding
 from llama_index.core import (
     Response,
@@ -37,19 +36,15 @@ from docint.utils.env_cfg import (
     load_model_env,
     load_ollama_env,
     load_path_env,
+    load_rag_env,
 )
 from docint.utils.clean_text import basic_clean
 from docint.utils.model_cfg import resolve_model_path
 from docint.utils.ollama_cfg import OllamaPipeline
 from docint.utils.storage import stage_sources_to_qdrant
 
-# --- Environment variables ---
-load_dotenv()
-
-RETRIEVE_SIMILARITY_TOP_K: int = int(os.getenv("RETRIEVE_SIMILARITY_TOP_K", "20"))
 
 CleanFn = Callable[[str], str]
-NER_PROMPT = OllamaPipeline().load_prompt(kw="ner")
 
 
 @dataclass
@@ -89,16 +84,16 @@ class RAG:
     ollama_options: dict[str, Any] | None = field(default=None, init=False)
 
     # --- Information extraction ---
-    enable_ie: bool = False
-    ie_max_chars: int = 800
-    ner_prompt: str = NER_PROMPT
+    enable_ie: bool = field(default=False, init=False)
+    ie_max_chars: int = field(default=800, init=False)
+    ner_prompt: str = field(default="", init=False)
     ie_sources: list[dict[str, Any]] = field(default_factory=list, init=False)
 
     # --- Reranking / retrieval ---
     enable_hybrid: bool = True
-    embed_batch_size: int = 64
-    retrieve_similarity_top_k: int = RETRIEVE_SIMILARITY_TOP_K
-    rerank_top_n: int = int(retrieve_similarity_top_k // 5)
+    embed_batch_size: int = field(default=64, init=False)
+    retrieve_similarity_top_k: int = field(default=20, init=False)
+    rerank_top_n: int = field(default=5, init=False)
 
     # --- Prompt config ---
     prompt_dir: Path | None = field(default=None, init=False)
@@ -165,6 +160,7 @@ class RAG:
         ie_config = load_ie_env()
         self.enable_ie = ie_config.enabled
         self.ie_max_chars = ie_config.max_chars
+        self.ner_prompt = OllamaPipeline().load_prompt(kw="ner")
 
         # --- Path config ---
         path_config = load_path_env()
@@ -196,6 +192,15 @@ class RAG:
             "top_k": self.ollama_top_k,
             "top_p": self.ollama_top_p,
         }
+
+        # --- RAG config ---
+        rag_config = load_rag_env()
+        self.retrieve_similarity_top_k = rag_config.retrieve_top_k
+        self.chunk_size = rag_config.split_chunk_size
+        self.chunk_overlap = rag_config.split_chunk_overlap
+        self.buffer_size = rag_config.semantic_split_buffer_size
+        self.breakpoint_percentile_threshold = rag_config.semantic_split_breakpoint
+        self.rerank_top_n = int(self.retrieve_similarity_top_k // 4)
 
         with open(self.reader_required_exts_path, "r", encoding="utf-8") as f:
             self.reader_required_exts = [f".{line.strip()}" for line in f]

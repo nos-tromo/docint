@@ -77,6 +77,19 @@ class PathConfig:
     hf_hub_cache: Path
 
 
+@dataclass(frozen=True)
+class RAGConfig:
+    """
+    Dataclass for RAG (Retrieval-Augmented Generation) configuration.
+    """
+
+    retrieve_top_k: int
+    split_chunk_size: int
+    split_chunk_overlap: int
+    semantic_split_buffer_size: int
+    semantic_split_breakpoint: int
+
+
 def load_host_env() -> HostConfig:
     """
     Loads host configuration from environment variables or defaults.
@@ -230,6 +243,27 @@ def load_path_env() -> PathConfig:
             os.getenv("XDG_CACHE_HOME", xdg_cache_home_dir)
         ).expanduser(),
         hf_hub_cache=Path(os.getenv("HF_HUB_CACHE", hf_hub_cache_dir)).expanduser(),
+    )
+
+
+def load_rag_env() -> RAGConfig:
+    """
+    Loads RAG (Retrieval-Augmented Generation) configuration from environment variables or defaults.
+
+    Returns:
+        RAGConfig: Dataclass containing RAG configuration.
+        - retrieve_top_k (int): The number of top documents to retrieve.
+        - split_chunk_size (int): The size of text chunks for retrieval.
+        - split_chunk_overlap (int): The overlap size between text chunks.
+        - semantic_split_buffer_size (int): The buffer size for the SemanticSplitterNodeParser.
+        - semantic_split_breakpoint (int): The percentile threshold for breakpoints for the SemanticSplitterNodeParser.
+    """
+    return RAGConfig(
+        retrieve_top_k=int(os.getenv("RETRIEVE_TOP_K", "20")),
+        split_chunk_size=int(os.getenv("SPLIT_CHUNK_SIZE", "1024")),
+        split_chunk_overlap=int(os.getenv("SPLIT_CHUNK_OVERLAP", "64")),
+        semantic_split_buffer_size=int(os.getenv("SEMANTIC_SPLIT_BUFFER_SIZE", "5")),
+        semantic_split_breakpoint=int(os.getenv("SEMANTIC_SPLIT_BREAKPOINT", "95")),
     )
 
 

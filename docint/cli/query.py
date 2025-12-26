@@ -3,7 +3,6 @@ import sys
 from pathlib import Path
 from time import time
 
-from dotenv import load_dotenv
 from loguru import logger
 
 from docint.core.rag import RAG
