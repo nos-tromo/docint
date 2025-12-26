@@ -32,7 +32,7 @@ def build_ie_extractor(
 ) -> Callable[[str], tuple[list[dict], list[dict]]]:
     """
     Create an IE extractor bound to a model and prompt template.
-    
+
     Args:
         model (Any): The language model instance with a 'complete' method.
         prompt (str): The prompt template for IE extraction.

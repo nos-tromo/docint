@@ -22,6 +22,7 @@ def get_collection() -> str:
 def ingest_docs(
     qdrant_col: str,
     data_dir: Path,
+    hybrid: bool = True,
     progress_callback: Callable[[str], None] | None = None,
 ) -> None:
     """
@@ -30,6 +31,7 @@ def ingest_docs(
     Args:
         qdrant_col (str): Qdrant collection name.
         data_dir (Path): Path to the data directory.
+        hybrid (bool): Whether to enable hybrid search. Defaults to True.
         progress_callback (Callable[[str], None] | None): Optional callback for
             reporting ingestion progress.
 
@@ -37,7 +39,7 @@ def ingest_docs(
         The CLI skips query engine creation so that large generation and reranker models
         are not loaded unnecessarily during ingestion jobs.
     """
-    rag = RAG(qdrant_collection=qdrant_col)
+    rag = RAG(qdrant_collection=qdrant_col, enable_hybrid=hybrid)
     rag.ingest_docs(
         data_dir,
         build_query_engine=False,
