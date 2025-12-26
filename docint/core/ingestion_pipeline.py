@@ -343,6 +343,46 @@ class DocumentIngestionPipeline:
             breakpoint_percentile_threshold=self.breakpoint_percentile_threshold,
         )
 
+    @staticmethod
+    def _extract_file_hash(data: dict | None) -> str | None:
+        """
+        Extract the file hash from the given data.
+
+        Args:
+            data (dict | None): The input data.
+
+        Returns:
+            str | None: The extracted file hash, or None if not found.
+        """
+        if not isinstance(data, dict):
+            return None
+        candidate = data.get("file_hash")
+        if isinstance(candidate, str) and candidate:
+            return candidate
+        origin = data.get("origin")
+        if isinstance(origin, dict):
+            candidate = origin.get("file_hash")
+            if isinstance(candidate, str) and candidate:
+                return candidate
+        for key in ("metadata", "meta", "extra_info"):
+            nested = data.get(key)
+            if isinstance(nested, dict):
+                nested_hash = DocumentIngestionPipeline._extract_file_hash(nested)
+                if nested_hash:
+                    return nested_hash
+        for value in data.values():
+            if isinstance(value, dict):
+                nested_hash = DocumentIngestionPipeline._extract_file_hash(value)
+                if nested_hash:
+                    return nested_hash
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        nested_hash = DocumentIngestionPipeline._extract_file_hash(item)
+                        if nested_hash:
+                            return nested_hash
+        return None
+
     def _filter_docs_by_existing_hashes(
         self, docs: Iterable[Document], existing_hashes: set[str] | None
     ) -> list[Document]:
@@ -395,6 +435,125 @@ class DocumentIngestionPipeline:
                 ", ".join(sorted(display)),
             )
         return filtered
+
+    def _partition_large_docs(
+        self, docs: list[Document]
+    ) -> tuple[list[Document], list[Document]]:
+        """
+        Partition documents into semantic and oversized categories.
+
+        Args:
+            docs (list[Document]): The documents to partition.
+
+        Returns:
+            tuple[list[Document], list[Document]]: The semantic documents and oversized documents.
+        """
+        if not docs:
+            return [], []
+        limit = max(self.semantic_splitter_char_limit, self.chunk_size)
+        semantic_docs: list[Document] = []
+        oversized_docs: list[Document] = []
+        for doc in docs:
+            text = getattr(doc, "text", None)
+            if text and len(text) > limit:
+                oversized_docs.append(doc)
+            else:
+                semantic_docs.append(doc)
+        return semantic_docs, oversized_docs
+
+    def _explode_oversized_documents(self, docs: list[Document]) -> list[Document]:
+        """
+        Explode oversized documents into smaller segments.
+
+        Args:
+            docs (list[Document]): The documents to explode.
+
+        Returns:
+            list[Document]: The exploded documents.
+        """
+        if not docs:
+            return []
+        limit = max(self.semantic_splitter_char_limit, self.chunk_size)
+        overlap = max(int(limit * 0.05), 0)
+        stride = max(limit - overlap, 1)
+        exploded: list[Document] = []
+        for doc in docs:
+            text = getattr(doc, "text", None)
+            if not text or len(text) <= limit:
+                exploded.append(doc)
+                continue
+            meta = dict(getattr(doc, "metadata", {}) or {})
+            for start in range(0, len(text), stride):
+                end = min(len(text), start + limit)
+                segment_meta = dict(meta)
+                segment_meta["segment_start"] = start
+                segment_meta["segment_end"] = end
+                exploded.append(Document(text=text[start:end], metadata=segment_meta))
+                if end >= len(text):
+                    break
+        return exploded
+
+    def _semantic_nodes_with_fallback(
+        self, docs: list[Document], doc_label: str
+    ) -> list[BaseNode]:
+        """
+        Create semantic nodes from documents with fallback options.
+
+        Args:
+            docs (list[Document]): The documents to process.
+            doc_label (str): The label for the document type.
+
+        Returns:
+            list[BaseNode]: The created nodes.
+
+        Raises:
+            RuntimeError: If the semantic node parser is not initialized.
+        """
+        if not docs:
+            return []
+        if self.semantic_node_parser is None:
+            raise RuntimeError("Semantic splitter is not initialized.")
+
+        semantic_docs, oversized_docs = self._partition_large_docs(docs)
+        nodes: list[BaseNode] = []
+
+        if semantic_docs:
+            try:
+                nodes.extend(
+                    self.semantic_node_parser.get_nodes_from_documents(semantic_docs)
+                )
+            except RuntimeError as exc:
+                message = str(exc).lower()
+                if "buffer size" not in message and "mps" not in message:
+                    raise
+                logger.warning(
+                    (
+                        "Semantic splitter failed for {} {} document(s); retrying with sentence-based chunks. Error: {}"
+                    ),
+                    len(semantic_docs),
+                    doc_label,
+                    exc,
+                )
+                fallback_docs = self._explode_oversized_documents(semantic_docs)
+                nodes.extend(
+                    self.sentence_splitter.get_nodes_from_documents(fallback_docs)
+                )
+
+        if oversized_docs:
+            limit = max(self.semantic_splitter_char_limit, self.chunk_size)
+            exploded_docs = self._explode_oversized_documents(oversized_docs)
+            logger.info(
+                (
+                    "Chunking {} {} document(s) ({} expanded segments) over {} chars with SentenceSplitter"
+                ),
+                len(oversized_docs),
+                doc_label,
+                len(exploded_docs),
+                limit,
+            )
+            nodes.extend(self.sentence_splitter.get_nodes_from_documents(exploded_docs))
+
+        return nodes
 
     def _create_nodes(self, docs: list[Document]) -> list[BaseNode]:
         """
@@ -568,162 +727,3 @@ class DocumentIngestionPipeline:
                     node.metadata = meta
 
         return nodes
-
-    def _partition_large_docs(
-        self, docs: list[Document]
-    ) -> tuple[list[Document], list[Document]]:
-        """
-        Partition documents into semantic and oversized categories.
-
-        Args:
-            docs (list[Document]): The documents to partition.
-
-        Returns:
-            tuple[list[Document], list[Document]]: The semantic documents and oversized documents.
-        """
-        if not docs:
-            return [], []
-        limit = max(self.semantic_splitter_char_limit, self.chunk_size)
-        semantic_docs: list[Document] = []
-        oversized_docs: list[Document] = []
-        for doc in docs:
-            text = getattr(doc, "text", None)
-            if text and len(text) > limit:
-                oversized_docs.append(doc)
-            else:
-                semantic_docs.append(doc)
-        return semantic_docs, oversized_docs
-
-    def _explode_oversized_documents(self, docs: list[Document]) -> list[Document]:
-        """
-        Explode oversized documents into smaller segments.
-
-        Args:
-            docs (list[Document]): The documents to explode.
-
-        Returns:
-            list[Document]: The exploded documents.
-        """
-        if not docs:
-            return []
-        limit = max(self.semantic_splitter_char_limit, self.chunk_size)
-        overlap = max(int(limit * 0.05), 0)
-        stride = max(limit - overlap, 1)
-        exploded: list[Document] = []
-        for doc in docs:
-            text = getattr(doc, "text", None)
-            if not text or len(text) <= limit:
-                exploded.append(doc)
-                continue
-            meta = dict(getattr(doc, "metadata", {}) or {})
-            for start in range(0, len(text), stride):
-                end = min(len(text), start + limit)
-                segment_meta = dict(meta)
-                segment_meta["segment_start"] = start
-                segment_meta["segment_end"] = end
-                exploded.append(Document(text=text[start:end], metadata=segment_meta))
-                if end >= len(text):
-                    break
-        return exploded
-
-    def _semantic_nodes_with_fallback(
-        self, docs: list[Document], doc_label: str
-    ) -> list[BaseNode]:
-        """
-        Create semantic nodes from documents with fallback options.
-
-        Args:
-            docs (list[Document]): The documents to process.
-            doc_label (str): The label for the document type.
-
-        Returns:
-            list[BaseNode]: The created nodes.
-
-        Raises:
-            RuntimeError: If the semantic node parser is not initialized.
-        """
-        if not docs:
-            return []
-        if self.semantic_node_parser is None:
-            raise RuntimeError("Semantic splitter is not initialized.")
-
-        semantic_docs, oversized_docs = self._partition_large_docs(docs)
-        nodes: list[BaseNode] = []
-
-        if semantic_docs:
-            try:
-                nodes.extend(
-                    self.semantic_node_parser.get_nodes_from_documents(semantic_docs)
-                )
-            except RuntimeError as exc:
-                message = str(exc).lower()
-                if "buffer size" not in message and "mps" not in message:
-                    raise
-                logger.warning(
-                    (
-                        "Semantic splitter failed for {} {} document(s); retrying with sentence-based chunks. Error: {}"
-                    ),
-                    len(semantic_docs),
-                    doc_label,
-                    exc,
-                )
-                fallback_docs = self._explode_oversized_documents(semantic_docs)
-                nodes.extend(
-                    self.sentence_splitter.get_nodes_from_documents(fallback_docs)
-                )
-
-        if oversized_docs:
-            limit = max(self.semantic_splitter_char_limit, self.chunk_size)
-            exploded_docs = self._explode_oversized_documents(oversized_docs)
-            logger.info(
-                (
-                    "Chunking {} {} document(s) ({} expanded segments) over {} chars with SentenceSplitter"
-                ),
-                len(oversized_docs),
-                doc_label,
-                len(exploded_docs),
-                limit,
-            )
-            nodes.extend(self.sentence_splitter.get_nodes_from_documents(exploded_docs))
-
-        return nodes
-
-    @staticmethod
-    def _extract_file_hash(data: dict | None) -> str | None:
-        """
-        Extract the file hash from the given data.
-
-        Args:
-            data (dict | None): The input data.
-
-        Returns:
-            str | None: The extracted file hash, or None if not found.
-        """
-        if not isinstance(data, dict):
-            return None
-        candidate = data.get("file_hash")
-        if isinstance(candidate, str) and candidate:
-            return candidate
-        origin = data.get("origin")
-        if isinstance(origin, dict):
-            candidate = origin.get("file_hash")
-            if isinstance(candidate, str) and candidate:
-                return candidate
-        for key in ("metadata", "meta", "extra_info"):
-            nested = data.get(key)
-            if isinstance(nested, dict):
-                nested_hash = DocumentIngestionPipeline._extract_file_hash(nested)
-                if nested_hash:
-                    return nested_hash
-        for value in data.values():
-            if isinstance(value, dict):
-                nested_hash = DocumentIngestionPipeline._extract_file_hash(value)
-                if nested_hash:
-                    return nested_hash
-            elif isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict):
-                        nested_hash = DocumentIngestionPipeline._extract_file_hash(item)
-                        if nested_hash:
-                            return nested_hash
-        return None
