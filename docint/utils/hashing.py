@@ -6,13 +6,11 @@ from typing import Any
 
 from loguru import logger
 
-_DEFAULT_CHUNK_SIZE = 1024 * 1024  # 1 MiB
-
 
 def compute_file_hash(
     path: str | Path,
     algorithm: str = "sha256",
-    chunk_size: int = _DEFAULT_CHUNK_SIZE,
+    chunk_size: int = 1024 * 1024,
 ) -> str:
     """
     Compute the hexadecimal digest for a file.
@@ -20,7 +18,7 @@ def compute_file_hash(
     Args:
         path: File system path to hash.
         algorithm: Hash algorithm supported by :mod:`hashlib`.
-        chunk_size: Size of the read buffer when streaming the file.
+        chunk_size: Size of the read buffer when streaming the file. Defaults to 1 MB.
 
     Returns:
         Hexadecimal string representing the digest.
