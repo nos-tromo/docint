@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import gc
-import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -17,7 +16,6 @@ from llama_index.core import (
     VectorStoreIndex,
 )
 from llama_index.core.embeddings import BaseEmbedding
-from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.postprocessor import LLMRerank
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.schema import BaseNode, Document
@@ -38,39 +36,37 @@ from docint.utils.env_cfg import (
     load_path_env,
     load_rag_env,
 )
-from docint.utils.clean_text import basic_clean
 from docint.utils.model_cfg import resolve_model_path
-from docint.utils.ollama_cfg import OllamaPipeline
 from docint.utils.storage import stage_sources_to_qdrant
-
-
-CleanFn = Callable[[str], str]
 
 
 @dataclass
 class RAG:
     """
-    Represents a Retrieval-Augmented Generation (RAG) model.
+    Represents a Retrieval-Augmented Generation (RAG) model. Handles configuration,
+    initialization, and interaction with underlying components like embedding models,
+    generation models, and vector stores. Provides methods to start sessions,
+    retrieve information, and manage document ingestion.
     """
 
-    # --- Data path & cleaning setup ---
-    data_dir: Path | None = field(default=None, init=False)
-    clean_fn: CleanFn = basic_clean
+    # --- Constructor args ---
+    qdrant_collection: str
+    enable_hybrid: bool = field(default=True)
 
     # --- Path setup ---
+    data_dir: Path | None = field(default=None, init=False)
     hf_hub_cache: Path | None = field(default=None, init=False)
     xdg_cache_home: Path | None = field(default=None, init=False)
 
     # --- Models ---
-    embed_model_id: str | None = field(default=None)
-    sparse_model_id: str | None = field(default=None)
-    gen_model_id: str | None = field(default=None)
+    embed_model_id: str | None = field(default=None, init=False)
+    sparse_model_id: str | None = field(default=None, init=False)
+    gen_model_id: str | None = field(default=None, init=False)
 
     # --- Qdrant controls ---
     qdrant_host: str | None = field(default=None, init=False)
     _qdrant_col_dir: Path | None = field(default=None, init=False, repr=False)
     _qdrant_src_dir: Path | None = field(default=None, init=False, repr=False)
-    qdrant_collection: str = "default"
 
     # --- Ollama parameters ---
     ollama_host: str | None = field(default=None, init=False)
@@ -84,13 +80,10 @@ class RAG:
     ollama_options: dict[str, Any] | None = field(default=None, init=False)
 
     # --- Information extraction ---
-    enable_ie: bool = field(default=False, init=False)
-    ie_max_chars: int = field(default=800, init=False)
-    ner_prompt: str = field(default="", init=False)
+    ie_enabled: bool = field(default=False, init=False)
     ie_sources: list[dict[str, Any]] = field(default_factory=list, init=False)
 
     # --- Reranking / retrieval ---
-    enable_hybrid: bool = True
     embed_batch_size: int = field(default=64, init=False)
     retrieve_similarity_top_k: int = field(default=20, init=False)
     rerank_top_n: int = field(default=5, init=False)
@@ -99,28 +92,6 @@ class RAG:
     prompt_dir: Path | None = field(default=None, init=False)
     summarize_prompt_path: Path | None = field(default=None, init=False)
     summarize_prompt: str = field(default="", init=False)
-
-    # --- Directory reader config ---
-    reader_errors: str = "ignore"
-    reader_recursive: bool = True
-    reader_encoding: str = "utf-8"
-    reader_required_exts: list[str] = field(default_factory=list, init=False)
-    reader_required_exts_path: Path | None = field(default=None, init=False)
-
-    # --- TableReader config ---
-    table_text_cols: list[str] | None = None
-    table_metadata_cols: list[str] | str | None = None
-    table_id_col: str | None = None
-    table_excel_sheet: str | int | None = None
-
-    # --- SemanticSplitterNodeParser config ---
-    buffer_size: int = 5
-    breakpoint_percentile_threshold: int = 90
-
-    # --- SentenceSplitter config ---
-    chunk_size: int = 1024
-    chunk_overlap: int = 0
-    semantic_splitter_char_limit: int = 20000
 
     # --- Runtime (lazy caches / not in repr) ---
     _device: str | None = field(default=None, init=False, repr=False)
@@ -132,17 +103,15 @@ class RAG:
         default=None, init=False, repr=False
     )
 
+    # -- Ingested data ---
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
-    sentence_splitter: SentenceSplitter = field(
-        default_factory=SentenceSplitter, init=False
-    )
-
     docs: list[Document] = field(default_factory=list, init=False)
     nodes: list[BaseNode] = field(default_factory=list, init=False)
 
+    # --- Built components (lazy loaded) ---
     index: VectorStoreIndex | None = field(default=None, init=False)
     query_engine: RetrieverQueryEngine | None = field(default=None, init=False)
-    sessions: SessionManager | None = field(default=None, init=False, repr=False)
+    sessions: SessionManager | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """
@@ -156,19 +125,12 @@ class RAG:
         self.ollama_host = host_config.ollama_host
         self.qdrant_host = host_config.qdrant_host
 
-        # --- Information Extraction config ---
-        ie_config = load_ie_env()
-        self.enable_ie = ie_config.enabled
-        self.ie_max_chars = ie_config.max_chars
-        self.ner_prompt = OllamaPipeline().load_prompt(kw="ner")
-
         # --- Path config ---
         path_config = load_path_env()
         self.data_dir = path_config.data
         self.prompt_dir = path_config.prompts
         self._qdrant_col_dir = path_config.qdrant_collections
         self._qdrant_src_dir = path_config.qdrant_sources
-        self.reader_required_exts_path = path_config.required_exts
         self.hf_hub_cache = path_config.hf_hub_cache
         self.xdg_cache_home = path_config.xdg_cache_home
 
@@ -177,6 +139,9 @@ class RAG:
         self.embed_model_id = model_config.embed_model
         self.sparse_model_id = model_config.sparse_model
         self.gen_model_id = model_config.gen_model
+
+        # --- Information Extraction config ---
+        self.ie_enabled = load_ie_env().ie_enabled
 
         # --- Ollama config ---
         ollama_config = load_ollama_env()
@@ -196,18 +161,10 @@ class RAG:
         # --- RAG config ---
         rag_config = load_rag_env()
         self.retrieve_similarity_top_k = rag_config.retrieve_top_k
-        self.chunk_size = rag_config.split_chunk_size
-        self.chunk_overlap = rag_config.split_chunk_overlap
-        self.buffer_size = rag_config.semantic_split_buffer_size
-        self.breakpoint_percentile_threshold = rag_config.semantic_split_breakpoint
         self.rerank_top_n = int(self.retrieve_similarity_top_k // 4)
-
-        with open(self.reader_required_exts_path, "r", encoding="utf-8") as f:
-            self.reader_required_exts = [f".{line.strip()}" for line in f]
 
         if self.prompt_dir:
             self.summarize_prompt_path = self.prompt_dir / "summarize.txt"
-
         if self.summarize_prompt_path is None:
             logger.error(
                 "ValueError: summarize_prompt_path is not set. Cannot load summarize prompt."
@@ -215,12 +172,11 @@ class RAG:
             raise ValueError(
                 "summarize_prompt_path is not set. Cannot load summarize prompt."
             )
+
         with open(self.summarize_prompt_path, "r", encoding="utf-8") as f:
             self.summarize_prompt = f.read()
 
-        self.sentence_splitter = SentenceSplitter(
-            chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap
-        )
+        # --- Session manager ---
         self.sessions = SessionManager(self)
 
     @property
@@ -579,7 +535,14 @@ class RAG:
 
         Returns:
             QdrantVectorStore: The initialized vector store.
+
+        Raises:
+            ValueError: If qdrant_collection is None.
         """
+        if self.qdrant_collection is None:
+            logger.error("ValueError: qdrant_collection cannot be None")
+            raise ValueError("qdrant_collection cannot be None")
+
         return QdrantVectorStore(
             collection_name=self.qdrant_collection,
             client=self.qdrant_client,
@@ -599,89 +562,6 @@ class RAG:
             StorageContext: The created storage context.
         """
         return StorageContext.from_defaults(vector_store=vector_store)
-
-    # --- Information extraction helpers ---
-    @staticmethod
-    def _parse_ie_payload(raw: str) -> dict[str, Any]:
-        """
-        Parses the raw text response from the IE model into a JSON payload.
-
-        Args:
-            raw (str): Raw text response from the IE model.
-
-        Returns:
-            dict[str, Any]: Parsed JSON payload.
-        """
-        try:
-            return json.loads(raw)
-        except Exception:
-            pass
-        try:
-            start = raw.find("{")
-            end = raw.rfind("}")
-            if start != -1 and end != -1 and end > start:
-                return json.loads(raw[start : end + 1])
-        except Exception:
-            return {}
-        return {}
-
-    def _ie_extract(self, text: str) -> tuple[list[dict], list[dict]]:
-        """
-        Performs information extraction on the given text.
-
-        Args:
-            text (str): Text to perform information extraction on.
-
-        Returns:
-            tuple[list[dict], list[dict]]: Extracted entities and relations.
-        """
-        snippet = text[: self.ie_max_chars]
-        prompt = self.ner_prompt.format(text=snippet)
-
-        try:
-            resp = self.gen_model.complete(prompt)
-            raw = resp.text if hasattr(resp, "text") else str(resp)
-        except Exception as exc:  # pragma: no cover - model failures are runtime
-            logger.warning("IE extraction request failed: {}", exc)
-            return [], []
-
-        payload = self._parse_ie_payload(raw) if isinstance(raw, str) else {}
-        entities_raw = payload.get("entities") if isinstance(payload, dict) else []
-        relations_raw = payload.get("relations") if isinstance(payload, dict) else []
-
-        entities: list[dict] = []
-        for ent in entities_raw or []:
-            if not isinstance(ent, dict):
-                continue
-            text_val = str(ent.get("text") or ent.get("name") or "").strip()
-            if not text_val:
-                continue
-            entities.append(
-                {
-                    "text": text_val,
-                    "type": ent.get("type") or ent.get("label"),
-                    "score": ent.get("score"),
-                }
-            )
-
-        relations: list[dict] = []
-        for rel in relations_raw or []:
-            if not isinstance(rel, dict):
-                continue
-            head = str(rel.get("head") or rel.get("subject") or "").strip()
-            tail = str(rel.get("tail") or rel.get("object") or "").strip()
-            if not head or not tail:
-                continue
-            relations.append(
-                {
-                    "head": head,
-                    "tail": tail,
-                    "label": rel.get("label") or rel.get("type"),
-                    "score": rel.get("score"),
-                }
-            )
-
-        return entities, relations
 
     def _build_ingestion_pipeline(
         self, progress_callback: Callable[[str], None] | None = None
@@ -705,24 +585,9 @@ class RAG:
 
         return DocumentIngestionPipeline(
             data_dir=self.data_dir,
-            clean_fn=self.clean_fn,
-            sentence_splitter=self.sentence_splitter,
             embed_model_factory=lambda: self.embed_model,
+            ie_model=self.gen_model if self.ie_enabled else None,
             device=self.device,
-            reader_errors=self.reader_errors,
-            reader_recursive=self.reader_recursive,
-            reader_encoding=self.reader_encoding,
-            reader_required_exts=list(self.reader_required_exts),
-            table_text_cols=self.table_text_cols,
-            table_metadata_cols=self.table_metadata_cols,
-            table_id_col=self.table_id_col,
-            table_excel_sheet=self.table_excel_sheet,
-            buffer_size=self.buffer_size,
-            breakpoint_percentile_threshold=self.breakpoint_percentile_threshold,
-            chunk_size=self.chunk_size,
-            chunk_overlap=self.chunk_overlap,
-            semantic_splitter_char_limit=self.semantic_splitter_char_limit,
-            entity_extractor=self._ie_extract if self.enable_ie else None,
             progress_callback=progress_callback,
         )
 

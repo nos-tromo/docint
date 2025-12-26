@@ -1,3 +1,5 @@
+"""Manages environment configuration for the DocInt application."""
+
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,8 +29,8 @@ class InformationExtractionConfig:
     Dataclass for information extraction configuration.
     """
 
-    enabled: bool
-    max_chars: int
+    ie_enabled: bool
+    ie_max_chars: int
 
 
 @dataclass(frozen=True)
@@ -84,10 +86,11 @@ class RAGConfig:
     """
 
     retrieve_top_k: int
-    split_chunk_size: int
-    split_chunk_overlap: int
-    semantic_split_buffer_size: int
-    semantic_split_breakpoint: int
+    semantic_splitter_breakpoint: int
+    semantic_splitter_buffer_size: int
+    semantic_splitter_char_limit: int
+    sent_splitter_chunk_overlap: int
+    sent_splitter_chunk_size: int
 
 
 def load_host_env() -> HostConfig:
@@ -119,18 +122,13 @@ def load_ie_env() -> InformationExtractionConfig:
 
     Returns:
         IEConfig: Dataclass containing IE configuration.
-        - enabled (bool): Whether to run entity/relation extraction during ingestion.
-        - max_chars (int): Maximum characters from each node to send to the extractor.
+        - ie_enabled (bool): Whether to run entity/relation extraction during ingestion.
+        - ie_max_chars (int): Maximum characters from each node to send to the extractor.
     """
 
-    def _as_bool(val: str | None, default: bool = False) -> bool:
-        if val is None:
-            return default
-        return val.lower() in {"1", "true", "yes", "on"}
-
     return InformationExtractionConfig(
-        enabled=_as_bool(os.getenv("ENABLE_IE"), False),
-        max_chars=int(os.getenv("IE_MAX_CHARS", "800")),
+        ie_enabled=os.getenv("ENABLE_IE", "1").lower() in {"1", "true", "yes"},
+        ie_max_chars=int(os.getenv("IE_MAX_CHARS", "800")),
     )
 
 
@@ -253,17 +251,25 @@ def load_rag_env() -> RAGConfig:
     Returns:
         RAGConfig: Dataclass containing RAG configuration.
         - retrieve_top_k (int): The number of top documents to retrieve.
-        - split_chunk_size (int): The size of text chunks for retrieval.
-        - split_chunk_overlap (int): The overlap size between text chunks.
-        - semantic_split_buffer_size (int): The buffer size for the SemanticSplitterNodeParser.
-        - semantic_split_breakpoint (int): The percentile threshold for breakpoints for the SemanticSplitterNodeParser.
+        - semantic_splitter_breakpoint (int): The percentile threshold for breakpoints for the SemanticSplitterNodeParser.
+        - semantic_splitter_buffer_size (int): The buffer size for the SemanticSplitterNodeParser.
+        - semantic_splitter_char_limit (int): The character limit for segments in the SemanticSplitterNodeParser.
+        - sent_splitter_chunk_overlap (int): The overlap size between text chunks.
+        - sent_splitter_chunk_size (int): The size of text chunks for retrieval.
     """
     return RAGConfig(
         retrieve_top_k=int(os.getenv("RETRIEVE_TOP_K", "20")),
-        split_chunk_size=int(os.getenv("SPLIT_CHUNK_SIZE", "1024")),
-        split_chunk_overlap=int(os.getenv("SPLIT_CHUNK_OVERLAP", "64")),
-        semantic_split_buffer_size=int(os.getenv("SEMANTIC_SPLIT_BUFFER_SIZE", "5")),
-        semantic_split_breakpoint=int(os.getenv("SEMANTIC_SPLIT_BREAKPOINT", "95")),
+        semantic_splitter_breakpoint=int(
+            os.getenv("SEMANTIC_SPLITTER_BREAKPOINT", "95")
+        ),
+        semantic_splitter_buffer_size=int(
+            os.getenv("SEMANTIC_SPLITTER_BUFFER_SIZE", "5")
+        ),
+        semantic_splitter_char_limit=int(
+            os.getenv("SEMANTIC_SPLITTER_CHAR_LIMIT", "20000")
+        ),
+        sent_splitter_chunk_overlap=int(os.getenv("SPLITTER_CHUNK_OVERLAP", "64")),
+        sent_splitter_chunk_size=int(os.getenv("SPLITTER_CHUNK_SIZE", "1024")),
     )
 
 

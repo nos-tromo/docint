@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable
 
 from llama_index.core import Document, SimpleDirectoryReader
@@ -13,6 +13,7 @@ from llama_index.core.node_parser import (
     SentenceSplitter,
 )
 from llama_index.core.schema import BaseNode
+from llama_index.llms.ollama import Ollama
 from llama_index.node_parser.docling import DoclingNodeParser
 from loguru import logger
 
@@ -21,7 +22,11 @@ from docint.core.readers.documents import CustomDoclingReader
 from docint.core.readers.images import ImageReader
 from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.tables import TableReader
+from docint.utils.clean_text import basic_clean
+from docint.utils.ie_extractor import build_ie_extractor
+from docint.utils.env_cfg import load_ie_env, load_path_env, load_rag_env
 from docint.utils.hashing import compute_file_hash
+from docint.utils.ollama_cfg import OllamaPipeline
 
 CleanFn = Callable[[str], str]
 
@@ -32,26 +37,43 @@ class DocumentIngestionPipeline:
     Encapsulates document loading, cleaning, and node construction.
     """
 
+    # --- Constructor args ---
     data_dir: Path
-    clean_fn: CleanFn
-    sentence_splitter: SentenceSplitter
+    device: str
     embed_model_factory: Callable[[], BaseEmbedding]
-    device: str = "cpu"
+    ie_model: Ollama | None
+    progress_callback: Callable[[str], None] | None
+
+    # --- Cleaning config ---
+    clean_fn: CleanFn = basic_clean
+
+    # --- Directory reader config ---
     reader_errors: str = "ignore"
     reader_recursive: bool = True
     reader_encoding: str = "utf-8"
-    reader_required_exts: list[str] | None = None
+    reader_required_exts: list[str] = field(default_factory=list, init=False)
+    reader_required_exts_path: Path | None = field(default=None, init=False)
+
+    # --- Table reader config ---
     table_text_cols: list[str] | None = None
     table_metadata_cols: list[str] | str | None = None
     table_id_col: str | None = None
     table_excel_sheet: str | int | None = None
-    buffer_size: int = 5
-    breakpoint_percentile_threshold: int = 90
-    chunk_size: int = 1024
-    chunk_overlap: int = 0
-    semantic_splitter_char_limit: int = 20000
+
+    # --- Information extraction ---
+    ie_enabled: bool = field(default=False, init=False)
+    ie_max_chars: int = field(default=800, init=False)
+    ie_prompt: str = field(default="", init=False)
     entity_extractor: Callable[[str], tuple[list[dict], list[dict]]] | None = None
-    progress_callback: Callable[[str], None] | None = None
+
+    # --- SemanticSplitterNodeParser config ---
+    semantic_splitter_buffer_size: int = field(default=5, init=False)
+    semantic_splitter_breakpoint: int = field(default=90, init=False)
+    semantic_splitter_char_limit: int = field(default=20000, init=False)
+
+    # --- SentenceSplitter config ---
+    sent_splitter_chunk_overlap: int = field(default=0, init=False)
+    sent_splitter_chunk_size: int = field(default=1024, init=False)
 
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
     md_node_parser: MarkdownNodeParser | None = field(default=None, init=False)
@@ -59,9 +81,43 @@ class DocumentIngestionPipeline:
     semantic_node_parser: SemanticSplitterNodeParser | None = field(
         default=None, init=False
     )
+    sentence_splitter: SentenceSplitter = field(default_factory=SentenceSplitter)
     docs: list[Document] = field(default_factory=list, init=False)
     nodes: list[BaseNode] = field(default_factory=list, init=False)
     file_hash_cache: dict[str, str] = field(default_factory=dict, init=False)
+
+    def __post_init__(self) -> None:
+        # --- Path config ---
+        path_config = load_path_env()
+        self.reader_required_exts_path = path_config.required_exts
+        with open(self.reader_required_exts_path, "r", encoding="utf-8") as f:
+            self.reader_required_exts = [f".{line.strip()}" for line in f]
+
+        # --- Information Extraction config ---
+        ie_config = load_ie_env()
+        self.ie_enabled = ie_config.ie_enabled
+        self.ie_max_chars = ie_config.ie_max_chars
+        self.ie_prompt = OllamaPipeline().load_prompt(kw="ner")
+
+        # Initialize IE extractor if runtime pieces are provided
+        if self.ie_enabled and self.ie_max_chars and self.ie_model and self.ie_prompt:
+            self.entity_extractor = build_ie_extractor(
+                model=self.ie_model,
+                prompt=self.ie_prompt,
+                max_chars=self.ie_max_chars,
+            )
+
+        # --- RAG config ---
+        rag_config = load_rag_env()
+        self.semantic_splitter_breakpoint = rag_config.semantic_splitter_breakpoint
+        self.semantic_splitter_buffer_size = rag_config.semantic_splitter_buffer_size
+        self.semantic_splitter_char_limit = rag_config.semantic_splitter_char_limit
+        self.sent_splitter_chunk_overlap = rag_config.sent_splitter_chunk_overlap
+        self.sent_splitter_chunk_size = rag_config.sent_splitter_chunk_size
+        self.sentence_splitter = SentenceSplitter(
+            chunk_size=self.sent_splitter_chunk_size,
+            chunk_overlap=self.sent_splitter_chunk_overlap,
+        )
 
     def build(
         self, existing_hashes: set[str] | None = None
@@ -98,7 +154,7 @@ class DocumentIngestionPipeline:
             current_docs.extend(file_docs)
             files_processed += 1
 
-            if files_processed >= self.buffer_size:
+            if files_processed >= self.semantic_splitter_buffer_size:
                 yield self._process_batch(current_docs, existing_hashes)
                 current_docs = []
                 files_processed = 0
@@ -131,29 +187,30 @@ class DocumentIngestionPipeline:
         if not self.dir_reader or not self.dir_reader.input_files:
             return
 
-        filtered_files: list[Path] = []
+        filtered_files: list[Path | PurePosixPath] = []
         skipped_count = 0
 
         for file_path in self.dir_reader.input_files:
-            path_str = str(file_path)
+            path_obj: Path = Path(file_path)
+            path_str = str(path_obj)
             try:
                 # Compute hash (or get from cache if we ever re-run)
                 if path_str in self.file_hash_cache:
                     f_hash = self.file_hash_cache[path_str]
                 else:
-                    f_hash = compute_file_hash(file_path)
+                    f_hash = compute_file_hash(path_obj)
                     self.file_hash_cache[path_str] = f_hash
 
                 if f_hash in existing_hashes:
                     skipped_count += 1
                     continue
 
-                filtered_files.append(file_path)
+                filtered_files.append(path_obj)
             except Exception as e:
                 logger.warning(
                     f"Failed to compute hash for {file_path}, skipping pre-filter: {e}"
                 )
-                filtered_files.append(file_path)
+                filtered_files.append(path_obj)
 
         if skipped_count > 0:
             logger.info(
@@ -339,8 +396,8 @@ class DocumentIngestionPipeline:
             raise RuntimeError("Embed model factory must be provided for ingestion.")
         self.semantic_node_parser = SemanticSplitterNodeParser(
             embed_model=self.embed_model_factory(),
-            buffer_size=self.buffer_size,
-            breakpoint_percentile_threshold=self.breakpoint_percentile_threshold,
+            buffer_size=self.semantic_splitter_buffer_size,
+            breakpoint_percentile_threshold=self.semantic_splitter_breakpoint,
         )
 
     @staticmethod
@@ -450,7 +507,7 @@ class DocumentIngestionPipeline:
         """
         if not docs:
             return [], []
-        limit = max(self.semantic_splitter_char_limit, self.chunk_size)
+        limit = max(self.semantic_splitter_char_limit, self.sent_splitter_chunk_size)
         semantic_docs: list[Document] = []
         oversized_docs: list[Document] = []
         for doc in docs:
@@ -473,7 +530,7 @@ class DocumentIngestionPipeline:
         """
         if not docs:
             return []
-        limit = max(self.semantic_splitter_char_limit, self.chunk_size)
+        limit = max(self.semantic_splitter_char_limit, self.sent_splitter_chunk_size)
         overlap = max(int(limit * 0.05), 0)
         stride = max(limit - overlap, 1)
         exploded: list[Document] = []
@@ -540,7 +597,9 @@ class DocumentIngestionPipeline:
                 )
 
         if oversized_docs:
-            limit = max(self.semantic_splitter_char_limit, self.chunk_size)
+            limit = max(
+                self.semantic_splitter_char_limit, self.sent_splitter_chunk_size
+            )
             exploded_docs = self._explode_oversized_documents(oversized_docs)
             logger.info(
                 (
