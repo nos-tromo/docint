@@ -170,9 +170,12 @@ def _make_pipeline(
     dummy_nodes: list = []
     pipeline = DocumentIngestionPipeline(
         data_dir=tmp_path,
+        device="cpu",
         clean_fn=lambda x: x,
         sentence_splitter=SentenceSplitter(chunk_size=50, chunk_overlap=0),
         embed_model_factory=lambda: cast(BaseEmbedding, SimpleNamespace()),
+        ie_model=None,
+        progress_callback=None,
         entity_extractor=entity_extractor,
     )  # type: ignore[arg-type]
 
