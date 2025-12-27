@@ -377,7 +377,13 @@ async def summarize_stream() -> StreamingResponse:
     if not rag.qdrant_collection:
         raise HTTPException(status_code=400, detail="No collection selected")
 
-    async def event_generator():
+    async def event_generator() -> AsyncIterator[str]:
+        """
+        Generate SSE events for the streaming summary.
+
+        Yields:
+            AsyncIterator[str]: An asynchronous iterator yielding SSE events.
+        """        
         try:
             for chunk in rag.stream_summarize_collection():
                 if isinstance(chunk, str):
@@ -632,7 +638,13 @@ async def agent_chat_stream(payload: AgentChatIn) -> StreamingResponse:
         StreamingResponse: SSE stream with clarification or answer tokens and metadata.
     """
 
-    async def event_generator():
+    async def event_generator() -> AsyncIterator[str]:
+        """
+        Generate SSE events for the agent chat stream.
+
+        Yields:
+            AsyncIterator[str]: An asynchronous iterator yielding SSE events.
+        """        
         if not rag.qdrant_collection:
             yield _format_sse("error", {"detail": "No collection selected"})
             return

@@ -20,7 +20,10 @@ class OllamaPipeline:
     model_id: str | None = field(default=None, init=False)
     _sys_prompt: str | None = field(default=None, init=False, repr=False)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
+        """
+        Post-initialization to load configurations.
+        """        
         self.model_id = load_model_env().vision_model
         self.prompt_dir = load_path_env().prompts
         self.ollama_host = load_host_env().ollama_host

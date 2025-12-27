@@ -87,6 +87,9 @@ class DocumentIngestionPipeline:
     file_hash_cache: dict[str, str] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
+        """
+        Post-initialization to load configurations and set up components.
+        """
         # --- Path config ---
         path_config = load_path_env()
         self.reader_required_exts_path = path_config.required_exts
@@ -165,6 +168,16 @@ class DocumentIngestionPipeline:
     def _process_batch(
         self, docs: list[Document], existing_hashes: set[str] | None
     ) -> tuple[list[Document], list[BaseNode]]:
+        """
+        Process a batch of documents through cleaning, hashing, filtering, and node creation.
+
+        Args:
+            docs (list[Document]): The list of documents to process.
+            existing_hashes (set[str] | None): A set of existing document hashes to filter out already processed documents.
+
+        Returns:
+            tuple[list[Document], list[BaseNode]]: A tuple containing the processed documents and their corresponding nodes.
+        """        
         docs = self._attach_clean_text(docs)
         docs = self._ensure_file_hashes(docs)
         # We still keep this filter as a safety net, though pre-filtering should catch most
@@ -705,6 +718,15 @@ class DocumentIngestionPipeline:
         if document_docs:
 
             def _is_docling_json(doc: Document) -> bool:
+                """
+                Check if the document text is valid Docling JSON.
+
+                Args:
+                    doc (Document): The document to check.
+
+                Returns:
+                    bool: True if the document text is valid Docling JSON, False otherwise.
+                """                
                 try:
                     json.loads(getattr(doc, "text", "") or "")
                     return True

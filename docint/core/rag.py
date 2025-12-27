@@ -40,7 +40,7 @@ from docint.utils.model_cfg import resolve_model_path
 from docint.utils.storage import stage_sources_to_qdrant
 
 
-@dataclass
+@dataclass(slots=True)
 class RAG:
     """
     Represents a Retrieval-Augmented Generation (RAG) model. Handles configuration,

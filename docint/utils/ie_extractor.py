@@ -43,6 +43,15 @@ def build_ie_extractor(
     """
 
     def _extract(text: str) -> tuple[list[dict], list[dict]]:
+        """
+        Extract entities and relations from text using the bound model and prompt.
+
+        Args:
+            text (str): The input text to extract entities and relations from.
+
+        Returns:
+            tuple[list[dict], list[dict]]: A tuple containing two lists: extracted entities and extracted relations.
+        """        
         snippet = text[:max_chars]
         prompt_text = prompt.format(text=snippet)
 

@@ -115,7 +115,15 @@ class SessionManager:
         return requested_id
 
     def get_agent_context(self, session_id: str) -> AgentTurnContext:
-        """Return the agent context for a session, creating it if missing."""
+        """
+        Return the agent context for a session, creating it if missing.
+        
+        Args:
+            session_id (str): The ID of the session.
+
+        Returns:
+            AgentTurnContext: The agent context for the session.
+        """
         return self.agent_contexts.setdefault(
             session_id, AgentTurnContext(session_id=session_id)
         )
@@ -690,6 +698,15 @@ class SessionManager:
         """
 
         def sha256_file(p: Path) -> str:
+            """
+            Compute the SHA256 hash of a file.
+
+            Args:
+                p (Path): The path to the file.
+
+            Returns:
+                str: The SHA256 hash of the file.
+            """            
             h = hashlib.sha256()
             with p.open("rb") as fh:
                 for chunk in iter(lambda: fh.read(65536), b""):
