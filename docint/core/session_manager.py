@@ -117,7 +117,7 @@ class SessionManager:
     def get_agent_context(self, session_id: str) -> AgentTurnContext:
         """
         Return the agent context for a session, creating it if missing.
-        
+
         Args:
             session_id (str): The ID of the session.
 
@@ -706,7 +706,7 @@ class SessionManager:
 
             Returns:
                 str: The SHA256 hash of the file.
-            """            
+            """
             h = hashlib.sha256()
             with p.open("rb") as fh:
                 for chunk in iter(lambda: fh.read(65536), b""):

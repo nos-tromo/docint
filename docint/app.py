@@ -20,7 +20,7 @@ BACKEND_PUBLIC_HOST = host_cfg.backend_public_host or BACKEND_HOST
 def _format_score(score: Any) -> str:
     """
     Format score values for display.
-    
+
     Args:
         score: The score value to format.
 
@@ -857,7 +857,7 @@ def render_chat() -> None:
     def stop_generation() -> None:
         """
         Stop the current answer generation.
-        """        
+        """
         st.session_state.chat_running = False
         if st.session_state.get("current_answer"):
             st.session_state.messages.append(
@@ -868,7 +868,7 @@ def render_chat() -> None:
     def _start_chat() -> None:
         """
         Start the chat answer generation.
-        """        
+        """
         st.session_state.chat_running = True
         st.session_state.current_answer = ""
 
@@ -1021,7 +1021,7 @@ def render_chat() -> None:
 def main() -> None:
     """
     Main function to run the Streamlit app.
-    """    
+    """
     setup_app()
     render_sidebar()
 

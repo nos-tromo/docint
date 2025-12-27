@@ -177,7 +177,7 @@ class DocumentIngestionPipeline:
 
         Returns:
             tuple[list[Document], list[BaseNode]]: A tuple containing the processed documents and their corresponding nodes.
-        """        
+        """
         docs = self._attach_clean_text(docs)
         docs = self._ensure_file_hashes(docs)
         # We still keep this filter as a safety net, though pre-filtering should catch most
@@ -726,7 +726,7 @@ class DocumentIngestionPipeline:
 
                 Returns:
                     bool: True if the document text is valid Docling JSON, False otherwise.
-                """                
+                """
                 try:
                     json.loads(getattr(doc, "text", "") or "")
                     return True

@@ -51,7 +51,7 @@ def build_ie_extractor(
 
         Returns:
             tuple[list[dict], list[dict]]: A tuple containing two lists: extracted entities and extracted relations.
-        """        
+        """
         snippet = text[:max_chars]
         prompt_text = prompt.format(text=snippet)
 

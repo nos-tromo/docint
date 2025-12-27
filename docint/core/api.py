@@ -383,7 +383,7 @@ async def summarize_stream() -> StreamingResponse:
 
         Yields:
             AsyncIterator[str]: An asynchronous iterator yielding SSE events.
-        """        
+        """
         try:
             for chunk in rag.stream_summarize_collection():
                 if isinstance(chunk, str):
@@ -644,7 +644,7 @@ async def agent_chat_stream(payload: AgentChatIn) -> StreamingResponse:
 
         Yields:
             AsyncIterator[str]: An asynchronous iterator yielding SSE events.
-        """        
+        """
         if not rag.qdrant_collection:
             yield _format_sse("error", {"detail": "No collection selected"})
             return
