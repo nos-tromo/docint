@@ -9,7 +9,7 @@ from PIL import Image
 from docint.utils.env_cfg import load_host_env, load_model_env, load_path_env
 
 
-@dataclass
+@dataclass(slots=True)
 class OllamaPipeline:
     """
     Pipeline for summarization and image processing with the Ollama API.
