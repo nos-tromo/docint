@@ -56,8 +56,6 @@ The application can be used both via Docker for containerized environments and d
    docker compose --profile <cpu|gpu> up
    ```
 
-   Use `watch` instead of `up` to enable live code synchronization for container development.
-
 ---
 
 ### Local Setup
@@ -112,7 +110,6 @@ The application is configured via environment variables. Key variables include:
 - `EMBED_MODEL`: HuggingFace embedding model ID (default: `BAAI/bge-m3`).
 - `SPARSE_MODEL`: Sparse embedding model ID (default: `Qdrant/all_miniLM_L6_v2_with_attentions`).
 - `ENABLE_IE`: Enable entity/relation extraction during ingestion (default: `false`).
-- `IE_MAX_CHARS`: Characters per node to send to the extractor (default: `800`).
 
 See `docint/utils/env_cfg.py` for the full list of configuration options and defaults.
 
@@ -172,7 +169,7 @@ See `docint/utils/env_cfg.py` for the full list of configuration options and def
 1. **Start the Development Server**
 
    ```bash
-   uv run streamlit run docint/app.py
+   uv run docint
    ```
 
 2. **Access the Frontend**
