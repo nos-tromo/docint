@@ -56,7 +56,6 @@ class RAG:
     # --- Path setup ---
     data_dir: Path | None = field(default=None, init=False)
     hf_hub_cache: Path | None = field(default=None, init=False)
-    xdg_cache_home: Path | None = field(default=None, init=False)
 
     # --- Models ---
     embed_model_id: str | None = field(default=None, init=False)
@@ -132,7 +131,6 @@ class RAG:
         self._qdrant_col_dir = path_config.qdrant_collections
         self._qdrant_src_dir = path_config.qdrant_sources
         self.hf_hub_cache = path_config.hf_hub_cache
-        self.xdg_cache_home = path_config.xdg_cache_home
 
         # --- Model config ---
         model_config = load_model_env()
