@@ -57,6 +57,6 @@ jobs:
           context: .
           file: Dockerfile.frontend
           push: false
-          tags: docint-frontend:latest
+          tags: docint-frontend:ci-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
