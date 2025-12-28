@@ -188,7 +188,9 @@ def load_ollama_env() -> OllamaConfig:
 
     return OllamaConfig(
         ctx_window=int(os.getenv("OLLAMA_CTX_WINDOW", default_ctx_window)),
-        request_timeout=int(os.getenv("OLLAMA_REQUEST_TIMEOUT", default_request_timeout)),
+        request_timeout=int(
+            os.getenv("OLLAMA_REQUEST_TIMEOUT", default_request_timeout)
+        ),
         seed=int(os.getenv("OLLAMA_SEED", default_seed)),
         temperature=float(os.getenv("OLLAMA_TEMPERATURE", default_temperature)),
         thinking=os.getenv("OLLAMA_THINKING", default_thinking).lower()
@@ -248,8 +250,12 @@ def load_path_env() -> PathConfig:
         logs=Path(
             os.getenv("LOG_PATH", project_root / ".logs" / "docint.log")
         ).expanduser(),
-        queries=Path(os.getenv("QUERIES_PATH", default_data_dir / "queries.txt")).expanduser(),
-        results=Path(os.getenv("RESULTS_PATH", default_data_dir / "results")).expanduser(),
+        queries=Path(
+            os.getenv("QUERIES_PATH", default_data_dir / "queries.txt")
+        ).expanduser(),
+        results=Path(
+            os.getenv("RESULTS_PATH", default_data_dir / "results")
+        ).expanduser(),
         prompts=utils_dir / "prompts",
         qdrant_collections=default_qdrant_collections,
         qdrant_sources=default_qdrant_sources,
@@ -280,16 +286,26 @@ def load_rag_env() -> RAGConfig:
     return RAGConfig(
         retrieve_top_k=int(os.getenv("RETRIEVE_TOP_K", default_retrieve_top_k)),
         semantic_splitter_breakpoint=int(
-            os.getenv("SEMANTIC_SPLITTER_BREAKPOINT", default_semantic_splitter_breakpoint)
+            os.getenv(
+                "SEMANTIC_SPLITTER_BREAKPOINT", default_semantic_splitter_breakpoint
+            )
         ),
         semantic_splitter_buffer_size=int(
-            os.getenv("SEMANTIC_SPLITTER_BUFFER_SIZE", default_semantic_splitter_buffer_size)
+            os.getenv(
+                "SEMANTIC_SPLITTER_BUFFER_SIZE", default_semantic_splitter_buffer_size
+            )
         ),
         semantic_splitter_char_limit=int(
-            os.getenv("SEMANTIC_SPLITTER_CHAR_LIMIT", default_semantic_splitter_char_limit)
+            os.getenv(
+                "SEMANTIC_SPLITTER_CHAR_LIMIT", default_semantic_splitter_char_limit
+            )
         ),
-        sent_splitter_chunk_overlap=int(os.getenv("SPLITTER_CHUNK_OVERLAP", default_sent_splitter_chunk_overlap)),
-        sent_splitter_chunk_size=int(os.getenv("SPLITTER_CHUNK_SIZE", default_sent_splitter_chunk_size)),
+        sent_splitter_chunk_overlap=int(
+            os.getenv("SPLITTER_CHUNK_OVERLAP", default_sent_splitter_chunk_overlap)
+        ),
+        sent_splitter_chunk_size=int(
+            os.getenv("SPLITTER_CHUNK_SIZE", default_sent_splitter_chunk_size)
+        ),
     )
 
 
