@@ -810,7 +810,7 @@ class RAG:
         if not isinstance(source_nodes, list):
             source_nodes = []
 
-        sources = []
+        sources: list[dict[str, Any]] = []
         for nws in source_nodes:
             # nws: NodeWithScore; the node itself:
             node = getattr(nws, "node", None)
