@@ -122,6 +122,7 @@ def load_ollama_model(model_id: str, kw: str) -> None:
 
     Args:
         model_id (str): The name of the model to load.
+        kw (str): The keyword for the model type (e.g., "generator").
 
     Returns:
         Ollama: The initialized generation model.
