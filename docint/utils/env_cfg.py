@@ -1,5 +1,3 @@
-"""Manages environment configuration for the DocInt application."""
-
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -222,11 +220,17 @@ def load_path_env() -> PathConfig:
         - hf_hub_cache (Path): Path to the Hugging Face Hub cache directory.
     """
     home_dir = Path.home()
-    default_data_dir: Path = home_dir / "docint"
+    docint_home_dir: Path = home_dir / "docint"
+    default_data_dir: Path = docint_home_dir / "data"
+    default_query_dir: Path = docint_home_dir / "queries.txt"
+    default_results_dir: Path = docint_home_dir / "results"
     default_hf_hub_cache: Path = home_dir / ".cache" / "huggingface" / "hub"
 
     project_root: Path = Path(__file__).parents[2].resolve()
+    default_log_dir = project_root / ".logs" / "docint.log"
     utils_dir: Path = project_root / "docint" / "utils"
+    default_prompts_dir: Path = utils_dir / "prompts"
+    default_exts_dir: Path = utils_dir / "required_exts.txt"
 
     default_qdrant_collections = Path(
         os.getenv("QDRANT_COL_DIR", "qdrant_storage")
@@ -245,21 +249,15 @@ def load_path_env() -> PathConfig:
         default_qdrant_sources = (default_sources_base / "sources").expanduser()
 
     return PathConfig(
-        data=Path(os.getenv("DATA_PATH", default_data_dir / "data")).expanduser(),
+        data=Path(os.getenv("DATA_PATH", default_data_dir)).expanduser(),
         hf_hub_cache=Path(os.getenv("HF_HUB_CACHE", default_hf_hub_cache)).expanduser(),
-        logs=Path(
-            os.getenv("LOG_PATH", project_root / ".logs" / "docint.log")
-        ).expanduser(),
-        queries=Path(
-            os.getenv("QUERIES_PATH", default_data_dir / "queries.txt")
-        ).expanduser(),
-        results=Path(
-            os.getenv("RESULTS_PATH", default_data_dir / "results")
-        ).expanduser(),
-        prompts=utils_dir / "prompts",
+        logs=Path(os.getenv("LOG_PATH", default_log_dir)).expanduser(),
+        queries=Path(os.getenv("QUERIES_PATH", default_query_dir)).expanduser(),
+        results=Path(os.getenv("RESULTS_PATH", default_results_dir)).expanduser(),
+        prompts=default_prompts_dir,
+        required_exts=default_exts_dir,
         qdrant_collections=default_qdrant_collections,
         qdrant_sources=default_qdrant_sources,
-        required_exts=utils_dir / "required_exts.txt",
     )
 
 
