@@ -92,7 +92,7 @@ class TableReader(BaseReader):
         if self.combine_with is None:
             self.combine_with = "\n"  # guardrail
 
-    # ---- helpers
+    # --- Helpers ---
     def _guess_text_cols(self, df: pd.DataFrame) -> list[str]:
         """
         Guess the text columns in a DataFrame based on common patterns.
@@ -178,7 +178,7 @@ class TableReader(BaseReader):
             file_hash = compute_file_hash(file_path)
         mimetype = get_mimetype(file_path)
 
-        # ---- Load to DataFrame
+        # --- Load to DataFrame ---
         if suffix in {".csv", ".tsv"}:
             sep = self.csv_sep if self.csv_sep else ("\t" if suffix == ".tsv" else ",")
             df = pd.read_csv(file_path, sep=sep, encoding=self.encoding)

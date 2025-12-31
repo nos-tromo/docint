@@ -27,8 +27,8 @@ class InformationExtractionConfig:
     Dataclass for information extraction configuration.
     """
 
-    enabled: bool
-    max_chars: int
+    ie_enabled: bool
+    ie_max_chars: int
 
 
 @dataclass(frozen=True)
@@ -73,8 +73,21 @@ class PathConfig:
     qdrant_collections: Path
     qdrant_sources: Path
     required_exts: Path
-    xdg_cache_home: Path
     hf_hub_cache: Path
+
+
+@dataclass(frozen=True)
+class RAGConfig:
+    """
+    Dataclass for RAG (Retrieval-Augmented Generation) configuration.
+    """
+
+    retrieve_top_k: int
+    semantic_splitter_breakpoint: int
+    semantic_splitter_buffer_size: int
+    semantic_splitter_char_limit: int
+    sent_splitter_chunk_overlap: int
+    sent_splitter_chunk_size: int
 
 
 def load_host_env() -> HostConfig:
@@ -89,14 +102,17 @@ def load_host_env() -> HostConfig:
         - qdrant_host (str): The Qdrant host URL.
         - cors_allowed_origins (str): Comma-separated list of allowed CORS origins.
     """
+    default_backend_host = "http://localhost:8000"
+    default_ollama_host = "http://localhost:11434"
+    default_qdrant_host = "http://localhost:6333"
+    default_cors_origins = "http://localhost:8501,http://127.0.0.1:8501"
+
     return HostConfig(
-        backend_host=os.getenv("BACKEND_HOST", "http://localhost:8000"),
-        backend_public_host=os.getenv("BACKEND_PUBLIC_HOST", "http://localhost:8000"),
-        ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-        qdrant_host=os.getenv("QDRANT_HOST", "http://localhost:6333"),
-        cors_allowed_origins=os.getenv(
-            "CORS_ALLOWED_ORIGINS", "http://localhost:8501,http://127.0.0.1:8501"
-        ),
+        backend_host=os.getenv("BACKEND_HOST", default_backend_host),
+        backend_public_host=os.getenv("BACKEND_PUBLIC_HOST", default_backend_host),
+        ollama_host=os.getenv("OLLAMA_HOST", default_ollama_host),
+        qdrant_host=os.getenv("QDRANT_HOST", default_qdrant_host),
+        cors_allowed_origins=os.getenv("CORS_ALLOWED_ORIGINS", default_cors_origins),
     )
 
 
@@ -106,18 +122,16 @@ def load_ie_env() -> InformationExtractionConfig:
 
     Returns:
         IEConfig: Dataclass containing IE configuration.
-        - enabled (bool): Whether to run entity/relation extraction during ingestion.
-        - max_chars (int): Maximum characters from each node to send to the extractor.
+        - ie_enabled (bool): Whether to run entity/relation extraction during ingestion.
+        - ie_max_chars (int): Maximum characters from each node to send to the extractor.
     """
-
-    def _as_bool(val: str | None, default: bool = False) -> bool:
-        if val is None:
-            return default
-        return val.lower() in {"1", "true", "yes", "on"}
+    default_ie_enabled = "1"
+    default_ie_max_chars = "800"
 
     return InformationExtractionConfig(
-        enabled=_as_bool(os.getenv("ENABLE_IE"), False),
-        max_chars=int(os.getenv("IE_MAX_CHARS", "800")),
+        ie_enabled=os.getenv("ENABLE_IE", default_ie_enabled).lower()
+        in {"1", "true", "yes"},
+        ie_max_chars=int(os.getenv("IE_MAX_CHARS", default_ie_max_chars)),
     )
 
 
@@ -133,14 +147,18 @@ def load_model_env() -> ModelConfig:
         - vision_model (str): The vision model identifier.
         - whisper_model (str): The Whisper model identifier.
     """
+    default_embed_model = "BAAI/bge-m3"
+    default_sparse_model = "Qdrant/all_miniLM_L6_v2_with_attentions"
+    default_gen_model = "gpt-oss:20b"
+    default_vision_model = "qwen3-vl:8b"
+    default_whisper_model = "turbo"
+
     return ModelConfig(
-        embed_model=os.getenv("EMBED_MODEL", "BAAI/bge-m3"),
-        sparse_model=os.getenv(
-            "SPARSE_MODEL", "Qdrant/all_miniLM_L6_v2_with_attentions"
-        ),
-        gen_model=os.getenv("LLM", "gpt-oss:20b"),
-        vision_model=os.getenv("VLM", "qwen3-vl:8b"),
-        whisper_model=os.getenv("WHISPER_MODEL", "turbo"),
+        embed_model=os.getenv("EMBED_MODEL", default_embed_model),
+        sparse_model=os.getenv("SPARSE_MODEL", default_sparse_model),
+        gen_model=os.getenv("LLM", default_gen_model),
+        vision_model=os.getenv("VLM", default_vision_model),
+        whisper_model=os.getenv("WHISPER_MODEL", default_whisper_model),
     )
 
 
@@ -158,20 +176,30 @@ def load_ollama_env() -> OllamaConfig:
         - top_k (int): The top_k setting for generation.
         - top_p (float): The top_p setting for generation.
     """
+    default_ctx_window = "8192"
+    default_request_timeout = "1200"
+    default_seed = "42"
+    default_temperature = "0.0"
+    default_thinking = "true"
+    default_top_k = "1"
+    default_top_p = "0"
+
     return OllamaConfig(
-        ctx_window=int(os.getenv("OLLAMA_CTX_WINDOW", "8192")),
-        request_timeout=int(os.getenv("OLLAMA_REQUEST_TIMEOUT", "1200")),
-        seed=int(os.getenv("OLLAMA_SEED", "42")),
-        temperature=float(os.getenv("OLLAMA_TEMPERATURE", "0.0")),
-        thinking=os.getenv("OLLAMA_THINKING", "true").lower()
+        ctx_window=int(os.getenv("OLLAMA_CTX_WINDOW", default_ctx_window)),
+        request_timeout=int(
+            os.getenv("OLLAMA_REQUEST_TIMEOUT", default_request_timeout)
+        ),
+        seed=int(os.getenv("OLLAMA_SEED", default_seed)),
+        temperature=float(os.getenv("OLLAMA_TEMPERATURE", default_temperature)),
+        thinking=os.getenv("OLLAMA_THINKING", default_thinking).lower()
         in {
             "1",
             "true",
             "yes",
             "on",
         },
-        top_k=int(os.getenv("OLLAMA_TOP_K", "1")),
-        top_p=float(os.getenv("OLLAMA_TOP_P", "0")),
+        top_k=int(os.getenv("OLLAMA_TOP_K", default_top_k)),
+        top_p=float(os.getenv("OLLAMA_TOP_P", default_top_p)),
     )
 
 
@@ -189,47 +217,93 @@ def load_path_env() -> PathConfig:
         - qdrant_collections (Path): Path to the Qdrant collections directory.
         - qdrant_sources (Path): Path to the Qdrant sources directory.
         - required_exts (Path): Path to the required extensions file.
-        - xdg_cache_home (Path): Path to the XDG cache home directory.
         - hf_hub_cache (Path): Path to the Hugging Face Hub cache directory.
     """
     home_dir = Path.home()
-    xdg_cache_home_dir: Path = home_dir / ".cache"
-    hf_hub_cache_dir: Path = xdg_cache_home_dir / "huggingface" / "hub"
-    data_dir: Path = home_dir / "docint"
-    project_root: Path = Path(__file__).parents[2].resolve()
-    utils_dir: Path = project_root / "docint" / "utils"
+    docint_home_dir: Path = home_dir / "docint"
+    default_data_dir: Path = docint_home_dir / "data"
+    default_query_dir: Path = docint_home_dir / "queries.txt"
+    default_results_dir: Path = docint_home_dir / "results"
+    default_hf_hub_cache: Path = home_dir / ".cache" / "huggingface" / "hub"
 
-    qdrant_collections = Path(
+    project_root: Path = Path(__file__).parents[2].resolve()
+    default_log_dir = project_root / ".logs" / "docint.log"
+    utils_dir: Path = project_root / "docint" / "utils"
+    default_prompts_dir: Path = utils_dir / "prompts"
+    default_exts_dir: Path = utils_dir / "required_exts.txt"
+
+    default_qdrant_collections = Path(
         os.getenv("QDRANT_COL_DIR", "qdrant_storage")
     ).expanduser()
     qdrant_sources_env = os.getenv("QDRANT_SRC_DIR")
 
     # Default sources root alongside Qdrant storage; fall back to a "sources" sibling.
     if qdrant_sources_env:
-        qdrant_sources = Path(qdrant_sources_env).expanduser()
+        default_qdrant_sources = Path(qdrant_sources_env).expanduser()
     else:
         default_sources_base = (
-            qdrant_collections.parent
-            if qdrant_collections.parent != Path(".")
-            else qdrant_collections
+            default_qdrant_collections.parent
+            if default_qdrant_collections.parent != Path(".")
+            else default_qdrant_collections
         )
-        qdrant_sources = (default_sources_base / "sources").expanduser()
+        default_qdrant_sources = (default_sources_base / "sources").expanduser()
 
     return PathConfig(
-        data=Path(os.getenv("DATA_PATH", data_dir / "data")).expanduser(),
-        logs=Path(
-            os.getenv("LOG_PATH", project_root / ".logs" / "docint.log")
-        ).expanduser(),
-        queries=Path(os.getenv("QUERIES_PATH", data_dir / "queries.txt")).expanduser(),
-        results=Path(os.getenv("RESULTS_PATH", data_dir / "results")).expanduser(),
-        prompts=utils_dir / "prompts",
-        qdrant_collections=qdrant_collections,
-        qdrant_sources=qdrant_sources,
-        required_exts=utils_dir / "required_exts.txt",
-        xdg_cache_home=Path(
-            os.getenv("XDG_CACHE_HOME", xdg_cache_home_dir)
-        ).expanduser(),
-        hf_hub_cache=Path(os.getenv("HF_HUB_CACHE", hf_hub_cache_dir)).expanduser(),
+        data=Path(os.getenv("DATA_PATH", default_data_dir)).expanduser(),
+        hf_hub_cache=Path(os.getenv("HF_HUB_CACHE", default_hf_hub_cache)).expanduser(),
+        logs=Path(os.getenv("LOG_PATH", default_log_dir)).expanduser(),
+        queries=Path(os.getenv("QUERIES_PATH", default_query_dir)).expanduser(),
+        results=Path(os.getenv("RESULTS_PATH", default_results_dir)).expanduser(),
+        prompts=default_prompts_dir,
+        required_exts=default_exts_dir,
+        qdrant_collections=default_qdrant_collections,
+        qdrant_sources=default_qdrant_sources,
+    )
+
+
+def load_rag_env() -> RAGConfig:
+    """
+    Loads RAG (Retrieval-Augmented Generation) configuration from environment variables or defaults.
+
+    Returns:
+        RAGConfig: Dataclass containing RAG configuration.
+        - retrieve_top_k (int): The number of top documents to retrieve.
+        - semantic_splitter_breakpoint (int): The percentile threshold for breakpoints for the SemanticSplitterNodeParser.
+        - semantic_splitter_buffer_size (int): The buffer size for the SemanticSplitterNodeParser.
+        - semantic_splitter_char_limit (int): The character limit for segments in the SemanticSplitterNodeParser.
+        - sent_splitter_chunk_overlap (int): The overlap size between text chunks.
+        - sent_splitter_chunk_size (int): The size of text chunks for retrieval.
+    """
+    default_retrieve_top_k = "20"
+    default_semantic_splitter_breakpoint = "95"
+    default_semantic_splitter_buffer_size = "5"
+    default_semantic_splitter_char_limit = "20000"
+    default_sent_splitter_chunk_overlap = "64"
+    default_sent_splitter_chunk_size = "1024"
+
+    return RAGConfig(
+        retrieve_top_k=int(os.getenv("RETRIEVE_TOP_K", default_retrieve_top_k)),
+        semantic_splitter_breakpoint=int(
+            os.getenv(
+                "SEMANTIC_SPLITTER_BREAKPOINT", default_semantic_splitter_breakpoint
+            )
+        ),
+        semantic_splitter_buffer_size=int(
+            os.getenv(
+                "SEMANTIC_SPLITTER_BUFFER_SIZE", default_semantic_splitter_buffer_size
+            )
+        ),
+        semantic_splitter_char_limit=int(
+            os.getenv(
+                "SEMANTIC_SPLITTER_CHAR_LIMIT", default_semantic_splitter_char_limit
+            )
+        ),
+        sent_splitter_chunk_overlap=int(
+            os.getenv("SPLITTER_CHUNK_OVERLAP", default_sent_splitter_chunk_overlap)
+        ),
+        sent_splitter_chunk_size=int(
+            os.getenv("SPLITTER_CHUNK_SIZE", default_sent_splitter_chunk_size)
+        ),
     )
 
 

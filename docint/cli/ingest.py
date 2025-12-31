@@ -2,7 +2,6 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from dotenv import load_dotenv
 from loguru import logger
 
 from docint.core.rag import RAG
@@ -32,7 +31,7 @@ def ingest_docs(
     Args:
         qdrant_col (str): Qdrant collection name.
         data_dir (Path): Path to the data directory.
-        hybrid (bool): Whether to enable hybrid search (default: True).
+        hybrid (bool): Whether to enable hybrid search. Defaults to True.
         progress_callback (Callable[[str], None] | None): Optional callback for
             reporting ingestion progress.
 
@@ -40,10 +39,7 @@ def ingest_docs(
         The CLI skips query engine creation so that large generation and reranker models
         are not loaded unnecessarily during ingestion jobs.
     """
-    rag = RAG(
-        qdrant_collection=qdrant_col,
-        enable_hybrid=hybrid,
-    )
+    rag = RAG(qdrant_collection=qdrant_col, enable_hybrid=hybrid)
     rag.ingest_docs(
         data_dir,
         build_query_engine=False,
@@ -54,7 +50,9 @@ def ingest_docs(
 
 
 def main() -> None:
-    load_dotenv()
+    """
+    Main function for the ingestion CLI.
+    """
     setup_logging()
     set_offline_env()
     data_path = load_path_env().data

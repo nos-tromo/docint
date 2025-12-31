@@ -3,16 +3,13 @@ from pathlib import Path
 
 import ollama
 import requests
-from dotenv import load_dotenv
 from loguru import logger
 from PIL import Image
 
 from docint.utils.env_cfg import load_host_env, load_model_env, load_path_env
 
-load_dotenv()
 
-
-@dataclass
+@dataclass(slots=True)
 class OllamaPipeline:
     """
     Pipeline for summarization and image processing with the Ollama API.
@@ -23,7 +20,10 @@ class OllamaPipeline:
     model_id: str | None = field(default=None, init=False)
     _sys_prompt: str | None = field(default=None, init=False, repr=False)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
+        """
+        Post-initialization to load configurations.
+        """
         self.model_id = load_model_env().vision_model
         self.prompt_dir = load_path_env().prompts
         self.ollama_host = load_host_env().ollama_host

@@ -18,7 +18,19 @@ BACKEND_PUBLIC_HOST = host_cfg.backend_public_host or BACKEND_HOST
 
 
 def _format_score(score: Any) -> str:
-    """Format score values for display."""
+    """
+    Format score values for display.
+
+    Args:
+        score: The score value to format.
+
+    Returns:
+        Formatted score string.
+
+    Raises:
+        TypeError: If the score is of an unsupported type.
+        ValueError: If the score cannot be converted to float.
+    """
     try:
         return f"{float(score):.2f}"
     except (TypeError, ValueError):
@@ -842,7 +854,10 @@ def render_chat() -> None:
                     st.markdown("**Information Extraction Overview**")
                     _render_ie_overview(msg["sources"])
 
-    def stop_generation():
+    def stop_generation() -> None:
+        """
+        Stop the current answer generation.
+        """
         st.session_state.chat_running = False
         if st.session_state.get("current_answer"):
             st.session_state.messages.append(
@@ -850,7 +865,10 @@ def render_chat() -> None:
             )
             del st.session_state.current_answer
 
-    def _start_chat():
+    def _start_chat() -> None:
+        """
+        Start the chat answer generation.
+        """
         st.session_state.chat_running = True
         st.session_state.current_answer = ""
 
@@ -899,7 +917,16 @@ def render_chat() -> None:
                                 except StopIteration:
                                     pass
 
-                        def process_line(line):
+                        def process_line(line) -> None:
+                            """
+                            Process a line from the streaming response.
+
+                            Args:
+                                line (bytes): A line from the streaming response.
+
+                            Raises:
+                                json.JSONDecodeError: If the line cannot be decoded as JSON.
+                            """
                             nonlocal full_answer, sources, reasoning
                             if line:
                                 decoded_line = line.decode("utf-8")
@@ -992,6 +1019,9 @@ def render_chat() -> None:
 
 
 def main() -> None:
+    """
+    Main function to run the Streamlit app.
+    """
     setup_app()
     render_sidebar()
 

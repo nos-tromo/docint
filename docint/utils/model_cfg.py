@@ -122,6 +122,7 @@ def load_ollama_model(model_id: str, kw: str) -> None:
 
     Args:
         model_id (str): The name of the model to load.
+        kw (str): The keyword for the model type (e.g., "generator").
 
     Returns:
         Ollama: The initialized generation model.
@@ -156,10 +157,10 @@ def main() -> None:
         logger.info("{}: {}", model, getattr(models, model))
 
     # Load the app's models
-    # docling
+    # Docling
     load_docling_models()
 
-    # hugging face
+    # Hugging Face
     for model_id, kw in [
         (models.embed_model, "embedding"),
         (models.sparse_model, "sparse"),
@@ -170,14 +171,14 @@ def main() -> None:
             kw=kw,
         )
 
-    # ollama
+    # Ollama
     for model, kw in [
         (models.gen_model, "generator"),
         (models.vision_model, "vision"),
     ]:
         load_ollama_model(model, kw)
 
-    # whisper
+    # Whisper
     load_whisper_model(models.whisper_model)
 
     logger.info("All models loaded successfully.")

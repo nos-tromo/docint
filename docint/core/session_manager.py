@@ -23,6 +23,7 @@ from docint.core.state.base import _make_session_maker
 from docint.core.state.citation import Citation
 from docint.core.state.conversation import Conversation
 from docint.core.state.turn import Turn
+from docint.agents.context import TurnContext as AgentTurnContext
 
 if TYPE_CHECKING:
     from docint.core.rag import RAG
@@ -40,6 +41,9 @@ class SessionManager:
     )
     chat_memory: ChatMemoryBuffer | None = field(default=None, init=False)
     session_id: str | None = field(default=None, init=False)
+    agent_contexts: dict[str, AgentTurnContext] = field(
+        default_factory=dict, init=False
+    )
     _SessionMaker: Any | None = field(default=None, init=False, repr=False)
 
     def init_session_store(self, db_url: str = "sqlite:///rag_sessions.db") -> None:
@@ -76,6 +80,11 @@ class SessionManager:
             requested_id = str(uuid.uuid4())
         self.session_id = requested_id
 
+        # Initialize agent context for this session
+        self.agent_contexts.setdefault(
+            requested_id, AgentTurnContext(session_id=requested_id)
+        )
+
         with self._session_scope() as s:
             self._load_or_create_convo(s, requested_id)
 
@@ -104,6 +113,20 @@ class SessionManager:
             llm=self.rag.gen_model,
         )
         return requested_id
+
+    def get_agent_context(self, session_id: str) -> AgentTurnContext:
+        """
+        Return the agent context for a session, creating it if missing.
+
+        Args:
+            session_id (str): The ID of the session.
+
+        Returns:
+            AgentTurnContext: The agent context for the session.
+        """
+        return self.agent_contexts.setdefault(
+            session_id, AgentTurnContext(session_id=session_id)
+        )
 
     def chat(self, user_msg: str) -> dict[str, Any]:
         """
@@ -675,6 +698,15 @@ class SessionManager:
         """
 
         def sha256_file(p: Path) -> str:
+            """
+            Compute the SHA256 hash of a file.
+
+            Args:
+                p (Path): The path to the file.
+
+            Returns:
+                str: The SHA256 hash of the file.
+            """
             h = hashlib.sha256()
             with p.open("rb") as fh:
                 for chunk in iter(lambda: fh.read(65536), b""):

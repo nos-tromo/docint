@@ -14,7 +14,7 @@ def test_get_col_name(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
     """
     monkeypatch.setattr("builtins.input", lambda _: "demo")
-    assert query_cli._get_col_name() == "demo"
+    assert query_cli.get_col_name() == "demo"
 
 
 def test_store_output_writes_json(tmp_path: Path) -> None:
@@ -84,8 +84,8 @@ def test_rag_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
             self.engine_built = True
 
     monkeypatch.setattr(query_cli, "RAG", DummyRAG)
-    monkeypatch.setattr(query_cli, "_get_col_name", lambda: "demo")
-    rag = query_cli.rag_pipeline()
+    monkeypatch.setattr(query_cli, "get_col_name", lambda: "demo")
+    rag = query_cli.rag_pipeline(col_name="demo")
     assert isinstance(rag, DummyRAG)
     assert rag.index_built and rag.engine_built
 
@@ -141,7 +141,7 @@ def test_main_executes_all(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_setup() -> None:
         sequence.append("setup")
 
-    def fake_pipeline() -> DummyRAG:
+    def fake_pipeline(col_name: str | None = None) -> DummyRAG:
         sequence.append("pipeline")
         return DummyRAG()
 
@@ -166,6 +166,7 @@ def test_main_executes_all(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(query_cli, "rag_pipeline", fake_pipeline)
     monkeypatch.setattr(query_cli, "load_queries", fake_load)
     monkeypatch.setattr(query_cli, "run_query", fake_run)
+    monkeypatch.setattr(query_cli, "get_col_name", lambda: "alpha")
 
     query_cli.main()
     # Order: setup -> env -> pipeline -> load -> run...

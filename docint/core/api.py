@@ -1,7 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
-from typing import Any, AsyncIterator, cast
+from typing import Any, AsyncIterator, Literal, cast
 
 import anyio
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -12,6 +12,15 @@ from qdrant_client import models
 from starlette.middleware.cors import CORSMiddleware
 
 from docint.cli import ingest as ingest_module
+from docint.agents import (
+    AgentOrchestrator,
+    ClarificationConfig,
+    ClarificationPolicy,
+    RAGRetrievalAgent,
+    SimpleClarificationAgent,
+    SimpleUnderstandingAgent,
+    Turn,
+)
 from docint.core.rag import RAG
 from docint.utils.env_cfg import load_host_env, load_path_env
 from docint.utils.hashing import compute_file_hash
@@ -29,6 +38,27 @@ app.add_middleware(
 )
 
 rag = RAG(qdrant_collection="")
+
+# Agent components (kept lightweight; swap with richer agents as needed)
+_understanding_agent = SimpleUnderstandingAgent()
+_clarification_agent = SimpleClarificationAgent()
+_clarification_policy = ClarificationPolicy(ClarificationConfig())
+
+
+def _build_orchestrator() -> AgentOrchestrator:
+    """
+    Construct an orchestrator bound to the current RAG instance.
+
+    Returns:
+        AgentOrchestrator: The constructed agent orchestrator.
+    """
+    retrieval_agent = RAGRetrievalAgent(rag)
+    return AgentOrchestrator(
+        understanding=_understanding_agent,
+        clarifier=_clarification_agent,
+        retriever=retrieval_agent,
+        policy=_clarification_policy,
+    )
 
 
 # --- Helper Functions ---
@@ -127,6 +157,24 @@ class SessionHistoryOut(BaseModel):
     messages: list[dict]
 
 
+class AgentChatIn(BaseModel):
+    message: str
+    session_id: str | None = None
+
+
+class AgentChatOut(BaseModel):
+    status: Literal["clarification", "answer"]
+    message: str | None = None
+    answer: str | None = None
+    sources: list[dict] = []
+    session_id: str | None = None
+    reason: str | None = None
+    intent: str | None = None
+    confidence: float | None = None
+    tool_used: str | None = None
+    latency_ms: float | None = None
+
+
 # --- API Endpoints ---
 
 
@@ -178,6 +226,13 @@ def collections_select(payload: SelectCollectionIn) -> dict[str, bool | str]:
                 rag.create_query_engine()
             except Exception:
                 pass
+
+        # Pre-warm IE cache if enabled
+        if getattr(rag, "enable_ie", False):
+            try:
+                rag.get_collection_ie(refresh=True)
+            except Exception:
+                logger.warning("Could not pre-warm IE cache for collection '{}'.", name)
 
         return {"ok": True, "name": name}
     except HTTPException as e:
@@ -322,7 +377,13 @@ async def summarize_stream() -> StreamingResponse:
     if not rag.qdrant_collection:
         raise HTTPException(status_code=400, detail="No collection selected")
 
-    async def event_generator():
+    async def event_generator() -> AsyncIterator[str]:
+        """
+        Generate SSE events for the streaming summary.
+
+        Yields:
+            AsyncIterator[str]: An asynchronous iterator yielding SSE events.
+        """
         try:
             for chunk in rag.stream_summarize_collection():
                 if isinstance(chunk, str):
@@ -445,6 +506,57 @@ def delete_session(session_id: str) -> dict[str, bool]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/agent/chat", response_model=AgentChatOut, tags=["Agent"])
+def agent_chat(payload: AgentChatIn) -> AgentChatOut:
+    """
+    Agentic chat endpoint: understand → maybe clarify → retrieve/respond.
+
+    Args:
+        payload (AgentChatIn): Message and optional session id.
+
+    Returns:
+        AgentChatOut: Clarification prompt or answer with sources.
+    """
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+
+    # Ensure a session is active and get per-session agent context
+    session_id = rag.start_session(payload.session_id)
+    ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
+
+    turn = Turn(user_input=payload.message, session_id=session_id)
+    orchestrator = _build_orchestrator()
+
+    result = orchestrator.handle_turn(turn, context=ctx)
+
+    if result.clarification is not None and result.clarification.needed:
+        if ctx:
+            ctx.clarifications += 1
+        return AgentChatOut(
+            status="clarification",
+            message=result.clarification.message,
+            reason=result.clarification.reason,
+            session_id=session_id,
+            intent=result.analysis.intent if result.analysis else None,
+            confidence=result.analysis.confidence if result.analysis else None,
+        )
+
+    retrieval = result.retrieval
+    if retrieval is None:
+        raise HTTPException(status_code=500, detail="No retrieval result available")
+
+    return AgentChatOut(
+        status="answer",
+        answer=retrieval.answer,
+        sources=retrieval.sources,
+        session_id=retrieval.session_id or session_id,
+        intent=retrieval.intent,
+        confidence=retrieval.confidence,
+        tool_used=retrieval.tool_used,
+        latency_ms=retrieval.latency_ms,
+    )
+
+
 @app.post("/ingest", response_model=IngestOut, tags=["Ingestion"])
 def ingest(payload: IngestIn) -> dict[str, bool | str]:
     """
@@ -486,6 +598,16 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
             if getattr(rag, "index", None) is None:
                 rag.create_index()
             rag.create_query_engine()
+
+            # Pre-warm IE cache if enabled
+            if getattr(rag, "enable_ie", False):
+                try:
+                    rag.get_collection_ie(refresh=True)
+                except Exception:
+                    logger.warning(
+                        "Exception: Failed to pre-warm IE cache for collection: {}",
+                        name,
+                    )
         except Exception:
             # If eager preparation fails, queries will lazily prepare the engine.
             logger.warning(
@@ -502,6 +624,73 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
     except HTTPException as e:
         logger.error("HTTPException: Error during ingestion: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/agent/chat/stream", tags=["Agent"])
+async def agent_chat_stream(payload: AgentChatIn) -> StreamingResponse:
+    """
+    Streaming variant of agent chat with token events and final metadata.
+
+    Args:
+        payload (AgentChatIn): Message and optional session id.
+
+    Returns:
+        StreamingResponse: SSE stream with clarification or answer tokens and metadata.
+    """
+
+    async def event_generator() -> AsyncIterator[str]:
+        """
+        Generate SSE events for the agent chat stream.
+
+        Yields:
+            AsyncIterator[str]: An asynchronous iterator yielding SSE events.
+        """
+        if not rag.qdrant_collection:
+            yield _format_sse("error", {"detail": "No collection selected"})
+            return
+
+        session_id = rag.start_session(payload.session_id)
+        ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
+        turn = Turn(user_input=payload.message, session_id=session_id)
+
+        analysis = _understanding_agent.analyze(turn)
+        clarification_decision = _clarification_policy.evaluate(
+            analysis, clarifications_so_far=ctx.clarifications if ctx else 0
+        )
+
+        if clarification_decision.needed:
+            if ctx:
+                ctx.clarifications += 1
+            payload_out = {
+                "status": "clarification",
+                "message": clarification_decision.message,
+                "reason": clarification_decision.reason,
+                "intent": analysis.intent,
+                "confidence": analysis.confidence,
+                "session_id": session_id,
+            }
+            yield _format_sse("clarification", payload_out)
+            return
+
+        # Stream via RAG chat
+        stream = rag.stream_chat(turn.user_input)
+
+        # Tokens
+        for chunk in stream:
+            if isinstance(chunk, str):
+                yield _format_sse("token", {"token": chunk})
+            elif isinstance(chunk, dict):
+                meta = {
+                    "status": "answer",
+                    "sources": chunk.get("sources", []),
+                    "session_id": chunk.get("session_id", session_id),
+                    "intent": analysis.intent,
+                    "confidence": analysis.confidence,
+                    "tool_used": "rag_chat",
+                }
+                yield _format_sse("done", meta)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.post("/ingest/upload", tags=["Ingestion"])
@@ -601,10 +790,19 @@ async def ingest_upload(
             queue: asyncio.Queue[str | None | Exception] = asyncio.Queue()
             loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
 
-            def progress_callback(msg: str):
+            def progress_callback(msg: str) -> None:
+                """
+                Callback function to report progress during ingestion.
+
+                Args:
+                    msg (str): Progress message to be reported.
+                """
                 loop.call_soon_threadsafe(queue.put_nowait, msg)
 
-            async def run_ingestion():
+            async def run_ingestion() -> None:
+                """
+                Run the ingestion process in a separate thread.
+                """
                 try:
                     await anyio.to_thread.run_sync(
                         ingest_module.ingest_docs,
