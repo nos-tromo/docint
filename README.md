@@ -204,7 +204,7 @@ See `docint/utils/env_cfg.py` for the full list of configuration options and def
 
 ### Additional Configuration
 
-For additional configurations, populate an `.env` (for local usage) or `.env.docker` file in the project's root. Example:
+For additional configuration, populate an `.env` (local usage) or `.env.docker` file in the project's root. Example:
 
 ```env
 DOCINT_OFFLINE=true
