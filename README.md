@@ -202,11 +202,11 @@ See `docint/utils/env_cfg.py` for the full list of configuration options and def
 
 ---
 
-### Additional Docker Configuration
+### Additional Configuration
 
-For additional configurations, populate an `.env.docker` file in the project's root. Example:
+For additional configurations, populate an `.env` (for local usage) or `.env.docker` file in the project's root. Example:
 
-```bash
+```env
 DOCINT_OFFLINE=true
 EMBED_MODEL=BAAI/bge-m3
 SPARSE_MODEL=Qdrant/all_miniLM_L6_v2_with_attentions
