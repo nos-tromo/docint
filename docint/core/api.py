@@ -91,8 +91,14 @@ def _resolve_qdrant_src_dir() -> Path:
 
     Returns:
         Path: The path to the Qdrant sources directory.
+
+    Raises:
+        RuntimeError: If the Qdrant sources directory is not configured.
     """
-    return load_path_env().qdrant_sources
+    path_config = load_path_env()
+    if path_config.qdrant_sources is None:
+        raise RuntimeError("Qdrant sources directory is not configured")
+    return path_config.qdrant_sources
 
 
 def _format_sse(event: str, data: dict[str, Any]) -> str:

@@ -82,12 +82,10 @@ class RAGConfig:
     Dataclass for RAG (Retrieval-Augmented Generation) configuration.
     """
 
+    ingestion_batch_size: int
     retrieve_top_k: int
-    semantic_splitter_breakpoint: int
-    semantic_splitter_buffer_size: int
-    semantic_splitter_char_limit: int
-    sent_splitter_chunk_overlap: int
-    sent_splitter_chunk_size: int
+    sentence_splitter_chunk_overlap: int
+    sentence_splitter_chunk_size: int
 
 
 def load_host_env() -> HostConfig:
@@ -267,42 +265,31 @@ def load_rag_env() -> RAGConfig:
 
     Returns:
         RAGConfig: Dataclass containing RAG configuration.
+        - ingestion_batch_size (int): The batch size for ingestion.
         - retrieve_top_k (int): The number of top documents to retrieve.
-        - semantic_splitter_breakpoint (int): The percentile threshold for breakpoints for the SemanticSplitterNodeParser.
-        - semantic_splitter_buffer_size (int): The buffer size for the SemanticSplitterNodeParser.
-        - semantic_splitter_char_limit (int): The character limit for segments in the SemanticSplitterNodeParser.
-        - sent_splitter_chunk_overlap (int): The overlap size between text chunks.
-        - sent_splitter_chunk_size (int): The size of text chunks for retrieval.
+        - sentence_splitter_chunk_overlap (int): The chunk overlap size for sentence splitting.
+        - sentence_splitter_chunk_size (int): The chunk size for sentence splitting.
     """
+    default_ingestion_batch_size = "5"
     default_retrieve_top_k = "20"
-    default_semantic_splitter_breakpoint = "95"
-    default_semantic_splitter_buffer_size = "5"
-    default_semantic_splitter_char_limit = "20000"
-    default_sent_splitter_chunk_overlap = "64"
-    default_sent_splitter_chunk_size = "1024"
+    default_sentence_splitter_chunk_overlap = "64"
+    default_sentence_splitter_chunk_size = "1024"
 
     return RAGConfig(
+        ingestion_batch_size=int(
+            os.getenv("INGESTION_BATCH_SIZE", default_ingestion_batch_size)
+        ),
         retrieve_top_k=int(os.getenv("RETRIEVE_TOP_K", default_retrieve_top_k)),
-        semantic_splitter_breakpoint=int(
+        sentence_splitter_chunk_overlap=int(
             os.getenv(
-                "SEMANTIC_SPLITTER_BREAKPOINT", default_semantic_splitter_breakpoint
+                "SENTENCE_SPLITTER_CHUNK_OVERLAP",
+                default_sentence_splitter_chunk_overlap,
             )
         ),
-        semantic_splitter_buffer_size=int(
+        sentence_splitter_chunk_size=int(
             os.getenv(
-                "SEMANTIC_SPLITTER_BUFFER_SIZE", default_semantic_splitter_buffer_size
+                "SENTENCE_SPLITTER_CHUNK_SIZE", default_sentence_splitter_chunk_size
             )
-        ),
-        semantic_splitter_char_limit=int(
-            os.getenv(
-                "SEMANTIC_SPLITTER_CHAR_LIMIT", default_semantic_splitter_char_limit
-            )
-        ),
-        sent_splitter_chunk_overlap=int(
-            os.getenv("SPLITTER_CHUNK_OVERLAP", default_sent_splitter_chunk_overlap)
-        ),
-        sent_splitter_chunk_size=int(
-            os.getenv("SPLITTER_CHUNK_SIZE", default_sent_splitter_chunk_size)
         ),
     )
 

@@ -583,7 +583,6 @@ class RAG:
 
         return DocumentIngestionPipeline(
             data_dir=self.data_dir,
-            embed_model_factory=lambda: self.embed_model,
             ie_model=self.gen_model if self.ie_enabled else None,
             device=self.device,
             progress_callback=progress_callback,
