@@ -23,9 +23,9 @@ from docint.core.readers.images import ImageReader
 from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.tables import TableReader
 from docint.utils.clean_text import basic_clean
-from docint.utils.ie_extractor import build_ie_extractor
 from docint.utils.env_cfg import load_ie_env, load_path_env, load_rag_env
 from docint.utils.hashing import compute_file_hash
+from docint.utils.ie_extractor import build_ie_extractor
 from docint.utils.ollama_cfg import OllamaPipeline
 
 CleanFn = Callable[[str], str]
