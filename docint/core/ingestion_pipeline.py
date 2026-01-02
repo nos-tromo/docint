@@ -57,9 +57,6 @@ class DocumentIngestionPipeline:
     table_excel_sheet: str | int | None = None
 
     # --- Information extraction ---
-    ie_enabled: bool = field(default=False, init=False)
-    ie_max_chars: int = field(default=800, init=False)
-    ie_prompt: str = field(default="", init=False)
     entity_extractor: Callable[[str], tuple[list[dict], list[dict]]] | None = None
 
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
@@ -76,22 +73,22 @@ class DocumentIngestionPipeline:
         """
         # --- Path config ---
         path_config = load_path_env()
-        self.reader_required_exts_path = path_config.required_exts
-        with open(self.reader_required_exts_path, "r", encoding="utf-8") as f:
+        reader_required_exts_path = path_config.required_exts
+        with open(reader_required_exts_path, "r", encoding="utf-8") as f:
             self.reader_required_exts = [f".{line.strip()}" for line in f]
 
         # --- Information Extraction config ---
         ie_config = load_ie_env()
-        self.ie_enabled = ie_config.ie_enabled
-        self.ie_max_chars = ie_config.ie_max_chars
-        self.ie_prompt = OllamaPipeline().load_prompt(kw="ner")
+        ie_enabled = ie_config.ie_enabled
+        ie_max_chars = ie_config.ie_max_chars
+        ie_prompt = OllamaPipeline().load_prompt(kw="ner")
 
         # Initialize IE extractor if runtime pieces are provided
-        if self.ie_enabled and self.ie_max_chars and self.ie_model and self.ie_prompt:
+        if self.ie_model and ie_enabled and ie_max_chars and ie_prompt:
             self.entity_extractor = build_ie_extractor(
                 model=self.ie_model,
-                prompt=self.ie_prompt,
-                max_chars=self.ie_max_chars,
+                prompt=ie_prompt,
+                max_chars=ie_max_chars,
             )
 
         # --- RAG config ---
