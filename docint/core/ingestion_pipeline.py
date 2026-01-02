@@ -62,7 +62,9 @@ class DocumentIngestionPipeline:
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
     md_node_parser: MarkdownNodeParser | None = field(default=None, init=False)
     docling_node_parser: DoclingNodeParser | None = field(default=None, init=False)
-    sentence_splitter: SentenceSplitter = field(default_factory=SentenceSplitter)
+    sentence_splitter: SentenceSplitter = field(
+        default_factory=SentenceSplitter, init=False
+    )
     docs: list[Document] = field(default_factory=list, init=False)
     nodes: list[BaseNode] = field(default_factory=list, init=False)
     file_hash_cache: dict[str, str] = field(default_factory=dict, init=False)
@@ -597,7 +599,7 @@ class DocumentIngestionPipeline:
 
         if table_docs:
             logger.info(
-                "Parsing {} table documents with one-node-per-row SentenceSplitter",
+                "Parsing {} table documents with SentenceSplitter (one node per document)",
                 len(table_docs),
             )
             table_splitter = SentenceSplitter(chunk_size=10_000_000, chunk_overlap=0)

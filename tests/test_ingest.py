@@ -7,7 +7,6 @@ import pytest
 import docint.cli.ingest as ingest
 from docint.core.ingestion_pipeline import DocumentIngestionPipeline
 from llama_index.core import Document
-from llama_index.core.node_parser import SentenceSplitter
 
 
 def test_get_collection(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -171,7 +170,6 @@ def _make_pipeline(
         data_dir=tmp_path,
         device="cpu",
         clean_fn=lambda x: x,
-        sentence_splitter=SentenceSplitter(chunk_size=50, chunk_overlap=0),
         ie_model=None,
         progress_callback=None,
         entity_extractor=entity_extractor,
@@ -186,7 +184,7 @@ def _make_pipeline(
     )  # type: ignore[assignment]
     pipeline.sentence_splitter = cast(
         Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
-    )
+    )  # type: ignore[assignment]
     return pipeline, dummy_nodes
 
 
