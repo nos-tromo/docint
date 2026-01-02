@@ -46,7 +46,9 @@ class DocumentIngestionPipeline:
     reader_recursive: bool = True
     reader_encoding: str = "utf-8"
     reader_required_exts: list[str] = field(default_factory=list, init=False)
-    reader_required_exts_path: Path | None = field(default=None, init=False)
+
+    # --- Ingestion config ---
+    ingestion_batch_size: int = field(default=5, init=False)
 
     # --- Table reader config ---
     table_text_cols: list[str] | None = None
@@ -94,14 +96,12 @@ class DocumentIngestionPipeline:
 
         # --- RAG config ---
         rag_config = load_rag_env()
-        self.semantic_splitter_breakpoint = rag_config.semantic_splitter_breakpoint
-        self.semantic_splitter_buffer_size = rag_config.semantic_splitter_buffer_size
-        self.semantic_splitter_char_limit = rag_config.semantic_splitter_char_limit
-        self.sent_splitter_chunk_overlap = rag_config.sent_splitter_chunk_overlap
-        self.sent_splitter_chunk_size = rag_config.sent_splitter_chunk_size
+        self.ingestion_batch_size = rag_config.ingestion_batch_size
+        sentence_splitter_chunk_size = rag_config.sentence_splitter_chunk_size
+        sentence_splitter_chunk_overlap = rag_config.sentence_splitter_chunk_overlap
         self.sentence_splitter = SentenceSplitter(
-            chunk_size=self.sent_splitter_chunk_size,
-            chunk_overlap=self.sent_splitter_chunk_overlap,
+            chunk_size=sentence_splitter_chunk_size,
+            chunk_overlap=sentence_splitter_chunk_overlap,
         )
 
     def build(
@@ -139,7 +139,7 @@ class DocumentIngestionPipeline:
             current_docs.extend(file_docs)
             files_processed += 1
 
-            if files_processed >= self.semantic_splitter_buffer_size:
+            if files_processed >= self.ingestion_batch_size:
                 yield self._process_batch(current_docs, existing_hashes)
                 current_docs = []
                 files_processed = 0
