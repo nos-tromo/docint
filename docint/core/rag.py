@@ -416,29 +416,39 @@ class RAG:
 
         # Check if the configured ID is directly supported
         supported_ids = [m["model"] for m in supported_models]
+        chosen = self.sparse_model_id
         if self.sparse_model_id in supported_ids:
-            return self.sparse_model_id
-
-        # Check if it matches a source HF repo (mapping logic)
-        for model_desc in supported_models:
-            sources = model_desc.get("sources")
-            if sources and sources.get("hf") == self.sparse_model_id:
-                logger.info(
-                    "Mapped sparse model {} to its source {}",
+            chosen = self.sparse_model_id
+        else:
+            # Check if it matches a source HF repo (mapping logic)
+            for model_desc in supported_models:
+                sources = model_desc.get("sources")
+                if sources and sources.get("hf") == self.sparse_model_id:
+                    logger.info(
+                        "Mapped sparse model {} to its source {}",
+                        self.sparse_model_id,
+                        model_desc["model"],
+                    )
+                    chosen = model_desc["model"]
+                    break
+            else:
+                logger.error(
+                    "ValueError: Sparse model {} not supported. Supported: {}",
                     self.sparse_model_id,
-                    model_desc["model"],
+                    supported_ids,
                 )
-                return model_desc["model"]
+                raise ValueError(
+                    f"Sparse model {self.sparse_model_id!r} not supported. "
+                    f"Supported: {supported_ids}"
+                )
 
-        logger.error(
-            "ValueError: Sparse model {} not supported. Supported: {}",
-            self.sparse_model_id,
-            supported_ids,
-        )
-        raise ValueError(
-            f"Sparse model {self.sparse_model_id!r} not supported. "
-            f"Supported: {supported_ids}"
-        )
+        cache_dir = self.hf_hub_cache or Path.home() / ".cache" / "huggingface" / "hub"
+        resolved = resolve_model_path(chosen, cache_dir)
+        if resolved != chosen:
+            logger.info("Using local sparse model path: {}", resolved)
+            return resolved
+
+        return chosen
 
     @property
     def gen_model(self) -> Ollama:

@@ -233,3 +233,45 @@ def test_filter_docs_skips_existing_hashes(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert len(filtered) == 1
     assert filtered[0].metadata.get("file_hash") == fresh_hash
+
+    def test_sparse_model_uses_cached_path(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """
+        Ensure sparse_model resolves to a cached snapshot path when available.
+
+        Args:
+            monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+            tmp_path (Path): The temporary path fixture.
+        """
+
+        # Build a fake HF cache layout with refs/main -> snapshots/abc123
+        cache_root = tmp_path / "hub"
+        model_dir = cache_root / "models--Qdrant--all_miniLM_L6_v2_with_attentions"
+        refs_dir = model_dir / "refs"
+        snaps_dir = model_dir / "snapshots"
+        snap = snaps_dir / "abc123"
+        snap.mkdir(parents=True)
+        refs_dir.mkdir(parents=True, exist_ok=True)
+        (refs_dir / "main").write_text("abc123")
+
+        # Stub supported models to match the configured sparse ID
+        monkeypatch.setattr(
+            rag_module.SparseTextEmbedding,
+            "list_supported_models",
+            staticmethod(
+                lambda: [
+                    {
+                        "model": "Qdrant/all_miniLM_L6_v2_with_attentions",
+                        "sources": {"hf": "Qdrant/all_miniLM_L6_v2_with_attentions"},
+                    }
+                ]
+            ),
+        )
+
+        rag = RAG(qdrant_collection="test")
+        rag.hf_hub_cache = cache_root
+        rag.sparse_model_id = "Qdrant/all_miniLM_L6_v2_with_attentions"
+
+        resolved = rag.sparse_model
+        assert resolved == str(snap)
