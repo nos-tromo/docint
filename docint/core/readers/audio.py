@@ -224,6 +224,14 @@ class AudioReader(BaseReader):
         """
         Create one Document per full sentence by merging segments until punctuation.
         Timing metadata reflects the merged start/end.
+
+        Args:
+            result (dict[str, Any]): The transcription result containing segments.
+            file_path (Path): The path to the audio file.
+            file_hash (str | None): The hash of the audio file.
+
+        Returns:
+            list[Document]: A list of enriched Document objects for each sentence.
         """
 
         segments = result.get("segments") if isinstance(result, dict) else None
