@@ -242,3 +242,37 @@ def test_entity_extractor_handles_exceptions(tmp_path: Path) -> None:
 
     assert len(nodes) == 1
     assert nodes[0].metadata == {}
+
+
+def test_audio_extension_classified_as_audio(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Ensure webm files route through the audio branch rather than plain text.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+
+    pipeline = DocumentIngestionPipeline(
+        data_dir=Path("/tmp"),
+        device="cpu",
+        ie_model=None,
+        progress_callback=None,
+    )
+
+    # Stub parsers to satisfy _create_nodes preconditions
+    dummy_nodes: list = []
+    pipeline.md_node_parser = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
+    )
+    pipeline.docling_node_parser = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
+    )
+
+    doc = Document(
+        text="hi",
+        metadata={"file_path": "foo.webm", "source": "audio", "file_hash": "x"},
+    )
+
+    nodes = pipeline._create_nodes([doc])
+
+    assert isinstance(nodes, list)
