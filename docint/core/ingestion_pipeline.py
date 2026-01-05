@@ -503,20 +503,20 @@ class DocumentIngestionPipeline:
             file_path = str(meta.get("file_path") or meta.get("file_name") or "")
             ext = file_path.lower().rsplit(".", 1)[-1] if "." in file_path else ""
 
-            if source_kind == "audio" or ext in {
-                ".avi",
-                ".flv",
-                ".mkv",
-                ".mov",
-                ".mpeg",
-                ".mpg",
-                ".mp3",
-                ".mp4",
-                ".m4v",
-                ".ogg",
-                ".wav",
-                ".webm",
-                ".wmv",
+            if source_kind in {"audio", "video"} or ext in {
+                "avi",
+                "flv",
+                "mkv",
+                "mov",
+                "mpeg",
+                "mpg",
+                "mp3",
+                "mp4",
+                "m4v",
+                "ogg",
+                "wav",
+                "webm",
+                "wmv",
             }:
                 audio_docs.append(d)
             elif source_kind == "image" or ext in {"gif", "jpeg", "jpg", "png"}:
