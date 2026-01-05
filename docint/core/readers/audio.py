@@ -46,7 +46,7 @@ class AudioReader(BaseReader):
         if self.model_id is None:
             logger.error("ValueError: Model ID is not set.")
             raise ValueError("Model ID is not set.")
-        return whisper.load_model(self.model_id)
+        return whisper.load_model(self.model_id, device=self.device)
 
     def _load_audio(self, file_path: str | Path) -> NDArray[floating[Any]]:
         """
