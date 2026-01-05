@@ -85,6 +85,7 @@ class AudioReader(BaseReader):
         text: str,
         source: str = "transcript",
         file_hash: str | None = None,
+        extra_metadata: dict[str, Any] | None = None,
     ) -> Document:
         """
         Enrich a document with metadata from the image file.
@@ -115,7 +116,7 @@ class AudioReader(BaseReader):
             )
             pass
 
-        metadata = {
+        metadata: dict[str, Any] = {
             "file_path": str(file_path),
             "file_name": filename,
             "filename": filename,
@@ -133,10 +134,134 @@ class AudioReader(BaseReader):
             path=file_path if file_hash is None else None,
         )
 
+        if extra_metadata:
+            metadata.update(extra_metadata)
+
         return Document(
             text_resource=MediaResource(text=text, mimetype=mimetype),
             metadata=metadata,
         )
+
+    @staticmethod
+    def _format_timestamp(seconds: float | int) -> str:
+        """
+        Format seconds into HH:MM:SS format.
+
+        Args:
+            seconds (float | int): The number of seconds to format.
+
+        Returns:
+            str: The formatted timestamp in HH:MM:SS format.
+        """
+        total_seconds = int(seconds)
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        secs = total_seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+    @staticmethod
+    def _ends_with_punctuation(text: str) -> bool:
+        """
+        Return True if text ends with sentence-ending punctuation.
+
+        Args:
+            text (str): The text to check.
+
+        Returns:
+            bool: True if text ends with '.', '!', or '?', False otherwise.
+        """
+        return text.strip().endswith((".", "!", "?"))
+
+    def _merge_segments_into_sentences(
+        self, segments: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """
+        Merge whisper segments into full sentences based on trailing punctuation.
+        Each merged item keeps earliest start and latest end.
+
+        Args:
+            segments (list[dict[str, Any]]): The list of segments to merge.
+
+        Returns:
+            list[dict[str, Any]]: The merged list of segments.
+        """
+
+        merged: list[dict[str, Any]] = []
+        current: dict[str, Any] | None = None
+
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            seg_text = seg.get("text", "")
+            if not isinstance(seg_text, str) or not seg_text.strip():
+                continue
+
+            if current is None:
+                current = {
+                    "start": seg.get("start"),
+                    "end": seg.get("end"),
+                    "text": seg_text.strip(),
+                }
+            else:
+                current["end"] = seg.get("end", current.get("end"))
+                current_text = current.get("text", "")
+                current["text"] = f"{current_text} {seg_text.strip()}".strip()
+
+            if self._ends_with_punctuation(seg_text):
+                merged.append(current)
+                current = None
+
+        if current:
+            current_text = current.get("text")
+            if isinstance(current_text, str) and current_text.strip():
+                merged.append(current)
+
+        return merged
+
+    def _build_segment_documents(
+        self, result: dict[str, Any], file_path: Path, file_hash: str | None
+    ) -> list[Document]:
+        """
+        Create one Document per full sentence by merging segments until punctuation.
+        Timing metadata reflects the merged start/end.
+        """
+
+        segments = result.get("segments") if isinstance(result, dict) else None
+        if not isinstance(segments, list):
+            fallback = result.get("text") if isinstance(result, dict) else ""
+            if isinstance(fallback, str) and fallback.strip():
+                return [self._enrich_document(file_path, fallback, file_hash=file_hash)]
+            return []
+
+        sentence_segments = self._merge_segments_into_sentences(segments)
+        docs: list[Document] = []
+        for idx, seg in enumerate(sentence_segments):
+            seg_text = seg.get("text", "")
+            if not isinstance(seg_text, str) or not seg_text.strip():
+                continue
+            start = seg.get("start")
+            end = seg.get("end")
+            extra: dict[str, Any] = {"sentence_index": idx}
+            if isinstance(start, (int, float)):
+                extra["start_ts"] = self._format_timestamp(start)
+                extra["start_seconds"] = float(start)
+            if isinstance(end, (int, float)):
+                extra["end_ts"] = self._format_timestamp(end)
+                extra["end_seconds"] = float(end)
+            docs.append(
+                self._enrich_document(
+                    file_path,
+                    seg_text,
+                    file_hash=file_hash,
+                    extra_metadata=extra,
+                )
+            )
+
+        if not docs:
+            fallback = result.get("text") if isinstance(result, dict) else ""
+            if isinstance(fallback, str) and fallback.strip():
+                return [self._enrich_document(file_path, fallback, file_hash=file_hash)]
+        return docs
 
     def load_data(self, file: str | Path, **kwargs) -> list[Document]:
         """
@@ -162,7 +287,6 @@ class AudioReader(BaseReader):
         model = self._load_model()
         audio = self._load_audio(file_path)
         self.result = self._transcribe_audio(audio, model)
-        text = self.result.get("text", "")
-        if self.result is None or not isinstance(text, str):
+        if self.result is None:
             return []
-        return [self._enrich_document(file_path, text, file_hash=file_hash)]
+        return self._build_segment_documents(self.result, file_path, file_hash)
