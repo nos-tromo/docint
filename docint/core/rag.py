@@ -1380,6 +1380,126 @@ class RAG:
         )
         yield normalized
 
+    def list_documents(self) -> list[dict[str, Any]]:
+        """
+        List all documents in the current collection by scanning all points.
+
+        Returns:
+            list[dict[str, Any]]: A list of document metadata dictionaries.
+        """
+        if not self.qdrant_collection:
+            return []
+
+        docs_map: dict[str, dict[str, Any]] = {}
+        offset = None
+
+        while True:
+            try:
+                points, offset = self.qdrant_client.scroll(
+                    collection_name=self.qdrant_collection,
+                    limit=256,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to scroll collection '{}': {}", self.qdrant_collection, exc
+                )
+                break
+
+            if not points:
+                break
+
+            for point in points:
+                payload = getattr(point, "payload", {}) or {}
+                origin = payload.get("origin") or {}
+                filename = (
+                    origin.get("filename")
+                    or payload.get("file_name")
+                    or payload.get("filename")
+                    or payload.get("file_path")
+                )
+                if not filename:
+                    continue
+
+                if filename not in docs_map:
+                    docs_map[filename] = {
+                        "filename": filename,
+                        "mimetype": (
+                            payload.get("filetype")
+                            or payload.get("mimetype")
+                            or payload.get("file_type")
+                            or origin.get("filetype")
+                            or payload.get("file_format")
+                            or origin.get("mimetype")
+                        ),
+                        "file_hash": payload.get("file_hash")
+                        or origin.get("file_hash"),
+                        "node_count": 0,
+                        "pages": set(),
+                        "max_rows": 0,
+                        "max_duration": 0.0,
+                    }
+
+                entry = docs_map[filename]
+                entry["node_count"] += 1
+
+                page = (
+                    payload.get("page")
+                    or payload.get("page_number")
+                    or origin.get("page_no")
+                )
+
+                # Try getting page from doc_items (Docling structure)
+                if page is None:
+                    doc_items = payload.get("doc_items")
+                    if isinstance(doc_items, list):
+                        for item in doc_items:
+                            if isinstance(item, dict):
+                                prov = item.get("prov")
+                                if isinstance(prov, list):
+                                    for p in prov:
+                                        if isinstance(p, dict) and "page_no" in p:
+                                            page = p["page_no"]
+                                            break
+                            if page is not None:
+                                break
+
+                if page is not None:
+                    try:
+                        entry["pages"].add(int(page))
+                    except (ValueError, TypeError):
+                        entry["pages"].add(page)
+
+                # Table rows logic
+                table_info = payload.get("table")
+                if isinstance(table_info, dict):
+                    rows = table_info.get("n_rows")
+                    if isinstance(rows, (int, float)):
+                        entry["max_rows"] = max(entry["max_rows"], int(rows))
+
+                # Audio duration logic
+                end_sec = payload.get("end_seconds") or (
+                    payload.get("extra_metadata") or {}
+                ).get("end_seconds")
+                if isinstance(end_sec, (int, float)):
+                    entry["max_duration"] = max(entry["max_duration"], float(end_sec))
+
+            if offset is None:
+                break
+
+        results = []
+        for _, data in docs_map.items():
+            data["page_count"] = len(data.pop("pages"))
+            if data["max_rows"] == 0:
+                del data["max_rows"]
+            if data["max_duration"] == 0.0:
+                del data["max_duration"]
+            results.append(data)
+
+        return sorted(results, key=lambda x: str(x["filename"]))
+
     def get_collection_ie(self, refresh: bool = False) -> list[dict[str, Any]]:
         """
         Fetch all nodes from the current collection and return their IE metadata.
