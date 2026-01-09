@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable, Tuple
 
+import pandas as pd
 import requests
 import streamlit as st
 from loguru import logger
@@ -1074,6 +1075,15 @@ def render_inspector() -> None:
 
         st.dataframe(display_data, width="stretch", hide_index=True)
 
+        # Download button
+        csv_data = pd.DataFrame(display_data).to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="📥 Download Overview (.csv)",
+            data=csv_data,
+            file_name=f"inspector_{st.session_state.selected_collection}.csv",
+            mime="text/csv",
+        )
+
         for doc in docs:
             mimetype = doc.get("mimetype") or "unknown"
             with st.expander(f"📄 {doc['filename']} ({mimetype})"):
@@ -1096,6 +1106,9 @@ def render_inspector() -> None:
 
                 c2.metric("Nodes", doc.get("node_count", 0))
                 c3.write(f"**Mimetype:** {mimetype}")
+
+                if doc.get("entity_types"):
+                    st.caption(f"Entities: {', '.join(doc['entity_types'])}")
 
                 st.code(doc.get("file_hash"), language="text")
 
