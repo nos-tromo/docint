@@ -1440,10 +1440,20 @@ class RAG:
                         "pages": set(),
                         "max_rows": 0,
                         "max_duration": 0.0,
+                        "entity_types": set(),
                     }
 
                 entry = docs_map[filename]
                 entry["node_count"] += 1
+
+                # Extract entities from payload
+                ents = payload.get("entities") or []
+                if isinstance(ents, list):
+                    for e in ents:
+                        if isinstance(e, dict):
+                            t = e.get("type", e.get("label"))
+                            if t:
+                                entry["entity_types"].add(t)
 
                 page = (
                     payload.get("page")
@@ -1492,6 +1502,11 @@ class RAG:
         results = []
         for _, data in docs_map.items():
             data["page_count"] = len(data.pop("pages"))
+            data["entity_types"] = sorted(list(data.get("entity_types", set())))
+            if "entity_types" in data and isinstance(data["entity_types"], set):
+                # Fallback if get didn't return set but pop of set or something (redundant with line above but safer)
+                pass
+
             if data["max_rows"] == 0:
                 del data["max_rows"]
             if data["max_duration"] == 0.0:
