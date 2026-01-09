@@ -1018,6 +1018,92 @@ def render_chat() -> None:
                 st.error(f"Error: {e}")
 
 
+def render_inspector() -> None:
+    """
+    Render the collection inspector.
+    """
+    st.header("Collection Inspector")
+    if not st.session_state.selected_collection:
+        st.info("Please select a collection to inspect.")
+        return
+
+    st.caption(f"Inspecting Collection: {st.session_state.selected_collection}")
+
+    if st.button("Load Documents", type="primary"):
+        with st.spinner("Fetching document list..."):
+            try:
+                resp = requests.get(f"{BACKEND_HOST}/collections/documents")
+                if resp.status_code == 200:
+                    st.session_state.inspector_docs = resp.json().get("documents", [])
+                else:
+                    st.error(f"Failed to fetch documents: {resp.text}")
+            except Exception as e:
+                st.error(f"Error fetching documents: {e}")
+
+    docs = st.session_state.get("inspector_docs", [])
+    if docs:
+        st.metric("Total Documents", len(docs))
+
+        # Convert to display data
+        display_data = []
+        for d in docs:
+            entry = {
+                "Filename": d["filename"],
+                "Nodes": d.get("node_count", 0),
+                "Type": d.get("mimetype") or "—",
+            }
+            # Add dynamic metric column
+            if "max_rows" in d:
+                entry["Length"] = f"{d['max_rows']} rows"
+            elif "max_duration" in d:
+                # Format duration
+                total_seconds = int(d["max_duration"])
+                hours = total_seconds // 3600
+                mins = (total_seconds % 3600) // 60
+                secs = total_seconds % 60
+
+                if hours > 0:
+                    entry["Length"] = f"{hours}h {mins}m {secs}s"
+                else:
+                    entry["Length"] = f"{mins}m {secs}s"
+            elif d.get("page_count", 0) > 0:
+                entry["Length"] = f"{d['page_count']} pages"
+            else:
+                entry["Length"] = "—"
+            display_data.append(entry)
+
+        st.dataframe(display_data, width="stretch", hide_index=True)
+
+        for doc in docs:
+            mimetype = doc.get("mimetype") or "unknown"
+            with st.expander(f"📄 {doc['filename']} ({mimetype})"):
+                c1, c2, c3 = st.columns(3)
+
+                # Show relevant metrics
+                if "max_rows" in doc:
+                    c1.metric("Rows", doc["max_rows"])
+                elif "max_duration" in doc:
+                    total_seconds = int(doc["max_duration"])
+                    hours = total_seconds // 3600
+                    mins = (total_seconds % 3600) // 60
+                    secs = total_seconds % 60
+                    if hours > 0:
+                        c1.metric("Duration", f"{hours}h {mins}m {secs}s")
+                    else:
+                        c1.metric("Duration", f"{mins}m {secs}s")
+                else:
+                    c1.metric("Pages", doc.get("page_count", 0))
+
+                c2.metric("Nodes", doc.get("node_count", 0))
+                c3.write(f"**Mimetype:** {mimetype}")
+
+                st.code(doc.get("file_hash"), language="text")
+
+                if doc.get("file_hash"):
+                    link = f"{BACKEND_PUBLIC_HOST}/sources/preview?collection={st.session_state.selected_collection}&file_hash={doc['file_hash']}"
+                    st.markdown(f"[View Original File]({link})")
+
+
 def main() -> None:
     """
     Main function to run the Streamlit app.
@@ -1025,8 +1111,8 @@ def main() -> None:
     setup_app()
     render_sidebar()
 
-    tab_chat, tab_ingest, tab_analysis = st.tabs(
-        ["💬 Chat", "📥 Ingest", "📊 Analysis"]
+    tab_chat, tab_ingest, tab_analysis, tab_inspector = st.tabs(
+        ["💬 Chat", "📥 Ingest", "📊 Analysis", "🔍 Inspector"]
     )
 
     with tab_chat:
@@ -1037,6 +1123,9 @@ def main() -> None:
 
     with tab_analysis:
         render_analysis()
+
+    with tab_inspector:
+        render_inspector()
 
 
 # ---- Streamlit CLI wrapper ----------------------------------------------- #
