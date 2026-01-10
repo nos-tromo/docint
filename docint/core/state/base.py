@@ -7,12 +7,12 @@ Base = declarative_base()
 
 
 # --- Session maker ---
-def _make_session_maker(db_url: str = "sqlite:///rag_sessions.db") -> sessionmaker:
+def _make_session_maker(db_url: str) -> sessionmaker:
     """
     Creates a new SQLAlchemy session maker.
 
     Args:
-        db_url (str, optional): The database URL. Defaults to "sqlite:///rag_sessions.db".
+        db_url (str): The database URL.
 
     Returns:
         sessionmaker: The SQLAlchemy session maker.

@@ -88,6 +88,15 @@ class RAGConfig:
     sentence_splitter_chunk_size: int
 
 
+@dataclass(frozen=True)
+class SessionConfig:
+    """
+    Dataclass for session configuration.
+    """
+
+    session_store: str
+
+
 def load_host_env() -> HostConfig:
     """
     Loads host configuration from environment variables or defaults.
@@ -291,6 +300,21 @@ def load_rag_env() -> RAGConfig:
                 "SENTENCE_SPLITTER_CHUNK_SIZE", default_sentence_splitter_chunk_size
             )
         ),
+    )
+
+
+def load_session_env() -> SessionConfig:
+    """
+    Loads session configuration from environment variables or defaults.
+
+    Returns:
+        SessionConfig: Dataclass containing session configuration.
+        - session_store (str): The session store configuration. Default is "sqlite:///sessions.db".
+    """
+    default_session_store = "sqlite:///sessions.db"
+
+    return SessionConfig(
+        session_store=os.getenv("SESSION_STORE", default_session_store)
     )
 
 

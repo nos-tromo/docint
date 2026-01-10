@@ -424,6 +424,27 @@ def get_collection_ie() -> dict[str, list[dict]]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/collections/documents", tags=["Query"])
+def get_collection_documents() -> dict[str, list[dict]]:
+    """
+    Get list of documents in the currently selected collection.
+
+    Returns:
+        dict[str, list[dict]]: A dictionary containing the list of documents.
+
+    Raises:
+        HTTPException: If no collection is selected or an error occurs.
+    """
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+    try:
+        docs = rag.list_documents()
+        return {"documents": docs}
+    except Exception as e:
+        logger.error(f"Error fetching collection documents: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/sessions/list", response_model=SessionListOut, tags=["Sessions"])
 def list_sessions() -> dict[str, list[dict]]:
     """
