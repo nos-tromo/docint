@@ -6,7 +6,7 @@ services:
     profiles: ["cpu"]
     build:
       context: .
-      dockerfile: Dockerfile.backend
+      dockerfile: Dockerfile.backend.cpu
     ports:
       - "8000:8000"
     environment:
@@ -43,7 +43,7 @@ services:
     profiles: ["gpu"]
     build:
       context: .
-      dockerfile: Dockerfile.backend
+      dockerfile: Dockerfile.backend.cuda
     ports:
       - "8000:8000"
     environment:
