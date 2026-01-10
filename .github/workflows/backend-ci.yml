@@ -47,6 +47,9 @@ jobs:
   build-backend-image:
     needs: test-backend
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dockerfile: [Dockerfile.backend.cpu, Dockerfile.backend.cuda]
     steps:
       - name: Free Disk Space
         run: |
@@ -65,8 +68,8 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: Dockerfile.backend.cpu
+          file: ${{ matrix.dockerfile }}
           push: false
           tags: docint-backend:ci-${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.dockerfile }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.dockerfile }}
