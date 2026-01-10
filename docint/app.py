@@ -350,6 +350,8 @@ def setup_app() -> None:
     if "chat_running" not in st.session_state:
         st.session_state.chat_running = False
 
+    st.caption(f"Current collection: {st.session_state.selected_collection}")
+
 
 def render_sidebar() -> None:
     """
@@ -490,6 +492,7 @@ def render_ingestion() -> None:
         JSONDecodeError: If the response from the backend cannot be decoded.
     """
     st.header("Ingestion")
+    st.info("Upload and ingest documents into your collection.")
 
     if "ingest_summary" not in st.session_state:
         st.session_state.ingest_summary = None
@@ -793,7 +796,7 @@ def render_analysis() -> None:
                                 st.error("Failed to fetch collection-wide IE data.")
 
                         st.download_button(
-                            label="📥 Download Analysis (.txt)",
+                            label="📥 Download analysis (.txt)",
                             data=analysis_text,
                             file_name=f"analysis_{st.session_state.selected_collection}.txt",
                             mime="text/plain",
@@ -816,7 +819,7 @@ def render_chat() -> None:
         st.info("Please select or create a collection from the sidebar to start.")
         return
 
-    st.caption(f"Current Collection: {st.session_state.selected_collection}")
+    st.info("Ask questions about your documents. The more specific, the better!")
 
     # Download button for chat
     if st.session_state.messages:
@@ -827,7 +830,7 @@ def render_chat() -> None:
                 chat_text += f"REASONING: {msg['reasoning']}\n\n"
 
         st.download_button(
-            label="📥 Download Chat (.txt)",
+            label="📥 Download chat (.txt)",
             data=chat_text,
             file_name=f"chat_{st.session_state.session_id or 'session'}.txt",
             mime="text/plain",
@@ -1041,13 +1044,12 @@ def render_inspector() -> None:
     Render the collection inspector.
     """
     st.header("Collection Inspector")
+    st.info("View detailed information about the documents in your collection.")
     if not st.session_state.selected_collection:
         st.info("Please select a collection to inspect.")
         return
 
-    st.caption(f"Inspecting Collection: {st.session_state.selected_collection}")
-
-    if st.button("Load Documents", type="primary"):
+    if st.button("Load documents"):
         with st.spinner("Fetching document list..."):
             try:
                 resp = requests.get(f"{BACKEND_HOST}/collections/documents")
@@ -1095,7 +1097,7 @@ def render_inspector() -> None:
         # Download button
         csv_data = pd.DataFrame(display_data).to_csv(index=False).encode("utf-8")
         st.download_button(
-            label="📥 Download Overview (.csv)",
+            label="📥 Download overview (.csv)",
             data=csv_data,
             file_name=f"inspector_{st.session_state.selected_collection}.csv",
             mime="text/csv",
@@ -1162,7 +1164,7 @@ def main() -> None:
     render_sidebar()
 
     tab_chat, tab_ingest, tab_analysis, tab_inspector = st.tabs(
-        ["💬 Chat", "📥 Ingest", "📊 Analysis", "🔍 Inspector"]
+        ["💬 Chat", "📥 Ingest", "📊 Analyse", "🔍 Inspect"]
     )
 
     with tab_chat:
