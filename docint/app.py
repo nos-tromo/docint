@@ -358,9 +358,6 @@ def render_sidebar() -> None:
     Render the sidebar controls.
     """
     with st.sidebar:
-        # Add top padding so sidebar content starts lower
-        st.markdown("<div style='height:59px'></div>", unsafe_allow_html=True)
-
         # Collection Selection
         try:
             resp = requests.get(f"{BACKEND_HOST}/collections/list")
