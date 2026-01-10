@@ -3,6 +3,9 @@ from __future__ import annotations
 import gc
 import os
 import re
+import shutil
+import stat
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -985,6 +988,66 @@ class RAG:
         except Exception as e:
             logger.warning("FS fallback list_collections failed: {}", e)
             return []
+
+    def delete_collection(self, name: str) -> None:
+        """
+        Delete a collection by name from Qdrant and clean up source files.
+
+        Args:
+            name (str): Name of the collection to delete.
+
+        Raises:
+            ValueError: If the name is empty.
+        """
+        if not name or not name.strip():
+            raise ValueError("Collection name cannot be empty")
+
+        # 1. Delete from Qdrant API
+        try:
+            self.qdrant_client.delete_collection(name)
+            logger.info(f"Deleted collection '{name}' from Qdrant.")
+        except Exception as e:
+            logger.error(f"Failed to delete collection '{name}' via API: {e}")
+
+        # 2. Cleanup source files
+        try:
+            src_path = self.qdrant_src_dir / name
+            if src_path.exists():
+
+                def on_error(func: Callable, path: str, _exc_info: Any) -> None:
+                    """
+                    Error handler for shutil.rmtree.
+
+                    Attempts to fix permissions/flags and retry operation.
+
+                    Args:
+                        func (Callable): The function that raised the exception.
+                        path (str): The path name passed to function.
+                        _exc_info (Any): The exception information returned by sys.exc_info().
+                    """
+                    try:
+                        # 1. Try adding write permission
+                        os.chmod(path, stat.S_IWUSR | stat.S_IREAD)
+
+                        # 2. Try clearing flags (macOS/BSD specific)
+                        if sys.platform == "darwin":
+                            try:
+                                # Clear all file flags (uchg, etc.)
+                                os.chflags(path, 0)
+                            except (AttributeError, OSError):
+                                pass
+
+                        # 3. Retry the failed operation
+                        func(path)
+                    except Exception as e:
+                        logger.warning(f"Failed to force delete {path}: {e}")
+
+                shutil.rmtree(path=src_path, onerror=on_error)
+                logger.info(f"Deleted source directory for collection '{name}'.")
+        except Exception as e:
+            logger.error(
+                f"Failed to delete source directory for collection '{name}': {e}"
+            )
 
     def select_collection(self, name: str) -> None:
         """
