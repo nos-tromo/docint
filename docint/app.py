@@ -1117,6 +1117,26 @@ def render_inspector() -> None:
                     st.markdown(f"[View Original File]({link})")
 
 
+def render_footer() -> None:
+    """
+    Render a footer with a GitHub link.
+    """
+    st.divider()
+    st.markdown(
+        """
+        <div style="text-align: center; color: #888; padding: 10px;">
+            <p>
+                Powered by 
+                <a href="https://github.com/nos-tromo/docint" target="_blank" style="color: inherit; text-decoration: none; font-weight: bold;">
+                    DocInt
+                </a>
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def main() -> None:
     """
     Main function to run the Streamlit app.
@@ -1139,6 +1159,8 @@ def main() -> None:
 
     with tab_inspector:
         render_inspector()
+
+    render_footer()
 
 
 # ---- Streamlit CLI wrapper ----------------------------------------------- #
