@@ -23,6 +23,7 @@ def session_manager() -> Generator[SessionManager, None, None]:
 
     rag_mock = MagicMock()
     rag_mock.index = None  # Simulate no index initially
+    rag_mock.qdrant_collection = "test_collection"
 
     sm = SessionManager(rag=rag_mock)
     sm._SessionMaker = SessionMaker

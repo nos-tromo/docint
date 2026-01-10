@@ -432,6 +432,23 @@ def render_sidebar() -> None:
                         type=b_type,
                     ):
                         if st.session_state.session_id != s["id"]:
+                            # Switch collection if needed
+                            clicked_col = s.get("collection")
+                            if (
+                                clicked_col
+                                and clicked_col != st.session_state.selected_collection
+                            ):
+                                r = requests.post(
+                                    f"{BACKEND_HOST}/collections/select",
+                                    json={"name": clicked_col},
+                                )
+                                if r.status_code == 200:
+                                    st.session_state.selected_collection = clicked_col
+                                else:
+                                    st.error(
+                                        f"Failed to switch to collection '{clicked_col}'"
+                                    )
+
                             st.session_state.session_id = s["id"]
                             # Load History
                             h_resp = requests.get(

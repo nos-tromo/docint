@@ -19,9 +19,10 @@ class Conversation(Base):
     created_at = Column(
         DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
     )
+    collection_name = Column(String, nullable=True)
     rolling_summary = Column(Text, default="", nullable=False)
     turns = relationship(
-        "Turn",
+        argument="Turn",
         back_populates="conversation",
         cascade="all, delete-orphan",
         order_by="Turn.idx",

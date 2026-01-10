@@ -35,6 +35,7 @@ from docint.utils.env_cfg import (
     load_ollama_env,
     load_path_env,
     load_rag_env,
+    load_session_env,
 )
 from docint.utils.model_cfg import resolve_model_path
 from docint.utils.storage import stage_sources_to_qdrant
@@ -56,6 +57,9 @@ class RAG:
     # --- Path setup ---
     data_dir: Path | None = field(default=None, init=False)
     hf_hub_cache: Path | None = field(default=None, init=False)
+
+    # --- Session config ---
+    session_store: str = field(default="", init=False)
 
     # --- Models ---
     embed_model_id: str | None = field(default=None, init=False)
@@ -174,7 +178,8 @@ class RAG:
         with open(self.summarize_prompt_path, "r", encoding="utf-8") as f:
             self.summarize_prompt = f.read()
 
-        # --- Session manager ---
+        # --- Session config ---
+        self.session_store = load_session_env().session_store
         self.sessions = SessionManager(self)
 
     @property
@@ -1223,7 +1228,7 @@ class RAG:
         return self._normalize_response_data(prompt, result)
 
     # --- Session integration ---
-    def init_session_store(self, db_url: str = "sqlite:///rag_sessions.db") -> None:
+    def init_session_store(self, db_url: str) -> None:
         """
         Initialize the relational session store via SessionManager.
 
@@ -1232,7 +1237,7 @@ class RAG:
         """
         if self.sessions is None:
             self.sessions = SessionManager(self)
-        self.sessions.init_session_store(db_url)
+        self.sessions.init_session_store(db_url=db_url)
 
     def reset_session_state(self) -> None:
         """

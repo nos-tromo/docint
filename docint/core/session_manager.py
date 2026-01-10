@@ -19,11 +19,11 @@ from llama_index.core.schema import BaseNode
 from loguru import logger
 from sqlalchemy.orm import Session
 
+from docint.agents.context import TurnContext as AgentTurnContext
 from docint.core.state.base import _make_session_maker
 from docint.core.state.citation import Citation
 from docint.core.state.conversation import Conversation
 from docint.core.state.turn import Turn
-from docint.agents.context import TurnContext as AgentTurnContext
 
 if TYPE_CHECKING:
     from docint.core.rag import RAG
@@ -40,20 +40,29 @@ class SessionManager:
         default=None, init=False
     )
     chat_memory: ChatMemoryBuffer | None = field(default=None, init=False)
-    session_id: str | None = field(default=None, init=False)
     agent_contexts: dict[str, AgentTurnContext] = field(
         default_factory=dict, init=False
     )
     _SessionMaker: Any | None = field(default=None, init=False, repr=False)
+    session_id: str | None = field(default=None, init=False)
+    session_store: str = field(default="", init=False)
 
-    def init_session_store(self, db_url: str = "sqlite:///rag_sessions.db") -> None:
+    def __post_init__(self) -> None:
+        """
+        Post-initialization to set up the session store.
+        """
+        self.session_store = self.rag.session_store
+
+    def init_session_store(self, db_url: str | None = None) -> None:
         """
         Initialize the session store.
 
         Args:
-            db_url (str, optional): The database URL. Defaults to "sqlite:///rag_sessions.db".
+           db_url (str | None): Optional database URL to override default.
         """
-        self._SessionMaker = _make_session_maker(db_url)
+        if db_url:
+            self.session_store = db_url
+        self._SessionMaker = _make_session_maker(self.session_store)
 
     def reset_runtime(self) -> None:
         """
@@ -356,6 +365,8 @@ class SessionManager:
         conv = session.get(Conversation, session_id)
         if conv is None:
             conv = Conversation(id=session_id)
+            if self.rag.qdrant_collection:
+                conv.collection_name = cast(Any, self.rag.qdrant_collection)
             session.add(conv)
             session.commit()
         return conv
@@ -561,6 +572,7 @@ class SessionManager:
                         "id": c.id,
                         "created_at": c.created_at.isoformat(),
                         "title": title,
+                        "collection": c.collection_name,
                     }
                 )
             return results
