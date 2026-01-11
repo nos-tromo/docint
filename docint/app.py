@@ -369,10 +369,33 @@ def render_sidebar() -> None:
                     index = cols.index(st.session_state.selected_collection)
 
                 selected = st.selectbox(
-                    "Collection",
-                    [col.strip() for col in cols],
+                    label="Collection",
+                    options=[col.strip() for col in cols],
                     index=index if cols else None,
                 )
+
+                if selected:
+                    with st.popover("Delete collection"):
+                        st.write(
+                            f"Are you sure you want to delete collection **{selected}**?"
+                        )
+                        st.warning("This action cannot be undone.")
+                        if st.button("Yes, delete", type="primary"):
+                            try:
+                                r = requests.delete(
+                                    f"{BACKEND_HOST}/collections/{selected}"
+                                )
+                                if r.status_code == 200:
+                                    if st.session_state.selected_collection == selected:
+                                        st.session_state.selected_collection = None
+                                        st.session_state.messages = []
+                                        st.session_state.session_id = None
+                                    st.success(f"Collection {selected} deleted")
+                                    st.rerun()
+                                else:
+                                    st.error(f"Failed to delete collection: {r.text}")
+                            except Exception as e:
+                                st.error(f"Error deleting collection: {e}")
 
                 if selected and selected != st.session_state.selected_collection:
                     # Notify backend of selection

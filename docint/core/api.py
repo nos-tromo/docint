@@ -246,6 +246,28 @@ def collections_select(payload: SelectCollectionIn) -> dict[str, bool | str]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.delete("/collections/{name}", tags=["Collections"])
+def collections_delete(name: str) -> dict[str, bool]:
+    """
+    Delete a collection.
+
+    Args:
+        name (str): The name of the collection to delete.
+
+    Returns:
+        dict[str, bool]: A dictionary indicating success.
+
+    Raises:
+        HTTPException: If an error occurs while deleting the collection.
+    """
+    try:
+        rag.delete_collection(name)
+        return {"ok": True}
+    except Exception as e:
+        logger.error("HTTPException: Error deleting collection: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/query", response_model=QueryOut, tags=["Query"])
 def query(payload: QueryIn) -> dict[str, list[dict] | str]:
     """
