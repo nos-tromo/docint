@@ -20,6 +20,7 @@ dependencies = [
   "llama-index-readers-docling>=0.4.0",
   "llama-index-vector-stores-qdrant>=0.7.1",
   "loguru>=0.7.2",
+  "numba>=0.63.1",
   "numpy>=1.26,<2.4",
   "openai-whisper>=20250625",
   "opencv-python-headless>=4.11.0.86",

@@ -11,6 +11,8 @@ updates:
     ignore:
       - dependency-name: "pillow"
         versions: [">= 12.0.0"]
+      - dependency-name: "numpy"
+        versions: [">= 2.4.0"]
 
   - package-ecosystem: "docker"
     directory: "/"
