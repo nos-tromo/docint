@@ -32,8 +32,6 @@ jobs:
       uses: github/codeql-action/init@v4
       with:
         languages: ${{ matrix.language }}
-        # We handle dependency installation manually below for better accuracy
-        setup-python-dependencies: false
 
     # Setup Python environment (matching backend-ci.yml)
     - uses: actions/setup-python@v6
