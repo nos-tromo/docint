@@ -349,8 +349,8 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                 elif isinstance(chunk, dict):
                     yield f"data: {json.dumps(chunk)}\n\n"
         except Exception as e:
-            logger.error(f"Stream error: {e}")
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            logger.exception("Stream error during SSE generation")
+            yield f"data: {json.dumps({'error': 'Internal server error'})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -420,7 +420,7 @@ async def summarize_stream() -> StreamingResponse:
                     yield f"data: {json.dumps(chunk)}\n\n"
         except Exception as e:
             logger.error(f"Stream error: {e}")
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            yield f"data: {json.dumps({'error': 'An internal error occurred during streaming.'})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -830,7 +830,7 @@ async def ingest_upload(
                 logger.error("Error saving uploaded file {}: {}", filename, exc)
                 yield _format_sse(
                     "error",
-                    {"message": f"Failed to save {filename}: {exc}"},
+                    {"message": f"Failed to save {filename}"},
                 )
                 return
 
@@ -892,7 +892,7 @@ async def ingest_upload(
             logger.error("Error during streamed ingestion: {}", exc)
             yield _format_sse(
                 "error",
-                {"message": f"Ingestion failed: {exc}"},
+                {"message": "Ingestion failed"},
             )
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
