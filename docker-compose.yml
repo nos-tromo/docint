@@ -7,8 +7,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend.cpu
-    ports:
-      - "8000:8000"
     environment:
       - DATA_PATH=/app/data
       - LOG_PATH=/app/.logs/backend-cpu.log
@@ -44,8 +42,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend.cuda
-    ports:
-      - "8000:8000"
     environment:
       - DATA_PATH=/app/data/in
       - LOG_PATH=/app/.logs/backend-gpu.log
@@ -92,7 +88,7 @@ services:
       - "8501:8501"
     environment:
       - BACKEND_HOST=http://backend-net:8000
-      - BACKEND_PUBLIC_HOST=http://localhost:8000
+      - BACKEND_PUBLIC_HOST=http://backend-net:8000
       - LOG_PATH=/app/.logs/frontend.log
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
     volumes:
@@ -108,8 +104,6 @@ services:
   ollama:
     profiles: ["cpu"]
     image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
     volumes:
       - ollama-models:/root/.ollama
     healthcheck:
@@ -128,8 +122,6 @@ services:
   ollama-gpu:
     profiles: ["gpu"]
     image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
     volumes:
