@@ -104,7 +104,8 @@ def load_host_env() -> HostConfig:
     Returns:
         HostConfig: Dataclass containing host configuration.
         - backend_host (str): The backend host URL.
-        - backend_public_host (str): The public backend host URL.
+        - backend_public_host (str): The public backend host URL. Required to enable document preview features 
+            in the Docker environment.
         - ollama_host (str): The Ollama host URL.
         - qdrant_host (str): The Qdrant host URL.
         - cors_allowed_origins (str): Comma-separated list of allowed CORS origins.
