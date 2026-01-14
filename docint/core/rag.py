@@ -458,6 +458,53 @@ class RAG:
 
         return chosen
 
+    def _create_gen_model(self, thinking: bool) -> Ollama:
+        """
+        Helper to create an Ollama model instance with specific settings.
+
+        Args:
+            thinking (bool): Whether to enable reasoning/thinking tokens.
+
+        Returns:
+            Ollama: The initialized model.
+
+        Raises:
+            ValueError: If required configuration is missing.
+        """
+        if self.gen_model_id is None:
+            raise ValueError("gen_model_id cannot be None")
+        if self.ollama_ctx_window is None:
+            raise ValueError("ollama_ctx_window cannot be None for Ollama model")
+        if self.ollama_host is None:
+            raise ValueError("ollama_host cannot be None for Ollama model")
+
+        # Ensure options dict exists
+        if self.ollama_options is None:
+            self.ollama_options = {}
+
+        # Consistent seed behavior
+        if self.ollama_seed is not None:
+            self.ollama_options["seed"] = 42
+
+        # Ensure ollama_host is clean (no trailing slash)
+        ollama_host = self.ollama_host.rstrip("/")
+
+        model = Ollama(
+            model=self.gen_model_id,
+            base_url=ollama_host,
+            temperature=self.ollama_temperature,
+            context_window=self.ollama_ctx_window,
+            request_timeout=self.ollama_request_timeout,
+            thinking=thinking,
+            additional_kwargs=self.ollama_options,
+        )
+        logger.info(
+            "Initializing generator model: {} (thinking={})",
+            self.gen_model_id,
+            thinking,
+        )
+        return model
+
     @property
     def gen_model(self) -> Ollama:
         """
@@ -470,30 +517,7 @@ class RAG:
             ValueError: If gen_model_id, ollama_ctx_window, or ollama_host is None.
         """
         if self._gen_model is None:
-            if self.gen_model_id is None:
-                raise ValueError("gen_model_id cannot be None")
-            if self.ollama_ctx_window is None:
-                raise ValueError("ollama_ctx_window cannot be None for Ollama model")
-            if self.ollama_host is None:
-                raise ValueError("ollama_host cannot be None for Ollama model")
-            if self.ollama_options is None:
-                self.ollama_options = {}
-            if self.ollama_seed is not None:
-                self.ollama_options["seed"] = 42
-
-            # Ensure ollama_host is clean (no trailing slash)
-            ollama_host = self.ollama_host.rstrip("/")
-
-            self._gen_model = Ollama(
-                model=self.gen_model_id,
-                base_url=ollama_host,
-                temperature=self.ollama_temperature,
-                context_window=self.ollama_ctx_window,
-                request_timeout=self.ollama_request_timeout,
-                thinking=self.ollama_thinking,
-                additional_kwargs=self.ollama_options,
-            )
-            logger.info("Initializing generator model: {}", self.gen_model_id)
+            self._gen_model = self._create_gen_model(thinking=self.ollama_thinking)
         return self._gen_model
 
     @property
@@ -599,9 +623,14 @@ class RAG:
             logger.error("ValueError: data_dir cannot be None for ingestion pipeline.")
             raise ValueError("data_dir cannot be None for ingestion pipeline.")
 
+        ie_model = None
+        if self.ie_enabled:
+            # Disable thinking for IE tasks to avoid bottlenecks
+            ie_model = self._create_gen_model(thinking=False)
+
         return DocumentIngestionPipeline(
             data_dir=self.data_dir,
-            ie_model=self.gen_model if self.ie_enabled else None,
+            ie_model=ie_model,
             device=self.device,
             progress_callback=progress_callback,
         )

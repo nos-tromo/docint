@@ -348,7 +348,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                     yield f"data: {json.dumps({'token': chunk})}\n\n"
                 elif isinstance(chunk, dict):
                     yield f"data: {json.dumps(chunk)}\n\n"
-        except Exception as e:
+        except Exception:
             logger.exception("Stream error during SSE generation")
             yield f"data: {json.dumps({'error': 'Internal server error'})}\n\n"
 
