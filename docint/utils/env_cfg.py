@@ -29,6 +29,7 @@ class InformationExtractionConfig:
 
     ie_enabled: bool
     ie_max_chars: int
+    ie_max_workers: int
 
 
 @dataclass(frozen=True)
@@ -132,14 +133,17 @@ def load_ie_env() -> InformationExtractionConfig:
         IEConfig: Dataclass containing IE configuration.
         - ie_enabled (bool): Whether to run entity/relation extraction during ingestion.
         - ie_max_chars (int): Maximum characters from each node to send to the extractor.
+        - ie_max_workers (int): Maximum number of worker threads for IE extraction.
     """
     default_ie_enabled = "1"
     default_ie_max_chars = "800"
+    default_ie_max_workers = "4"
 
     return InformationExtractionConfig(
         ie_enabled=os.getenv("ENABLE_IE", default_ie_enabled).lower()
         in {"1", "true", "yes"},
         ie_max_chars=int(os.getenv("IE_MAX_CHARS", default_ie_max_chars)),
+        ie_max_workers=int(os.getenv("IE_MAX_WORKERS", default_ie_max_workers)),
     )
 
 
