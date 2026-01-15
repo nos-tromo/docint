@@ -30,13 +30,13 @@ def compute_file_hash(
 
     file_path = Path(path) if not isinstance(path, Path) else path
     if not file_path.is_file():
-        logger.error(f"FileNotFoundError: File not found for hashing: {file_path}")
+        logger.error("FileNotFoundError: File not found for hashing: {}", file_path)
         raise FileNotFoundError(f"File not found for hashing: {file_path}")
 
     try:
         hasher = hashlib.new(algorithm)
     except ValueError as exc:  # pragma: no cover - defensive guard
-        logger.error(f"ValueError: Unsupported hash algorithm: {algorithm}")
+        logger.error("ValueError: Unsupported hash algorithm: {}", algorithm)
         raise ValueError(f"Unsupported hash algorithm: {algorithm}") from exc
 
     with file_path.open("rb") as fh:

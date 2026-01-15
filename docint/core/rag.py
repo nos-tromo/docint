@@ -1042,9 +1042,9 @@ class RAG:
         # 1. Delete from Qdrant API
         try:
             self.qdrant_client.delete_collection(name)
-            logger.info(f"Deleted collection '{name}' from Qdrant.")
+            logger.info("Deleted collection '{}' from Qdrant.", name)
         except Exception as e:
-            logger.error(f"Failed to delete collection '{name}' via API: {e}")
+            logger.error("Failed to delete collection '{}' via API: {}", name, e)
 
         # 2. Cleanup source files
         try:
@@ -1077,10 +1077,10 @@ class RAG:
                         # 3. Retry the failed operation
                         func(path)
                     except Exception as e:
-                        logger.warning(f"Failed to force delete {path}: {e}")
+                        logger.warning("Failed to force delete {}: {}", path, e)
 
                 shutil.rmtree(path=src_path, onerror=on_error)
-                logger.info(f"Deleted source directory for collection '{name}'.")
+                logger.info("Deleted source directory for collection '{}'.", name)
         except Exception as e:
             logger.error(
                 f"Failed to delete source directory for collection '{name}': {e}"

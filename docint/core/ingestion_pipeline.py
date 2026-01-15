@@ -261,7 +261,7 @@ class DocumentIngestionPipeline:
                     doc.metadata["file_hash"] = f_hash
                     path_hash_map[file_path_str] = f_hash
             except Exception as e:
-                logger.warning(f"Could not compute hash for {file_path}: {e}")
+                logger.warning("Could not compute hash for {}: {}", file_path_str, e)
                 raise RuntimeError(
                     f"Failed to compute file hash for {file_path}"
                 ) from e

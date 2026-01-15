@@ -408,10 +408,10 @@ def render_sidebar() -> None:
                         st.session_state.session_id = None
                         st.rerun()
                     else:
-                        logger.error(f"Failed to select collection: {r.text}")
+                        logger.error("Failed to select collection: {}", r.text)
                         st.error(f"Failed to select collection: {r.text}")
             else:
-                logger.error(f"Failed to fetch collections: {resp.text}")
+                logger.error("Failed to fetch collections: {}", resp.text)
                 st.error(f"Failed to fetch collections: {resp.text}")
                 cols = []
 
@@ -501,7 +501,7 @@ def render_sidebar() -> None:
                 st.error("Failed to load sessions")
 
         except Exception as e:
-            logger.warning(f"Failed to fetch sessions: {e}")
+            logger.warning("Failed to fetch sessions: {}", e)
 
 
 def render_ingestion() -> None:
@@ -710,11 +710,11 @@ def render_ingestion() -> None:
                             st.rerun()
                     else:
                         status.update(label="Ingestion failed", state="error")
-                        logger.error(f"Ingestion failed: {response.text}")
+                        logger.error("Ingestion failed: {}", response.text)
                         st.error(f"Ingestion failed: {response.text}")
                 except Exception as e:
                     status.update(label="Error", state="error")
-                    logger.error(f"Error during ingestion: {e}")
+                    logger.error("Error during ingestion: {}", e)
                     st.error(f"Error during ingestion: {e}")
 
 
@@ -822,10 +822,10 @@ def render_analysis() -> None:
                             mime="text/plain",
                         )
                     else:
-                        logger.error(f"Summarization failed: {resp.text}")
+                        logger.error("Summarization failed: {}", resp.text)
                         st.error(f"Summarization failed: {resp.text}")
                 except Exception as e:
-                    logger.error(f"Error: {e}")
+                    logger.error("Error: {}", e)
                     st.error(f"Error: {e}")
 
 
@@ -1051,11 +1051,11 @@ def render_chat() -> None:
                         st.rerun()
                     else:
                         st.session_state.chat_running = False
-                        logger.error(f"Query failed: {resp.text}")
+                        logger.error("Query failed: {}", resp.text)
                         st.error(f"Query failed: {resp.text}")
             except Exception as e:
                 st.session_state.chat_running = False
-                logger.error(f"Error: {e}")
+                logger.error("Error: {}", e)
                 st.error(f"Error: {e}")
 
 

@@ -419,7 +419,7 @@ async def summarize_stream() -> StreamingResponse:
                 elif isinstance(chunk, dict):
                     yield f"data: {json.dumps(chunk)}\n\n"
         except Exception as e:
-            logger.error(f"Stream error: {e}")
+            logger.error("Stream error: {}", e)
             yield f"data: {json.dumps({'error': 'An internal error occurred during streaming.'})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
@@ -442,7 +442,7 @@ def get_collection_ie() -> dict[str, list[dict]]:
         sources = rag.get_collection_ie()
         return {"sources": sources}
     except Exception as e:
-        logger.error(f"Error fetching collection IE: {e}")
+        logger.error("Error fetching collection IE: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -463,7 +463,7 @@ def get_collection_documents() -> dict[str, list[dict]]:
         docs = rag.list_documents()
         return {"documents": docs}
     except Exception as e:
-        logger.error(f"Error fetching collection documents: {e}")
+        logger.error("Error fetching collection documents: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -489,7 +489,7 @@ def list_sessions() -> dict[str, list[dict]]:
         sessions = rag.sessions.list_sessions()
         return {"sessions": sessions}
     except Exception as e:
-        logger.error(f"Error listing sessions: {e}")
+        logger.error("Error listing sessions: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -522,7 +522,7 @@ def get_session_history(session_id: str) -> dict[str, list[dict]]:
         messages = rag.sessions.get_session_history(session_id)
         return {"messages": messages}
     except Exception as e:
-        logger.error(f"Error fetching history: {e}")
+        logger.error("Error fetching history: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -551,7 +551,7 @@ def delete_session(session_id: str) -> dict[str, bool]:
         success = rag.sessions.delete_session(session_id)
         return {"ok": success}
     except Exception as e:
-        logger.error(f"Error deleting session: {e}")
+        logger.error("Error deleting session: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
