@@ -6,6 +6,7 @@ This is a proof of concept document intelligence platform offering the following
 
    - Process and extract data from various file types, including documents, tables, images, audio, video, and JSON files.
    - Automatically organizes and prepares data for querying.
+   - **Scalable Information Extraction**: Uses parallel processing and JSON-mode enforced LLM inference for high-speed entity and relation extraction.
 2. **Query Pipeline**
 
    - Perform batch or single queries on ingested data.
@@ -64,6 +65,13 @@ The application can be used both via Docker for containerized environments and d
 
    Ensure that **Ollama** and **Qdrant** are running locally or are accessible via network.
    - **Ollama**: Must be running (default: `http://localhost:11434`).
+
+     Use the provided helper script to start Ollama with the parallelization settings from your `.env` file (if defined):
+
+     ```bash
+     ./scripts/start_ollama.sh
+     ```
+
    - **Qdrant**: Must be running (default: `http://localhost:6333`).
 
 2. **Install Dependencies**
@@ -109,7 +117,8 @@ The application is configured via environment variables. Key variables include:
 - `LLM`: Name of the Ollama model to use (default: `gpt-oss:20b`).
 - `EMBED_MODEL`: HuggingFace embedding model ID (default: `BAAI/bge-m3`).
 - `SPARSE_MODEL`: Sparse embedding model ID (default: `Qdrant/all_miniLM_L6_v2_with_attentions`).
-- `ENABLE_IE`: Enable entity/relation extraction during ingestion (default: `false`).
+- `ENABLE_IE`: Enable scalable entity/relation extraction during ingestion (default: `false`). Uses parallel execution and disables reasoning tokens for maximum throughput.
+- `IE_MAX_WORKERS`: Number of parallel workers for entity extraction (default: `4`). Increasing this improves throughput but requires ensuring your Ollama server can handle the concurrency (see `OLLAMA_NUM_PARALLEL`).
 
 See `docint/utils/env_cfg.py` for the full list of configuration options and defaults.
 
