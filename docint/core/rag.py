@@ -458,12 +458,13 @@ class RAG:
 
         return chosen
 
-    def _create_gen_model(self, thinking: bool) -> Ollama:
+    def _create_gen_model(self, thinking: bool, enable_json: bool = False) -> Ollama:
         """
         Helper to create an Ollama model instance with specific settings.
 
         Args:
             thinking (bool): Whether to enable reasoning/thinking tokens.
+            enable_json (bool): Whether to enforce JSON output mode.
 
         Returns:
             Ollama: The initialized model.
@@ -482,9 +483,15 @@ class RAG:
         if self.ollama_options is None:
             self.ollama_options = {}
 
+        # Prepare options copy to avoid side effects
+        options = self.ollama_options.copy()
+
         # Consistent seed behavior
         if self.ollama_seed is not None:
-            self.ollama_options["seed"] = 42
+            options["seed"] = 42
+
+        if enable_json:
+            options["format"] = "json"
 
         # Ensure ollama_host is clean (no trailing slash)
         ollama_host = self.ollama_host.rstrip("/")
@@ -496,12 +503,13 @@ class RAG:
             context_window=self.ollama_ctx_window,
             request_timeout=self.ollama_request_timeout,
             thinking=thinking,
-            additional_kwargs=self.ollama_options,
+            additional_kwargs=options,
         )
         logger.info(
-            "Initializing generator model: {} (thinking={})",
+            "Initializing generator model: {} (thinking={}, json={})",
             self.gen_model_id,
             thinking,
+            enable_json,
         )
         return model
 
@@ -625,8 +633,8 @@ class RAG:
 
         ie_model = None
         if self.ie_enabled:
-            # Disable thinking for IE tasks to avoid bottlenecks
-            ie_model = self._create_gen_model(thinking=False)
+            # Disable thinking for IE tasks to avoid performance bottlenecks and enforce JSON
+            ie_model = self._create_gen_model(thinking=False, enable_json=True)
 
         return DocumentIngestionPipeline(
             data_dir=self.data_dir,
