@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable
@@ -57,6 +58,7 @@ class DocumentIngestionPipeline:
     table_excel_sheet: str | int | None = None
 
     # --- Information extraction ---
+    ie_max_workers: int = field(default=4, init=False)
     entity_extractor: Callable[[str], tuple[list[dict], list[dict]]] | None = None
 
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
@@ -83,6 +85,7 @@ class DocumentIngestionPipeline:
         ie_config = load_ie_env()
         ie_enabled = ie_config.ie_enabled
         ie_max_chars = ie_config.ie_max_chars
+        self.ie_max_workers = ie_config.ie_max_workers
         ie_prompt = OllamaPipeline().load_prompt(kw="ner")
 
         # Initialize IE extractor if runtime pieces are provided
@@ -635,25 +638,46 @@ class DocumentIngestionPipeline:
 
         if self.entity_extractor:
             total_nodes = len(nodes)
-            for i, node in enumerate(nodes):
-                if self.progress_callback:
-                    self.progress_callback(
-                        f"Extracting entities from chunk {i + 1} of {total_nodes}"
-                    )
+
+            def _process_node(args: tuple[int, BaseNode]) -> None:
+                """
+                Helper to process a single node for entity extraction.
+
+                Args:
+                    args (tuple[int, BaseNode]): The index and node to process.
+                """
+                idx, node = args
                 text_value = getattr(node, "text", "") or ""
                 if not text_value.strip():
-                    continue
+                    return
                 try:
-                    ents, rels = self.entity_extractor(text_value)
-                except Exception as exc:  # pragma: no cover - extractor errors logged
-                    logger.warning("Entity extractor failed: {}", exc)
-                    continue
-                if ents or rels:
-                    meta = dict(getattr(node, "metadata", {}) or {})
-                    if ents:
-                        meta["entities"] = ents
-                    if rels:
-                        meta["relations"] = rels
-                    node.metadata = meta
+                    # Provide type hint if self.entity_extractor is not None
+                    if self.entity_extractor:
+                        ents, rels = self.entity_extractor(text_value)
+                        if ents or rels:
+                            meta = dict(getattr(node, "metadata", {}) or {})
+                            if ents:
+                                meta["entities"] = ents
+                            if rels:
+                                meta["relations"] = rels
+                            node.metadata = meta
+                except Exception as exc:
+                    logger.warning("Entity extractor failed on chunk {}: {}", idx, exc)
+
+            # Use ThreadPoolExecutor to run extraction in parallel
+            # We limit workers to avoid overwhelming the local inference server
+            with ThreadPoolExecutor(max_workers=self.ie_max_workers) as executor:
+                # Submit all tasks
+                futures = [
+                    executor.submit(_process_node, (i, node))
+                    for i, node in enumerate(nodes)
+                ]
+
+                # Wait for completion and update progress
+                for i, _ in enumerate(as_completed(futures)):
+                    if self.progress_callback:
+                        self.progress_callback(
+                            f"Extracting entities: {i + 1}/{total_nodes} chunks processed"
+                        )
 
         return nodes
