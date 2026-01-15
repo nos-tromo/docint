@@ -6,6 +6,7 @@ This is a proof of concept document intelligence platform offering the following
 
    - Process and extract data from various file types, including documents, tables, images, audio, video, and JSON files.
    - Automatically organizes and prepares data for querying.
+   - **Scalable Information Extraction**: Uses parallel processing and JSON-mode enforced LLM inference for high-speed entity and relation extraction.
 2. **Query Pipeline**
 
    - Perform batch or single queries on ingested data.
@@ -64,6 +65,13 @@ The application can be used both via Docker for containerized environments and d
 
    Ensure that **Ollama** and **Qdrant** are running locally or are accessible via network.
    - **Ollama**: Must be running (default: `http://localhost:11434`).
+
+     Use the provided helper script to start Ollama with the parallelization settings from your `.env` file (if defined):
+
+     ```bash
+     ./scripts/start_ollama.sh
+     ```
+
    - **Qdrant**: Must be running (default: `http://localhost:6333`).
 
 2. **Install Dependencies**
@@ -109,7 +117,10 @@ The application is configured via environment variables. Key variables include:
 - `LLM`: Name of the Ollama model to use (default: `gpt-oss:20b`).
 - `EMBED_MODEL`: HuggingFace embedding model ID (default: `BAAI/bge-m3`).
 - `SPARSE_MODEL`: Sparse embedding model ID (default: `Qdrant/all_miniLM_L6_v2_with_attentions`).
-- `ENABLE_IE`: Enable entity/relation extraction during ingestion (default: `false`).
+- `ENABLE_IE`: Enable scalable entity/relation extraction during ingestion (default: `false`). Uses parallel execution and disables reasoning tokens for maximum throughput.
+- `IE_MAX_WORKERS`: Number of parallel workers for entity extraction (default: `4`). Increasing this improves throughput but requires ensuring your Ollama server can handle the concurrency (see `OLLAMA_NUM_PARALLEL`).
+- `OLLAMA_NUM_PARALLEL`: Maximum number of parallel requests the Ollama server can process simultaneously (default: system default). Should be set >= `IE_MAX_WORKERS` to achieve actual parallel performance.
+- `OLLAMA_MAX_LOADED_MODELS`: Maximum number of models Ollama allows to be loaded in memory (default: system default). Set to at least `2` if using both text (LLM) and vision (VLM) models to prevent constant reloading.
 
 See `docint/utils/env_cfg.py` for the full list of configuration options and defaults.
 
@@ -214,6 +225,9 @@ LLM=gpt-oss:20b
 VLM=qwen3-vl:8b
 WHISPER_MODEL=turbo
 ENABLE_IE=true
+IE_MAX_WORKERS=4
+OLLAMA_NUM_PARALLEL=4
+OLLAMA_MAX_LOADED_MODELS=2
 ```
 
 ## Unit Tests

@@ -108,6 +108,8 @@ services:
   ollama:
     profiles: ["cpu"]
     image: ollama/ollama:latest
+    environment:
+      - OLLAMA_HOST=0.0.0.0
     volumes:
       - ollama-models:/root/.ollama
     healthcheck:
@@ -128,6 +130,7 @@ services:
     image: ollama/ollama:latest
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
+      - OLLAMA_HOST=0.0.0.0
     volumes:
       - ollama-models:/root/.ollama
     healthcheck:
