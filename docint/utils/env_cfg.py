@@ -83,6 +83,7 @@ class RAGConfig:
     Dataclass for RAG (Retrieval-Augmented Generation) configuration.
     """
 
+    docstore_batch_size: int
     ingestion_batch_size: int
     retrieve_top_k: int
     sentence_splitter_chunk_overlap: int
@@ -279,17 +280,22 @@ def load_rag_env() -> RAGConfig:
 
     Returns:
         RAGConfig: Dataclass containing RAG configuration.
+        - docstore_batch_size (int): The batch size for document store operations.
         - ingestion_batch_size (int): The batch size for ingestion.
         - retrieve_top_k (int): The number of top documents to retrieve.
         - sentence_splitter_chunk_overlap (int): The chunk overlap size for sentence splitting.
         - sentence_splitter_chunk_size (int): The chunk size for sentence splitting.
     """
+    default_docstore_batch_size = "100"
     default_ingestion_batch_size = "5"
     default_retrieve_top_k = "20"
     default_sentence_splitter_chunk_overlap = "64"
     default_sentence_splitter_chunk_size = "1024"
 
     return RAGConfig(
+        docstore_batch_size=int(
+            os.getenv("DOCSTORE_BATCH_SIZE", default_docstore_batch_size)
+        ),
         ingestion_batch_size=int(
             os.getenv("INGESTION_BATCH_SIZE", default_ingestion_batch_size)
         ),

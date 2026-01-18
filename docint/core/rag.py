@@ -22,6 +22,7 @@ from llama_index.core.embeddings import BaseEmbedding
 from llama_index.core.postprocessor import LLMRerank
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.schema import BaseNode, Document
+from llama_index.core.storage.docstore.keyval_docstore import KVDocumentStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
 from llama_index.vector_stores.qdrant import QdrantVectorStore
@@ -31,6 +32,8 @@ from qdrant_client.async_qdrant_client import AsyncQdrantClient
 
 from docint.core.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.session_manager import SessionManager
+from docint.core.storage.docstore import QdrantKVStore
+from docint.core.storage.sources import stage_sources_to_qdrant
 from docint.utils.env_cfg import (
     load_host_env,
     load_ie_env,
@@ -41,7 +44,6 @@ from docint.utils.env_cfg import (
     load_session_env,
 )
 from docint.utils.model_cfg import resolve_model_path
-from docint.utils.storage import stage_sources_to_qdrant
 
 
 @dataclass(slots=True)
@@ -70,6 +72,7 @@ class RAG:
     gen_model_id: str | None = field(default=None, init=False)
 
     # --- Qdrant controls ---
+    docstore_batch_size: int = field(default=100, init=False)
     qdrant_host: str | None = field(default=None, init=False)
     _qdrant_col_dir: Path | None = field(default=None, init=False, repr=False)
     _qdrant_src_dir: Path | None = field(default=None, init=False, repr=False)
@@ -90,7 +93,6 @@ class RAG:
     ie_sources: list[dict[str, Any]] = field(default_factory=list, init=False)
 
     # --- Reranking / retrieval ---
-    embed_batch_size: int = field(default=64, init=False)
     retrieve_similarity_top_k: int = field(default=20, init=False)
     rerank_top_n: int = field(default=5, init=False)
 
@@ -165,6 +167,7 @@ class RAG:
 
         # --- RAG config ---
         rag_config = load_rag_env()
+        self.docstore_batch_size = rag_config.docstore_batch_size
         self.retrieve_similarity_top_k = rag_config.retrieve_top_k
         self.rerank_top_n = int(self.retrieve_similarity_top_k // 4)
 
@@ -609,7 +612,20 @@ class RAG:
         Returns:
             StorageContext: The created storage context.
         """
-        return StorageContext.from_defaults(vector_store=vector_store)
+        kv_collection = f"{self.qdrant_collection}_dockv"
+        kv_store = QdrantKVStore(
+            client=self.qdrant_client,
+            collection_name=kv_collection,
+        )
+        # Use a reasonable batch size to encourage batch operations
+        doc_store = KVDocumentStore(
+            kvstore=kv_store, batch_size=self.docstore_batch_size
+        )
+
+        return StorageContext.from_defaults(
+            vector_store=vector_store,
+            docstore=doc_store,
+        )
 
     def _build_ingestion_pipeline(
         self, progress_callback: Callable[[str], None] | None = None
@@ -774,8 +790,7 @@ class RAG:
 
     def create_index(self) -> None:
         """
-        Materialize a VectorStoreIndex.
-        If nodes are present in memory, create from nodes.
+        Materialize a VectorStoreIndex. If nodes are present in memory, create from nodes.
         Otherwise, load from vector store.
         """
         vector_store = self._vector_store()
@@ -784,8 +799,11 @@ class RAG:
         if self.nodes:
             self.index = self._index(storage_ctx)
         else:
-            self.index = VectorStoreIndex.from_vector_store(
-                vector_store=vector_store, embed_model=self.embed_model
+            # Build index with explicit storage_context so it uses the persistent docstore.
+            self.index = VectorStoreIndex(
+                nodes=[],
+                embed_model=self.embed_model,
+                storage_context=storage_ctx,
             )
 
     def create_query_engine(self) -> None:
@@ -1160,15 +1178,21 @@ class RAG:
 
         # Initialize index (load existing or create new wrapper)
         vector_store = self._vector_store()
-        # We use from_vector_store to attach to the store.
-        # If the store is empty, it will be populated as we insert nodes.
-        self.index = VectorStoreIndex.from_vector_store(
-            vector_store=vector_store, embed_model=self.embed_model
+        storage_ctx = self._storage_context(vector_store)
+
+        # Build index with explicit storage_context so it uses the persistent docstore.
+        self.index = VectorStoreIndex(
+            nodes=[],
+            embed_model=self.embed_model,
+            storage_context=storage_ctx,
         )
 
         # Process batches from the pipeline generator
         for docs, nodes in pipeline.build(self._get_existing_file_hashes()):
             if nodes:
+                # Explicitly persist to docstore first to ensure data safety
+                logger.debug("Persisting {} nodes to DocStore...", len(nodes))
+                self.index.docstore.add_documents(nodes, allow_update=True)
                 self.index.insert_nodes(nodes)
 
         self.dir_reader = pipeline.dir_reader
