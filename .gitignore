@@ -54,6 +54,7 @@
 **/output/
 **/qdrant*/
 **/results/
+**/scripts/
 **/session/
 **/uploads/
 **/venv/

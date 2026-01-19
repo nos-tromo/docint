@@ -129,7 +129,9 @@ class QdrantKVStore(BaseKVStore):
         # Batch upsert
         for i in range(0, len(points), batch_size):
             batch = points[i : i + batch_size]
-            logger.debug("Upserting batch {} of size {}", i // batch_size + 1, len(batch))
+            logger.debug(
+                "Upserting batch {} of size {}", i // batch_size + 1, len(batch)
+            )
             self.client.upsert(
                 collection_name=self.collection_name,
                 points=batch,
