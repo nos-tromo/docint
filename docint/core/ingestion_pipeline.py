@@ -4,10 +4,14 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
 from llama_index.core import Document, SimpleDirectoryReader
-from llama_index.core.node_parser import MarkdownNodeParser, SentenceSplitter
+from llama_index.core.node_parser import (
+    HierarchicalNodeParser,
+    MarkdownNodeParser,
+    SentenceSplitter,
+)
 from llama_index.core.schema import BaseNode
 from llama_index.llms.ollama import Ollama
 from llama_index.node_parser.docling import DoclingNodeParser
@@ -67,9 +71,41 @@ class DocumentIngestionPipeline:
     sentence_splitter: SentenceSplitter = field(
         default_factory=SentenceSplitter, init=False
     )
+    hierarchical_node_parser: HierarchicalNodeParser | None = field(
+        default=None, init=False
+    )
+    enable_hierarchical_chunking: bool = field(default=True, init=False)
     docs: list[Document] = field(default_factory=list, init=False)
     nodes: list[BaseNode] = field(default_factory=list, init=False)
     file_hash_cache: dict[str, str] = field(default_factory=dict, init=False)
+
+    @staticmethod
+    def _minimal_metadata(meta: dict[str, Any]) -> dict[str, Any]:
+        """
+        Reduce metadata to a small, consistent subset to avoid overlong metadata during
+        hierarchical splitting. Keeps only file identity and lightweight context fields.
+
+        Args:
+            meta (dict[str, Any]): The original metadata.
+
+        Returns:
+            dict[str, Any]: The reduced metadata.
+        """
+
+        allowed_keys = {
+            "file_path",
+            "file_name",
+            "filename",
+            "file_hash",
+            "file_type",
+            "mimetype",
+            "source",
+            "origin",
+            "page",
+            "page_number",
+            "headings",
+        }
+        return {k: v for k, v in meta.items() if k in allowed_keys}
 
     def __post_init__(self) -> None:
         """
@@ -101,9 +137,14 @@ class DocumentIngestionPipeline:
         self.ingestion_batch_size = rag_config.ingestion_batch_size
         sentence_splitter_chunk_size = rag_config.sentence_splitter_chunk_size
         sentence_splitter_chunk_overlap = rag_config.sentence_splitter_chunk_overlap
+        self.enable_hierarchical_chunking = rag_config.enable_hierarchical_chunking
         self.sentence_splitter = SentenceSplitter(
             chunk_size=sentence_splitter_chunk_size,
             chunk_overlap=sentence_splitter_chunk_overlap,
+        )
+        self.hierarchical_node_parser = HierarchicalNodeParser.from_defaults(
+            chunk_sizes=rag_config.hierarchical_chunk_sizes,
+            chunk_overlap=rag_config.hierarchical_chunk_overlap,
         )
 
     def build(
@@ -386,6 +427,12 @@ class DocumentIngestionPipeline:
         """
         self.md_node_parser = MarkdownNodeParser()
         self.docling_node_parser = DoclingNodeParser()
+        if self.hierarchical_node_parser is None:
+            rag_config = load_rag_env()
+            self.hierarchical_node_parser = HierarchicalNodeParser.from_defaults(
+                chunk_sizes=rag_config.hierarchical_chunk_sizes,
+                chunk_overlap=rag_config.hierarchical_chunk_overlap,
+            )
 
     @staticmethod
     def _extract_file_hash(data: dict | None) -> str | None:
@@ -493,7 +540,11 @@ class DocumentIngestionPipeline:
         Raises:
             RuntimeError: If node parsers are not initialized.
         """
-        if self.md_node_parser is None or self.docling_node_parser is None:
+        if (
+            self.md_node_parser is None
+            or self.docling_node_parser is None
+            or self.hierarchical_node_parser is None
+        ):
             raise RuntimeError("Node parsers are not initialized.")
 
         audio_docs, document_docs, img_docs, json_docs, table_docs, text_docs = [
@@ -545,24 +596,30 @@ class DocumentIngestionPipeline:
         nodes: list[BaseNode] = []
         if audio_docs:
             logger.info(
-                "Parsing {} audio documents with SentenceSplitter",
+                "Parsing {} audio documents with HierarchicalNodeParser",
                 len(audio_docs),
             )
-            nodes.extend(self.sentence_splitter.get_nodes_from_documents(audio_docs))
+            nodes.extend(
+                self.hierarchical_node_parser.get_nodes_from_documents(audio_docs)
+            )
 
         if img_docs:
             logger.info(
-                "Parsing {} image documents with SentenceSplitter",
+                "Parsing {} image documents with HierarchicalNodeParser",
                 len(img_docs),
             )
-            nodes.extend(self.sentence_splitter.get_nodes_from_documents(img_docs))
+            nodes.extend(
+                self.hierarchical_node_parser.get_nodes_from_documents(img_docs)
+            )
 
         if json_docs:
             logger.info(
-                "Parsing {} JSON documents with SentenceSplitter",
+                "Parsing {} JSON documents with HierarchicalNodeParser",
                 len(json_docs),
             )
-            nodes.extend(self.sentence_splitter.get_nodes_from_documents(json_docs))
+            nodes.extend(
+                self.hierarchical_node_parser.get_nodes_from_documents(json_docs)
+            )
 
         if document_docs:
 
@@ -590,9 +647,43 @@ class DocumentIngestionPipeline:
                     "Parsing {} Docling JSON PDFs with DoclingNodeParser",
                     len(pdf_docs_docling),
                 )
-                nodes.extend(
-                    self.docling_node_parser.get_nodes_from_documents(pdf_docs_docling)
+                docling_nodes = self.docling_node_parser.get_nodes_from_documents(
+                    pdf_docs_docling
                 )
+                if self.enable_hierarchical_chunking:
+                    hier_docs = []
+                    for n in docling_nodes:
+                        text_val = getattr(n, "text", "") or ""
+                        if not text_val:
+                            continue
+                        meta = getattr(n, "metadata", {}) or {}
+                        slim_meta = self._minimal_metadata(meta)
+                        hier_docs.append(
+                            Document(
+                                text=text_val,
+                                metadata=slim_meta,
+                                id_=getattr(n, "id_", None),
+                            )
+                        )
+                    logger.info(
+                        "Building hierarchical chunks over {} Docling nodes",
+                        len(hier_docs),
+                    )
+                    try:
+                        nodes.extend(
+                            self.hierarchical_node_parser.get_nodes_from_documents(
+                                hier_docs
+                            )
+                        )
+                    except ValueError as exc:
+                        logger.warning(
+                            "Hierarchical chunking failed on Docling nodes: {}. "
+                            "You can raise HIERARCHICAL_CHUNK_SIZES or disable hierarchical chunking.",
+                            exc,
+                        )
+                        nodes.extend(docling_nodes)
+                else:
+                    nodes.extend(docling_nodes)
             if pdf_docs_md:
                 logger.info(
                     "Parsing {} Markdown PDFs with MarkdownNodeParser",
@@ -629,11 +720,11 @@ class DocumentIngestionPipeline:
                 )
             if plain_docs:
                 logger.info(
-                    "Parsing {} plain text documents with SentenceSplitter",
+                    "Parsing {} plain text documents with HierarchicalNodeParser",
                     len(plain_docs),
                 )
                 nodes.extend(
-                    self.sentence_splitter.get_nodes_from_documents(plain_docs)
+                    self.hierarchical_node_parser.get_nodes_from_documents(plain_docs)
                 )
 
         if self.entity_extractor:

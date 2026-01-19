@@ -8,7 +8,7 @@ import stat
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 import torch
 from fastembed import SparseTextEmbedding
@@ -21,7 +21,11 @@ from llama_index.core import (
 from llama_index.core.embeddings import BaseEmbedding
 from llama_index.core.postprocessor import LLMRerank
 from llama_index.core.query_engine import RetrieverQueryEngine
+from llama_index.core.retrievers import AutoMergingRetriever
 from llama_index.core.schema import BaseNode, Document
+from llama_index.core.indices.vector_store.retrievers.retriever import (
+    VectorIndexRetriever,
+)
 from llama_index.core.storage.docstore.keyval_docstore import KVDocumentStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
@@ -95,6 +99,7 @@ class RAG:
     # --- Reranking / retrieval ---
     retrieve_similarity_top_k: int = field(default=20, init=False)
     rerank_top_n: int = field(default=5, init=False)
+    enable_hierarchical_chunking: bool = field(default=True, init=False)
 
     # --- Prompt config ---
     prompt_dir: Path | None = field(default=None, init=False)
@@ -170,6 +175,7 @@ class RAG:
         self.docstore_batch_size = rag_config.docstore_batch_size
         self.retrieve_similarity_top_k = rag_config.retrieve_top_k
         self.rerank_top_n = int(self.retrieve_similarity_top_k // 4)
+        self.enable_hierarchical_chunking = rag_config.enable_hierarchical_chunking
 
         if self.prompt_dir:
             self.summarize_prompt_path = self.prompt_dir / "summarize.txt"
@@ -817,8 +823,16 @@ class RAG:
             logger.error("RuntimeError: Index is not initialized.")
             raise RuntimeError("Index is not initialized. Cannot create query engine.")
         k = min(max(self.retrieve_similarity_top_k, self.rerank_top_n * 8), 64)
+        base_retriever = self.index.as_retriever(similarity_top_k=k)
+        retriever = base_retriever
+        if self.enable_hierarchical_chunking:
+            retriever = AutoMergingRetriever(
+                vector_retriever=cast(VectorIndexRetriever, base_retriever),
+                storage_context=self.index.storage_context,
+                verbose=False,
+            )
         self.query_engine = RetrieverQueryEngine.from_args(
-            retriever=self.index.as_retriever(similarity_top_k=k),
+            retriever=retriever,
             llm=self.gen_model,
             node_postprocessors=[self.reranker],
         )
