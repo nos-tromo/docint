@@ -64,14 +64,8 @@ The application can be used both via Docker for containerized environments and d
 1. **Start Infrastructure Services**
 
    Ensure that **Ollama** and **Qdrant** are running locally or are accessible via network.
+
    - **Ollama**: Must be running (default: `http://localhost:11434`).
-
-     Use the provided helper script to start Ollama with the parallelization settings from your `.env` file (if defined):
-
-     ```bash
-     ./scripts/start_ollama.sh
-     ```
-
    - **Qdrant**: Must be running (default: `http://localhost:6333`).
 
 2. **Install Dependencies**
@@ -118,6 +112,10 @@ The application is configured via environment variables. Key variables include:
 - `EMBED_MODEL`: HuggingFace embedding model ID (default: `BAAI/bge-m3`).
 - `SPARSE_MODEL`: Sparse embedding model ID (default: `Qdrant/all_miniLM_L6_v2_with_attentions`).
 - `ENABLE_IE`: Enable scalable entity/relation extraction during ingestion (default: `false`). Uses parallel execution and disables reasoning tokens for maximum throughput.
+- `DOCSTORE_BATCH_SIZE`: Batch size for document store writes (default: `100`).
+- `ENABLE_HIERARCHICAL_CHUNKING`: Enable hierarchical chunking and auto-merging retrieval (default: `true`).
+- `HIERARCHICAL_CHUNK_SIZES`: Comma-separated chunk sizes for hierarchical splitting (default: `4096,2048,1024`).
+- `HIERARCHICAL_CHUNK_OVERLAP`: Token overlap for hierarchical splitting (default: `64`).
 - `IE_MAX_WORKERS`: Number of parallel workers for entity extraction (default: `4`). Increasing this improves throughput but requires ensuring your Ollama server can handle the concurrency (see `OLLAMA_NUM_PARALLEL`).
 - `OLLAMA_NUM_PARALLEL`: Maximum number of parallel requests the Ollama server can process simultaneously (default: system default). Should be set >= `IE_MAX_WORKERS` to achieve actual parallel performance.
 - `OLLAMA_MAX_LOADED_MODELS`: Maximum number of models Ollama allows to be loaded in memory (default: system default). Set to at least `2` if using both text (LLM) and vision (VLM) models to prevent constant reloading.
