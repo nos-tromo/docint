@@ -3,10 +3,10 @@ from types import SimpleNamespace
 from typing import Any, Callable, cast
 
 import pytest
+from llama_index.core import Document
 
 import docint.cli.ingest as ingest
 from docint.core.ingestion_pipeline import DocumentIngestionPipeline
-from llama_index.core import Document
 
 
 def test_get_collection(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -173,19 +173,174 @@ def _make_pipeline(
         ie_model=None,
         progress_callback=None,
         entity_extractor=entity_extractor,
-    )  # type: ignore[arg-type]
+    )
 
     # Minimal parser stubs to satisfy _create_nodes preconditions
     pipeline.md_node_parser = cast(
         Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
-    )  # type: ignore[assignment]
+    )
     pipeline.docling_node_parser = cast(
         Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
-    )  # type: ignore[assignment]
+    )
+    pipeline.hierarchical_node_parser = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
+    )
     pipeline.sentence_splitter = cast(
         Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
-    )  # type: ignore[assignment]
+    )
     return pipeline, dummy_nodes
+
+
+def test_docling_hierarchical_success(tmp_path: Path) -> None:
+    """
+    Ensure Docling JSON docs are hierarchically re-chunked when enabled.
+
+    Args:
+        tmp_path (Path): Temporary directory path for the test.
+    """
+
+    docling_nodes = [
+        SimpleNamespace(
+            text="Child text",
+            metadata={
+                "file_path": "file.pdf",
+                "file_name": "file.pdf",
+                "file_hash": "abc",
+                "mimetype": "application/pdf",
+                "source": "document",
+            },
+            id_="docling-1",
+        )
+    ]
+
+    hier_calls: list[list[Document]] = []
+    hier_nodes = [SimpleNamespace(id_="hier-1", metadata={}, text="Parent text")]
+
+    pipeline = DocumentIngestionPipeline(
+        data_dir=tmp_path,
+        device="cpu",
+        clean_fn=lambda x: x,
+        ie_model=None,
+        progress_callback=None,
+        entity_extractor=None,
+    )
+
+    pipeline.md_node_parser = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: [])
+    )
+    pipeline.docling_node_parser = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: docling_nodes)
+    )
+
+    def record_hier_docs(docs: list[Document]) -> list[SimpleNamespace]:
+        """
+        Record hierarchical parser input and return the precomputed nodes.
+
+        Args:
+            docs (list[Document]): The documents provided to the hierarchical parser.
+
+        Returns:
+            list[SimpleNamespace]: The precomputed hierarchical nodes.
+        """
+        hier_calls.append(docs)
+        return hier_nodes
+
+    pipeline.hierarchical_node_parser = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=record_hier_docs)
+    )
+    pipeline.sentence_splitter = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: [])
+    )
+
+    docs = [
+        Document(
+            text="{}",  # valid JSON so it routes through Docling branch
+            metadata={
+                "file_path": "file.pdf",
+                "file_type": "application/pdf",
+                "source": "document",
+            },
+        )
+    ]
+
+    nodes = pipeline._create_nodes(docs)
+
+    assert nodes == hier_nodes  # hierarchical output is used
+    assert len(hier_calls) == 1
+    assert len(hier_calls[0]) == len(docling_nodes)
+    assert hier_calls[0][0].metadata["file_path"] == "file.pdf"
+
+
+def test_docling_hierarchical_fallback_on_error(tmp_path: Path) -> None:
+    """
+    If hierarchical chunking raises, fall back to Docling nodes.
+
+    Args:
+        tmp_path (Path): Temporary directory path for the test.
+    """
+
+    docling_nodes = [
+        SimpleNamespace(
+            text="Child text",
+            metadata={
+                "file_path": "file.pdf",
+                "file_name": "file.pdf",
+                "file_hash": "abc",
+                "mimetype": "application/pdf",
+                "source": "document",
+            },
+            id_="docling-1",
+        )
+    ]
+
+    def raise_hier(docs: list[Document]) -> None:
+        """
+        Placeholder hierarchical parser that raises an exception.
+
+        Args:
+            docs (list[Document]): The list of documents to parse.
+
+        Raises:
+            ValueError: Raised when metadata is too long.
+        """
+        raise ValueError("metadata too long")
+
+    pipeline = DocumentIngestionPipeline(
+        data_dir=tmp_path,
+        device="cpu",
+        clean_fn=lambda x: x,
+        ie_model=None,
+        progress_callback=None,
+        entity_extractor=None,
+    )
+
+    pipeline.md_node_parser = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: [])
+    )
+    pipeline.docling_node_parser = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: docling_nodes)
+    )
+    pipeline.hierarchical_node_parser = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=raise_hier)
+    )
+    pipeline.sentence_splitter = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: [])
+    )
+
+    docs = [
+        Document(
+            text="{}",
+            metadata={
+                "file_path": "file.pdf",
+                "file_type": "application/pdf",
+                "source": "document",
+            },
+        )
+    ]
+
+    nodes = pipeline._create_nodes(docs)
+
+    assert nodes == docling_nodes  # fall back to flat Docling nodes
 
 
 def test_entity_extractor_attaches_metadata(tmp_path: Path) -> None:
