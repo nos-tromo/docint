@@ -88,6 +88,23 @@ class RAGConfig:
     retrieve_top_k: int
     sentence_splitter_chunk_overlap: int
     sentence_splitter_chunk_size: int
+    hierarchical_chunk_sizes: list[int]
+    hierarchical_chunk_overlap: int
+    enable_hierarchical_chunking: bool
+
+
+def _parse_int_list(value: str) -> list[int]:
+    """
+    Parse a comma-separated list of integers from a string.
+
+    Args:
+        value (str): The comma-separated string value.
+
+    Returns:
+        list[int]: Parsed list of integers.
+    """
+    parts = [item.strip() for item in value.split(",") if item.strip()]
+    return [int(item) for item in parts]
 
 
 @dataclass(frozen=True)
@@ -285,12 +302,18 @@ def load_rag_env() -> RAGConfig:
         - retrieve_top_k (int): The number of top documents to retrieve.
         - sentence_splitter_chunk_overlap (int): The chunk overlap size for sentence splitting.
         - sentence_splitter_chunk_size (int): The chunk size for sentence splitting.
+        - hierarchical_chunk_sizes (list[int]): The chunk sizes for hierarchical splitting.
+        - hierarchical_chunk_overlap (int): The chunk overlap size for hierarchical splitting.
+        - enable_hierarchical_chunking (bool): Whether to enable hierarchical chunking.
     """
     default_docstore_batch_size = "100"
     default_ingestion_batch_size = "5"
     default_retrieve_top_k = "20"
     default_sentence_splitter_chunk_overlap = "64"
     default_sentence_splitter_chunk_size = "1024"
+    default_hierarchical_chunk_sizes = "4096,2048,1024"
+    default_hierarchical_chunk_overlap = "64"
+    default_enable_hierarchical_chunking = "true"
 
     return RAGConfig(
         docstore_batch_size=int(
@@ -311,6 +334,16 @@ def load_rag_env() -> RAGConfig:
                 "SENTENCE_SPLITTER_CHUNK_SIZE", default_sentence_splitter_chunk_size
             )
         ),
+        hierarchical_chunk_sizes=_parse_int_list(
+            os.getenv("HIERARCHICAL_CHUNK_SIZES", default_hierarchical_chunk_sizes)
+        ),
+        hierarchical_chunk_overlap=int(
+            os.getenv("HIERARCHICAL_CHUNK_OVERLAP", default_hierarchical_chunk_overlap)
+        ),
+        enable_hierarchical_chunking=os.getenv(
+            "ENABLE_HIERARCHICAL_CHUNKING", default_enable_hierarchical_chunking
+        ).lower()
+        in {"1", "true", "yes", "on"},
     )
 
 
