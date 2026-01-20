@@ -75,37 +75,11 @@ class DocumentIngestionPipeline:
         default=None, init=False
     )
     enable_hierarchical_chunking: bool = field(default=True, init=False)
+    hierarchical_chunk_sizes: list[int] = field(default_factory=list, init=False)
+    hierarchical_chunk_overlap: int = field(default=0, init=False)
     docs: list[Document] = field(default_factory=list, init=False)
     nodes: list[BaseNode] = field(default_factory=list, init=False)
     file_hash_cache: dict[str, str] = field(default_factory=dict, init=False)
-
-    @staticmethod
-    def _minimal_metadata(meta: dict[str, Any]) -> dict[str, Any]:
-        """
-        Reduce metadata to a small, consistent subset to avoid overlong metadata during
-        hierarchical splitting. Keeps only file identity and lightweight context fields.
-
-        Args:
-            meta (dict[str, Any]): The original metadata.
-
-        Returns:
-            dict[str, Any]: The reduced metadata.
-        """
-
-        allowed_keys = {
-            "file_path",
-            "file_name",
-            "filename",
-            "file_hash",
-            "file_type",
-            "mimetype",
-            "source",
-            "origin",
-            "page",
-            "page_number",
-            "headings",
-        }
-        return {k: v for k, v in meta.items() if k in allowed_keys}
 
     def __post_init__(self) -> None:
         """
@@ -138,14 +112,53 @@ class DocumentIngestionPipeline:
         sentence_splitter_chunk_size = rag_config.sentence_splitter_chunk_size
         sentence_splitter_chunk_overlap = rag_config.sentence_splitter_chunk_overlap
         self.enable_hierarchical_chunking = rag_config.enable_hierarchical_chunking
+        self.hierarchical_chunk_sizes = rag_config.hierarchical_chunk_sizes
+        self.hierarchical_chunk_overlap = rag_config.hierarchical_chunk_overlap
         self.sentence_splitter = SentenceSplitter(
             chunk_size=sentence_splitter_chunk_size,
             chunk_overlap=sentence_splitter_chunk_overlap,
         )
         self.hierarchical_node_parser = HierarchicalNodeParser.from_defaults(
-            chunk_sizes=rag_config.hierarchical_chunk_sizes,
-            chunk_overlap=rag_config.hierarchical_chunk_overlap,
+            chunk_sizes=self.hierarchical_chunk_sizes,
+            chunk_overlap=self.hierarchical_chunk_overlap,
         )
+        try:
+            last_id = self.hierarchical_node_parser.node_parser_ids[-1]
+            self.hierarchical_node_parser.node_parser_map[last_id] = (
+                self.sentence_splitter
+            )
+        except Exception:
+            logger.warning(
+                "Could not override leaf parser; hierarchical chunking may ignore sentence splitter."
+            )
+
+    @staticmethod
+    def _minimal_metadata(meta: dict[str, Any]) -> dict[str, Any]:
+        """
+        Reduce metadata to a small, consistent subset to avoid overlong metadata during
+        hierarchical splitting. Keeps only file identity and lightweight context fields.
+
+        Args:
+            meta (dict[str, Any]): The original metadata.
+
+        Returns:
+            dict[str, Any]: The reduced metadata.
+        """
+
+        allowed_keys = {
+            "file_path",
+            "file_name",
+            "filename",
+            "file_hash",
+            "file_type",
+            "mimetype",
+            "source",
+            "origin",
+            "page",
+            "page_number",
+            "headings",
+        }
+        return {k: v for k, v in meta.items() if k in allowed_keys}
 
     def build(
         self, existing_hashes: set[str] | None = None
@@ -428,10 +441,9 @@ class DocumentIngestionPipeline:
         self.md_node_parser = MarkdownNodeParser()
         self.docling_node_parser = DoclingNodeParser()
         if self.hierarchical_node_parser is None:
-            rag_config = load_rag_env()
             self.hierarchical_node_parser = HierarchicalNodeParser.from_defaults(
-                chunk_sizes=rag_config.hierarchical_chunk_sizes,
-                chunk_overlap=rag_config.hierarchical_chunk_overlap,
+                chunk_sizes=self.hierarchical_chunk_sizes,
+                chunk_overlap=self.hierarchical_chunk_overlap,
             )
 
     @staticmethod
