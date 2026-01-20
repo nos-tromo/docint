@@ -343,6 +343,24 @@ def test_docling_hierarchical_fallback_on_error(tmp_path: Path) -> None:
     assert nodes == docling_nodes  # fall back to flat Docling nodes
 
 
+def test_hierarchical_uses_sentence_splitter(tmp_path: Path) -> None:
+    """Hierarchical parser should reuse the configured SentenceSplitter for leaves."""
+
+    pipeline = DocumentIngestionPipeline(
+        data_dir=tmp_path,
+        device="cpu",
+        clean_fn=lambda x: x,
+        ie_model=None,
+        progress_callback=None,
+        entity_extractor=None,
+    )
+
+    hnp = cast(Any, pipeline.hierarchical_node_parser)
+    assert hnp is not None
+    last_id = hnp.node_parser_ids[-1]
+    assert hnp.node_parser_map[last_id] is pipeline.sentence_splitter
+
+
 def test_entity_extractor_attaches_metadata(tmp_path: Path) -> None:
     """
     Test that the entity extractor is called and its results are attached to node metadata.
