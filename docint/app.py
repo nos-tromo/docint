@@ -362,7 +362,7 @@ def render_sidebar() -> None:
         try:
             resp = requests.get(f"{BACKEND_HOST}/collections/list")
             if resp.status_code == 200:
-                cols = resp.json()
+                cols = [c for c in resp.json() if not c.endswith("_dockv")]
                 # If we have a selected collection in state, try to keep it selected
                 index = 0
                 if st.session_state.selected_collection in cols:
