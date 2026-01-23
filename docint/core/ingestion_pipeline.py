@@ -7,7 +7,11 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable
 
 from llama_index.core import Document, SimpleDirectoryReader
-from llama_index.core.node_parser import MarkdownNodeParser, SentenceSplitter
+from llama_index.core.node_parser import (
+    MarkdownNodeParser,
+    NodeParser,
+    SentenceSplitter,
+)
 from llama_index.core.schema import BaseNode
 from llama_index.llms.ollama import Ollama
 from llama_index.node_parser.docling import DoclingNodeParser
@@ -18,6 +22,7 @@ from docint.core.readers.documents import CustomDoclingReader
 from docint.core.readers.images import ImageReader
 from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.tables import TableReader
+from docint.core.storage.hierarchical import HierarchicalNodeParser
 from docint.utils.clean_text import basic_clean
 from docint.utils.env_cfg import load_ie_env, load_path_env, load_rag_env
 from docint.utils.hashing import compute_file_hash
@@ -67,6 +72,9 @@ class DocumentIngestionPipeline:
     sentence_splitter: SentenceSplitter = field(
         default_factory=SentenceSplitter, init=False
     )
+    hierarchical_node_parser: HierarchicalNodeParser | None = field(
+        default=None, init=False
+    )
     docs: list[Document] = field(default_factory=list, init=False)
     nodes: list[BaseNode] = field(default_factory=list, init=False)
     file_hash_cache: dict[str, str] = field(default_factory=dict, init=False)
@@ -105,6 +113,15 @@ class DocumentIngestionPipeline:
             chunk_size=sentence_splitter_chunk_size,
             chunk_overlap=sentence_splitter_chunk_overlap,
         )
+        if rag_config.hierarchical_chunking_enabled:
+            logger.info("Hierarchical chunking is ENABLED.")
+            self.hierarchical_node_parser = HierarchicalNodeParser(
+                coarse_chunk_size=rag_config.coarse_chunk_size,
+                fine_chunk_size=rag_config.fine_chunk_size,
+                fine_chunk_overlap=rag_config.fine_chunk_overlap,
+            )
+        else:
+            self.hierarchical_node_parser = None
 
     def build(
         self, existing_hashes: set[str] | None = None
@@ -480,6 +497,40 @@ class DocumentIngestionPipeline:
             )
         return filtered
 
+    def _process_docs_hierarchical(
+        self, docs: list[Document], base_parser: NodeParser | None = None
+    ) -> list[BaseNode]:
+        """
+        Process documents possibly using hierarchical chunking.
+
+        Args:
+            docs (list[Document]): Documents to process.
+            base_parser (NodeParser | None): The base parser to use for coarse chunking.
+                                             If None, uses the internal logic of HierarchicalNodeParser (defaulting to SentenceSplitter).
+
+        Returns:
+            list[BaseNode]: The processed nodes.
+        """
+        if not docs:
+            return []
+
+        if self.hierarchical_node_parser:
+            # If a specific base parser is provided (and it's not the default sentence splitter),
+            # use it to generate Level 1 chunks, then refine.
+            if base_parser and base_parser != self.sentence_splitter:
+                # Use base parser for Coarse L1
+                # Note: get_nodes_from_documents returns list[BaseNode]
+                coarse = base_parser.get_nodes_from_documents(docs)
+                # Refine to Level 2
+                return self.hierarchical_node_parser._parse_nodes(coarse)
+            else:
+                # Use hierarchical parser from scratch (L0 -> L1 -> L2)
+                # This uses SentenceSplitter internally for L1
+                return self.hierarchical_node_parser.get_nodes_from_documents(docs)
+
+        parser = base_parser or self.sentence_splitter
+        return parser.get_nodes_from_documents(docs)
+
     def _create_nodes(self, docs: list[Document]) -> list[BaseNode]:
         """
         Create nodes from the provided documents.
@@ -548,21 +599,21 @@ class DocumentIngestionPipeline:
                 "Parsing {} audio documents with SentenceSplitter",
                 len(audio_docs),
             )
-            nodes.extend(self.sentence_splitter.get_nodes_from_documents(audio_docs))
+            nodes.extend(self._process_docs_hierarchical(audio_docs))
 
         if img_docs:
             logger.info(
                 "Parsing {} image documents with SentenceSplitter",
                 len(img_docs),
             )
-            nodes.extend(self.sentence_splitter.get_nodes_from_documents(img_docs))
+            nodes.extend(self._process_docs_hierarchical(img_docs))
 
         if json_docs:
             logger.info(
                 "Parsing {} JSON documents with SentenceSplitter",
                 len(json_docs),
             )
-            nodes.extend(self.sentence_splitter.get_nodes_from_documents(json_docs))
+            nodes.extend(self._process_docs_hierarchical(json_docs))
 
         if document_docs:
 
@@ -591,14 +642,18 @@ class DocumentIngestionPipeline:
                     len(pdf_docs_docling),
                 )
                 nodes.extend(
-                    self.docling_node_parser.get_nodes_from_documents(pdf_docs_docling)
+                    self._process_docs_hierarchical(
+                        pdf_docs_docling, self.docling_node_parser
+                    )
                 )
             if pdf_docs_md:
                 logger.info(
                     "Parsing {} Markdown PDFs with MarkdownNodeParser",
                     len(pdf_docs_md),
                 )
-                nodes.extend(self.md_node_parser.get_nodes_from_documents(pdf_docs_md))
+                nodes.extend(
+                    self._process_docs_hierarchical(pdf_docs_md, self.md_node_parser)
+                )
 
         if table_docs:
             logger.info(
@@ -625,16 +680,14 @@ class DocumentIngestionPipeline:
                     len(markdown_docs),
                 )
                 nodes.extend(
-                    self.md_node_parser.get_nodes_from_documents(markdown_docs)
+                    self._process_docs_hierarchical(markdown_docs, self.md_node_parser)
                 )
             if plain_docs:
                 logger.info(
                     "Parsing {} plain text documents with SentenceSplitter",
                     len(plain_docs),
                 )
-                nodes.extend(
-                    self.sentence_splitter.get_nodes_from_documents(plain_docs)
-                )
+                nodes.extend(self._process_docs_hierarchical(plain_docs))
 
         if self.entity_extractor:
             total_nodes = len(nodes)

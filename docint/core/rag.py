@@ -1190,10 +1190,19 @@ class RAG:
         # Process batches from the pipeline generator
         for docs, nodes in pipeline.build(self._get_existing_file_hashes()):
             if nodes:
+                # Filter nodes for vector indexing (exclude coarse chunks from vector store)
+                is_hierarchical = any("docint_hier_type" in n.metadata for n in nodes)
+                vector_nodes = (
+                    [n for n in nodes if n.metadata.get("docint_hier_type") != "coarse"]
+                    if is_hierarchical
+                    else nodes
+                )
+
                 # Explicitly persist to docstore first to ensure data safety
                 logger.debug("Persisting {} nodes to DocStore...", len(nodes))
                 self.index.docstore.add_documents(nodes, allow_update=True)
-                self.index.insert_nodes(nodes)
+                if vector_nodes:
+                    self.index.insert_nodes(vector_nodes)
 
         self.dir_reader = pipeline.dir_reader
         # Clear memory-heavy lists as we've persisted them to the vector store

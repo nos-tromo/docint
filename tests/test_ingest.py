@@ -185,6 +185,8 @@ def _make_pipeline(
     pipeline.sentence_splitter = cast(
         Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
     )  # type: ignore[assignment]
+    # Disable hierarchical node parser to ensure flat chunking (which uses the mocked splitters)
+    pipeline.hierarchical_node_parser = None
     return pipeline, dummy_nodes
 
 

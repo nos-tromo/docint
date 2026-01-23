@@ -88,6 +88,10 @@ class RAGConfig:
     retrieve_top_k: int
     sentence_splitter_chunk_overlap: int
     sentence_splitter_chunk_size: int
+    hierarchical_chunking_enabled: bool
+    coarse_chunk_size: int
+    fine_chunk_size: int
+    fine_chunk_overlap: int
 
 
 @dataclass(frozen=True)
@@ -285,12 +289,20 @@ def load_rag_env() -> RAGConfig:
         - retrieve_top_k (int): The number of top documents to retrieve.
         - sentence_splitter_chunk_overlap (int): The chunk overlap size for sentence splitting.
         - sentence_splitter_chunk_size (int): The chunk size for sentence splitting.
+        - hierarchical_chunking_enabled (bool): Whether hierarchical chunking is enabled.
+        - coarse_chunk_size (int): The coarse chunk size for hierarchical chunking.
+        - fine_chunk_size (int): The fine chunk size for hierarchical chunking.
+        - fine_chunk_overlap (int): The fine chunk overlap size for hierarchical chunking.
     """
     default_docstore_batch_size = "100"
     default_ingestion_batch_size = "5"
     default_retrieve_top_k = "20"
     default_sentence_splitter_chunk_overlap = "64"
     default_sentence_splitter_chunk_size = "1024"
+    default_hierarchical_chunking_enabled = "true"
+    default_coarse_chunk_size = "8192"
+    default_fine_chunk_size = "1024"
+    default_fine_chunk_overlap = "0"
 
     return RAGConfig(
         docstore_batch_size=int(
@@ -310,6 +322,17 @@ def load_rag_env() -> RAGConfig:
             os.getenv(
                 "SENTENCE_SPLITTER_CHUNK_SIZE", default_sentence_splitter_chunk_size
             )
+        ),
+        hierarchical_chunking_enabled=os.getenv(
+            "HIERARCHICAL_CHUNKING_ENABLED", default_hierarchical_chunking_enabled
+        ).lower()
+        in {"true", "1", "yes"},
+        coarse_chunk_size=int(
+            os.getenv("COARSE_CHUNK_SIZE", default_coarse_chunk_size)
+        ),
+        fine_chunk_size=int(os.getenv("FINE_CHUNK_SIZE", default_fine_chunk_size)),
+        fine_chunk_overlap=int(
+            os.getenv("FINE_CHUNK_OVERLAP", default_fine_chunk_overlap)
         ),
     )
 
