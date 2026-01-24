@@ -64,14 +64,8 @@ The application can be used both via Docker for containerized environments and d
 1. **Start Infrastructure Services**
 
    Ensure that **Ollama** and **Qdrant** are running locally or are accessible via network.
+
    - **Ollama**: Must be running (default: `http://localhost:11434`).
-
-     Use the provided helper script to start Ollama with the parallelization settings from your `.env` file (if defined):
-
-     ```bash
-     ./scripts/start_ollama.sh
-     ```
-
    - **Qdrant**: Must be running (default: `http://localhost:6333`).
 
 2. **Install Dependencies**

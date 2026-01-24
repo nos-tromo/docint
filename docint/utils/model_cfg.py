@@ -2,11 +2,16 @@ import sys
 from pathlib import Path
 
 import whisper
-from docling.models.code_formula_model import CodeFormulaModel
-from docling.models.document_picture_classifier import DocumentPictureClassifier
-from docling.models.layout_model import LayoutModel
-from docling.models.rapid_ocr_model import RapidOcrModel
-from docling.models.table_structure_model import TableStructureModel
+from docling.models.stages.code_formula.code_formula_model import CodeFormulaModel
+from docling.models.stages.picture_classifier.document_picture_classifier import (
+    DocumentPictureClassifier,
+    DocumentPictureClassifierOptions,
+)
+from docling.models.stages.layout.layout_model import LayoutModel
+from docling.models.stages.ocr.rapid_ocr_model import RapidOcrModel
+from docling.models.stages.table_structure.table_structure_model import (
+    TableStructureModel,
+)
 from dotenv import load_dotenv
 from huggingface_hub import snapshot_download
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
@@ -78,7 +83,9 @@ def load_docling_models() -> None:
         logger.info("Loaded Code/Formula model")
 
         # 5. Picture Classifier (Standard HF cache)
-        DocumentPictureClassifier.download_models(progress=True)
+        DocumentPictureClassifier.download_models(
+            repo_id=DocumentPictureClassifierOptions().repo_id, progress=True
+        )
         logger.info("Loaded Picture Classifier model")
 
     except Exception as e:

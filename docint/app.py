@@ -349,6 +349,8 @@ def setup_app() -> None:
         st.session_state.preview_url = None
     if "chat_running" not in st.session_state:
         st.session_state.chat_running = False
+    if "analysis_result" not in st.session_state:
+        st.session_state.analysis_result = None
 
     st.caption(f"Current collection: {st.session_state.selected_collection}")
 
@@ -362,7 +364,7 @@ def render_sidebar() -> None:
         try:
             resp = requests.get(f"{BACKEND_HOST}/collections/list")
             if resp.status_code == 200:
-                cols = resp.json()
+                cols = [c for c in resp.json() if not c.endswith("_dockv")]
                 # If we have a selected collection in state, try to keep it selected
                 index = 0
                 if st.session_state.selected_collection in cols:
@@ -730,9 +732,17 @@ def render_analysis() -> None:
             logger.error("No collection selected.")
             st.error("No collection selected.")
         else:
-            st.markdown(f"### Summary of '{st.session_state.selected_collection}'")
+            st.session_state.analysis_result = {
+                "summary": "",
+                "sources": [],
+                "ie": None,
+                "collection": st.session_state.selected_collection,
+            }
             summary_placeholder = st.empty()
             full_summary = ""
+            current_sources: list[dict[str, Any]] = []
+
+            st.markdown(f"### Summary of '{st.session_state.selected_collection}'")
 
             with st.spinner("Thinking..."):
                 try:
@@ -740,7 +750,6 @@ def render_analysis() -> None:
                         f"{BACKEND_HOST}/summarize/stream", stream=True
                     )
                     if resp.status_code == 200:
-                        sources = []
                         for line in resp.iter_lines():
                             if line:
                                 decoded_line = line.decode("utf-8")
@@ -750,83 +759,100 @@ def render_analysis() -> None:
                                         full_summary += data["token"]
                                         summary_placeholder.markdown(full_summary + "▌")
                                     elif "sources" in data:
-                                        sources = data["sources"]
+                                        current_sources = data["sources"]
                                     elif "error" in data:
                                         st.error(f"Error: {data['error']}")
 
                         summary_placeholder.markdown(full_summary)
-
-                        # Download button for analysis
-                        analysis_text = (
-                            f"COLLECTION: {st.session_state.selected_collection}\n\n"
-                        )
-                        analysis_text += f"SUMMARY:\n{full_summary}\n\n"
-
-                        if sources:
-                            with st.expander("Sources used for summary"):
-                                for j, src in enumerate(sources):
-                                    loc = ""
-                                    if src.get("page") is not None:
-                                        loc += f" (Page {src['page']})"
-                                    if src.get("row") is not None:
-                                        loc += f" (Row {src['row']})"
-
-                                    score = ""
-                                    if src.get("score"):
-                                        score = f" - Score: {src['score']:.2f}"
-
-                                    st.markdown(
-                                        f"**{src.get('filename')}{loc}**{score}"
-                                    )
-                                    st.caption(src.get("preview_text", ""))
-                                    _render_entities_relations(src)
-                                    if src.get("file_hash"):
-                                        link = f"{BACKEND_PUBLIC_HOST}/sources/preview?collection={st.session_state.selected_collection}&file_hash={src['file_hash']}"
-                                        st.markdown(
-                                            f'<a href="{link}" target="_blank">Download/View Original</a>',
-                                            unsafe_allow_html=True,
-                                        )
-                                    st.divider()
-
-                        # Fetch and aggregate IE for the whole collection
-                        st.markdown("---")
-                        st.markdown("### Collection-wide Information Extraction")
-                        with st.spinner(
-                            "Aggregating entities and relations from entire collection..."
-                        ):
-                            ie_resp = requests.get(f"{BACKEND_HOST}/collections/ie")
-                            if ie_resp.status_code == 200:
-                                all_ie_sources = ie_resp.json().get("sources", [])
-                                if all_ie_sources:
-                                    _render_ie_overview(all_ie_sources)
-
-                                    # Add IE to download text
-                                    entities, relations = _aggregate_ie(all_ie_sources)
-                                    analysis_text += "ENTITIES:\n"
-                                    for ent in entities:
-                                        analysis_text += f"- {ent['text']} ({ent.get('type', 'Unlabeled')}): {ent['count']} mentions in {', '.join(ent['files'])}\n"
-                                    analysis_text += "\nRELATIONS:\n"
-                                    for rel in relations:
-                                        analysis_text += f"- {rel['head']} --[{rel.get('label', 'rel')}]--> {rel['tail']}: {rel['count']} mentions in {', '.join(rel['files'])}\n"
-                                else:
-                                    st.info(
-                                        "No entities or relations found in this collection."
-                                    )
-                            else:
-                                st.error("Failed to fetch collection-wide IE data.")
-
-                        st.download_button(
-                            label="📥 Download analysis (.txt)",
-                            data=analysis_text,
-                            file_name=f"analysis_{st.session_state.selected_collection}.txt",
-                            mime="text/plain",
-                        )
+                        st.session_state.analysis_result["summary"] = full_summary
+                        st.session_state.analysis_result["sources"] = current_sources
                     else:
-                        logger.error("Summarization failed: {}", resp.text)
                         st.error(f"Summarization failed: {resp.text}")
                 except Exception as e:
-                    logger.error("Error: {}", e)
                     st.error(f"Error: {e}")
+
+            # Fetch IE
+            with st.spinner(
+                "Aggregating entities and relations from entire collection..."
+            ):
+                try:
+                    ie_resp = requests.get(f"{BACKEND_HOST}/collections/ie")
+                    if ie_resp.status_code == 200:
+                        st.session_state.analysis_result["ie"] = ie_resp.json().get(
+                            "sources", []
+                        )
+                    else:
+                        st.session_state.analysis_result["ie"] = []
+                except Exception:
+                    st.session_state.analysis_result["ie"] = []
+
+            st.rerun()
+
+    # Render stored result
+    if (
+        st.session_state.analysis_result
+        and st.session_state.analysis_result.get("collection")
+        == st.session_state.selected_collection
+    ):
+        res = st.session_state.analysis_result
+        st.markdown(f"### Summary of '{res['collection']}'")
+        st.markdown(res["summary"])
+
+        sources = res["sources"]
+
+        # Download button for analysis
+        analysis_text = f"COLLECTION: {res['collection']}\n\n"
+        analysis_text += f"SUMMARY:\n{res['summary']}\n\n"
+
+        if sources:
+            with st.expander("Sources used for summary"):
+                for j, src in enumerate(sources):
+                    loc = ""
+                    if src.get("page") is not None:
+                        loc += f" (Page {src['page']})"
+                    if src.get("row") is not None:
+                        loc += f" (Row {src['row']})"
+
+                    score = ""
+                    if src.get("score"):
+                        score = f" - Score: {src['score']:.2f}"
+
+                    st.markdown(f"**{src.get('filename')}{loc}**{score}")
+                    st.caption(src.get("preview_text", ""))
+                    _render_entities_relations(src)
+                    if src.get("file_hash"):
+                        link = f"{BACKEND_PUBLIC_HOST}/sources/preview?collection={st.session_state.selected_collection}&file_hash={src['file_hash']}"
+                        st.markdown(
+                            f'<a href="{link}" target="_blank">Download/View Original</a>',
+                            unsafe_allow_html=True,
+                        )
+                    st.divider()
+
+        # IE Display
+        st.markdown("---")
+        st.markdown("### Collection-wide Information Extraction")
+
+        ie_sources = res["ie"]
+        if ie_sources:
+            _render_ie_overview(ie_sources)
+
+            # Add IE to download text
+            entities, relations = _aggregate_ie(ie_sources)
+            analysis_text += "ENTITIES:\n"
+            for ent in entities:
+                analysis_text += f"- {ent['text']} ({ent.get('type', 'Unlabeled')}): {ent['count']} mentions in {', '.join(ent['files'])}\n"
+            analysis_text += "\nRELATIONS:\n"
+            for rel in relations:
+                analysis_text += f"- {rel['head']} --[{rel.get('label', 'rel')}]--> {rel['tail']}: {rel['count']} mentions in {', '.join(rel['files'])}\n"
+        else:
+            st.info("No entities or relations found in this collection.")
+
+        st.download_button(
+            label="📥 Download analysis (.txt)",
+            data=analysis_text,
+            file_name=f"analysis_{st.session_state.selected_collection}.txt",
+            mime="text/plain",
+        )
 
 
 def render_chat() -> None:
@@ -1128,7 +1154,7 @@ def render_inspector() -> None:
             with st.expander(f"📄 {doc['filename']} ({mimetype})"):
                 c1, c2, c3 = st.columns(3)
 
-                # Show relevant metrics
+                # Show relevant metrics (rows, duration, or pages)
                 if "max_rows" in doc:
                     c1.metric("Rows", doc["max_rows"])
                 elif "max_duration" in doc:
@@ -1144,12 +1170,13 @@ def render_inspector() -> None:
                     c1.metric("Pages", doc.get("page_count", 0))
 
                 c2.metric("Nodes", doc.get("node_count", 0))
-                c3.write(f"**Mimetype:** {mimetype}")
+                c3.metric("Mimetype", mimetype)
 
                 if doc.get("entity_types"):
                     st.caption(f"Entities: {', '.join(doc['entity_types'])}")
 
-                st.code(doc.get("file_hash"), language="text")
+                if doc.get("file_hash"):
+                    st.caption(f"File Hash: {doc['file_hash']}")
 
                 if doc.get("file_hash"):
                     link = f"{BACKEND_PUBLIC_HOST}/sources/preview?collection={st.session_state.selected_collection}&file_hash={doc['file_hash']}"
