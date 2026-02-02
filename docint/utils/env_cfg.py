@@ -301,7 +301,7 @@ def load_rag_env() -> RAGConfig:
     default_sentence_splitter_chunk_size = "1024"
     default_hierarchical_chunking_enabled = "true"
     default_coarse_chunk_size = "8192"
-    default_fine_chunk_size = "1024"
+    default_fine_chunk_size = "8192"
     default_fine_chunk_overlap = "0"
 
     return RAGConfig(
