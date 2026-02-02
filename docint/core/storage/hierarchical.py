@@ -7,7 +7,6 @@ from typing import Sequence, cast
 from llama_index.core.bridge.pydantic import PrivateAttr
 from llama_index.core.node_parser import NodeParser, SentenceSplitter
 from llama_index.core.schema import BaseNode, Document, NodeRelationship
-from loguru import logger
 
 from docint.utils.env_cfg import load_rag_env
 
@@ -92,7 +91,7 @@ class HierarchicalNodeParser(NodeParser):
             # B) Input is a Pre-chunked Node (Level 1 candidates) -> Split to Fine
 
             is_document = isinstance(node, Document)
-            
+
             coarse_candidates: list[BaseNode] = []
 
             if is_document:
@@ -103,24 +102,26 @@ class HierarchicalNodeParser(NodeParser):
                     [doc_node]
                 )
             else:
-                # Already a node (Level 1 candidate). 
+                # Already a node (Level 1 candidate).
                 # Check if it's too big? If so, split it further?
                 # For simplicity, let's treat it as a Coarse Chunk, but ensure it respects coarse_chunk_size if possible.
                 # If we re-split a Node, we lose its original identity if we aren't careful.
                 # But here we assume the incoming nodes (e.g. Markdown sections) describe the "structure".
                 # If a section is huge, we probably WANT to split it.
-                
+
                 # Check length
                 text_len = len(node.get_content())
                 if text_len > self.coarse_chunk_size:
-                     # It's too big, split it mechanism
-                     # But we must preserve the metadata of the incoming node (e.g. header path)
-                     # SentenceSplitter works on Documents usually.
-                     # We can wrap the node's text in a temporary Document or use `get_nodes_from_documents`.
-                     
-                     # Create a temp doc to split
-                     temp_doc = Document(text=node.get_content(), metadata=node.metadata)
-                     coarse_candidates = self._coarse_splitter.get_nodes_from_documents([temp_doc])
+                    # It's too big, split it mechanism
+                    # But we must preserve the metadata of the incoming node (e.g. header path)
+                    # SentenceSplitter works on Documents usually.
+                    # We can wrap the node's text in a temporary Document or use `get_nodes_from_documents`.
+
+                    # Create a temp doc to split
+                    temp_doc = Document(text=node.get_content(), metadata=node.metadata)
+                    coarse_candidates = self._coarse_splitter.get_nodes_from_documents(
+                        [temp_doc]
+                    )
                 else:
                     # It's fine as a coarse chunk
                     coarse_candidates = [node]
@@ -130,45 +131,47 @@ class HierarchicalNodeParser(NodeParser):
                 # Assign ID if missing
                 if not coarse_node.node_id:
                     coarse_node.node_id = str(uuid.uuid4())
-                
+
                 # Mark as coarse
                 coarse_node.metadata["hier.level"] = 1
                 coarse_node.metadata["docint_hier_type"] = "coarse"
-                
+
                 # Ensure parent (Document) linkage is set if available
                 # If input was Document, SentneceSplitter sets ref_doc_id.
                 # If input was Node, we might have lost connection if we re-split.
-                
+
                 # Add to result list
                 all_nodes.append(coarse_node)
-                
+
                 # Level 1 -> Level 2
                 # We split the *content* of the coarse chunk
                 # We must ensure fine chunks link back to THIS coarse_node
-                
+
                 # Create a temp doc for splitting to ensure easy usage of SentenceSplitter
                 temp_coarse_doc = Document(
-                    text=coarse_node.get_content(), 
-                    metadata=deepcopy(coarse_node.metadata)
+                    text=coarse_node.get_content(),
+                    metadata=deepcopy(coarse_node.metadata),
                 )
-                
+
                 fine_nodes = self._fine_splitter.get_nodes_from_documents(
                     [temp_coarse_doc]
                 )
-                
+
                 for fine_node in fine_nodes:
                     fine_node.metadata["hier.level"] = 2
                     fine_node.metadata["docint_hier_type"] = "fine"
                     fine_node.metadata["hier.parent_id"] = coarse_node.node_id
-                    
+
                     # Also keep track of ancestors if possible?
                     # coarse_node might have ref_doc_id.
                     if coarse_node.ref_doc_id:
-                         fine_node.metadata["hier.doc_id"] = coarse_node.ref_doc_id
-                    
+                        fine_node.metadata["hier.doc_id"] = coarse_node.ref_doc_id
+
                     # Ensure relationships
-                    fine_node.relationships[NodeRelationship.PARENT] = coarse_node.as_related_node_info()
-                    
+                    fine_node.relationships[NodeRelationship.PARENT] = (
+                        coarse_node.as_related_node_info()
+                    )
+
                     # Add to result
                     all_nodes.append(fine_node)
 

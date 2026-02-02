@@ -24,8 +24,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 COPY . .
 
+# Reinstall specific packages with GPU support
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+    uv sync --frozen --no-dev && \
+    uv pip uninstall fastembed onnxruntime && \
+    uv pip install fastembed-gpu onnxruntime-gpu
 
 EXPOSE 8000
 
