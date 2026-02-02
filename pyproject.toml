@@ -22,7 +22,6 @@ dependencies = [
   "loguru>=0.7.2",
   "numba>=0.63.1",
   "numpy>=1.26,<2.4",
-  "onnxruntime>=1.23.2",
   "openai-whisper>=20250625",
   "opencv-python-headless>=4.11.0.86",
   "pandas>=2.2.3",
