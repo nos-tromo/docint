@@ -5,7 +5,7 @@ description = "Proof of concept RAG application"
 authors = [
   { name = "nos-tromo" }
 ]
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.11,<3.12"
 license = "Apache-2.0"
 dependencies = [
   "docling>=2.64.1",
