@@ -30,6 +30,7 @@ class InformationExtractionConfig:
     ie_enabled: bool
     ie_max_chars: int
     ie_max_workers: int
+    ie_engine: str
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class ModelConfig:
 
     embed_model: str
     sparse_model: str
+    ner_model: str
     gen_model: str
     vision_model: str
     whisper_model: str
@@ -85,6 +87,7 @@ class RAGConfig:
 
     docstore_batch_size: int
     ingestion_batch_size: int
+    docling_accelerator_num_threads: int
     retrieve_top_k: int
     sentence_splitter_chunk_overlap: int
     sentence_splitter_chunk_size: int
@@ -143,12 +146,14 @@ def load_ie_env() -> InformationExtractionConfig:
     default_ie_enabled = "1"
     default_ie_max_chars = "800"
     default_ie_max_workers = "4"
+    default_ie_engine = "gliner"
 
     return InformationExtractionConfig(
         ie_enabled=os.getenv("ENABLE_IE", default_ie_enabled).lower()
         in {"1", "true", "yes"},
         ie_max_chars=int(os.getenv("IE_MAX_CHARS", default_ie_max_chars)),
         ie_max_workers=int(os.getenv("IE_MAX_WORKERS", default_ie_max_workers)),
+        ie_engine=os.getenv("IE_ENGINE", default_ie_engine).lower(),
     )
 
 
@@ -160,12 +165,14 @@ def load_model_env() -> ModelConfig:
         ModelConfig: Dataclass containing model configuration.
         - embed_model (str): The embedding model identifier.
         - sparse_model (str): The sparse model identifier.
+        - ner_model (str): The NER model identifier.
         - gen_model (str): The generation model identifier.
         - vision_model (str): The vision model identifier.
         - whisper_model (str): The Whisper model identifier.
     """
     default_embed_model = "BAAI/bge-m3"
     default_sparse_model = "Qdrant/all_miniLM_L6_v2_with_attentions"
+    default_ner_model = "gliner-community/gliner_large-v2.5"
     default_gen_model = "gpt-oss:20b"
     default_vision_model = "qwen3-vl:8b"
     default_whisper_model = "turbo"
@@ -173,6 +180,7 @@ def load_model_env() -> ModelConfig:
     return ModelConfig(
         embed_model=os.getenv("EMBED_MODEL", default_embed_model),
         sparse_model=os.getenv("SPARSE_MODEL", default_sparse_model),
+        ner_model=os.getenv("NER_MODEL", default_ner_model),
         gen_model=os.getenv("LLM", default_gen_model),
         vision_model=os.getenv("VLM", default_vision_model),
         whisper_model=os.getenv("WHISPER_MODEL", default_whisper_model),
@@ -286,6 +294,7 @@ def load_rag_env() -> RAGConfig:
         RAGConfig: Dataclass containing RAG configuration.
         - docstore_batch_size (int): The batch size for document store operations.
         - ingestion_batch_size (int): The batch size for ingestion.
+        - docling_accelerator_num_threads (int): The default number of threads for Docling accelerator.
         - retrieve_top_k (int): The number of top documents to retrieve.
         - sentence_splitter_chunk_overlap (int): The chunk overlap size for sentence splitting.
         - sentence_splitter_chunk_size (int): The chunk size for sentence splitting.
@@ -296,6 +305,7 @@ def load_rag_env() -> RAGConfig:
     """
     default_docstore_batch_size = "100"
     default_ingestion_batch_size = "5"
+    default_docling_accelerator_num_threads = "4"
     default_retrieve_top_k = "20"
     default_sentence_splitter_chunk_overlap = "64"
     default_sentence_splitter_chunk_size = "1024"
@@ -310,6 +320,12 @@ def load_rag_env() -> RAGConfig:
         ),
         ingestion_batch_size=int(
             os.getenv("INGESTION_BATCH_SIZE", default_ingestion_batch_size)
+        ),
+        docling_accelerator_num_threads=int(
+            os.getenv(
+                "DOCLING_ACCELERATOR_NUM_THREADS",
+                default_docling_accelerator_num_threads,
+            )
         ),
         retrieve_top_k=int(os.getenv("RETRIEVE_TOP_K", default_retrieve_top_k)),
         sentence_splitter_chunk_overlap=int(
