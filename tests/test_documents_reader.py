@@ -34,7 +34,7 @@ def test_file_hash_computed_once_when_no_extra_info(
             JSON = "json"
             MARKDOWN = "markdown"
 
-        def __init__(self, export_type=None):
+        def __init__(self, export_type=None, doc_converter=None):
             pass
 
         def load_data(self, path):
@@ -42,6 +42,20 @@ def test_file_hash_computed_once_when_no_extra_info(
                 SimpleNamespace(text="page1", metadata={"page": 1}, id_="doc1"),
                 SimpleNamespace(text="page2", metadata={"page": 2}, id_="doc2"),
             ]
+
+    # Mock DocumentConverter and options to avoid loading real models
+    monkeypatch.setattr(
+        "docint.core.readers.documents.DocumentConverter", lambda **kwargs: None
+    )
+    monkeypatch.setattr(
+        "docint.core.readers.documents.PdfFormatOption", lambda **kwargs: None
+    )
+    monkeypatch.setattr(
+        "docint.core.readers.documents.PdfPipelineOptions", lambda **kwargs: None
+    )
+    monkeypatch.setattr(
+        "docint.core.readers.documents.AcceleratorOptions", lambda **kwargs: None
+    )
 
     monkeypatch.setattr(
         "docint.core.readers.documents.DoclingReader",
@@ -91,7 +105,7 @@ def test_file_hash_respects_extra_info_and_not_recomputed(
             JSON = "json"
             MARKDOWN = "markdown"
 
-        def __init__(self, export_type=None):
+        def __init__(self, export_type=None, doc_converter=None):
             pass
 
         def load_data(self, path):
@@ -100,6 +114,20 @@ def test_file_hash_respects_extra_info_and_not_recomputed(
     monkeypatch.setattr(
         "docint.core.readers.documents.DoclingReader",
         DummyDoclingReader,
+    )
+
+    # Mock DocumentConverter and options to avoid loading real models
+    monkeypatch.setattr(
+        "docint.core.readers.documents.DocumentConverter", lambda **kwargs: None
+    )
+    monkeypatch.setattr(
+        "docint.core.readers.documents.PdfFormatOption", lambda **kwargs: None
+    )
+    monkeypatch.setattr(
+        "docint.core.readers.documents.PdfPipelineOptions", lambda **kwargs: None
+    )
+    monkeypatch.setattr(
+        "docint.core.readers.documents.AcceleratorOptions", lambda **kwargs: None
     )
 
     p = tmp_path / "doc2.pdf"
