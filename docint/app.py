@@ -1031,6 +1031,14 @@ def render_chat() -> None:
 
                         answer_placeholder.markdown(full_answer)
 
+                        if not full_answer and not reasoning:
+                            st.warning("Received empty response from the backend.")
+                        elif not full_answer and reasoning:
+                            # If we only have reasoning (e.g. from <think> tag extraction or similar)
+                            # we might want to show it as the answer or just leave it in the expander.
+                            # For now, let's keep it in the expander but warn.
+                            st.info("No text response generated (only reasoning).")
+
                         if reasoning:
                             with st.expander("Reasoning"):
                                 st.markdown(reasoning)
