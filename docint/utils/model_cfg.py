@@ -13,6 +13,7 @@ from docling.models.stages.table_structure.table_structure_model import (
     TableStructureModel,
 )
 from dotenv import load_dotenv
+from gliner import GLiNER
 from huggingface_hub import snapshot_download
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from loguru import logger
@@ -123,6 +124,17 @@ def load_hf_model(
     logger.info("Loaded {} model: {}", kw, model_id)
 
 
+def load_gliner_model(model_id: str) -> None:
+    """
+    Loads the GLiNER model.
+
+    Args:
+        model_id (str): The name of the GLiNER model to load.
+    """
+    GLiNER.from_pretrained(model_id)
+    logger.info("Loaded GLiNER model: {}", model_id)
+
+
 def load_ollama_model(model_id: str, kw: str) -> None:
     """
     Loads and returns the Ollama model.
@@ -145,7 +157,7 @@ def load_whisper_model(model_id: str) -> None:
     Args:
         model_id (str): The name of the model to load.
     """
-    whisper.load_model("turbo")
+    whisper.load_model(model_id)
     logger.info("Loaded whisper model: {}", model_id)
 
 
@@ -178,6 +190,9 @@ def main() -> None:
             kw=kw,
         )
 
+    # GLiNER
+    load_gliner_model(models.ner_model)
+
     # Ollama
     for model, kw in [
         (models.gen_model, "generator"),
@@ -187,8 +202,6 @@ def main() -> None:
 
     # Whisper
     load_whisper_model(models.whisper_model)
-
-    logger.info("All models loaded successfully.")
 
 
 if __name__ == "__main__":

@@ -26,7 +26,7 @@ from docint.core.storage.hierarchical import HierarchicalNodeParser
 from docint.utils.clean_text import basic_clean
 from docint.utils.env_cfg import load_ie_env, load_path_env, load_rag_env
 from docint.utils.hashing import compute_file_hash
-from docint.utils.ie_extractor import build_ie_extractor
+from docint.utils.ie_extractor import build_ie_extractor, build_gliner_ie_extractor
 from docint.utils.ollama_cfg import OllamaPipeline
 
 CleanFn = Callable[[str], str]
@@ -94,15 +94,29 @@ class DocumentIngestionPipeline:
         ie_enabled = ie_config.ie_enabled
         ie_max_chars = ie_config.ie_max_chars
         self.ie_max_workers = ie_config.ie_max_workers
-        ie_prompt = OllamaPipeline().load_prompt(kw="ner")
+        ie_engine = getattr(ie_config, "ie_engine", "gliner")
 
         # Initialize IE extractor if runtime pieces are provided
-        if self.ie_model and ie_enabled and ie_max_chars and ie_prompt:
-            self.entity_extractor = build_ie_extractor(
-                model=self.ie_model,
-                prompt=ie_prompt,
-                max_chars=ie_max_chars,
-            )
+        if ie_enabled:
+            if ie_engine == "gliner":
+                logger.info("Initializing GLiNER IE extractor")
+                # We purposefully ignore ie_max_chars for GLiNER as it handles chunking or short texts well,
+                # but we can pass it if we want to limit input size strictly.
+                self.entity_extractor = build_gliner_ie_extractor()
+            elif ie_engine == "ollama" and self.ie_model and ie_max_chars:
+                ie_prompt = OllamaPipeline().load_prompt(kw="ner")
+                if ie_prompt:
+                    logger.info("Initializing Ollama IE extractor")
+                    self.entity_extractor = build_ie_extractor(
+                        model=self.ie_model,
+                        prompt=ie_prompt,
+                        max_chars=ie_max_chars,
+                    )
+            else:
+                logger.warning(
+                    "IE enabled but configuration invalid or model missing. Skipping."
+                )
+                self.entity_extractor = None
 
         # --- RAG config ---
         rag_config = load_rag_env()
@@ -370,8 +384,8 @@ class DocumentIngestionPipeline:
                 ".m4v": audio_reader,
                 ".wmv": audio_reader,
                 ".json": CustomJSONReader(),
-                ".docx": CustomDoclingReader(),
-                ".pdf": CustomDoclingReader(),
+                ".docx": CustomDoclingReader(device=self.device),
+                ".pdf": CustomDoclingReader(device=self.device),
                 ".gif": image_reader,
                 ".jpeg": image_reader,
                 ".jpg": image_reader,

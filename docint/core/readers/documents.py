@@ -1,10 +1,18 @@
 from pathlib import Path
 
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.pipeline_options import (
+    AcceleratorDevice,
+    AcceleratorOptions,
+    PdfPipelineOptions,
+)
+from docling.document_converter import DocumentConverter, PdfFormatOption
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from llama_index.readers.docling import DoclingReader
 from loguru import logger
 
+from docint.utils.env_cfg import load_rag_env
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.mimetype import get_mimetype
 
@@ -16,19 +24,43 @@ class CustomDoclingReader(BaseReader):
     Ensures consistent metadata for all outputs.
     """
 
-    def __init__(self, export_type: str = "json") -> None:
+    def __init__(self, export_type: str = "json", device: str = "cpu") -> None:
         """
         Initializes the CustomDoclingReader with the specified export type.
 
         Args:
             export_type (str): 'json' or 'markdown'.
+            device (str): 'cpu', 'cuda', or 'mps'.
         """
+        # Map device string to AcceleratorDevice
+        accelerator = AcceleratorDevice.CPU
+        if device == "cuda":
+            accelerator = AcceleratorDevice.CUDA
+        elif device == "mps":
+            accelerator = AcceleratorDevice.MPS
+
+        # Configure pipeline with device
+        num_threads = load_rag_env().docling_accelerator_num_threads
+        acc_opts = AcceleratorOptions(num_threads=num_threads, device=accelerator)
+        pipeline_opts = PdfPipelineOptions(
+            accelerator_options=acc_opts,
+            do_ocr=True,
+            do_table_structure=True,
+        )
+
+        converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_opts)
+            }
+        )
+
         self.docling_reader = DoclingReader(
             export_type=(
                 DoclingReader.ExportType.JSON
                 if export_type.lower() == "json"
                 else DoclingReader.ExportType.MARKDOWN
-            )
+            ),
+            doc_converter=converter,
         )
 
     def _standardize_metadata(

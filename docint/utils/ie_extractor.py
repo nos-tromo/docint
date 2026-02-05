@@ -1,7 +1,11 @@
 import json
 from typing import Any, Callable
 
+import torch
 from loguru import logger
+from gliner import GLiNER
+
+from docint.utils.env_cfg import load_model_env
 
 
 def _parse_ie_payload(raw: str) -> dict[str, Any]:
@@ -97,6 +101,86 @@ def build_ie_extractor(
                     "score": rel.get("score"),
                 }
             )
+
+        return entities, relations
+
+    return _extract
+
+
+def build_gliner_ie_extractor(
+    labels: list[str] | None = None,
+    threshold: float = 0.3,
+) -> Callable[[str], tuple[list[dict], list[dict]]]:
+    """
+    Create an IE extractor bound to a GLiNER model.
+
+    Args:
+        labels (list[str] | None): The entity labels to extract.
+        threshold (float): Confidence threshold.
+
+    Returns:
+        Callable[[str], tuple[list[dict], list[dict]]]: The IE extraction function.
+    """
+    model_id = load_model_env().ner_model
+
+    # Default labels if none provided - covering general domain
+    if not labels:
+        labels = [
+            "person",
+            "organization",
+            "location",
+            "date",
+            "event",
+        ]
+
+    logger.info("Loading GLiNER model: {}", model_id)
+
+    # We load initially; moving to device happens if available
+    try:
+        model = GLiNER.from_pretrained(model_id)
+    except Exception as e:
+        logger.error("Failed to load GLiNER model: {}. Error: {}", model_id, e)
+        raise
+
+    if torch.cuda.is_available():
+        model = model.to("cuda")
+        logger.info("GLiNER moved to CUDA")
+    elif torch.backends.mps.is_available():
+        model = model.to("mps")
+        logger.info("GLiNER moved to MPS")
+
+    def _extract(text: str) -> tuple[list[dict], list[dict]]:
+        """
+        Extract entities using GLiNER.
+
+        Args:
+            text (str): Input text.
+
+        Returns:
+            tuple[list[dict], list[dict]]: Entities and relations.
+        """
+        if not text.strip():
+            return [], []
+
+        try:
+            # GLiNER predict_entities
+            preds = model.predict_entities(text, labels, threshold=threshold)
+        except Exception as e:
+            logger.warning("GLiNER extraction failed: {}", e)
+            return [], []
+
+        entities = []
+        for p in preds:
+            entities.append(
+                {
+                    "text": p["text"],
+                    "type": p["label"],
+                    "score": p["score"],
+                }
+            )
+
+        # GLiNER is pure NER, leaving relations empty
+        relations: list[dict] = []
 
         return entities, relations
 

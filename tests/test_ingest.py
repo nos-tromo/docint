@@ -166,14 +166,17 @@ def _make_pipeline(
         tuple[DocumentIngestionPipeline, list]: The created pipeline and the list of dummy nodes
     """
     dummy_nodes: list = []
+    # Pipeline.__post_init__ will override entity_extractor if env vars are present.
+    # We must forcibly set the extractor AFTER init.
     pipeline = DocumentIngestionPipeline(
         data_dir=tmp_path,
         device="cpu",
         clean_fn=lambda x: x,
         ie_model=None,
         progress_callback=None,
-        entity_extractor=entity_extractor,
     )  # type: ignore[arg-type]
+
+    pipeline.entity_extractor = entity_extractor
 
     # Minimal parser stubs to satisfy _create_nodes preconditions
     pipeline.md_node_parser = cast(
