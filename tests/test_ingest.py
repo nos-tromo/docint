@@ -175,7 +175,7 @@ def _make_pipeline(
         ie_model=None,
         progress_callback=None,
     )  # type: ignore[arg-type]
-    
+
     pipeline.entity_extractor = entity_extractor
 
     # Minimal parser stubs to satisfy _create_nodes preconditions
