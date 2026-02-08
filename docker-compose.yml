@@ -12,6 +12,9 @@ services:
     environment:
       - DATA_PATH=/app/data
       - LOG_PATH=/app/.logs/backend-cpu.log
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=password
       - OLLAMA_HOST=http://ollama-net:11434
       - QDRANT_COL_DIR=/qdrant/storage/collections
       - QDRANT_HOST=http://qdrant:6333
@@ -31,12 +34,30 @@ services:
     depends_on:
       ollama:
         condition: service_healthy
+      neo4j:
+        condition: service_started
     networks:
       docint-net:
         aliases:
           - backend-net
 
   ##########################################################
+  # Neo4j
+  ##########################################################
+  neo4j:
+    image: neo4j:5.26.0
+    ports:
+      - "7474:7474" # HTTP
+      - "7687:7687" # Bolt
+    environment:
+      - NEO4J_AUTH=neo4j/password
+    volumes:
+      - neo4j-data:/data
+    networks:
+      docint-net:
+        aliases:
+          - neo4j-net
+
   # Backend (GPU)
   ##########################################################
   backend-gpu:
@@ -48,6 +69,10 @@ services:
       - "8000:8000"
     environment:
       - DATA_PATH=/app/data/in
+      - LOG_PATH=/app/.logs/backend-gpu.log
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=password
       - LOG_PATH=/app/.logs/backend-gpu.log
       - NVIDIA_VISIBLE_DEVICES=all
       - OLLAMA_HOST=http://ollama-net:11434
@@ -75,6 +100,8 @@ services:
     depends_on:
       ollama-gpu:
         condition: service_healthy
+      neo4j:
+        condition: service_started
     networks:
       docint-net:
         aliases:
@@ -179,6 +206,7 @@ volumes:
   ollama-models:
   qdrant-snapshots:
   qdrant-storage:
+  neo4j-data:
 
 ##########################################################
 # Networks

@@ -22,6 +22,17 @@ class HostConfig:
 
 
 @dataclass(frozen=True)
+class GraphConfig:
+    """
+    Dataclass for graph database configuration.
+    """
+
+    neo4j_uri: str
+    neo4j_user: str
+    neo4j_password: str
+
+
+@dataclass(frozen=True)
 class InformationExtractionConfig:
     """
     Dataclass for information extraction configuration.
@@ -130,6 +141,27 @@ def load_host_env() -> HostConfig:
         ollama_host=os.getenv("OLLAMA_HOST", default_ollama_host),
         qdrant_host=os.getenv("QDRANT_HOST", default_qdrant_host),
         cors_allowed_origins=os.getenv("CORS_ALLOWED_ORIGINS", default_cors_origins),
+    )
+
+
+def load_graph_env() -> GraphConfig:
+    """
+    Loads graph configuration from environment variables or defaults.
+
+    Returns:
+        GraphConfig: Dataclass containing graph configuration.
+        - neo4j_uri (str): The Neo4j URI.
+        - neo4j_user (str): The Neo4j user.
+        - neo4j_password (str): The Neo4j password.
+    """
+    default_neo4j_uri = "bolt://localhost:7687"
+    default_neo4j_user = "neo4j"
+    default_neo4j_password = "password"
+
+    return GraphConfig(
+        neo4j_uri=os.getenv("NEO4J_URI", default_neo4j_uri),
+        neo4j_user=os.getenv("NEO4J_USER", default_neo4j_user),
+        neo4j_password=os.getenv("NEO4J_PASSWORD", default_neo4j_password),
     )
 
 

@@ -13,17 +13,23 @@ from typing import Any, Callable
 import torch
 from fastembed import SparseTextEmbedding
 from llama_index.core import (
+    PropertyGraphIndex,
     Response,
     SimpleDirectoryReader,
     StorageContext,
     VectorStoreIndex,
 )
 from llama_index.core.embeddings import BaseEmbedding
+from llama_index.core.indices.property_graph import (
+    SchemaLLMPathExtractor,
+    SimpleLLMPathExtractor,
+)
 from llama_index.core.postprocessor import LLMRerank
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.schema import BaseNode, Document
 from llama_index.core.storage.docstore.keyval_docstore import KVDocumentStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.graph_stores.neo4j import Neo4jGraphStore
 from llama_index.llms.ollama import Ollama
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from loguru import logger
@@ -35,6 +41,7 @@ from docint.core.session_manager import SessionManager
 from docint.core.storage.docstore import QdrantKVStore
 from docint.core.storage.sources import stage_sources_to_qdrant
 from docint.utils.env_cfg import (
+    load_graph_env,
     load_host_env,
     load_ie_env,
     load_model_env,
@@ -57,6 +64,7 @@ class RAG:
 
     # --- Constructor args ---
     qdrant_collection: str
+    enable_graph: bool = field(default=True)
     enable_hybrid: bool = field(default=True)
 
     # --- Path setup ---
@@ -76,7 +84,13 @@ class RAG:
     qdrant_host: str | None = field(default=None, init=False)
     _qdrant_col_dir: Path | None = field(default=None, init=False, repr=False)
     _qdrant_src_dir: Path | None = field(default=None, init=False, repr=False)
+    
+    # --- Graph config ---
+    neo4j_uri: str | None = field(default=None, init=False)
+    neo4j_user: str | None = field(default=None, init=False)
+    neo4j_password: str | None = field(default=None, init=False)
 
+    # --- 
     # --- Ollama parameters ---
     ollama_host: str | None = field(default=None, init=False)
     ollama_ctx_window: int | None = field(default=None, init=False)
@@ -111,23 +125,26 @@ class RAG:
         default=None, init=False, repr=False
     )
 
-    # -- Ingested data ---
-    dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
-    docs: list[Document] = field(default_factory=list, init=False)
-    nodes: list[BaseNode] = field(default_factory=list, init=False)
-
-    # --- Built components (lazy loaded) ---
-    index: VectorStoreIndex | None = field(default=None, init=False)
+    # -- Ingested data ---PropertyGraphIndex | None = field(default=None, init=False)
     query_engine: RetrieverQueryEngine | None = field(default=None, init=False)
     sessions: SessionManager | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """
         Post-initialization to set up any necessary components.
-
-        Raises:
-            ValueError: If summarize_prompt_path is not set.
         """
+        # --- Host config ---
+        host_config = load_host_env()
+        self.ollama_host = host_config.ollama_host
+        self.qdrant_host = host_config.qdrant_host
+
+        # --- Graph config ---
+        if self.enable_graph:
+            graph_config = load_graph_env()
+            self.neo4j_uri = graph_config.neo4j_uri
+            self.neo4j_user = graph_config.neo4j_user
+            self.neo4j_password = graph_config.neo4j_password
+
         # --- Host config ---
         host_config = load_host_env()
         self.ollama_host = host_config.ollama_host
@@ -580,6 +597,28 @@ class RAG:
         return self._qdrant_aclient
 
     # --- Build pieces ---
+    def _graph_store(self) -> Neo4jGraphStore | None:
+        """
+        Creates the graph store for knowledge graph.
+
+        Returns:
+            Neo4jGraphStore | None: The initialized graph store or None if graph is disabled.
+
+        Raises:
+            ValueError: If graph config is missing.
+        """
+        if not self.enable_graph:
+            return None
+        
+        if not (self.neo4j_user and self.neo4j_password and self.neo4j_uri):
+             raise ValueError("Neo4j configuration is missing.")
+
+        return Neo4jGraphStore(
+            username=self.neo4j_user,
+            password=self.neo4j_password,
+            url=self.neo4j_uri,
+        )
+
     def _vector_store(self) -> QdrantVectorStore:
         """
         Creates the vector store for document embeddings.
@@ -790,21 +829,53 @@ class RAG:
 
     def create_index(self) -> None:
         """
-        Materialize a VectorStoreIndex. If nodes are present in memory, create from nodes.
-        Otherwise, load from vector store.
+        Materialize an Index. If nodes are present in memory, create from nodes.
+        Otherwise, load from stores. Supports both VectorStoreIndex and PropertyGraphIndex.
         """
         vector_store = self._vector_store()
-        storage_ctx = self._storage_context(vector_store)
 
-        if self.nodes:
-            self.index = self._index(storage_ctx)
+        if self.enable_graph:
+            graph_store = self._graph_store()
+            
+            # Simple extractor for now - can be enhanced with SchemaLLMPathExtractor if needed
+            kg_extractors = [
+                SimpleLLMPathExtractor(
+                    llm=self.gen_model,
+                    max_paths_per_chunk=10,
+                    num_workers=4,
+                )
+            ]
+
+            if self.nodes:
+                logger.info("Creating PropertyGraphIndex from nodes...")
+                self.index = PropertyGraphIndex(
+                    nodes=self.nodes,
+                    embed_model=self.embed_model,
+                    property_graph_store=graph_store,
+                    vector_store=vector_store,
+                    kg_extractors=kg_extractors,
+                )
+            else:
+                logger.info("Loading existing PropertyGraphIndex...")
+                # from_existing will try to load from the stores
+                self.index = PropertyGraphIndex.from_existing(
+                    property_graph_store=graph_store,
+                    vector_store=vector_store,
+                    embed_model=self.embed_model,
+                    kg_extractors=kg_extractors,
+                )
         else:
-            # Build index with explicit storage_context so it uses the persistent docstore.
-            self.index = VectorStoreIndex(
-                nodes=[],
-                embed_model=self.embed_model,
-                storage_context=storage_ctx,
-            )
+            storage_ctx = self._storage_context(vector_store)
+
+            if self.nodes:
+                self.index = self._index(storage_ctx)
+            else:
+                # Build index with explicit storage_context so it uses the persistent docstore.
+                self.index = VectorStoreIndex(
+                    nodes=[],
+                    embed_model=self.embed_model,
+                    storage_context=storage_ctx,
+                )
 
     def create_query_engine(self) -> None:
         """
@@ -817,8 +888,19 @@ class RAG:
             logger.error("RuntimeError: Index is not initialized.")
             raise RuntimeError("Index is not initialized. Cannot create query engine.")
         k = min(max(self.retrieve_similarity_top_k, self.rerank_top_n * 8), 64)
+        
+        if self.enable_graph and isinstance(self.index, PropertyGraphIndex):
+            # For PropertyGraphIndex, we want to leverage both graph and vector search
+            # This configures a retriever that acts on the graph index
+            retriever = self.index.as_retriever(
+                similarity_top_k=k,
+                include_text=True, # Enable vector search alongside graph traversal
+            )
+        else:
+            retriever = self.index.as_retriever(similarity_top_k=k)
+
         self.query_engine = RetrieverQueryEngine.from_args(
-            retriever=self.index.as_retriever(similarity_top_k=k),
+            retriever=retriever,
             llm=self.gen_model,
             node_postprocessors=[self.reranker],
         )

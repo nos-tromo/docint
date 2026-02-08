@@ -413,11 +413,13 @@ dependencies = [
     { name = "huggingface-hub" },
     { name = "llama-index" },
     { name = "llama-index-embeddings-huggingface" },
+    { name = "llama-index-graph-stores-neo4j" },
     { name = "llama-index-llms-ollama" },
     { name = "llama-index-node-parser-docling" },
     { name = "llama-index-readers-docling" },
     { name = "llama-index-vector-stores-qdrant" },
     { name = "loguru" },
+    { name = "neo4j" },
     { name = "numba" },
     { name = "numpy" },
     { name = "openai-whisper" },
@@ -458,11 +460,13 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=0.36.0,<2.0" },
     { name = "llama-index", specifier = ">=0.13.0" },
     { name = "llama-index-embeddings-huggingface", specifier = ">=0.6.0" },
+    { name = "llama-index-graph-stores-neo4j", specifier = ">=0.4.0" },
     { name = "llama-index-llms-ollama", specifier = ">=0.7.0" },
     { name = "llama-index-node-parser-docling", specifier = ">=0.4.0" },
     { name = "llama-index-readers-docling", specifier = ">=0.4.0" },
     { name = "llama-index-vector-stores-qdrant", specifier = ">=0.7.1" },
     { name = "loguru", specifier = ">=0.7.2" },
+    { name = "neo4j", specifier = ">=5.28.0" },
     { name = "numba", specifier = ">=0.63.1" },
     { name = "numpy", specifier = ">=1.26,<2.4" },
     { name = "openai-whisper", specifier = ">=20250625" },
@@ -1241,6 +1245,19 @@ wheels = [
 ]
 
 [[package]]
+name = "llama-index-graph-stores-neo4j"
+version = "0.5.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "llama-index-core" },
+    { name = "neo4j" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/fa/2c/24f07d32395a90c4bc9302e2941779020105a38bb13540b76194e68c496e/llama_index_graph_stores_neo4j-0.5.1.tar.gz", hash = "sha256:3f713347aa620f8f5d150636e8bb95e3f819a4eb057b91dfa7cec1162c28d578", size = 17172, upload-time = "2025-09-08T20:29:54.201Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d1/de/810b379b25c877679a45f995453eaba89bf2371f174e03d482023dff789b/llama_index_graph_stores_neo4j-0.5.1-py3-none-any.whl", hash = "sha256:d9a93c7974de648dd0850b8e405599fdc56195b24429dedcd5f971274536f322", size = 18283, upload-time = "2025-09-08T20:29:53.389Z" },
+]
+
+[[package]]
 name = "llama-index-indices-managed-llama-cloud"
 version = "0.9.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1649,6 +1666,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/47/6d/b57c64e5038a8cf071bce391bb11551657a74558877ac961e7fa905ece27/narwhals-2.15.0.tar.gz", hash = "sha256:a9585975b99d95084268445a1fdd881311fa26ef1caa18020d959d5b2ff9a965", size = 603479, upload-time = "2026-01-06T08:10:13.27Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/3d/2e/cf2ffeb386ac3763526151163ad7da9f1b586aac96d2b4f7de1eaebf0c61/narwhals-2.15.0-py3-none-any.whl", hash = "sha256:cbfe21ca19d260d9fd67f995ec75c44592d1f106933b03ddd375df7ac841f9d6", size = 432856, upload-time = "2026-01-06T08:10:11.511Z" },
+]
+
+[[package]]
+name = "neo4j"
+version = "5.28.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytz" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/83/f2/9e386c8e7243c285768ecd2b71e6796009d3f6f3b202310e9ef972acf526/neo4j-5.28.3.tar.gz", hash = "sha256:0625aaaf0963bc99a7231e946952f579792c3be22687192b20e0b74aa1233a2b", size = 232122, upload-time = "2026-01-12T10:42:43.842Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/64/83/15b4ee7c081322ba3095e58bfa2c4214452fda9accaece68e25fc86a9bb4/neo4j-5.28.3-py3-none-any.whl", hash = "sha256:dbf6d9211b861bc3dd62dccbf8a74d1e33e0c602084dd123b753edf46e1fdfad", size = 313351, upload-time = "2026-01-12T10:42:40.507Z" },
 ]
 
 [[package]]
