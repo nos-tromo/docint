@@ -11,16 +11,16 @@ from PIL import Image
 
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.mimetype import get_mimetype
-from docint.utils.ollama_cfg import OllamaPipeline
+from docint.utils.llama_cpp_cfg import LlamaCppPipeline
 
 
 @dataclass
 class ImageReader(BaseReader):
     """
-    Image reader that utilizes the OllamaPipeline for processing images.
+    Image reader that utilizes the LlamaCppPipeline for processing images.
     """
 
-    ollama_pipeline: OllamaPipeline = field(default_factory=OllamaPipeline, init=False)
+    llama_cpp_pipeline: LlamaCppPipeline = field(default_factory=LlamaCppPipeline, init=False)
 
     def _load_image(self, file_path: Path, mode: str = "RGB") -> Image.Image:
         """
@@ -103,7 +103,7 @@ class ImageReader(BaseReader):
 
     def load_data(self, file: str | Path, **kwargs) -> list[Document]:
         """
-        Load and process image data using the OllamaPipeline.
+        Load and process image data using the LlamaCppPipeline.
 
         Args:
             file (str | bytes): The path to the image file or image bytes.
@@ -124,8 +124,8 @@ class ImageReader(BaseReader):
 
         img = self._load_image(file_path)
         img_base64 = self._encode_img_to_base64(img)
-        prompt = self.ollama_pipeline.load_prompt("describe")
-        self.response = self.ollama_pipeline.call_ollama_server(
+        prompt = self.llama_cpp_pipeline.load_prompt("describe")
+        self.response = self.llama_cpp_pipeline.call_llama_cpp(
             prompt=prompt,
             img=img_base64,
         )

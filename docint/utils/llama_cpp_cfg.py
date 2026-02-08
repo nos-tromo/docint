@@ -1,0 +1,258 @@
+"""
+Llama.cpp pipeline for text generation and vision model inference.
+
+This module provides a pipeline for running inference with Llama.cpp models,
+supporting both CPU and GPU (CUDA/Metal) acceleration.
+"""
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from huggingface_hub import hf_hub_download
+from llama_cpp import Llama
+from loguru import logger
+from PIL import Image
+
+from docint.utils.env_cfg import load_host_env, load_model_env, load_path_env
+
+
+@dataclass(slots=True)
+class LlamaCppPipeline:
+    """
+    Pipeline for text generation and image processing with Llama.cpp.
+    
+    This pipeline manages model loading, caching, and inference for both
+    text and vision models using the llama-cpp-python library.
+    """
+
+    prompt_dir: Path | None = field(default=None, init=False)
+    model_id: str | None = field(default=None, init=False)
+    model_cache_dir: Path | None = field(default=None, init=False)
+    n_gpu_layers: int = field(default=-1, init=False)  # -1 = offload all to GPU
+    n_ctx: int = field(default=32768, init=False)
+    _sys_prompt: str | None = field(default=None, init=False, repr=False)
+    _model: Llama | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """
+        Post-initialization to load configurations.
+        """
+        self.model_id = load_model_env().vision_model
+        self.prompt_dir = load_path_env().prompts
+        self.model_cache_dir = load_path_env().llama_cpp_cache
+        
+        # Create cache directory if it doesn't exist
+        if self.model_cache_dir:
+            self.model_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def sys_prompt(self) -> str:
+        """
+        Get the system prompt for model inference.
+
+        Returns:
+            str: The system prompt.
+        """
+        if self._sys_prompt is None:
+            self._sys_prompt = self.load_prompt()
+            logger.info("System prompt loaded.")
+        return self._sys_prompt
+
+    def load_prompt(self, kw: str = "system") -> str:
+        """
+        Load a prompt from the prompts directory based on the given keyword.
+
+        Args:
+            kw (str, optional): The keyword to identify the prompt file. Defaults to "system".
+
+        Returns:
+            str: The content of the prompt file.
+
+        Raises:
+            RuntimeError: If the prompt directory is not set.
+            FileNotFoundError: If the prompt file for the given keyword does not exist.
+        """
+        if self.prompt_dir is None:
+            logger.error("RuntimeError: Prompt directory is not set.")
+            raise RuntimeError("Prompt directory is not set.")
+
+        prompt_path = self.prompt_dir / f"{kw}.txt"
+        if not prompt_path.is_file():
+            logger.error(
+                "FileNotFoundError: Prompt file for keyword '{}' not found.", kw
+            )
+            raise FileNotFoundError(f"Prompt file for keyword '{kw}' not found.")
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            logger.info("Loaded prompt from '{}'", prompt_path)
+            return f.read()
+
+    def _load_model(self, model_path: str) -> Llama:
+        """
+        Load a GGUF model with Llama.cpp.
+
+        Args:
+            model_path (str): Path to the GGUF model file.
+
+        Returns:
+            Llama: The loaded model instance.
+        """
+        logger.info("Loading Llama.cpp model from: {}", model_path)
+        
+        model = Llama(
+            model_path=model_path,
+            n_ctx=self.n_ctx,
+            n_gpu_layers=self.n_gpu_layers,
+            verbose=False,
+        )
+        
+        logger.info("Successfully loaded model with {} GPU layers", self.n_gpu_layers)
+        return model
+
+    @property
+    def model(self) -> Llama:
+        """
+        Lazily load and cache the model.
+
+        Returns:
+            Llama: The loaded model instance.
+        """
+        if self._model is None:
+            model_path = self._resolve_model_path(self.model_id)
+            self._model = self._load_model(model_path)
+        return self._model
+
+    def _resolve_model_path(self, model_id: str | None) -> str:
+        """
+        Resolve the model identifier to a local file path.
+
+        Args:
+            model_id (str | None): Model identifier (HF repo/file or local path).
+
+        Returns:
+            str: Path to the GGUF model file.
+
+        Raises:
+            ValueError: If model_id is None or invalid.
+        """
+        if model_id is None:
+            raise ValueError("model_id cannot be None")
+
+        # If it's already a local path, return it
+        model_path = Path(model_id)
+        if model_path.exists() and model_path.is_file():
+            logger.info("Using local model at: {}", model_path)
+            return str(model_path)
+
+        # Otherwise, check cache directory
+        if self.model_cache_dir:
+            cached_path = self.model_cache_dir / model_id
+            if cached_path.exists():
+                logger.info("Using cached model at: {}", cached_path)
+                return str(cached_path)
+
+        logger.error("Model not found: {}", model_id)
+        raise FileNotFoundError(f"Model not found: {model_id}")
+
+    def call_llama_cpp(
+        self,
+        prompt: str,
+        img: str | bytes | Image.Image | None = None,
+        temperature: float = 0.1,
+        max_tokens: int = 2048,
+        top_k: int = 40,
+        top_p: float = 0.95,
+        repeat_penalty: float = 1.1,
+    ) -> str:
+        """
+        Call Llama.cpp for text generation.
+
+        Args:
+            prompt (str): The prompt to send to the model.
+            img (str | bytes | Image.Image | None, optional): Optional image data (for vision models).
+            temperature (float): The temperature for sampling. Defaults to 0.1.
+            max_tokens (int): Maximum tokens to generate. Defaults to 2048.
+            top_k (int): Top-k sampling parameter. Defaults to 40.
+            top_p (float): Top-p sampling parameter. Defaults to 0.95.
+            repeat_penalty (float): Repetition penalty. Defaults to 1.1.
+
+        Returns:
+            str: The generated text response.
+
+        Raises:
+            RuntimeError: If model loading or inference fails.
+        """
+        try:
+            # Format the full prompt with system message
+            full_prompt = f"{self.sys_prompt}\n\nUser: {prompt}\n\nAssistant:"
+
+            # Generate response
+            response = self.model(
+                full_prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                repeat_penalty=repeat_penalty,
+                echo=False,
+            )
+
+            # Extract text from response
+            if isinstance(response, dict) and "choices" in response:
+                text = response["choices"][0]["text"].strip()
+                return text
+            
+            logger.error("Unexpected response format from Llama.cpp")
+            return ""
+
+        except Exception as e:
+            logger.error("Error during Llama.cpp inference: {}", e)
+            raise RuntimeError(f"Llama.cpp inference failed: {e}")
+
+    @staticmethod
+    def ensure_model(model_name: str, repo_id: str | None = None) -> None:
+        """
+        Ensure that the specified GGUF model is available locally.
+        If not, attempt to download it from Hugging Face.
+
+        Args:
+            model_name (str): The name of the model file (e.g., "model.gguf").
+            repo_id (str | None): The Hugging Face repository ID. If None, assumes local file.
+        """
+        try:
+            paths = load_path_env()
+            cache_dir = paths.llama_cpp_cache
+            
+            # Create cache directory if it doesn't exist
+            cache_dir.mkdir(parents=True, exist_ok=True)
+
+            model_path = cache_dir / model_name
+            
+            # Check if model already exists
+            if model_path.exists():
+                logger.info("Model '{}' is already available at {}", model_name, model_path)
+                return
+
+            if repo_id is None:
+                logger.warning(
+                    "Model '{}' not found locally and no repo_id provided for download",
+                    model_name
+                )
+                return
+
+            logger.info("Model '{}' not found. Downloading from {}...", model_name, repo_id)
+
+            # Download from Hugging Face
+            downloaded_path = hf_hub_download(
+                repo_id=repo_id,
+                filename=model_name,
+                cache_dir=cache_dir,
+                local_dir=cache_dir,
+                local_dir_use_symlinks=False,
+            )
+
+            logger.info("Successfully downloaded model '{}' to {}", model_name, downloaded_path)
+
+        except Exception as e:
+            logger.error("Failed to ensure model '{}': {}", model_name, e)
+            raise

@@ -24,7 +24,7 @@ from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.schema import BaseNode, Document
 from llama_index.core.storage.docstore.keyval_docstore import KVDocumentStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.llms.ollama import Ollama
+from llama_index.llms.llama_cpp import LlamaCPP
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from loguru import logger
 from qdrant_client import QdrantClient
@@ -38,7 +38,7 @@ from docint.utils.env_cfg import (
     load_host_env,
     load_ie_env,
     load_model_env,
-    load_ollama_env,
+    load_llama_cpp_env,
     load_path_env,
     load_rag_env,
     load_session_env,
@@ -77,16 +77,16 @@ class RAG:
     _qdrant_col_dir: Path | None = field(default=None, init=False, repr=False)
     _qdrant_src_dir: Path | None = field(default=None, init=False, repr=False)
 
-    # --- Ollama parameters ---
-    ollama_host: str | None = field(default=None, init=False)
-    ollama_ctx_window: int | None = field(default=None, init=False)
-    ollama_request_timeout: int | None = field(default=None, init=False)
-    ollama_seed: int | None = field(default=None, init=False)
-    ollama_temperature: float | None = field(default=None, init=False)
-    ollama_thinking: bool = False
-    ollama_top_k: int | None = field(default=None, init=False)
-    ollama_top_p: float | None = field(default=None, init=False)
-    ollama_options: dict[str, Any] | None = field(default=None, init=False)
+    # --- Llama.cpp parameters ---
+    llama_cpp_ctx_window: int | None = field(default=None, init=False)
+    llama_cpp_request_timeout: int | None = field(default=None, init=False)
+    llama_cpp_seed: int | None = field(default=None, init=False)
+    llama_cpp_temperature: float | None = field(default=None, init=False)
+    llama_cpp_n_gpu_layers: int = field(default=-1, init=False)
+    llama_cpp_top_k: int | None = field(default=None, init=False)
+    llama_cpp_top_p: float | None = field(default=None, init=False)
+    llama_cpp_repeat_penalty: float | None = field(default=None, init=False)
+    llama_cpp_options: dict[str, Any] | None = field(default=None, init=False)
 
     # --- Information extraction ---
     ie_enabled: bool = field(default=False, init=False)
@@ -104,7 +104,7 @@ class RAG:
     # --- Runtime (lazy caches / not in repr) ---
     _device: str | None = field(default=None, init=False, repr=False)
     _embed_model: BaseEmbedding | None = field(default=None, init=False, repr=False)
-    _gen_model: Ollama | None = field(default=None, init=False, repr=False)
+    _gen_model: LlamaCPP | None = field(default=None, init=False, repr=False)
     _reranker: LLMRerank | None = field(default=None, init=False, repr=False)
     _qdrant_client: QdrantClient | None = field(default=None, init=False, repr=False)
     _qdrant_aclient: AsyncQdrantClient | None = field(
@@ -150,19 +150,21 @@ class RAG:
         # --- Information Extraction config ---
         self.ie_enabled = load_ie_env().ie_enabled
 
-        # --- Ollama config ---
-        ollama_config = load_ollama_env()
-        self.ollama_ctx_window = ollama_config.ctx_window
-        self.ollama_request_timeout = ollama_config.request_timeout
-        self.ollama_seed = ollama_config.seed
-        self.ollama_temperature = ollama_config.temperature
-        self.ollama_thinking = ollama_config.thinking
-        self.ollama_top_k = ollama_config.top_k
-        self.ollama_top_p = ollama_config.top_p
-        self.ollama_options = {
-            "seed": self.ollama_seed,
-            "top_k": self.ollama_top_k,
-            "top_p": self.ollama_top_p,
+        # --- Llama.cpp config ---
+        llama_cpp_config = load_llama_cpp_env()
+        self.llama_cpp_ctx_window = llama_cpp_config.ctx_window
+        self.llama_cpp_request_timeout = llama_cpp_config.request_timeout
+        self.llama_cpp_seed = llama_cpp_config.seed
+        self.llama_cpp_temperature = llama_cpp_config.temperature
+        self.llama_cpp_n_gpu_layers = llama_cpp_config.n_gpu_layers
+        self.llama_cpp_top_k = llama_cpp_config.top_k
+        self.llama_cpp_top_p = llama_cpp_config.top_p
+        self.llama_cpp_repeat_penalty = llama_cpp_config.repeat_penalty
+        self.llama_cpp_options = {
+            "seed": self.llama_cpp_seed,
+            "top_k": self.llama_cpp_top_k,
+            "top_p": self.llama_cpp_top_p,
+            "repeat_penalty": self.llama_cpp_repeat_penalty,
         }
 
         # --- RAG config ---
@@ -461,74 +463,74 @@ class RAG:
 
         return chosen
 
-    def _create_gen_model(self, thinking: bool, enable_json: bool = False) -> Ollama:
+    def _create_gen_model(self, enable_json: bool = False) -> LlamaCPP:
         """
-        Helper to create an Ollama model instance with specific settings.
+        Helper to create a Llama.cpp model instance with specific settings.
 
         Args:
-            thinking (bool): Whether to enable reasoning/thinking tokens.
             enable_json (bool): Whether to enforce JSON output mode.
 
         Returns:
-            Ollama: The initialized model.
+            LlamaCPP: The initialized model.
 
         Raises:
             ValueError: If required configuration is missing.
         """
         if self.gen_model_id is None:
             raise ValueError("gen_model_id cannot be None")
-        if self.ollama_ctx_window is None:
-            raise ValueError("ollama_ctx_window cannot be None for Ollama model")
-        if self.ollama_host is None:
-            raise ValueError("ollama_host cannot be None for Ollama model")
+        if self.llama_cpp_ctx_window is None:
+            raise ValueError("llama_cpp_ctx_window cannot be None for Llama.cpp model")
+
+        # Resolve model path
+        from docint.utils.env_cfg import load_path_env
+        model_cache = load_path_env().llama_cpp_cache
+        model_path = model_cache / self.gen_model_id
+        
+        if not model_path.exists():
+            logger.error("Model file not found: {}", model_path)
+            raise FileNotFoundError(f"Model file not found: {model_path}")
 
         # Ensure options dict exists
-        if self.ollama_options is None:
-            self.ollama_options = {}
+        if self.llama_cpp_options is None:
+            self.llama_cpp_options = {}
 
         # Prepare options copy to avoid side effects
-        options = self.ollama_options.copy()
+        options = self.llama_cpp_options.copy()
 
         # Consistent seed behavior
-        if self.ollama_seed is not None:
-            options["seed"] = 42
+        if self.llama_cpp_seed is not None:
+            options["seed"] = self.llama_cpp_seed
 
-        if enable_json:
-            options["format"] = "json"
-
-        # Ensure ollama_host is clean (no trailing slash)
-        ollama_host = self.ollama_host.rstrip("/")
-
-        model = Ollama(
-            model=self.gen_model_id,
-            base_url=ollama_host,
-            temperature=self.ollama_temperature,
-            context_window=self.ollama_ctx_window,
-            request_timeout=self.ollama_request_timeout,
-            thinking=thinking,
-            additional_kwargs=options,
+        model = LlamaCPP(
+            model_path=str(model_path),
+            temperature=self.llama_cpp_temperature,
+            max_new_tokens=2048,
+            context_window=self.llama_cpp_ctx_window,
+            model_kwargs={
+                "n_gpu_layers": self.llama_cpp_n_gpu_layers,
+            },
+            generate_kwargs=options,
         )
         logger.info(
-            "Initializing generator model: {} (thinking={}, json={})",
+            "Initializing generator model: {} (json={})",
             self.gen_model_id,
-            thinking,
             enable_json,
         )
         return model
 
     @property
-    def gen_model(self) -> Ollama:
+    def gen_model(self) -> LlamaCPP:
         """
-        Lazily initializes and returns the generation model (Ollama).
+        Lazily initializes and returns the generation model (Llama.cpp).
 
         Returns:
-            Ollama: The initialized generation model.
+            LlamaCPP: The initialized generation model.
 
         Raises:
-            ValueError: If gen_model_id, ollama_ctx_window, or ollama_host is None.
+            ValueError: If gen_model_id or llama_cpp_ctx_window is None.
         """
         if self._gen_model is None:
-            self._gen_model = self._create_gen_model(thinking=self.ollama_thinking)
+            self._gen_model = self._create_gen_model()
         return self._gen_model
 
     @property
@@ -649,8 +651,8 @@ class RAG:
 
         ie_model = None
         if self.ie_enabled:
-            # Disable thinking for IE tasks to avoid performance bottlenecks and enforce JSON
-            ie_model = self._create_gen_model(thinking=False, enable_json=True)
+            # Enforce JSON for IE tasks to ensure structured output
+            ie_model = self._create_gen_model(enable_json=True)
 
         return DocumentIngestionPipeline(
             data_dir=self.data_dir,

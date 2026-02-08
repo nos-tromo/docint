@@ -20,7 +20,7 @@ from loguru import logger
 
 from docint.utils.env_cfg import load_model_env, load_path_env
 from docint.utils.logging_cfg import setup_logging
-from docint.utils.ollama_cfg import OllamaPipeline
+from docint.utils.llama_cpp_cfg import LlamaCppPipeline
 
 load_dotenv()
 setup_logging()
@@ -135,19 +135,18 @@ def load_gliner_model(model_id: str) -> None:
     logger.info("Loaded GLiNER model: {}", model_id)
 
 
-def load_ollama_model(model_id: str, kw: str) -> None:
+def load_llama_cpp_model(model_id: str, kw: str) -> None:
     """
-    Loads and returns the Ollama model.
+    Loads a Llama.cpp GGUF model.
 
     Args:
-        model_id (str): The name of the model to load.
+        model_id (str): The name of the model file or repo/file (e.g., "model.gguf" or "user/repo/model.gguf").
         kw (str): The keyword for the model type (e.g., "generator").
-
-    Returns:
-        Ollama: The initialized generation model.
     """
-    OllamaPipeline.ensure_model(model_id)
-    logger.info("Loaded {} model: {}", kw, model_id)
+    # For now, we just verify the model path or prepare for download
+    # The actual model loading happens lazily when needed
+    LlamaCppPipeline.ensure_model(model_id, repo_id=None)
+    logger.info("Verified {} model: {}", kw, model_id)
 
 
 def load_whisper_model(model_id: str) -> None:
@@ -193,12 +192,12 @@ def main() -> None:
     # GLiNER
     load_gliner_model(models.ner_model)
 
-    # Ollama
+    # Llama.cpp models
     for model, kw in [
         (models.gen_model, "generator"),
         (models.vision_model, "vision"),
     ]:
-        load_ollama_model(model, kw)
+        load_llama_cpp_model(model, kw)
 
     # Whisper
     load_whisper_model(models.whisper_model)

@@ -12,13 +12,13 @@ services:
     environment:
       - DATA_PATH=/app/data
       - LOG_PATH=/app/.logs/backend-cpu.log
-      - OLLAMA_HOST=http://ollama-net:11434
       - QDRANT_COL_DIR=/qdrant/storage/collections
       - QDRANT_HOST=http://qdrant:6333
       - QDRANT_SRC_DIR=/qdrant/storage/sources
       - QUERIES_PATH=/app/data/queries.txt
       - RESULTS_PATH=/app/results
       - USE_DEVICE=auto
+      - LLAMA_CPP_N_GPU_LAYERS=0
     env_file:
       - .env.docker
     volumes:
@@ -28,9 +28,6 @@ services:
       - easyocr-cache:/root/.EasyOCR
       - model-cache:/root/.cache
       - qdrant-storage:/qdrant/storage
-    depends_on:
-      ollama:
-        condition: service_healthy
     networks:
       docint-net:
         aliases:
@@ -50,13 +47,13 @@ services:
       - DATA_PATH=/app/data/in
       - LOG_PATH=/app/.logs/backend-gpu.log
       - NVIDIA_VISIBLE_DEVICES=all
-      - OLLAMA_HOST=http://ollama-net:11434
       - QDRANT_COL_DIR=/qdrant/storage/collections
       - QDRANT_HOST=http://qdrant:6333
       - QDRANT_SRC_DIR=/qdrant/storage/sources
       - QUERIES_PATH=/app/data/queries.txt
       - RESULTS_PATH=/app/data/out
       - USE_DEVICE=auto
+      - LLAMA_CPP_N_GPU_LAYERS=-1
     env_file:
       - .env.docker
     volumes:
@@ -72,9 +69,6 @@ services:
           devices:
             - driver: nvidia
               capabilities: [gpu]
-    depends_on:
-      ollama-gpu:
-        condition: service_healthy
     networks:
       docint-net:
         aliases:
@@ -103,56 +97,6 @@ services:
       - docint-net
 
   ##########################################################
-  # Ollama (CPU)
-  ##########################################################
-  ollama:
-    profiles: ["cpu"]
-    image: ollama/ollama:latest
-    environment:
-      - OLLAMA_HOST=0.0.0.0
-    volumes:
-      - ollama-models:/root/.ollama
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 5s
-      timeout: 10s
-      retries: 5
-    networks:
-      docint-net:
-        aliases:
-          - ollama-net
-
-  ##########################################################
-  # Ollama (GPU)
-  ##########################################################
-  ollama-gpu:
-    profiles: ["gpu"]
-    image: ollama/ollama:latest
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - OLLAMA_HOST=0.0.0.0
-    volumes:
-      - ollama-models:/root/.ollama
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 5s
-      timeout: 10s
-      retries: 5
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    runtime: nvidia
-    restart: always
-    networks:
-      docint-net:
-        aliases:
-          - ollama-net
-
-  ##########################################################
   # Qdrant
   ##########################################################
   qdrant:
@@ -176,7 +120,6 @@ volumes:
   docint-logs:
   easyocr-cache:
   model-cache:
-  ollama-models:
   qdrant-snapshots:
   qdrant-storage:
 

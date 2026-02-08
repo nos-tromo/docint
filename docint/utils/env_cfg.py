@@ -16,7 +16,6 @@ class HostConfig:
 
     backend_host: str
     backend_public_host: str
-    ollama_host: str
     qdrant_host: str
     cors_allowed_origins: str
 
@@ -48,18 +47,19 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
-class OllamaConfig:
+class LlamaCppConfig:
     """
-    Dataclass for Ollama configuration.
+    Dataclass for Llama.cpp configuration.
     """
 
     ctx_window: int
     request_timeout: int
     seed: int
     temperature: float
-    thinking: bool
+    n_gpu_layers: int
     top_k: int
     top_p: float
+    repeat_penalty: float
 
 
 @dataclass(frozen=True)
@@ -77,6 +77,7 @@ class PathConfig:
     qdrant_sources: Path
     required_exts: Path
     hf_hub_cache: Path
+    llama_cpp_cache: Path
 
 
 @dataclass(frozen=True)
@@ -115,19 +116,16 @@ def load_host_env() -> HostConfig:
         - backend_host (str): The backend host URL.
         - backend_public_host (str): The public backend host URL. Required to enable document preview features
             in the Docker environment.
-        - ollama_host (str): The Ollama host URL.
         - qdrant_host (str): The Qdrant host URL.
         - cors_allowed_origins (str): Comma-separated list of allowed CORS origins.
     """
     default_backend_host = "http://localhost:8000"
-    default_ollama_host = "http://localhost:11434"
     default_qdrant_host = "http://localhost:6333"
     default_cors_origins = "http://localhost:8501,http://127.0.0.1:8501"
 
     return HostConfig(
         backend_host=os.getenv("BACKEND_HOST", default_backend_host),
         backend_public_host=os.getenv("BACKEND_PUBLIC_HOST", default_backend_host),
-        ollama_host=os.getenv("OLLAMA_HOST", default_ollama_host),
         qdrant_host=os.getenv("QDRANT_HOST", default_qdrant_host),
         cors_allowed_origins=os.getenv("CORS_ALLOWED_ORIGINS", default_cors_origins),
     )
@@ -187,44 +185,41 @@ def load_model_env() -> ModelConfig:
     )
 
 
-def load_ollama_env() -> OllamaConfig:
+def load_llama_cpp_env() -> LlamaCppConfig:
     """
-    Loads Ollama configuration from environment variables or defaults.
+    Loads Llama.cpp configuration from environment variables or defaults.
 
     Returns:
-        OllamaConfig: Dataclass containing Ollama configuration.
+        LlamaCppConfig: Dataclass containing Llama.cpp configuration.
         - ctx_window (int): The context window size.
         - request_timeout (int): The request timeout in seconds.
         - seed (int): The random seed for generation.
         - temperature (float): The temperature setting for generation.
-        - thinking (bool): Whether to enable thinking mode.
+        - n_gpu_layers (int): Number of layers to offload to GPU (-1 = all).
         - top_k (int): The top_k setting for generation.
         - top_p (float): The top_p setting for generation.
+        - repeat_penalty (float): The repetition penalty for generation.
     """
     default_ctx_window = "8192"
     default_request_timeout = "1200"
     default_seed = "42"
     default_temperature = "0.0"
-    default_thinking = "true"
-    default_top_k = "1"
-    default_top_p = "0"
+    default_n_gpu_layers = "-1"  # -1 means offload all layers to GPU
+    default_top_k = "40"
+    default_top_p = "0.95"
+    default_repeat_penalty = "1.1"
 
-    return OllamaConfig(
-        ctx_window=int(os.getenv("OLLAMA_CTX_WINDOW", default_ctx_window)),
+    return LlamaCppConfig(
+        ctx_window=int(os.getenv("LLAMA_CPP_CTX_WINDOW", default_ctx_window)),
         request_timeout=int(
-            os.getenv("OLLAMA_REQUEST_TIMEOUT", default_request_timeout)
+            os.getenv("LLAMA_CPP_REQUEST_TIMEOUT", default_request_timeout)
         ),
-        seed=int(os.getenv("OLLAMA_SEED", default_seed)),
-        temperature=float(os.getenv("OLLAMA_TEMPERATURE", default_temperature)),
-        thinking=os.getenv("OLLAMA_THINKING", default_thinking).lower()
-        in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        },
-        top_k=int(os.getenv("OLLAMA_TOP_K", default_top_k)),
-        top_p=float(os.getenv("OLLAMA_TOP_P", default_top_p)),
+        seed=int(os.getenv("LLAMA_CPP_SEED", default_seed)),
+        temperature=float(os.getenv("LLAMA_CPP_TEMPERATURE", default_temperature)),
+        n_gpu_layers=int(os.getenv("LLAMA_CPP_N_GPU_LAYERS", default_n_gpu_layers)),
+        top_k=int(os.getenv("LLAMA_CPP_TOP_K", default_top_k)),
+        top_p=float(os.getenv("LLAMA_CPP_TOP_P", default_top_p)),
+        repeat_penalty=float(os.getenv("LLAMA_CPP_REPEAT_PENALTY", default_repeat_penalty)),
     )
 
 
@@ -243,6 +238,7 @@ def load_path_env() -> PathConfig:
         - qdrant_sources (Path): Path to the Qdrant sources directory.
         - required_exts (Path): Path to the required extensions file.
         - hf_hub_cache (Path): Path to the Hugging Face Hub cache directory.
+        - llama_cpp_cache (Path): Path to the Llama.cpp models cache directory.
     """
     home_dir = Path.home()
     docint_home_dir: Path = home_dir / "docint"
@@ -250,6 +246,7 @@ def load_path_env() -> PathConfig:
     default_query_dir: Path = docint_home_dir / "queries.txt"
     default_results_dir: Path = docint_home_dir / "results"
     default_hf_hub_cache: Path = home_dir / ".cache" / "huggingface" / "hub"
+    default_llama_cpp_cache: Path = home_dir / ".cache" / "llama.cpp"
 
     project_root: Path = Path(__file__).parents[2].resolve()
     default_log_dir = project_root / ".logs" / "docint.log"
@@ -283,6 +280,7 @@ def load_path_env() -> PathConfig:
         required_exts=default_exts_dir,
         qdrant_collections=default_qdrant_collections,
         qdrant_sources=default_qdrant_sources,
+        llama_cpp_cache=Path(os.getenv("LLAMA_CPP_CACHE", default_llama_cpp_cache)).expanduser(),
     )
 
 
