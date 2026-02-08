@@ -144,7 +144,7 @@ def load_ie_env() -> InformationExtractionConfig:
     default_ie_enabled = "1"
     default_ie_max_chars = "800"
     default_ie_max_workers = "4"
-    default_ie_engine = "gliner"
+    default_ie_engine = "gliner"  # Options: gliner, llama_cpp
 
     return InformationExtractionConfig(
         ie_enabled=os.getenv("ENABLE_IE", default_ie_enabled).lower()

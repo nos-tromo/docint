@@ -130,7 +130,6 @@ class RAG:
         """
         # --- Host config ---
         host_config = load_host_env()
-        self.ollama_host = host_config.ollama_host
         self.qdrant_host = host_config.qdrant_host
 
         # --- Path config ---

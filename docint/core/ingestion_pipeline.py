@@ -13,7 +13,7 @@ from llama_index.core.node_parser import (
     SentenceSplitter,
 )
 from llama_index.core.schema import BaseNode
-from llama_index.llms.ollama import Ollama
+from llama_index.llms.llama_cpp import LlamaCPP
 from llama_index.node_parser.docling import DoclingNodeParser
 from loguru import logger
 
@@ -27,7 +27,7 @@ from docint.utils.clean_text import basic_clean
 from docint.utils.env_cfg import load_ie_env, load_path_env, load_rag_env
 from docint.utils.hashing import compute_file_hash
 from docint.utils.ie_extractor import build_ie_extractor, build_gliner_ie_extractor
-from docint.utils.ollama_cfg import OllamaPipeline
+from docint.utils.llama_cpp_cfg import LlamaCppPipeline
 
 CleanFn = Callable[[str], str]
 
@@ -41,7 +41,7 @@ class DocumentIngestionPipeline:
     # --- Constructor args ---
     data_dir: Path
     device: str
-    ie_model: Ollama | None
+    ie_model: LlamaCPP | None
     progress_callback: Callable[[str], None] | None
 
     # --- Cleaning config ---
@@ -103,10 +103,10 @@ class DocumentIngestionPipeline:
                 # We purposefully ignore ie_max_chars for GLiNER as it handles chunking or short texts well,
                 # but we can pass it if we want to limit input size strictly.
                 self.entity_extractor = build_gliner_ie_extractor()
-            elif ie_engine == "ollama" and self.ie_model and ie_max_chars:
-                ie_prompt = OllamaPipeline().load_prompt(kw="ner")
+            elif ie_engine == "llama_cpp" and self.ie_model and ie_max_chars:
+                ie_prompt = LlamaCppPipeline().load_prompt(kw="ner")
                 if ie_prompt:
-                    logger.info("Initializing Ollama IE extractor")
+                    logger.info("Initializing Llama.cpp IE extractor")
                     self.entity_extractor = build_ie_extractor(
                         model=self.ie_model,
                         prompt=ie_prompt,
