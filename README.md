@@ -35,23 +35,20 @@ The application can be used both via Docker for containerized environments and d
 
 ### Prerequisites
 
-**GGUF Model Files:**
-Before running the application, you need GGUF quantized models for text generation and vision tasks. These can be obtained from:
-- Hugging Face model repositories (search for GGUF or quantized models)
-- Converting models using llama.cpp tools
+**System Requirements:**
+Ensure you have the necessary runtime installed:
 
-Example model sources:
-- Text models: Search for "GGUF" on Hugging Face (e.g., `TheBloke/Mistral-7B-Instruct-v0.2-GGUF`)
-- Vision models: Look for multimodal GGUF models
+- **Docker** (recommended)
 
-Download the model files and place them in `~/.cache/llama.cpp/` (or the path specified by `LLAMA_CPP_CACHE`).
+- **Python 3.11+** and **uv** (for local development)
+
+Model files are handled automatically by the ingestion pipeline and do not need to be manually pre-loaded.
 
 ### Docker Setup (Recommended)
 
 1. **Ensure Docker is installed**
 
    Refer to the [Docker installation guide](https://docs.docker.com/get-docker/) if needed.
-
 2. **Configure Environment**
 
    Create the Docker environment file from the example:
@@ -63,7 +60,6 @@ Download the model files and place them in `~/.cache/llama.cpp/` (or the path sp
 3. **Choose a Profile**
 
    Decide between the CPU or GPU profile. The GPU profile requires a CUDA-compatible GPU and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) set up.
-
 4. **Start the Services**
 
    ```bash
@@ -79,7 +75,6 @@ Download the model files and place them in `~/.cache/llama.cpp/` (or the path sp
    Ensure that **Qdrant** is running locally or accessible via network.
 
    - **Qdrant**: Must be running (default: `http://localhost:6333`).
-
 2. **Install Dependencies**
 
    Navigate to the project root and synchronize dependencies:
@@ -90,26 +85,11 @@ Download the model files and place them in `~/.cache/llama.cpp/` (or the path sp
 
 3. **Download Models**
 
-   Pre-download the required models to your local cache to enable offline functionality.
-   
-   **Hugging Face Models:**
-   Embedding and sparse models will be automatically downloaded to `~/.cache/huggingface/hub`.
-   
-   **GGUF Models for Llama.cpp:**
-   Download GGUF quantized models (e.g., from Hugging Face) and place them in `~/.cache/llama.cpp/`:
-
-   ```bash
-   mkdir -p ~/.cache/llama.cpp
-   # Download your preferred GGUF models, for example:
-   # wget https://huggingface.co/<user>/<repo>/resolve/main/model-q4_k_m.gguf -P ~/.cache/llama.cpp/
-   ```
-
-   Then run the model loading script:
+   Pre-download all required models (Embeddings, Sparse, LLMs, VLMs, NER, Whisper) to your local cache to enable offline functionality:
 
    ```bash
    uv run load-models
    ```
-
 4. **Run the Application**
 
    The application consists of a FastAPI backend and a Streamlit UI. You can run both locally.
@@ -133,14 +113,9 @@ Download the model files and place them in `~/.cache/llama.cpp/` (or the path sp
 The application is configured via environment variables. Key variables include:
 
 - `DOCINT_OFFLINE`: Set to `true` to force offline mode (fails if models aren't cached).
-- `LLM`: Name of the GGUF model file for text generation (e.g., `model-q4_k_m.gguf`).
-- `VLM`: Name of the GGUF model file for vision tasks (e.g., `model-vision-q4_k_m.gguf`).
-- `LLAMA_CPP_CACHE`: Directory where GGUF models are stored (default: `~/.cache/llama.cpp`).
 - `LLAMA_CPP_N_GPU_LAYERS`: Number of layers to offload to GPU. Use `-1` for all layers (full GPU), `0` for CPU only (default: `-1`).
 - `LLAMA_CPP_CTX_WINDOW`: Context window size (default: `8192`).
 - `LLAMA_CPP_TEMPERATURE`: Sampling temperature (default: `0.0`).
-- `EMBED_MODEL`: HuggingFace embedding model ID (default: `BAAI/bge-m3`).
-- `SPARSE_MODEL`: Sparse embedding model ID (default: `Qdrant/all_miniLM_L6_v2_with_attentions`).
 - `ENABLE_IE`: Enable scalable entity/relation extraction during ingestion (default: `false`). Uses parallel execution for maximum throughput.
 - `IE_MAX_WORKERS`: Number of parallel workers for entity extraction (default: `4`).
 
@@ -149,15 +124,18 @@ See `docint/utils/env_cfg.py` for the full list of configuration options and def
 ### GPU Acceleration
 
 **CUDA (NVIDIA GPUs):**
+
 - Set `LLAMA_CPP_N_GPU_LAYERS=-1` to offload all layers to GPU
 - Requires CUDA toolkit and compatible NVIDIA GPU
 - Docker: Use the `gpu` profile with `docker compose --profile gpu up`
 
 **Metal (Apple Silicon):**
 To use Metal acceleration on macOS with Apple Silicon:
+
 ```bash
 CMAKE_ARGS="-DLLAMA_METAL=on" pip install llama-cpp-python --force-reinstall --no-cache-dir
 ```
+
 Then set `LLAMA_CPP_N_GPU_LAYERS=-1` to enable GPU acceleration.
 
 ## Usage
@@ -166,25 +144,23 @@ Then set `LLAMA_CPP_N_GPU_LAYERS=-1` to enable GPU acceleration.
 
 1. **Data Preparation**
 
-    Place files to be ingested in the `~/docint/data` directory. Supported file types include:
+   Place files to be ingested in the `~/docint/data` directory. Supported file types include:
 
-    - **Documents**: `.pdf`, `.docx`, `.txt`
-    - **Tables**: `.csv`, `.xls`, `.xlsx`
-    - **Images**: `.png`, `.jpg`, `.jpeg`, `.gif`
-    - **Audio**: `.mp3`, `.wav`
-    - **Video**: `.mp4`, `.avi`
-    - **JSON**: `.json`
-    - **Other**: Additional formats supported via custom readers.
-
-1. **Run the Ingestion Command**
+   - **Documents**: `.pdf`, `.docx`, `.txt`
+   - **Tables**: `.csv`, `.xls`, `.xlsx`
+   - **Images**: `.png`, `.jpg`, `.jpeg`, `.gif`
+   - **Audio**: `.mp3`, `.wav`
+   - **Video**: `.mp4`, `.avi`
+   - **JSON**: `.json`
+   - **Other**: Additional formats supported via custom readers.
+2. **Run the Ingestion Command**
 
    Start the ingestion process with:
 
    ```bash
    uv run ingest
    ```
-
-1. **Verify the Ingestion**
+3. **Verify the Ingestion**
 
    Check the logs or output directory to confirm the data has been organized and prepared for querying.
 
@@ -257,14 +233,12 @@ For additional configuration, populate an `.env` (local usage) or `.env.docker` 
 DOCINT_OFFLINE=true
 EMBED_MODEL=BAAI/bge-m3
 SPARSE_MODEL=Qdrant/all_miniLM_L6_v2_with_attentions
-LLM=model-q4_k_m.gguf
-VLM=model-vision-q4_k_m.gguf
 WHISPER_MODEL=turbo
 ENABLE_IE=true
 IE_MAX_WORKERS=4
 LLAMA_CPP_N_GPU_LAYERS=-1
 LLAMA_CPP_CTX_WINDOW=8192
-LLAMA_CPP_TEMPERATURE=0.0
+LLAMA_CPP_TEMPERATURE=0.1
 ```
 
 ## Unit Tests
