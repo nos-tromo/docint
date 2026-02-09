@@ -7,27 +7,27 @@ supporting both CPU and GPU (CUDA/Metal) acceleration.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from huggingface_hub import hf_hub_download
 from llama_cpp import Llama
 from loguru import logger
 from PIL import Image
 
-from docint.utils.env_cfg import load_host_env, load_model_env, load_path_env
+from docint.utils.env_cfg import load_model_env, load_path_env, resolve_hf_cache_path
 
 
 @dataclass(slots=True)
 class LlamaCppPipeline:
     """
     Pipeline for text generation and image processing with Llama.cpp.
-    
+
     This pipeline manages model loading, caching, and inference for both
     text and vision models using the llama-cpp-python library.
     """
 
     prompt_dir: Path | None = field(default=None, init=False)
     model_id: str | None = field(default=None, init=False)
+    model_file: str | None = field(default=None, init=False)
     model_cache_dir: Path | None = field(default=None, init=False)
     n_gpu_layers: int = field(default=-1, init=False)  # -1 = offload all to GPU
     n_ctx: int = field(default=32768, init=False)
@@ -38,10 +38,11 @@ class LlamaCppPipeline:
         """
         Post-initialization to load configurations.
         """
-        self.model_id = load_model_env().vision_model
+        self.model_id = load_model_env().vlm
+        self.model_file = load_model_env().vlm_file
         self.prompt_dir = load_path_env().prompts
-        self.model_cache_dir = load_path_env().llama_cpp_cache
-        
+        self.model_cache_dir = load_path_env().hf_hub_cache
+
         # Create cache directory if it doesn't exist
         if self.model_cache_dir:
             self.model_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -98,14 +99,14 @@ class LlamaCppPipeline:
             Llama: The loaded model instance.
         """
         logger.info("Loading Llama.cpp model from: {}", model_path)
-        
+
         model = Llama(
             model_path=model_path,
             n_ctx=self.n_ctx,
             n_gpu_layers=self.n_gpu_layers,
             verbose=False,
         )
-        
+
         logger.info("Successfully loaded model with {} GPU layers", self.n_gpu_layers)
         return model
 
@@ -127,7 +128,7 @@ class LlamaCppPipeline:
         Resolve the model identifier to a local file path.
 
         Args:
-            model_id (str | None): Model identifier (HF repo/file or local path).
+            model_id (str | None): Model identifier (HF repo ID or local path).
 
         Returns:
             str: Path to the GGUF model file.
@@ -138,21 +139,33 @@ class LlamaCppPipeline:
         if model_id is None:
             raise ValueError("model_id cannot be None")
 
-        # If it's already a local path, return it
-        model_path = Path(model_id)
-        if model_path.exists() and model_path.is_file():
-            logger.info("Using local model at: {}", model_path)
-            return str(model_path)
+        # If model_file is a direct local path, return it
+        if self.model_file:
+            file_path = Path(self.model_file)
+            if file_path.exists() and file_path.is_file():
+                logger.info("Using local model at: {}", file_path)
+                return str(file_path)
 
-        # Otherwise, check cache directory
-        if self.model_cache_dir:
-            cached_path = self.model_cache_dir / model_id
-            if cached_path.exists():
-                logger.info("Using cached model at: {}", cached_path)
-                return str(cached_path)
+        # Check cache directory for the file
+        if self.model_cache_dir and self.model_file:
+            # Direct path in cache dir
+            direct_path = self.model_cache_dir / self.model_file
+            if direct_path.exists():
+                logger.info("Using cached model at: {}", direct_path)
+                return str(direct_path)
 
-        logger.error("Model not found: {}", model_id)
-        raise FileNotFoundError(f"Model not found: {model_id}")
+            # HF cache structure: models--{org}--{repo}/snapshots/{hash}/{file}
+            resolved = resolve_hf_cache_path(
+                self.model_cache_dir, model_id, self.model_file
+            )
+            if resolved:
+                logger.info("Using HF cached model at: {}", resolved)
+                return str(resolved)
+
+        logger.error("Model not found: {} (file: {})", model_id, self.model_file)
+        raise FileNotFoundError(
+            f"Model not found: {self.model_file} (repo: {model_id})"
+        )
 
     def call_llama_cpp(
         self,
@@ -201,7 +214,7 @@ class LlamaCppPipeline:
             if isinstance(response, dict) and "choices" in response:
                 text = response["choices"][0]["text"].strip()
                 return text
-            
+
             logger.error("Unexpected response format from Llama.cpp")
             return ""
 
@@ -210,49 +223,64 @@ class LlamaCppPipeline:
             raise RuntimeError(f"Llama.cpp inference failed: {e}")
 
     @staticmethod
-    def ensure_model(model_name: str, repo_id: str | None = None) -> None:
+    def ensure_model(model_id: str, repo_id: str | None = None) -> None:
         """
         Ensure that the specified GGUF model is available locally.
         If not, attempt to download it from Hugging Face.
 
         Args:
-            model_name (str): The name of the model file (e.g., "model.gguf").
+            model_id (str): The name of the model file (e.g., "model.gguf").
             repo_id (str | None): The Hugging Face repository ID. If None, assumes local file.
         """
         try:
             paths = load_path_env()
-            cache_dir = paths.llama_cpp_cache
-            
+            cache_dir = paths.hf_hub_cache
+
             # Create cache directory if it doesn't exist
             cache_dir.mkdir(parents=True, exist_ok=True)
 
-            model_path = cache_dir / model_name
-            
-            # Check if model already exists
+            model_path = cache_dir / model_id
+
+            # Check if model already exists (direct path)
             if model_path.exists():
-                logger.info("Model '{}' is already available at {}", model_name, model_path)
+                logger.info(
+                    "Model '{}' is already available at {}", model_id, model_path
+                )
                 return
+
+            # Check HF cache structure
+            if repo_id:
+                resolved = resolve_hf_cache_path(cache_dir, repo_id, model_id)
+                if resolved:
+                    logger.info(
+                        "Model '{}' is already available at {}", model_id, resolved
+                    )
+                    return
 
             if repo_id is None:
                 logger.warning(
                     "Model '{}' not found locally and no repo_id provided for download",
-                    model_name
+                    model_id,
                 )
                 return
 
-            logger.info("Model '{}' not found. Downloading from {}...", model_name, repo_id)
+            logger.info(
+                "Model '{}' not found. Downloading from {}...", model_id, repo_id
+            )
 
             # Download from Hugging Face
             downloaded_path = hf_hub_download(
                 repo_id=repo_id,
-                filename=model_name,
+                filename=model_id,
                 cache_dir=cache_dir,
                 local_dir=cache_dir,
                 local_dir_use_symlinks=False,
             )
 
-            logger.info("Successfully downloaded model '{}' to {}", model_name, downloaded_path)
+            logger.info(
+                "Successfully downloaded model '{}' to {}", model_id, downloaded_path
+            )
 
         except Exception as e:
-            logger.error("Failed to ensure model '{}': {}", model_name, e)
+            logger.error("Failed to ensure model '{}': {}", model_id, e)
             raise

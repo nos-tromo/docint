@@ -20,7 +20,9 @@ class ImageReader(BaseReader):
     Image reader that utilizes the LlamaCppPipeline for processing images.
     """
 
-    llama_cpp_pipeline: LlamaCppPipeline = field(default_factory=LlamaCppPipeline, init=False)
+    llama_cpp_pipeline: LlamaCppPipeline = field(
+        default_factory=LlamaCppPipeline, init=False
+    )
 
     def _load_image(self, file_path: Path, mode: str = "RGB") -> Image.Image:
         """
