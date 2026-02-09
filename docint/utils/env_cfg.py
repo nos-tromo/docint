@@ -8,6 +8,45 @@ from loguru import logger
 load_dotenv()
 
 
+def resolve_hf_cache_path(
+    cache_dir: Path, repo_id: str, filename: str | None = None
+) -> Path | None:
+    """
+    Resolve a HuggingFace model or file path from the local HF cache.
+
+    HF hub stores downloads under:
+        {cache_dir}/models--{org}--{repo}/snapshots/{commit_hash}/
+
+    Args:
+        cache_dir: The HF hub cache directory (e.g. ~/.cache/huggingface/hub).
+        repo_id: The HuggingFace repository ID (e.g. "BAAI/bge-m3").
+        filename: Optional file name within the snapshot directory. If provided,
+                  return the path to that specific file; otherwise return the
+                  snapshot directory itself.
+
+    Returns:
+        The resolved Path if found, otherwise None.
+    """
+    model_dir_name = f"models--{repo_id.replace('/', '--')}"
+    model_cache_dir = cache_dir / model_dir_name
+
+    if not model_cache_dir.exists():
+        return None
+
+    ref_path = model_cache_dir / "refs" / "main"
+    if not ref_path.exists():
+        return None
+
+    commit_hash = ref_path.read_text().strip()
+    snapshot_path = model_cache_dir / "snapshots" / commit_hash
+
+    if filename:
+        file_path = snapshot_path / filename
+        return file_path if file_path.exists() else None
+
+    return snapshot_path if snapshot_path.exists() else None
+
+
 @dataclass(frozen=True)
 class HostConfig:
     """
@@ -41,8 +80,10 @@ class ModelConfig:
     embed_model: str
     sparse_model: str
     ner_model: str
-    gen_model: str
-    vision_model: str
+    llm: str
+    llm_file: str
+    vlm: str
+    vlm_file: str
     whisper_model: str
 
 
@@ -77,7 +118,6 @@ class PathConfig:
     qdrant_sources: Path
     required_exts: Path
     hf_hub_cache: Path
-    llama_cpp_cache: Path
 
 
 @dataclass(frozen=True)
@@ -164,23 +204,29 @@ def load_model_env() -> ModelConfig:
         - embed_model (str): The embedding model identifier.
         - sparse_model (str): The sparse model identifier.
         - ner_model (str): The NER model identifier.
-        - gen_model (str): The generation model identifier.
-        - vision_model (str): The vision model identifier.
+        - llm (str): The LLM (Language Model) identifier for generation.
+        - llm_file (str): The local file name for the LLM model (GGUF format).
+        - vlm (str): The VLM (Vision-Language Model) identifier for generation.
+        - vlm_file (str): The local file name for the VLM model (GGUF format).
         - whisper_model (str): The Whisper model identifier.
     """
     default_embed_model = "BAAI/bge-m3"
     default_sparse_model = "Qdrant/all_miniLM_L6_v2_with_attentions"
     default_ner_model = "gliner-community/gliner_large-v2.5"
-    default_gen_model = "gpt-oss:20b"
-    default_vision_model = "qwen3-vl:8b"
+    default_llm = "unsloth/Qwen3-4B-Instruct-2507-GGUF"
+    default_llm_file = "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+    default_vlm = "Qwen/Qwen3-VL-8B-Instruct-GGUF"
+    default_vlm_file = "Qwen3VL-8B-Instruct-Q4_K_M.gguf"
     default_whisper_model = "turbo"
 
     return ModelConfig(
         embed_model=os.getenv("EMBED_MODEL", default_embed_model),
         sparse_model=os.getenv("SPARSE_MODEL", default_sparse_model),
         ner_model=os.getenv("NER_MODEL", default_ner_model),
-        gen_model=os.getenv("LLM", default_gen_model),
-        vision_model=os.getenv("VLM", default_vision_model),
+        llm=os.getenv("LLM_REPO", default_llm),
+        llm_file=os.getenv("LLM", default_llm_file),
+        vlm=os.getenv("VLM_REPO", default_vlm),
+        vlm_file=os.getenv("VLM", default_vlm_file),
         whisper_model=os.getenv("WHISPER_MODEL", default_whisper_model),
     )
 
@@ -219,7 +265,9 @@ def load_llama_cpp_env() -> LlamaCppConfig:
         n_gpu_layers=int(os.getenv("LLAMA_CPP_N_GPU_LAYERS", default_n_gpu_layers)),
         top_k=int(os.getenv("LLAMA_CPP_TOP_K", default_top_k)),
         top_p=float(os.getenv("LLAMA_CPP_TOP_P", default_top_p)),
-        repeat_penalty=float(os.getenv("LLAMA_CPP_REPEAT_PENALTY", default_repeat_penalty)),
+        repeat_penalty=float(
+            os.getenv("LLAMA_CPP_REPEAT_PENALTY", default_repeat_penalty)
+        ),
     )
 
 
@@ -238,7 +286,6 @@ def load_path_env() -> PathConfig:
         - qdrant_sources (Path): Path to the Qdrant sources directory.
         - required_exts (Path): Path to the required extensions file.
         - hf_hub_cache (Path): Path to the Hugging Face Hub cache directory.
-        - llama_cpp_cache (Path): Path to the Llama.cpp models cache directory.
     """
     home_dir = Path.home()
     docint_home_dir: Path = home_dir / "docint"
@@ -246,7 +293,6 @@ def load_path_env() -> PathConfig:
     default_query_dir: Path = docint_home_dir / "queries.txt"
     default_results_dir: Path = docint_home_dir / "results"
     default_hf_hub_cache: Path = home_dir / ".cache" / "huggingface" / "hub"
-    default_llama_cpp_cache: Path = home_dir / ".cache" / "llama.cpp"
 
     project_root: Path = Path(__file__).parents[2].resolve()
     default_log_dir = project_root / ".logs" / "docint.log"
@@ -280,7 +326,6 @@ def load_path_env() -> PathConfig:
         required_exts=default_exts_dir,
         qdrant_collections=default_qdrant_collections,
         qdrant_sources=default_qdrant_sources,
-        llama_cpp_cache=Path(os.getenv("LLAMA_CPP_CACHE", default_llama_cpp_cache)).expanduser(),
     )
 
 
