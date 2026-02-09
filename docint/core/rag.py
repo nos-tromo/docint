@@ -42,8 +42,8 @@ from docint.utils.env_cfg import (
     load_path_env,
     load_rag_env,
     load_session_env,
+    resolve_hf_cache_path
 )
-from docint.utils.model_cfg import resolve_model_path
 
 
 @dataclass(slots=True)
@@ -70,6 +70,7 @@ class RAG:
     embed_model_id: str | None = field(default=None, init=False)
     sparse_model_id: str | None = field(default=None, init=False)
     gen_model_id: str | None = field(default=None, init=False)
+    gen_model_file: str | None = field(default=None, init=False)
 
     # --- Qdrant controls ---
     docstore_batch_size: int = field(default=100, init=False)
@@ -144,7 +145,8 @@ class RAG:
         model_config = load_model_env()
         self.embed_model_id = model_config.embed_model
         self.sparse_model_id = model_config.sparse_model
-        self.gen_model_id = model_config.gen_model
+        self.gen_model_id = model_config.llm
+        self.gen_model_file = model_config.llm_file
 
         # --- Information Extraction config ---
         self.ie_enabled = load_ie_env().ie_enabled
@@ -367,10 +369,11 @@ class RAG:
         if self._embed_model is None:
             if self.embed_model_id is None:
                 raise ValueError("embed_model_id cannot be None")
-            resolved_model = resolve_model_path(
-                self.embed_model_id, self.hf_hub_cache or Path()
+            resolved = resolve_hf_cache_path(
+                self.hf_hub_cache or Path(), self.embed_model_id
             )
-            if resolved_model != self.embed_model_id:
+            resolved_model = str(resolved) if resolved else self.embed_model_id
+            if resolved:
                 logger.info("Using local model path: {}", resolved_model)
 
             try:
@@ -455,10 +458,10 @@ class RAG:
                 )
 
         cache_dir = self.hf_hub_cache or Path.home() / ".cache" / "huggingface" / "hub"
-        resolved = resolve_model_path(chosen, cache_dir)
-        if resolved != chosen:
+        resolved = resolve_hf_cache_path(cache_dir, chosen)
+        if resolved:
             logger.info("Using local sparse model path: {}", resolved)
-            return resolved
+            return str(resolved)
 
         return chosen
 
@@ -481,13 +484,34 @@ class RAG:
             raise ValueError("llama_cpp_ctx_window cannot be None for Llama.cpp model")
 
         # Resolve model path
-        from docint.utils.env_cfg import load_path_env
-        model_cache = load_path_env().llama_cpp_cache
-        model_path = model_cache / self.gen_model_id
-        
-        if not model_path.exists():
-            logger.error("Model file not found: {}", model_path)
-            raise FileNotFoundError(f"Model file not found: {model_path}")
+        model_cache = (
+            self.hf_hub_cache or Path.home() / ".cache" / "huggingface" / "hub"
+        )
+        model_path = None
+
+        if self.gen_model_file:
+            # Try direct path first (e.g. file sitting directly in cache dir)
+            direct_path = model_cache / self.gen_model_file
+            if direct_path.exists():
+                model_path = direct_path
+
+            # Try HF cache structure: models--{org}--{repo}/snapshots/{hash}/{file}
+            if model_path is None and self.gen_model_id:
+                model_path = resolve_hf_cache_path(
+                    model_cache, self.gen_model_id, self.gen_model_file
+                )
+
+        if model_path is None:
+            logger.error(
+                "Model file not found: repo={}, file={}, cache={}",
+                self.gen_model_id,
+                self.gen_model_file,
+                model_cache,
+            )
+            raise FileNotFoundError(
+                f"Model file not found: {self.gen_model_file} "
+                f"(repo: {self.gen_model_id}, cache: {model_cache})"
+            )
 
         # Ensure options dict exists
         if self.llama_cpp_options is None:
@@ -502,7 +526,9 @@ class RAG:
 
         model = LlamaCPP(
             model_path=str(model_path),
-            temperature=self.llama_cpp_temperature,
+            temperature=self.llama_cpp_temperature
+            if self.llama_cpp_temperature is not None
+            else 0.1,
             max_new_tokens=2048,
             context_window=self.llama_cpp_ctx_window,
             model_kwargs={
