@@ -45,7 +45,7 @@ from docint.utils.env_cfg import (
     load_session_env,
     resolve_hf_cache_path,
 )
-from docint.utils.llama_cpp_cfg import build_prompt_functions
+from docint.utils.llama_cpp_cfg import LlamaCppPipeline, build_prompt_functions
 
 
 @dataclass(slots=True)
@@ -542,16 +542,35 @@ class RAG:
             # Try HF cache structure: models--{org}--{repo}/snapshots/{hash}/{file}
             if model_path is None and self.gen_model_id:
                 model_path = resolve_hf_cache_path(
-                    model_cache, self.gen_model_id, self.gen_model_file
+                    cache_dir=model_cache, repo_id=self.gen_model_id, filename=self.gen_model_file
                 )
 
         if model_path is None:
-            logger.error(
-                "Model file not found: repo={}, file={}, cache={}",
+            logger.warning(
+                "Model file not found locally, attempting download: repo={}, file={}, cache={}",
                 self.gen_model_id,
                 self.gen_model_file,
                 model_cache,
             )
+            if self.gen_model_file is None:
+                logger.error(
+                    "ValueError: gen_model_file must be specified to download the model."
+                )
+                raise ValueError("gen_model_file must be specified to download the model.")
+            LlamaCppPipeline.ensure_model(
+                model_id=self.gen_model_file, repo_id=self.gen_model_id
+            )
+
+            # Re-resolve after download
+            direct_path = model_cache / self.gen_model_file
+            if direct_path.exists():
+                model_path = direct_path
+            elif self.gen_model_id:
+                model_path = resolve_hf_cache_path(
+                    cache_dir=model_cache, repo_id=self.gen_model_id, filename=self.gen_model_file
+                )
+
+        if model_path is None:
             raise FileNotFoundError(
                 f"Model file not found: {self.gen_model_file} "
                 f"(repo: {self.gen_model_id}, cache: {model_cache})"
