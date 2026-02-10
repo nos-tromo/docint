@@ -75,12 +75,13 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    Ensure that **Qdrant** is running locally or accessible via network.
 
    - **Qdrant**: Must be running (default: `http://localhost:6333`).
+
 2. **Install Dependencies**
 
    Navigate to the project root and synchronize dependencies:
 
    ```bash
-   uv sync
+   CMAKE_ARGS="-DGGML_CUDA=on" uv sync
    ```
 
 3. **Download Models**
