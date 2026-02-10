@@ -321,7 +321,7 @@ def load_model_env(
     )
 
 
-def load_path_env(home_dir: Path | None = None) -> PathConfig:
+def load_path_env() -> PathConfig:
     """
     Loads path configuration from environment variables or defaults.
 
@@ -337,8 +337,7 @@ def load_path_env(home_dir: Path | None = None) -> PathConfig:
         - required_exts (Path): Path to the required extensions file.
         - hf_hub_cache (Path): Path to the Hugging Face Hub cache directory.
     """
-    if home_dir is None:
-        home_dir: Path = Path.home()
+    home_dir: Path = Path.home()
     docint_home_dir: Path = home_dir / "docint"
     default_data_dir: Path = docint_home_dir / "data"
     default_query_dir: Path = docint_home_dir / "queries.txt"
@@ -467,12 +466,14 @@ def load_rag_env(
     )
 
 
-def load_session_env(default_session_store: str = "sqlite:///sessions.db") -> SessionConfig:
+def load_session_env(
+    default_session_store: str = "sqlite:///sessions.db",
+) -> SessionConfig:
     """
     Loads session configuration from environment variables or defaults.
 
     Args:
-        default_session_store (str): Default session store configuration (e.g. database URL or file path). 
+        default_session_store (str): Default session store configuration (e.g. database URL or file path).
             Default is "sqlite:///sessions.db".
 
     Returns:
