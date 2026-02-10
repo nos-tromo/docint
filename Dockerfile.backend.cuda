@@ -10,7 +10,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential ca-certificates libmagic1 libgl1 cmake \
+    build-essential ca-certificates libmagic1 libgl1 cmake zlib1g-dev \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:0.9.28 /uv /uvx /bin/
@@ -20,20 +20,17 @@ COPY pyproject.toml uv.lock ./
 
 # Install dependencies (without the project itself) using cache mount to speed up downloads
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project
+    uv sync --frozen --no-dev --no-install-project && \
+    uv pip uninstall fastembed onnxruntime && \
+    uv pip install fastembed-gpu onnxruntime-gpu && \
+    CMAKE_ARGS="-DLLAMA_CUDA=on" \
+    uv pip install llama-cpp-python --no-cache-dir --force-reinstall --upgrade
 
 COPY . .
 
-# Reinstall specific packages with GPU support
+# Install the project package
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev && \
-    uv pip uninstall fastembed onnxruntime && \
-    uv pip install fastembed-gpu onnxruntime-gpu
-
-# Install llama-cpp-python with CUDA support
-RUN --mount=type=cache,target=/root/.cache/uv \
-    CMAKE_ARGS="-DLLAMA_CUDA=on" \
-    uv pip install llama-cpp-python --no-cache-dir --force-reinstall --upgrade
+    uv pip install --no-deps .
 
 EXPOSE 8000
 
