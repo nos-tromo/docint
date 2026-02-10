@@ -407,6 +407,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "fastembed" },
     { name = "fastparquet" },
+    { name = "flagembedding" },
     { name = "gliner" },
     { name = "huggingface-hub" },
     { name = "llama-cpp-python" },
@@ -414,6 +415,7 @@ dependencies = [
     { name = "llama-index-embeddings-huggingface" },
     { name = "llama-index-llms-llama-cpp" },
     { name = "llama-index-node-parser-docling" },
+    { name = "llama-index-postprocessor-flag-embedding-reranker" },
     { name = "llama-index-readers-docling" },
     { name = "llama-index-vector-stores-qdrant" },
     { name = "loguru" },
@@ -453,6 +455,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.116.1" },
     { name = "fastembed", specifier = ">=0.7.3" },
     { name = "fastparquet", specifier = ">=2024.11.0" },
+    { name = "flagembedding", specifier = ">=1.3.5" },
     { name = "gliner", specifier = ">=0.2.24" },
     { name = "huggingface-hub", specifier = ">=0.36.0,<2.0" },
     { name = "llama-cpp-python", specifier = ">=0.3.0" },
@@ -460,6 +463,7 @@ requires-dist = [
     { name = "llama-index-embeddings-huggingface", specifier = ">=0.6.0" },
     { name = "llama-index-llms-llama-cpp", specifier = ">=0.3.0" },
     { name = "llama-index-node-parser-docling", specifier = ">=0.4.0" },
+    { name = "llama-index-postprocessor-flag-embedding-reranker", specifier = ">=0.4.1" },
     { name = "llama-index-readers-docling", specifier = ">=0.4.0" },
     { name = "llama-index-vector-stores-qdrant", specifier = ">=0.7.1" },
     { name = "loguru", specifier = ">=0.7.2" },
@@ -705,6 +709,23 @@ sdist = { url = "https://files.pythonhosted.org/packages/bb/29/745f7d30d47fe0f25
 wheels = [
     { url = "https://files.pythonhosted.org/packages/18/79/1b8fa1bb3568781e84c9200f951c735f3f157429f44be0495da55894d620/filetype-1.2.0-py2.py3-none-any.whl", hash = "sha256:7ce71b6880181241cf7ac8697a2f1eb6a8bd9b429f7ad6d27b8db9ba5f1c2d25", size = 19970, upload-time = "2022-11-02T17:34:01.425Z" },
 ]
+
+[[package]]
+name = "flagembedding"
+version = "1.3.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "accelerate" },
+    { name = "datasets" },
+    { name = "ir-datasets" },
+    { name = "peft" },
+    { name = "protobuf" },
+    { name = "sentence-transformers" },
+    { name = "sentencepiece" },
+    { name = "torch" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/36/5f/a5e20bb601f83f4abd491e0aec2b991d23f54fefa135b64e4203b3cb59d6/FlagEmbedding-1.3.5.tar.gz", hash = "sha256:a0714cb8dd03f38e74b84530684c47ad8e0442ab1f4cbb7b0bcd4017dafb9f9c", size = 163889, upload-time = "2025-05-28T07:03:56.693Z" }
 
 [[package]]
 name = "flatbuffers"
@@ -1326,6 +1347,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/3d/a9/dea8b678ee997ffda40f02c1806ce257242a5c07201eadd44a7a748efbec/llama_index_node_parser_docling-0.4.2.tar.gz", hash = "sha256:0b1ac73dd36afbb6d57f011bb4acd2b62a974465e538286878dd000c88d9ee41", size = 4509, upload-time = "2025-11-28T15:23:45.995Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e7/0e/e05e2af3105002107bbc08086148fe923f0c87f0b5f8aeebeac29565b7e5/llama_index_node_parser_docling-0.4.2-py3-none-any.whl", hash = "sha256:e978e7de5b05e7c63e46b3282edb25ca269c2a57a5ca03113c45627f0d53360d", size = 4058, upload-time = "2025-11-28T15:23:45.199Z" },
+]
+
+[[package]]
+name = "llama-index-postprocessor-flag-embedding-reranker"
+version = "0.4.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "llama-index-core" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c0/7e/5dc9d4936480d5a33867b5193b230df03f39880e8db9a9487e9390ecad74/llama_index_postprocessor_flag_embedding_reranker-0.4.1.tar.gz", hash = "sha256:e0bae3524dc33f530e8eaec0600844bcbd3515806cd7bf6fac4c13e4332603d5", size = 4076, upload-time = "2025-09-08T20:35:09.575Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e0/9f/badcd4329463c1e86ed75d468cfa8abac61eb2b5414fcd569bf028a90d4e/llama_index_postprocessor_flag_embedding_reranker-0.4.1-py3-none-any.whl", hash = "sha256:03b1c76e578ea7bdbe1d026f3be700d75b989aad625930154a915c23ef00cb11", size = 3894, upload-time = "2025-09-08T20:35:08.884Z" },
 ]
 
 [[package]]

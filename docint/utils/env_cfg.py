@@ -136,6 +136,7 @@ class RAGConfig:
     coarse_chunk_size: int
     fine_chunk_size: int
     fine_chunk_overlap: int
+    rerank_use_fp16: bool
 
 
 @dataclass(frozen=True)
@@ -393,6 +394,10 @@ def load_rag_env() -> RAGConfig:
         fine_chunk_overlap=int(
             os.getenv("FINE_CHUNK_OVERLAP", default_fine_chunk_overlap)
         ),
+        rerank_use_fp16=str(
+            os.getenv("RERANK_USE_FP16", default_rerank_use_fp16)
+        ).lower()
+        in {"true", "1", "yes"},
     )
 
 

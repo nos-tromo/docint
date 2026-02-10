@@ -19,7 +19,8 @@ from llama_index.core import (
     VectorStoreIndex,
 )
 from llama_index.core.embeddings import BaseEmbedding
-from llama_index.core.postprocessor import LLMRerank
+from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
+
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.schema import BaseNode, Document
 from llama_index.core.storage.docstore.keyval_docstore import KVDocumentStore
@@ -69,6 +70,7 @@ class RAG:
     # --- Models ---
     embed_model_id: str | None = field(default=None, init=False)
     sparse_model_id: str | None = field(default=None, init=False)
+    rerank_model_id: str | None = field(default=None, init=False)
     gen_model_id: str | None = field(default=None, init=False)
     gen_model_file: str | None = field(default=None, init=False)
 
@@ -96,6 +98,7 @@ class RAG:
     # --- Reranking / retrieval ---
     retrieve_similarity_top_k: int = field(default=20, init=False)
     rerank_top_n: int = field(default=5, init=False)
+    rerank_use_fp16: bool = field(default=False, init=False)
 
     # --- Prompt config ---
     prompt_dir: Path | None = field(default=None, init=False)
@@ -106,7 +109,7 @@ class RAG:
     _device: str | None = field(default=None, init=False, repr=False)
     _embed_model: BaseEmbedding | None = field(default=None, init=False, repr=False)
     _gen_model: LlamaCPP | None = field(default=None, init=False, repr=False)
-    _reranker: LLMRerank | None = field(default=None, init=False, repr=False)
+    _reranker: FlagEmbeddingReranker | None = field(default=None, init=False, repr=False)
     _qdrant_client: QdrantClient | None = field(default=None, init=False, repr=False)
     _qdrant_aclient: AsyncQdrantClient | None = field(
         default=None, init=False, repr=False
@@ -145,6 +148,7 @@ class RAG:
         model_config = load_model_env()
         self.embed_model_id = model_config.embed_model
         self.sparse_model_id = model_config.sparse_model
+        self.rerank_model_id = model_config.rerank_model
         self.gen_model_id = model_config.llm
         self.gen_model_file = model_config.llm_file
 
@@ -465,6 +469,35 @@ class RAG:
 
         return chosen
 
+    @property
+    def reranker(self) -> FlagEmbeddingReranker:
+        """
+        Lazily initializes and returns the reranker model (FlagEmbeddingReranker).
+
+        Returns:
+            FlagEmbeddingReranker: The initialized reranker model.
+
+        Raises:
+            ValueError: If rerank_model_id is None.
+        """
+        if self.rerank_model_id is None:
+            raise ValueError("rerank_model_id cannot be None")
+        if self._reranker is None:
+            # Resolve to local cache path for offline compatibility
+            cache_dir = (
+                self.hf_hub_cache or Path.home() / ".cache" / "huggingface" / "hub"
+            )
+            resolved = resolve_hf_cache_path(cache_dir, self.rerank_model_id)
+            resolved_model = str(resolved) if resolved else self.rerank_model_id
+            if resolved:
+                logger.info("Using local reranker model path: {}", resolved_model)
+            self._reranker = FlagEmbeddingReranker(
+                top_n=self.rerank_top_n,
+                model=resolved_model,
+            )
+            logger.info("Initializing FlagEmbeddingReranker with model: {}", self.rerank_model_id)
+        return self._reranker
+
     def _create_gen_model(self, enable_json: bool = False) -> LlamaCPP:
         """
         Helper to create a Llama.cpp model instance with specific settings.
@@ -557,22 +590,6 @@ class RAG:
         if self._gen_model is None:
             self._gen_model = self._create_gen_model()
         return self._gen_model
-
-    @property
-    def reranker(self) -> LLMRerank:
-        """
-        Lazily initializes and returns the reranker model (LLMRerank).
-
-        Returns:
-            LLMRerank: The initialized reranker model.
-        """
-        if self._reranker is None:
-            self._reranker = LLMRerank(
-                top_n=self.rerank_top_n,
-                llm=self.gen_model,
-            )
-            logger.info("Initializing LLM reranker with model: {}", self.gen_model_id)
-        return self._reranker
 
     @property
     def qdrant_client(self) -> QdrantClient:

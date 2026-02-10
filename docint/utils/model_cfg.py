@@ -154,6 +154,7 @@ def main() -> None:
         (models.embed_model, "embedding"),
         (models.sparse_model, "sparse"),
         (models.ner_model, "NER"),
+        (models.rerank_model, "rerank"),
     ]:
         load_hf_model(
             model_id=model_id,
