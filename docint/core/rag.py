@@ -112,7 +112,9 @@ class RAG:
     _device: str | None = field(default=None, init=False, repr=False)
     _embed_model: BaseEmbedding | None = field(default=None, init=False, repr=False)
     _gen_model: LlamaCPP | None = field(default=None, init=False, repr=False)
-    _reranker: FlagEmbeddingReranker | None = field(default=None, init=False, repr=False)
+    _reranker: FlagEmbeddingReranker | None = field(
+        default=None, init=False, repr=False
+    )
     _qdrant_client: QdrantClient | None = field(default=None, init=False, repr=False)
     _qdrant_aclient: AsyncQdrantClient | None = field(
         default=None, init=False, repr=False
@@ -501,7 +503,10 @@ class RAG:
                 top_n=self.rerank_top_n,
                 model=resolved_model,
             )
-            logger.info("Initializing FlagEmbeddingReranker with model: {}", self.rerank_model_id)
+            logger.info(
+                "Initializing FlagEmbeddingReranker with model: {}",
+                self.rerank_model_id,
+            )
         return self._reranker
 
     def _create_gen_model(self, enable_json: bool = False) -> LlamaCPP:

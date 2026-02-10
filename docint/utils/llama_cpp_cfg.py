@@ -34,7 +34,9 @@ def messages_to_prompt_qwen3(messages: Sequence) -> str:
     """
     prompt = ""
     for message in messages:
-        role = message.role.value if hasattr(message.role, "value") else str(message.role)
+        role = (
+            message.role.value if hasattr(message.role, "value") else str(message.role)
+        )
         content = message.content or ""
         prompt += f"<|im_start|>{role}\n{content}<|im_end|>\n"
     # Start the assistant turn with thinking explicitly disabled

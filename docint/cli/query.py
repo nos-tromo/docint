@@ -126,7 +126,9 @@ def main() -> None:
     col_name = get_col_name()
     rag = rag_pipeline(col_name=col_name)
     path_config = load_path_env()
-    queries = load_queries(queries_path=path_config.queries, prompts_path=path_config.prompts)
+    queries = load_queries(
+        queries_path=path_config.queries, prompts_path=path_config.prompts
+    )
     for index, query in enumerate(queries, start=1):
         run_query(rag=rag, query=query, index=index, output_path=path_config.results)
     rag.unload_models()
