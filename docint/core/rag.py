@@ -542,7 +542,9 @@ class RAG:
             # Try HF cache structure: models--{org}--{repo}/snapshots/{hash}/{file}
             if model_path is None and self.gen_model_id:
                 model_path = resolve_hf_cache_path(
-                    cache_dir=model_cache, repo_id=self.gen_model_id, filename=self.gen_model_file
+                    cache_dir=model_cache,
+                    repo_id=self.gen_model_id,
+                    filename=self.gen_model_file,
                 )
 
         if model_path is None:
@@ -556,7 +558,9 @@ class RAG:
                 logger.error(
                     "ValueError: gen_model_file must be specified to download the model."
                 )
-                raise ValueError("gen_model_file must be specified to download the model.")
+                raise ValueError(
+                    "gen_model_file must be specified to download the model."
+                )
             LlamaCppPipeline.ensure_model(
                 model_id=self.gen_model_file, repo_id=self.gen_model_id
             )
@@ -567,7 +571,9 @@ class RAG:
                 model_path = direct_path
             elif self.gen_model_id:
                 model_path = resolve_hf_cache_path(
-                    cache_dir=model_cache, repo_id=self.gen_model_id, filename=self.gen_model_file
+                    cache_dir=model_cache,
+                    repo_id=self.gen_model_id,
+                    filename=self.gen_model_file,
                 )
 
         if model_path is None:
