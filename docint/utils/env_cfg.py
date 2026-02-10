@@ -72,6 +72,23 @@ class InformationExtractionConfig:
 
 
 @dataclass(frozen=True)
+class LlamaCppConfig:
+    """
+    Dataclass for Llama.cpp configuration.
+    """
+
+    ctx_window: int
+    max_new_tokens: int
+    request_timeout: int
+    seed: int
+    temperature: float
+    n_gpu_layers: int
+    top_k: int
+    top_p: float
+    repeat_penalty: float
+
+
+@dataclass(frozen=True)
 class ModelConfig:
     """
     Dataclass for model configuration.
@@ -80,27 +97,13 @@ class ModelConfig:
     embed_model: str
     sparse_model: str
     ner_model: str
+    rerank_model: str
     llm: str
     llm_file: str
+    llm_tokenizer: str
     vlm: str
     vlm_file: str
     whisper_model: str
-
-
-@dataclass(frozen=True)
-class LlamaCppConfig:
-    """
-    Dataclass for Llama.cpp configuration.
-    """
-
-    ctx_window: int
-    request_timeout: int
-    seed: int
-    temperature: float
-    n_gpu_layers: int
-    top_k: int
-    top_p: float
-    repeat_penalty: float
 
 
 @dataclass(frozen=True)
@@ -148,9 +151,18 @@ class SessionConfig:
     session_store: str
 
 
-def load_host_env() -> HostConfig:
+def load_host_env(
+    default_backend_host: str = "http://localhost:8000",
+    default_qdrant_host: str = "http://localhost:6333",
+    default_cors_origins: str = "http://localhost:8501,http://127.0.0.1:8501",
+) -> HostConfig:
     """
     Loads host configuration from environment variables or defaults.
+
+    Args:
+        default_backend_host (str): Default backend host URL.
+        default_qdrant_host (str): Default Qdrant host URL.
+        default_cors_origins (str): Default CORS allowed origins.
 
     Returns:
         HostConfig: Dataclass containing host configuration.
@@ -160,10 +172,6 @@ def load_host_env() -> HostConfig:
         - qdrant_host (str): The Qdrant host URL.
         - cors_allowed_origins (str): Comma-separated list of allowed CORS origins.
     """
-    default_backend_host = "http://localhost:8000"
-    default_qdrant_host = "http://localhost:6333"
-    default_cors_origins = "http://localhost:8501,http://127.0.0.1:8501"
-
     return HostConfig(
         backend_host=os.getenv("BACKEND_HOST", default_backend_host),
         backend_public_host=os.getenv("BACKEND_PUBLIC_HOST", default_backend_host),
@@ -172,9 +180,20 @@ def load_host_env() -> HostConfig:
     )
 
 
-def load_ie_env() -> InformationExtractionConfig:
+def load_ie_env(
+    default_ie_enabled: str = "1",
+    default_ie_max_chars: str = "800",
+    default_ie_max_workers: str = "4",
+    default_ie_engine: str = "gliner",
+) -> InformationExtractionConfig:
     """
     Loads information extraction configuration from environment variables or defaults.
+
+    Args:
+        default_ie_enabled (str): Default value to enable IE extraction.
+        default_ie_max_chars (str): Default maximum characters for IE extraction.
+        default_ie_max_workers (str): Default maximum worker threads for IE extraction.
+        default_ie_engine (str): Default IE engine to use. Options: gliner, llama_cpp.
 
     Returns:
         IEConfig: Dataclass containing IE configuration.
@@ -182,11 +201,6 @@ def load_ie_env() -> InformationExtractionConfig:
         - ie_max_chars (int): Maximum characters from each node to send to the extractor.
         - ie_max_workers (int): Maximum number of worker threads for IE extraction.
     """
-    default_ie_enabled = "1"
-    default_ie_max_chars = "800"
-    default_ie_max_workers = "4"
-    default_ie_engine = "gliner"  # Options: gliner, llama_cpp
-
     return InformationExtractionConfig(
         ie_enabled=os.getenv("ENABLE_IE", default_ie_enabled).lower()
         in {"1", "true", "yes"},
@@ -196,49 +210,35 @@ def load_ie_env() -> InformationExtractionConfig:
     )
 
 
-def load_model_env() -> ModelConfig:
-    """
-    Loads model configuration from environment variables or defaults.
-
-    Returns:
-        ModelConfig: Dataclass containing model configuration.
-        - embed_model (str): The embedding model identifier.
-        - sparse_model (str): The sparse model identifier.
-        - ner_model (str): The NER model identifier.
-        - llm (str): The LLM (Language Model) identifier for generation.
-        - llm_file (str): The local file name for the LLM model (GGUF format).
-        - vlm (str): The VLM (Vision-Language Model) identifier for generation.
-        - vlm_file (str): The local file name for the VLM model (GGUF format).
-        - whisper_model (str): The Whisper model identifier.
-    """
-    default_embed_model = "BAAI/bge-m3"
-    default_sparse_model = "Qdrant/all_miniLM_L6_v2_with_attentions"
-    default_ner_model = "gliner-community/gliner_large-v2.5"
-    default_llm = "unsloth/Qwen3-4B-Instruct-2507-GGUF"
-    default_llm_file = "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
-    default_vlm = "Qwen/Qwen3-VL-8B-Instruct-GGUF"
-    default_vlm_file = "Qwen3VL-8B-Instruct-Q4_K_M.gguf"
-    default_whisper_model = "turbo"
-
-    return ModelConfig(
-        embed_model=os.getenv("EMBED_MODEL", default_embed_model),
-        sparse_model=os.getenv("SPARSE_MODEL", default_sparse_model),
-        ner_model=os.getenv("NER_MODEL", default_ner_model),
-        llm=os.getenv("LLM_REPO", default_llm),
-        llm_file=os.getenv("LLM", default_llm_file),
-        vlm=os.getenv("VLM_REPO", default_vlm),
-        vlm_file=os.getenv("VLM", default_vlm_file),
-        whisper_model=os.getenv("WHISPER_MODEL", default_whisper_model),
-    )
-
-
-def load_llama_cpp_env() -> LlamaCppConfig:
+def load_llama_cpp_env(
+    default_ctx_window: int = 8192,
+    default_max_new_tokens: int = 1024,
+    default_request_timeout: int = 1200,
+    default_seed: int = 42,
+    default_temperature: float = 0.1,
+    default_n_gpu_layers: int = -1,
+    default_top_k: int = 40,
+    default_top_p: float = 0.95,
+    default_repeat_penalty: float = 1.1,
+) -> LlamaCppConfig:
     """
     Loads Llama.cpp configuration from environment variables or defaults.
+
+    Args:
+        default_ctx_window (int): Default context window size.
+        default_max_new_tokens (int): Default maximum new tokens per completion.
+        default_request_timeout (int): Default request timeout in seconds.
+        default_seed (int): Default random seed for generation.
+        default_temperature (float): Default temperature setting for generation.
+        default_n_gpu_layers (int): Default number of layers to offload to GPU (-1 = all).
+        default_top_k (int): Default top_k setting for generation.
+        default_top_p (float): Default top_p setting for generation.
+        default_repeat_penalty (float): Default repetition penalty for generation.
 
     Returns:
         LlamaCppConfig: Dataclass containing Llama.cpp configuration.
         - ctx_window (int): The context window size.
+        - max_new_tokens (int): Maximum number of tokens to generate per completion.
         - request_timeout (int): The request timeout in seconds.
         - seed (int): The random seed for generation.
         - temperature (float): The temperature setting for generation.
@@ -247,17 +247,11 @@ def load_llama_cpp_env() -> LlamaCppConfig:
         - top_p (float): The top_p setting for generation.
         - repeat_penalty (float): The repetition penalty for generation.
     """
-    default_ctx_window = "8192"
-    default_request_timeout = "1200"
-    default_seed = "42"
-    default_temperature = "0.0"
-    default_n_gpu_layers = "-1"  # -1 means offload all layers to GPU
-    default_top_k = "40"
-    default_top_p = "0.95"
-    default_repeat_penalty = "1.1"
-
     return LlamaCppConfig(
         ctx_window=int(os.getenv("LLAMA_CPP_CTX_WINDOW", default_ctx_window)),
+        max_new_tokens=int(
+            os.getenv("LLAMA_CPP_MAX_NEW_TOKENS", default_max_new_tokens)
+        ),
         request_timeout=int(
             os.getenv("LLAMA_CPP_REQUEST_TIMEOUT", default_request_timeout)
         ),
@@ -272,7 +266,62 @@ def load_llama_cpp_env() -> LlamaCppConfig:
     )
 
 
-def load_path_env() -> PathConfig:
+def load_model_env(
+    default_embed_model: str = "BAAI/bge-m3",
+    default_sparse_model: str = "Qdrant/all_miniLM_L6_v2_with_attentions",
+    default_ner_model: str = "gliner-community/gliner_large-v2.5",
+    default_rerank_model: str = "BAAI/bge-reranker-v2-m3",
+    default_llm: str = "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+    default_llm_file: str = "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+    default_llm_tokenizer: str = "Qwen/Qwen3-4B-Instruct-2507",
+    default_vlm: str = "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+    default_vlm_file: str = "Qwen3VL-8B-Instruct-Q4_K_M.gguf",
+    default_whisper_model: str = "turbo",
+) -> ModelConfig:
+    """
+    Loads model configuration from environment variables or defaults.
+
+    Args:
+        default_embed_model (str): Default embedding model identifier.
+        default_sparse_model (str): Default sparse model identifier.
+        default_ner_model (str): Default NER model identifier.
+        default_rerank_model (str): Default reranker model identifier.
+        default_llm (str): Default LLM (Language Model) identifier for generation.
+        default_llm_file (str): Default local file name for the LLM model (GGUF format).
+        default_llm_tokenizer (str): Default HuggingFace repo for the LLM tokenizer.
+            Used by apply_chat_template() to format prompts. Leave empty to auto-detect.
+        default_vlm (str): Default VLM (Vision-Language Model) identifier for generation.
+        default_vlm_file (str): Default local file name for the VLM model (GGUF format).
+        default_whisper_model (str): Default Whisper model identifier.
+
+    Returns:
+        ModelConfig: Dataclass containing model configuration.
+        - embed_model (str): The embedding model identifier.
+        - sparse_model (str): The sparse model identifier.
+        - ner_model (str): The NER model identifier.
+        - rerank_model (str): The reranker model identifier.
+        - llm (str): The LLM (Language Model) identifier for generation.
+        - llm_file (str): The local file name for the LLM model (GGUF format).
+        - llm_tokenizer (str): HuggingFace repo for the LLM tokenizer.
+        - vlm (str): The VLM (Vision-Language Model) identifier for generation.
+        - vlm_file (str): The local file name for the VLM model (GGUF format).
+        - whisper_model (str): The Whisper model identifier.
+    """
+    return ModelConfig(
+        embed_model=os.getenv("EMBED_MODEL", default_embed_model),
+        sparse_model=os.getenv("SPARSE_MODEL", default_sparse_model),
+        ner_model=os.getenv("NER_MODEL", default_ner_model),
+        rerank_model=os.getenv("RERANK_MODEL", default_rerank_model),
+        llm=os.getenv("LLM", default_llm),
+        llm_file=os.getenv("LLM_FILE", default_llm_file),
+        llm_tokenizer=os.getenv("LLM_TOKENIZER", default_llm_tokenizer),
+        vlm=os.getenv("VLM", default_vlm),
+        vlm_file=os.getenv("VLM_FILE", default_vlm_file),
+        whisper_model=os.getenv("WHISPER_MODEL", default_whisper_model),
+    )
+
+
+def load_path_env(home_dir: Path | None = None) -> PathConfig:
     """
     Loads path configuration from environment variables or defaults.
 
@@ -288,7 +337,8 @@ def load_path_env() -> PathConfig:
         - required_exts (Path): Path to the required extensions file.
         - hf_hub_cache (Path): Path to the Hugging Face Hub cache directory.
     """
-    home_dir = Path.home()
+    if home_dir is None:
+        home_dir: Path = Path.home()
     docint_home_dir: Path = home_dir / "docint"
     default_data_dir: Path = docint_home_dir / "data"
     default_query_dir: Path = docint_home_dir / "queries.txt"
@@ -330,9 +380,34 @@ def load_path_env() -> PathConfig:
     )
 
 
-def load_rag_env() -> RAGConfig:
+def load_rag_env(
+    default_docstore_batch_size: int = 100,
+    default_ingestion_batch_size: int = 5,
+    default_docling_accelerator_num_threads: int = 4,
+    default_retrieve_top_k: int = 20,
+    default_sentence_splitter_chunk_overlap: int = 64,
+    default_sentence_splitter_chunk_size: int = 1024,
+    default_hierarchical_chunking_enabled: bool = True,
+    default_coarse_chunk_size: int = 8192,
+    default_fine_chunk_size: int = 8192,
+    default_fine_chunk_overlap: int = 0,
+    default_rerank_use_fp16: bool = False,
+) -> RAGConfig:
     """
     Loads RAG (Retrieval-Augmented Generation) configuration from environment variables or defaults.
+
+    Args:
+        default_docstore_batch_size (int): Default batch size for document store operations.
+        default_ingestion_batch_size (int): Default batch size for ingestion.
+        default_docling_accelerator_num_threads (int): Default number of threads for Docling accelerator.
+        default_retrieve_top_k (int): Default number of top documents to retrieve.
+        default_sentence_splitter_chunk_overlap (int): Default chunk overlap size for sentence splitting.
+        default_sentence_splitter_chunk_size (int): Default chunk size for sentence splitting.
+        default_hierarchical_chunking_enabled (bool): Default flag to enable hierarchical chunking.
+        default_coarse_chunk_size (int): Default coarse chunk size for hierarchical chunking.
+        default_fine_chunk_size (int): Default fine chunk size for hierarchical chunking.
+        default_fine_chunk_overlap (int): Default fine chunk overlap size for hierarchical chunking.
+        default_rerank_use_fp16 (bool): Default flag to use FP16 for reranker model. Default is False.
 
     Returns:
         RAGConfig: Dataclass containing RAG configuration.
@@ -345,19 +420,8 @@ def load_rag_env() -> RAGConfig:
         - hierarchical_chunking_enabled (bool): Whether hierarchical chunking is enabled.
         - coarse_chunk_size (int): The coarse chunk size for hierarchical chunking.
         - fine_chunk_size (int): The fine chunk size for hierarchical chunking.
-        - fine_chunk_overlap (int): The fine chunk overlap size for hierarchical chunking.
+        - fine_chunk_overlap (bool): The fine chunk overlap size for hierarchical chunking.
     """
-    default_docstore_batch_size = "100"
-    default_ingestion_batch_size = "5"
-    default_docling_accelerator_num_threads = "4"
-    default_retrieve_top_k = "20"
-    default_sentence_splitter_chunk_overlap = "64"
-    default_sentence_splitter_chunk_size = "1024"
-    default_hierarchical_chunking_enabled = "true"
-    default_coarse_chunk_size = "8192"
-    default_fine_chunk_size = "8192"
-    default_fine_chunk_overlap = "0"
-
     return RAGConfig(
         docstore_batch_size=int(
             os.getenv("DOCSTORE_BATCH_SIZE", default_docstore_batch_size)
@@ -383,8 +447,10 @@ def load_rag_env() -> RAGConfig:
                 "SENTENCE_SPLITTER_CHUNK_SIZE", default_sentence_splitter_chunk_size
             )
         ),
-        hierarchical_chunking_enabled=os.getenv(
-            "HIERARCHICAL_CHUNKING_ENABLED", default_hierarchical_chunking_enabled
+        hierarchical_chunking_enabled=str(
+            os.getenv(
+                "HIERARCHICAL_CHUNKING_ENABLED", default_hierarchical_chunking_enabled
+            )
         ).lower()
         in {"true", "1", "yes"},
         coarse_chunk_size=int(
@@ -401,16 +467,18 @@ def load_rag_env() -> RAGConfig:
     )
 
 
-def load_session_env() -> SessionConfig:
+def load_session_env(default_session_store: str = "sqlite:///sessions.db") -> SessionConfig:
     """
     Loads session configuration from environment variables or defaults.
+
+    Args:
+        default_session_store (str): Default session store configuration (e.g. database URL or file path). 
+            Default is "sqlite:///sessions.db".
 
     Returns:
         SessionConfig: Dataclass containing session configuration.
         - session_store (str): The session store configuration. Default is "sqlite:///sessions.db".
     """
-    default_session_store = "sqlite:///sessions.db"
-
     return SessionConfig(
         session_store=os.getenv("SESSION_STORE", default_session_store)
     )
