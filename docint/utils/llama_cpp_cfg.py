@@ -7,6 +7,7 @@ supporting both CPU and GPU (CUDA/Metal) acceleration.
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable, Sequence
 
 from huggingface_hub import hf_hub_download
 from llama_cpp import Llama
@@ -14,6 +15,192 @@ from loguru import logger
 from PIL import Image
 
 from docint.utils.env_cfg import load_model_env, load_path_env, resolve_hf_cache_path
+
+
+def messages_to_prompt_qwen3(messages: Sequence) -> str:
+    """
+    Convert chat messages to the Qwen3 ChatML prompt format with thinking
+    disabled.
+
+    Produces the ``<|im_start|>role\\ncontent<|im_end|>`` structure that Qwen3
+    expects and appends an empty ``<think>`` block so the model skips its
+    internal chain-of-thought and responds directly.
+
+    Args:
+        messages: Sequence of ChatMessage objects.
+
+    Returns:
+        The formatted prompt string.
+    """
+    prompt = ""
+    for message in messages:
+        role = message.role.value if hasattr(message.role, "value") else str(message.role)
+        content = message.content or ""
+        prompt += f"<|im_start|>{role}\n{content}<|im_end|>\n"
+    # Start the assistant turn with thinking explicitly disabled
+    prompt += "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    return prompt
+
+
+def completion_to_prompt_qwen3(completion: str) -> str:
+    """
+    Wrap a plain completion string in the Qwen3 ChatML format with thinking
+    disabled.
+
+    Args:
+        completion: The raw completion/instruction text.
+
+    Returns:
+        The formatted prompt string.
+    """
+    return (
+        f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        f"<|im_start|>user\n{completion}<|im_end|>\n"
+        f"<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    )
+
+
+def _load_tokenizer(
+    tokenizer_id: str | None = None,
+    model_id: str | None = None,
+    cache_dir: Path | None = None,
+):
+    """
+    Attempt to load a HuggingFace tokenizer, trying multiple sources.
+
+    Resolution order:
+        1. ``tokenizer_id`` (explicit tokenizer repo, e.g. ``Qwen/Qwen3-4B-Instruct-2507``)
+        2. ``model_id`` (the GGUF repo itself — works when it ships tokenizer files)
+
+    For each candidate the function first checks for a local HF cache snapshot
+    and falls back to loading by name (which may trigger a download when
+    ``DOCINT_OFFLINE`` is not set).
+
+    Args:
+        tokenizer_id: Explicit HuggingFace repo that contains tokenizer files.
+        model_id: The model repo to try as a fallback (often the GGUF repo).
+        cache_dir: HF hub cache directory for local resolution.
+
+    Returns:
+        A ``PreTrainedTokenizerBase`` instance, or ``None`` if loading failed.
+    """
+    try:
+        from transformers import AutoTokenizer
+    except ImportError:
+        logger.debug("transformers not installed; tokenizer loading unavailable.")
+        return None
+
+    candidates: list[str] = []
+    if tokenizer_id:
+        candidates.append(tokenizer_id)
+    if model_id and model_id not in candidates:
+        candidates.append(model_id)
+
+    for candidate in candidates:
+        # Try local HF cache first
+        if cache_dir:
+            resolved = resolve_hf_cache_path(cache_dir, candidate)
+            if resolved:
+                try:
+                    tok = AutoTokenizer.from_pretrained(
+                        str(resolved), trust_remote_code=True
+                    )
+                    logger.info(
+                        "Loaded tokenizer from local cache: {} ({})",
+                        candidate,
+                        resolved,
+                    )
+                    return tok
+                except Exception as exc:
+                    logger.debug(
+                        "Failed to load tokenizer from cache path {}: {}",
+                        resolved,
+                        exc,
+                    )
+
+        # Try loading by name (may download if online)
+        try:
+            tok = AutoTokenizer.from_pretrained(candidate, trust_remote_code=True)
+            logger.info("Loaded tokenizer from repo: {}", candidate)
+            return tok
+        except Exception as exc:
+            logger.debug("Failed to load tokenizer {}: {}", candidate, exc)
+
+    return None
+
+
+def build_prompt_functions(
+    tokenizer_id: str | None = None,
+    model_id: str | None = None,
+    cache_dir: Path | None = None,
+) -> tuple[Callable[[Sequence], str], Callable[[str], str]]:
+    """
+    Build ``messages_to_prompt`` and ``completion_to_prompt`` callables for
+    the llama-index ``LlamaCPP`` wrapper.
+
+    When a HuggingFace tokenizer can be loaded (via ``tokenizer_id`` or
+    ``model_id``), the returned functions use
+    ``tokenizer.apply_chat_template()`` which is model-agnostic — it reads
+    the Jinja2 chat template shipped with the tokenizer config.
+
+    If no tokenizer is available the functions fall back to the hardcoded
+    Qwen3 ChatML helpers (``messages_to_prompt_qwen3`` /
+    ``completion_to_prompt_qwen3``).
+
+    Args:
+        tokenizer_id: Explicit HuggingFace repo for the tokenizer (e.g.
+            ``Qwen/Qwen3-4B-Instruct-2507``).  Set via the ``LLM_TOKENIZER``
+            env var.
+        model_id: The LLM repo id.  Used as a fallback tokenizer source.
+        cache_dir: HF hub cache directory for local snapshot resolution.
+
+    Returns:
+        A ``(messages_to_prompt, completion_to_prompt)`` tuple.
+    """
+    tokenizer = _load_tokenizer(tokenizer_id, model_id, cache_dir)
+
+    if tokenizer is None:
+        logger.warning(
+            "No tokenizer found (tokenizer_id={}, model_id={}). "
+            "Falling back to hardcoded Qwen3 prompt format.",
+            tokenizer_id,
+            model_id,
+        )
+        return messages_to_prompt_qwen3, completion_to_prompt_qwen3
+
+    logger.info("Using tokenizer-based prompt formatting.")
+
+    def _messages_to_prompt(messages: Sequence) -> str:
+        chat_messages = []
+        for message in messages:
+            role = (
+                message.role.value
+                if hasattr(message.role, "value")
+                else str(message.role)
+            )
+            content = message.content or ""
+            chat_messages.append({"role": role, "content": content})
+
+        return tokenizer.apply_chat_template(
+            chat_messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+
+    def _completion_to_prompt(completion: str) -> str:
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": completion},
+        ]
+        return tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+
+    return _messages_to_prompt, _completion_to_prompt
 
 
 @dataclass(slots=True)

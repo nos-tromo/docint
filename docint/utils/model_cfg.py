@@ -17,6 +17,7 @@ from gliner import GLiNER
 from huggingface_hub import snapshot_download
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from loguru import logger
+from transformers import AutoTokenizer
 
 from docint.utils.env_cfg import load_model_env, load_path_env, resolve_hf_cache_path
 from docint.utils.llama_cpp_cfg import LlamaCppPipeline
@@ -120,6 +121,33 @@ def load_llama_cpp_model(model_id: str, repo_id: str, kw: str) -> None:
     logger.info("Loaded {}: {}", kw, model_id)
 
 
+def load_tokenizer(tokenizer_id: str, cache_folder: Path) -> None:
+    """
+    Downloads and caches a HuggingFace tokenizer for chat template formatting.
+
+    This ensures the tokenizer files are available locally for offline use.
+    Only the tokenizer files are downloaded (tokenizer.json, tokenizer_config.json,
+    etc.), not the full model weights.
+
+    Args:
+        tokenizer_id: HuggingFace repo containing the tokenizer
+            (e.g. ``Qwen/Qwen3-4B-Instruct-2507``).
+        cache_folder: HuggingFace hub cache directory.
+    """
+    resolved = resolve_hf_cache_path(cache_folder, tokenizer_id)
+    if resolved:
+        logger.info("Tokenizer '{}' already cached at {}", tokenizer_id, resolved)
+        return
+
+    logger.info("Downloading tokenizer '{}'...", tokenizer_id)
+    AutoTokenizer.from_pretrained(
+        tokenizer_id,
+        cache_dir=cache_folder,
+        trust_remote_code=True,
+    )
+    logger.info("Loaded tokenizer: {}", tokenizer_id)
+
+
 def load_whisper_model(model_id: str) -> None:
     """
     Loads and returns the Whisper model.
@@ -171,6 +199,10 @@ def main() -> None:
         (models.vlm_file, models.vlm, "VLM"),
     ]:
         load_llama_cpp_model(model_id, repo_id, kw)
+
+    # LLM tokenizer (for chat template formatting)
+    if models.llm_tokenizer:
+        load_tokenizer(models.llm_tokenizer, paths.hf_hub_cache)
 
     # Whisper
     load_whisper_model(models.whisper_model)

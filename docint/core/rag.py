@@ -45,6 +45,7 @@ from docint.utils.env_cfg import (
     load_session_env,
     resolve_hf_cache_path
 )
+from docint.utils.llama_cpp_cfg import build_prompt_functions
 
 
 @dataclass(slots=True)
@@ -73,6 +74,7 @@ class RAG:
     rerank_model_id: str | None = field(default=None, init=False)
     gen_model_id: str | None = field(default=None, init=False)
     gen_model_file: str | None = field(default=None, init=False)
+    llm_tokenizer_id: str | None = field(default=None, init=False)
 
     # --- Qdrant controls ---
     docstore_batch_size: int = field(default=100, init=False)
@@ -151,6 +153,7 @@ class RAG:
         self.rerank_model_id = model_config.rerank_model
         self.gen_model_id = model_config.llm
         self.gen_model_file = model_config.llm_file
+        self.llm_tokenizer_id = model_config.llm_tokenizer or None
 
         # --- Information Extraction config ---
         self.ie_enabled = load_ie_env().ie_enabled
@@ -177,6 +180,7 @@ class RAG:
         self.docstore_batch_size = rag_config.docstore_batch_size
         self.retrieve_similarity_top_k = rag_config.retrieve_top_k
         self.rerank_top_n = int(self.retrieve_similarity_top_k // 4)
+        self.rerank_use_fp16 = rag_config.rerank_use_fp16
 
         if self.prompt_dir:
             self.summarize_prompt_path = self.prompt_dir / "summarize.txt"
@@ -557,6 +561,16 @@ class RAG:
         if self.llama_cpp_seed is not None:
             options["seed"] = self.llama_cpp_seed
 
+        # Add stop tokens so the model stops at the end of an assistant turn
+        options.setdefault("stop", ["<|im_end|>"])
+
+        # Build model-agnostic prompt functions via tokenizer
+        messages_fn, completion_fn = build_prompt_functions(
+            tokenizer_id=self.llm_tokenizer_id,
+            model_id=self.gen_model_id,
+            cache_dir=model_cache,
+        )
+
         model = LlamaCPP(
             model_path=str(model_path),
             temperature=self.llama_cpp_temperature
@@ -568,6 +582,8 @@ class RAG:
                 "n_gpu_layers": self.llama_cpp_n_gpu_layers,
             },
             generate_kwargs=options,
+            messages_to_prompt=messages_fn,
+            completion_to_prompt=completion_fn,
         )
         logger.info(
             "Initializing generator model: {} (json={})",
