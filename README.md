@@ -121,9 +121,9 @@ The application is configured via environment variables. Key variables include:
 
 **Model Selection:**
 
-- `LLM`: HuggingFace repo for the GGUF model (default: `unsloth/Qwen3-4B-Instruct-2507-GGUF`).
-- `LLM_FILE`: GGUF filename within the repo (default: `Qwen3-4B-Instruct-2507-Q4_K_M.gguf`).
-- `LLM_TOKENIZER`: HuggingFace repo containing the tokenizer for chat template formatting (default: `Qwen/Qwen3-4B-Instruct-2507`). Required because GGUF-only repos don't include tokenizer files. The tokenizer is downloaded automatically by `load-models` and used at runtime to apply the model's chat template, making prompt formatting model-agnostic.
+- `LLM`: HuggingFace repo for the GGUF model (default: `unsloth/Qwen3-1.7B-GGUF`).
+- `LLM_FILE`: GGUF filename within the repo (default: `Qwen3-1.7B-Q4_K_M.gguf`).
+- `LLM_TOKENIZER`: HuggingFace repo containing the tokenizer for chat template formatting (default: `Qwen/Qwen3-1.7B`). Required because GGUF-only repos don't include tokenizer files. The tokenizer is downloaded automatically by `load-models` and used at runtime to apply the model's chat template, making prompt formatting model-agnostic.
 
 **Llama.cpp Inference:**
 
@@ -245,9 +245,9 @@ For additional configuration, populate an `.env` (local usage) or `.env.docker` 
 
 ```env
 DOCINT_OFFLINE=true
-LLM=unsloth/Qwen3-4B-Instruct-2507-GGUF
-LLM_FILE=Qwen3-4B-Instruct-2507-Q4_K_M.gguf
-LLM_TOKENIZER=Qwen/Qwen3-4B-Instruct-2507
+LLM=unsloth/Qwen3-1.7B-GGUF
+LLM_FILE=Qwen3-1.7B-Q4_K_M.gguf
+LLM_TOKENIZER=Qwen/Qwen3-1.7B
 ENABLE_IE=true
 IE_MAX_WORKERS=4
 LLAMA_CPP_N_GPU_LAYERS=-1
