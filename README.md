@@ -90,6 +90,7 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    ```bash
    uv run load-models
    ```
+
 4. **Run the Application**
 
    The application consists of a FastAPI backend and a Streamlit UI. You can run both locally.
@@ -112,12 +113,24 @@ Model files are handled automatically by the ingestion pipeline and do not need 
 
 The application is configured via environment variables. Key variables include:
 
+**General:**
+
 - `DOCINT_OFFLINE`: Set to `true` to force offline mode (fails if models aren't cached).
-- `LLAMA_CPP_N_GPU_LAYERS`: Number of layers to offload to GPU. Use `-1` for all layers (full GPU), `0` for CPU only (default: `-1`).
-- `LLAMA_CPP_CTX_WINDOW`: Context window size (default: `8192`).
-- `LLAMA_CPP_TEMPERATURE`: Sampling temperature (default: `0.0`).
 - `ENABLE_IE`: Enable scalable entity/relation extraction during ingestion (default: `false`). Uses parallel execution for maximum throughput.
 - `IE_MAX_WORKERS`: Number of parallel workers for entity extraction (default: `4`).
+
+**Model Selection:**
+
+- `LLM`: HuggingFace repo for the GGUF model (default: `unsloth/Qwen3-4B-Instruct-2507-GGUF`).
+- `LLM_FILE`: GGUF filename within the repo (default: `Qwen3-4B-Instruct-2507-Q4_K_M.gguf`).
+- `LLM_TOKENIZER`: HuggingFace repo containing the tokenizer for chat template formatting (default: `Qwen/Qwen3-4B-Instruct-2507`). Required because GGUF-only repos don't include tokenizer files. The tokenizer is downloaded automatically by `load-models` and used at runtime to apply the model's chat template, making prompt formatting model-agnostic.
+
+**Llama.cpp Inference:**
+
+- `LLAMA_CPP_N_GPU_LAYERS`: Number of layers to offload to GPU. Use `-1` for all layers (full GPU), `0` for CPU only (default: `-1`).
+- `LLAMA_CPP_CTX_WINDOW`: Context window size (default: `32768`).
+- `LLAMA_CPP_MAX_NEW_TOKENS`: Maximum tokens per generation (default: `1024`).
+- `LLAMA_CPP_TEMPERATURE`: Sampling temperature (default: `0.1`).
 
 See `docint/utils/env_cfg.py` for the full list of configuration options and defaults.
 
@@ -160,6 +173,7 @@ Then set `LLAMA_CPP_N_GPU_LAYERS=-1` to enable GPU acceleration.
    ```bash
    uv run ingest
    ```
+
 3. **Verify the Ingestion**
 
    Check the logs or output directory to confirm the data has been organized and prepared for querying.
@@ -170,7 +184,7 @@ Then set `LLAMA_CPP_N_GPU_LAYERS=-1` to enable GPU acceleration.
 
 1. **Prepare Your Queries**
 
-   Create a `queries.txt` file in the `~/docint` directory. Each line represents a single query. If no file is provided, a default summary query file will be generated.
+   Create a `queries.txt` file in the `~/docint` directory. Each line represents a single query. If no file is provided, the default summarize prompt is used.
 2. **Run the Query Command**
 
    Execute the following command:
@@ -231,13 +245,14 @@ For additional configuration, populate an `.env` (local usage) or `.env.docker` 
 
 ```env
 DOCINT_OFFLINE=true
-EMBED_MODEL=BAAI/bge-m3
-SPARSE_MODEL=Qdrant/all_miniLM_L6_v2_with_attentions
-WHISPER_MODEL=turbo
+LLM=unsloth/Qwen3-4B-Instruct-2507-GGUF
+LLM_FILE=Qwen3-4B-Instruct-2507-Q4_K_M.gguf
+LLM_TOKENIZER=Qwen/Qwen3-4B-Instruct-2507
 ENABLE_IE=true
 IE_MAX_WORKERS=4
 LLAMA_CPP_N_GPU_LAYERS=-1
 LLAMA_CPP_CTX_WINDOW=8192
+LLAMA_CPP_MAX_NEW_TOKENS=1024
 LLAMA_CPP_TEMPERATURE=0.1
 ```
 
