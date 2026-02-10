@@ -43,7 +43,7 @@ from docint.utils.env_cfg import (
     load_path_env,
     load_rag_env,
     load_session_env,
-    resolve_hf_cache_path
+    resolve_hf_cache_path,
 )
 from docint.utils.llama_cpp_cfg import build_prompt_functions
 
@@ -84,6 +84,7 @@ class RAG:
 
     # --- Llama.cpp parameters ---
     llama_cpp_ctx_window: int | None = field(default=None, init=False)
+    llama_cpp_max_new_tokens: int = field(default=1024, init=False)
     llama_cpp_request_timeout: int | None = field(default=None, init=False)
     llama_cpp_seed: int | None = field(default=None, init=False)
     llama_cpp_temperature: float | None = field(default=None, init=False)
@@ -161,6 +162,7 @@ class RAG:
         # --- Llama.cpp config ---
         llama_cpp_config = load_llama_cpp_env()
         self.llama_cpp_ctx_window = llama_cpp_config.ctx_window
+        self.llama_cpp_max_new_tokens = llama_cpp_config.max_new_tokens
         self.llama_cpp_request_timeout = llama_cpp_config.request_timeout
         self.llama_cpp_seed = llama_cpp_config.seed
         self.llama_cpp_temperature = llama_cpp_config.temperature
@@ -576,7 +578,7 @@ class RAG:
             temperature=self.llama_cpp_temperature
             if self.llama_cpp_temperature is not None
             else 0.1,
-            max_new_tokens=2048,
+            max_new_tokens=self.llama_cpp_max_new_tokens,
             context_window=self.llama_cpp_ctx_window,
             model_kwargs={
                 "n_gpu_layers": self.llama_cpp_n_gpu_layers,
