@@ -108,14 +108,20 @@ def load_hf_model(
     logger.info("Loaded {} model: {}", kw, model_id)
 
 
-def load_gliner_model(model_id: str) -> None:
+def load_gliner_model(model_id: str, cache_folder: Path) -> None:
     """
     Loads the GLiNER model.
 
     Args:
         model_id (str): The name of the GLiNER model to load.
+        cache_folder (Path): The path to the HuggingFace cache folder.
     """
-    GLiNER.from_pretrained(model_id)
+    resolved = resolve_hf_cache_path(cache_dir=cache_folder, repo_id=model_id)
+    if resolved:
+        logger.info("Found local cache for GLiNER at {}", resolved)
+        GLiNER.from_pretrained(model_id=str(resolved), local_files_only=True)
+    else:
+        GLiNER.from_pretrained(model_id=model_id)
     logger.info("Loaded GLiNER model: {}", model_id)
 
 
@@ -202,7 +208,7 @@ def main() -> None:
         )
 
     # GLiNER
-    load_gliner_model(models.ner_model)
+    load_gliner_model(model_id=models.ner_model, cache_folder=paths.hf_hub_cache)
 
     # Llama.cpp models
     for model_id, repo_id, kw in [
