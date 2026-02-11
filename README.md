@@ -66,6 +66,8 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    docker compose --profile <cpu|gpu> up
    ```
 
+   On the first run, required ML models are automatically downloaded and cached in a Docker volume (`model-cache`). This may take several minutes depending on your connection. Subsequent starts reuse the cached models and are fast.
+
 ---
 
 ### Local Setup
@@ -119,6 +121,7 @@ The application is configured via environment variables. Key variables include:
 - `DOCINT_OFFLINE`: Set to `true` to force offline mode (fails if models aren't cached).
 - `ENABLE_IE`: Enable scalable entity/relation extraction during ingestion (default: `false`). Uses parallel execution for maximum throughput.
 - `IE_MAX_WORKERS`: Number of parallel workers for entity extraction (default: `4`).
+- `PRELOAD_MODELS`: Set to `true` to download all ML models at container startup (default: unset/disabled). Used by `docker-compose.yml` to populate the `model-cache` volume on first run.
 
 **Model Selection:**
 
