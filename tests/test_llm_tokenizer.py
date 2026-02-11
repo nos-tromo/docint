@@ -179,7 +179,7 @@ def test_load_tokenizer_downloads_when_not_cached(
     load_tokenizer("org/model", tmp_path)
 
     mock_auto.from_pretrained.assert_called_once_with(
-        "org/model",
+        pretrained_model_name_or_path="org/model",
         cache_dir=tmp_path,
         trust_remote_code=True,
     )
