@@ -102,7 +102,11 @@ class DocumentIngestionPipeline:
                 logger.info("Initializing GLiNER IE extractor")
                 # We purposefully ignore ie_max_chars for GLiNER as it handles chunking or short texts well,
                 # but we can pass it if we want to limit input size strictly.
-                self.entity_extractor = build_gliner_ie_extractor()
+                try:
+                    self.entity_extractor = build_gliner_ie_extractor()
+                except Exception:
+                    logger.warning("GLiNER model unavailable – continuing without IE")
+                    self.entity_extractor = None
             elif ie_engine == "llama_cpp" and self.ie_model and ie_max_chars:
                 ie_prompt = LlamaCppPipeline().load_prompt(kw="ner")
                 if ie_prompt:
