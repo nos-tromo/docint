@@ -1,5 +1,6 @@
 import json
 import os
+import warnings
 from typing import Any, Callable
 
 import torch
@@ -140,7 +141,7 @@ def build_gliner_ie_extractor(
     hf_cache = load_path_env().hf_hub_cache
     resolved = resolve_hf_cache_path(hf_cache, model_id)
     load_id = str(resolved) if resolved else model_id
-    local_only = os.getenv("HF_HUB_OFFLINE", "0") == "1"
+    local_only = resolved is not None or os.getenv("HF_HUB_OFFLINE", "0") == "1"
 
     if resolved:
         logger.info("Using local GLiNER model path: {}", resolved)
@@ -174,7 +175,16 @@ def build_gliner_ie_extractor(
 
         try:
             # GLiNER predict_entities
-            preds = model.predict_entities(text, labels, threshold=threshold)
+            # Suppress the "Asking to truncate to max_length but no maximum
+            # length is provided" warning from the internal DeBERTa tokenizer.
+            # Input chunks are already size-limited by SentenceSplitter, so
+            # truncation is not needed.
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=".*truncat.*max_length.*no maximum length.*",
+                )
+                preds = model.predict_entities(text, labels, threshold=threshold)
         except Exception as e:
             logger.warning("GLiNER extraction failed: {}", e)
             return [], []

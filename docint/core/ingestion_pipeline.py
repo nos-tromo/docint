@@ -710,19 +710,11 @@ class DocumentIngestionPipeline:
         if self.entity_extractor:
             total_nodes = len(nodes)
 
-            def _process_node(args: tuple[int, BaseNode]) -> None:
-                """
-                Helper to process a single node for entity extraction.
-
-                Args:
-                    args (tuple[int, BaseNode]): The index and node to process.
-                """
-                idx, node = args
+            def _process_node(idx: int, node: BaseNode) -> None:
                 text_value = getattr(node, "text", "") or ""
                 if not text_value.strip():
                     return
                 try:
-                    # Provide type hint if self.entity_extractor is not None
                     if self.entity_extractor:
                         ents, rels = self.entity_extractor(text_value)
                         if ents or rels:
@@ -735,17 +727,20 @@ class DocumentIngestionPipeline:
                 except Exception as exc:
                     logger.warning("Entity extractor failed on chunk {}: {}", idx, exc)
 
-            # Use ThreadPoolExecutor to run extraction in parallel
-            # We limit workers to avoid overwhelming the local inference server
-            with ThreadPoolExecutor(max_workers=self.ie_max_workers) as executor:
-                # Submit all tasks
-                futures = [
-                    executor.submit(_process_node, (i, node))
-                    for i, node in enumerate(nodes)
-                ]
-
-                # Wait for completion and update progress
-                for i, _ in enumerate(as_completed(futures)):
+            if self.ie_max_workers > 1:
+                with ThreadPoolExecutor(max_workers=self.ie_max_workers) as executor:
+                    futures = [
+                        executor.submit(_process_node, i, node)
+                        for i, node in enumerate(nodes)
+                    ]
+                    for i, _ in enumerate(as_completed(futures)):
+                        if self.progress_callback:
+                            self.progress_callback(
+                                f"Extracting entities: {i + 1}/{total_nodes} chunks processed"
+                            )
+            else:
+                for i, node in enumerate(nodes):
+                    _process_node(i, node)
                     if self.progress_callback:
                         self.progress_callback(
                             f"Extracting entities: {i + 1}/{total_nodes} chunks processed"
