@@ -205,18 +205,18 @@ def load_host_env(
 
 
 def load_ie_env(
-    default_ie_enabled: str = "1",
-    default_ie_max_chars: str = "800",
-    default_ie_max_workers: str = "4",
+    default_ie_enabled: bool = True,
+    default_ie_max_chars: int = 800,
+    default_ie_max_workers: int = 4,
     default_ie_engine: str = "gliner",
 ) -> InformationExtractionConfig:
     """
     Loads information extraction configuration from environment variables or defaults.
 
     Args:
-        default_ie_enabled (str): Default value to enable IE extraction.
-        default_ie_max_chars (str): Default maximum characters for IE extraction.
-        default_ie_max_workers (str): Default maximum worker threads for IE extraction.
+        default_ie_enabled (bool): Default value to enable IE extraction. Set to True to enable by default.
+        default_ie_max_chars (int): Default maximum characters for IE extraction.
+        default_ie_max_workers (int): Default maximum worker threads for IE extraction.
         default_ie_engine (str): Default IE engine to use. Options: gliner, llama_cpp.
 
     Returns:
@@ -226,8 +226,8 @@ def load_ie_env(
         - ie_max_workers (int): Maximum number of worker threads for IE extraction.
     """
     return InformationExtractionConfig(
-        ie_enabled=os.getenv("ENABLE_IE", default_ie_enabled).lower()
-        in {"1", "true", "yes"},
+        ie_enabled=str(os.getenv("ENABLE_IE", default_ie_enabled)).lower()
+        in {"true", "1", "yes"},
         ie_max_chars=int(os.getenv("IE_MAX_CHARS", default_ie_max_chars)),
         ie_max_workers=int(os.getenv("IE_MAX_WORKERS", default_ie_max_workers)),
         ie_engine=os.getenv("IE_ENGINE", default_ie_engine).lower(),
