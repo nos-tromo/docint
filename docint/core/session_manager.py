@@ -137,6 +137,43 @@ class SessionManager:
             session_id, AgentTurnContext(session_id=session_id)
         )
 
+    def _get_session_context(self, session_id: str) -> str:
+        """
+        Build a context string from rolling summary plus recent unsummarized turns.
+
+        Args:
+            session_id (str): The ID of the session.
+
+        Returns:
+            str: The context string.
+        """
+        with self._session_scope() as s:
+            conv = s.get(Conversation, session_id)
+            if not conv:
+                return ""
+
+            summary = cast(str | None, conv.rolling_summary) or ""
+            turns = conv.turns
+
+            # Reconstruct recent history not covered by summary
+            # Matches logic in _maybe_update_summary (every 5 turns)
+            # If turns=6, 6%5=1, last 1 turn is not in summary.
+            # If turns=4, 4%5=4, last 4 turns are not in summary.
+            remainder = len(turns) % 5
+
+            if remainder == 0:
+                return summary
+
+            recent_turns = turns[-remainder:]
+            parts = []
+            if summary:
+                parts.append(summary)
+
+            for t in recent_turns:
+                parts.append(f"User: {t.user_text}\nAssistant: {t.model_response}")
+
+            return "\n\n".join(parts)
+
     def chat(self, user_msg: str) -> dict[str, Any]:
         """
         Handle a chat message from the user.
@@ -166,9 +203,12 @@ class SessionManager:
         if self.chat_engine is None or session_id is None:
             session_id = self.start_session(session_id)
 
-        summary = self._get_rolling_summary(session_id)
+        # Include both summary and recent unsummarized turns in context
+        session_context = self._get_session_context(session_id)
         retrieval_query = (
-            f"{summary}\n\nUser question: {user_msg}" if summary else user_msg
+            f"{session_context}\n\nUser question: {user_msg}"
+            if session_context
+            else user_msg
         )
 
         resp = engine.query(retrieval_query)
