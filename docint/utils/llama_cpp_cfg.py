@@ -71,7 +71,7 @@ def _load_tokenizer(
     Attempt to load a HuggingFace tokenizer, trying multiple sources.
 
     Resolution order:
-        1. ``tokenizer_id`` (explicit tokenizer repo, e.g. ``Qwen/Qwen3-4B-Instruct-2507``)
+        1. ``tokenizer_id`` (explicit tokenizer repo, e.g. ``Qwen/Qwen3-1.7B``)
         2. ``model_id`` (the GGUF repo itself — works when it ships tokenizer files)
 
     For each candidate the function first checks for a local HF cache snapshot

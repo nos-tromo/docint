@@ -142,7 +142,7 @@ def load_tokenizer(tokenizer_id: str, cache_folder: Path) -> None:
 
     Args:
         tokenizer_id: HuggingFace repo containing the tokenizer
-            (e.g. ``Qwen/Qwen3-4B-Instruct-2507``).
+            (e.g. ``Qwen/Qwen3-1.7B``).
         cache_folder: HuggingFace hub cache directory.
     """
     resolved = resolve_hf_cache_path(cache_folder, tokenizer_id)
