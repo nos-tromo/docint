@@ -11,7 +11,6 @@ from pydantic import BaseModel
 from qdrant_client import models
 from starlette.middleware.cors import CORSMiddleware
 
-from docint.cli import ingest as ingest_module
 from docint.agents import (
     AgentOrchestrator,
     ClarificationConfig,
@@ -21,9 +20,13 @@ from docint.agents import (
     SimpleUnderstandingAgent,
     Turn,
 )
+from docint.cli import ingest as ingest_module
 from docint.core.rag import RAG
 from docint.utils.env_cfg import load_host_env, load_path_env
 from docint.utils.hashing import compute_file_hash
+from docint.utils.logging_cfg import setup_logging
+
+setup_logging()
 
 # Load allowed origins from environment or default to Streamlit's default ports
 allowed_origins = load_host_env().cors_allowed_origins.split(",")
