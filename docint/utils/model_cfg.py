@@ -13,7 +13,7 @@ os.environ["DOCINT_OFFLINE"] = "0"
 from docint.utils.env_cfg import load_model_env, load_path_env, resolve_hf_cache_path
 # isort: on
 
-import whisper
+import whisper  # type: ignore[import-untyped]
 from docling.models.stages.code_formula.code_formula_model import CodeFormulaModel
 from docling.models.stages.layout.layout_model import LayoutModel
 from docling.models.stages.ocr.rapid_ocr_model import RapidOcrModel
@@ -25,7 +25,7 @@ from docling.models.stages.table_structure.table_structure_model import (
     TableStructureModel,
 )
 from dotenv import load_dotenv
-from gliner import GLiNER
+from gliner import GLiNER  # type: ignore[import-untyped]
 from huggingface_hub import snapshot_download
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from loguru import logger
@@ -89,7 +89,7 @@ def load_hf_model(
         kw (str): The keyword for the model type (e.g., "embedding").
         trust_remote_code (bool): Whether to trust remote code. Defaults to False.
     """
-    resolved = resolve_hf_cache_path(cache_folder, model_id)
+    resolved = resolve_hf_cache_path(cache_dir=cache_folder, repo_id=model_id)
 
     if resolved:
         logger.info("Found local cache for {} at {}", model_id, resolved)
@@ -134,7 +134,7 @@ def load_llama_cpp_model(model_id: str, repo_id: str, kw: str) -> None:
         repo_id (str): The Hugging Face repository ID for the model (e.g., "user/repo").
         kw (str): The keyword for the model type (e.g., "generator").
     """
-    LlamaCppPipeline.ensure_model(model_id, repo_id=repo_id)
+    LlamaCppPipeline.ensure_model(model_id=model_id, repo_id=repo_id)
     logger.info("Loaded {}: {}", kw, model_id)
 
 
@@ -158,7 +158,7 @@ def load_tokenizer(tokenizer_id: str, cache_folder: Path) -> None:
 
     logger.info("Downloading tokenizer '{}'...", tokenizer_id)
     AutoTokenizer.from_pretrained(
-        tokenizer_id,
+        pretrained_model_name_or_path=tokenizer_id,
         cache_dir=cache_folder,
         trust_remote_code=True,
     )
@@ -172,7 +172,7 @@ def load_whisper_model(model_id: str) -> None:
     Args:
         model_id (str): The name of the model to load.
     """
-    whisper.load_model(model_id)
+    whisper.load_model(name=model_id)
     logger.info("Loaded whisper model: {}", model_id)
 
 
@@ -215,14 +215,16 @@ def main() -> None:
         (models.llm_file, models.llm, "LLM"),
         (models.vlm_file, models.vlm, "VLM"),
     ]:
-        load_llama_cpp_model(model_id, repo_id, kw)
+        load_llama_cpp_model(model_id=model_id, repo_id=repo_id, kw=kw)
 
     # LLM tokenizer (for chat template formatting)
     if models.llm_tokenizer:
-        load_tokenizer(models.llm_tokenizer, paths.hf_hub_cache)
+        load_tokenizer(
+            tokenizer_id=models.llm_tokenizer, cache_folder=paths.hf_hub_cache
+        )
 
     # Whisper
-    load_whisper_model(models.whisper_model)
+    load_whisper_model(model_id=models.whisper_model)
 
 
 if __name__ == "__main__":
