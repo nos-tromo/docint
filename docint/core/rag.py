@@ -740,7 +740,7 @@ class RAG:
             raise ValueError("data_dir cannot be None for ingestion pipeline.")
 
         ie_model = None
-        if self.ie_enabled:
+        if self.ie_enabled and load_ie_env().ie_engine == "llama_cpp":
             # Enforce JSON for IE tasks to ensure structured output
             ie_model = self._create_gen_model(enable_json=True)
 
