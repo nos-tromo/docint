@@ -10,31 +10,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-import torch
-from fastembed import SparseTextEmbedding
-from llama_index.core import (
-    Response,
-    SimpleDirectoryReader,
-    StorageContext,
-    VectorStoreIndex,
-)
-from llama_index.core.embeddings import BaseEmbedding
-from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
-
-from llama_index.core.query_engine import RetrieverQueryEngine
-from llama_index.core.schema import BaseNode, Document
-from llama_index.core.storage.docstore.keyval_docstore import KVDocumentStore
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.llms.llama_cpp import LlamaCPP
-from llama_index.vector_stores.qdrant import QdrantVectorStore
-from loguru import logger
-from qdrant_client import QdrantClient
-from qdrant_client.async_qdrant_client import AsyncQdrantClient
-
-from docint.core.ingestion_pipeline import DocumentIngestionPipeline
-from docint.core.session_manager import SessionManager
-from docint.core.storage.docstore import QdrantKVStore
-from docint.core.storage.sources import stage_sources_to_qdrant
+# isort: off
+# Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
+# TRANSFORMERS_OFFLINE env vars are set before huggingface_hub caches them.
 from docint.utils.env_cfg import (
     load_host_env,
     load_ie_env,
@@ -45,6 +23,32 @@ from docint.utils.env_cfg import (
     load_session_env,
     resolve_hf_cache_path,
 )
+# isort: on
+
+import torch
+from fastembed import SparseTextEmbedding
+from llama_index.core import (
+    Response,
+    SimpleDirectoryReader,
+    StorageContext,
+    VectorStoreIndex,
+)
+from llama_index.core.embeddings import BaseEmbedding
+from llama_index.core.query_engine import RetrieverQueryEngine
+from llama_index.core.schema import BaseNode, Document
+from llama_index.core.storage.docstore.keyval_docstore import KVDocumentStore
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.llms.llama_cpp import LlamaCPP
+from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
+from llama_index.vector_stores.qdrant import QdrantVectorStore
+from loguru import logger
+from qdrant_client import QdrantClient
+from qdrant_client.async_qdrant_client import AsyncQdrantClient
+
+from docint.core.ingestion_pipeline import DocumentIngestionPipeline
+from docint.core.session_manager import SessionManager
+from docint.core.storage.docstore import QdrantKVStore
+from docint.core.storage.sources import stage_sources_to_qdrant
 from docint.utils.llama_cpp_cfg import LlamaCppPipeline, build_prompt_functions
 
 

@@ -1,14 +1,26 @@
+import os
 import sys
 from pathlib import Path
 
+# load-models is an online operation — override offline mode before env_cfg
+# sets HF_HUB_OFFLINE at import time.  load_dotenv() in env_cfg honours
+# existing env vars (override=False), so this takes precedence over .env.
+os.environ["DOCINT_OFFLINE"] = "0"
+
+# isort: off
+# Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
+# TRANSFORMERS_OFFLINE env vars are set before huggingface_hub caches them.
+from docint.utils.env_cfg import load_model_env, load_path_env, resolve_hf_cache_path
+# isort: on
+
 import whisper
 from docling.models.stages.code_formula.code_formula_model import CodeFormulaModel
+from docling.models.stages.layout.layout_model import LayoutModel
+from docling.models.stages.ocr.rapid_ocr_model import RapidOcrModel
 from docling.models.stages.picture_classifier.document_picture_classifier import (
     DocumentPictureClassifier,
     DocumentPictureClassifierOptions,
 )
-from docling.models.stages.layout.layout_model import LayoutModel
-from docling.models.stages.ocr.rapid_ocr_model import RapidOcrModel
 from docling.models.stages.table_structure.table_structure_model import (
     TableStructureModel,
 )
@@ -19,7 +31,6 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from loguru import logger
 from transformers import AutoTokenizer
 
-from docint.utils.env_cfg import load_model_env, load_path_env, resolve_hf_cache_path
 from docint.utils.llama_cpp_cfg import LlamaCppPipeline
 from docint.utils.logging_cfg import setup_logging
 

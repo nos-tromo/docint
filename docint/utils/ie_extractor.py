@@ -1,11 +1,12 @@
 import json
+import os
 from typing import Any, Callable
 
 import torch
 from loguru import logger
 from gliner import GLiNER
 
-from docint.utils.env_cfg import load_model_env
+from docint.utils.env_cfg import load_model_env, load_path_env, resolve_hf_cache_path
 
 
 def _parse_ie_payload(raw: str) -> dict[str, Any]:
@@ -135,9 +136,18 @@ def build_gliner_ie_extractor(
 
     logger.info("Loading GLiNER model: {}", model_id)
 
+    # Resolve from local HF cache when available to avoid network requests
+    hf_cache = load_path_env().hf_hub_cache
+    resolved = resolve_hf_cache_path(hf_cache, model_id)
+    load_id = str(resolved) if resolved else model_id
+    local_only = os.getenv("HF_HUB_OFFLINE", "0") == "1"
+
+    if resolved:
+        logger.info("Using local GLiNER model path: {}", resolved)
+
     # We load initially; moving to device happens if available
     try:
-        model = GLiNER.from_pretrained(model_id)
+        model = GLiNER.from_pretrained(load_id, local_files_only=local_only)
     except Exception as e:
         logger.error("Failed to load GLiNER model: {}. Error: {}", model_id, e)
         raise

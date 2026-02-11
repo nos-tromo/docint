@@ -8,6 +8,30 @@ from loguru import logger
 load_dotenv()
 
 
+def set_offline_env() -> None:
+    """
+    Log the current offline mode status.
+
+    The actual env vars (HF_HUB_OFFLINE, TRANSFORMERS_OFFLINE, etc.) are set at
+    module level immediately after ``load_dotenv()`` so they are available before
+    ``huggingface_hub`` / ``transformers`` cache their values at import time.
+    This function re-applies them (idempotent) and emits a log message.
+    """
+    if os.getenv("DOCINT_OFFLINE", "1").lower() in {"1", "true", "yes"}:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+        os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+        os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+        os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+        logger.info("Set Hugging Face libraries to offline mode.")
+    else:
+        logger.info("Hugging Face libraries are in online mode.")
+
+
+set_offline_env()  # Apply offline settings at module load time
+
+
 def resolve_hf_cache_path(
     cache_dir: Path, repo_id: str, filename: str | None = None
 ) -> Path | None:
@@ -483,38 +507,3 @@ def load_session_env(
     return SessionConfig(
         session_store=os.getenv("SESSION_STORE", default_session_store)
     )
-
-
-def set_offline_env() -> None:
-    """
-    Sets environment variables to configure Hugging Face libraries for offline mode.
-
-    This function ensures that Hugging Face libraries such as `transformers` and
-    `llama_index` operate in offline mode by setting the appropriate environment
-    variables. It should be invoked before importing these libraries to avoid
-    unexpected behavior.
-
-    Environment Variables Set:
-    - `HF_HUB_OFFLINE`: Forces the Hugging Face Hub to operate in offline mode.
-    - `TRANSFORMERS_OFFLINE`: Disables online access for the `transformers` library.
-    - `HF_HUB_DISABLE_TELEMETRY`: Disables telemetry data collection by Hugging Face.
-    - `HF_HUB_DISABLE_PROGRESS_BARS`: Suppresses progress bars in Hugging Face operations.
-    - `HF_HUB_DISABLE_SYMLINKS_WARNING`: Disables symlink-related warnings.
-    - `KMP_DUPLICATE_LIB_OK`: Resolves potential library duplication issues.
-
-    Note:
-    Call this function before importing `transformers` or `llama_index` to ensure
-    the offline mode is applied correctly.
-    """
-    docint_offline = os.getenv("DOCINT_OFFLINE", "1").lower() in {"1", "true", "yes"}
-
-    if docint_offline:
-        os.environ["HF_HUB_OFFLINE"] = "1"
-        os.environ["TRANSFORMERS_OFFLINE"] = "1"
-        os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
-        os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-        os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-        os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-        logger.info("Set Hugging Face libraries to offline mode.")
-    else:
-        logger.info("Hugging Face libraries are in online mode.")
