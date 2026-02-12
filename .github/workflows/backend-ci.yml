@@ -52,7 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        dockerfile: [Dockerfile.backend.cpu, Dockerfile.backend.cuda]
+        dockerfile: [Dockerfile.backend.cpu]  # , Dockerfile.backend.cuda]  # CUDA build is currently disabled due to GitHub Actions runner limitations
     steps:
       - name: Free Disk Space
         run: |
