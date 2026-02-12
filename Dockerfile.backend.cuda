@@ -23,7 +23,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project && \
     uv pip uninstall fastembed onnxruntime && \
     uv pip install fastembed-gpu onnxruntime-gpu && \
-    CMAKE_ARGS="-DGGML_CUDA=on" \
+    CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90" \
     uv pip install llama-cpp-python --no-cache-dir --force-reinstall --upgrade
 
 COPY . .
