@@ -93,15 +93,18 @@ def test_rag_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_load_queries_existing_file(tmp_path: Path) -> None:
     file = tmp_path / "queries.txt"
     file.write_text("one\n\ntwo\n")
-    result = query_cli.load_queries(file)
+    result = query_cli.load_queries(file, prompts_path=tmp_path)
     assert result == ["one", "two"]
 
 
-def test_load_queries_creates_default(tmp_path: Path) -> None:
+def test_load_queries_falls_back_to_summarize_prompt(tmp_path: Path) -> None:
     target = tmp_path / "missing.txt"
-    result = query_cli.load_queries(target)
-    assert result == ["Summarize the content with a maximum of 15 sentences."]
-    assert target.exists()
+    prompts = tmp_path / "prompts"
+    prompts.mkdir()
+    (prompts / "summarize.txt").write_text("Summarize the content.")
+    result = query_cli.load_queries(target, prompts_path=prompts)
+    assert result == ["Summarize the content."]
+    assert not target.exists()
 
 
 def test_run_query_records_results(
@@ -145,7 +148,7 @@ def test_main_executes_all(monkeypatch: pytest.MonkeyPatch) -> None:
         sequence.append("pipeline")
         return DummyRAG()
 
-    def fake_load(q_path: Path) -> list[str]:
+    def fake_load(queries_path: Path, prompts_path: Path) -> list[str]:
         sequence.append("load")
         return ["one", "two"]
 
@@ -154,6 +157,7 @@ def test_main_executes_all(monkeypatch: pytest.MonkeyPatch) -> None:
 
     class FakePathConfig:
         queries = Path("/tmp/queries.txt")
+        prompts = Path("/tmp/prompts")
         results = Path("/tmp/results")
 
     def fake_load_path_env() -> FakePathConfig:

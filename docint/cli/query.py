@@ -37,29 +37,32 @@ def rag_pipeline(col_name: str) -> RAG:
     return rag
 
 
-def load_queries(q_path: str | Path) -> list[str]:
+def load_queries(queries_path: Path, prompts_path: Path) -> list[str]:
     """
     Loads query strings from a text file. Defaults to creating a file with a default query if none exists.
 
     Args:
-        q_path (str | Path): The path to the query text file.
+        queries_path (Path): The path to the query text file.
+        prompts_path (Path): The path to the prompts directory.
 
     Returns:
         list[str]: The list of query strings.
     """
-    if not isinstance(q_path, Path):
-        q_path = Path(q_path).expanduser()
+    if not isinstance(queries_path, Path):
+        queries_path = Path(queries_path).expanduser()
 
-    if q_path.exists():
-        logger.info("Loading queries from {}", q_path)
-        with open(q_path, "r", encoding="utf-8") as f:
+    if not isinstance(prompts_path, Path):
+        prompts_path = Path(prompts_path).expanduser()
+
+    if queries_path.exists():
+        logger.info("Loading queries from {}", queries_path)
+        with open(queries_path, "r", encoding="utf-8") as f:
             return [line.strip() for line in f if line.strip()]
-    else:
-        logger.info("Creating default query file at {}", q_path)
-        default_query = "Summarize the content with a maximum of 15 sentences."
-        with open(q_path, "w", encoding="utf-8") as f:
-            f.write(default_query + "\n")
-        return [default_query]
+
+    logger.info("No queries file found, using default summarize prompt")
+    summarize_prompt_path = prompts_path / "summarize.txt"
+    with open(summarize_prompt_path, "r", encoding="utf-8") as f:
+        return [f.read().strip()]
 
 
 def _store_output(filename: str, data: dict | list, output_path: str | Path) -> None:
@@ -123,7 +126,9 @@ def main() -> None:
     col_name = get_col_name()
     rag = rag_pipeline(col_name=col_name)
     path_config = load_path_env()
-    queries = load_queries(q_path=path_config.queries)
+    queries = load_queries(
+        queries_path=path_config.queries, prompts_path=path_config.prompts
+    )
     for index, query in enumerate(queries, start=1):
         run_query(rag=rag, query=query, index=index, output_path=path_config.results)
     rag.unload_models()

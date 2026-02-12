@@ -10,6 +10,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+# isort: off
+# Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
+# TRANSFORMERS_OFFLINE env vars are set before huggingface_hub caches them.
+from docint.utils.env_cfg import (
+    load_host_env,
+    load_ie_env,
+    load_model_env,
+    load_llama_cpp_env,
+    load_path_env,
+    load_rag_env,
+    load_session_env,
+    resolve_hf_cache_path,
+)
+# isort: on
+
 import torch
 from fastembed import SparseTextEmbedding
 from llama_index.core import (
@@ -19,12 +34,12 @@ from llama_index.core import (
     VectorStoreIndex,
 )
 from llama_index.core.embeddings import BaseEmbedding
-from llama_index.core.postprocessor import LLMRerank
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.schema import BaseNode, Document
 from llama_index.core.storage.docstore.keyval_docstore import KVDocumentStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.llms.ollama import Ollama
+from llama_index.llms.llama_cpp import LlamaCPP
+from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from loguru import logger
 from qdrant_client import QdrantClient
@@ -34,16 +49,7 @@ from docint.core.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.session_manager import SessionManager
 from docint.core.storage.docstore import QdrantKVStore
 from docint.core.storage.sources import stage_sources_to_qdrant
-from docint.utils.env_cfg import (
-    load_host_env,
-    load_ie_env,
-    load_model_env,
-    load_ollama_env,
-    load_path_env,
-    load_rag_env,
-    load_session_env,
-)
-from docint.utils.model_cfg import resolve_model_path
+from docint.utils.llama_cpp_cfg import LlamaCppPipeline, build_prompt_functions
 
 
 @dataclass(slots=True)
@@ -62,6 +68,7 @@ class RAG:
     # --- Path setup ---
     data_dir: Path | None = field(default=None, init=False)
     hf_hub_cache: Path | None = field(default=None, init=False)
+    llama_cpp_cache: Path | None = field(default=None, init=False)
 
     # --- Session config ---
     session_store: str = field(default="", init=False)
@@ -69,7 +76,10 @@ class RAG:
     # --- Models ---
     embed_model_id: str | None = field(default=None, init=False)
     sparse_model_id: str | None = field(default=None, init=False)
+    rerank_model_id: str | None = field(default=None, init=False)
     gen_model_id: str | None = field(default=None, init=False)
+    gen_model_file: str | None = field(default=None, init=False)
+    llm_tokenizer_id: str | None = field(default=None, init=False)
 
     # --- Qdrant controls ---
     docstore_batch_size: int = field(default=100, init=False)
@@ -77,16 +87,17 @@ class RAG:
     _qdrant_col_dir: Path | None = field(default=None, init=False, repr=False)
     _qdrant_src_dir: Path | None = field(default=None, init=False, repr=False)
 
-    # --- Ollama parameters ---
-    ollama_host: str | None = field(default=None, init=False)
-    ollama_ctx_window: int | None = field(default=None, init=False)
-    ollama_request_timeout: int | None = field(default=None, init=False)
-    ollama_seed: int | None = field(default=None, init=False)
-    ollama_temperature: float | None = field(default=None, init=False)
-    ollama_thinking: bool = False
-    ollama_top_k: int | None = field(default=None, init=False)
-    ollama_top_p: float | None = field(default=None, init=False)
-    ollama_options: dict[str, Any] | None = field(default=None, init=False)
+    # --- Llama.cpp parameters ---
+    llama_cpp_ctx_window: int | None = field(default=None, init=False)
+    llama_cpp_max_new_tokens: int = field(default=1024, init=False)
+    llama_cpp_request_timeout: int | None = field(default=None, init=False)
+    llama_cpp_seed: int | None = field(default=None, init=False)
+    llama_cpp_temperature: float | None = field(default=None, init=False)
+    llama_cpp_n_gpu_layers: int = field(default=-1, init=False)
+    llama_cpp_top_k: int | None = field(default=None, init=False)
+    llama_cpp_top_p: float | None = field(default=None, init=False)
+    llama_cpp_repeat_penalty: float | None = field(default=None, init=False)
+    llama_cpp_options: dict[str, Any] | None = field(default=None, init=False)
 
     # --- Information extraction ---
     ie_enabled: bool = field(default=False, init=False)
@@ -95,6 +106,7 @@ class RAG:
     # --- Reranking / retrieval ---
     retrieve_similarity_top_k: int = field(default=20, init=False)
     rerank_top_n: int = field(default=5, init=False)
+    rerank_use_fp16: bool = field(default=False, init=False)
 
     # --- Prompt config ---
     prompt_dir: Path | None = field(default=None, init=False)
@@ -104,8 +116,10 @@ class RAG:
     # --- Runtime (lazy caches / not in repr) ---
     _device: str | None = field(default=None, init=False, repr=False)
     _embed_model: BaseEmbedding | None = field(default=None, init=False, repr=False)
-    _gen_model: Ollama | None = field(default=None, init=False, repr=False)
-    _reranker: LLMRerank | None = field(default=None, init=False, repr=False)
+    _gen_model: LlamaCPP | None = field(default=None, init=False, repr=False)
+    _reranker: FlagEmbeddingReranker | None = field(
+        default=None, init=False, repr=False
+    )
     _qdrant_client: QdrantClient | None = field(default=None, init=False, repr=False)
     _qdrant_aclient: AsyncQdrantClient | None = field(
         default=None, init=False, repr=False
@@ -130,7 +144,6 @@ class RAG:
         """
         # --- Host config ---
         host_config = load_host_env()
-        self.ollama_host = host_config.ollama_host
         self.qdrant_host = host_config.qdrant_host
 
         # --- Path config ---
@@ -140,29 +153,36 @@ class RAG:
         self._qdrant_col_dir = path_config.qdrant_collections
         self._qdrant_src_dir = path_config.qdrant_sources
         self.hf_hub_cache = path_config.hf_hub_cache
+        self.llama_cpp_cache = path_config.llama_cpp_cache
 
         # --- Model config ---
         model_config = load_model_env()
         self.embed_model_id = model_config.embed_model
         self.sparse_model_id = model_config.sparse_model
-        self.gen_model_id = model_config.gen_model
+        self.rerank_model_id = model_config.rerank_model
+        self.gen_model_id = model_config.llm
+        self.gen_model_file = model_config.llm_file
+        self.llm_tokenizer_id = model_config.llm_tokenizer or None
 
         # --- Information Extraction config ---
         self.ie_enabled = load_ie_env().ie_enabled
 
-        # --- Ollama config ---
-        ollama_config = load_ollama_env()
-        self.ollama_ctx_window = ollama_config.ctx_window
-        self.ollama_request_timeout = ollama_config.request_timeout
-        self.ollama_seed = ollama_config.seed
-        self.ollama_temperature = ollama_config.temperature
-        self.ollama_thinking = ollama_config.thinking
-        self.ollama_top_k = ollama_config.top_k
-        self.ollama_top_p = ollama_config.top_p
-        self.ollama_options = {
-            "seed": self.ollama_seed,
-            "top_k": self.ollama_top_k,
-            "top_p": self.ollama_top_p,
+        # --- Llama.cpp config ---
+        llama_cpp_config = load_llama_cpp_env()
+        self.llama_cpp_ctx_window = llama_cpp_config.ctx_window
+        self.llama_cpp_max_new_tokens = llama_cpp_config.max_new_tokens
+        self.llama_cpp_request_timeout = llama_cpp_config.request_timeout
+        self.llama_cpp_seed = llama_cpp_config.seed
+        self.llama_cpp_temperature = llama_cpp_config.temperature
+        self.llama_cpp_n_gpu_layers = llama_cpp_config.n_gpu_layers
+        self.llama_cpp_top_k = llama_cpp_config.top_k
+        self.llama_cpp_top_p = llama_cpp_config.top_p
+        self.llama_cpp_repeat_penalty = llama_cpp_config.repeat_penalty
+        self.llama_cpp_options = {
+            "seed": self.llama_cpp_seed,
+            "top_k": self.llama_cpp_top_k,
+            "top_p": self.llama_cpp_top_p,
+            "repeat_penalty": self.llama_cpp_repeat_penalty,
         }
 
         # --- RAG config ---
@@ -170,6 +190,7 @@ class RAG:
         self.docstore_batch_size = rag_config.docstore_batch_size
         self.retrieve_similarity_top_k = rag_config.retrieve_top_k
         self.rerank_top_n = int(self.retrieve_similarity_top_k // 4)
+        self.rerank_use_fp16 = rag_config.rerank_use_fp16
 
         if self.prompt_dir:
             self.summarize_prompt_path = self.prompt_dir / "summarize.txt"
@@ -366,10 +387,11 @@ class RAG:
         if self._embed_model is None:
             if self.embed_model_id is None:
                 raise ValueError("embed_model_id cannot be None")
-            resolved_model = resolve_model_path(
-                self.embed_model_id, self.hf_hub_cache or Path()
+            resolved = resolve_hf_cache_path(
+                self.hf_hub_cache or Path(), self.embed_model_id
             )
-            if resolved_model != self.embed_model_id:
+            resolved_model = str(resolved) if resolved else self.embed_model_id
+            if resolved:
                 logger.info("Using local model path: {}", resolved_model)
 
             try:
@@ -454,98 +476,172 @@ class RAG:
                 )
 
         cache_dir = self.hf_hub_cache or Path.home() / ".cache" / "huggingface" / "hub"
-        resolved = resolve_model_path(chosen, cache_dir)
-        if resolved != chosen:
+        resolved = resolve_hf_cache_path(cache_dir, chosen)
+        if resolved:
             logger.info("Using local sparse model path: {}", resolved)
-            return resolved
+            return str(resolved)
 
         return chosen
 
-    def _create_gen_model(self, thinking: bool, enable_json: bool = False) -> Ollama:
+    @property
+    def reranker(self) -> FlagEmbeddingReranker:
         """
-        Helper to create an Ollama model instance with specific settings.
+        Lazily initializes and returns the reranker model (FlagEmbeddingReranker).
+
+        Returns:
+            FlagEmbeddingReranker: The initialized reranker model.
+
+        Raises:
+            ValueError: If rerank_model_id is None.
+        """
+        if self.rerank_model_id is None:
+            raise ValueError("rerank_model_id cannot be None")
+        if self._reranker is None:
+            # Resolve to local cache path for offline compatibility
+            cache_dir = (
+                self.hf_hub_cache or Path.home() / ".cache" / "huggingface" / "hub"
+            )
+            resolved = resolve_hf_cache_path(cache_dir, self.rerank_model_id)
+            resolved_model = str(resolved) if resolved else self.rerank_model_id
+            if resolved:
+                logger.info("Using local reranker model path: {}", resolved_model)
+            self._reranker = FlagEmbeddingReranker(
+                top_n=self.rerank_top_n,
+                model=resolved_model,
+            )
+            logger.info(
+                "Initializing FlagEmbeddingReranker with model: {}",
+                self.rerank_model_id,
+            )
+        return self._reranker
+
+    def _create_gen_model(self, enable_json: bool = False) -> LlamaCPP:
+        """
+        Helper to create a Llama.cpp model instance with specific settings.
 
         Args:
-            thinking (bool): Whether to enable reasoning/thinking tokens.
             enable_json (bool): Whether to enforce JSON output mode.
 
         Returns:
-            Ollama: The initialized model.
+            LlamaCPP: The initialized model.
 
         Raises:
             ValueError: If required configuration is missing.
         """
         if self.gen_model_id is None:
             raise ValueError("gen_model_id cannot be None")
-        if self.ollama_ctx_window is None:
-            raise ValueError("ollama_ctx_window cannot be None for Ollama model")
-        if self.ollama_host is None:
-            raise ValueError("ollama_host cannot be None for Ollama model")
+        if self.llama_cpp_ctx_window is None:
+            raise ValueError("llama_cpp_ctx_window cannot be None for Llama.cpp model")
+
+        # Resolve model path
+        model_cache = self.llama_cpp_cache or Path.home() / ".cache" / "llama.cpp"
+        model_path = None
+
+        if self.gen_model_file:
+            # Try direct path first (e.g. file sitting directly in cache dir)
+            direct_path = model_cache / self.gen_model_file
+            if direct_path.exists():
+                model_path = direct_path
+
+            # Try HF cache structure: models--{org}--{repo}/snapshots/{hash}/{file}
+            if model_path is None and self.gen_model_id:
+                model_path = resolve_hf_cache_path(
+                    cache_dir=model_cache,
+                    repo_id=self.gen_model_id,
+                    filename=self.gen_model_file,
+                )
+
+        if model_path is None:
+            logger.warning(
+                "Model file not found locally, attempting download: repo={}, file={}, cache={}",
+                self.gen_model_id,
+                self.gen_model_file,
+                model_cache,
+            )
+            if self.gen_model_file is None:
+                logger.error(
+                    "ValueError: gen_model_file must be specified to download the model."
+                )
+                raise ValueError(
+                    "gen_model_file must be specified to download the model."
+                )
+            LlamaCppPipeline.ensure_model(
+                model_id=self.gen_model_file, repo_id=self.gen_model_id
+            )
+
+            # Re-resolve after download
+            direct_path = model_cache / self.gen_model_file
+            if direct_path.exists():
+                model_path = direct_path
+            elif self.gen_model_id:
+                model_path = resolve_hf_cache_path(
+                    cache_dir=model_cache,
+                    repo_id=self.gen_model_id,
+                    filename=self.gen_model_file,
+                )
+
+        if model_path is None:
+            raise FileNotFoundError(
+                f"Model file not found: {self.gen_model_file} "
+                f"(repo: {self.gen_model_id}, cache: {model_cache})"
+            )
 
         # Ensure options dict exists
-        if self.ollama_options is None:
-            self.ollama_options = {}
+        if self.llama_cpp_options is None:
+            self.llama_cpp_options = {}
 
         # Prepare options copy to avoid side effects
-        options = self.ollama_options.copy()
+        options = self.llama_cpp_options.copy()
 
         # Consistent seed behavior
-        if self.ollama_seed is not None:
-            options["seed"] = 42
+        if self.llama_cpp_seed is not None:
+            options["seed"] = self.llama_cpp_seed
 
-        if enable_json:
-            options["format"] = "json"
+        # Add stop tokens so the model stops at the end of an assistant turn
+        options.setdefault("stop", ["<|im_end|>"])
 
-        # Ensure ollama_host is clean (no trailing slash)
-        ollama_host = self.ollama_host.rstrip("/")
+        # Build model-agnostic prompt functions via tokenizer
+        messages_fn, completion_fn = build_prompt_functions(
+            tokenizer_id=self.llm_tokenizer_id,
+            model_id=self.gen_model_id,
+            cache_dir=model_cache,
+        )
 
-        model = Ollama(
-            model=self.gen_model_id,
-            base_url=ollama_host,
-            temperature=self.ollama_temperature,
-            context_window=self.ollama_ctx_window,
-            request_timeout=self.ollama_request_timeout,
-            thinking=thinking,
-            additional_kwargs=options,
+        model = LlamaCPP(
+            model_path=str(model_path),
+            temperature=self.llama_cpp_temperature
+            if self.llama_cpp_temperature is not None
+            else 0.1,
+            max_new_tokens=self.llama_cpp_max_new_tokens,
+            context_window=self.llama_cpp_ctx_window,
+            model_kwargs={
+                "n_gpu_layers": self.llama_cpp_n_gpu_layers,
+            },
+            generate_kwargs=options,
+            messages_to_prompt=messages_fn,
+            completion_to_prompt=completion_fn,
         )
         logger.info(
-            "Initializing generator model: {} (thinking={}, json={})",
+            "Initializing generator model: {} (json={})",
             self.gen_model_id,
-            thinking,
             enable_json,
         )
         return model
 
     @property
-    def gen_model(self) -> Ollama:
+    def gen_model(self) -> LlamaCPP:
         """
-        Lazily initializes and returns the generation model (Ollama).
+        Lazily initializes and returns the generation model (Llama.cpp).
 
         Returns:
-            Ollama: The initialized generation model.
+            LlamaCPP: The initialized generation model.
 
         Raises:
-            ValueError: If gen_model_id, ollama_ctx_window, or ollama_host is None.
+            ValueError: If gen_model_id or llama_cpp_ctx_window is None.
         """
         if self._gen_model is None:
-            self._gen_model = self._create_gen_model(thinking=self.ollama_thinking)
+            self._gen_model = self._create_gen_model()
         return self._gen_model
-
-    @property
-    def reranker(self) -> LLMRerank:
-        """
-        Lazily initializes and returns the reranker model (LLMRerank).
-
-        Returns:
-            LLMRerank: The initialized reranker model.
-        """
-        if self._reranker is None:
-            self._reranker = LLMRerank(
-                top_n=self.rerank_top_n,
-                llm=self.gen_model,
-            )
-            logger.info("Initializing LLM reranker with model: {}", self.gen_model_id)
-        return self._reranker
 
     @property
     def qdrant_client(self) -> QdrantClient:
@@ -648,9 +744,9 @@ class RAG:
             raise ValueError("data_dir cannot be None for ingestion pipeline.")
 
         ie_model = None
-        if self.ie_enabled:
-            # Disable thinking for IE tasks to avoid performance bottlenecks and enforce JSON
-            ie_model = self._create_gen_model(thinking=False, enable_json=True)
+        if self.ie_enabled and load_ie_env().ie_engine == "llama_cpp":
+            # Enforce JSON for IE tasks to ensure structured output
+            ie_model = self._create_gen_model(enable_json=True)
 
         return DocumentIngestionPipeline(
             data_dir=self.data_dir,

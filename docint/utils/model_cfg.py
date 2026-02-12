@@ -1,57 +1,41 @@
+import os
 import sys
 from pathlib import Path
 
-import whisper
+# load-models is an online operation — override offline mode before env_cfg
+# sets HF_HUB_OFFLINE at import time.  load_dotenv() in env_cfg honours
+# existing env vars (override=False), so this takes precedence over .env.
+os.environ["DOCINT_OFFLINE"] = "0"
+
+# isort: off
+# Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
+# TRANSFORMERS_OFFLINE env vars are set before huggingface_hub caches them.
+from docint.utils.env_cfg import load_model_env, load_path_env, resolve_hf_cache_path
+# isort: on
+
+import whisper  # type: ignore[import-untyped]
 from docling.models.stages.code_formula.code_formula_model import CodeFormulaModel
+from docling.models.stages.layout.layout_model import LayoutModel
+from docling.models.stages.ocr.rapid_ocr_model import RapidOcrModel
 from docling.models.stages.picture_classifier.document_picture_classifier import (
     DocumentPictureClassifier,
     DocumentPictureClassifierOptions,
 )
-from docling.models.stages.layout.layout_model import LayoutModel
-from docling.models.stages.ocr.rapid_ocr_model import RapidOcrModel
 from docling.models.stages.table_structure.table_structure_model import (
     TableStructureModel,
 )
 from dotenv import load_dotenv
-from gliner import GLiNER
+from gliner import GLiNER  # type: ignore[import-untyped]
 from huggingface_hub import snapshot_download
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from loguru import logger
+from transformers import AutoTokenizer
 
-from docint.utils.env_cfg import load_model_env, load_path_env
+from docint.utils.llama_cpp_cfg import LlamaCppPipeline
 from docint.utils.logging_cfg import setup_logging
-from docint.utils.ollama_cfg import OllamaPipeline
 
 load_dotenv()
 setup_logging()
-
-
-def resolve_model_path(model_name: str, cache_folder: Path) -> str:
-    """
-    Resolves the model path to the local cache directory if available.
-    This helps bypass online checks in the transformers library when running offline.
-
-    Args:
-        model_name (str): The name of the model (e.g., "bert-base-uncased").
-        cache_folder (Path): The path to the Hugging Face cache directory.
-
-    Returns:
-        str: Local path to the model if cached, else the original model name.
-    """
-    if "/" in model_name and not Path(model_name).exists():
-        repo_id = model_name
-        model_dir_name = f"models--{repo_id.replace('/', '--')}"
-        model_cache_dir = cache_folder / model_dir_name
-
-        if model_cache_dir.exists():
-            ref_path = model_cache_dir / "refs" / "main"
-            if ref_path.exists():
-                with open(ref_path, "r") as f:
-                    commit_hash = f.read().strip()
-                snapshot_path = model_cache_dir / "snapshots" / commit_hash
-                if snapshot_path.exists():
-                    return str(snapshot_path)
-    return model_name
 
 
 def load_docling_models() -> None:
@@ -105,11 +89,11 @@ def load_hf_model(
         kw (str): The keyword for the model type (e.g., "embedding").
         trust_remote_code (bool): Whether to trust remote code. Defaults to False.
     """
-    resolved_model_name = resolve_model_path(model_id, cache_folder)
+    resolved = resolve_hf_cache_path(cache_dir=cache_folder, repo_id=model_id)
 
-    if resolved_model_name != model_id:
-        logger.info("Found local cache for {} at {}", model_id, resolved_model_name)
-        model_id = resolved_model_name
+    if resolved:
+        logger.info("Found local cache for {} at {}", model_id, resolved)
+        model_id = str(resolved)
     else:
         snapshot_download(
             repo_id=model_id,
@@ -124,30 +108,61 @@ def load_hf_model(
     logger.info("Loaded {} model: {}", kw, model_id)
 
 
-def load_gliner_model(model_id: str) -> None:
+def load_gliner_model(model_id: str, cache_folder: Path) -> None:
     """
     Loads the GLiNER model.
 
     Args:
         model_id (str): The name of the GLiNER model to load.
+        cache_folder (Path): The path to the HuggingFace cache folder.
     """
-    GLiNER.from_pretrained(model_id)
+    resolved = resolve_hf_cache_path(cache_dir=cache_folder, repo_id=model_id)
+    if resolved:
+        logger.info("Found local cache for GLiNER at {}", resolved)
+        GLiNER.from_pretrained(model_id=str(resolved), local_files_only=True)
+    else:
+        GLiNER.from_pretrained(model_id=model_id)
     logger.info("Loaded GLiNER model: {}", model_id)
 
 
-def load_ollama_model(model_id: str, kw: str) -> None:
+def load_llama_cpp_model(model_id: str, repo_id: str, kw: str) -> None:
     """
-    Loads and returns the Ollama model.
+    Loads a Llama.cpp GGUF model.
 
     Args:
-        model_id (str): The name of the model to load.
+        model_id (str): The name of the model file or repo/file (e.g., "model.gguf" or "user/repo/model.gguf").
+        repo_id (str): The Hugging Face repository ID for the model (e.g., "user/repo").
         kw (str): The keyword for the model type (e.g., "generator").
-
-    Returns:
-        Ollama: The initialized generation model.
     """
-    OllamaPipeline.ensure_model(model_id)
-    logger.info("Loaded {} model: {}", kw, model_id)
+    LlamaCppPipeline.ensure_model(model_id=model_id, repo_id=repo_id)
+    logger.info("Loaded {}: {}", kw, model_id)
+
+
+def load_tokenizer(cache_folder: Path, tokenizer_id: str) -> None:
+    """
+    Downloads and caches a HuggingFace tokenizer for chat template formatting.
+
+    This ensures the tokenizer files are available locally for offline use.
+    Only the tokenizer files are downloaded (tokenizer.json, tokenizer_config.json,
+    etc.), not the full model weights.
+
+    Args:
+        cache_folder: HuggingFace hub cache directory.
+        tokenizer_id: HuggingFace repo containing the tokenizer
+            (e.g. ``Qwen/Qwen3-1.7B``).
+    """
+    resolved = resolve_hf_cache_path(cache_folder, tokenizer_id)
+    if resolved:
+        logger.info("Tokenizer '{}' already cached at {}", tokenizer_id, resolved)
+        return
+
+    logger.info("Downloading tokenizer '{}'...", tokenizer_id)
+    AutoTokenizer.from_pretrained(
+        pretrained_model_name_or_path=tokenizer_id,
+        cache_dir=cache_folder,
+        trust_remote_code=True,
+    )
+    logger.info("Loaded tokenizer: {}", tokenizer_id)
 
 
 def load_whisper_model(model_id: str) -> None:
@@ -157,7 +172,7 @@ def load_whisper_model(model_id: str) -> None:
     Args:
         model_id (str): The name of the model to load.
     """
-    whisper.load_model(model_id)
+    whisper.load_model(name=model_id)
     logger.info("Loaded whisper model: {}", model_id)
 
 
@@ -172,8 +187,8 @@ def main() -> None:
     # Log the loaded configurations
     for path in paths.__dataclass_fields__.keys():
         logger.info("{} path: {}", path, getattr(paths, path))
-    for model in models.__dataclass_fields__.keys():
-        logger.info("{}: {}", model, getattr(models, model))
+    for model_id in models.__dataclass_fields__.keys():
+        logger.info("{}: {}", model_id, getattr(models, model_id))
 
     # Load the app's models
     # Docling
@@ -183,6 +198,7 @@ def main() -> None:
     for model_id, kw in [
         (models.embed_model, "embedding"),
         (models.sparse_model, "sparse"),
+        (models.rerank_model, "rerank"),
     ]:
         load_hf_model(
             model_id=model_id,
@@ -191,17 +207,23 @@ def main() -> None:
         )
 
     # GLiNER
-    load_gliner_model(models.ner_model)
+    load_gliner_model(model_id=models.ner_model, cache_folder=paths.hf_hub_cache)
 
-    # Ollama
-    for model, kw in [
-        (models.gen_model, "generator"),
-        (models.vision_model, "vision"),
+    # Llama.cpp models
+    for model_id, repo_id, kw in [
+        (models.llm_file, models.llm, "LLM"),
+        (models.vlm_file, models.vlm, "VLM"),
     ]:
-        load_ollama_model(model, kw)
+        load_llama_cpp_model(model_id=model_id, repo_id=repo_id, kw=kw)
+
+    # LLM tokenizer (for chat template formatting)
+    if models.llm_tokenizer:
+        load_tokenizer(
+            cache_folder=paths.hf_hub_cache, tokenizer_id=models.llm_tokenizer
+        )
 
     # Whisper
-    load_whisper_model(models.whisper_model)
+    load_whisper_model(model_id=models.whisper_model)
 
 
 if __name__ == "__main__":

@@ -1,1 +1,1 @@
-Provide a concise overview of the active collection. Highlight the main topics, document types, and notable findings. Limit the response to 10 sentences.
+Provide a concise overview of the active collection. Highlight the main topics, document types, and notable findings. Focus on text bodies, not metadata. Limit the response to 15 sentences.

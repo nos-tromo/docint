@@ -744,7 +744,7 @@ def render_analysis() -> None:
 
             st.markdown(f"### Summary of '{st.session_state.selected_collection}'")
 
-            with st.spinner("Thinking..."):
+            with st.spinner("Searching..."):
                 try:
                     resp = requests.post(
                         f"{BACKEND_HOST}/summarize/stream", stream=True
