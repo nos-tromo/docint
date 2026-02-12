@@ -138,7 +138,7 @@ def load_llama_cpp_model(model_id: str, repo_id: str, kw: str) -> None:
     logger.info("Loaded {}: {}", kw, model_id)
 
 
-def load_tokenizer(tokenizer_id: str, cache_folder: Path) -> None:
+def load_tokenizer(cache_folder: Path, tokenizer_id: str) -> None:
     """
     Downloads and caches a HuggingFace tokenizer for chat template formatting.
 
@@ -147,9 +147,9 @@ def load_tokenizer(tokenizer_id: str, cache_folder: Path) -> None:
     etc.), not the full model weights.
 
     Args:
+        cache_folder: HuggingFace hub cache directory.
         tokenizer_id: HuggingFace repo containing the tokenizer
             (e.g. ``Qwen/Qwen3-1.7B``).
-        cache_folder: HuggingFace hub cache directory.
     """
     resolved = resolve_hf_cache_path(cache_folder, tokenizer_id)
     if resolved:
@@ -198,7 +198,6 @@ def main() -> None:
     for model_id, kw in [
         (models.embed_model, "embedding"),
         (models.sparse_model, "sparse"),
-        (models.ner_model, "NER"),
         (models.rerank_model, "rerank"),
     ]:
         load_hf_model(
@@ -220,7 +219,7 @@ def main() -> None:
     # LLM tokenizer (for chat template formatting)
     if models.llm_tokenizer:
         load_tokenizer(
-            tokenizer_id=models.llm_tokenizer, cache_folder=paths.hf_hub_cache
+            cache_folder=paths.hf_hub_cache, tokenizer_id=models.llm_tokenizer
         )
 
     # Whisper

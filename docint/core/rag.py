@@ -68,6 +68,7 @@ class RAG:
     # --- Path setup ---
     data_dir: Path | None = field(default=None, init=False)
     hf_hub_cache: Path | None = field(default=None, init=False)
+    llama_cpp_cache: Path | None = field(default=None, init=False)
 
     # --- Session config ---
     session_store: str = field(default="", init=False)
@@ -152,6 +153,7 @@ class RAG:
         self._qdrant_col_dir = path_config.qdrant_collections
         self._qdrant_src_dir = path_config.qdrant_sources
         self.hf_hub_cache = path_config.hf_hub_cache
+        self.llama_cpp_cache = path_config.llama_cpp_cache
 
         # --- Model config ---
         model_config = load_model_env()
@@ -532,9 +534,7 @@ class RAG:
             raise ValueError("llama_cpp_ctx_window cannot be None for Llama.cpp model")
 
         # Resolve model path
-        model_cache = (
-            self.hf_hub_cache or Path.home() / ".cache" / "huggingface" / "hub"
-        )
+        model_cache = self.llama_cpp_cache or Path.home() / ".cache" / "llama.cpp"
         model_path = None
 
         if self.gen_model_file:

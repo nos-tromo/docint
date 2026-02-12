@@ -145,6 +145,7 @@ class PathConfig:
     qdrant_sources: Path
     required_exts: Path
     hf_hub_cache: Path
+    llama_cpp_cache: Path
 
 
 @dataclass(frozen=True)
@@ -360,13 +361,16 @@ def load_path_env() -> PathConfig:
         - qdrant_sources (Path): Path to the Qdrant sources directory.
         - required_exts (Path): Path to the required extensions file.
         - hf_hub_cache (Path): Path to the Hugging Face Hub cache directory.
+        - llama_cpp_cache (Path): Path to the Llama.cpp cache directory.
     """
     home_dir: Path = Path.home()
     docint_home_dir: Path = home_dir / "docint"
     default_data_dir: Path = docint_home_dir / "data"
     default_query_dir: Path = docint_home_dir / "queries.txt"
     default_results_dir: Path = docint_home_dir / "results"
-    default_hf_hub_cache: Path = home_dir / ".cache" / "huggingface" / "hub"
+    default_cache_dir: Path = home_dir / ".cache"
+    default_hf_hub_cache: Path = default_cache_dir / "huggingface" / "hub"
+    default_llama_cpp_cache: Path = default_cache_dir / "llama.cpp"
 
     project_root: Path = Path(__file__).parents[2].resolve()
     default_log_dir = project_root / ".logs" / "docint.log"
@@ -392,7 +396,6 @@ def load_path_env() -> PathConfig:
 
     return PathConfig(
         data=Path(os.getenv("DATA_PATH", default_data_dir)).expanduser(),
-        hf_hub_cache=Path(os.getenv("HF_HUB_CACHE", default_hf_hub_cache)).expanduser(),
         logs=Path(os.getenv("LOG_PATH", default_log_dir)).expanduser(),
         queries=Path(os.getenv("QUERIES_PATH", default_query_dir)).expanduser(),
         results=Path(os.getenv("RESULTS_PATH", default_results_dir)).expanduser(),
@@ -400,6 +403,10 @@ def load_path_env() -> PathConfig:
         required_exts=default_exts_dir,
         qdrant_collections=default_qdrant_collections,
         qdrant_sources=default_qdrant_sources,
+        hf_hub_cache=Path(os.getenv("HF_HUB_CACHE", default_hf_hub_cache)).expanduser(),
+        llama_cpp_cache=Path(
+            os.getenv("LLAMA_CPP_CACHE", default_llama_cpp_cache)
+        ).expanduser(),
     )
 
 

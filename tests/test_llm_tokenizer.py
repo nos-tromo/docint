@@ -159,7 +159,7 @@ def test_load_tokenizer_skips_when_cached(
     """
     mock_resolve.return_value = tmp_path / "cached_tokenizer"
 
-    load_tokenizer("org/model", tmp_path)
+    load_tokenizer(cache_folder=tmp_path, tokenizer_id="org/model")
     mock_auto.from_pretrained.assert_not_called()
 
 
@@ -176,7 +176,7 @@ def test_load_tokenizer_downloads_when_not_cached(
         mock_resolve (MagicMock): The mock object for the cache path resolver function.
         tmp_path (Path): The temporary path fixture.
     """
-    load_tokenizer("org/model", tmp_path)
+    load_tokenizer(cache_folder=tmp_path, tokenizer_id="org/model")
 
     mock_auto.from_pretrained.assert_called_once_with(
         pretrained_model_name_or_path="org/model",

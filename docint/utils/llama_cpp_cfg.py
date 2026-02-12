@@ -230,7 +230,7 @@ class LlamaCppPipeline:
         self.model_id = load_model_env().vlm
         self.model_file = load_model_env().vlm_file
         self.prompt_dir = load_path_env().prompts
-        self.model_cache_dir = load_path_env().hf_hub_cache
+        self.model_cache_dir = load_path_env().llama_cpp_cache
 
         # Create cache directory if it doesn't exist
         if self.model_cache_dir:
@@ -423,7 +423,7 @@ class LlamaCppPipeline:
         """
         try:
             paths = load_path_env()
-            cache_dir = paths.hf_hub_cache
+            cache_dir = paths.llama_cpp_cache
 
             # Create cache directory if it doesn't exist
             cache_dir.mkdir(parents=True, exist_ok=True)
