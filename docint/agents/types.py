@@ -25,6 +25,7 @@ class IntentAnalysis:
     entities: dict[str, Any]
     tool: str | None = None
     reason: str | None = None
+    rewritten_query: str | None = None
 
 
 @dataclass
@@ -79,9 +80,15 @@ class UnderstandingAgent(Protocol):
     Interface for understanding user input.
     """
 
-    def analyze(self, turn: Turn) -> IntentAnalysis:  # pragma: no cover - interface
+    def analyze(
+        self, turn: Turn, context: Any | None = None
+    ) -> IntentAnalysis:  # pragma: no cover - interface
         """
         Analyze a turn and return intent/entities/confidence.
+
+        Args:
+            turn (Turn): The turn to analyze.
+            context (Any | None, optional): The conversation context.
 
         Returns:
             IntentAnalysis: The result of the analysis.

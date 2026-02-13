@@ -13,3 +13,4 @@ class TurnContext:
     session_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     clarifications: int = 0
+    history: list[dict[str, str]] = field(default_factory=list)

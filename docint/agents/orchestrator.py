@@ -54,7 +54,7 @@ class AgentOrchestrator:
             OrchestratorResult: Clarification or retrieval result for the turn.
         """
         ctx = context or TurnContext(session_id=turn.session_id)
-        analysis = self.understanding.analyze(turn)
+        analysis = self.understanding.analyze(turn, context=ctx)
         clarification_decision: ClarificationRequest = self.policy.evaluate(
             analysis, clarifications_so_far=ctx.clarifications
         )

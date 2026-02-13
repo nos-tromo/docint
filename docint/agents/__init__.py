@@ -14,7 +14,10 @@ from docint.agents.types import (
 )
 from docint.agents.policies import ClarificationConfig, ClarificationPolicy
 from docint.agents.orchestrator import AgentOrchestrator
-from docint.agents.understanding import SimpleUnderstandingAgent
+from docint.agents.understanding import (
+    ContextualUnderstandingAgent,
+    SimpleUnderstandingAgent,
+)
 from docint.agents.clarify import SimpleClarificationAgent
 from docint.agents.retrieval import RAGRetrievalAgent
 from docint.agents.generation import PassthroughResponseAgent
