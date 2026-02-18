@@ -80,6 +80,30 @@ def load_docling_models() -> None:
         logger.warning("Failed to download Docling models: {}", e)
 
 
+def load_gliner_model(model_id: str, cache_folder: Path) -> None:
+    """
+    Loads the GLiNER model.
+
+    Args:
+        model_id (str): The name of the GLiNER model to load.
+        cache_folder (Path): The path to the HuggingFace cache folder.
+    """
+    resolved = resolve_hf_cache_path(cache_dir=cache_folder, repo_id=model_id)
+    if resolved:
+        logger.info("Found local cache for GLiNER at {}", resolved)
+        try:
+            GLiNER.from_pretrained(model_id=str(resolved), local_files_only=True)
+        except Exception as e:
+            logger.warning(
+                "Failed to load GLiNER from local cache: {}. Retrying with download...",
+                e,
+            )
+            GLiNER.from_pretrained(model_id=model_id)
+    else:
+        GLiNER.from_pretrained(model_id=model_id)
+    logger.info("Loaded GLiNER model: {}", model_id)
+
+
 def load_hf_model(
     model_id: str, cache_folder: Path, kw: str, trust_remote_code: bool = False
 ) -> None:
@@ -240,24 +264,28 @@ def main() -> None:
     openai_config = load_openai_env()
 
     # Log the loaded configurations
-    for path in paths.__dataclass_fields__.keys():
-        logger.info("{} path: {}", path, getattr(paths, path))
-    for model_id in models.__dataclass_fields__.keys():
-        logger.info("{}: {}", model_id, getattr(models, model_id))
+    for path in path_config.__dataclass_fields__.keys():
+        logger.info("{} path: {}", path, getattr(path_config, path))
+    for model_id in model_config.__dataclass_fields__.keys():
+        logger.info("{}: {}", model_id, getattr(model_config, model_id))
 
     # Load the app's models
     # Docling
     load_docling_models()
 
+    # GLiNER
+    load_gliner_model(
+        model_id=model_config.ner_model, cache_folder=path_config.hf_hub_cache
+    )
+
     # Hugging Face
     for model_id, kw in [
-        (models.embed_model, "embedding"),
-        (models.sparse_model, "sparse"),
-        (models.rerank_model, "rerank"),
+        (model_config.sparse_model, "sparse"),
+        (model_config.rerank_model, "rerank"),
     ]:
         load_hf_model(
             model_id=model_id,
-            cache_folder=paths.hf_hub_cache,
+            cache_folder=path_config.hf_hub_cache,
             kw=kw,
         )
 
@@ -298,7 +326,7 @@ def main() -> None:
         )
 
     # Whisper
-    load_whisper_model(model_id=models.whisper_model)
+    load_whisper_model(model_id=model_config.whisper_model)
 
 
 if __name__ == "__main__":
