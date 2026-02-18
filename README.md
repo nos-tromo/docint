@@ -19,8 +19,10 @@ This is a proof of concept document intelligence platform offering the following
    - Use the Streamlit UI for interactive workflows.
 4. **Integration with LLMs and Models**
 
-   - Utilize large language models (LLMs) and other AI models for advanced processing tasks like summarization and similarity retrieval.
-   - **Offline-First**: Models are cached locally, allowing the system to run without an active internet connection after initial setup.
+   - Utilize large language models (LLMs) and other AI models for advanced processing tasks.
+   - **Flexible Backend**: Supports OpenAI-compatible APIs (OpenAI, Ollama, llama.cpp, vLLM, etc.) for text and vision tasks.
+   - **Provider-Agnostic Architecture**: The system is designed to be backend-agnostic. While it includes a highly optimized `llama.cpp` server for local inference by default, it can easily switch to any OpenAI-compatible API (Ollama, vLLM, DeepSeek, etc.) by changing environment variables.
+   - **Performance & Decoupling**: Inference runs in a dedicated container (`llamacpp-server`), ensuring the application logic remains responsive even during heavy model computations.
 5. **Extensibility**
 
    - Easily extend functionality with additional readers, such as OCR for images, Whisper for audio/video, and table/json enhancements.
@@ -59,36 +61,44 @@ Model files are handled automatically by the ingestion pipeline and do not need 
 
 3. **Choose a Profile**
 
-   Decide between the CPU or GPU profile. The GPU profile requires a CUDA-compatible GPU and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) set up.
+   Decide between the CPU or CUDA profile. The CUDA profile requires a CUDA-compatible GPU and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) set up.
 4. **Start the Services**
 
    ```bash
-   docker compose --profile <cpu|gpu> up
+   docker compose --profile <cpu|cuda> up
    ```
 
-   On the first run, required ML models are automatically downloaded and cached in a Docker volume (`model-cache`). This may take several minutes depending on your connection. Subsequent starts reuse the cached models and are fast.
+   **What's Included:**
+   - **Backend**: FastAPI application for RAG and orchestration.
+   - **Inference Server**: `llama.cpp` server (CPU or CUDA) pre-configured to run GGUF models.
+   - **Qdrant**: Vector database for hybrid (semantic, bm42) search.
+   - **Frontend**: Streamlit UI.
+
+   On the first run, required ML models are automatically downloaded into the `model-cache` shared volume. This volume is shared between the backend (which handles downloads) and the inference server (which loads them).
 
 ---
 
-### Local Setup
+### Local Setup (BYO Inference)
 
 1. **Start Infrastructure Services**
 
-   Ensure that **Qdrant** is running locally or accessible via network.
+   For local Python development (without Docker), you must provide your own inference endpoints.
 
    - **Qdrant**: Must be running (default: `http://localhost:6333`).
+   - **Inference Server**: An OpenAI-compatible server (Ollama, LocalAI, vLLM, or `llama-server`) must be accessible.
+     - By default, the app expects an endpoint at `http://localhost:8080/v1` (or `11434` for Ollama). Configure `OPENAI_API_BASE` in `.env` accordingly.
 
 2. **Install Dependencies**
 
    Navigate to the project root and synchronize dependencies:
 
    ```bash
-   CMAKE_ARGS="-DGGML_CUDA=on" uv sync
+   uv sync
    ```
 
-3. **Download Models**
+3. **Download Embedding/Rerank Models**
 
-   Pre-download all required models (Embeddings, Sparse, LLMs, VLMs, NER, Whisper) to your local cache to enable offline functionality:
+   Pre-download required local models (Embeddings, Sparse, Rerank, Text, Vision, Whisper) to your local cache:
 
    ```bash
    uv run load-models
@@ -123,37 +133,25 @@ The application is configured via environment variables. Key variables include:
 - `IE_MAX_WORKERS`: Number of parallel workers for entity extraction (default: `4`).
 - `PRELOAD_MODELS`: Set to `true` to download all ML models at container startup (default: unset/disabled). Used by `docker-compose.yml` to populate the `model-cache` volume on first run.
 
-**Model Selection:**
+**Model Selection (Environment Variables):**
 
-- `LLM`: HuggingFace repo for the GGUF model (default: `unsloth/Qwen3-1.7B-GGUF`).
-- `LLM_FILE`: GGUF filename within the repo (default: `Qwen3-1.7B-Q4_K_M.gguf`).
-- `LLM_TOKENIZER`: HuggingFace repo containing the tokenizer for chat template formatting (default: `Qwen/Qwen3-1.7B`). Required because GGUF-only repos don't include tokenizer files. The tokenizer is downloaded automatically by `load-models` and used at runtime to apply the model's chat template, making prompt formatting model-agnostic.
+- `OPENAI_API_KEY`: API key for the LLM provider (default: `sk-no-key-required`).
+- `OPENAI_API_BASE`: Base API URL. In Docker, this defaults to the internal `http://llamacpp-server:8080/v1`. For local setup, point this to your provider (e.g., `http://localhost:11434/v1`).
+- `LLM`: HuggingFace repo ID (e.g., `bartowski/Meta-Llama-3-8B-Instruct-GGUF`) for automatic download.
+- `LLM_FILE`: GGUF filename (e.g., `Meta-Llama-3-8B-Instruct.gguf`) if using the included server, or model name/ID if using an external API.
+- `EMBED_MODEL`: HuggingFace repo ID for the embedding model (e.g. `ggml-org/bge-m3-Q8_0-GGUF`).
+- `EMBED_MODEL_FILE`: Embedding model filename or ID. By default, embeddings utilize the same inference server endpoint if configured.
 
-**Llama.cpp Inference:**
+**Note on Provider Agnosticism:**
+The `docker-compose.yml` setup includes a `llama.cpp` server for convenience. However, the backend logic is standard OpenAI-compatible. To switch providers (e.g., to Ollama or vLLM), simply update `OPENAI_API_BASE` and `LLM` in your `.env` file, and disable the `llamacpp-server` service in compose if desired.
 
-- `LLAMA_CPP_N_GPU_LAYERS`: Number of layers to offload to GPU. Use `-1` for all layers (full GPU), `0` for CPU only (default: `-1`).
-- `LLAMA_CPP_CTX_WINDOW`: Context window size (default: `32768`).
-- `LLAMA_CPP_MAX_NEW_TOKENS`: Maximum tokens per generation (default: `1024`).
-- `LLAMA_CPP_TEMPERATURE`: Sampling temperature (default: `0.1`).
+**Local Models (Hugging Face):**
+
+- `SPARSE_MODEL`: Sparse embedding model (default: `Qdrant/all_miniLM_L6_v2_with_attentions`).
+- `RERANK_MODEL`: Cross-encoder reranker (default: `BAAI/bge-reranker-v2-m3`).
+- `NER_MODEL`: Local GLiNER model for entity extraction (default: `gliner-community/gliner_large-v2.5`).
 
 See `docint/utils/env_cfg.py` for the full list of configuration options and defaults.
-
-### GPU Acceleration
-
-**CUDA (NVIDIA GPUs):**
-
-- Set `LLAMA_CPP_N_GPU_LAYERS=-1` to offload all layers to GPU
-- Requires CUDA toolkit and compatible NVIDIA GPU
-- Docker: Use the `gpu` profile with `docker compose --profile gpu up`
-
-**Metal (Apple Silicon):**
-To use Metal acceleration on macOS with Apple Silicon:
-
-```bash
-CMAKE_ARGS="-DLLAMA_METAL=on" pip install llama-cpp-python --force-reinstall --no-cache-dir
-```
-
-Then set `LLAMA_CPP_N_GPU_LAYERS=-1` to enable GPU acceleration.
 
 ## Usage
 
@@ -249,15 +247,13 @@ For additional configuration, populate an `.env` (local usage) or `.env.docker` 
 
 ```env
 DOCINT_OFFLINE=true
-LLM=unsloth/Qwen3-1.7B-GGUF
-LLM_FILE=Qwen3-1.7B-Q4_K_M.gguf
-LLM_TOKENIZER=Qwen/Qwen3-1.7B
+OPENAI_API_KEY=sk-no-key-required
+OPENAI_API_BASE=http://localhost:8000/v1
+LLM=gpt-4o
+EMBED_MODEL=text-embedding-3-small
 ENABLE_IE=true
 IE_MAX_WORKERS=4
-LLAMA_CPP_N_GPU_LAYERS=-1
-LLAMA_CPP_CTX_WINDOW=8192
-LLAMA_CPP_MAX_NEW_TOKENS=1024
-LLAMA_CPP_TEMPERATURE=0.1
+IE_ENGINE=gliner
 ```
 
 ## Unit Tests
