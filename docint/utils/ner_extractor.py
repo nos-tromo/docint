@@ -10,11 +10,11 @@ from gliner import GLiNER
 from docint.utils.env_cfg import load_model_env, load_path_env, resolve_hf_cache_path
 
 
-def _parse_ie_payload(raw: str) -> dict[str, Any]:
+def _parse_ner_payload(raw: str) -> dict[str, Any]:
     """
-    Parse a raw IE model response into JSON-like payload.
+    Parse a raw NER model response into JSON-like payload.
     Args:
-        raw (str): The raw response string from the IE model.
+        raw (str): The raw response string from the NER model.
 
     Returns:
         dict[str, Any]: The parsed payload dictionary.
@@ -33,19 +33,19 @@ def _parse_ie_payload(raw: str) -> dict[str, Any]:
     return {}
 
 
-def build_ie_extractor(
+def build_ner_extractor(
     model: Any, prompt: str, max_chars: int
 ) -> Callable[[str], tuple[list[dict], list[dict]]]:
     """
-    Create an IE extractor bound to a model and prompt template.
+    Create an NER extractor bound to a model and prompt template.
 
     Args:
         model (Any): The language model instance with a 'complete' method.
-        prompt (str): The prompt template for IE extraction.
+        prompt (str): The prompt template for NER extraction.
         max_chars (int): Maximum characters from input text to send to the model.
 
     Returns:
-        Callable[[str], tuple[list[dict], list[dict]]]: The IE extraction function.
+        Callable[[str], tuple[list[dict], list[dict]]]: The NER extraction function.
     """
 
     def _extract(text: str) -> tuple[list[dict], list[dict]]:
@@ -65,10 +65,10 @@ def build_ie_extractor(
             resp = model.complete(prompt_text)
             raw = resp.text if hasattr(resp, "text") else str(resp)
         except Exception as exc:  # pragma: no cover - model failures are runtime
-            logger.warning("IE extraction request failed: {}", exc)
+            logger.warning("NER extraction request failed: {}", exc)
             return [], []
 
-        payload = _parse_ie_payload(raw) if isinstance(raw, str) else {}
+        payload = _parse_ner_payload(raw) if isinstance(raw, str) else {}
         entities_raw = payload.get("entities") if isinstance(payload, dict) else []
         relations_raw = payload.get("relations") if isinstance(payload, dict) else []
 
@@ -109,19 +109,19 @@ def build_ie_extractor(
     return _extract
 
 
-def build_gliner_ie_extractor(
+def build_gliner_ner_extractor(
     labels: list[str] | None = None,
     threshold: float = 0.3,
 ) -> Callable[[str], tuple[list[dict], list[dict]]]:
     """
-    Create an IE extractor bound to a GLiNER model.
+    Create an NER extractor bound to a GLiNER model.
 
     Args:
         labels (list[str] | None): The entity labels to extract.
         threshold (float): Confidence threshold.
 
     Returns:
-        Callable[[str], tuple[list[dict], list[dict]]]: The IE extraction function.
+        Callable[[str], tuple[list[dict], list[dict]]]: The NER extraction function.
     """
     model_id = load_model_env().ner_model
 

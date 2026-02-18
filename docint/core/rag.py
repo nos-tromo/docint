@@ -15,7 +15,8 @@ from typing import Any, Callable
 # TRANSFORMERS_OFFLINE env vars are set before huggingface_hub caches them.
 from docint.utils.env_cfg import (
     load_host_env,
-    load_ie_env,
+    load_ingestion_env,
+    load_ner_env,
     load_model_env,
     load_llama_cpp_env,
     load_path_env,
@@ -100,8 +101,8 @@ class RAG:
     llama_cpp_options: dict[str, Any] | None = field(default=None, init=False)
 
     # --- Information extraction ---
-    ie_enabled: bool = field(default=False, init=False)
-    ie_sources: list[dict[str, Any]] = field(default_factory=list, init=False)
+    ner_enabled: bool = field(default=False, init=False)
+    ner_sources: list[dict[str, Any]] = field(default_factory=list, init=False)
 
     # --- Reranking / retrieval ---
     retrieve_similarity_top_k: int = field(default=20, init=False)
@@ -743,14 +744,19 @@ class RAG:
             logger.error("ValueError: data_dir cannot be None for ingestion pipeline.")
             raise ValueError("data_dir cannot be None for ingestion pipeline.")
 
-        ie_model = None
-        if self.ie_enabled and load_ie_env().ie_engine == "llama_cpp":
-            # Enforce JSON for IE tasks to ensure structured output
-            ie_model = self._create_gen_model(enable_json=True)
+        ner_model = None
+        if self.ner_enabled and load_ner_env().engine in [
+            "llama_cpp",
+            "ollama",
+            "openai",
+            "llm",
+        ]:
+            # Enforce JSON for NER tasks to ensure structured output
+            ner_model = self._create_text_model()
 
         return DocumentIngestionPipeline(
             data_dir=self.data_dir,
-            ie_model=ie_model,
+            ner_model=ner_model,
             device=self.device,
             progress_callback=progress_callback,
         )
@@ -1749,21 +1755,21 @@ class RAG:
 
         return sorted(results, key=lambda x: str(x["filename"]))
 
-    def get_collection_ie(self, refresh: bool = False) -> list[dict[str, Any]]:
+    def get_collection_ner(self, refresh: bool = False) -> list[dict[str, Any]]:
         """
-        Fetch all nodes from the current collection and return their IE metadata.
+        Fetch all nodes from the current collection and return their NER metadata.
 
         Returns:
-            list[dict[str, Any]]: A list of source metadata dictionaries containing IE data.
+            list[dict[str, Any]]: A list of source metadata dictionaries containing NER data.
         """
         if not self.qdrant_collection:
             return []
 
-        if self.ie_sources and not refresh:
-            return self.ie_sources
+        if self.ner_sources and not refresh:
+            return self.ner_sources
 
-        if self.ie_sources:
-            return self.ie_sources
+        if self.ner_sources:
+            return self.ner_sources
 
         sources = []
         offset = None
@@ -1788,10 +1794,10 @@ class RAG:
             for point in points:
                 payload = getattr(point, "payload", None)
                 if isinstance(payload, dict):
-                    # We only care about nodes that have IE data
+                    # We only care about nodes that have NER data
                     if "entities" in payload or "relations" in payload:
                         # Normalize payload to match what _normalize_response_data produces
-                        # so that _render_ie_overview in app.py can handle it.
+                        # so that _render_ner_overview in app.py can handle it.
 
                         # Extract filename/filetype/etc.
                         origin = payload.get("origin") or {}
@@ -1836,7 +1842,7 @@ class RAG:
             if offset is None:
                 break
 
-        self.ie_sources = sources
+        self.ner_sources = sources
         return sources
 
     def unload_models(self) -> None:

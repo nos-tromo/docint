@@ -236,12 +236,14 @@ def collections_select(payload: SelectCollectionIn) -> dict[str, bool | str]:
             except Exception:
                 pass
 
-        # Pre-warm IE cache if enabled
-        if getattr(rag, "enable_ie", False):
+        # Pre-warm NER cache if enabled
+        if getattr(rag, "enable_ner", False):
             try:
-                rag.get_collection_ie(refresh=True)
+                rag.get_collection_ner(refresh=True)
             except Exception:
-                logger.warning("Could not pre-warm IE cache for collection '{}'.", name)
+                logger.warning(
+                    "Could not pre-warm NER cache for collection '{}'.", name
+                )
 
         return {"ok": True, "name": name}
     except HTTPException as e:
@@ -429,12 +431,12 @@ async def summarize_stream() -> StreamingResponse:
 
 
 @app.get("/collections/ie", tags=["Query"])
-def get_collection_ie() -> dict[str, list[dict]]:
+def get_collection_ner() -> dict[str, list[dict]]:
     """
-    Get all IE data (entities and relations) for the currently selected collection.
+    Get all NER data (entities and relations) for the currently selected collection.
 
     Returns:
-        dict[str, list[dict]]: A dictionary containing the list of IE sources.
+        dict[str, list[dict]]: A dictionary containing the list of NER sources.
 
     Raises:
         HTTPException: If no collection is selected or an error occurs.
@@ -442,10 +444,10 @@ def get_collection_ie() -> dict[str, list[dict]]:
     if not rag.qdrant_collection:
         raise HTTPException(status_code=400, detail="No collection selected")
     try:
-        sources = rag.get_collection_ie()
+        sources = rag.get_collection_ner()
         return {"sources": sources}
     except Exception as e:
-        logger.error("Error fetching collection IE: {}", e)
+        logger.error("Error fetching collection NER: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -651,13 +653,13 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
                 rag.create_index()
             rag.create_query_engine()
 
-            # Pre-warm IE cache if enabled
-            if getattr(rag, "enable_ie", False):
+            # Pre-warm NER cache if enabled
+            if getattr(rag, "enable_ner", False):
                 try:
-                    rag.get_collection_ie(refresh=True)
+                    rag.get_collection_ner(refresh=True)
                 except Exception:
                     logger.warning(
-                        "Exception: Failed to pre-warm IE cache for collection: {}",
+                        "Exception: Failed to pre-warm NER cache for collection: {}",
                         name,
                     )
         except Exception:

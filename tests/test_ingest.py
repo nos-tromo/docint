@@ -172,7 +172,7 @@ def _make_pipeline(
         data_dir=tmp_path,
         device="cpu",
         clean_fn=lambda x: x,
-        ie_model=None,
+        ner_model=None,
         progress_callback=None,
     )  # type: ignore[arg-type]
 
@@ -260,7 +260,7 @@ def test_audio_extension_classified_as_audio(monkeypatch: pytest.MonkeyPatch) ->
     pipeline = DocumentIngestionPipeline(
         data_dir=Path("/tmp"),
         device="cpu",
-        ie_model=None,
+        ner_model=None,
         progress_callback=None,
     )
 

@@ -24,7 +24,7 @@ from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.tables import TableReader
 from docint.core.storage.hierarchical import HierarchicalNodeParser
 from docint.utils.clean_text import basic_clean
-from docint.utils.env_cfg import load_ie_env, load_path_env, load_rag_env
+from docint.utils.env_cfg import load_ingestion_env, load_ner_env
 from docint.utils.hashing import compute_file_hash
 from docint.utils.ie_extractor import build_ie_extractor, build_gliner_ie_extractor
 from docint.utils.llama_cpp_cfg import LlamaCppPipeline
@@ -41,7 +41,7 @@ class DocumentIngestionPipeline:
     # --- Constructor args ---
     data_dir: Path
     device: str
-    ie_model: LlamaCPP | None
+    ner_model: OpenAI | None
     progress_callback: Callable[[str], None] | None
 
     # --- Cleaning config ---
@@ -63,7 +63,7 @@ class DocumentIngestionPipeline:
     table_excel_sheet: str | int | None = None
 
     # --- Information extraction ---
-    ie_max_workers: int = field(default=4, init=False)
+    ner_max_workers: int = field(default=4, init=False)
     entity_extractor: Callable[[str], tuple[list[dict], list[dict]]] | None = None
 
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
@@ -83,42 +83,36 @@ class DocumentIngestionPipeline:
         """
         Post-initialization to load configurations and set up components.
         """
-        # --- Path config ---
-        path_config = load_path_env()
-        reader_required_exts_path = path_config.required_exts
-        with open(reader_required_exts_path, "r", encoding="utf-8") as f:
-            self.reader_required_exts = [f".{line.strip()}" for line in f]
+        # --- Named Entity Recognition (NER) config ---
+        ner_config = load_ner_env()
+        ner_enabled = ner_config.enabled
+        ner_max_chars = ner_config.max_chars
+        self.ner_max_workers = ner_config.max_workers
+        ner_engine = ner_config.engine
 
-        # --- Information Extraction config ---
-        ie_config = load_ie_env()
-        ie_enabled = ie_config.ie_enabled
-        ie_max_chars = ie_config.ie_max_chars
-        self.ie_max_workers = ie_config.ie_max_workers
-        ie_engine = getattr(ie_config, "ie_engine", "gliner")
-
-        # Initialize IE extractor if runtime pieces are provided
-        if ie_enabled:
-            if ie_engine == "gliner":
-                logger.info("Initializing GLiNER IE extractor")
-                # We purposefully ignore ie_max_chars for GLiNER as it handles chunking or short texts well,
+        # Initialize NER extractor if runtime pieces are provided
+        if ner_enabled:
+            if ner_engine == "gliner":
+                logger.info("Initializing GLiNER NER extractor")
+                # We purposefully ignore ner_max_chars for GLiNER as it handles chunking or short texts well,
                 # but we can pass it if we want to limit input size strictly.
                 try:
-                    self.entity_extractor = build_gliner_ie_extractor()
+                    self.entity_extractor = build_gliner_ner_extractor()
                 except Exception:
-                    logger.warning("GLiNER model unavailable – continuing without IE")
+                    logger.warning("GLiNER model unavailable – continuing without NER")
                     self.entity_extractor = None
-            elif ie_engine == "llama_cpp" and self.ie_model and ie_max_chars:
-                ie_prompt = LlamaCppPipeline().load_prompt(kw="ner")
-                if ie_prompt:
-                    logger.info("Initializing Llama.cpp IE extractor")
-                    self.entity_extractor = build_ie_extractor(
-                        model=self.ie_model,
-                        prompt=ie_prompt,
-                        max_chars=ie_max_chars,
+            elif ner_engine in {"gliner", "llm"} and self.ner_model and ner_max_chars:
+                ner_prompt = OpenAIPipeline().load_prompt(kw="ner")
+                if ner_prompt:
+                    logger.info("Initializing LLM NER extractor")
+                    self.entity_extractor = build_ner_extractor(
+                        model=self.ner_model,
+                        prompt=ner_prompt,
+                        max_chars=ner_max_chars,
                     )
             else:
                 logger.warning(
-                    "IE enabled but configuration invalid or model missing. Skipping."
+                    "NER enabled but configuration invalid or model missing. Skipping."
                 )
                 self.entity_extractor = None
 
@@ -727,8 +721,8 @@ class DocumentIngestionPipeline:
                 except Exception as exc:
                     logger.warning("Entity extractor failed on chunk {}: {}", idx, exc)
 
-            if self.ie_max_workers > 1:
-                with ThreadPoolExecutor(max_workers=self.ie_max_workers) as executor:
+            if self.ner_max_workers > 1:
+                with ThreadPoolExecutor(max_workers=self.ner_max_workers) as executor:
                     futures = [
                         executor.submit(_process_node, i, node)
                         for i, node in enumerate(nodes)

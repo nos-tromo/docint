@@ -3,9 +3,9 @@ from typing import Any
 from docint import app
 
 
-def test_aggregate_ie_deduplicates_and_tracks_sources() -> None:
+def test_aggregate_ner_deduplicates_and_tracks_sources() -> None:
     """
-    Tests that the _aggregate_ie method correctly deduplicates entities and relations,
+    Tests that the _aggregate_ner method correctly deduplicates entities and relations,
     aggregates their counts and best scores, and tracks the source files and locations.
     """
     sources: list[dict[str, Any]] = [
@@ -46,7 +46,7 @@ def test_aggregate_ie_deduplicates_and_tracks_sources() -> None:
         },
     ]
 
-    entities, relations = app._aggregate_ie(sources)
+    entities, relations = app._aggregate_ner(sources)
 
     assert len(entities) == 2
     acme = entities[0]
