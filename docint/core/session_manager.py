@@ -119,7 +119,7 @@ class SessionManager:
         self.chat_engine = CondenseQuestionChatEngine.from_defaults(
             query_engine=engine,
             memory=self.chat_memory,
-            llm=self.rag.gen_model,
+            llm=self.rag.text_model,
         )
         return requested_id
 
@@ -246,7 +246,7 @@ class SessionManager:
         k = min(max(self.rag.retrieve_similarity_top_k, self.rag.rerank_top_n * 8), 64)
         streaming_engine = RetrieverQueryEngine.from_args(
             retriever=self.rag.index.as_retriever(similarity_top_k=k),
-            llm=self.rag.gen_model,
+            llm=self.rag.text_model,
             node_postprocessors=[self.rag.reranker],
             streaming=True,
         )
@@ -327,8 +327,8 @@ class SessionManager:
                 "models": {
                     "embed_model_id": self.rag.embed_model_id,
                     "sparse_model_id": self.rag.sparse_model_id,
-                    "rerank_model_id": self.rag.gen_model_id,
-                    "gen_model_id": self.rag.gen_model_id,
+                    "rerank_model_id": self.rag.text_model_id,
+                    "gen_model_id": self.rag.text_model_id,
                 },
                 "retrieval": {
                     "similarity_top_k": self.rag.retrieve_similarity_top_k,
@@ -533,7 +533,7 @@ class SessionManager:
                 )
             prompt = self.rag.summarize_prompt + "\n\n".join(slice_text)
 
-            summary_resp = self.rag.gen_model.complete(prompt)
+            summary_resp = self.rag.text_model.complete(prompt)
             existing_summary = cast(str | None, conv.rolling_summary) or ""
             new_summary = (existing_summary + "\n" + summary_resp.text).strip()
             conv.rolling_summary = new_summary

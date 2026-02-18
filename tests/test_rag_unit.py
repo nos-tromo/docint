@@ -151,7 +151,7 @@ def test_start_session_initializes_memory(
     rag.init_session_store(f"sqlite:///{tmp_path / 'sessions.db'}")
     rag.index = object()
     rag.query_engine = object()
-    rag._gen_model = object()
+    rag._text_model = object()
 
     class FakeMemory:
         def __init__(self) -> None:

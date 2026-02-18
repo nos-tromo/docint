@@ -12,6 +12,7 @@ services:
     environment:
       - DATA_PATH=/app/data
       - LOG_PATH=/app/.logs/backend-cpu.log
+      - OPENAI_API_BASE=http://llamacpp-server:8080/v1
       - QDRANT_COL_DIR=/qdrant/storage/collections
       - QDRANT_HOST=http://qdrant:6333
       - QDRANT_SRC_DIR=/qdrant/storage/sources
@@ -46,6 +47,7 @@ services:
       - DATA_PATH=/app/data/in
       - LOG_PATH=/app/.logs/backend-gpu.log
       - NVIDIA_VISIBLE_DEVICES=all
+      - OPENAI_API_BASE=http://llamacpp-server:8080/v1
       - QDRANT_COL_DIR=/qdrant/storage/collections
       - QDRANT_HOST=http://qdrant:6333
       - QDRANT_SRC_DIR=/qdrant/storage/sources
@@ -71,6 +73,68 @@ services:
       docint-net:
         aliases:
           - backend-net
+
+  ##########################################################
+  # Llama.cpp (CPU)
+  ##########################################################
+  llamacpp-server-cpu:
+    profiles: ["cpu"]
+    image: ghcr.io/ggml-org/llama.cpp:server
+    ports:
+      - 8080:8080
+    # Ensure the models directory exists before starting the server to prevent crash
+    entrypoint: ["/bin/sh", "-c", "mkdir -p /root/.cache/llama.cpp && /app/llama-server"]
+    environment:
+      LLAMA_ARG_EMBEDDINGS: 1
+      LLAMA_ARG_ENDPOINT_METRICS: 1
+      LLAMA_ARG_HOST: 0.0.0.0
+      LLAMA_ARG_MODELS_DIR: /root/.cache/llama.cpp
+      LLAMA_ARG_PORT: 8080
+      LLAMA_ARG_UBATCH: 1024
+      LLAMA_ARG_ENDPOINT_PROPS: 1
+      LLAMA_LOG_FILE: /app/.logs/llamacpp-server-cpu.log
+      LLAMA_OFFLINE: true
+    volumes:
+      - docint-logs:/app/.logs
+      - model-cache:/root/.cache
+    networks:
+      docint-net:
+        aliases:
+          - llamacpp-server
+    restart: unless-stopped
+
+  ##########################################################
+  # Llama.cpp (CUDA)
+  ##########################################################
+  llamacpp-server-cuda:
+    profiles: ["cuda"]
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    ports:
+      - 8080:8080
+    entrypoint: ["/bin/sh", "-c", "mkdir -p /root/.cache/llama.cpp"]
+    environment:
+      LLAMA_ARG_EMBEDDINGS: 1
+      LLAMA_ARG_ENDPOINT_METRICS: 1
+      LLAMA_ARG_HOST: 0.0.0.0
+      LLAMA_ARG_MODELS_DIR: /root/.cache/llama.cpp
+      LLAMA_ARG_PORT: 8080
+      LLAMA_ARG_UBATCH: 1024
+      LLAMA_LOG_FILE: /app/.logs/llamacpp-server-cuda.log
+      LLAMA_OFFLINE: true
+      NVIDIA_VISIBLE_DEVICES: all
+    volumes:
+      - model-cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [cuda]
+    networks:
+      docint-net:
+        aliases:
+          - llamacpp-server
+    restart: unless-stopped
 
   ##########################################################
   # Frontend (Streamlit)

@@ -13,7 +13,7 @@ from llama_index.core.node_parser import (
     SentenceSplitter,
 )
 from llama_index.core.schema import BaseNode
-from llama_index.llms.llama_cpp import LlamaCPP
+from llama_index.llms.openai import OpenAI
 from llama_index.node_parser.docling import DoclingNodeParser
 from loguru import logger
 
@@ -26,8 +26,8 @@ from docint.core.storage.hierarchical import HierarchicalNodeParser
 from docint.utils.clean_text import basic_clean
 from docint.utils.env_cfg import load_ingestion_env, load_ner_env
 from docint.utils.hashing import compute_file_hash
-from docint.utils.ie_extractor import build_ie_extractor, build_gliner_ie_extractor
-from docint.utils.llama_cpp_cfg import LlamaCppPipeline
+from docint.utils.ner_extractor import build_ner_extractor, build_gliner_ner_extractor
+from docint.utils.openai_cfg import OpenAIPipeline
 
 CleanFn = Callable[[str], str]
 
