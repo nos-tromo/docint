@@ -84,11 +84,11 @@ class DocumentIngestionPipeline:
         Post-initialization to load configurations and set up components.
         """
         # --- Named Entity Recognition (NER) config ---
-        ner_config = load_ner_env()
-        ner_enabled = ner_config.enabled
-        ner_max_chars = ner_config.max_chars
-        self.ner_max_workers = ner_config.max_workers
-        ner_engine = ner_config.engine
+        _ner_config = load_ner_env()
+        ner_enabled = _ner_config.enabled
+        ner_max_chars = _ner_config.max_chars
+        self.ner_max_workers = _ner_config.max_workers
+        ner_engine = _ner_config.engine
 
         # Initialize NER extractor if runtime pieces are provided
         if ner_enabled:
@@ -116,11 +116,13 @@ class DocumentIngestionPipeline:
                 )
                 self.entity_extractor = None
 
-        # --- RAG config ---
-        rag_config = load_rag_env()
-        self.ingestion_batch_size = rag_config.ingestion_batch_size
-        sentence_splitter_chunk_size = rag_config.sentence_splitter_chunk_size
-        sentence_splitter_chunk_overlap = rag_config.sentence_splitter_chunk_overlap
+        # --- Ingestion config ---
+        _ingestion_config = load_ingestion_env()
+        self.ingestion_batch_size = _ingestion_config.ingestion_batch_size
+        sentence_splitter_chunk_size = _ingestion_config.sentence_splitter_chunk_size
+        sentence_splitter_chunk_overlap = (
+            _ingestion_config.sentence_splitter_chunk_overlap
+        )
         self.sentence_splitter = SentenceSplitter(
             chunk_size=sentence_splitter_chunk_size,
             chunk_overlap=sentence_splitter_chunk_overlap,
@@ -129,9 +131,9 @@ class DocumentIngestionPipeline:
         if _ingestion_config.hierarchical_chunking_enabled:
             logger.info("Hierarchical chunking is ENABLED.")
             self.hierarchical_node_parser = HierarchicalNodeParser(
-                coarse_chunk_size=rag_config.coarse_chunk_size,
-                fine_chunk_size=rag_config.fine_chunk_size,
-                fine_chunk_overlap=rag_config.fine_chunk_overlap,
+                coarse_chunk_size=_ingestion_config.coarse_chunk_size,
+                fine_chunk_size=_ingestion_config.fine_chunk_size,
+                fine_chunk_overlap=_ingestion_config.fine_chunk_overlap,
             )
         else:
             self.hierarchical_node_parser = None

@@ -13,9 +13,9 @@ from streamlit.web import cli as st_cli
 from docint.utils.env_cfg import load_host_env, set_offline_env
 from docint.utils.logging_cfg import setup_logging
 
-host_cfg = load_host_env()
-BACKEND_HOST = host_cfg.backend_host
-BACKEND_PUBLIC_HOST = host_cfg.backend_public_host or BACKEND_HOST
+_host_cfg = load_host_env()
+BACKEND_HOST = _host_cfg.backend_host
+BACKEND_PUBLIC_HOST = _host_cfg.backend_public_host or BACKEND_HOST
 
 
 def _format_score(score: Any) -> str:

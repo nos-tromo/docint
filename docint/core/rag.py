@@ -20,9 +20,10 @@ from docint.utils.env_cfg import (
     load_model_env,
     load_openai_env,
     load_path_env,
-    load_rag_env,
+    load_retrieval_env,
     load_session_env,
     resolve_hf_cache_path,
+    PathConfig,
 )
 # isort: on
 
@@ -67,9 +68,9 @@ class RAG:
     enable_hybrid: bool = field(default=True)
 
     # --- Path setup ---
+    _path_config: PathConfig | None = field(default=None, init=False, repr=False)
     data_dir: Path | None = field(default=None, init=False)
     hf_hub_cache: Path | None = field(default=None, init=False)
-    llama_cpp_cache: Path | None = field(default=None, init=False)
 
     # --- Session config ---
     session_store: str = field(default="", init=False)
@@ -139,17 +140,12 @@ class RAG:
             ValueError: If summarize_prompt_path is not set.
         """
         # --- Host config ---
-        host_config = load_host_env()
-        self.qdrant_host = host_config.qdrant_host
+        _host_config = load_host_env()
+        self.qdrant_host = _host_config.qdrant_host
 
-        # --- Path config ---
-        path_config = load_path_env()
-        self.data_dir = path_config.data
-        self.prompt_dir = path_config.prompts
-        self._qdrant_col_dir = path_config.qdrant_collections
-        self._qdrant_src_dir = path_config.qdrant_sources
-        self.hf_hub_cache = path_config.hf_hub_cache
-        self.llama_cpp_cache = path_config.llama_cpp_cache
+        # --- Ingestion config ---
+        _ingestion_config = load_ingestion_env()
+        self.docstore_batch_size = _ingestion_config.docstore_batch_size
 
         # --- Model config ---
         _model_config = load_model_env()
@@ -193,6 +189,12 @@ class RAG:
 
         with open(self.summarize_prompt_path, "r", encoding="utf-8") as f:
             self.summarize_prompt = f.read()
+
+        # --- Retrieval config ---
+        _retrieval_config = load_retrieval_env()
+        self.rerank_use_fp16 = _retrieval_config.rerank_use_fp16
+        self.retrieve_similarity_top_k = _retrieval_config.retrieve_top_k
+        self.rerank_top_n = int(self.retrieve_similarity_top_k // 4)
 
         # --- Session config ---
         self.session_store = load_session_env().session_store
@@ -273,10 +275,13 @@ class RAG:
             The Path representing the Qdrant host directory.
 
         Raises:
-            ValueError: If the Qdrant host directory is not set.
+            ValueError: If the path configuration or the Qdrant host directory is not set.
         """
         if self._qdrant_col_dir is None:
-            env = load_path_env().qdrant_collections
+            if self._path_config is None:
+                logger.error("ValueError: Path configuration is not set.")
+                raise ValueError("Path configuration is not set.")
+            env = self._path_config.qdrant_collections
             if env:
                 self._qdrant_col_dir = Path(env) if not env.is_absolute() else env
             else:
@@ -301,10 +306,13 @@ class RAG:
             The Path representing the Qdrant source host directory.
 
         Raises:
-            ValueError: If the Qdrant source host directory is not set.
+            ValueError: If the path configuration or the Qdrant source host directory is not set.
         """
         if self._qdrant_src_dir is None:
-            env = load_path_env().qdrant_sources
+            if self._path_config is None:
+                logger.error("ValueError: Path configuration is not set.")
+                raise ValueError("Path configuration is not set.")
+            env = self._path_config.qdrant_sources
             if env:
                 self._qdrant_src_dir = Path(env) if not env.is_absolute() else env
             else:

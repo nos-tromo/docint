@@ -8,9 +8,7 @@ from llama_index.core.bridge.pydantic import PrivateAttr
 from llama_index.core.node_parser import NodeParser, SentenceSplitter
 from llama_index.core.schema import BaseNode, Document, NodeRelationship
 
-from docint.utils.env_cfg import load_rag_env
-
-_rag_config = load_rag_env()
+from docint.utils.env_cfg import load_ingestion_env
 
 
 class HierarchicalNodeParser(NodeParser):
@@ -23,9 +21,10 @@ class HierarchicalNodeParser(NodeParser):
     Fine chunks are linked to their parent coarse chunk via metadata.
     """
 
-    coarse_chunk_size: int = _rag_config.coarse_chunk_size
-    fine_chunk_size: int = _rag_config.fine_chunk_size
-    fine_chunk_overlap: int = _rag_config.fine_chunk_overlap
+    _ingestion_config = load_ingestion_env()
+    coarse_chunk_size: int = _ingestion_config.coarse_chunk_size
+    fine_chunk_size: int = _ingestion_config.fine_chunk_size
+    fine_chunk_overlap: int = _ingestion_config.fine_chunk_overlap
     _coarse_splitter: SentenceSplitter = PrivateAttr()
     _fine_splitter: SentenceSplitter = PrivateAttr()
 

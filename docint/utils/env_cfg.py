@@ -93,32 +93,17 @@ class HostConfig:
 
 
 @dataclass(frozen=True)
-class InformationExtractionConfig:
-    """
-    Dataclass for information extraction configuration.
-    """
-
-    ie_enabled: bool
-    ie_max_chars: int
-    ie_max_workers: int
-    ie_engine: str
-
-
-@dataclass(frozen=True)
-class LlamaCppConfig:
-    """
-    Dataclass for Llama.cpp configuration.
-    """
-
-    ctx_window: int
-    max_new_tokens: int
-    request_timeout: int
-    seed: int
-    temperature: float
-    n_gpu_layers: int
-    top_k: int
-    top_p: float
-    repeat_penalty: float
+class IngestionConfig:
+    coarse_chunk_size: int
+    docling_accelerator_num_threads: int
+    docstore_batch_size: int
+    fine_chunk_overlap: int
+    fine_chunk_size: int
+    hierarchical_chunking_enabled: bool
+    ingestion_batch_size: int
+    sentence_splitter_chunk_overlap: int
+    sentence_splitter_chunk_size: int
+    supported_filetypes: list[str]
 
 
 @dataclass(frozen=True)
@@ -180,28 +165,18 @@ class PathConfig:
     prompts: Path
     qdrant_collections: Path
     qdrant_sources: Path
-    required_exts: Path
     hf_hub_cache: Path
     llama_cpp_cache: Path
 
 
 @dataclass(frozen=True)
-class RAGConfig:
+class RetrievalConfig:
     """
     Dataclass for RAG (Retrieval-Augmented Generation) configuration.
     """
 
-    docstore_batch_size: int
-    ingestion_batch_size: int
-    docling_accelerator_num_threads: int
-    retrieve_top_k: int
-    sentence_splitter_chunk_overlap: int
-    sentence_splitter_chunk_size: int
-    hierarchical_chunking_enabled: bool
-    coarse_chunk_size: int
-    fine_chunk_size: int
-    fine_chunk_overlap: int
     rerank_use_fp16: bool
+    retrieve_top_k: int
 
 
 @dataclass(frozen=True)
@@ -287,73 +262,54 @@ def load_ingestion_env(
     Loads ingestion configuration from environment variables or defaults.
 
     Returns:
-        IEConfig: Dataclass containing IE configuration.
-        - ie_enabled (bool): Whether to run entity/relation extraction during ingestion.
-        - ie_max_chars (int): Maximum characters from each node to send to the extractor.
-        - ie_max_workers (int): Maximum number of worker threads for IE extraction.
+        IngestionConfig: Dataclass containing ingestion configuration.
+        - coarse_chunk_size (int): The coarse chunk size for hierarchical chunking.
+        - docling_accelerator_num_threads (int): The default number of threads for Docling accelerator.
+        - docstore_batch_size (int): The batch size for document store operations.
+        - fine_chunk_overlap (int): The fine chunk overlap size for hierarchical chunking.
+        - fine_chunk_size (int): The fine chunk size for hierarchical chunking.
+        - hierarchical_chunking_enabled (bool): Whether hierarchical chunking is enabled.
+        - ingestion_batch_size (int): The batch size for ingestion.
+        - sentence_splitter_chunk_overlap (int): The chunk overlap size for sentence splitting.
+        - sentence_splitter_chunk_size (int): The chunk size for sentence splitting.
+        - supported_filetypes (list[str]): List of supported file extensions for ingestion.
     """
-    return InformationExtractionConfig(
-        ie_enabled=str(os.getenv("ENABLE_IE", default_ie_enabled)).lower()
+    return IngestionConfig(
+        coarse_chunk_size=int(
+            os.getenv("COARSE_CHUNK_SIZE", default_coarse_chunk_size)
+        ),
+        docling_accelerator_num_threads=int(
+            os.getenv(
+                "DOCLING_ACCELERATOR_NUM_THREADS",
+                default_docling_accelerator_num_threads,
+            )
+        ),
+        docstore_batch_size=int(
+            os.getenv("DOCSTORE_BATCH_SIZE", default_docstore_batch_size)
+        ),
+        fine_chunk_overlap=int(
+            os.getenv("FINE_CHUNK_OVERLAP", default_fine_chunk_overlap)
+        ),
+        fine_chunk_size=int(os.getenv("FINE_CHUNK_SIZE", default_fine_chunk_size)),
+        hierarchical_chunking_enabled=str(
+            os.getenv("HIERARCHICAL_CHUNKING_ENABLED", "true")
+        ).lower()
         in {"true", "1", "yes"},
-        ie_max_chars=int(os.getenv("IE_MAX_CHARS", default_ie_max_chars)),
-        ie_max_workers=int(os.getenv("IE_MAX_WORKERS", default_ie_max_workers)),
-        ie_engine=os.getenv("IE_ENGINE", default_ie_engine).lower(),
-    )
-
-
-def load_llama_cpp_env(
-    default_ctx_window: int = 8192,
-    default_max_new_tokens: int = 1024,
-    default_request_timeout: int = 1200,
-    default_seed: int = 42,
-    default_temperature: float = 0.1,
-    default_n_gpu_layers: int = -1,
-    default_top_k: int = 40,
-    default_top_p: float = 0.95,
-    default_repeat_penalty: float = 1.1,
-) -> LlamaCppConfig:
-    """
-    Loads Llama.cpp configuration from environment variables or defaults.
-
-    Args:
-        default_ctx_window (int): Default context window size.
-        default_max_new_tokens (int): Default maximum new tokens per completion.
-        default_request_timeout (int): Default request timeout in seconds.
-        default_seed (int): Default random seed for generation.
-        default_temperature (float): Default temperature setting for generation.
-        default_n_gpu_layers (int): Default number of layers to offload to GPU (-1 = all).
-        default_top_k (int): Default top_k setting for generation.
-        default_top_p (float): Default top_p setting for generation.
-        default_repeat_penalty (float): Default repetition penalty for generation.
-
-    Returns:
-        LlamaCppConfig: Dataclass containing Llama.cpp configuration.
-        - ctx_window (int): The context window size.
-        - max_new_tokens (int): Maximum number of tokens to generate per completion.
-        - request_timeout (int): The request timeout in seconds.
-        - seed (int): The random seed for generation.
-        - temperature (float): The temperature setting for generation.
-        - n_gpu_layers (int): Number of layers to offload to GPU (-1 = all).
-        - top_k (int): The top_k setting for generation.
-        - top_p (float): The top_p setting for generation.
-        - repeat_penalty (float): The repetition penalty for generation.
-    """
-    return LlamaCppConfig(
-        ctx_window=int(os.getenv("LLAMA_CPP_CTX_WINDOW", default_ctx_window)),
-        max_new_tokens=int(
-            os.getenv("LLAMA_CPP_MAX_NEW_TOKENS", default_max_new_tokens)
+        ingestion_batch_size=int(
+            os.getenv("INGESTION_BATCH_SIZE", default_ingestion_batch_size)
         ),
-        request_timeout=int(
-            os.getenv("LLAMA_CPP_REQUEST_TIMEOUT", default_request_timeout)
+        sentence_splitter_chunk_overlap=int(
+            os.getenv(
+                "SENTENCE_SPLITTER_CHUNK_OVERLAP",
+                default_sentence_splitter_chunk_overlap,
+            )
         ),
-        seed=int(os.getenv("LLAMA_CPP_SEED", default_seed)),
-        temperature=float(os.getenv("LLAMA_CPP_TEMPERATURE", default_temperature)),
-        n_gpu_layers=int(os.getenv("LLAMA_CPP_N_GPU_LAYERS", default_n_gpu_layers)),
-        top_k=int(os.getenv("LLAMA_CPP_TOP_K", default_top_k)),
-        top_p=float(os.getenv("LLAMA_CPP_TOP_P", default_top_p)),
-        repeat_penalty=float(
-            os.getenv("LLAMA_CPP_REPEAT_PENALTY", default_repeat_penalty)
+        sentence_splitter_chunk_size=int(
+            os.getenv(
+                "SENTENCE_SPLITTER_CHUNK_SIZE", default_sentence_splitter_chunk_size
+            )
         ),
+        supported_filetypes=default_supported_filetypes,
     )
 
 
@@ -544,24 +500,22 @@ def load_path_env() -> PathConfig:
         - prompts (Path): Path to the prompts directory.
         - qdrant_collections (Path): Path to the Qdrant collections directory.
         - qdrant_sources (Path): Path to the Qdrant sources directory.
-        - required_exts (Path): Path to the required extensions file.
         - hf_hub_cache (Path): Path to the Hugging Face Hub cache directory.
-        - llama_cpp_cache (Path): Path to the Llama.cpp cache directory.
+        - llama_cpp_cache (Path): Path to the llama.cpp cache directory.
     """
     home_dir: Path = Path.home()
     docint_home_dir: Path = home_dir / "docint"
     default_data_dir: Path = docint_home_dir / "data"
     default_query_dir: Path = docint_home_dir / "queries.txt"
     default_results_dir: Path = docint_home_dir / "results"
-    default_cache_dir: Path = home_dir / ".cache"
-    default_hf_hub_cache: Path = default_cache_dir / "huggingface" / "hub"
-    default_llama_cpp_cache: Path = default_cache_dir / "llama.cpp"
+    default_model_cache: Path = home_dir / ".cache"
+    default_hf_hub_cache: Path = default_model_cache / "huggingface" / "hub"
+    default_llama_cpp_cache: Path = default_model_cache / "llama.cpp"
 
-    project_root: Path = Path(__file__).parents[2].resolve()
-    default_log_dir = project_root / ".logs" / "docint.log"
-    utils_dir: Path = project_root / "docint" / "utils"
+    utils_dir: Path = Path(__file__).parent.resolve()
     default_prompts_dir: Path = utils_dir / "prompts"
-    default_exts_dir: Path = utils_dir / "required_exts.txt"
+    project_root: Path = utils_dir.parents[1]
+    default_log_dir = project_root / ".logs" / "docint.log"
 
     default_qdrant_collections = Path(
         os.getenv("QDRANT_COL_DIR", "qdrant_storage")
@@ -585,7 +539,6 @@ def load_path_env() -> PathConfig:
         queries=Path(os.getenv("QUERIES_PATH", default_query_dir)).expanduser(),
         results=Path(os.getenv("RESULTS_PATH", default_results_dir)).expanduser(),
         prompts=default_prompts_dir,
-        required_exts=default_exts_dir,
         qdrant_collections=default_qdrant_collections,
         qdrant_sources=default_qdrant_sources,
         hf_hub_cache=Path(os.getenv("HF_HUB_CACHE", default_hf_hub_cache)).expanduser(),
@@ -595,90 +548,28 @@ def load_path_env() -> PathConfig:
     )
 
 
-def load_rag_env(
-    default_docstore_batch_size: int = 100,
-    default_ingestion_batch_size: int = 5,
-    default_docling_accelerator_num_threads: int = 4,
-    default_retrieve_top_k: int = 20,
-    default_sentence_splitter_chunk_overlap: int = 64,
-    default_sentence_splitter_chunk_size: int = 1024,
-    default_hierarchical_chunking_enabled: bool = True,
-    default_coarse_chunk_size: int = 8192,
-    default_fine_chunk_size: int = 8192,
-    default_fine_chunk_overlap: int = 0,
+def load_retrieval_env(
     default_rerank_use_fp16: bool = False,
-) -> RAGConfig:
+    default_retrieve_top_k: int = 20,
+) -> RetrievalConfig:
     """
-    Loads RAG (Retrieval-Augmented Generation) configuration from environment variables or defaults.
+    Loads retrieval configuration from environment variables or defaults.
 
     Args:
-        default_docstore_batch_size (int): Default batch size for document store operations.
-        default_ingestion_batch_size (int): Default batch size for ingestion.
-        default_docling_accelerator_num_threads (int): Default number of threads for Docling accelerator.
-        default_retrieve_top_k (int): Default number of top documents to retrieve.
-        default_sentence_splitter_chunk_overlap (int): Default chunk overlap size for sentence splitting.
-        default_sentence_splitter_chunk_size (int): Default chunk size for sentence splitting.
-        default_hierarchical_chunking_enabled (bool): Default flag to enable hierarchical chunking.
-        default_coarse_chunk_size (int): Default coarse chunk size for hierarchical chunking.
-        default_fine_chunk_size (int): Default fine chunk size for hierarchical chunking.
-        default_fine_chunk_overlap (int): Default fine chunk overlap size for hierarchical chunking.
         default_rerank_use_fp16 (bool): Default flag to use FP16 for reranker model. Default is False.
+        default_retrieve_top_k (int): Default number of top documents to retrieve.
 
     Returns:
-        RAGConfig: Dataclass containing RAG configuration.
-        - docstore_batch_size (int): The batch size for document store operations.
-        - ingestion_batch_size (int): The batch size for ingestion.
-        - docling_accelerator_num_threads (int): The default number of threads for Docling accelerator.
-        - retrieve_top_k (int): The number of top documents to retrieve.
-        - sentence_splitter_chunk_overlap (int): The chunk overlap size for sentence splitting.
-        - sentence_splitter_chunk_size (int): The chunk size for sentence splitting.
-        - hierarchical_chunking_enabled (bool): Whether hierarchical chunking is enabled.
-        - coarse_chunk_size (int): The coarse chunk size for hierarchical chunking.
-        - fine_chunk_size (int): The fine chunk size for hierarchical chunking.
-        - fine_chunk_overlap (bool): The fine chunk overlap size for hierarchical chunking.
+        RetrievalConfig: Dataclass containing retrieval configuration.
+        - rerank_use_fp16 (bool): Whether to use FP16 for the reranker model.
+        - retrieve_top_k (int): The number of top documents to retrieve for RAG
     """
-    return RAGConfig(
-        docstore_batch_size=int(
-            os.getenv("DOCSTORE_BATCH_SIZE", default_docstore_batch_size)
-        ),
-        ingestion_batch_size=int(
-            os.getenv("INGESTION_BATCH_SIZE", default_ingestion_batch_size)
-        ),
-        docling_accelerator_num_threads=int(
-            os.getenv(
-                "DOCLING_ACCELERATOR_NUM_THREADS",
-                default_docling_accelerator_num_threads,
-            )
-        ),
-        retrieve_top_k=int(os.getenv("RETRIEVE_TOP_K", default_retrieve_top_k)),
-        sentence_splitter_chunk_overlap=int(
-            os.getenv(
-                "SENTENCE_SPLITTER_CHUNK_OVERLAP",
-                default_sentence_splitter_chunk_overlap,
-            )
-        ),
-        sentence_splitter_chunk_size=int(
-            os.getenv(
-                "SENTENCE_SPLITTER_CHUNK_SIZE", default_sentence_splitter_chunk_size
-            )
-        ),
-        hierarchical_chunking_enabled=str(
-            os.getenv(
-                "HIERARCHICAL_CHUNKING_ENABLED", default_hierarchical_chunking_enabled
-            )
-        ).lower()
-        in {"true", "1", "yes"},
-        coarse_chunk_size=int(
-            os.getenv("COARSE_CHUNK_SIZE", default_coarse_chunk_size)
-        ),
-        fine_chunk_size=int(os.getenv("FINE_CHUNK_SIZE", default_fine_chunk_size)),
-        fine_chunk_overlap=int(
-            os.getenv("FINE_CHUNK_OVERLAP", default_fine_chunk_overlap)
-        ),
+    return RetrievalConfig(
         rerank_use_fp16=str(
             os.getenv("RERANK_USE_FP16", default_rerank_use_fp16)
         ).lower()
         in {"true", "1", "yes"},
+        retrieve_top_k=int(os.getenv("RETRIEVE_TOP_K", default_retrieve_top_k)),
     )
 
 
