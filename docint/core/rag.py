@@ -261,26 +261,6 @@ class RAG:
         if self.sessions is not None:
             self.sessions.chat_memory = value
 
-    # --- Static methods ---
-    @staticmethod
-    def _list_supported_sparse_models() -> list[str]:
-        """
-        Lists all supported sparse models.
-
-        Returns:
-            list[str]: A list of supported sparse model IDs.
-
-        Raises:
-            ImportError: If fastembed is not installed.
-        """
-        try:
-            return [m["model"] for m in SparseTextEmbedding.list_supported_models()]
-        except ImportError:
-            logger.warning(
-                "ImportError: fastembed is not installed; cannot list sparse models."
-            )
-            return []
-
     # --- Properties (lazy loading) ---
     @property
     def qdrant_col_dir(self) -> Path:
@@ -442,12 +422,8 @@ class RAG:
                     f"Supported: {supported_ids}"
                 )
 
-        cache_dir = self.hf_hub_cache or Path.home() / ".cache" / "huggingface" / "hub"
-        resolved = resolve_hf_cache_path(cache_dir, chosen)
-        if resolved:
-            logger.info("Using local sparse model path: {}", resolved)
-            return str(resolved)
-
+        # Return the canonical fastembed model name.  fastembed will resolve
+        # local files via FASTEMBED_CACHE_PATH (set by env_cfg to HF_HUB_CACHE).
         return chosen
 
     @property

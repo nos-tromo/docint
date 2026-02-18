@@ -24,6 +24,15 @@ def set_offline_env() -> None:
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
         os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
         os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+        # Point fastembed at the HF hub cache so it reuses models downloaded
+        # by ``model_cfg.py`` instead of trying to fetch them.
+        if not os.getenv("FASTEMBED_CACHE_PATH"):
+            default_hf_cache = str(Path.home() / ".cache" / "huggingface" / "hub")
+            os.environ["FASTEMBED_CACHE_PATH"] = os.getenv(
+                "HF_HUB_CACHE", default_hf_cache
+            )
+
         logger.info("Set Hugging Face libraries to offline mode.")
     else:
         logger.info("Hugging Face libraries are in online mode.")

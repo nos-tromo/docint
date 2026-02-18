@@ -190,11 +190,12 @@ def test_chat_rejects_empty_prompt() -> None:
         rag.chat("   ")
 
 
-def test_list_supported_sparse_models_handles_import_error(
+def test_sparse_model_raises_import_error_when_fastembed_broken(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    Test that _list_supported_sparse_models handles ImportErrors gracefully.
+    Test that the sparse_model property raises ImportError when
+    SparseTextEmbedding.list_supported_models raises ImportError.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -208,7 +209,12 @@ def test_list_supported_sparse_models_handles_import_error(
         "list_supported_models",
         staticmethod(broken),
     )
-    assert rag_module.RAG._list_supported_sparse_models() == []
+
+    rag = RAG(qdrant_collection="test")
+    rag.enable_hybrid = True
+    rag.sparse_model_id = "some-model"
+    with pytest.raises(ImportError, match="fastembed is not installed"):
+        rag.sparse_model
 
 
 def test_filter_docs_skips_existing_hashes(monkeypatch: pytest.MonkeyPatch) -> None:
