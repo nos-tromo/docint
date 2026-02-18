@@ -242,20 +242,49 @@ def load_host_env(
     )
 
 
-def load_ie_env(
-    default_ie_enabled: bool = True,
-    default_ie_max_chars: int = 800,
-    default_ie_max_workers: int = 4,
-    default_ie_engine: str = "gliner",
-) -> InformationExtractionConfig:
+def load_ingestion_env(
+    default_coarse_chunk_size: int = 8192,
+    default_docling_accelerator_num_threads: int = 4,
+    default_docstore_batch_size: int = 100,
+    default_fine_chunk_overlap: int = 0,
+    default_fine_chunk_size: int = 8192,
+    default_hierarchical_chunking_enabled: bool = True,
+    default_ingestion_batch_size: int = 5,
+    default_sentence_splitter_chunk_overlap: int = 64,
+    default_sentence_splitter_chunk_size: int = 1024,
+    default_supported_filetypes: list[str] = [
+        ".avi",
+        ".csv",
+        ".docx",
+        ".flv",
+        ".gif",
+        ".jpeg",
+        ".jpg",
+        ".jsonl",
+        ".md",
+        ".mkv",
+        ".mov",
+        ".mpeg",
+        ".mpg",
+        ".mp3",
+        ".mp4",
+        ".m4a",
+        ".m4v",
+        ".ogg",
+        ".parquet",
+        ".pdf",
+        ".png",
+        ".tsv",
+        ".txt",
+        ".wav",
+        ".webm",
+        ".wmv",
+        ".xls",
+        ".xlsx",
+    ],
+) -> IngestionConfig:
     """
-    Loads information extraction configuration from environment variables or defaults.
-
-    Args:
-        default_ie_enabled (bool): Default value to enable IE extraction. Set to True to enable by default.
-        default_ie_max_chars (int): Default maximum characters for IE extraction.
-        default_ie_max_workers (int): Default maximum worker threads for IE extraction.
-        default_ie_engine (str): Default IE engine to use. Options: gliner, llama_cpp.
+    Loads ingestion configuration from environment variables or defaults.
 
     Returns:
         IEConfig: Dataclass containing IE configuration.

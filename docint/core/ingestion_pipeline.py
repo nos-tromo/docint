@@ -125,7 +125,8 @@ class DocumentIngestionPipeline:
             chunk_size=sentence_splitter_chunk_size,
             chunk_overlap=sentence_splitter_chunk_overlap,
         )
-        if rag_config.hierarchical_chunking_enabled:
+        self.reader_required_exts = _ingestion_config.supported_filetypes
+        if _ingestion_config.hierarchical_chunking_enabled:
             logger.info("Hierarchical chunking is ENABLED.")
             self.hierarchical_node_parser = HierarchicalNodeParser(
                 coarse_chunk_size=rag_config.coarse_chunk_size,
