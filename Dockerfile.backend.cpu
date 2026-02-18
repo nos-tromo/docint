@@ -1,46 +1,41 @@
 FROM python:3.11-slim-bookworm
 
-COPY --from=ghcr.io/astral-sh/uv:0.9.2 /uv /uvx /bin/
-
 ENV DEBIAN_FRONTEND=noninteractive \
-    UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
+    PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONIOENCODING=utf-8 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    UV_CACHE_DIR=/root/.cache/uv \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    VIRTUAL_ENV=/app/.venv
 
 WORKDIR /app
 
-RUN apt-get update && apt-get upgrade -y \
-    && apt-get install -y git build-essential \
-    python3-dev gcc wget \
-    libopenblas-dev ninja-build pkg-config \
-    ca-certificates libmagic1 libgl1 cmake zlib1g-dev \
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
+    build-essential ca-certificates libmagic1 libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
+COPY --from=ghcr.io/astral-sh/uv:0.9.2 /uv /uvx /bin/
+
+RUN uv venv
+
 # Copy dependency files
+# We only use pyproject.toml for CPU build because uv.lock resolves to CUDA on Linux
 COPY pyproject.toml ./
 
-# Configure build environment
-# GGML_NATIVE=OFF is crucial for portability and fixing macOS build issues
-ENV CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS -DGGML_NATIVE=OFF"
-
-# Install dependencies using uv
-# We create a dummy docint package to trick pip into installing dependencies from pyproject.toml
-# without needing the full source code (which would bust the cache)
-RUN mkdir -p docint && touch docint/__init__.py
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --upgrade pip && \
-    uv pip install --system \
-    --index-strategy unsafe-best-match \
-    --extra-index-url https://download.pytorch.org/whl/cpu \
-    .
+# Install dependencies (using cache mount to speed up downloads)
+RUN --mount=type=cache,target=${UV_CACHE_DIR} \
+    uv pip install \
+    --index-url https://download.pytorch.org/whl/cpu \
+    --extra-index-url https://pypi.org/simple \
+    -r pyproject.toml
 
 COPY . .
 
-# Install the project and overwrite the dummy package
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --no-deps .
+# Install the project itselfwithout re-installing dependencies (to preserve CPU versions)
+RUN --mount=type=cache,target=${UV_CACHE_DIR} \
+    uv pip install --no-deps .
 
 EXPOSE 8000
 
