@@ -978,7 +978,9 @@ def render_chat() -> None:
 
                         # Show spinner while waiting for the first chunk
                         with c1:
-                            with st.spinner("Thinking..."):
+                            with st.spinner(
+                                "Waiting for the backend to stop procrastinating..."
+                            ):
                                 try:
                                     first_line = next(lines)
                                 except StopIteration:
