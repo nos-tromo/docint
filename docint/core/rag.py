@@ -15,13 +15,15 @@ from typing import Any, Callable
 # TRANSFORMERS_OFFLINE env vars are set before huggingface_hub caches them.
 from docint.utils.env_cfg import (
     load_host_env,
-    load_ie_env,
+    load_ingestion_env,
+    load_ner_env,
     load_model_env,
-    load_llama_cpp_env,
+    load_openai_env,
     load_path_env,
-    load_rag_env,
+    load_retrieval_env,
     load_session_env,
     resolve_hf_cache_path,
+    PathConfig,
 )
 # isort: on
 
@@ -37,8 +39,8 @@ from llama_index.core.embeddings import BaseEmbedding
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.schema import BaseNode, Document
 from llama_index.core.storage.docstore.keyval_docstore import KVDocumentStore
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.llms.llama_cpp import LlamaCPP
+from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.llms.openai import OpenAI
 from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from loguru import logger
@@ -49,7 +51,7 @@ from docint.core.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.session_manager import SessionManager
 from docint.core.storage.docstore import QdrantKVStore
 from docint.core.storage.sources import stage_sources_to_qdrant
-from docint.utils.llama_cpp_cfg import LlamaCppPipeline, build_prompt_functions
+from docint.utils.openai_cfg import LocalOpenAI
 
 
 @dataclass(slots=True)
@@ -66,9 +68,9 @@ class RAG:
     enable_hybrid: bool = field(default=True)
 
     # --- Path setup ---
+    _path_config: PathConfig | None = field(default=None, init=False, repr=False)
     data_dir: Path | None = field(default=None, init=False)
     hf_hub_cache: Path | None = field(default=None, init=False)
-    llama_cpp_cache: Path | None = field(default=None, init=False)
 
     # --- Session config ---
     session_store: str = field(default="", init=False)
@@ -77,9 +79,7 @@ class RAG:
     embed_model_id: str | None = field(default=None, init=False)
     sparse_model_id: str | None = field(default=None, init=False)
     rerank_model_id: str | None = field(default=None, init=False)
-    gen_model_id: str | None = field(default=None, init=False)
-    gen_model_file: str | None = field(default=None, init=False)
-    llm_tokenizer_id: str | None = field(default=None, init=False)
+    text_model_id: str | None = field(default=None, init=False)
 
     # --- Qdrant controls ---
     docstore_batch_size: int = field(default=100, init=False)
@@ -87,21 +87,18 @@ class RAG:
     _qdrant_col_dir: Path | None = field(default=None, init=False, repr=False)
     _qdrant_src_dir: Path | None = field(default=None, init=False, repr=False)
 
-    # --- Llama.cpp parameters ---
-    llama_cpp_ctx_window: int | None = field(default=None, init=False)
-    llama_cpp_max_new_tokens: int = field(default=1024, init=False)
-    llama_cpp_request_timeout: int | None = field(default=None, init=False)
-    llama_cpp_seed: int | None = field(default=None, init=False)
-    llama_cpp_temperature: float | None = field(default=None, init=False)
-    llama_cpp_n_gpu_layers: int = field(default=-1, init=False)
-    llama_cpp_top_k: int | None = field(default=None, init=False)
-    llama_cpp_top_p: float | None = field(default=None, init=False)
-    llama_cpp_repeat_penalty: float | None = field(default=None, init=False)
-    llama_cpp_options: dict[str, Any] | None = field(default=None, init=False)
+    # --- OpenAI parameters ---
+    openai_temperature: float = field(default=0.1, init=False)
+    openai_max_retries: int = field(default=2, init=False)
+    openai_timeout: float = field(default=300.0, init=False)
+    openai_reuse_client: bool = field(default=True, init=False)
+    openai_ctx_window: int = field(default=4096, init=False)
+    openai_api_key: str | None = field(default=None, init=False)
+    openai_api_base: str | None = field(default=None, init=False)
 
     # --- Information extraction ---
-    ie_enabled: bool = field(default=False, init=False)
-    ie_sources: list[dict[str, Any]] = field(default_factory=list, init=False)
+    ner_enabled: bool = field(default=False, init=False)
+    ner_sources: list[dict[str, Any]] = field(default_factory=list, init=False)
 
     # --- Reranking / retrieval ---
     retrieve_similarity_top_k: int = field(default=20, init=False)
@@ -116,7 +113,7 @@ class RAG:
     # --- Runtime (lazy caches / not in repr) ---
     _device: str | None = field(default=None, init=False, repr=False)
     _embed_model: BaseEmbedding | None = field(default=None, init=False, repr=False)
-    _gen_model: LlamaCPP | None = field(default=None, init=False, repr=False)
+    _text_model: OpenAI | None = field(default=None, init=False, repr=False)
     _reranker: FlagEmbeddingReranker | None = field(
         default=None, init=False, repr=False
     )
@@ -143,55 +140,43 @@ class RAG:
             ValueError: If summarize_prompt_path is not set.
         """
         # --- Host config ---
-        host_config = load_host_env()
-        self.qdrant_host = host_config.qdrant_host
+        _host_config = load_host_env()
+        self.qdrant_host = _host_config.qdrant_host
 
-        # --- Path config ---
-        path_config = load_path_env()
-        self.data_dir = path_config.data
-        self.prompt_dir = path_config.prompts
-        self._qdrant_col_dir = path_config.qdrant_collections
-        self._qdrant_src_dir = path_config.qdrant_sources
-        self.hf_hub_cache = path_config.hf_hub_cache
-        self.llama_cpp_cache = path_config.llama_cpp_cache
+        # --- Ingestion config ---
+        _ingestion_config = load_ingestion_env()
+        self.docstore_batch_size = _ingestion_config.docstore_batch_size
 
         # --- Model config ---
-        model_config = load_model_env()
-        self.embed_model_id = model_config.embed_model
-        self.sparse_model_id = model_config.sparse_model
-        self.rerank_model_id = model_config.rerank_model
-        self.gen_model_id = model_config.llm
-        self.gen_model_file = model_config.llm_file
-        self.llm_tokenizer_id = model_config.llm_tokenizer or None
+        _model_config = load_model_env()
+        suffix = ".gguf"
+        self.embed_model_id = _model_config.embed_model_file.removesuffix(suffix)
+        self.rerank_model_id = _model_config.rerank_model
+        self.sparse_model_id = _model_config.sparse_model
+        self.text_model_id = _model_config.text_model_file.removesuffix(suffix)
 
-        # --- Information Extraction config ---
-        self.ie_enabled = load_ie_env().ie_enabled
+        # --- OpenAI config ---
+        _openai_config = load_openai_env()
+        self.openai_temperature = _openai_config.temperature
+        self.openai_max_retries = _openai_config.max_retries
+        self.openai_timeout = _openai_config.timeout
+        self.openai_reuse_client = _openai_config.reuse_client
+        self.openai_ctx_window = _openai_config.ctx_window
+        self.openai_api_key = _openai_config.api_key
+        self.openai_api_base = _openai_config.api_base
 
-        # --- Llama.cpp config ---
-        llama_cpp_config = load_llama_cpp_env()
-        self.llama_cpp_ctx_window = llama_cpp_config.ctx_window
-        self.llama_cpp_max_new_tokens = llama_cpp_config.max_new_tokens
-        self.llama_cpp_request_timeout = llama_cpp_config.request_timeout
-        self.llama_cpp_seed = llama_cpp_config.seed
-        self.llama_cpp_temperature = llama_cpp_config.temperature
-        self.llama_cpp_n_gpu_layers = llama_cpp_config.n_gpu_layers
-        self.llama_cpp_top_k = llama_cpp_config.top_k
-        self.llama_cpp_top_p = llama_cpp_config.top_p
-        self.llama_cpp_repeat_penalty = llama_cpp_config.repeat_penalty
-        self.llama_cpp_options = {
-            "seed": self.llama_cpp_seed,
-            "top_k": self.llama_cpp_top_k,
-            "top_p": self.llama_cpp_top_p,
-            "repeat_penalty": self.llama_cpp_repeat_penalty,
-        }
+        # --- Named Entity Recognition (NER) config ---
+        self.ner_enabled = load_ner_env().enabled
 
-        # --- RAG config ---
-        rag_config = load_rag_env()
-        self.docstore_batch_size = rag_config.docstore_batch_size
-        self.retrieve_similarity_top_k = rag_config.retrieve_top_k
-        self.rerank_top_n = int(self.retrieve_similarity_top_k // 4)
-        self.rerank_use_fp16 = rag_config.rerank_use_fp16
+        # --- Path config ---
+        self._path_config = load_path_env()
+        self.data_dir = self._path_config.data
+        self.prompt_dir = self._path_config.prompts
+        self._qdrant_col_dir = self._path_config.qdrant_collections
+        self._qdrant_src_dir = self._path_config.qdrant_sources
+        self.hf_hub_cache = self._path_config.hf_hub_cache
 
+        ## --- Load prompts ---
         if self.prompt_dir:
             self.summarize_prompt_path = self.prompt_dir / "summarize.txt"
         if self.summarize_prompt_path is None:
@@ -204,6 +189,12 @@ class RAG:
 
         with open(self.summarize_prompt_path, "r", encoding="utf-8") as f:
             self.summarize_prompt = f.read()
+
+        # --- Retrieval config ---
+        _retrieval_config = load_retrieval_env()
+        self.rerank_use_fp16 = _retrieval_config.rerank_use_fp16
+        self.retrieve_similarity_top_k = _retrieval_config.retrieve_top_k
+        self.rerank_top_n = int(self.retrieve_similarity_top_k // 4)
 
         # --- Session config ---
         self.session_store = load_session_env().session_store
@@ -272,26 +263,6 @@ class RAG:
         if self.sessions is not None:
             self.sessions.chat_memory = value
 
-    # --- Static methods ---
-    @staticmethod
-    def _list_supported_sparse_models() -> list[str]:
-        """
-        Lists all supported sparse models.
-
-        Returns:
-            list[str]: A list of supported sparse model IDs.
-
-        Raises:
-            ImportError: If fastembed is not installed.
-        """
-        try:
-            return [m["model"] for m in SparseTextEmbedding.list_supported_models()]
-        except ImportError:
-            logger.warning(
-                "ImportError: fastembed is not installed; cannot list sparse models."
-            )
-            return []
-
     # --- Properties (lazy loading) ---
     @property
     def qdrant_col_dir(self) -> Path:
@@ -304,10 +275,13 @@ class RAG:
             The Path representing the Qdrant host directory.
 
         Raises:
-            ValueError: If the Qdrant host directory is not set.
+            ValueError: If the path configuration or the Qdrant host directory is not set.
         """
         if self._qdrant_col_dir is None:
-            env = load_path_env().qdrant_collections
+            if self._path_config is None:
+                logger.error("ValueError: Path configuration is not set.")
+                raise ValueError("Path configuration is not set.")
+            env = self._path_config.qdrant_collections
             if env:
                 self._qdrant_col_dir = Path(env) if not env.is_absolute() else env
             else:
@@ -332,10 +306,13 @@ class RAG:
             The Path representing the Qdrant source host directory.
 
         Raises:
-            ValueError: If the Qdrant source host directory is not set.
+            ValueError: If the path configuration or the Qdrant source host directory is not set.
         """
         if self._qdrant_src_dir is None:
-            env = load_path_env().qdrant_sources
+            if self._path_config is None:
+                logger.error("ValueError: Path configuration is not set.")
+                raise ValueError("Path configuration is not set.")
+            env = self._path_config.qdrant_sources
             if env:
                 self._qdrant_src_dir = Path(env) if not env.is_absolute() else env
             else:
@@ -387,39 +364,17 @@ class RAG:
         if self._embed_model is None:
             if self.embed_model_id is None:
                 raise ValueError("embed_model_id cannot be None")
-            resolved = resolve_hf_cache_path(
-                self.hf_hub_cache or Path(), self.embed_model_id
-            )
-            resolved_model = str(resolved) if resolved else self.embed_model_id
-            if resolved:
-                logger.info("Using local model path: {}", resolved_model)
 
-            try:
-                model = HuggingFaceEmbedding(
-                    model_name=resolved_model,
-                    normalize=True,
-                    device=self.device,
-                )
-                # Trigger warmup to detect potential MPS/meta-tensor issues immediately
-                model.get_text_embedding("warmup")
-                self._embed_model = model
-                logger.info("Initializing embedding model: {}", self.embed_model_id)
-            except Exception as e:
-                if self.device == "mps" and "meta tensor" in str(e):
-                    logger.warning(
-                        "MPS meta-tensor error detected. Falling back to CPU for embeddings. Error: {}",
-                        e,
-                    )
-                    self._device = "cpu"
-                    self._embed_model = HuggingFaceEmbedding(
-                        model_name=resolved_model,
-                        normalize=True,
-                        device="cpu",
-                    )
-                    # Trigger warmup to ensure CPU fallback is working
-                    self._embed_model.get_text_embedding("warmup")
-                else:
-                    raise
+            logger.info("Initializing embedding model: {}", self.embed_model_id)
+            self._embed_model = OpenAIEmbedding(
+                model_name=self.embed_model_id,
+                api_key=self.openai_api_key,
+                api_base=self.openai_api_base,
+                timeout=self.openai_timeout,
+                max_retries=self.openai_max_retries,
+                reuse_client=False,
+            )
+
         return self._embed_model
 
     @property
@@ -475,12 +430,8 @@ class RAG:
                     f"Supported: {supported_ids}"
                 )
 
-        cache_dir = self.hf_hub_cache or Path.home() / ".cache" / "huggingface" / "hub"
-        resolved = resolve_hf_cache_path(cache_dir, chosen)
-        if resolved:
-            logger.info("Using local sparse model path: {}", resolved)
-            return str(resolved)
-
+        # Return the canonical fastembed model name.  fastembed will resolve
+        # local files via FASTEMBED_CACHE_PATH (set by env_cfg to HF_HUB_CACHE).
         return chosen
 
     @property
@@ -515,133 +466,52 @@ class RAG:
             )
         return self._reranker
 
-    def _create_gen_model(self, enable_json: bool = False) -> LlamaCPP:
+    def _create_text_model(self) -> OpenAI:
         """
-        Helper to create a Llama.cpp model instance with specific settings.
-
-        Args:
-            enable_json (bool): Whether to enforce JSON output mode.
+        Helper to create an OpenAI (or compatible) model instance.
 
         Returns:
-            LlamaCPP: The initialized model.
+            OpenAI: The initialized model.
 
         Raises:
             ValueError: If required configuration is missing.
         """
-        if self.gen_model_id is None:
-            raise ValueError("gen_model_id cannot be None")
-        if self.llama_cpp_ctx_window is None:
-            raise ValueError("llama_cpp_ctx_window cannot be None for Llama.cpp model")
+        if self.text_model_id is None:
+            raise ValueError("text_model_id cannot be None")
 
-        # Resolve model path
-        model_cache = self.llama_cpp_cache or Path.home() / ".cache" / "llama.cpp"
-        model_path = None
+        additional_kwargs: dict[str, Any] = {}
 
-        if self.gen_model_file:
-            # Try direct path first (e.g. file sitting directly in cache dir)
-            direct_path = model_cache / self.gen_model_file
-            if direct_path.exists():
-                model_path = direct_path
-
-            # Try HF cache structure: models--{org}--{repo}/snapshots/{hash}/{file}
-            if model_path is None and self.gen_model_id:
-                model_path = resolve_hf_cache_path(
-                    cache_dir=model_cache,
-                    repo_id=self.gen_model_id,
-                    filename=self.gen_model_file,
-                )
-
-        if model_path is None:
-            logger.warning(
-                "Model file not found locally, attempting download: repo={}, file={}, cache={}",
-                self.gen_model_id,
-                self.gen_model_file,
-                model_cache,
-            )
-            if self.gen_model_file is None:
-                logger.error(
-                    "ValueError: gen_model_file must be specified to download the model."
-                )
-                raise ValueError(
-                    "gen_model_file must be specified to download the model."
-                )
-            LlamaCppPipeline.ensure_model(
-                model_id=self.gen_model_file, repo_id=self.gen_model_id
-            )
-
-            # Re-resolve after download
-            direct_path = model_cache / self.gen_model_file
-            if direct_path.exists():
-                model_path = direct_path
-            elif self.gen_model_id:
-                model_path = resolve_hf_cache_path(
-                    cache_dir=model_cache,
-                    repo_id=self.gen_model_id,
-                    filename=self.gen_model_file,
-                )
-
-        if model_path is None:
-            raise FileNotFoundError(
-                f"Model file not found: {self.gen_model_file} "
-                f"(repo: {self.gen_model_id}, cache: {model_cache})"
-            )
-
-        # Ensure options dict exists
-        if self.llama_cpp_options is None:
-            self.llama_cpp_options = {}
-
-        # Prepare options copy to avoid side effects
-        options = self.llama_cpp_options.copy()
-
-        # Consistent seed behavior
-        if self.llama_cpp_seed is not None:
-            options["seed"] = self.llama_cpp_seed
-
-        # Add stop tokens so the model stops at the end of an assistant turn
-        options.setdefault("stop", ["<|im_end|>"])
-
-        # Build model-agnostic prompt functions via tokenizer
-        messages_fn, completion_fn = build_prompt_functions(
-            tokenizer_id=self.llm_tokenizer_id,
-            model_id=self.gen_model_id,
-            cache_dir=model_cache,
+        # LlamaIndex OpenAI class supports api_key, api_base, timeout, max_retries
+        # Use LocalOpenAI which tolerates unknown model names (e.g. paths) by falling back to default metadata
+        model = LocalOpenAI(
+            model=self.text_model_id,
+            temperature=self.openai_temperature,
+            max_retries=self.openai_max_retries,
+            additional_kwargs=additional_kwargs,
+            timeout=self.openai_timeout,
+            reuse_client=self.openai_reuse_client,
+            api_key=self.openai_api_key,
+            api_base=self.openai_api_base,
+            context_window=self.openai_ctx_window,
         )
 
-        model = LlamaCPP(
-            model_path=str(model_path),
-            temperature=self.llama_cpp_temperature
-            if self.llama_cpp_temperature is not None
-            else 0.1,
-            max_new_tokens=self.llama_cpp_max_new_tokens,
-            context_window=self.llama_cpp_ctx_window,
-            model_kwargs={
-                "n_gpu_layers": self.llama_cpp_n_gpu_layers,
-            },
-            generate_kwargs=options,
-            messages_to_prompt=messages_fn,
-            completion_to_prompt=completion_fn,
-        )
         logger.info(
-            "Initializing generator model: {} (json={})",
-            self.gen_model_id,
-            enable_json,
+            "Initializing generator model: {}",
+            self.text_model_id,
         )
         return model
 
     @property
-    def gen_model(self) -> LlamaCPP:
+    def text_model(self) -> OpenAI:
         """
-        Lazily initializes and returns the generation model (Llama.cpp).
+        Lazily initializes and returns the generation model (OpenAI).
 
         Returns:
-            LlamaCPP: The initialized generation model.
-
-        Raises:
-            ValueError: If gen_model_id or llama_cpp_ctx_window is None.
+            OpenAI: The initialized generation model.
         """
-        if self._gen_model is None:
-            self._gen_model = self._create_gen_model()
-        return self._gen_model
+        if self._text_model is None:
+            self._text_model = self._create_text_model()
+        return self._text_model
 
     @property
     def qdrant_client(self) -> QdrantClient:
@@ -743,14 +613,19 @@ class RAG:
             logger.error("ValueError: data_dir cannot be None for ingestion pipeline.")
             raise ValueError("data_dir cannot be None for ingestion pipeline.")
 
-        ie_model = None
-        if self.ie_enabled and load_ie_env().ie_engine == "llama_cpp":
-            # Enforce JSON for IE tasks to ensure structured output
-            ie_model = self._create_gen_model(enable_json=True)
+        ner_model = None
+        if self.ner_enabled and load_ner_env().engine in [
+            "llama_cpp",
+            "ollama",
+            "openai",
+            "llm",
+        ]:
+            # Enforce JSON for NER tasks to ensure structured output
+            ner_model = self._create_text_model()
 
         return DocumentIngestionPipeline(
             data_dir=self.data_dir,
-            ie_model=ie_model,
+            ner_model=ner_model,
             device=self.device,
             progress_callback=progress_callback,
         )
@@ -915,7 +790,7 @@ class RAG:
         k = min(max(self.retrieve_similarity_top_k, self.rerank_top_n * 8), 64)
         self.query_engine = RetrieverQueryEngine.from_args(
             retriever=self.index.as_retriever(similarity_top_k=k),
-            llm=self.gen_model,
+            llm=self.text_model,
             node_postprocessors=[self.reranker],
         )
 
@@ -1585,7 +1460,7 @@ class RAG:
         retriever = self.index.as_retriever(similarity_top_k=k)
         streaming_engine = RetrieverQueryEngine.from_args(
             retriever=retriever,
-            llm=self.gen_model,
+            llm=self.text_model,
             node_postprocessors=[self.reranker],
             streaming=True,
         )
@@ -1749,21 +1624,21 @@ class RAG:
 
         return sorted(results, key=lambda x: str(x["filename"]))
 
-    def get_collection_ie(self, refresh: bool = False) -> list[dict[str, Any]]:
+    def get_collection_ner(self, refresh: bool = False) -> list[dict[str, Any]]:
         """
-        Fetch all nodes from the current collection and return their IE metadata.
+        Fetch all nodes from the current collection and return their NER metadata.
 
         Returns:
-            list[dict[str, Any]]: A list of source metadata dictionaries containing IE data.
+            list[dict[str, Any]]: A list of source metadata dictionaries containing NER data.
         """
         if not self.qdrant_collection:
             return []
 
-        if self.ie_sources and not refresh:
-            return self.ie_sources
+        if self.ner_sources and not refresh:
+            return self.ner_sources
 
-        if self.ie_sources:
-            return self.ie_sources
+        if self.ner_sources:
+            return self.ner_sources
 
         sources = []
         offset = None
@@ -1788,10 +1663,10 @@ class RAG:
             for point in points:
                 payload = getattr(point, "payload", None)
                 if isinstance(payload, dict):
-                    # We only care about nodes that have IE data
+                    # We only care about nodes that have NER data
                     if "entities" in payload or "relations" in payload:
                         # Normalize payload to match what _normalize_response_data produces
-                        # so that _render_ie_overview in app.py can handle it.
+                        # so that _render_ner_overview in app.py can handle it.
 
                         # Extract filename/filetype/etc.
                         origin = payload.get("origin") or {}
@@ -1836,7 +1711,7 @@ class RAG:
             if offset is None:
                 break
 
-        self.ie_sources = sources
+        self.ner_sources = sources
         return sources
 
     def unload_models(self) -> None:
@@ -1844,7 +1719,7 @@ class RAG:
         Unload models to free up memory.
         """
         self._embed_model = None
-        self._gen_model = None
+        self._text_model = None
         self._reranker = None
 
         gc.collect()

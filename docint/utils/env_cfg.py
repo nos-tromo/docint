@@ -24,6 +24,15 @@ def set_offline_env() -> None:
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
         os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
         os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+        # Point fastembed at the HF hub cache so it reuses models downloaded
+        # by ``model_cfg.py`` instead of trying to fetch them.
+        if not os.getenv("FASTEMBED_CACHE_PATH"):
+            default_hf_cache = str(Path.home() / ".cache" / "huggingface" / "hub")
+            os.environ["FASTEMBED_CACHE_PATH"] = os.getenv(
+                "HF_HUB_CACHE", default_hf_cache
+            )
+
         logger.info("Set Hugging Face libraries to offline mode.")
     else:
         logger.info("Hugging Face libraries are in online mode.")
@@ -84,32 +93,17 @@ class HostConfig:
 
 
 @dataclass(frozen=True)
-class InformationExtractionConfig:
-    """
-    Dataclass for information extraction configuration.
-    """
-
-    ie_enabled: bool
-    ie_max_chars: int
-    ie_max_workers: int
-    ie_engine: str
-
-
-@dataclass(frozen=True)
-class LlamaCppConfig:
-    """
-    Dataclass for Llama.cpp configuration.
-    """
-
-    ctx_window: int
-    max_new_tokens: int
-    request_timeout: int
-    seed: int
-    temperature: float
-    n_gpu_layers: int
-    top_k: int
-    top_p: float
-    repeat_penalty: float
+class IngestionConfig:
+    coarse_chunk_size: int
+    docling_accelerator_num_threads: int
+    docstore_batch_size: int
+    fine_chunk_overlap: int
+    fine_chunk_size: int
+    hierarchical_chunking_enabled: bool
+    ingestion_batch_size: int
+    sentence_splitter_chunk_overlap: int
+    sentence_splitter_chunk_size: int
+    supported_filetypes: list[str]
 
 
 @dataclass(frozen=True)
@@ -118,16 +112,44 @@ class ModelConfig:
     Dataclass for model configuration.
     """
 
-    embed_model: str
-    sparse_model: str
+    embed_model_file: str
+    embed_model_repo: str
     ner_model: str
     rerank_model: str
-    llm: str
-    llm_file: str
-    llm_tokenizer: str
-    vlm: str
-    vlm_file: str
+    sparse_model: str
+    text_model_file: str
+    text_model_repo: str
+    vision_model_file: str
+    vision_model_repo: str
     whisper_model: str
+
+
+@dataclass(frozen=True)
+class NERConfig:
+    """
+    Dataclass for information extraction configuration.
+    """
+
+    enabled: bool
+    max_chars: int
+    max_workers: int
+    engine: str
+
+
+@dataclass(frozen=True)
+class OpenAIConfig:
+    """
+    Dataclass for OpenAI-compatible API configuration.
+    """
+
+    temperature: float
+    max_retries: int
+    timeout: float
+    reuse_client: bool
+    ctx_window: int
+    api_key: str
+    api_base: str
+    inference_server: str
 
 
 @dataclass(frozen=True)
@@ -143,28 +165,18 @@ class PathConfig:
     prompts: Path
     qdrant_collections: Path
     qdrant_sources: Path
-    required_exts: Path
     hf_hub_cache: Path
     llama_cpp_cache: Path
 
 
 @dataclass(frozen=True)
-class RAGConfig:
+class RetrievalConfig:
     """
     Dataclass for RAG (Retrieval-Augmented Generation) configuration.
     """
 
-    docstore_batch_size: int
-    ingestion_batch_size: int
-    docling_accelerator_num_threads: int
-    retrieve_top_k: int
-    sentence_splitter_chunk_overlap: int
-    sentence_splitter_chunk_size: int
-    hierarchical_chunking_enabled: bool
-    coarse_chunk_size: int
-    fine_chunk_size: int
-    fine_chunk_overlap: int
     rerank_use_fp16: bool
+    retrieve_top_k: int
 
 
 @dataclass(frozen=True)
@@ -205,144 +217,273 @@ def load_host_env(
     )
 
 
-def load_ie_env(
-    default_ie_enabled: bool = True,
-    default_ie_max_chars: int = 800,
-    default_ie_max_workers: int = 4,
-    default_ie_engine: str = "gliner",
-) -> InformationExtractionConfig:
+def load_ingestion_env(
+    default_coarse_chunk_size: int = 8192,
+    default_docling_accelerator_num_threads: int = 4,
+    default_docstore_batch_size: int = 100,
+    default_fine_chunk_overlap: int = 0,
+    default_fine_chunk_size: int = 8192,
+    default_hierarchical_chunking_enabled: bool = True,
+    default_ingestion_batch_size: int = 5,
+    default_sentence_splitter_chunk_overlap: int = 64,
+    default_sentence_splitter_chunk_size: int = 1024,
+    default_supported_filetypes: list[str] = [
+        ".avi",
+        ".csv",
+        ".docx",
+        ".flv",
+        ".gif",
+        ".jpeg",
+        ".jpg",
+        ".jsonl",
+        ".md",
+        ".mkv",
+        ".mov",
+        ".mpeg",
+        ".mpg",
+        ".mp3",
+        ".mp4",
+        ".m4a",
+        ".m4v",
+        ".ogg",
+        ".parquet",
+        ".pdf",
+        ".png",
+        ".tsv",
+        ".txt",
+        ".wav",
+        ".webm",
+        ".wmv",
+        ".xls",
+        ".xlsx",
+    ],
+) -> IngestionConfig:
     """
-    Loads information extraction configuration from environment variables or defaults.
-
-    Args:
-        default_ie_enabled (bool): Default value to enable IE extraction. Set to True to enable by default.
-        default_ie_max_chars (int): Default maximum characters for IE extraction.
-        default_ie_max_workers (int): Default maximum worker threads for IE extraction.
-        default_ie_engine (str): Default IE engine to use. Options: gliner, llama_cpp.
+    Loads ingestion configuration from environment variables or defaults.
 
     Returns:
-        IEConfig: Dataclass containing IE configuration.
-        - ie_enabled (bool): Whether to run entity/relation extraction during ingestion.
-        - ie_max_chars (int): Maximum characters from each node to send to the extractor.
-        - ie_max_workers (int): Maximum number of worker threads for IE extraction.
+        IngestionConfig: Dataclass containing ingestion configuration.
+        - coarse_chunk_size (int): The coarse chunk size for hierarchical chunking.
+        - docling_accelerator_num_threads (int): The default number of threads for Docling accelerator.
+        - docstore_batch_size (int): The batch size for document store operations.
+        - fine_chunk_overlap (int): The fine chunk overlap size for hierarchical chunking.
+        - fine_chunk_size (int): The fine chunk size for hierarchical chunking.
+        - hierarchical_chunking_enabled (bool): Whether hierarchical chunking is enabled.
+        - ingestion_batch_size (int): The batch size for ingestion.
+        - sentence_splitter_chunk_overlap (int): The chunk overlap size for sentence splitting.
+        - sentence_splitter_chunk_size (int): The chunk size for sentence splitting.
+        - supported_filetypes (list[str]): List of supported file extensions for ingestion.
     """
-    return InformationExtractionConfig(
-        ie_enabled=str(os.getenv("ENABLE_IE", default_ie_enabled)).lower()
+    return IngestionConfig(
+        coarse_chunk_size=int(
+            os.getenv("COARSE_CHUNK_SIZE", default_coarse_chunk_size)
+        ),
+        docling_accelerator_num_threads=int(
+            os.getenv(
+                "DOCLING_ACCELERATOR_NUM_THREADS",
+                default_docling_accelerator_num_threads,
+            )
+        ),
+        docstore_batch_size=int(
+            os.getenv("DOCSTORE_BATCH_SIZE", default_docstore_batch_size)
+        ),
+        fine_chunk_overlap=int(
+            os.getenv("FINE_CHUNK_OVERLAP", default_fine_chunk_overlap)
+        ),
+        fine_chunk_size=int(os.getenv("FINE_CHUNK_SIZE", default_fine_chunk_size)),
+        hierarchical_chunking_enabled=str(
+            os.getenv("HIERARCHICAL_CHUNKING_ENABLED", "true")
+        ).lower()
         in {"true", "1", "yes"},
-        ie_max_chars=int(os.getenv("IE_MAX_CHARS", default_ie_max_chars)),
-        ie_max_workers=int(os.getenv("IE_MAX_WORKERS", default_ie_max_workers)),
-        ie_engine=os.getenv("IE_ENGINE", default_ie_engine).lower(),
-    )
-
-
-def load_llama_cpp_env(
-    default_ctx_window: int = 8192,
-    default_max_new_tokens: int = 1024,
-    default_request_timeout: int = 1200,
-    default_seed: int = 42,
-    default_temperature: float = 0.1,
-    default_n_gpu_layers: int = -1,
-    default_top_k: int = 40,
-    default_top_p: float = 0.95,
-    default_repeat_penalty: float = 1.1,
-) -> LlamaCppConfig:
-    """
-    Loads Llama.cpp configuration from environment variables or defaults.
-
-    Args:
-        default_ctx_window (int): Default context window size.
-        default_max_new_tokens (int): Default maximum new tokens per completion.
-        default_request_timeout (int): Default request timeout in seconds.
-        default_seed (int): Default random seed for generation.
-        default_temperature (float): Default temperature setting for generation.
-        default_n_gpu_layers (int): Default number of layers to offload to GPU (-1 = all).
-        default_top_k (int): Default top_k setting for generation.
-        default_top_p (float): Default top_p setting for generation.
-        default_repeat_penalty (float): Default repetition penalty for generation.
-
-    Returns:
-        LlamaCppConfig: Dataclass containing Llama.cpp configuration.
-        - ctx_window (int): The context window size.
-        - max_new_tokens (int): Maximum number of tokens to generate per completion.
-        - request_timeout (int): The request timeout in seconds.
-        - seed (int): The random seed for generation.
-        - temperature (float): The temperature setting for generation.
-        - n_gpu_layers (int): Number of layers to offload to GPU (-1 = all).
-        - top_k (int): The top_k setting for generation.
-        - top_p (float): The top_p setting for generation.
-        - repeat_penalty (float): The repetition penalty for generation.
-    """
-    return LlamaCppConfig(
-        ctx_window=int(os.getenv("LLAMA_CPP_CTX_WINDOW", default_ctx_window)),
-        max_new_tokens=int(
-            os.getenv("LLAMA_CPP_MAX_NEW_TOKENS", default_max_new_tokens)
+        ingestion_batch_size=int(
+            os.getenv("INGESTION_BATCH_SIZE", default_ingestion_batch_size)
         ),
-        request_timeout=int(
-            os.getenv("LLAMA_CPP_REQUEST_TIMEOUT", default_request_timeout)
+        sentence_splitter_chunk_overlap=int(
+            os.getenv(
+                "SENTENCE_SPLITTER_CHUNK_OVERLAP",
+                default_sentence_splitter_chunk_overlap,
+            )
         ),
-        seed=int(os.getenv("LLAMA_CPP_SEED", default_seed)),
-        temperature=float(os.getenv("LLAMA_CPP_TEMPERATURE", default_temperature)),
-        n_gpu_layers=int(os.getenv("LLAMA_CPP_N_GPU_LAYERS", default_n_gpu_layers)),
-        top_k=int(os.getenv("LLAMA_CPP_TOP_K", default_top_k)),
-        top_p=float(os.getenv("LLAMA_CPP_TOP_P", default_top_p)),
-        repeat_penalty=float(
-            os.getenv("LLAMA_CPP_REPEAT_PENALTY", default_repeat_penalty)
+        sentence_splitter_chunk_size=int(
+            os.getenv(
+                "SENTENCE_SPLITTER_CHUNK_SIZE", default_sentence_splitter_chunk_size
+            )
         ),
+        supported_filetypes=default_supported_filetypes,
     )
 
 
 def load_model_env(
-    default_embed_model: str = "BAAI/bge-m3",
-    default_sparse_model: str = "Qdrant/all_miniLM_L6_v2_with_attentions",
+    default_embed_model_str: str = "ggml-org/bge-m3-Q8_0-GGUF;bge-m3-q8_0.gguf",
     default_ner_model: str = "gliner-community/gliner_large-v2.5",
     default_rerank_model: str = "BAAI/bge-reranker-v2-m3",
-    default_llm: str = "unsloth/Qwen3-1.7B-GGUF",
-    default_llm_file: str = "Qwen3-1.7B-Q4_K_M.gguf",
-    default_llm_tokenizer: str = "Qwen/Qwen3-1.7B",
-    default_vlm: str = "Qwen/Qwen3-VL-8B-Instruct-GGUF",
-    default_vlm_file: str = "Qwen3VL-8B-Instruct-Q4_K_M.gguf",
+    default_sparse_model: str = "Qdrant/all_miniLM_L6_v2_with_attentions",
+    default_text_model_str: str = "unsloth/Qwen3-1.7B-GGUF;Qwen3-1.7B-Q4_K_M.gguf",
+    default_vision_model_str: str = "Qwen/Qwen3-VL-8B-Instruct-GGUF;Qwen3VL-8B-Instruct-Q4_K_M.gguf",
     default_whisper_model: str = "turbo",
 ) -> ModelConfig:
     """
     Loads model configuration from environment variables or defaults.
 
     Args:
-        default_embed_model (str): Default embedding model identifier.
-        default_sparse_model (str): Default sparse model identifier.
+        default_embed_model_str (str): Default embedding model identifier.
         default_ner_model (str): Default NER model identifier.
         default_rerank_model (str): Default reranker model identifier.
-        default_llm (str): Default LLM (Language Model) identifier for generation.
-        default_llm_file (str): Default local file name for the LLM model (GGUF format).
-        default_llm_tokenizer (str): Default HuggingFace repo for the LLM tokenizer.
-            Used by apply_chat_template() to format prompts. Leave empty to auto-detect.
-        default_vlm (str): Default VLM (Vision-Language Model) identifier for generation.
-        default_vlm_file (str): Default local file name for the VLM model (GGUF format).
+        default_sparse_model (str): Default sparse model identifier.
+        default_text_model_str (str): Default text model identifier.
+        default_vision_model_str (str): Default vision model identifier.
         default_whisper_model (str): Default Whisper model identifier.
 
     Returns:
         ModelConfig: Dataclass containing model configuration.
-        - embed_model (str): The embedding model identifier.
-        - sparse_model (str): The sparse model identifier.
+        - embed_model_file (str): The embedding model file name.
+        - embed_model_repo (str): The embedding model HuggingFace repo ID for cache resolution
         - ner_model (str): The NER model identifier.
         - rerank_model (str): The reranker model identifier.
-        - llm (str): The LLM (Language Model) identifier for generation.
-        - llm_file (str): The local file name for the LLM model (GGUF format).
-        - llm_tokenizer (str): HuggingFace repo for the LLM tokenizer.
-        - vlm (str): The VLM (Vision-Language Model) identifier for generation.
-        - vlm_file (str): The local file name for the VLM model (GGUF format).
+        - sparse_model (str): The sparse model identifier.
+        - text_model_file (str): The text model file name.
+        - text_model_repo (str): The text model HuggingFace repo ID for cache resolution
+        - vision_model_file (str): The vision model file name.
+        - vision_model_repo (str): The vision model HuggingFace repo ID for cache resolution
         - whisper_model (str): The Whisper model identifier.
     """
+
+    def resolve_model_name(model_str: str) -> tuple[str, str]:
+        """
+        Resolve a model string into its repo ID and file name components.
+
+        The model string can be in the format "repo_id;file_name" (required for llama.cpp) or just "model_name".
+        If only "model_name" is provided, it is treated as both the repo ID and file name.
+
+        Args:
+            model_str (str): The model string to resolve.
+
+        Returns:
+            tuple[str, str] | str: A tuple of (repo_id, file_name) if the input contains a semicolon.
+        """
+        if ";" in model_str:
+            repo_id, file_name = model_str.split(";", 1)
+            return repo_id.strip(), file_name.strip()
+        else:
+            return model_str.strip(), model_str.strip()
+
+    embed_model_repo, embed_model_file = resolve_model_name(
+        os.getenv("EMBED_MODEL", default_embed_model_str)
+    )
+    text_model_repo, text_model_file = resolve_model_name(
+        os.getenv("LLM", default_text_model_str)
+    )
+    vision_model_repo, vision_model_file = resolve_model_name(
+        os.getenv("VLM", default_vision_model_str)
+    )
+
     return ModelConfig(
-        embed_model=os.getenv("EMBED_MODEL", default_embed_model),
-        sparse_model=os.getenv("SPARSE_MODEL", default_sparse_model),
+        embed_model_file=embed_model_file,
+        embed_model_repo=embed_model_repo,
         ner_model=os.getenv("NER_MODEL", default_ner_model),
         rerank_model=os.getenv("RERANK_MODEL", default_rerank_model),
-        llm=os.getenv("LLM", default_llm),
-        llm_file=os.getenv("LLM_FILE", default_llm_file),
-        llm_tokenizer=os.getenv("LLM_TOKENIZER", default_llm_tokenizer),
-        vlm=os.getenv("VLM", default_vlm),
-        vlm_file=os.getenv("VLM_FILE", default_vlm_file),
+        sparse_model=os.getenv("SPARSE_MODEL", default_sparse_model),
+        text_model_file=text_model_file,
+        text_model_repo=text_model_repo,
+        vision_model_file=vision_model_file,
+        vision_model_repo=vision_model_repo,
         whisper_model=os.getenv("WHISPER_MODEL", default_whisper_model),
+    )
+
+
+def load_ner_env(
+    default_enabled: bool = True,
+    default_max_chars: int = 1024,
+    default_max_workers: int = 4,
+    default_engine: str = "gliner",
+) -> NERConfig:
+    """
+    Loads information extraction configuration from environment variables or defaults.
+
+    Args:
+        default_enabled (bool): Default value to enable NER extraction. Set to True to enable by default.
+        default_max_chars (int): Default maximum characters for NER extraction.
+        default_max_workers (int): Default maximum worker threads for NER extraction.
+        default_engine (str): Default NER engine to use. Options: gliner, llm.
+
+    Returns:
+        NERConfig: Dataclass containing NER configuration.
+        - enabled (bool): Whether to run entity/relation extraction during ingestion.
+        - max_chars (int): Maximum characters from each node to send to the extractor.
+        - max_workers (int): Maximum number of worker threads for NER extraction.
+        - engine (str): The NER engine to use. Options: gliner, llm.
+
+    Raises:
+        ValueError: If an unsupported NER engine is specified.
+    """
+    engine = os.getenv("NER_ENGINE", default_engine).lower()
+    if engine not in {"gliner", "llm"}:
+        raise ValueError(
+            f"Unsupported NER engine: {engine}. Supported options are: 'gliner', 'llm'."
+        )
+
+    return NERConfig(
+        enabled=str(os.getenv("ENABLE_NER", default_enabled)).lower()
+        in {"true", "1", "yes"},
+        max_chars=int(os.getenv("NER_MAX_CHARS", default_max_chars)),
+        max_workers=int(os.getenv("NER_MAX_WORKERS", default_max_workers)),
+        engine=engine,
+    )
+
+
+def load_openai_env(
+    default_temperature: float = 0.1,
+    default_max_retries: int = 2,
+    default_timeout: float = 300.0,
+    default_reuse_client: bool = False,
+    default_ctx_window: int = 32768,
+    default_api_key: str = "sk-no-key-required",
+    default_api_base: str = "http://localhost:8080/v1",
+    default_inference_server: str = "llama.cpp",
+) -> OpenAIConfig:
+    """
+    Loads OpenAI configuration from environment variables or defaults.
+
+    Args:
+        default_temperature (float): Default temperature for text generation.
+        default_max_retries (int): Default number of retries.
+        default_timeout (float): Default timeout in seconds.
+        default_reuse_client (bool): Whether to reuse the OpenAI client across calls. Default is False.
+        default_ctx_window (int): Default context window size for models that support it.
+        default_api_key (str): Default OpenAI API key.
+        default_api_base (str): Default OpenAI API base URL.
+        default_inference_server (str): Default inference server type (e.g. "llama.cpp", "ollama", "openai", "vllm"). Default is "llama.cpp".
+
+    Returns:
+        OpenAIConfig: Dataclass containing OpenAI configuration.
+
+    Raises:
+        ValueError: If an unsupported inference server is specified.
+    """
+    inference_server = os.getenv("INFERENCE_SERVER", default_inference_server).lower()
+    if inference_server not in {
+        "llama.cpp",
+        "llama_cpp",
+        "llamacpp",
+        "ollama",
+        "openai",
+        "vllm",
+    }:
+        raise ValueError(
+            f"Unsupported inference server: {inference_server}. "
+            f"Supported options are: 'ollama', 'llama.cpp', 'openai', 'vllm'."
+        )
+
+    return OpenAIConfig(
+        temperature=float(os.getenv("OPENAI_TEMPERATURE", default_temperature)),
+        max_retries=int(os.getenv("OPENAI_MAX_RETRIES", default_max_retries)),
+        timeout=float(os.getenv("OPENAI_TIMEOUT", default_timeout)),
+        reuse_client=str(os.getenv("OPENAI_REUSE_CLIENT", default_reuse_client)).lower()
+        in {"true", "1", "yes"},
+        ctx_window=int(os.getenv("OPENAI_CTX_WINDOW", default_ctx_window)),
+        api_key=os.getenv("OPENAI_API_KEY", default_api_key),
+        api_base=os.getenv("OPENAI_API_BASE", default_api_base),
+        inference_server=inference_server,
     )
 
 
@@ -359,24 +500,22 @@ def load_path_env() -> PathConfig:
         - prompts (Path): Path to the prompts directory.
         - qdrant_collections (Path): Path to the Qdrant collections directory.
         - qdrant_sources (Path): Path to the Qdrant sources directory.
-        - required_exts (Path): Path to the required extensions file.
         - hf_hub_cache (Path): Path to the Hugging Face Hub cache directory.
-        - llama_cpp_cache (Path): Path to the Llama.cpp cache directory.
+        - llama_cpp_cache (Path): Path to the llama.cpp cache directory.
     """
     home_dir: Path = Path.home()
     docint_home_dir: Path = home_dir / "docint"
     default_data_dir: Path = docint_home_dir / "data"
     default_query_dir: Path = docint_home_dir / "queries.txt"
     default_results_dir: Path = docint_home_dir / "results"
-    default_cache_dir: Path = home_dir / ".cache"
-    default_hf_hub_cache: Path = default_cache_dir / "huggingface" / "hub"
-    default_llama_cpp_cache: Path = default_cache_dir / "llama.cpp"
+    default_model_cache: Path = home_dir / ".cache"
+    default_hf_hub_cache: Path = default_model_cache / "huggingface" / "hub"
+    default_llama_cpp_cache: Path = default_model_cache / "llama.cpp"
 
-    project_root: Path = Path(__file__).parents[2].resolve()
-    default_log_dir = project_root / ".logs" / "docint.log"
-    utils_dir: Path = project_root / "docint" / "utils"
+    utils_dir: Path = Path(__file__).parent.resolve()
     default_prompts_dir: Path = utils_dir / "prompts"
-    default_exts_dir: Path = utils_dir / "required_exts.txt"
+    project_root: Path = utils_dir.parents[1]
+    default_log_dir = project_root / ".logs" / "docint.log"
 
     default_qdrant_collections = Path(
         os.getenv("QDRANT_COL_DIR", "qdrant_storage")
@@ -400,7 +539,6 @@ def load_path_env() -> PathConfig:
         queries=Path(os.getenv("QUERIES_PATH", default_query_dir)).expanduser(),
         results=Path(os.getenv("RESULTS_PATH", default_results_dir)).expanduser(),
         prompts=default_prompts_dir,
-        required_exts=default_exts_dir,
         qdrant_collections=default_qdrant_collections,
         qdrant_sources=default_qdrant_sources,
         hf_hub_cache=Path(os.getenv("HF_HUB_CACHE", default_hf_hub_cache)).expanduser(),
@@ -410,90 +548,28 @@ def load_path_env() -> PathConfig:
     )
 
 
-def load_rag_env(
-    default_docstore_batch_size: int = 100,
-    default_ingestion_batch_size: int = 5,
-    default_docling_accelerator_num_threads: int = 4,
-    default_retrieve_top_k: int = 20,
-    default_sentence_splitter_chunk_overlap: int = 64,
-    default_sentence_splitter_chunk_size: int = 1024,
-    default_hierarchical_chunking_enabled: bool = True,
-    default_coarse_chunk_size: int = 8192,
-    default_fine_chunk_size: int = 8192,
-    default_fine_chunk_overlap: int = 0,
+def load_retrieval_env(
     default_rerank_use_fp16: bool = False,
-) -> RAGConfig:
+    default_retrieve_top_k: int = 20,
+) -> RetrievalConfig:
     """
-    Loads RAG (Retrieval-Augmented Generation) configuration from environment variables or defaults.
+    Loads retrieval configuration from environment variables or defaults.
 
     Args:
-        default_docstore_batch_size (int): Default batch size for document store operations.
-        default_ingestion_batch_size (int): Default batch size for ingestion.
-        default_docling_accelerator_num_threads (int): Default number of threads for Docling accelerator.
-        default_retrieve_top_k (int): Default number of top documents to retrieve.
-        default_sentence_splitter_chunk_overlap (int): Default chunk overlap size for sentence splitting.
-        default_sentence_splitter_chunk_size (int): Default chunk size for sentence splitting.
-        default_hierarchical_chunking_enabled (bool): Default flag to enable hierarchical chunking.
-        default_coarse_chunk_size (int): Default coarse chunk size for hierarchical chunking.
-        default_fine_chunk_size (int): Default fine chunk size for hierarchical chunking.
-        default_fine_chunk_overlap (int): Default fine chunk overlap size for hierarchical chunking.
         default_rerank_use_fp16 (bool): Default flag to use FP16 for reranker model. Default is False.
+        default_retrieve_top_k (int): Default number of top documents to retrieve.
 
     Returns:
-        RAGConfig: Dataclass containing RAG configuration.
-        - docstore_batch_size (int): The batch size for document store operations.
-        - ingestion_batch_size (int): The batch size for ingestion.
-        - docling_accelerator_num_threads (int): The default number of threads for Docling accelerator.
-        - retrieve_top_k (int): The number of top documents to retrieve.
-        - sentence_splitter_chunk_overlap (int): The chunk overlap size for sentence splitting.
-        - sentence_splitter_chunk_size (int): The chunk size for sentence splitting.
-        - hierarchical_chunking_enabled (bool): Whether hierarchical chunking is enabled.
-        - coarse_chunk_size (int): The coarse chunk size for hierarchical chunking.
-        - fine_chunk_size (int): The fine chunk size for hierarchical chunking.
-        - fine_chunk_overlap (bool): The fine chunk overlap size for hierarchical chunking.
+        RetrievalConfig: Dataclass containing retrieval configuration.
+        - rerank_use_fp16 (bool): Whether to use FP16 for the reranker model.
+        - retrieve_top_k (int): The number of top documents to retrieve for RAG
     """
-    return RAGConfig(
-        docstore_batch_size=int(
-            os.getenv("DOCSTORE_BATCH_SIZE", default_docstore_batch_size)
-        ),
-        ingestion_batch_size=int(
-            os.getenv("INGESTION_BATCH_SIZE", default_ingestion_batch_size)
-        ),
-        docling_accelerator_num_threads=int(
-            os.getenv(
-                "DOCLING_ACCELERATOR_NUM_THREADS",
-                default_docling_accelerator_num_threads,
-            )
-        ),
-        retrieve_top_k=int(os.getenv("RETRIEVE_TOP_K", default_retrieve_top_k)),
-        sentence_splitter_chunk_overlap=int(
-            os.getenv(
-                "SENTENCE_SPLITTER_CHUNK_OVERLAP",
-                default_sentence_splitter_chunk_overlap,
-            )
-        ),
-        sentence_splitter_chunk_size=int(
-            os.getenv(
-                "SENTENCE_SPLITTER_CHUNK_SIZE", default_sentence_splitter_chunk_size
-            )
-        ),
-        hierarchical_chunking_enabled=str(
-            os.getenv(
-                "HIERARCHICAL_CHUNKING_ENABLED", default_hierarchical_chunking_enabled
-            )
-        ).lower()
-        in {"true", "1", "yes"},
-        coarse_chunk_size=int(
-            os.getenv("COARSE_CHUNK_SIZE", default_coarse_chunk_size)
-        ),
-        fine_chunk_size=int(os.getenv("FINE_CHUNK_SIZE", default_fine_chunk_size)),
-        fine_chunk_overlap=int(
-            os.getenv("FINE_CHUNK_OVERLAP", default_fine_chunk_overlap)
-        ),
+    return RetrievalConfig(
         rerank_use_fp16=str(
             os.getenv("RERANK_USE_FP16", default_rerank_use_fp16)
         ).lower()
         in {"true", "1", "yes"},
+        retrieve_top_k=int(os.getenv("RETRIEVE_TOP_K", default_retrieve_top_k)),
     )
 
 

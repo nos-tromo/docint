@@ -40,16 +40,16 @@ class RAGRetrievalAgent(RetrievalAgent):
         start = time.monotonic()
 
         if intent in {"ie", "extract"}:
-            raw_sources = self.rag.get_collection_ie()
-            sources = self._filter_ie_sources(raw_sources, analysis.entities)
+            raw_sources = self.rag.get_collection_ner()
+            sources = self._filter_ner_sources(raw_sources, analysis.entities)
             latency = (time.monotonic() - start) * 1000
             return RetrievalResult(
-                answer="IE results attached",
+                answer="NER results attached",
                 sources=sources,
                 session_id=session_id,
                 intent=intent,
                 confidence=analysis.confidence,
-                tool_used="ie_sources",
+                tool_used="ner_sources",
                 latency_ms=latency,
             )
 
@@ -85,12 +85,12 @@ class RAGRetrievalAgent(RetrievalAgent):
             latency_ms=latency,
         )
 
-    def _filter_ie_sources(self, sources: list[dict], entities: dict) -> list[dict]:
+    def _filter_ner_sources(self, sources: list[dict], entities: dict) -> list[dict]:
         """
-        Filter IE sources using simple entity/page heuristics.
+        Filter NER sources using simple entity/page heuristics.
 
         Args:
-            sources (list[dict]): The list of IE sources.
+            sources (list[dict]): The list of NER sources.
             entities (dict): Extracted entities from the user input.
 
         Returns:

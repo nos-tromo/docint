@@ -70,7 +70,7 @@ class DummyRAG:
         self.chats: list[str] = []
         self.created_index = 0  # Tracks the number of times an index is created
         self.created_query_engine = 0
-        self.ie_sources: list[dict[str, Any]] = []
+        self.ner_sources: list[dict[str, Any]] = []
 
     def list_collections(self) -> list[str]:
         """
@@ -136,14 +136,14 @@ class DummyRAG:
         yield "chunk"
         yield {"sources": [{"id": 1}], "session_id": "generated-session"}
 
-    def get_collection_ie(self) -> list[dict[str, Any]]:
+    def get_collection_ner(self) -> list[dict[str, Any]]:
         """
         Get information extraction data for the selected collection.
 
         Returns:
             list[dict[str, Any]]: Information extraction data for the selected collection.
         """
-        return self.ie_sources
+        return self.ner_sources
 
 
 @pytest.fixture(autouse=True)
@@ -240,19 +240,19 @@ def test_collections_select_blank_name(client: TestClient) -> None:
     assert "Collection name required" in response.json()["detail"]
 
 
-def test_collections_ie_success(client: TestClient) -> None:
+def test_collections_ner_success(client: TestClient) -> None:
     """
     Test the successful retrieval of information extraction data.
 
     Args:
         client (TestClient): The TestClient instance.
     """
-    api_module.rag.ie_sources = [
+    api_module.rag.ner_sources = [
         {"filename": "doc1.pdf", "page": 1, "row": 2, "entities": [], "relations": []}
     ]
     response = client.get("/collections/ie")
     assert response.status_code == 200
-    assert response.json() == {"sources": api_module.rag.ie_sources}
+    assert response.json() == {"sources": api_module.rag.ner_sources}
 
 
 def test_agent_chat_answers(
@@ -326,7 +326,7 @@ def test_agent_chat_stream_clarifies(
     assert "status" in text
 
 
-def test_collections_ie_requires_selection(client: TestClient) -> None:
+def test_collections_ner_requires_selection(client: TestClient) -> None:
     """
     Test that information extraction requires a collection to be selected.
 
@@ -339,7 +339,7 @@ def test_collections_ie_requires_selection(client: TestClient) -> None:
     assert "No collection selected" in response.json()["detail"]
 
 
-def test_collections_ie_failure(
+def test_collections_ner_failure(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
     """
@@ -362,7 +362,7 @@ def test_collections_ie_failure(
         """
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(api_module.rag, "get_collection_ie", raiser)
+    monkeypatch.setattr(api_module.rag, "get_collection_ner", raiser)
     response = client.get("/collections/ie")
     assert response.status_code == 500
     assert response.json()["detail"] == "boom"

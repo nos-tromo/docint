@@ -11,18 +11,16 @@ from PIL import Image
 
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.mimetype import get_mimetype
-from docint.utils.llama_cpp_cfg import LlamaCppPipeline
+from docint.utils.openai_cfg import OpenAIPipeline
 
 
 @dataclass
 class ImageReader(BaseReader):
     """
-    Image reader that utilizes the LlamaCppPipeline for processing images.
+    Image reader that utilizes the OpenAIPipeline for processing images.
     """
 
-    llama_cpp_pipeline: LlamaCppPipeline = field(
-        default_factory=LlamaCppPipeline, init=False
-    )
+    openai_pipeline: OpenAIPipeline = field(default_factory=OpenAIPipeline, init=False)
 
     def _load_image(self, file_path: Path, mode: str = "RGB") -> Image.Image:
         """
@@ -105,7 +103,7 @@ class ImageReader(BaseReader):
 
     def load_data(self, file: str | Path, **kwargs) -> list[Document]:
         """
-        Load and process image data using the LlamaCppPipeline.
+        Load and process image data using the OpenAIPipeline.
 
         Args:
             file (str | bytes): The path to the image file or image bytes.
@@ -126,9 +124,9 @@ class ImageReader(BaseReader):
 
         img = self._load_image(file_path)
         img_base64 = self._encode_img_to_base64(img)
-        prompt = self.llama_cpp_pipeline.load_prompt("describe")
-        self.response = self.llama_cpp_pipeline.call_llama_cpp(
+        prompt = self.openai_pipeline.load_prompt("describe")
+        self.response = self.openai_pipeline.call_vision(
             prompt=prompt,
-            img=img_base64,
+            img_base64=img_base64,
         )
         return [self._enrich_document(file_path, self.response, file_hash=file_hash)]

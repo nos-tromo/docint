@@ -12,7 +12,7 @@ from llama_index.core.readers.base import BaseReader
 from llama_index.readers.docling import DoclingReader
 from loguru import logger
 
-from docint.utils.env_cfg import load_rag_env
+from docint.utils.env_cfg import load_ingestion_env
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.mimetype import get_mimetype
 
@@ -40,7 +40,7 @@ class CustomDoclingReader(BaseReader):
             accelerator = AcceleratorDevice.MPS
 
         # Configure pipeline with device
-        num_threads = load_rag_env().docling_accelerator_num_threads
+        num_threads = load_ingestion_env().docling_accelerator_num_threads
         acc_opts = AcceleratorOptions(num_threads=num_threads, device=accelerator)
         pipeline_opts = PdfPipelineOptions(
             accelerator_options=acc_opts,

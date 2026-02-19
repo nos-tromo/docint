@@ -13,9 +13,9 @@ from streamlit.web import cli as st_cli
 from docint.utils.env_cfg import load_host_env, set_offline_env
 from docint.utils.logging_cfg import setup_logging
 
-host_cfg = load_host_env()
-BACKEND_HOST = host_cfg.backend_host
-BACKEND_PUBLIC_HOST = host_cfg.backend_public_host or BACKEND_HOST
+_host_cfg = load_host_env()
+BACKEND_HOST = _host_cfg.backend_host
+BACKEND_PUBLIC_HOST = _host_cfg.backend_public_host or BACKEND_HOST
 
 
 def _format_score(score: Any) -> str:
@@ -114,7 +114,7 @@ def _source_label(src: dict) -> str:
     return f"{filename} ({', '.join(parts)})" if parts else filename
 
 
-def _aggregate_ie(
+def _aggregate_ner(
     sources: Iterable[dict] | None,
 ) -> Tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """
@@ -242,14 +242,14 @@ def _render_entities_relations(src: dict[str, Any]) -> None:
                 )
 
 
-def _render_ie_overview(sources: list[dict[str, Any]]) -> None:
+def _render_ner_overview(sources: list[dict[str, Any]]) -> None:
     """
-    Show aggregated IE results for a set of sources.
+    Show aggregated NER results for a set of sources.
 
     Args:
         sources: List of source dictionaries containing 'entities' and 'relations'.
     """
-    entities, relations = _aggregate_ie(sources)
+    entities, relations = _aggregate_ner(sources)
 
     metrics = st.columns(2)
     metrics[0].metric("Unique entities", len(entities))
@@ -603,7 +603,7 @@ def render_ingestion() -> None:
                     "Queued": "⏳",
                     "Uploading": "📤",
                     "Processing": "⚙️",
-                    "IE": "🔍",
+                    "NER": "🔍",
                     "Processed": "✅",
                     "Done": "✅",
                     "Error": "❌",
@@ -771,14 +771,14 @@ def render_analysis() -> None:
                 except Exception as e:
                     st.error(f"Error: {e}")
 
-            # Fetch IE
+            # Fetch NER
             with st.spinner(
                 "Aggregating entities and relations from entire collection..."
             ):
                 try:
-                    ie_resp = requests.get(f"{BACKEND_HOST}/collections/ie")
-                    if ie_resp.status_code == 200:
-                        st.session_state.analysis_result["ie"] = ie_resp.json().get(
+                    ner_resp = requests.get(f"{BACKEND_HOST}/collections/ie")
+                    if ner_resp.status_code == 200:
+                        st.session_state.analysis_result["ie"] = ner_resp.json().get(
                             "sources", []
                         )
                     else:
@@ -828,16 +828,16 @@ def render_analysis() -> None:
                         )
                     st.divider()
 
-        # IE Display
+        # NER Display
         st.markdown("---")
         st.markdown("### Collection-wide Information Extraction")
 
-        ie_sources = res["ie"]
-        if ie_sources:
-            _render_ie_overview(ie_sources)
+        ner_sources = res["ie"]
+        if ner_sources:
+            _render_ner_overview(ner_sources)
 
-            # Add IE to download text
-            entities, relations = _aggregate_ie(ie_sources)
+            # Add NER to download text
+            entities, relations = _aggregate_ner(ner_sources)
             analysis_text += "ENTITIES:\n"
             for ent in entities:
                 analysis_text += f"- {ent['text']} ({ent.get('type', 'Unlabeled')}): {ent['count']} mentions in {', '.join(ent['files'])}\n"
@@ -919,7 +919,7 @@ def render_chat() -> None:
                         st.divider()
 
                     st.markdown("**Information Extraction Overview**")
-                    _render_ie_overview(msg["sources"])
+                    _render_ner_overview(msg["sources"])
 
     def stop_generation() -> None:
         """
@@ -978,7 +978,9 @@ def render_chat() -> None:
 
                         # Show spinner while waiting for the first chunk
                         with c1:
-                            with st.spinner("Thinking..."):
+                            with st.spinner(
+                                "Waiting for the backend to stop procrastinating..."
+                            ):
                                 try:
                                     first_line = next(lines)
                                 except StopIteration:
@@ -1070,7 +1072,7 @@ def render_chat() -> None:
                                     st.divider()
 
                             st.markdown("**Information Extraction Overview**")
-                            _render_ie_overview(sources)
+                            _render_ner_overview(sources)
 
                         # 3. Save bot message
                         msg_entry = {

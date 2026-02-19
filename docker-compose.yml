@@ -1,77 +1,241 @@
+##########################################################
+# Shared backend fragments (YAML anchors)
+##########################################################
+x-backend-cpu: &backend-cpu
+  build:
+    context: .
+    dockerfile: Dockerfile.backend.cpu
+  ports: &backend-ports
+    - 8000:8000
+  environment: &backend-cpu-env
+    DATA_PATH: /app/data
+    LOG_PATH: /app/.logs/backend-cpu.log
+    OPENAI_TIMEOUT: ${OPENAI_TIMEOUT:-600}
+    QDRANT_COL_DIR: /qdrant/storage/collections
+    QDRANT_HOST: http://qdrant:6333
+    QDRANT_SRC_DIR: /qdrant/storage/sources
+    QUERIES_PATH: /app/data/queries.txt
+    RESULTS_PATH: /app/results
+    USE_DEVICE: auto
+  env_file:
+    - .env.docker
+  volumes: &backend-volumes
+    - ${USERPROFILE:-$HOME}/docint/data:/app/data
+    - ${USERPROFILE:-$HOME}/docint/results:/app/results
+    - docint-logs:/app/.logs
+    - model-cache:/root/.cache
+    - qdrant-storage:/qdrant/storage
+  networks: &backend-net
+    docint-net:
+      aliases:
+        - backend-net
+
+x-backend-cuda: &backend-cuda
+  build:
+    context: .
+    dockerfile: Dockerfile.backend.cuda
+  ports: *backend-ports
+  environment: &backend-cuda-env
+    DATA_PATH: /app/data/in
+    LOG_PATH: /app/.logs/backend-cuda.log
+    NVIDIA_VISIBLE_DEVICES: all
+    OPENAI_TIMEOUT: ${OPENAI_TIMEOUT:-600}
+    QDRANT_COL_DIR: /qdrant/storage/collections
+    QDRANT_HOST: http://qdrant:6333
+    QDRANT_SRC_DIR: /qdrant/storage/sources
+    QUERIES_PATH: /app/data/queries.txt
+    RESULTS_PATH: /app/data/out
+    USE_DEVICE: auto
+  env_file:
+    - .env.docker
+  volumes: *backend-volumes
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            capabilities: [cuda]
+  networks: *backend-net
+
 services:
   ##########################################################
-  # Backend (CPU)
+  # Backend – CPU + Llama.cpp
   ##########################################################
-  backend:
-    profiles: ["cpu"]
-    build:
-      context: .
-      dockerfile: Dockerfile.backend.cpu
-    ports:
-      - "8000:8000"
+  backend-cpu-llamacpp:
+    <<: *backend-cpu
+    profiles: ["cpu-llamacpp"]
     environment:
-      - DATA_PATH=/app/data
-      - LOG_PATH=/app/.logs/backend-cpu.log
-      - QDRANT_COL_DIR=/qdrant/storage/collections
-      - QDRANT_HOST=http://qdrant:6333
-      - QDRANT_SRC_DIR=/qdrant/storage/sources
-      - QUERIES_PATH=/app/data/queries.txt
-      - RESULTS_PATH=/app/results
-      - USE_DEVICE=auto
-      - LLAMA_CPP_N_GPU_LAYERS=0
-    env_file:
-      - .env.docker
+      <<: *backend-cpu-env
+      INFERENCE_SERVER: llama.cpp
+      OPENAI_API_BASE: http://llamacpp-server:8080/v1
+
+  ##########################################################
+  # Backend – CPU + Ollama
+  ##########################################################
+  backend-cpu-ollama:
+    <<: *backend-cpu
+    profiles: ["cpu-ollama"]
+    environment:
+      <<: *backend-cpu-env
+      INFERENCE_SERVER: ollama
+      OPENAI_API_BASE: http://ollama-server:11434/v1
+
+  ##########################################################
+  # Backend – CPU + External OpenAI API
+  ##########################################################
+  backend-cpu-openai:
+    <<: *backend-cpu
+    profiles: ["cpu-openai"]
+    environment:
+      <<: *backend-cpu-env
+      INFERENCE_SERVER: openai
+      OPENAI_API_BASE: ${OPENAI_API_BASE:?Set OPENAI_API_BASE in .env.docker for the openai profile}
+
+  ##########################################################
+  # Backend – CUDA + Llama.cpp
+  ##########################################################
+  backend-cuda-llamacpp:
+    <<: *backend-cuda
+    profiles: ["cuda-llamacpp"]
+    environment:
+      <<: *backend-cuda-env
+      INFERENCE_SERVER: llama.cpp
+      OPENAI_API_BASE: http://llamacpp-server:8080/v1
+
+  ##########################################################
+  # Backend – CUDA + Ollama
+  ##########################################################
+  backend-cuda-ollama:
+    <<: *backend-cuda
+    profiles: ["cuda-ollama"]
+    environment:
+      <<: *backend-cuda-env
+      INFERENCE_SERVER: ollama
+      OPENAI_API_BASE: http://ollama-server:11434/v1
+
+  ##########################################################
+  # Backend – CUDA + External OpenAI API
+  ##########################################################
+  backend-cuda-openai:
+    <<: *backend-cuda
+    profiles: ["cuda-openai"]
+    environment:
+      <<: *backend-cuda-env
+      INFERENCE_SERVER: openai
+      OPENAI_API_BASE: ${OPENAI_API_BASE:?Set OPENAI_API_BASE in .env.docker for the openai profile}
+
+  ##########################################################
+  # Llama.cpp (CPU)
+  ##########################################################
+  llamacpp-server-cpu:
+    profiles: ["cpu-llamacpp"]
+    image: ghcr.io/ggml-org/llama.cpp:server
+    ports:
+      - 8080:8080
+    # Ensure the models directory exists before starting the server to prevent crash
+    entrypoint: ["/bin/sh", "-c", "mkdir -p /root/.cache/llama.cpp && /app/llama-server"]
+    environment:
+      LLAMA_ARG_EMBEDDINGS: 1
+      LLAMA_ARG_ENDPOINT_METRICS: 1
+      LLAMA_ARG_HOST: 0.0.0.0
+      LLAMA_ARG_MODELS_DIR: /root/.cache/llama.cpp
+      LLAMA_ARG_PORT: 8080
+      LLAMA_ARG_UBATCH: 1024
+      LLAMA_ARG_ENDPOINT_PROPS: 1
+      LLAMA_LOG_FILE: /app/.logs/llamacpp-server-cpu.log
+      LLAMA_OFFLINE: true
     volumes:
-      - ${USERPROFILE:-$HOME}/docint/data:/app/data
-      - ${USERPROFILE:-$HOME}/docint/results:/app/results
       - docint-logs:/app/.logs
       - model-cache:/root/.cache
-      - qdrant-storage:/qdrant/storage
     networks:
       docint-net:
         aliases:
-          - backend-net
+          - llamacpp-server
+    restart: unless-stopped
 
   ##########################################################
-  # Backend (GPU)
+  # Llama.cpp (CUDA)
   ##########################################################
-  backend-gpu:
-    profiles: ["gpu"]
-    build:
-      context: .
-      dockerfile: Dockerfile.backend.cuda
+  llamacpp-server-cuda:
+    profiles: ["cuda-llamacpp"]
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
     ports:
-      - "8000:8000"
+      - 8080:8080
+    entrypoint: ["/bin/sh", "-c", "mkdir -p /root/.cache/llama.cpp"]
     environment:
-      - DATA_PATH=/app/data/in
-      - LOG_PATH=/app/.logs/backend-gpu.log
-      - NVIDIA_VISIBLE_DEVICES=all
-      - QDRANT_COL_DIR=/qdrant/storage/collections
-      - QDRANT_HOST=http://qdrant:6333
-      - QDRANT_SRC_DIR=/qdrant/storage/sources
-      - QUERIES_PATH=/app/data/queries.txt
-      - RESULTS_PATH=/app/data/out
-      - USE_DEVICE=auto
-      - LLAMA_CPP_N_GPU_LAYERS=-1
-    env_file:
-      - .env.docker
+      LLAMA_ARG_EMBEDDINGS: 1
+      LLAMA_ARG_ENDPOINT_METRICS: 1
+      LLAMA_ARG_HOST: 0.0.0.0
+      LLAMA_ARG_MODELS_DIR: /root/.cache/llama.cpp
+      LLAMA_ARG_PORT: 8080
+      LLAMA_ARG_UBATCH: 1024
+      LLAMA_LOG_FILE: /app/.logs/llamacpp-server-cuda.log
+      LLAMA_OFFLINE: true
+      NVIDIA_VISIBLE_DEVICES: all
     volumes:
-      - ${USERPROFILE:-$HOME}/docint/data:/app/data
-      - ${USERPROFILE:-$HOME}/docint/results:/app/results
-      - docint-logs:/app/.logs
       - model-cache:/root/.cache
-      - qdrant-storage:/qdrant/storage
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              capabilities: [gpu]
+              capabilities: [cuda]
     networks:
       docint-net:
         aliases:
-          - backend-net
+          - llamacpp-server
+    restart: unless-stopped
 
+  ##########################################################
+  # Ollama (CPU)
+  ##########################################################
+  ollama-cpu:
+    profiles: ["cpu-ollama"]
+    image: ollama/ollama:latest
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+    networks:
+      docint-net:
+        aliases:
+          - ollama-server
+
+  ##########################################################
+  # Ollama (CUDA)
+  ##########################################################
+  ollama-gpu:
+    profiles: ["cuda-ollama"]
+    image: ollama/ollama:latest
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - OLLAMA_HOST=0.0.0.0
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    runtime: nvidia
+    restart: always
+    networks:
+      docint-net:
+        aliases:
+          - ollama-server
+    
   ##########################################################
   # Frontend (Streamlit)
   ##########################################################
@@ -81,7 +245,7 @@ services:
       dockerfile: Dockerfile.frontend
     command: streamlit run docint/app.py --server.address 0.0.0.0
     ports:
-      - "8501:8501"
+      - 8501:8501
     environment:
       - BACKEND_HOST=http://backend-net:8000
       - BACKEND_PUBLIC_HOST=http://localhost:8000
@@ -100,8 +264,8 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - 6333:6333
+      - 6334:6334
     environment:
       - QDRANT__TELEMETRY_DISABLED=true
     volumes:
@@ -117,6 +281,7 @@ services:
 volumes:
   docint-logs:
   model-cache:
+  ollama-models:
   qdrant-snapshots:
   qdrant-storage:
 
