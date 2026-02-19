@@ -65,7 +65,8 @@ class RAGRetrievalAgent(RetrievalAgent):
                 latency_ms=latency,
             )
 
-        data = self.rag.chat(turn.user_input)
+        query_text = analysis.rewritten_query or turn.user_input
+        data = self.rag.chat(query_text)
         latency = (time.monotonic() - start) * 1000
 
         answer = (

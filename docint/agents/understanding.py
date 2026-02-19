@@ -1,8 +1,12 @@
 """Understanding agent implementations."""
 
+import json
 import re
-from typing import Iterable
+from typing import Any, Iterable
 
+from llama_index.core.llms import LLM, ChatMessage, MessageRole
+
+from docint.agents.context import TurnContext
 from docint.agents.types import IntentAnalysis, Turn, UnderstandingAgent
 
 
@@ -67,12 +71,13 @@ class SimpleUnderstandingAgent(UnderstandingAgent):
                 entities["page"] = page_match.group(1)
         return entities
 
-    def analyze(self, turn: Turn) -> IntentAnalysis:
+    def analyze(self, turn: Turn, context: Any | None = None) -> IntentAnalysis:
         """
         Return intent, confidence, entities, and reason.
 
         Args:
             turn (Turn): The current turn in the conversation.
+            context (Any | None, optional): The conversation context.
 
         Returns:
             IntentAnalysis: The result of the analysis.
@@ -86,3 +91,105 @@ class SimpleUnderstandingAgent(UnderstandingAgent):
             tool=None,
             reason=reason,
         )
+
+
+class ContextualUnderstandingAgent(UnderstandingAgent):
+    """
+    Understanding agent that uses an LLM to determine intent and rewrite queries.
+    Replaces keyword matching with semantic reasoning via the LLM.
+    """
+
+    def __init__(self, llm: LLM):
+        self.llm = llm
+
+    def analyze(self, turn: Turn, context: Any | None = None) -> IntentAnalysis:
+        """
+        Analyze the turn using LLM reasoning.
+
+        Args:
+            turn (Turn): The current turn.
+            context (Any | None): The conversation context (TurnContext).
+
+        Returns:
+            IntentAnalysis: The analysis result including intent and rewritten query.
+        """
+        history_str = ""
+        if context and isinstance(context, TurnContext) and context.history:
+            history_str = self._format_history(context.history)
+
+        prompt = self._build_prompt(turn.user_input, history_str)
+        
+        try:
+            response = self.llm.complete(prompt)
+            result = self._parse_response(response.text)
+            
+            return IntentAnalysis(
+                intent=result.get("intent", "qa"),
+                confidence=0.9, # LLM decided
+                entities={"query": turn.user_input}, # Basic passthrough
+                reason=result.get("reason"),
+                rewritten_query=result.get("rewritten_query")
+            )
+        except Exception:
+            # Fallback for robustness
+            return IntentAnalysis(
+                intent="qa",
+                confidence=0.5,
+                entities={"query": turn.user_input},
+                reason="LLM analysis failed, defaulting to QA",
+            )
+
+    def _format_history(self, history: list[dict[str, str]]) -> str:
+        """
+        Format the conversation history into a string.
+        """
+        relevant_history = history[-4:] 
+        formatted = []
+        for msg in relevant_history:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            if role in ("user", "assistant"):
+                formatted.append(f"{role.capitalize()}: {content}")
+        return "\n".join(formatted)
+
+    def _build_prompt(self, query: str, context_str: str) -> str:
+        """
+        Construct the analysis prompt.
+        """
+        return (
+            "You are an expert conversation analyst for a RAG system.\n"
+            "Your task is to Analyze the User Query and extract the following JSON:\n"
+            "{\n"
+            '  "intent": "qa" | "ie" | "table" | "summary",\n'
+            '  "rewritten_query": "The fully self-contained query resolving all references using context",\n'
+            '  "reason": "Brief explanation of the intent choice"\n'
+            "}\n\n"
+            "Intents:\n"
+            "- 'qa': General questions, searching for information.\n"
+            "- 'ie': Request to extract specific entities (people, orgs) or relations.\n"
+            "- 'table': Request to look up or extract tabular data/rows.\n"
+            "- 'summary': Request to summarize a document or topic.\n\n"
+            f"Conversation Context:\n{context_str}\n\n"
+            f"User Query: {query}\n\n"
+            "Output JSON only:"
+        )
+
+    def _parse_response(self, text: str) -> dict[str, Any]:
+        """
+        Parse the LLM response, handling potential markdown wrapping.
+        """
+        clean_text = text.strip()
+        # Remove markdown code blocks if present
+        if clean_text.startswith("```"):
+            clean_text = clean_text.split("```", 2)[1]
+            if clean_text.startswith("json"):
+                clean_text = clean_text[4:]
+        
+        try:
+            return json.loads(clean_text)
+        except json.JSONDecodeError:
+            # Attempt to find JSON object if mixed with text
+            match = re.search(r"\{.*\}", clean_text, re.DOTALL)
+            if match:
+                return json.loads(match.group(0))
+            return {"intent": "qa", "rewritten_query": None, "reason": "Failed to parse JSON"}

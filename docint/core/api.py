@@ -18,6 +18,7 @@ from docint.agents import (
     RAGRetrievalAgent,
     SimpleClarificationAgent,
     SimpleUnderstandingAgent,
+    ContextualUnderstandingAgent,
     Turn,
 )
 from docint.cli import ingest as ingest_module
@@ -56,8 +57,17 @@ def _build_orchestrator() -> AgentOrchestrator:
         AgentOrchestrator: The constructed agent orchestrator.
     """
     retrieval_agent = RAGRetrievalAgent(rag)
+    understanding = _understanding_agent
+
+    # Use contextual understanding if LLM is configured
+    if getattr(rag, "gen_model_id", None):
+        try:
+            understanding = ContextualUnderstandingAgent(llm=rag.gen_model)
+        except Exception as e:
+            logger.warning("Failed to init ContextualUnderstandingAgent: {}", e)
+
     return AgentOrchestrator(
-        understanding=_understanding_agent,
+        understanding=understanding,
         clarifier=_clarification_agent,
         retriever=retrieval_agent,
         policy=_clarification_policy,
@@ -577,6 +587,9 @@ def agent_chat(payload: AgentChatIn) -> AgentChatOut:
     # Ensure a session is active and get per-session agent context
     session_id = rag.start_session(payload.session_id)
     ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
+
+    if ctx and rag.sessions:
+        ctx.history = rag.sessions.get_session_history(session_id)
 
     turn = Turn(user_input=payload.message, session_id=session_id)
     orchestrator = _build_orchestrator()
