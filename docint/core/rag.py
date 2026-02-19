@@ -90,7 +90,7 @@ class RAG:
     # --- OpenAI parameters ---
     openai_temperature: float = field(default=0.1, init=False)
     openai_max_retries: int = field(default=2, init=False)
-    openai_timeout: float = field(default=60.0, init=False)
+    openai_timeout: float = field(default=300.0, init=False)
     openai_reuse_client: bool = field(default=True, init=False)
     openai_ctx_window: int = field(default=4096, init=False)
     openai_api_key: str | None = field(default=None, init=False)

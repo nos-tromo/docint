@@ -434,7 +434,7 @@ def load_ner_env(
 def load_openai_env(
     default_temperature: float = 0.1,
     default_max_retries: int = 2,
-    default_timeout: float = 60.0,
+    default_timeout: float = 300.0,
     default_reuse_client: bool = False,
     default_ctx_window: int = 32768,
     default_api_key: str = "sk-no-key-required",
