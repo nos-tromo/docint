@@ -29,6 +29,7 @@ __all__ = [
     "ClarificationPolicy",
     "ClarificationConfig",
     "ClarificationRequest",
+    "ContextualUnderstandingAgent",
     "IntentAnalysis",
     "OrchestratorResult",
     "PassthroughResponseAgent",
