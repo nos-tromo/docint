@@ -76,7 +76,7 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    Create the Docker environment file from the example:
 
    ```bash
-   cp .env.docker.example .env.docker
+   cp .env.docker.example .env
    ```
 
 3. **Choose a Profile**
