@@ -1,10 +1,12 @@
-"""Understanding agent implementations."""
+"""
+Understanding agent implementations.
+"""
 
 import json
 import re
 from typing import Any, Iterable
 
-from llama_index.core.llms import LLM, ChatMessage, MessageRole
+from llama_index.core.llms import LLM
 
 from docint.agents.context import TurnContext
 from docint.agents.types import IntentAnalysis, Turn, UnderstandingAgent
@@ -20,7 +22,7 @@ class SimpleUnderstandingAgent(UnderstandingAgent):
         default_intent: str = "qa",
         default_confidence: float = 0.6,
         intent_keywords: dict[str, Iterable[str]] | None = None,
-    ):
+    ) -> None:
         """
         Initialize the SimpleUnderstandingAgent.
 
@@ -118,17 +120,17 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
             history_str = self._format_history(context.history)
 
         prompt = self._build_prompt(turn.user_input, history_str)
-        
+
         try:
             response = self.llm.complete(prompt)
             result = self._parse_response(response.text)
-            
+
             return IntentAnalysis(
                 intent=result.get("intent", "qa"),
-                confidence=0.9, # LLM decided
-                entities={"query": turn.user_input}, # Basic passthrough
+                confidence=0.9,  # LLM decided
+                entities={"query": turn.user_input},  # Basic passthrough
                 reason=result.get("reason"),
-                rewritten_query=result.get("rewritten_query")
+                rewritten_query=result.get("rewritten_query"),
             )
         except Exception:
             # Fallback for robustness
@@ -142,8 +144,14 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
     def _format_history(self, history: list[dict[str, str]]) -> str:
         """
         Format the conversation history into a string.
+
+        Args:
+            history (list[dict[str, str]]): The conversation history as a list of messages
+
+        Returns:
+            str: A formatted string representation of the conversation history.
         """
-        relevant_history = history[-4:] 
+        relevant_history = history[-4:]
         formatted = []
         for msg in relevant_history:
             role = msg.get("role", "unknown")
@@ -155,6 +163,13 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
     def _build_prompt(self, query: str, context_str: str) -> str:
         """
         Construct the analysis prompt.
+
+        Args:
+            query (str): The user's current query.
+            context_str (str): The formatted conversation context.
+
+        Returns:
+            str: The complete prompt to send to the LLM for analysis.
         """
         return (
             "You are an expert conversation analyst for a RAG system.\n"
@@ -177,6 +192,12 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
     def _parse_response(self, text: str) -> dict[str, Any]:
         """
         Parse the LLM response, handling potential markdown wrapping.
+
+        Args:
+            text (str): The raw text response from the LLM.
+
+        Returns:
+            dict[str, Any]: The parsed JSON content with intent analysis results.
         """
         clean_text = text.strip()
         # Remove markdown code blocks if present
@@ -184,7 +205,7 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
             clean_text = clean_text.split("```", 2)[1]
             if clean_text.startswith("json"):
                 clean_text = clean_text[4:]
-        
+
         try:
             return json.loads(clean_text)
         except json.JSONDecodeError:
@@ -192,4 +213,8 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
             match = re.search(r"\{.*\}", clean_text, re.DOTALL)
             if match:
                 return json.loads(match.group(0))
-            return {"intent": "qa", "rewritten_query": None, "reason": "Failed to parse JSON"}
+            return {
+                "intent": "qa",
+                "rewritten_query": None,
+                "reason": "Failed to parse JSON",
+            }
