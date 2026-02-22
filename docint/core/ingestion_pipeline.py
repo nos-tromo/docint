@@ -26,7 +26,10 @@ from docint.core.storage.hierarchical import HierarchicalNodeParser
 from docint.utils.clean_text import basic_clean
 from docint.utils.env_cfg import load_ingestion_env, load_ner_env
 from docint.utils.hashing import compute_file_hash
-from docint.utils.ner_extractor import build_ner_extractor, build_gliner_ner_extractor
+from docint.utils.ner_extractor import (
+    build_gliner_ner_extractor,
+    build_llm_ner_extractor,
+)
 from docint.utils.openai_cfg import OpenAIPipeline
 
 CleanFn = Callable[[str], str]
@@ -56,13 +59,16 @@ class DocumentIngestionPipeline:
     # --- Ingestion config ---
     ingestion_batch_size: int = field(default=5, init=False)
 
+    # --- OpenAI config (for LLM-based NER) ---
+    openai_model_provider: str = field(default="llama.cpp", init=False)
+
     # --- Table reader config ---
     table_text_cols: list[str] | None = None
     table_metadata_cols: list[str] | str | None = None
     table_id_col: str | None = None
     table_excel_sheet: str | int | None = None
 
-    # --- Information extraction ---
+    # --- Named entity recognition (NER) ---
     ner_max_workers: int = field(default=4, init=False)
     entity_extractor: Callable[[str], tuple[list[dict], list[dict]]] | None = None
 
@@ -88,33 +94,24 @@ class DocumentIngestionPipeline:
         ner_enabled = _ner_config.enabled
         ner_max_chars = _ner_config.max_chars
         self.ner_max_workers = _ner_config.max_workers
-        ner_engine = _ner_config.engine
 
-        # Initialize NER extractor if runtime pieces are provided
         if ner_enabled:
-            if ner_engine == "gliner":
-                logger.info("Initializing GLiNER NER extractor")
-                # We purposefully ignore ner_max_chars for GLiNER as it handles chunking or short texts well,
-                # but we can pass it if we want to limit input size strictly.
-                try:
-                    self.entity_extractor = build_gliner_ner_extractor()
-                except Exception:
-                    logger.warning("GLiNER model unavailable – continuing without NER")
-                    self.entity_extractor = None
-            elif ner_engine in {"gliner", "llm"} and self.ner_model and ner_max_chars:
+            if self.openai_model_provider.lower() in {"openai"}:
                 ner_prompt = OpenAIPipeline().load_prompt(kw="ner")
                 if ner_prompt:
                     logger.info("Initializing LLM NER extractor")
-                    self.entity_extractor = build_ner_extractor(
+                    self.entity_extractor = build_llm_ner_extractor(
                         model=self.ner_model,
                         prompt=ner_prompt,
                         max_chars=ner_max_chars,
                     )
             else:
-                logger.warning(
-                    "NER enabled but configuration invalid or model missing. Skipping."
-                )
-                self.entity_extractor = None
+                logger.info("Initializing GLiNER NER extractor")
+                try:
+                    self.entity_extractor = build_gliner_ner_extractor()
+                except Exception:
+                    logger.warning("GLiNER model unavailable – continuing without NER")
+                    self.entity_extractor = None
 
         # --- Ingestion config ---
         _ingestion_config = load_ingestion_env()

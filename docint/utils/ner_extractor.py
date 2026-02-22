@@ -33,7 +33,7 @@ def _parse_ner_payload(raw: str) -> dict[str, Any]:
     return {}
 
 
-def build_ner_extractor(
+def build_llm_ner_extractor(
     model: Any, prompt: str, max_chars: int
 ) -> Callable[[str], tuple[list[dict], list[dict]]]:
     """
