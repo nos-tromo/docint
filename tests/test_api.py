@@ -224,8 +224,8 @@ def test_collections_select_success(
     assert payload == {"ok": True, "name": "gamma"}
     rag = cast(Any, api_module.rag)
     assert rag.qdrant_collection == "gamma"
-    assert rag.created_index == 1  # type: ignore[attr-defined]
-    assert rag.created_query_engine == 1  # type: ignore[attr-defined]
+    assert rag.created_index == 1
+    assert rag.created_query_engine == 1
 
 
 def test_collections_select_blank_name(client: TestClient) -> None:
@@ -291,7 +291,7 @@ def test_agent_chat_clarifies(
                 confidence_threshold=1.0, require_entities=True
             )
         ),
-    )  # type: ignore[arg-type]
+    )
 
     payload = {"message": "hello"}
     response = client.post("/agent/chat", json=payload)
@@ -317,7 +317,7 @@ def test_agent_chat_stream_clarifies(
                 confidence_threshold=1.0, require_entities=True
             )
         ),
-    )  # type: ignore[arg-type]
+    )
 
     with client.stream("POST", "/agent/chat/stream", json={"message": "hello"}) as resp:
         assert resp.status_code == 200
