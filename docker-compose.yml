@@ -66,7 +66,7 @@ services:
     profiles: ["cpu-llamacpp"]
     environment:
       <<: *backend-cpu-env
-      INFERENCE_SERVER: llama.cpp
+      MODEL_PROVIDER: llama.cpp
       OPENAI_API_BASE: http://llamacpp-server:8080/v1
 
   ##########################################################
@@ -77,7 +77,7 @@ services:
     profiles: ["cpu-ollama"]
     environment:
       <<: *backend-cpu-env
-      INFERENCE_SERVER: ollama
+      MODEL_PROVIDER: ollama
       OPENAI_API_BASE: http://ollama-server:11434/v1
 
   ##########################################################
@@ -88,7 +88,7 @@ services:
     profiles: ["cpu-openai"]
     environment:
       <<: *backend-cpu-env
-      INFERENCE_SERVER: openai
+      MODEL_PROVIDER: openai
       OPENAI_API_BASE: ${OPENAI_API_BASE:?Set OPENAI_API_BASE in .env.docker for the openai profile}
 
   ##########################################################
@@ -99,7 +99,7 @@ services:
     profiles: ["cuda-llamacpp"]
     environment:
       <<: *backend-cuda-env
-      INFERENCE_SERVER: llama.cpp
+      MODEL_PROVIDER: llama.cpp
       OPENAI_API_BASE: http://llamacpp-server:8080/v1
 
   ##########################################################
@@ -110,7 +110,7 @@ services:
     profiles: ["cuda-ollama"]
     environment:
       <<: *backend-cuda-env
-      INFERENCE_SERVER: ollama
+      MODEL_PROVIDER: ollama
       OPENAI_API_BASE: http://ollama-server:11434/v1
 
   ##########################################################
@@ -121,7 +121,7 @@ services:
     profiles: ["cuda-openai"]
     environment:
       <<: *backend-cuda-env
-      INFERENCE_SERVER: openai
+      MODEL_PROVIDER: openai
       OPENAI_API_BASE: ${OPENAI_API_BASE:?Set OPENAI_API_BASE in .env.docker for the openai profile}
 
   ##########################################################

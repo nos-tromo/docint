@@ -290,7 +290,7 @@ def main() -> None:
         )
 
     # LLaMA.cpp
-    if openai_config.inference_server in {"llama.cpp", "llama_cpp", "llamacpp"}:
+    if openai_config.model_provider in {"llama.cpp", "llama_cpp", "llamacpp"}:
         for model_id, repo_id, kw in [
             # model_id refers to the GGUF filename, repo_id is the HuggingFace repo where it lives.
             # We need both to resolve cache correctly.
@@ -305,7 +305,7 @@ def main() -> None:
                 kw=kw,
             )
     # Ollama
-    if openai_config.inference_server in {"ollama"}:
+    if openai_config.model_provider in {"ollama"}:
         for model_id, kw in [
             (model_config.embed_model_file, "embedding"),
             (model_config.text_model_file, "text"),
@@ -314,12 +314,12 @@ def main() -> None:
             load_ollama_model(model_id=model_id, kw=kw, host=openai_config.api_base)
 
     # vLLM
-    if openai_config.inference_server in {"vllm"}:
+    if openai_config.model_provider in {"vllm"}:
         # TODO: Add vLLM loading logic here when we support vLLM as an inference server option.
         logger.warning("vLLM inference server support is not yet implemented.")
 
     # OpenAI API
-    if openai_config.inference_server in {"openai"}:
+    if openai_config.model_provider in {"openai"}:
         # For OpenAI API, we don't have local model loading.
         logger.info(
             "Using OpenAI API as inference server. No local model loading required."

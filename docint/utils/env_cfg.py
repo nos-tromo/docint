@@ -149,7 +149,7 @@ class OpenAIConfig:
     ctx_window: int
     api_key: str
     api_base: str
-    inference_server: str
+    model_provider: str
 
 
 @dataclass(frozen=True)
@@ -439,7 +439,7 @@ def load_openai_env(
     default_ctx_window: int = 32768,
     default_api_key: str = "sk-no-key-required",
     default_api_base: str = "http://localhost:8080/v1",
-    default_inference_server: str = "llama.cpp",
+    default_model_provider: str = "llama.cpp",
 ) -> OpenAIConfig:
     """
     Loads OpenAI configuration from environment variables or defaults.
@@ -452,7 +452,7 @@ def load_openai_env(
         default_ctx_window (int): Default context window size for models that support it.
         default_api_key (str): Default OpenAI API key.
         default_api_base (str): Default OpenAI API base URL.
-        default_inference_server (str): Default inference server type (e.g. "llama.cpp", "ollama", "openai", "vllm"). Default is "llama.cpp".
+        default_model_provider (str): Default inference server type (e.g. "llama.cpp", "ollama", "openai", "vllm"). Default is "llama.cpp".
 
     Returns:
         OpenAIConfig: Dataclass containing OpenAI configuration.
@@ -460,8 +460,8 @@ def load_openai_env(
     Raises:
         ValueError: If an unsupported inference server is specified.
     """
-    inference_server = os.getenv("INFERENCE_SERVER", default_inference_server).lower()
-    if inference_server not in {
+    model_provider = os.getenv("MODEL_PROVIDER", default_model_provider).lower()
+    if model_provider not in {
         "llama.cpp",
         "llama_cpp",
         "llamacpp",
@@ -470,7 +470,7 @@ def load_openai_env(
         "vllm",
     }:
         raise ValueError(
-            f"Unsupported inference server: {inference_server}. "
+            f"Unsupported inference server: {model_provider}. "
             f"Supported options are: 'ollama', 'llama.cpp', 'openai', 'vllm'."
         )
 
@@ -483,7 +483,7 @@ def load_openai_env(
         ctx_window=int(os.getenv("OPENAI_CTX_WINDOW", default_ctx_window)),
         api_key=os.getenv("OPENAI_API_KEY", default_api_key),
         api_base=os.getenv("OPENAI_API_BASE", default_api_base),
-        inference_server=inference_server,
+        model_provider=model_provider,
     )
 
 

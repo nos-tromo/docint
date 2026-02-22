@@ -97,7 +97,7 @@ Model files are handled automatically by the ingestion pipeline and do not need 
 
    CUDA profiles require a CUDA-compatible GPU and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
-   Each profile automatically sets `INFERENCE_SERVER` and `OPENAI_API_BASE` to the correct values. For the `*-openai` profiles, set `OPENAI_API_BASE` and `OPENAI_API_KEY` in `.env.docker`.
+   Each profile automatically sets `MODEL_PROVIDER` and `OPENAI_API_BASE` to the correct values. For the `*-openai` profiles, set `OPENAI_API_BASE` and `OPENAI_API_KEY` in `.env.docker`.
 
 4. **Start the Services**
 
