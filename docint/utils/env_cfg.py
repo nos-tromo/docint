@@ -141,14 +141,17 @@ class OpenAIConfig:
     Dataclass for OpenAI-compatible API configuration.
     """
 
-    temperature: float
-    max_retries: int
-    timeout: float
-    reuse_client: bool
-    ctx_window: int
-    api_key: str
     api_base: str
+    api_key: str
+    ctx_window: int
+    dimensions: int
+    max_retries: int
     model_provider: str
+    reuse_client: bool
+    seed: int
+    temperature: float
+    timeout: float
+    top_p: float
 
 
 @dataclass(frozen=True)
@@ -421,27 +424,33 @@ def load_ner_env(
 
 
 def load_openai_env(
-    default_temperature: float = 0.1,
-    default_max_retries: int = 2,
-    default_timeout: float = 300.0,
-    default_reuse_client: bool = False,
-    default_ctx_window: int = 32768,
-    default_api_key: str = "sk-no-key-required",
     default_api_base: str = "http://localhost:8080/v1",
+    default_api_key: str = "sk-no-key-required",
+    default_ctx_window: int = 32768,
+    default_dimensions: int = 1024,
+    default_max_retries: int = 2,
     default_model_provider: str = "llama.cpp",
+    default_reuse_client: bool = False,
+    default_seed: int = 42,
+    default_temperature: float = 0.0,
+    default_timeout: float = 300.0,
+    default_top_p: float = 0.0,
 ) -> OpenAIConfig:
     """
     Loads OpenAI configuration from environment variables or defaults.
 
     Args:
-        default_temperature (float): Default temperature for text generation.
-        default_max_retries (int): Default number of retries.
-        default_timeout (float): Default timeout in seconds.
-        default_reuse_client (bool): Whether to reuse the OpenAI client across calls. Default is False.
-        default_ctx_window (int): Default context window size for models that support it.
-        default_api_key (str): Default OpenAI API key.
         default_api_base (str): Default OpenAI API base URL.
+        default_api_key (str): Default OpenAI API key.
+        default_ctx_window (int): Default context window size for models that support it.
+        default_dimensions (int): Default embedding dimensions for embedding models.
+        default_max_retries (int): Default number of retries.
         default_model_provider (str): Default inference server type (e.g. "llama.cpp", "ollama", "openai", "vllm"). Default is "llama.cpp".
+        default_reuse_client (bool): Whether to reuse the OpenAI client across calls. Default is False.
+        default_seed (int): Default random seed for reproducibility.
+        default_temperature (float): Default temperature for text generation.
+        default_timeout (float): Default timeout in seconds.
+        default_top_p (float): Default top_p for nucleus sampling.
 
     Returns:
         OpenAIConfig: Dataclass containing OpenAI configuration.
@@ -456,23 +465,25 @@ def load_openai_env(
         "llamacpp",
         "ollama",
         "openai",
-        "vllm",
     }:
         raise ValueError(
             f"Unsupported inference server: {model_provider}. "
-            f"Supported options are: 'ollama', 'llama.cpp', 'openai', 'vllm'."
+            f"Supported options are: 'llama.cpp', 'ollama', 'openai'."
         )
 
     return OpenAIConfig(
-        temperature=float(os.getenv("OPENAI_TEMPERATURE", default_temperature)),
+        api_base=os.getenv("OPENAI_API_BASE", default_api_base),
+        api_key=os.getenv("OPENAI_API_KEY", default_api_key),
+        ctx_window=int(os.getenv("OPENAI_CTX_WINDOW", default_ctx_window)),
+        dimensions=int(os.getenv("OPENAI_DIMENSIONS", default_dimensions)),
         max_retries=int(os.getenv("OPENAI_MAX_RETRIES", default_max_retries)),
-        timeout=float(os.getenv("OPENAI_TIMEOUT", default_timeout)),
+        model_provider=model_provider,
         reuse_client=str(os.getenv("OPENAI_REUSE_CLIENT", default_reuse_client)).lower()
         in {"true", "1", "yes"},
-        ctx_window=int(os.getenv("OPENAI_CTX_WINDOW", default_ctx_window)),
-        api_key=os.getenv("OPENAI_API_KEY", default_api_key),
-        api_base=os.getenv("OPENAI_API_BASE", default_api_base),
-        model_provider=model_provider,
+        seed=int(os.getenv("OPENAI_SEED", default_seed)),
+        temperature=float(os.getenv("OPENAI_TEMPERATURE", default_temperature)),
+        timeout=float(os.getenv("OPENAI_TIMEOUT", default_timeout)),
+        top_p=float(os.getenv("OPENAI_TOP_P", default_top_p)),
     )
 
 

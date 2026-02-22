@@ -56,16 +56,24 @@ class OpenAIPipeline:
         self.vision_model_id = _model_config.vision_model_file.removesuffix(".gguf")
 
         _openai_config = load_openai_env()
+        api_key = _openai_config.api_key
+        api_base = _openai_config.api_base
+        max_retries = _openai_config.max_retries
+        self.seed = _openai_config.seed
+        timeout = _openai_config.timeout
+        self.temperature = _openai_config.temperature
+        self.top_p = _openai_config.top_p
+
         self.client = OpenAI(
-            api_key=_openai_config.api_key,
-            base_url=_openai_config.api_base,
-            timeout=_openai_config.timeout,
-            max_retries=_openai_config.max_retries,
+            api_key=api_key,
+            base_url=api_base,
+            timeout=timeout,
+            max_retries=max_retries,
         )
         self.vision_client = OpenAI(
-            api_key=_openai_config.api_key,
-            base_url=_openai_config.api_base,
-            timeout=_openai_config.timeout,
+            api_key=api_key,
+            base_url=api_base,
+            timeout=timeout,
             max_retries=_openai_config.max_retries,
         )
 
@@ -160,6 +168,9 @@ class OpenAIPipeline:
             response = self.vision_client.chat.completions.create(
                 model=self.vision_model_id,
                 messages=messages,
+                seed=self.seed,
+                temperature=self.temperature,
+                top_p=self.top_p,
             )
             return response.choices[0].message.content or ""
         except Exception as e:

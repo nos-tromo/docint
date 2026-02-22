@@ -89,13 +89,17 @@ class RAG:
     _qdrant_src_dir: Path | None = field(default=None, init=False, repr=False)
 
     # --- OpenAI parameters ---
-    openai_temperature: float = field(default=0.1, init=False)
-    openai_max_retries: int = field(default=2, init=False)
-    openai_timeout: float = field(default=300.0, init=False)
-    openai_reuse_client: bool = field(default=True, init=False)
-    openai_ctx_window: int = field(default=4096, init=False)
-    openai_api_key: str | None = field(default=None, init=False)
     openai_api_base: str | None = field(default=None, init=False)
+    openai_api_key: str | None = field(default=None, init=False)
+    openai_ctx_window: int = field(default=4096, init=False)
+    openai_dimensions: int = field(default=1024, init=False)
+    openai_max_retries: int = field(default=2, init=False)
+    openai_model_provider: str = field(default="llama.cpp", init=False)
+    openai_reuse_client: bool = field(default=True, init=False)
+    openai_seed: int = field(default=42, init=False)
+    openai_temperature: float = field(default=0.1, init=False)
+    openai_timeout: float = field(default=300.0, init=False)
+    openai_top_p: float = field(default=0.0, init=False)
 
     # --- Information extraction ---
     ner_enabled: bool = field(default=False, init=False)
@@ -158,13 +162,17 @@ class RAG:
 
         # --- OpenAI config ---
         _openai_config = load_openai_env()
-        self.openai_temperature = _openai_config.temperature
-        self.openai_max_retries = _openai_config.max_retries
-        self.openai_timeout = _openai_config.timeout
-        self.openai_reuse_client = _openai_config.reuse_client
-        self.openai_ctx_window = _openai_config.ctx_window
         self.openai_api_key = _openai_config.api_key
         self.openai_api_base = _openai_config.api_base
+        self.openai_ctx_window = _openai_config.ctx_window
+        self.openai_dimensions = _openai_config.dimensions
+        self.openai_max_retries = _openai_config.max_retries
+        self.openai_model_provider = _openai_config.model_provider
+        self.openai_reuse_client = _openai_config.reuse_client
+        self.openai_seed = _openai_config.seed
+        self.openai_temperature = _openai_config.temperature
+        self.openai_timeout = _openai_config.timeout
+        self.openai_top_p = _openai_config.top_p
 
         # --- Named Entity Recognition (NER) config ---
         self.ner_enabled = load_ner_env().enabled
@@ -368,12 +376,13 @@ class RAG:
 
             logger.info("Initializing embedding model: {}", self.embed_model_id)
             self._embed_model = OpenAIEmbedding(
-                model_name=self.embed_model_id,
-                api_key=self.openai_api_key,
                 api_base=self.openai_api_base,
-                timeout=self.openai_timeout,
+                api_key=self.openai_api_key,
+                dimensions=self.openai_dimensions,
                 max_retries=self.openai_max_retries,
+                model_name=self.embed_model_id,
                 reuse_client=False,
+                timeout=self.openai_timeout,
             )
 
         return self._embed_model
@@ -493,18 +502,20 @@ class RAG:
 
         additional_kwargs: dict[str, Any] = {}
 
-        # LlamaIndex OpenAI class supports api_key, api_base, timeout, max_retries
+        # LlamaIndex OpenAI class supports api_key, api_base, timeout, max_retries, seed, top_p
         # Use LocalOpenAI which tolerates unknown model names (e.g. paths) by falling back to default metadata
         model = LocalOpenAI(
-            model=self.text_model_id,
-            temperature=self.openai_temperature,
-            max_retries=self.openai_max_retries,
             additional_kwargs=additional_kwargs,
-            timeout=self.openai_timeout,
-            reuse_client=self.openai_reuse_client,
-            api_key=self.openai_api_key,
             api_base=self.openai_api_base,
+            api_key=self.openai_api_key,
             context_window=self.openai_ctx_window,
+            max_retries=self.openai_max_retries,
+            model=self.text_model_id,
+            reuse_client=self.openai_reuse_client,
+            seed=self.openai_seed,
+            temperature=self.openai_temperature,
+            timeout=self.openai_timeout,
+            top_p=self.openai_top_p,
         )
 
         logger.info(
