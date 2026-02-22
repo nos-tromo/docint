@@ -36,6 +36,7 @@ from llama_index.core import (
     VectorStoreIndex,
 )
 from llama_index.core.embeddings import BaseEmbedding
+from llama_index.core.postprocessor import LLMRerank
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.schema import BaseNode, Document
 from llama_index.core.storage.docstore.keyval_docstore import KVDocumentStore
@@ -114,7 +115,7 @@ class RAG:
     _device: str | None = field(default=None, init=False, repr=False)
     _embed_model: BaseEmbedding | None = field(default=None, init=False, repr=False)
     _text_model: OpenAI | None = field(default=None, init=False, repr=False)
-    _reranker: FlagEmbeddingReranker | None = field(
+    _reranker: FlagEmbeddingReranker | LLMRerank | None = field(
         default=None, init=False, repr=False
     )
     _qdrant_client: QdrantClient | None = field(default=None, init=False, repr=False)
@@ -435,12 +436,14 @@ class RAG:
         return chosen
 
     @property
-    def reranker(self) -> FlagEmbeddingReranker:
+    def reranker(self) -> LLMRerank | FlagEmbeddingReranker:
         """
-        Lazily initializes and returns the reranker model (FlagEmbeddingReranker).
+        Lazily initializes and returns the reranker model. The type of reranker is determined by the configuration:
+        - If the openai_model_provider is "openai" or "azure", an LLMRerank is used.
+        - Otherwise, a FlagEmbeddingReranker is used with the specified rerank_model_id.
 
         Returns:
-            FlagEmbeddingReranker: The initialized reranker model.
+            LLMRerank | FlagEmbeddingReranker: The initialized reranker model.
 
         Raises:
             ValueError: If rerank_model_id is None.
@@ -448,22 +451,31 @@ class RAG:
         if self.rerank_model_id is None:
             raise ValueError("rerank_model_id cannot be None")
         if self._reranker is None:
-            # Resolve to local cache path for offline compatibility
-            cache_dir = (
-                self.hf_hub_cache or Path.home() / ".cache" / "huggingface" / "hub"
-            )
-            resolved = resolve_hf_cache_path(cache_dir, self.rerank_model_id)
-            resolved_model = str(resolved) if resolved else self.rerank_model_id
-            if resolved:
-                logger.info("Using local reranker model path: {}", resolved_model)
-            self._reranker = FlagEmbeddingReranker(
-                top_n=self.rerank_top_n,
-                model=resolved_model,
-            )
-            logger.info(
-                "Initializing FlagEmbeddingReranker with model: {}",
-                self.rerank_model_id,
-            )
+            if self.openai_model_provider.lower() in {"openai"}:
+                self._reranker = LLMRerank(
+                    top_n=self.rerank_top_n,
+                    llm=self.text_model,
+                )
+                logger.info(
+                    "Initializing LLM reranker with model: {}", self.text_model_id
+                )
+            else:
+                # Resolve to local cache path for offline compatibility
+                cache_dir = (
+                    self.hf_hub_cache or Path.home() / ".cache" / "huggingface" / "hub"
+                )
+                resolved = resolve_hf_cache_path(cache_dir, self.rerank_model_id)
+                resolved_model = str(resolved) if resolved else self.rerank_model_id
+                if resolved:
+                    logger.info("Using local reranker model path: {}", resolved_model)
+                self._reranker = FlagEmbeddingReranker(
+                    top_n=self.rerank_top_n,
+                    model=resolved_model,
+                )
+                logger.info(
+                    "Initializing FlagEmbeddingReranker with model: {}",
+                    self.rerank_model_id,
+                )
         return self._reranker
 
     def _create_text_model(self) -> OpenAI:
@@ -614,13 +626,9 @@ class RAG:
             raise ValueError("data_dir cannot be None for ingestion pipeline.")
 
         ner_model = None
-        if self.ner_enabled and load_ner_env().engine in [
-            "llama_cpp",
-            "ollama",
-            "openai",
-            "llm",
-        ]:
+        if self.ner_enabled and self.openai_model_provider.lower() in {"openai"}:
             # Enforce JSON for NER tasks to ensure structured output
+            # Only use LLM-based NER for OpenAI provider; otherwise use GLiNER
             ner_model = self._create_text_model()
 
         return DocumentIngestionPipeline(

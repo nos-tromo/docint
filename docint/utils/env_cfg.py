@@ -133,7 +133,6 @@ class NERConfig:
     enabled: bool
     max_chars: int
     max_workers: int
-    engine: str
 
 
 @dataclass(frozen=True)
@@ -395,7 +394,6 @@ def load_ner_env(
     default_enabled: bool = True,
     default_max_chars: int = 1024,
     default_max_workers: int = 4,
-    default_engine: str = "gliner",
 ) -> NERConfig:
     """
     Loads information extraction configuration from environment variables or defaults.
@@ -404,30 +402,21 @@ def load_ner_env(
         default_enabled (bool): Default value to enable NER extraction. Set to True to enable by default.
         default_max_chars (int): Default maximum characters for NER extraction.
         default_max_workers (int): Default maximum worker threads for NER extraction.
-        default_engine (str): Default NER engine to use. Options: gliner, llm.
 
     Returns:
         NERConfig: Dataclass containing NER configuration.
         - enabled (bool): Whether to run entity/relation extraction during ingestion.
         - max_chars (int): Maximum characters from each node to send to the extractor.
         - max_workers (int): Maximum number of worker threads for NER extraction.
-        - engine (str): The NER engine to use. Options: gliner, llm.
 
     Raises:
         ValueError: If an unsupported NER engine is specified.
     """
-    engine = os.getenv("NER_ENGINE", default_engine).lower()
-    if engine not in {"gliner", "llm"}:
-        raise ValueError(
-            f"Unsupported NER engine: {engine}. Supported options are: 'gliner', 'llm'."
-        )
-
     return NERConfig(
-        enabled=str(os.getenv("ENABLE_NER", default_enabled)).lower()
+        enabled=str(os.getenv("NER_ENABLED", default_enabled)).lower()
         in {"true", "1", "yes"},
         max_chars=int(os.getenv("NER_MAX_CHARS", default_max_chars)),
         max_workers=int(os.getenv("NER_MAX_WORKERS", default_max_workers)),
-        engine=engine,
     )
 
 
