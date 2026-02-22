@@ -119,7 +119,7 @@ class RAG:
     _device: str | None = field(default=None, init=False, repr=False)
     _embed_model: BaseEmbedding | None = field(default=None, init=False, repr=False)
     _text_model: OpenAI | None = field(default=None, init=False, repr=False)
-    _reranker: FlagEmbeddingReranker | LLMRerank | None = field(
+    _reranker: LLMRerank | FlagEmbeddingReranker | None = field(
         default=None, init=False, repr=False
     )
     _qdrant_client: QdrantClient | None = field(default=None, init=False, repr=False)
@@ -519,7 +519,7 @@ class RAG:
         )
 
         logger.info(
-            "Initializing generator model: {}",
+            "Initializing text model: {}",
             self.text_model_id,
         )
         return model
