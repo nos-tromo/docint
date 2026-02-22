@@ -10,7 +10,6 @@ x-backend-cpu: &backend-cpu
   environment: &backend-cpu-env
     DATA_PATH: /app/data
     LOG_PATH: /app/.logs/backend-cpu.log
-    OPENAI_TIMEOUT: ${OPENAI_TIMEOUT:-600}
     QDRANT_COL_DIR: /qdrant/storage/collections
     QDRANT_HOST: http://qdrant:6333
     QDRANT_SRC_DIR: /qdrant/storage/sources
@@ -39,7 +38,6 @@ x-backend-cuda: &backend-cuda
     DATA_PATH: /app/data/in
     LOG_PATH: /app/.logs/backend-cuda.log
     NVIDIA_VISIBLE_DEVICES: all
-    OPENAI_TIMEOUT: ${OPENAI_TIMEOUT:-600}
     QDRANT_COL_DIR: /qdrant/storage/collections
     QDRANT_HOST: http://qdrant:6333
     QDRANT_SRC_DIR: /qdrant/storage/sources
@@ -89,7 +87,7 @@ services:
     environment:
       <<: *backend-cpu-env
       MODEL_PROVIDER: openai
-      OPENAI_API_BASE: ${OPENAI_API_BASE:?Set OPENAI_API_BASE in .env.docker for the openai profile}
+      OPENAI_API_BASE: https://api.openai.com/v1
 
   ##########################################################
   # Backend – CUDA + Llama.cpp
@@ -122,7 +120,7 @@ services:
     environment:
       <<: *backend-cuda-env
       MODEL_PROVIDER: openai
-      OPENAI_API_BASE: ${OPENAI_API_BASE:?Set OPENAI_API_BASE in .env.docker for the openai profile}
+      OPENAI_API_BASE: https://api.openai.com/v1
 
   ##########################################################
   # Llama.cpp (CPU)
