@@ -76,7 +76,7 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    Create the Docker environment file from the example:
 
    ```bash
-   cp .env.docker.example .env
+   cp .env.docker.example .env.docker
    ```
 
 3. **Choose a Profile**
@@ -166,18 +166,16 @@ The application is configured via environment variables. Key variables include:
 **General:**
 
 - `DOCINT_OFFLINE`: Set to `true` to force offline mode (fails if models aren't cached).
-- `ENABLE_IE`: Enable scalable entity/relation extraction during ingestion (default: `false`). Uses parallel execution for maximum throughput.
-- `IE_MAX_WORKERS`: Number of parallel workers for entity extraction (default: `4`).
+- `NER_ENABLED`: Enable scalable entity/relation extraction during ingestion (default: `false`). Uses parallel execution for maximum throughput.
+- `NER_MAX_WORKERS`: Number of parallel workers for entity extraction (default: `4`).
 - `PRELOAD_MODELS`: Set to `true` to download all ML models at container startup (default: unset/disabled). Used by `docker-compose.yml` to populate the `model-cache` volume on first run.
 
 **Model Selection (Environment Variables):**
 
 - `OPENAI_API_KEY`: API key for the LLM provider (default: `sk-no-key-required`).
 - `OPENAI_API_BASE`: Base API URL. In Docker, this is set automatically per profile (e.g. `http://llamacpp-server:8080/v1` for `*-llamacpp`). For local development, point this to your provider (e.g., `http://localhost:11434/v1`).
-- `LLM`: HuggingFace repo ID (e.g., `bartowski/Meta-Llama-3-8B-Instruct-GGUF`) for automatic download.
-- `LLM_FILE`: GGUF filename (e.g., `Meta-Llama-3-8B-Instruct.gguf`) if using the included server, or model name/ID if using an external API.
+- `LLM`: Repo ID (e.g., `bartowski/Meta-Llama-3-8B-Instruct-GGUF`) for automatic download.
 - `EMBED_MODEL`: HuggingFace repo ID for the embedding model (e.g. `ggml-org/bge-m3-Q8_0-GGUF`).
-- `EMBED_MODEL_FILE`: Embedding model filename or ID. By default, embeddings utilize the same inference server endpoint if configured.
 
 **Note on Provider Agnosticism:**
 The backend logic is standard OpenAI-compatible. The `docker-compose.yml` profiles bundle `llama.cpp` and Ollama servers, but you can also point to any external API by selecting a `*-openai` profile and setting `OPENAI_API_BASE` and `OPENAI_API_KEY` in `.env.docker`.
@@ -289,12 +287,10 @@ For additional configuration, populate an `.env` (local usage) or `.env.docker` 
 ```env
 DOCINT_OFFLINE=true
 OPENAI_API_KEY=sk-no-key-required
-OPENAI_API_BASE=http://localhost:8000/v1
 LLM=gpt-4o
 EMBED_MODEL=text-embedding-3-small
-ENABLE_IE=true
-IE_MAX_WORKERS=4
-IE_ENGINE=gliner
+NER_ENABLED=true
+NER_MAX_WORKERS=4
 ```
 
 ## Unit Tests
