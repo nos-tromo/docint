@@ -64,9 +64,7 @@ class PypdfTextEngine(OCREngine):
                     )
                 )
         except Exception as exc:
-            logger.warning(
-                "Text extraction failed for page {}: {}", page_index, exc
-            )
+            logger.warning("Text extraction failed for page {}: {}", page_index, exc)
         return spans
 
 
@@ -110,9 +108,7 @@ def build_page_text(
         source_mix = "pdf_text"
 
     avg_confidence = (
-        sum(s.confidence for s in all_spans) / len(all_spans)
-        if all_spans
-        else 0.0
+        sum(s.confidence for s in all_spans) / len(all_spans) if all_spans else 0.0
     )
 
     return PageText(
@@ -150,9 +146,7 @@ def extract_text_for_pages(
             try:
                 ocr_spans = engine.ocr_page(page_info.page_index, file_path=file_path)
             except Exception as exc:
-                logger.warning(
-                    "OCR failed for page {}: {}", page_info.page_index, exc
-                )
+                logger.warning("OCR failed for page {}: {}", page_info.page_index, exc)
 
         blocks = layout.get(page_info.page_index, [])
         result[page_info.page_index] = build_page_text(page_info, blocks, ocr_spans)

@@ -62,9 +62,7 @@ def save_layout(
     return out
 
 
-def save_page_text(
-    doc_id: str, page_text: PageText, artifacts_dir: Path
-) -> Path:
+def save_page_text(doc_id: str, page_text: PageText, artifacts_dir: Path) -> Path:
     """Write ``text.json`` for a single page.
 
     Args:
@@ -75,18 +73,14 @@ def save_page_text(
     Returns:
         Path to the written file.
     """
-    page_dir = _ensure_dir(
-        artifacts_dir / doc_id / "pages" / str(page_text.page_index)
-    )
+    page_dir = _ensure_dir(artifacts_dir / doc_id / "pages" / str(page_text.page_index))
     out = page_dir / "text.json"
     out.write_text(json.dumps(asdict(page_text), indent=2, default=str))
     logger.debug("Saved text for page {}: {}", page_text.page_index, out)
     return out
 
 
-def save_table(
-    doc_id: str, table: TableResult, artifacts_dir: Path
-) -> Path:
+def save_table(doc_id: str, table: TableResult, artifacts_dir: Path) -> Path:
     """Write ``{table_id}.json`` to the tables directory.
 
     Args:
@@ -112,9 +106,7 @@ def save_table(
     return out
 
 
-def save_image_metadata(
-    doc_id: str, image: ImageResult, artifacts_dir: Path
-) -> Path:
+def save_image_metadata(doc_id: str, image: ImageResult, artifacts_dir: Path) -> Path:
     """Write ``{image_id}.json`` to the images directory.
 
     Args:
@@ -132,9 +124,7 @@ def save_image_metadata(
     return out
 
 
-def save_chunks(
-    doc_id: str, chunks: list[ChunkResult], artifacts_dir: Path
-) -> Path:
+def save_chunks(doc_id: str, chunks: list[ChunkResult], artifacts_dir: Path) -> Path:
     """Write ``chunks.jsonl`` to the document's artifact directory.
 
     Args:

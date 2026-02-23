@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import uuid
 
 from loguru import logger
 
@@ -80,7 +79,9 @@ def chunk_document(
             if block.type in {BlockType.TITLE, BlockType.HEADER}:
                 title_text = block.text.strip()
                 if title_text:
-                    section_path = _update_section_path(section_path, title_text)
+                    section_path = _update_section_path(
+                        section_path, title_text, block.type
+                    )
 
             # Determine related tables/images for this block
             page_tables = table_by_page.get(page_idx, [])
@@ -111,10 +112,7 @@ def chunk_document(
             chunk_idx = 0
 
             for sentence in sentences:
-                if (
-                    current_text
-                    and len(current_text) + len(sentence) + 1 > chunk_size
-                ):
+                if current_text and len(current_text) + len(sentence) + 1 > chunk_size:
                     # Emit chunk
                     chunks.append(
                         _make_chunk(
@@ -200,12 +198,19 @@ def _make_chunk(
 
 
 def _update_section_path(
-    current_path: list[str], new_heading: str
+    current_path: list[str], new_heading: str, block_type: BlockType = BlockType.TITLE
 ) -> list[str]:
-    """Append or replace the last heading in the section path."""
+    """Update section path based on heading block type.
+
+    ``TITLE`` blocks reset the path (top-level heading); ``HEADER``
+    blocks nest under the current title.  This provides a simple but
+    reliable heading hierarchy based on layout block semantics rather
+    than string length.
+    """
     if not current_path:
         return [new_heading]
-    # Simple heuristic: if new heading is shorter, treat as higher-level
-    if len(new_heading) < len(current_path[-1]):
+    if block_type == BlockType.TITLE:
+        # Titles reset to top level
         return [new_heading]
+    # Headers nest under the current path
     return current_path + [new_heading]

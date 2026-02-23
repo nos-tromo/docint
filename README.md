@@ -301,3 +301,73 @@ Run unit tests and pre-commit checks to ensure functionality and lint/type quali
 uv run pytest
 uv run pre-commit run --all-files
 ```
+
+## Document Processing Pipeline
+
+The enhanced document processing pipeline provides page-level triage, layout analysis, OCR fallback, table/image extraction, and layout-aware chunking. It runs fully offline and handles digital, scanned, and mixed PDFs.
+
+### Pipeline Stages
+
+1. **Page Triage** — Classifies each page as digital (text layer present) or scanned (needs OCR) using a configurable text-coverage heuristic.
+2. **Layout Analysis** — Detects layout blocks (text, titles, tables, figures, headers/footers) with reading order and bounding boxes.
+3. **OCR / Text Extraction** — Extracts text from the PDF text layer; applies OCR fallback on pages flagged as needing it.
+4. **Table & Image Extraction** — Extracts table regions and figure/image regions from layout blocks with best-effort structure detection.
+5. **Layout-Aware Chunking** — Chunks text respecting reading order, section headings, and sentence boundaries. Produces stable chunk IDs.
+6. **Artifact Persistence** — Writes structured artifacts per document for debugging and reprocessing.
+
+### Artifact Directory Structure
+
+```
+artifacts/{doc_id}/
+├── manifest.json                  # Document-level metadata and page triage results
+├── pages/{page_index}/
+│   ├── layout.json                # Layout blocks for the page
+│   └── text.json                  # Text extraction results (PDF text + OCR spans)
+├── tables/{table_id}.json         # Table metadata and content (+ .csv if grid available)
+├── images/{image_id}.json         # Image metadata
+└── chunks.jsonl                   # All chunks with stable IDs and metadata
+```
+
+### Configuration
+
+Pipeline behaviour is controlled via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PIPELINE_TEXT_COVERAGE_THRESHOLD` | `0.01` | Chars-per-area ratio below which a page needs OCR |
+| `PIPELINE_ARTIFACTS_DIR` | `artifacts` | Root directory for artifact output |
+| `PIPELINE_MAX_RETRIES` | `2` | Max retry attempts per processing stage |
+| `PIPELINE_FORCE_REPROCESS` | `false` | Ignore existing artifacts and reprocess |
+| `PIPELINE_MAX_WORKERS` | `4` | Document-level parallelism |
+
+### Programmatic Usage
+
+```python
+from docint.core.pipeline import DocumentPipelineOrchestrator, PipelineConfig
+
+config = PipelineConfig(
+    text_coverage_threshold=0.01,
+    pipeline_version="1.0.0",
+    artifacts_dir="artifacts",
+    max_retries=2,
+    force_reprocess=False,
+    max_workers=4,
+)
+orchestrator = DocumentPipelineOrchestrator(config=config)
+manifest = orchestrator.process("path/to/document.pdf")
+
+print(f"Pages: {manifest.pages_total}, OCR: {manifest.pages_ocr}, Failed: {manifest.pages_failed}")
+print(f"Tables: {manifest.tables_found}, Images: {manifest.images_found}")
+```
+
+### Idempotency
+
+The pipeline uses SHA-256 of file bytes as `doc_id`. Re-running on the same file with the same `pipeline_version` skips processing unless `--force` / `PIPELINE_FORCE_REPROCESS=true` is set.
+
+### Error Isolation
+
+Failures on individual pages do not crash the entire document. Failed pages are recorded in `manifest.json` with error details, and processing continues for remaining pages.
+
+### Offline Compliance
+
+All processing runs locally. No network calls are made. Set `DOCINT_OFFLINE=true` to enforce offline mode for all Hugging Face model loading.

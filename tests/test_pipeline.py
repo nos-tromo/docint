@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import textwrap
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -27,6 +26,7 @@ from docint.core.pipeline.models import (
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture()
 def pipeline_config(tmp_path: Path) -> PipelineConfig:
@@ -71,6 +71,7 @@ def sample_layout_block() -> LayoutBlock:
 # Model tests
 # ---------------------------------------------------------------------------
 
+
 class TestBBox:
     def test_area(self) -> None:
         bbox = BBox(x0=0, y0=0, x1=10, y1=20)
@@ -112,7 +113,9 @@ class TestPageInfo:
 class TestDocumentManifest:
     def test_defaults(self) -> None:
         m = DocumentManifest(
-            doc_id="abc", file_path="/x.pdf", file_name="x.pdf",
+            doc_id="abc",
+            file_path="/x.pdf",
+            file_name="x.pdf",
             pipeline_version="1.0.0",
         )
         assert m.pages_total == 0
@@ -122,6 +125,7 @@ class TestDocumentManifest:
 # ---------------------------------------------------------------------------
 # Config tests
 # ---------------------------------------------------------------------------
+
 
 class TestPipelineConfig:
     def test_load_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -152,6 +156,7 @@ class TestPipelineConfig:
 # ---------------------------------------------------------------------------
 # Triage tests
 # ---------------------------------------------------------------------------
+
 
 class TestTriage:
     def test_digital_pdf(self, pipeline_config: PipelineConfig) -> None:
@@ -259,6 +264,7 @@ class TestTriage:
 # Chunking tests
 # ---------------------------------------------------------------------------
 
+
 class TestChunking:
     def test_basic_chunking(self, sample_layout_block: LayoutBlock) -> None:
         from docint.core.pipeline.chunking import chunk_document
@@ -299,9 +305,7 @@ class TestChunking:
             text="This is the introduction text.",
         )
         layout = {0: [title_block, text_block]}
-        page_texts = {
-            0: PageText(page_index=0, full_text="", source_mix="pdf_text")
-        }
+        page_texts = {0: PageText(page_index=0, full_text="", source_mix="pdf_text")}
         chunks = chunk_document("doc456", layout, page_texts, [], [])
         # The text block chunk should have the section path from the title
         text_chunks = [c for c in chunks if "introduction text" in c.text.lower()]
@@ -325,9 +329,7 @@ class TestChunking:
         page_texts = {
             0: PageText(page_index=0, full_text=long_text, source_mix="pdf_text")
         }
-        chunks = chunk_document(
-            "doc789", layout, page_texts, [], [], chunk_size=200
-        )
+        chunks = chunk_document("doc789", layout, page_texts, [], [], chunk_size=200)
         assert len(chunks) > 1
         for chunk in chunks:
             # Allow some tolerance for sentence boundaries
@@ -346,9 +348,7 @@ class TestChunking:
             text="Deterministic content for testing.",
         )
         layout = {0: [block]}
-        page_texts = {
-            0: PageText(page_index=0, full_text="", source_mix="pdf_text")
-        }
+        page_texts = {0: PageText(page_index=0, full_text="", source_mix="pdf_text")}
         c1 = chunk_document("same-doc", layout, page_texts, [], [])
         c2 = chunk_document("same-doc", layout, page_texts, [], [])
         assert len(c1) == len(c2)
@@ -379,6 +379,7 @@ class TestChunking:
 # ---------------------------------------------------------------------------
 # Artifact tests
 # ---------------------------------------------------------------------------
+
 
 class TestArtifacts:
     def test_save_and_load_manifest(self, tmp_path: Path) -> None:
@@ -496,6 +497,7 @@ class TestArtifacts:
 # Extraction tests
 # ---------------------------------------------------------------------------
 
+
 class TestExtraction:
     def test_extract_tables_from_layout(self) -> None:
         from docint.core.pipeline.extraction import extract_tables
@@ -553,6 +555,7 @@ class TestExtraction:
 # OCR tests
 # ---------------------------------------------------------------------------
 
+
 class TestOCR:
     def test_build_page_text_pdf_only(
         self, sample_page_info: PageInfo, sample_layout_block: LayoutBlock
@@ -603,6 +606,7 @@ class TestOCR:
 # Orchestrator tests
 # ---------------------------------------------------------------------------
 
+
 class TestOrchestrator:
     def test_process_with_mocked_pdf(
         self, pipeline_config: PipelineConfig, tmp_path: Path
@@ -630,9 +634,11 @@ class TestOrchestrator:
 
         orch = DocumentPipelineOrchestrator(config=pipeline_config)
 
-        with patch("docint.core.pipeline.triage.pypdf") as mock_triage_pypdf, \
-             patch("docint.core.pipeline.layout.pypdf") as mock_layout_pypdf, \
-             patch("docint.core.pipeline.ocr.pypdf") as mock_ocr_pypdf:
+        with (
+            patch("docint.core.pipeline.triage.pypdf") as mock_triage_pypdf,
+            patch("docint.core.pipeline.layout.pypdf") as mock_layout_pypdf,
+            patch("docint.core.pipeline.ocr.pypdf") as mock_ocr_pypdf,
+        ):
             mock_triage_pypdf.PdfReader.return_value = mock_reader
             mock_layout_pypdf.PdfReader.return_value = mock_reader
             mock_ocr_pypdf.PdfReader.return_value = mock_reader
@@ -645,6 +651,7 @@ class TestOrchestrator:
 
         # Check artifacts were created
         from docint.utils.hashing import compute_file_hash
+
         doc_id = compute_file_hash(pdf_file)
         artifacts_dir = Path(pipeline_config.artifacts_dir)
         assert (artifacts_dir / doc_id / "manifest.json").exists()
@@ -685,9 +692,11 @@ class TestOrchestrator:
         orch = DocumentPipelineOrchestrator(config=config)
 
         # First run
-        with patch("docint.core.pipeline.triage.pypdf") as m1, \
-             patch("docint.core.pipeline.layout.pypdf") as m2, \
-             patch("docint.core.pipeline.ocr.pypdf") as m3:
+        with (
+            patch("docint.core.pipeline.triage.pypdf") as m1,
+            patch("docint.core.pipeline.layout.pypdf") as m2,
+            patch("docint.core.pipeline.ocr.pypdf") as m3,
+        ):
             m1.PdfReader.return_value = mock_reader
             m2.PdfReader.return_value = mock_reader
             m3.PdfReader.return_value = mock_reader
@@ -728,9 +737,11 @@ class TestOrchestrator:
 
         orch = DocumentPipelineOrchestrator(config=pipeline_config)
 
-        with patch("docint.core.pipeline.triage.pypdf") as m1, \
-             patch("docint.core.pipeline.layout.pypdf") as m2, \
-             patch("docint.core.pipeline.ocr.pypdf") as m3:
+        with (
+            patch("docint.core.pipeline.triage.pypdf") as m1,
+            patch("docint.core.pipeline.layout.pypdf") as m2,
+            patch("docint.core.pipeline.ocr.pypdf") as m3,
+        ):
             m1.PdfReader.return_value = mock_reader
             m2.PdfReader.return_value = mock_reader
             m3.PdfReader.return_value = mock_reader
@@ -741,9 +752,7 @@ class TestOrchestrator:
         # At least one page should be processed (the good one)
         assert any(p.status == "completed" for p in manifest.pages)
 
-    def test_retry_logic(
-        self, pipeline_config: PipelineConfig, tmp_path: Path
-    ) -> None:
+    def test_retry_logic(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
         """Stages should retry on transient failures."""
         from docint.core.pipeline.orchestrator import DocumentPipelineOrchestrator
 

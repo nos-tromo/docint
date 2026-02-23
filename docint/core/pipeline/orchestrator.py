@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import time
-from dataclasses import asdict
 from pathlib import Path
+from typing import Any, Callable
 
 from loguru import logger
 
@@ -150,28 +150,34 @@ class DocumentPipelineOrchestrator:
                 page_info.error = "Text extraction failed"
 
         # --- Stage 4: Table extraction ---
-        tables: list[TableResult] = self._run_with_retry(
-            "tables", lambda: extract_tables(layout)
-        ) or []
+        tables: list[TableResult] = (
+            self._run_with_retry("tables", lambda: extract_tables(layout)) or []
+        )
         for table in tables:
             save_table(doc_id, table, artifacts_dir)
         manifest.tables_found = len(tables)
 
         # --- Stage 5: Image extraction ---
         images_dir = artifacts_dir / doc_id / "images"
-        images: list[ImageResult] = self._run_with_retry(
-            "images",
-            lambda: extract_images(layout, file_path, images_dir),
-        ) or []
+        images: list[ImageResult] = (
+            self._run_with_retry(
+                "images",
+                lambda: extract_images(layout, file_path, images_dir),
+            )
+            or []
+        )
         for image in images:
             save_image_metadata(doc_id, image, artifacts_dir)
         manifest.images_found = len(images)
 
         # --- Stage 6: Chunking ---
-        chunks: list[ChunkResult] = self._run_with_retry(
-            "chunking",
-            lambda: chunk_document(doc_id, layout, page_texts, tables, images),
-        ) or []
+        chunks: list[ChunkResult] = (
+            self._run_with_retry(
+                "chunking",
+                lambda: chunk_document(doc_id, layout, page_texts, tables, images),
+            )
+            or []
+        )
         if chunks:
             save_chunks(doc_id, chunks, artifacts_dir)
 
@@ -188,7 +194,9 @@ class DocumentPipelineOrchestrator:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _run_with_retry(self, stage: str, fn, retries: int | None = None):  # type: ignore[no-untyped-def]
+    def _run_with_retry(
+        self, stage: str, fn: Callable[[], Any], retries: int | None = None
+    ) -> Any:
         """Execute *fn* with retry logic, returning ``None`` on exhaustion.
 
         Args:
@@ -212,7 +220,9 @@ class DocumentPipelineOrchestrator:
                     exc,
                 )
                 if attempt == max_tries:
-                    logger.error("Stage '{}' failed after {} attempts", stage, max_tries)
+                    logger.error(
+                        "Stage '{}' failed after {} attempts", stage, max_tries
+                    )
                     return None
 
     @staticmethod
