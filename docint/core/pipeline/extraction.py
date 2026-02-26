@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pypdf
 from loguru import logger
@@ -104,11 +105,15 @@ def _try_extract_embedded_image(
 ) -> str | None:
     """Best-effort extraction of embedded images via ``pypdf``.
 
+    Uses ``pypdf``'s ``page.images`` API which returns decoded image
+    data ready for writing.  Falls back to manual ``/XObject``
+    inspection when the higher-level API is unavailable.
+
     Args:
         file_path: Source PDF.
         page_index: Page to inspect.
         image_id: Identifier for naming the output file.
-        output_dir: Where to write the PNG.
+        output_dir: Where to write the image.
 
     Returns:
         Path string to the written image, or ``None`` on failure.
@@ -116,27 +121,86 @@ def _try_extract_embedded_image(
     try:
         reader = pypdf.PdfReader(file_path)
         page = reader.pages[page_index]
-        x_objects = page.get("/Resources", {})
+
+        # pypdf >= 3.x exposes page.images with decoded data
+        if hasattr(page, "images") and page.images:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            for idx, img in enumerate(page.images):
+                ext = Path(img.name).suffix or ".png"
+                img_path = output_dir / f"{image_id}-{idx}{ext}"
+                img_path.write_bytes(img.data)
+                logger.debug("Extracted image: {}", img_path)
+                # Return the first extracted image path
+                return str(img_path)
+
+        # Fallback: manual XObject extraction with Pillow decoding
+        return _try_extract_xobject_image(page, image_id, output_dir)
+
+    except Exception as exc:
+        logger.debug("Embedded image extraction failed: {}", exc)
+    return None
+
+
+def _try_extract_xobject_image(
+    page: object, image_id: str, output_dir: Path
+) -> str | None:
+    """Attempt to extract an image from page XObjects using Pillow.
+
+    Args:
+        page: A ``pypdf`` page object.
+        image_id: Identifier for naming the output file.
+        output_dir: Where to write the PNG.
+
+    Returns:
+        Path string to the written image, or ``None`` on failure.
+    """
+    try:
+        import io
+
+        from PIL import Image
+
+        x_objects: Any = getattr(page, "get", lambda *a: None)("/Resources", {})
         if hasattr(x_objects, "get"):
             x_objects = x_objects.get("/XObject", {})
         else:
             return None
 
+        if hasattr(x_objects, "get_object"):
+            x_objects = x_objects.get_object()
+
         for obj_name in x_objects:
             obj = x_objects[obj_name]
             resolved = obj.get_object() if hasattr(obj, "get_object") else obj
-            subtype = resolved.get("/Subtype", "")
-            if subtype == "/Image":
-                output_dir.mkdir(parents=True, exist_ok=True)
+            subtype = str(resolved.get("/Subtype", ""))
+            if subtype != "/Image":
+                continue
+
+            output_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                data = resolved.get_data()
+                width = int(resolved.get("/Width", 0))
+                height = int(resolved.get("/Height", 0))
+                color_space = str(resolved.get("/ColorSpace", "/DeviceRGB"))
+
+                if width > 0 and height > 0:
+                    mode = "RGB" if "RGB" in color_space else "L"
+                    try:
+                        img = Image.frombytes(mode, (width, height), data)
+                    except Exception:
+                        img = Image.open(io.BytesIO(data))
+                else:
+                    img = Image.open(io.BytesIO(data))
+
                 img_path = output_dir / f"{image_id}.png"
-                try:
-                    data = resolved.get_data()
-                    img_path.write_bytes(data)
-                    return str(img_path)
-                except Exception:
-                    pass
+                img.save(str(img_path), "PNG")
+                return str(img_path)
+            except Exception:
+                # Last resort: write raw bytes
+                img_path = output_dir / f"{image_id}.bin"
+                img_path.write_bytes(data)
+                return str(img_path)
     except Exception as exc:
-        logger.debug("Embedded image extraction failed: {}", exc)
+        logger.debug("XObject image extraction failed: {}", exc)
     return None
 
 
