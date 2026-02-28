@@ -49,6 +49,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 
 from docint.core.ingestion_pipeline import DocumentIngestionPipeline
+from docint.core.readers.pipeline import CorePDFPipelineReader
 from docint.core.session_manager import SessionManager
 from docint.core.storage.docstore import QdrantKVStore
 from docint.core.storage.sources import stage_sources_to_qdrant
@@ -666,6 +667,21 @@ class RAG:
         )
 
     @staticmethod
+    def _select_vector_nodes(nodes: list[BaseNode]) -> list[BaseNode]:
+        """Select nodes that should be inserted into the vector store.
+
+        Args:
+            nodes: Parsed nodes for an ingestion batch.
+
+        Returns:
+            The subset of nodes suitable for vector indexing.
+        """
+        is_hierarchical = any("docint_hier_type" in n.metadata for n in nodes)
+        if is_hierarchical:
+            return [n for n in nodes if n.metadata.get("docint_hier_type") != "coarse"]
+        return nodes
+
+    @staticmethod
     def _extract_file_hash(data: Any) -> str | None:
         """
         Best-effort extraction of a ``file_hash`` value from nested payloads.
@@ -1164,7 +1180,6 @@ class RAG:
             Path(data_dir) if isinstance(data_dir, str) else data_dir
         )
         self.data_dir = prepared_dir
-        pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
 
         # Initialize index (load existing or create new wrapper)
         vector_store = self._vector_store()
@@ -1177,16 +1192,38 @@ class RAG:
             storage_context=storage_ctx,
         )
 
-        # Process batches from the pipeline generator
-        for docs, nodes in pipeline.build(self._get_existing_file_hashes()):
+        pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
+        existing_hashes = self._get_existing_file_hashes()
+        processed_hashes = set(existing_hashes)
+        core_pdf_reader = CorePDFPipelineReader(
+            data_dir=prepared_dir,
+            entity_extractor=pipeline.entity_extractor,
+            ner_max_workers=pipeline.ner_max_workers,
+        )
+
+        for docs, nodes, file_hash in core_pdf_reader.build(
+            existing_hashes=processed_hashes, progress_callback=progress_callback
+        ):
             if nodes:
-                # Filter nodes for vector indexing (exclude coarse chunks from vector store)
-                is_hierarchical = any("docint_hier_type" in n.metadata for n in nodes)
-                vector_nodes = (
-                    [n for n in nodes if n.metadata.get("docint_hier_type") != "coarse"]
-                    if is_hierarchical
-                    else nodes
+                vector_nodes = self._select_vector_nodes(nodes)
+
+                logger.debug(
+                    "Persisting {} core-pipeline nodes to DocStore...",
+                    len(nodes),
                 )
+                self.index.docstore.add_documents(nodes, allow_update=True)
+                if vector_nodes:
+                    self.index.insert_nodes(vector_nodes)
+                processed_hashes.add(file_hash)
+
+        # PDFs are owned by the core pipeline reader and should not be
+        # re-processed by the legacy ingestion path.
+        processed_hashes.update(core_pdf_reader.discovered_hashes)
+
+        # Process batches from the pipeline generator
+        for docs, nodes in pipeline.build(processed_hashes):
+            if nodes:
+                vector_nodes = self._select_vector_nodes(nodes)
 
                 # Explicitly persist to docstore first to ensure data safety
                 logger.debug("Persisting {} nodes to DocStore...", len(nodes))
@@ -1248,18 +1285,43 @@ class RAG:
             Path(data_dir) if isinstance(data_dir, str) else data_dir
         )
         self.data_dir = prepared_dir
-        pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
-
         # Initialize index
         vector_store = self._vector_store()
-        self.index = VectorStoreIndex.from_vector_store(
-            vector_store=vector_store, embed_model=self.embed_model
+        storage_ctx = self._storage_context(vector_store)
+        self.index = VectorStoreIndex(
+            nodes=[],
+            embed_model=self.embed_model,
+            storage_context=storage_ctx,
         )
 
-        # Process batches
-        for docs, nodes in pipeline.build(self._get_existing_file_hashes()):
+        pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
+        existing_hashes = self._get_existing_file_hashes()
+        processed_hashes = set(existing_hashes)
+        core_pdf_reader = CorePDFPipelineReader(
+            data_dir=prepared_dir,
+            entity_extractor=pipeline.entity_extractor,
+            ner_max_workers=pipeline.ner_max_workers,
+        )
+
+        for docs, nodes, file_hash in core_pdf_reader.build(
+            existing_hashes=processed_hashes, progress_callback=progress_callback
+        ):
             if nodes:
-                await self.index.ainsert_nodes(nodes)
+                vector_nodes = self._select_vector_nodes(nodes)
+                self.index.docstore.add_documents(nodes, allow_update=True)
+                if vector_nodes:
+                    await self.index.ainsert_nodes(vector_nodes)
+                processed_hashes.add(file_hash)
+
+        processed_hashes.update(core_pdf_reader.discovered_hashes)
+
+        # Process batches
+        for docs, nodes in pipeline.build(processed_hashes):
+            if nodes:
+                vector_nodes = self._select_vector_nodes(nodes)
+                self.index.docstore.add_documents(nodes, allow_update=True)
+                if vector_nodes:
+                    await self.index.ainsert_nodes(vector_nodes)
 
         self.dir_reader = pipeline.dir_reader
         self.docs = []

@@ -305,6 +305,7 @@ uv run pre-commit run --all-files
 ## Document Processing Pipeline
 
 The enhanced document processing pipeline provides page-level triage, layout analysis, OCR fallback, table/image extraction, and layout-aware chunking. It runs fully offline and handles digital, scanned, and mixed PDFs.
+This pipeline is the default PDF ingestion path used by the API/UI/CLI ingestion workflows.
 
 ### Pipeline Stages
 
