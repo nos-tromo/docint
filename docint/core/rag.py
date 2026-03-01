@@ -16,14 +16,21 @@ from typing import Any, Callable
 from docint.utils.env_cfg import (
     load_host_env,
     load_ingestion_env,
-    load_ner_env,
     load_model_env,
+    load_ner_env,
     load_openai_env,
     load_path_env,
     load_retrieval_env,
     load_session_env,
     resolve_hf_cache_path,
     PathConfig,
+    HostConfig,
+    IngestionConfig,
+    NERConfig,
+    ModelConfig,
+    OpenAIConfig,
+    RetrievalConfig,
+    SessionConfig,
 )
 # isort: on
 
@@ -48,9 +55,10 @@ from loguru import logger
 from qdrant_client import QdrantClient
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 
-from docint.core.ingestion_pipeline import DocumentIngestionPipeline
-from docint.core.readers.pipeline import CorePDFPipelineReader
-from docint.core.session_manager import SessionManager
+from docint.core.ingest.images_service import ImageIngestionService
+from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
+from docint.core.readers.documents import CorePDFPipelineReader
+from docint.core.state.session_manager import SessionManager
 from docint.core.storage.docstore import QdrantKVStore
 from docint.core.storage.sources import stage_sources_to_qdrant
 from docint.utils.openai_cfg import LocalOpenAI
@@ -68,13 +76,29 @@ class RAG:
     qdrant_collection: str
     enable_hybrid: bool = field(default=True)
 
-    # --- Path setup ---
-    _path_config: PathConfig | None = field(default=None, init=False, repr=False)
-    data_dir: Path | None = field(default=None, init=False)
-    hf_hub_cache: Path | None = field(default=None, init=False)
-
-    # --- Session config ---
-    session_store: str = field(default="", init=False)
+    # --- Environment config ---
+    host_config: HostConfig = field(
+        default_factory=load_host_env, init=False, repr=False
+    )
+    ingestion_config: IngestionConfig = field(
+        default_factory=load_ingestion_env, init=False, repr=False
+    )
+    model_config: ModelConfig = field(
+        default_factory=load_model_env, init=False, repr=False
+    )
+    ner_config: NERConfig = field(default_factory=load_ner_env, init=False, repr=False)
+    openai_config: OpenAIConfig = field(
+        default_factory=load_openai_env, init=False, repr=False
+    )
+    path_config: PathConfig = field(
+        default_factory=load_path_env, init=False, repr=False
+    )
+    retrieval_config: RetrievalConfig = field(
+        default_factory=load_retrieval_env, init=False, repr=False
+    )
+    session_config: SessionConfig = field(
+        default_factory=load_session_env, init=False, repr=False
+    )
 
     # --- Models ---
     embed_model_id: str | None = field(default=None, init=False)
@@ -82,11 +106,9 @@ class RAG:
     rerank_model_id: str | None = field(default=None, init=False)
     text_model_id: str | None = field(default=None, init=False)
 
-    # --- Qdrant controls ---
-    docstore_batch_size: int = field(default=100, init=False)
-    qdrant_host: str | None = field(default=None, init=False)
-    _qdrant_col_dir: Path | None = field(default=None, init=False, repr=False)
-    _qdrant_src_dir: Path | None = field(default=None, init=False, repr=False)
+    # --- Named entity recognition ---
+    ner_enabled: bool = field(default=False, init=False)
+    ner_sources: list[dict[str, Any]] = field(default_factory=list, init=False)
 
     # --- OpenAI parameters ---
     openai_api_base: str | None = field(default=None, init=False)
@@ -101,14 +123,23 @@ class RAG:
     openai_timeout: float = field(default=300.0, init=False)
     openai_top_p: float = field(default=0.0, init=False)
 
-    # --- Information extraction ---
-    ner_enabled: bool = field(default=False, init=False)
-    ner_sources: list[dict[str, Any]] = field(default_factory=list, init=False)
+    # --- Path setup ---
+    data_dir: Path | None = field(default=None, init=False)
+    hf_hub_cache: Path | None = field(default=None, init=False)
 
     # --- Reranking / retrieval ---
     retrieve_similarity_top_k: int = field(default=20, init=False)
     rerank_top_n: int = field(default=5, init=False)
     rerank_use_fp16: bool = field(default=False, init=False)
+
+    # --- Session config ---
+    session_store: str = field(default="", init=False)
+
+    # --- Qdrant controls ---
+    docstore_batch_size: int = field(default=100, init=False)
+    qdrant_host: str | None = field(default=None, init=False)
+    _qdrant_col_dir: Path | None = field(default=None, init=False, repr=False)
+    _qdrant_src_dir: Path | None = field(default=None, init=False, repr=False)
 
     # --- Prompt config ---
     prompt_dir: Path | None = field(default=None, init=False)
@@ -147,45 +178,41 @@ class RAG:
             ValueError: If summarize_prompt_path is not set.
         """
         # --- Host config ---
-        _host_config = load_host_env()
-        self.qdrant_host = _host_config.qdrant_host
+        self.qdrant_host = self.host_config.qdrant_host
 
         # --- Ingestion config ---
-        _ingestion_config = load_ingestion_env()
-        self.docstore_batch_size = _ingestion_config.docstore_batch_size
+        self.docstore_batch_size = self.ingestion_config.docstore_batch_size
 
         # --- Model config ---
-        _model_config = load_model_env()
         suffix = ".gguf"
-        self.embed_model_id = _model_config.embed_model_file.removesuffix(suffix)
-        self.rerank_model_id = _model_config.rerank_model
-        self.sparse_model_id = _model_config.sparse_model
-        self.text_model_id = _model_config.text_model_file.removesuffix(suffix)
+        self.embed_model_id = self.model_config.embed_model_file.removesuffix(suffix)
+        self.rerank_model_id = self.model_config.rerank_model
+        self.sparse_model_id = self.model_config.sparse_model
+        self.text_model_id = self.model_config.text_model_file.removesuffix(suffix)
 
         # --- OpenAI config ---
-        _openai_config = load_openai_env()
-        self.openai_api_key = _openai_config.api_key
-        self.openai_api_base = _openai_config.api_base
-        self.openai_ctx_window = _openai_config.ctx_window
-        self.openai_dimensions = _openai_config.dimensions
-        self.openai_max_retries = _openai_config.max_retries
-        self.openai_model_provider = _openai_config.model_provider
-        self.openai_reuse_client = _openai_config.reuse_client
-        self.openai_seed = _openai_config.seed
-        self.openai_temperature = _openai_config.temperature
-        self.openai_timeout = _openai_config.timeout
-        self.openai_top_p = _openai_config.top_p
+        self.openai_api_key = self.openai_config.api_key
+        self.openai_api_base = self.openai_config.api_base
+        self.openai_ctx_window = self.openai_config.ctx_window
+        self.openai_dimensions = self.openai_config.dimensions
+        self.openai_max_retries = self.openai_config.max_retries
+        self.openai_model_provider = self.openai_config.model_provider
+        self.openai_reuse_client = self.openai_config.reuse_client
+        self.openai_seed = self.openai_config.seed
+        self.openai_temperature = self.openai_config.temperature
+        self.openai_timeout = self.openai_config.timeout
+        self.openai_top_p = self.openai_config.top_p
 
         # --- Named Entity Recognition (NER) config ---
-        self.ner_enabled = load_ner_env().enabled
+        self.ner_enabled = self.ner_config.enabled
 
         # --- Path config ---
-        self._path_config = load_path_env()
-        self.data_dir = self._path_config.data
-        self.prompt_dir = self._path_config.prompts
-        self._qdrant_col_dir = self._path_config.qdrant_collections
-        self._qdrant_src_dir = self._path_config.qdrant_sources
-        self.hf_hub_cache = self._path_config.hf_hub_cache
+        self.path_config = self.path_config
+        self.data_dir = self.path_config.data
+        self.prompt_dir = self.path_config.prompts
+        self._qdrant_col_dir = self.path_config.qdrant_collections
+        self._qdrant_src_dir = self.path_config.qdrant_sources
+        self.hf_hub_cache = self.path_config.hf_hub_cache
 
         ## --- Load prompts ---
         if self.prompt_dir:
@@ -202,13 +229,12 @@ class RAG:
             self.summarize_prompt = f.read()
 
         # --- Retrieval config ---
-        _retrieval_config = load_retrieval_env()
-        self.rerank_use_fp16 = _retrieval_config.rerank_use_fp16
-        self.retrieve_similarity_top_k = _retrieval_config.retrieve_top_k
+        self.rerank_use_fp16 = self.retrieval_config.rerank_use_fp16
+        self.retrieve_similarity_top_k = self.retrieval_config.retrieve_top_k
         self.rerank_top_n = int(self.retrieve_similarity_top_k // 4)
 
         # --- Session config ---
-        self.session_store = load_session_env().session_store
+        self.session_store = self.session_config.session_store
         self.sessions = SessionManager(self)
 
     @property
@@ -282,10 +308,10 @@ class RAG:
             ValueError: If the path configuration or the Qdrant host directory is not set.
         """
         if self._qdrant_col_dir is None:
-            if self._path_config is None:
+            if self.path_config is None:
                 logger.error("ValueError: Path configuration is not set.")
                 raise ValueError("Path configuration is not set.")
-            env = self._path_config.qdrant_collections
+            env = self.path_config.qdrant_collections
             if env:
                 self._qdrant_col_dir = Path(env) if not env.is_absolute() else env
             else:
@@ -312,10 +338,10 @@ class RAG:
             ValueError: If the path configuration or the Qdrant source host directory is not set.
         """
         if self._qdrant_src_dir is None:
-            if self._path_config is None:
+            if self.path_config is None:
                 logger.error("ValueError: Path configuration is not set.")
                 raise ValueError("Path configuration is not set.")
-            env = self._path_config.qdrant_sources
+            env = self.path_config.qdrant_sources
             if env:
                 self._qdrant_src_dir = Path(env) if not env.is_absolute() else env
             else:
