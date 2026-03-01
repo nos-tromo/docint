@@ -88,104 +88,6 @@ class HostConfig:
     cors_allowed_origins: str
 
 
-@dataclass(frozen=True)
-class IngestionConfig:
-    coarse_chunk_size: int
-    docling_accelerator_num_threads: int
-    docstore_batch_size: int
-    fine_chunk_overlap: int
-    fine_chunk_size: int
-    hierarchical_chunking_enabled: bool
-    ingestion_batch_size: int
-    sentence_splitter_chunk_overlap: int
-    sentence_splitter_chunk_size: int
-    supported_filetypes: list[str]
-
-
-@dataclass(frozen=True)
-class ModelConfig:
-    """
-    Dataclass for model configuration.
-    """
-
-    embed_model_file: str
-    embed_model_repo: str
-    ner_model: str
-    rerank_model: str
-    sparse_model: str
-    text_model_file: str
-    text_model_repo: str
-    vision_model_file: str
-    vision_model_repo: str
-    whisper_model: str
-
-
-@dataclass(frozen=True)
-class NERConfig:
-    """
-    Dataclass for information extraction configuration.
-    """
-
-    enabled: bool
-    max_chars: int
-    max_workers: int
-
-
-@dataclass(frozen=True)
-class OpenAIConfig:
-    """
-    Dataclass for OpenAI-compatible API configuration.
-    """
-
-    api_base: str
-    api_key: str
-    ctx_window: int
-    dimensions: int
-    max_retries: int
-    model_provider: str
-    reuse_client: bool
-    seed: int
-    temperature: float
-    timeout: float
-    top_p: float
-
-
-@dataclass(frozen=True)
-class PathConfig:
-    """
-    Dataclass for path configuration.
-    """
-
-    data: Path
-    logs: Path
-    queries: Path
-    results: Path
-    prompts: Path
-    qdrant_collections: Path
-    qdrant_sources: Path
-    hf_hub_cache: Path
-    llama_cpp_cache: Path
-
-
-@dataclass(frozen=True)
-class RetrievalConfig:
-    """
-    Dataclass for RAG (Retrieval-Augmented Generation) configuration.
-    """
-
-    rerank_use_fp16: bool
-    retrieve_top_k: int
-
-
-@dataclass(frozen=True)
-class SessionConfig:
-    """
-    Dataclass for session configuration.
-    """
-
-    session_store: str
-
-
 def load_host_env(
     default_backend_host: str = "http://localhost:8000",
     default_qdrant_host: str = "http://localhost:6333",
@@ -396,8 +298,26 @@ def load_ingestion_env(
     )
 
 
+@dataclass(frozen=True)
+class ModelConfig:
+    """Dataclass for model configuration."""
+
+    embed_model_file: str
+    embed_model_repo: str
+    image_embed_model: str
+    ner_model: str
+    rerank_model: str
+    sparse_model: str
+    text_model_file: str
+    text_model_repo: str
+    vision_model_file: str
+    vision_model_repo: str
+    whisper_model: str
+
+
 def load_model_env(
     default_embed_model_str: str = "ggml-org/bge-m3-Q8_0-GGUF;bge-m3-q8_0.gguf",
+    default_image_embed_model: str = "openai/clip-vit-base-patch32",
     default_ner_model: str = "gliner-community/gliner_large-v2.5",
     default_rerank_model: str = "BAAI/bge-reranker-v2-m3",
     default_sparse_model: str = "Qdrant/all_miniLM_L6_v2_with_attentions",
@@ -409,6 +329,7 @@ def load_model_env(
 
     Args:
         default_embed_model_str (str): Default embedding model identifier.
+        default_image_embed_model (str): Default image embedding model identifier.
         default_ner_model (str): Default NER model identifier.
         default_rerank_model (str): Default reranker model identifier.
         default_sparse_model (str): Default sparse model identifier.
@@ -461,6 +382,7 @@ def load_model_env(
     return ModelConfig(
         embed_model_file=embed_model_file,
         embed_model_repo=embed_model_repo,
+        image_embed_model=os.getenv("IMAGE_EMBED_MODEL", default_image_embed_model),
         ner_model=os.getenv("NER_MODEL", default_ner_model),
         rerank_model=os.getenv("RERANK_MODEL", default_rerank_model),
         sparse_model=os.getenv("SPARSE_MODEL", default_sparse_model),
@@ -470,6 +392,15 @@ def load_model_env(
         vision_model_repo=vision_model_repo,
         whisper_model=os.getenv("WHISPER_MODEL", default_whisper_model),
     )
+
+
+@dataclass(frozen=True)
+class NERConfig:
+    """Dataclass for information extraction configuration."""
+
+    enabled: bool
+    max_chars: int
+    max_workers: int
 
 
 def load_ner_env(
@@ -499,6 +430,23 @@ def load_ner_env(
         max_chars=int(os.getenv("NER_MAX_CHARS", default_max_chars)),
         max_workers=int(os.getenv("NER_MAX_WORKERS", default_max_workers)),
     )
+
+
+@dataclass(frozen=True)
+class OpenAIConfig:
+    """Dataclass for OpenAI-compatible API configuration."""
+
+    api_base: str
+    api_key: str
+    ctx_window: int
+    dimensions: int
+    max_retries: int
+    model_provider: str
+    reuse_client: bool
+    seed: int
+    temperature: float
+    timeout: float
+    top_p: float
 
 
 def load_openai_env(
@@ -564,6 +512,21 @@ def load_openai_env(
     )
 
 
+@dataclass(frozen=True)
+class PathConfig:
+    """Dataclass for path configuration."""
+
+    data: Path
+    logs: Path
+    queries: Path
+    results: Path
+    prompts: Path
+    qdrant_collections: Path
+    qdrant_sources: Path
+    hf_hub_cache: Path
+    llama_cpp_cache: Path
+
+
 def load_path_env() -> PathConfig:
     """Loads path configuration from environment variables or defaults.
 
@@ -624,6 +587,14 @@ def load_path_env() -> PathConfig:
     )
 
 
+@dataclass(frozen=True)
+class RetrievalConfig:
+    """Dataclass for RAG (Retrieval-Augmented Generation) configuration."""
+
+    rerank_use_fp16: bool
+    retrieve_top_k: int
+
+
 def load_retrieval_env(
     default_rerank_use_fp16: bool = False,
     default_retrieve_top_k: int = 20,
@@ -646,6 +617,13 @@ def load_retrieval_env(
         in {"true", "1", "yes"},
         retrieve_top_k=int(os.getenv("RETRIEVE_TOP_K", default_retrieve_top_k)),
     )
+
+
+@dataclass(frozen=True)
+class SessionConfig:
+    """Dataclass for session configuration."""
+
+    session_store: str
 
 
 def load_session_env(
