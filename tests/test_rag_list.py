@@ -4,9 +4,7 @@ from docint.core.rag import RAG
 
 
 def test_list_documents() -> None:
-    """
-    Test listing documents from RAG with mocked Qdrant client.
-    """
+    """Test listing documents from RAG with mocked Qdrant client."""
     rag = RAG(qdrant_collection="test")
     rag._qdrant_client = MagicMock()
 

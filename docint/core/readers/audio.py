@@ -15,16 +15,14 @@ from docint.utils.mimetype import get_mimetype
 
 
 class AudioReader(BaseReader):
-    """
-    A reader for audio files using the Whisper model.
+    """A reader for audio files using the Whisper model.
 
     Args:
         BaseReader: Base class for all LlamaIndex readers.
     """
 
     def __init__(self, device: str | None = "cpu") -> None:
-        """
-        Initialize the AudioReader.
+        """Initialize the AudioReader.
 
         Args:
             device (str | None, optional): The device to use for inference. Defaults to "cpu".
@@ -34,8 +32,7 @@ class AudioReader(BaseReader):
         self.result: dict[str, str | list[Any]] | None = None
 
     def _load_model(self) -> whisper.Whisper:
-        """
-        Load the Whisper model.
+        """Load the Whisper model.
 
         Returns:
             whisper.Whisper: The loaded Whisper model.
@@ -49,8 +46,7 @@ class AudioReader(BaseReader):
         return whisper.load_model(self.model_id, device=self.device)
 
     def _load_audio(self, file_path: str | Path) -> NDArray[floating[Any]]:
-        """
-        Load audio from a file path.
+        """Load audio from a file path.
 
         Args:
             file_path (str | Path): The path to the audio file.
@@ -64,8 +60,7 @@ class AudioReader(BaseReader):
     def _transcribe_audio(
         self, audio: NDArray[floating[Any]], model: whisper.Whisper
     ) -> dict[str, str | list[Any]]:
-        """
-        Transcribe the given audio using the specified model and optional language.
+        """Transcribe the given audio using the specified model and optional language.
 
         Args:
             audio (NDArray[floating[Any]]): The audio data to transcribe.
@@ -87,8 +82,7 @@ class AudioReader(BaseReader):
         file_hash: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
     ) -> Document:
-        """
-        Enrich a document with metadata from the image file.
+        """Enrich a document with metadata from the image file.
 
         Args:
             file_path (Path): The path to the image file.
@@ -144,8 +138,7 @@ class AudioReader(BaseReader):
 
     @staticmethod
     def _format_timestamp(seconds: float | int) -> str:
-        """
-        Format seconds into HH:MM:SS format.
+        """Format seconds into HH:MM:SS format.
 
         Args:
             seconds (float | int): The number of seconds to format.
@@ -161,8 +154,7 @@ class AudioReader(BaseReader):
 
     @staticmethod
     def _ends_with_punctuation(text: str) -> bool:
-        """
-        Return True if text ends with sentence-ending punctuation.
+        """Return True if text ends with sentence-ending punctuation.
 
         Args:
             text (str): The text to check.
@@ -175,8 +167,7 @@ class AudioReader(BaseReader):
     def _merge_segments_into_sentences(
         self, segments: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """
-        Merge whisper segments into full sentences based on trailing punctuation.
+        """Merge whisper segments into full sentences based on trailing punctuation.
         Each merged item keeps earliest start and latest end.
 
         Args:
@@ -221,8 +212,7 @@ class AudioReader(BaseReader):
     def _build_segment_documents(
         self, result: dict[str, Any], file_path: Path, file_hash: str | None
     ) -> list[Document]:
-        """
-        Create one Document per full sentence by merging segments until punctuation.
+        """Create one Document per full sentence by merging segments until punctuation.
         Timing metadata reflects the merged start/end.
 
         Args:
@@ -272,8 +262,7 @@ class AudioReader(BaseReader):
         return docs
 
     def load_data(self, file: str | Path, **kwargs) -> list[Document]:
-        """
-        Transcribe audio from a file using the Whisper model.
+        """Transcribe audio from a file using the Whisper model.
 
         Args:
             audio_file (Path): The path to the audio file.

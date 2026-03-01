@@ -11,17 +11,14 @@ from loguru import logger
 
 
 def test_basic_clean_normalizes_whitespace() -> None:
-    """
-    Test that basic_clean normalizes whitespace and newlines.
-    """
+    """Test that basic_clean normalizes whitespace and newlines."""
     text = "Line 1\r\n\r\nLine 2\n\n\nLine 3   \n"
     cleaned = basic_clean(text)
     assert cleaned == "Line 1\nLine 2\nLine 3"
 
 
 def test_compute_file_hash(tmp_path: Path) -> None:
-    """
-    Test that compute_file_hash correctly calculates the SHA256 hash of a file.
+    """Test that compute_file_hash correctly calculates the SHA256 hash of a file.
 
     Args:
         tmp_path (Path): The temporary path fixture.
@@ -33,8 +30,7 @@ def test_compute_file_hash(tmp_path: Path) -> None:
 
 
 def test_compute_file_hash_missing(tmp_path: Path) -> None:
-    """
-    Test that compute_file_hash raises FileNotFoundError for missing files.
+    """Test that compute_file_hash raises FileNotFoundError for missing files.
 
     Args:
         tmp_path (Path): The temporary path fixture.
@@ -44,8 +40,7 @@ def test_compute_file_hash_missing(tmp_path: Path) -> None:
 
 
 def test_ensure_file_hash_mutates_metadata(tmp_path: Path) -> None:
-    """
-    Test that ensure_file_hash adds the file hash to the metadata dictionary.
+    """Test that ensure_file_hash adds the file hash to the metadata dictionary.
 
     Args:
         tmp_path (Path): The temporary path fixture.
@@ -58,9 +53,7 @@ def test_ensure_file_hash_mutates_metadata(tmp_path: Path) -> None:
 
 
 def test_ensure_file_hash_requires_inputs() -> None:
-    """
-    Test that ensure_file_hash raises ValueError if neither path nor file_hash is provided.
-    """
+    """Test that ensure_file_hash raises ValueError if neither path nor file_hash is provided."""
     with pytest.raises(ValueError):
         ensure_file_hash({}, path=None, file_hash=None)
 
@@ -68,8 +61,7 @@ def test_ensure_file_hash_requires_inputs() -> None:
 def test_setup_logging_respects_env_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """
-    setup_logging should honor LOG_PATH and create the log file.
+    """setup_logging should honor LOG_PATH and create the log file.
 
     Args:
         tmp_path (Path): Temporary directory.

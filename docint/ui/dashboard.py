@@ -1,6 +1,4 @@
-"""
-Dashboard page: KPI metrics, quick-start guide, and recent activity.
-"""
+"""Dashboard page: KPI metrics, quick-start guide, and recent activity."""
 
 from typing import Any
 
@@ -11,9 +9,7 @@ from docint.ui.state import BACKEND_HOST, navigate_to
 
 
 def render_dashboard() -> None:
-    """
-    Render the main dashboard page.
-    """
+    """Render the main dashboard page."""
     st.header("📊 Dashboard")
 
     collections: list[str] = st.session_state.get("_cached_collections", [])
@@ -119,8 +115,7 @@ def render_dashboard() -> None:
 
 
 def _fetch_documents(collection: str) -> list[dict[str, Any]]:
-    """
-    Fetch documents for *collection* from the backend.
+    """Fetch documents for *collection* from the backend.
 
     Args:
         collection: Collection name.
@@ -138,8 +133,7 @@ def _fetch_documents(collection: str) -> list[dict[str, Any]]:
 
 
 def _render_welcome(sessions: list[dict[str, Any]]) -> None:
-    """
-    Render the first-visit / no-collection welcome block.
+    """Render the first-visit / no-collection welcome block.
 
     Args:
         sessions: List of existing sessions (may be empty).
@@ -166,8 +160,7 @@ Get started in three easy steps:
 
 
 def _render_recent_sessions(sessions: list[dict[str, Any]]) -> None:
-    """
-    Show the five most-recent chat sessions.
+    """Show the five most-recent chat sessions.
 
     Args:
         sessions: Full sessions list (will be sliced to five).

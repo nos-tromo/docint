@@ -7,8 +7,7 @@ from docint.core.state.base import Base
 
 
 class Conversation(Base):
-    """
-    Represents a user conversation session.
+    """Represents a user conversation session.
 
     Args:
         Base (declarative_base): The declarative base class for SQLAlchemy models.

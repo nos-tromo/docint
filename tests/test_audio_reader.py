@@ -14,8 +14,7 @@ def _make_audio_reader(
     segments: list[dict[str, Any]] | None,
     text: str = "",
 ) -> AudioReader:
-    """
-    Create a stubbed AudioReader for testing.
+    """Create a stubbed AudioReader for testing.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
@@ -32,8 +31,7 @@ def _make_audio_reader(
     monkeypatch.setattr(reader, "_load_audio", lambda _: None)
 
     def fake_transcribe(_audio, _model) -> dict[str, Any]:
-        """
-        Fake transcription method.
+        """Fake transcription method.
 
         Args:
             _audio (_type_): Ignored.
@@ -51,8 +49,7 @@ def _make_audio_reader(
 def test_audio_reader_builds_segmented_transcript(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """
-    Test that AudioReader builds a segmented transcript correctly.
+    """Test that AudioReader builds a segmented transcript correctly.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
@@ -82,8 +79,7 @@ def test_audio_reader_builds_segmented_transcript(
 def test_audio_reader_falls_back_to_text(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """
-    Test that AudioReader falls back to full text when no segments are provided.
+    """Test that AudioReader falls back to full text when no segments are provided.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.

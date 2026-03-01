@@ -58,8 +58,7 @@ class ImageReader(BaseReader):
         source: str = "image",
         file_hash: str | None = None,
     ) -> Document:
-        """
-        Enrich a document with metadata from the image file.
+        """Enrich a document with metadata from the image file.
 
         Args:
             file_path (Path): The path to the image file.
@@ -102,8 +101,7 @@ class ImageReader(BaseReader):
         )
 
     def load_data(self, file: str | Path, **kwargs) -> list[Document]:
-        """
-        Load and process image data using the OpenAIPipeline.
+        """Load and process image data through the shared image ingestion service.
 
         Args:
             file (str | bytes): The path to the image file or image bytes.

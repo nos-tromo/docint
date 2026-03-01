@@ -12,13 +12,10 @@ from docint.utils.hashing import compute_file_hash
 
 
 class DummyNode:
-    """
-    A dummy node class to simulate LlamaIndex nodes.
-    """
+    """A dummy node class to simulate LlamaIndex nodes."""
 
     def __init__(self, text: str, metadata: dict[str, object]) -> None:
-        """
-        Initializes a DummyNode with text and metadata.
+        """Initializes a DummyNode with text and metadata.
 
         Args:
             text (str): The text content of the node.
@@ -29,13 +26,10 @@ class DummyNode:
 
 
 class DummyNodeWithScore:
-    """
-    A dummy node with score class to simulate LlamaIndex nodes with scores.
-    """
+    """A dummy node with score class to simulate LlamaIndex nodes with scores."""
 
     def __init__(self, node: DummyNode) -> None:
-        """
-        Initializes a DummyNodeWithScore with a DummyNode.
+        """Initializes a DummyNodeWithScore with a DummyNode.
 
         Args:
             node (DummyNode): The dummy node associated with this score.
@@ -45,8 +39,7 @@ class DummyNodeWithScore:
 
 class DummyResponse:
     def __init__(self, text: str, nodes: list[DummyNodeWithScore]):
-        """
-        Initializes a DummyResponse with text and source nodes.
+        """Initializes a DummyResponse with text and source nodes.
 
         Args:
             text (str): The response text.
@@ -56,10 +49,10 @@ class DummyResponse:
         self.source_nodes = nodes
 
 
-def test_normalize_response_data_extracts_sources() -> None:
-    """
-    Test that _normalize_response_data correctly extracts source information.
-    """
+def test_normalize_response_data_extracts_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that _normalize_response_data correctly extracts source information."""
     rag = RAG(qdrant_collection="test")
     node = DummyNode(
         "Example text",
@@ -100,8 +93,7 @@ def test_normalize_response_data_extracts_sources() -> None:
 
 
 def test_directory_ingestion_attaches_file_hash(tmp_path: Path) -> None:
-    """
-    Test that directory ingestion attaches file hashes to documents.
+    """Test that directory ingestion attaches file hashes to documents.
 
     Args:
         tmp_path (Path): The temporary path fixture.
@@ -124,8 +116,7 @@ def test_directory_ingestion_attaches_file_hash(tmp_path: Path) -> None:
 
 
 def test_start_session_requires_query_engine(tmp_path: Path) -> None:
-    """
-    Test that start_session raises RuntimeError if query_engine is not initialized.
+    """Test that start_session raises RuntimeError if query_engine is not initialized.
 
     Args:
         tmp_path (Path): The temporary path fixture.
@@ -140,8 +131,7 @@ def test_start_session_requires_query_engine(tmp_path: Path) -> None:
 def test_start_session_initializes_memory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """
-    Test that start_session initializes the chat memory and engine.
+    """Test that start_session initializes the chat memory and engine.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -182,9 +172,7 @@ def test_start_session_initializes_memory(
 
 
 def test_chat_rejects_empty_prompt() -> None:
-    """
-    Test that chat rejects empty prompts.
-    """
+    """Test that chat rejects empty prompts."""
     rag = RAG(qdrant_collection="test")
     with pytest.raises(ValueError):
         rag.chat("   ")
@@ -193,8 +181,7 @@ def test_chat_rejects_empty_prompt() -> None:
 def test_sparse_model_raises_import_error_when_fastembed_broken(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """
-    Test that the sparse_model property raises ImportError when
+    """Test that the sparse_model property raises ImportError when
     SparseTextEmbedding.list_supported_models raises ImportError.
 
     Args:
@@ -218,8 +205,7 @@ def test_sparse_model_raises_import_error_when_fastembed_broken(
 
 
 def test_filter_docs_skips_existing_hashes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """
-    Test that _filter_docs_by_existing_hashes skips documents with existing hashes.
+    """Test that _filter_docs_by_existing_hashes skips documents with existing hashes.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -243,8 +229,7 @@ def test_filter_docs_skips_existing_hashes(monkeypatch: pytest.MonkeyPatch) -> N
     def test_sparse_model_uses_cached_path(
         monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """
-        Ensure sparse_model resolves to a cached snapshot path when available.
+        """Ensure sparse_model resolves to a cached snapshot path when available.
 
         Args:
             monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.

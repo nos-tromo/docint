@@ -31,9 +31,7 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True)
 class SessionManager:
-    """
-    Owns chat session state, persistence, and exports.
-    """
+    """Owns chat session state, persistence, and exports."""
 
     rag: RAG
     chat_engine: RetrieverQueryEngine | CondenseQuestionChatEngine | None = field(
@@ -48,14 +46,11 @@ class SessionManager:
     session_store: str = field(default="", init=False)
 
     def __post_init__(self) -> None:
-        """
-        Post-initialization to set up the session store.
-        """
+        """Post-initialization to set up the session store."""
         self.session_store = self.rag.session_store
 
     def init_session_store(self, db_url: str | None = None) -> None:
-        """
-        Initialize the session store.
+        """Initialize the session store.
 
         Args:
            db_url (str | None): Optional database URL to override default.
@@ -65,16 +60,13 @@ class SessionManager:
         self._SessionMaker = _make_session_maker(self.session_store)
 
     def reset_runtime(self) -> None:
-        """
-        Reset the runtime state.
-        """
+        """Reset the runtime state."""
         self.session_id = None
         self.chat_engine = None
         self.chat_memory = None
 
     def start_session(self, requested_id: str | None = None) -> str:
-        """
-        Start a new chat session.
+        """Start a new chat session.
 
         Args:
             requested_id (str | None, optional): The ID of the session to start. Defaults to None.
@@ -124,8 +116,7 @@ class SessionManager:
         return requested_id
 
     def get_agent_context(self, session_id: str) -> AgentTurnContext:
-        """
-        Return the agent context for a session, creating it if missing.
+        """Return the agent context for a session, creating it if missing.
 
         Args:
             session_id (str): The ID of the session.
@@ -138,8 +129,7 @@ class SessionManager:
         )
 
     def _get_session_context(self, session_id: str) -> str:
-        """
-        Build a context string from rolling summary plus recent unsummarized turns.
+        """Build a context string from rolling summary plus recent unsummarized turns.
 
         Args:
             session_id (str): The ID of the session.
@@ -175,8 +165,7 @@ class SessionManager:
             return "\n\n".join(parts)
 
     def chat(self, user_msg: str) -> dict[str, Any]:
-        """
-        Handle a chat message from the user.
+        """Handle a chat message from the user.
 
         Args:
             user_msg (str): The message from the user.
@@ -218,8 +207,7 @@ class SessionManager:
         return response
 
     def stream_chat(self, user_msg: str) -> Iterator[str | dict]:
-        """
-        Handle a streaming chat message from the user.
+        """Handle a streaming chat message from the user.
 
         Args:
             user_msg (str): The message from the user.
@@ -287,8 +275,7 @@ class SessionManager:
     def export_session(
         self, session_id: str | None = None, out_dir: str | Path = "session"
     ) -> Path:
-        """
-        Export the chat session to a directory.
+        """Export the chat session to a directory.
 
         Args:
             session_id (str | None, optional): The ID of the session to export. Defaults to None.
@@ -365,16 +352,13 @@ class SessionManager:
             return out_dir
 
     def init_session_store_if_needed(self) -> None:
-        """
-        Initialize the session store if it has not been initialized yet.
-        """
+        """Initialize the session store if it has not been initialized yet."""
         if self._SessionMaker is None:
             self.init_session_store()
 
     @contextmanager
     def _session_scope(self) -> Iterator[Session]:
-        """
-        Provide a transactional scope around a series of operations.
+        """Provide a transactional scope around a series of operations.
 
         Yields:
             Iterator[Session]: A new database session.
@@ -392,8 +376,7 @@ class SessionManager:
             session.close()
 
     def _load_or_create_convo(self, session: Session, session_id: str) -> Conversation:
-        """
-        Load an existing conversation or create a new one.
+        """Load an existing conversation or create a new one.
 
         Args:
             session (Session): The database session.
@@ -412,8 +395,7 @@ class SessionManager:
         return conv
 
     def _get_rolling_summary(self, session_id: str) -> str:
-        """
-        Get the rolling summary for a conversation.
+        """Get the rolling summary for a conversation.
 
         Args:
             session_id (str): The ID of the session.
@@ -431,8 +413,7 @@ class SessionManager:
     def _persist_turn(
         self, session_id: str, user_msg: str, resp: Any, data: dict
     ) -> None:
-        """
-        Persist a user message and the assistant's response in the database.
+        """Persist a user message and the assistant's response in the database.
 
         Args:
             session_id (str): The ID of the session.
@@ -510,8 +491,7 @@ class SessionManager:
             s.commit()
 
     def _maybe_update_summary(self, session_id: str, every_n_turns: int = 5) -> None:
-        """
-        Update the rolling summary for a conversation if the conditions are met.
+        """Update the rolling summary for a conversation if the conditions are met.
 
         Args:
             session_id (str): The ID of the session.
@@ -540,8 +520,7 @@ class SessionManager:
             s.commit()
 
     def _export_citations(self, out_dir: Path, conv: Conversation) -> None:
-        """
-        Export citations from a conversation to a Parquet file.
+        """Export citations from a conversation to a Parquet file.
 
         Args:
             out_dir (Path): The output directory.
@@ -588,8 +567,7 @@ class SessionManager:
             )
 
     def list_sessions(self) -> list[dict[str, Any]]:
-        """
-        List all sessions ordered by creation date (descending).
+        """List all sessions ordered by creation date (descending).
 
         Returns:
             list[dict[str, Any]]: A list of session dictionaries.
@@ -618,8 +596,7 @@ class SessionManager:
             return results
 
     def get_session_history(self, session_id: str) -> list[dict[str, Any]]:
-        """
-        Get the full message history for a session.
+        """Get the full message history for a session.
 
         Args:
             session_id (str): The ID of the session.
@@ -672,8 +649,7 @@ class SessionManager:
             return messages
 
     def delete_session(self, session_id: str) -> bool:
-        """
-        Delete a session.
+        """Delete a session.
 
         Args:
             session_id (str): The ID of the session to delete.
@@ -692,8 +668,7 @@ class SessionManager:
     def _export_transcript(
         self, out_dir: Path, conv: Conversation, rolling_summary: str
     ) -> None:
-        """
-        Export the conversation transcript to a Markdown file.
+        """Export the conversation transcript to a Markdown file.
 
         Args:
             out_dir (Path): The output directory.
@@ -742,16 +717,14 @@ class SessionManager:
         (out_dir / "transcript.md").write_text("\n".join(lines), encoding="utf-8")
 
     def _write_manifest(self, out_dir: Path) -> None:
-        """
-        Write a manifest file for the exported conversation data.
+        """Write a manifest file for the exported conversation data.
 
         Args:
             out_dir (Path): The output directory.
         """
 
         def sha256_file(p: Path) -> str:
-            """
-            Compute the SHA256 hash of a file.
+            """Compute the SHA256 hash of a file.
 
             Args:
                 p (Path): The path to the file.
@@ -784,8 +757,7 @@ class SessionManager:
         )
 
     def _get_node_text_by_id(self, node_id: str) -> str | None:
-        """
-        Retrieve the text content of a node by its ID.
+        """Retrieve the text content of a node by its ID.
 
         Args:
             node_id (str): The ID of the node.

@@ -32,8 +32,7 @@ PAGE_ICONS: dict[str, str] = {
 
 
 def init_session_state() -> None:
-    """
-    Initialise all session-state keys with sane defaults.
+    """Initialise all session-state keys with sane defaults.
 
     Must be called once, before any widget is rendered, so that every key
     referenced elsewhere already exists.
@@ -59,8 +58,7 @@ def init_session_state() -> None:
 
 
 def navigate_to(page: str) -> None:
-    """
-    Set the active page and trigger a rerun.
+    """Set the active page and trigger a rerun.
 
     Args:
         page: Target page name (must be one of ``PAGES``).

@@ -58,8 +58,7 @@ from docint.utils.openai_cfg import LocalOpenAI
 
 @dataclass(slots=True)
 class RAG:
-    """
-    Represents a Retrieval-Augmented Generation (RAG) model. Handles configuration,
+    """Represents a Retrieval-Augmented Generation (RAG) model. Handles configuration,
     initialization, and interaction with underlying components like embedding models,
     generation models, and vector stores. Provides methods to start sessions,
     retrieve information, and manage document ingestion.
@@ -139,8 +138,7 @@ class RAG:
     sessions: SessionManager | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
-        """
-        Post-initialization to set up any necessary components.
+        """Post-initialization to set up any necessary components.
 
         Raises:
             ValueError: If summarize_prompt_path is not set.
@@ -212,8 +210,7 @@ class RAG:
 
     @property
     def session_id(self) -> str | None:
-        """
-        Get the current session ID.
+        """Get the current session ID.
 
         Returns:
             str | None: The current session ID.
@@ -222,8 +219,7 @@ class RAG:
 
     @session_id.setter
     def session_id(self, value: str | None) -> None:
-        """
-        Set the current session ID.
+        """Set the current session ID.
 
         Args:
             value (str | None): The new session ID.
@@ -233,8 +229,7 @@ class RAG:
 
     @property
     def chat_engine(self) -> Any | None:
-        """
-        Get the current chat engine.
+        """Get the current chat engine.
 
         Returns:
             Any | None: The current chat engine.
@@ -243,8 +238,7 @@ class RAG:
 
     @chat_engine.setter
     def chat_engine(self, value: Any | None) -> None:
-        """
-        Set the current chat engine.
+        """Set the current chat engine.
 
         Args:
             value (Any | None): The new chat engine.
@@ -254,8 +248,7 @@ class RAG:
 
     @property
     def chat_memory(self) -> Any | None:
-        """
-        Get the current chat memory.
+        """Get the current chat memory.
 
         Returns:
             Any | None: The current chat memory.
@@ -264,8 +257,7 @@ class RAG:
 
     @chat_memory.setter
     def chat_memory(self, value: Any | None) -> None:
-        """
-        Set the current chat memory.
+        """Set the current chat memory.
 
         Args:
             value (Any | None): The new chat memory.
@@ -276,8 +268,7 @@ class RAG:
     # --- Properties (lazy loading) ---
     @property
     def qdrant_col_dir(self) -> Path:
-        """
-        Best-effort resolution of the host directory where Qdrant stores data.
+        """Best-effort resolution of the host directory where Qdrant stores data.
         Used only as a *fallback* when we cannot reach the Qdrant API.
         Priority: explicit field -> env var -> platform default under home.
 
@@ -307,8 +298,7 @@ class RAG:
 
     @property
     def qdrant_src_dir(self) -> Path:
-        """
-        Best-effort resolution of the host directory where Qdrant stores source data.
+        """Best-effort resolution of the host directory where Qdrant stores source data.
         Used only as a *fallback* when we cannot reach the Qdrant API.
         Priority: explicit field -> env var -> platform default under home.
 
@@ -338,8 +328,7 @@ class RAG:
 
     @property
     def device(self) -> str:
-        """
-        Returns the device being used for computation.
+        """Returns the device being used for computation.
 
         Returns:
             str: The device being used ("cpu", "cuda", or "mps").
@@ -362,8 +351,7 @@ class RAG:
 
     @property
     def embed_model(self) -> BaseEmbedding:
-        """
-        Lazily initializes and returns the embedding model.
+        """Lazily initializes and returns the embedding model.
 
         Returns:
             BaseEmbedding: The initialized embedding model.
@@ -390,8 +378,7 @@ class RAG:
 
     @property
     def sparse_model(self) -> str | None:
-        """
-        Returns the configured sparse model id for hybrid retrieval.
+        """Returns the configured sparse model id for hybrid retrieval.
 
         Returns:
             str | None: The sparse model id or None if not enabled.
@@ -447,8 +434,7 @@ class RAG:
 
     @property
     def reranker(self) -> LLMRerank | FlagEmbeddingReranker:
-        """
-        Lazily initializes and returns the reranker model. The type of reranker is determined by the configuration:
+        """Lazily initializes and returns the reranker model. The type of reranker is determined by the configuration:
         - If the openai_model_provider is "openai" or "azure", an LLMRerank is used.
         - Otherwise, a FlagEmbeddingReranker is used with the specified rerank_model_id.
 
@@ -489,8 +475,7 @@ class RAG:
         return self._reranker
 
     def _create_text_model(self) -> OpenAI:
-        """
-        Helper to create an OpenAI (or compatible) model instance.
+        """Helper to create an OpenAI (or compatible) model instance.
 
         Returns:
             OpenAI: The initialized model.
@@ -527,8 +512,7 @@ class RAG:
 
     @property
     def text_model(self) -> OpenAI:
-        """
-        Lazily initializes and returns the generation model (OpenAI).
+        """Lazily initializes and returns the generation model (OpenAI).
 
         Returns:
             OpenAI: The initialized generation model.
@@ -539,8 +523,7 @@ class RAG:
 
     @property
     def qdrant_client(self) -> QdrantClient:
-        """
-        Lazily initializes and returns the Qdrant client.
+        """Lazily initializes and returns the Qdrant client.
 
         Returns:
             QdrantClient: The initialized Qdrant client.
@@ -555,8 +538,7 @@ class RAG:
 
     @property
     def qdrant_aclient(self) -> AsyncQdrantClient:
-        """
-        Lazily initializes and returns the Qdrant async client.
+        """Lazily initializes and returns the Qdrant async client.
 
         Returns:
             AsyncQdrantClient: The initialized Qdrant async client.
@@ -571,8 +553,7 @@ class RAG:
 
     # --- Build pieces ---
     def _vector_store(self) -> QdrantVectorStore:
-        """
-        Creates the vector store for document embeddings.
+        """Creates the vector store for document embeddings.
 
         Returns:
             QdrantVectorStore: The initialized vector store.
@@ -593,8 +574,7 @@ class RAG:
         )
 
     def _storage_context(self, vector_store: QdrantVectorStore) -> StorageContext:
-        """
-        Creates the storage context for document embeddings.
+        """Creates the storage context for document embeddings.
 
         Args:
             vector_store (QdrantVectorStore): The vector store for document embeddings.
@@ -620,8 +600,7 @@ class RAG:
     def _build_ingestion_pipeline(
         self, progress_callback: Callable[[str], None] | None = None
     ) -> DocumentIngestionPipeline:
-        """
-        Instantiate a document ingestion pipeline using current settings.
+        """Instantiate a document ingestion pipeline using current settings.
 
         Args:
             progress_callback (Callable[[str], None] | None): Optional callback for
@@ -651,8 +630,7 @@ class RAG:
         )
 
     def _index(self, storage_ctx: StorageContext) -> VectorStoreIndex:
-        """
-        Creates the vector store index for document embeddings.
+        """Creates the vector store index for document embeddings.
 
         Args:
             storage_ctx (StorageContext): The storage context for document embeddings.
@@ -683,8 +661,7 @@ class RAG:
 
     @staticmethod
     def _extract_file_hash(data: Any) -> str | None:
-        """
-        Best-effort extraction of a ``file_hash`` value from nested payloads.
+        """Best-effort extraction of a ``file_hash`` value from nested payloads.
 
         Args:
             data (Any): The data dictionary to search for a file hash.
@@ -727,8 +704,7 @@ class RAG:
         return None
 
     def _get_existing_file_hashes(self) -> set[str]:
-        """
-        Fetch file hashes already stored in the active Qdrant collection.
+        """Fetch file hashes already stored in the active Qdrant collection.
 
         Returns:
             set[str]: A set of existing file hashes.
@@ -795,8 +771,7 @@ class RAG:
         return existing
 
     def create_index(self) -> None:
-        """
-        Materialize a VectorStoreIndex. If nodes are present in memory, create from nodes.
+        """Materialize a VectorStoreIndex. If nodes are present in memory, create from nodes.
         Otherwise, load from vector store.
         """
         vector_store = self._vector_store()
@@ -813,8 +788,7 @@ class RAG:
             )
 
     def create_query_engine(self) -> None:
-        """
-        Create the query engine with a retriever and reranker.
+        """Create the query engine with a retriever and reranker.
 
         Raises:
             RuntimeError: If the index is not initialized.
@@ -832,8 +806,7 @@ class RAG:
     def _normalize_response_data(
         self, query: str, result: Any, reason: str | None = None
     ) -> dict[str, Any]:
-        """
-        Normalize both llama_index.core.Response and AgentChatResponse into a single payload.
+        """Normalize both llama_index.core.Response and AgentChatResponse into a single payload.
         Handles:
         - response text (result.response or result.text)
         - source_nodes (list[NodeWithScore])
@@ -1018,8 +991,7 @@ class RAG:
 
     # --- Collection discovery / selection ---
     def list_collections(self, prefer_api: bool = True) -> list[str]:
-        """
-        Return a list of collection names. Uses Qdrant API when available; falls back to listing the host storage path.
+        """Return a list of collection names. Uses Qdrant API when available; falls back to listing the host storage path.
 
         Args:
             prefer_api (bool): Whether to prefer the Qdrant API over filesystem access.
@@ -1051,8 +1023,7 @@ class RAG:
             return []
 
     def delete_collection(self, name: str) -> None:
-        """
-        Delete a collection by name from Qdrant and clean up source files.
+        """Delete a collection by name from Qdrant and clean up source files.
 
         Args:
             name (str): Name of the collection to delete.
@@ -1076,8 +1047,7 @@ class RAG:
             if src_path.exists():
 
                 def on_error(func: Callable, path: str, _exc_info: Any) -> None:
-                    """
-                    Error handler for shutil.rmtree.
+                    """Error handler for shutil.rmtree.
 
                     Attempts to fix permissions/flags and retry operation.
 
@@ -1111,8 +1081,7 @@ class RAG:
             )
 
     def select_collection(self, name: str) -> None:
-        """
-        Switch active collection, ensuring it already exists.
+        """Switch active collection, ensuring it already exists.
 
         Args:
             name: Name of the collection to select.
@@ -1139,8 +1108,7 @@ class RAG:
         self.reset_session_state()
 
     def _prepare_sources_dir(self, data_dir: Path) -> Path:
-        """
-        Ensure source files live under qdrant_src_dir/<collection> for preview and persistence.
+        """Ensure source files live under qdrant_src_dir/<collection> for preview and persistence.
 
         If the provided data_dir is already under that path, it is returned as-is.
         Otherwise, files/directories are copied into the target.
@@ -1165,8 +1133,7 @@ class RAG:
         build_query_engine: bool = True,
         progress_callback: Callable[[str], None] | None = None,
     ) -> None:
-        """
-        Ingest documents from the specified directory into the Qdrant collection.
+        """Ingest documents from the specified directory into the Qdrant collection.
 
         Args:
             data_dir (str | Path): The directory containing the documents to ingest.
@@ -1268,8 +1235,7 @@ class RAG:
         build_query_engine: bool = True,
         progress_callback: Callable[[str], None] | None = None,
     ) -> None:
-        """
-        Asynchronously ingest documents from the specified directory into the Qdrant collection.
+        """Asynchronously ingest documents from the specified directory into the Qdrant collection.
 
         Args:
             data_dir (str | Path): The directory containing the documents to ingest.
@@ -1353,8 +1319,7 @@ class RAG:
         logger.info("Documents ingested successfully (async path).")
 
     def run_query(self, prompt: str) -> dict[str, Any]:
-        """
-        Run a query against the Qdrant collection.
+        """Run a query against the Qdrant collection.
 
         Args:
             prompt (str): The query prompt.
@@ -1383,8 +1348,7 @@ class RAG:
         return self._normalize_response_data(prompt, result)
 
     async def run_query_async(self, prompt: str) -> dict[str, Any]:
-        """
-        Run a query against the Qdrant collection asynchronously.
+        """Run a query against the Qdrant collection asynchronously.
 
         Args:
             prompt (str): The query prompt.
@@ -1414,8 +1378,7 @@ class RAG:
 
     # --- Session integration ---
     def init_session_store(self, db_url: str) -> None:
-        """
-        Initialize the relational session store via SessionManager.
+        """Initialize the relational session store via SessionManager.
 
         Args:
             db_url (str): The database URL for the session store.
@@ -1425,17 +1388,14 @@ class RAG:
         self.sessions.init_session_store(db_url=db_url)
 
     def reset_session_state(self) -> None:
-        """
-        Clear cached chat state so future sessions start fresh.
-        """
+        """Clear cached chat state so future sessions start fresh."""
         if self.sessions is not None:
             self.sessions.reset_runtime()
 
     def export_session(
         self, session_id: str | None = None, out_dir: str | Path = "session"
     ) -> Path:
-        """
-        Delegate session export to SessionManager.
+        """Delegate session export to SessionManager.
 
         Args:
             session_id (str | None): The session ID to export. If None, exports the
@@ -1450,8 +1410,7 @@ class RAG:
         return self.sessions.export_session(session_id=session_id, out_dir=out_dir)
 
     def start_session(self, session_id: str | None = None) -> str:
-        """
-        Start or resume a chat session through SessionManager.
+        """Start or resume a chat session through SessionManager.
 
         Args:
             session_id (str | None): The session ID to start or resume. If None,
@@ -1462,8 +1421,7 @@ class RAG:
         return self.sessions.start_session(session_id)
 
     def chat(self, user_msg: str) -> dict[str, Any]:
-        """
-        Proxy chat turns to SessionManager.
+        """Proxy chat turns to SessionManager.
 
         Args:
             user_msg (str): The user's chat message.
@@ -1476,8 +1434,7 @@ class RAG:
         return self.sessions.chat(user_msg)
 
     def stream_chat(self, user_msg: str) -> Any:
-        """
-        Proxy stream chat turns to SessionManager.
+        """Proxy stream chat turns to SessionManager.
 
         Args:
             user_msg (str): The user's chat message.
@@ -1490,8 +1447,7 @@ class RAG:
         return self.sessions.stream_chat(user_msg)
 
     def summarize_collection(self) -> dict[str, Any]:
-        """
-        Generate a summary of the currently selected collection.
+        """Generate a summary of the currently selected collection.
 
         Returns:
             dict[str, Any]: Normalized response data containing the summary and sources.
@@ -1516,8 +1472,7 @@ class RAG:
         return self._normalize_response_data(self.summarize_prompt, resp)
 
     def stream_summarize_collection(self) -> Any:
-        """
-        Generate a streaming summary of the currently selected collection.
+        """Generate a streaming summary of the currently selected collection.
 
         Yields:
             str | dict: Chunks of text, followed by a dict with metadata.
@@ -1571,8 +1526,7 @@ class RAG:
         yield normalized
 
     def list_documents(self) -> list[dict[str, Any]]:
-        """
-        List all documents in the current collection by scanning all points.
+        """List all documents in the current collection by scanning all points.
 
         Returns:
             list[dict[str, Any]]: A list of document metadata dictionaries.
@@ -1706,8 +1660,7 @@ class RAG:
         return sorted(results, key=lambda x: str(x["filename"]))
 
     def get_collection_ner(self, refresh: bool = False) -> list[dict[str, Any]]:
-        """
-        Fetch all nodes from the current collection and return their NER metadata.
+        """Fetch all nodes from the current collection and return their NER metadata.
 
         Returns:
             list[dict[str, Any]]: A list of source metadata dictionaries containing NER data.
@@ -1796,9 +1749,7 @@ class RAG:
         return sources
 
     def unload_models(self) -> None:
-        """
-        Unload models to free up memory.
-        """
+        """Unload models to free up memory."""
         self._embed_model = None
         self._text_model = None
         self._reranker = None

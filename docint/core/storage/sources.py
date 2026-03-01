@@ -9,8 +9,7 @@ from loguru import logger
 def stage_sources_to_qdrant(
     data_dir: Path, collection: str, qdrant_sources: Path
 ) -> Path:
-    """
-    Ensure source files reside under the shared sources root (separate from Qdrant's internal collections).
+    """Ensure source files reside under the shared sources root (separate from Qdrant's internal collections).
 
     Files/directories from ``data_dir`` are copied into ``qdrant_sources/<collection>``.
     If ``data_dir`` already points to that target, no copy occurs.

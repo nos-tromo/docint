@@ -4,14 +4,12 @@ from docint.agents.types import ResponseAgent, RetrievalResult, Turn
 
 
 class PassthroughResponseAgent(ResponseAgent):
-    """
-    No-op response post-processor.
+    """No-op response post-processor.
     Returns retrieval results unchanged.
     """
 
     def finalize(self, result: RetrievalResult, turn: Turn) -> RetrievalResult:
-        """
-        Return retrieval results unchanged.
+        """Return retrieval results unchanged.
 
         Args:
             result (RetrievalResult): The retrieval result to finalize.

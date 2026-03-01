@@ -6,8 +6,7 @@ from docint.core.state.base import Base
 
 
 class Turn(Base):
-    """
-    Represents a user turn within a conversation.
+    """Represents a user turn within a conversation.
 
     Args:
         Base (declarative_base): The declarative base class for SQLAlchemy models.

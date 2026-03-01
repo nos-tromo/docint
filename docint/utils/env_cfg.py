@@ -9,8 +9,7 @@ load_dotenv()
 
 
 def set_offline_env() -> None:
-    """
-    Log the current offline mode status.
+    """Log the current offline mode status.
 
     The actual env vars (HF_HUB_OFFLINE, TRANSFORMERS_OFFLINE, etc.) are set at
     module level immediately after ``load_dotenv()`` so they are available before
@@ -44,8 +43,7 @@ set_offline_env()  # Apply offline settings at module load time
 def resolve_hf_cache_path(
     cache_dir: Path, repo_id: str, filename: str | None = None
 ) -> Path | None:
-    """
-    Resolve a HuggingFace model or file path from the local HF cache.
+    """Resolve a HuggingFace model or file path from the local HF cache.
 
     HF hub stores downloads under:
         {cache_dir}/models--{org}--{repo}/snapshots/{commit_hash}/
@@ -82,9 +80,7 @@ def resolve_hf_cache_path(
 
 @dataclass(frozen=True)
 class HostConfig:
-    """
-    Dataclass for host configuration.
-    """
+    """Dataclass for host configuration."""
 
     backend_host: str
     backend_public_host: str
@@ -195,8 +191,7 @@ def load_host_env(
     default_qdrant_host: str = "http://localhost:6333",
     default_cors_origins: str = "http://localhost:8501,http://127.0.0.1:8501",
 ) -> HostConfig:
-    """
-    Loads host configuration from environment variables or defaults.
+    """Loads host configuration from environment variables or defaults.
 
     Args:
         default_backend_host (str): Default backend host URL.
@@ -260,8 +255,7 @@ def load_ingestion_env(
         ".xlsx",
     ],
 ) -> IngestionConfig:
-    """
-    Loads ingestion configuration from environment variables or defaults.
+    """Loads ingestion configuration from environment variables or defaults.
 
     Returns:
         IngestionConfig: Dataclass containing ingestion configuration.
@@ -324,8 +318,7 @@ def load_model_env(
     default_vision_model_str: str = "Qwen/Qwen3-VL-8B-Instruct-GGUF;Qwen3VL-8B-Instruct-Q4_K_M.gguf",
     default_whisper_model: str = "turbo",
 ) -> ModelConfig:
-    """
-    Loads model configuration from environment variables or defaults.
+    """Loads model configuration from environment variables or defaults.
 
     Args:
         default_embed_model_str (str): Default embedding model identifier.
@@ -351,8 +344,7 @@ def load_model_env(
     """
 
     def resolve_model_name(model_str: str) -> tuple[str, str]:
-        """
-        Resolve a model string into its repo ID and file name components.
+        """Resolve a model string into its repo ID and file name components.
 
         The model string can be in the format "repo_id;file_name" (required for llama.cpp) or just "model_name".
         If only "model_name" is provided, it is treated as both the repo ID and file name.
@@ -398,8 +390,7 @@ def load_ner_env(
     default_max_chars: int = 1024,
     default_max_workers: int = 4,
 ) -> NERConfig:
-    """
-    Loads information extraction configuration from environment variables or defaults.
+    """Loads information extraction configuration from environment variables or defaults.
 
     Args:
         default_enabled (bool): Default value to enable NER extraction. Set to True to enable by default.
@@ -436,8 +427,7 @@ def load_openai_env(
     default_timeout: float = 300.0,
     default_top_p: float = 0.0,
 ) -> OpenAIConfig:
-    """
-    Loads OpenAI configuration from environment variables or defaults.
+    """Loads OpenAI configuration from environment variables or defaults.
 
     Args:
         default_api_base (str): Default OpenAI API base URL.
@@ -488,8 +478,7 @@ def load_openai_env(
 
 
 def load_path_env() -> PathConfig:
-    """
-    Loads path configuration from environment variables or defaults.
+    """Loads path configuration from environment variables or defaults.
 
     Returns:
         PathConfig: Dataclass containing path configuration.
@@ -552,8 +541,7 @@ def load_retrieval_env(
     default_rerank_use_fp16: bool = False,
     default_retrieve_top_k: int = 20,
 ) -> RetrievalConfig:
-    """
-    Loads retrieval configuration from environment variables or defaults.
+    """Loads retrieval configuration from environment variables or defaults.
 
     Args:
         default_rerank_use_fp16 (bool): Default flag to use FP16 for reranker model. Default is False.
@@ -576,8 +564,7 @@ def load_retrieval_env(
 def load_session_env(
     default_session_store: str = "sqlite:///sessions.db",
 ) -> SessionConfig:
-    """
-    Loads session configuration from environment variables or defaults.
+    """Loads session configuration from environment variables or defaults.
 
     Args:
         default_session_store (str): Default session store configuration (e.g. database URL or file path).

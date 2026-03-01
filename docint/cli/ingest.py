@@ -10,8 +10,7 @@ from docint.utils.logging_cfg import setup_logging
 
 
 def get_collection() -> str:
-    """
-    Get user inputs for the Qdrant collection name.
+    """Get user inputs for the Qdrant collection name.
 
     Returns:
         str: Qdrant collection name.
@@ -25,8 +24,7 @@ def ingest_docs(
     hybrid: bool = True,
     progress_callback: Callable[[str], None] | None = None,
 ) -> None:
-    """
-    Ingest documents from the specified directory into the Qdrant collection.
+    """Ingest documents from the specified directory into the Qdrant collection.
 
     Args:
         qdrant_col (str): Qdrant collection name.
@@ -50,9 +48,7 @@ def ingest_docs(
 
 
 def main() -> None:
-    """
-    Main function for the ingestion CLI.
-    """
+    """Main function for the ingestion CLI."""
     setup_logging()
     set_offline_env()
     data_path = load_path_env().data

@@ -10,14 +10,12 @@ if TYPE_CHECKING:
 
 
 class RAGRetrievalAgent(RetrievalAgent):
-    """
-    Adapter that uses the existing RAG pipeline for retrieval/response.
+    """Adapter that uses the existing RAG pipeline for retrieval/response.
     Depending on the intent detected in the turn, it may invoke different tools.
     """
 
     def __init__(self, rag: "RAG"):
-        """
-        Initialize the RAGRetrievalAgent.
+        """Initialize the RAGRetrievalAgent.
 
         Args:
             rag (RAG): The RAG instance to use for retrieval.
@@ -25,8 +23,8 @@ class RAGRetrievalAgent(RetrievalAgent):
         self.rag = rag
 
     def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
-        """
-        Invoke the appropriate tool based on intent; default to RAG chat.
+        """Invoke the appropriate tool based on intent; default to RAG chat.
+
         Args:
             request (RetrievalRequest): The retrieval request containing the turn and analysis.
 
@@ -87,8 +85,7 @@ class RAGRetrievalAgent(RetrievalAgent):
         )
 
     def _filter_ner_sources(self, sources: list[dict], entities: dict) -> list[dict]:
-        """
-        Filter NER sources using simple entity/page heuristics.
+        """Filter NER sources using simple entity/page heuristics.
 
         Args:
             sources (list[dict]): The list of NER sources.
@@ -104,8 +101,7 @@ class RAGRetrievalAgent(RetrievalAgent):
         page = str(entities.get("page") or "").strip()
 
         def match(src: dict) -> bool:
-            """
-            Determine if a source matches the given page or query.
+            """Determine if a source matches the given page or query.
 
             Args:
                 src (dict): The source dictionary to check.

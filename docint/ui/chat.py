@@ -1,6 +1,4 @@
-"""
-Chat page: streaming Q&A with source rendering and NER.
-"""
+"""Chat page: streaming Q&A with source rendering and NER."""
 
 import json
 from typing import Any
@@ -14,9 +12,9 @@ from docint.ui.state import BACKEND_HOST
 
 
 def render_chat() -> None:
+    """Render the chat interface.
+    This includes the message history, chat input, and handling of streaming responses from the backend.
     """
-    Render the chat interface.
-    This includes the message history, chat input, and handling of streaming responses from the backend."""
     st.header("💬 Chat")
 
     collection = st.session_state.selected_collection
@@ -60,9 +58,7 @@ def render_chat() -> None:
     # ── Callbacks ────────────────────────────────────────────
 
     def _stop_generation() -> None:
-        """
-        Stop the current chat generation.
-        """
+        """Stop the current chat generation."""
         st.session_state.chat_running = False
         if st.session_state.get("current_answer"):
             st.session_state.messages.append(
@@ -71,9 +67,7 @@ def render_chat() -> None:
             del st.session_state.current_answer
 
     def _start_chat() -> None:
-        """
-        Start a new chat turn by sending the user's query to the backend and handling the streaming response.
-        """
+        """Start a new chat turn by sending the user's query to the backend and handling the streaming response."""
         st.session_state.chat_running = True
         st.session_state.current_answer = ""
 
@@ -127,8 +121,7 @@ def render_chat() -> None:
                                     pass
 
                         def _process_line(line: bytes) -> None:
-                            """
-                            Process a single SSE line.
+                            """Process a single SSE line.
 
                             Args:
                                 line: Raw bytes from the streaming response.

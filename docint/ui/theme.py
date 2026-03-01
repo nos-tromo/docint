@@ -4,9 +4,7 @@ import streamlit as st
 
 
 def configure_page() -> None:
-    """
-    Set the Streamlit page config.  Must be the **first** Streamlit call.
-    """
+    """Set the Streamlit page config.  Must be the **first** Streamlit call."""
     st.set_page_config(
         page_title="DocInt · Document Intelligence",
         page_icon="🔍",
@@ -16,9 +14,7 @@ def configure_page() -> None:
 
 
 def apply_custom_css() -> None:
-    """
-    Inject lightweight CSS for consistent spacing and typography.
-    """
+    """Inject lightweight CSS for consistent spacing and typography."""
     st.markdown(
         """
         <style>
@@ -51,9 +47,7 @@ def apply_custom_css() -> None:
 
 
 def render_footer() -> None:
-    """
-    Render a compact footer with a GitHub link.
-    """
+    """Render a compact footer with a GitHub link."""
     st.divider()
     st.markdown(
         '<div class="docint-footer">'

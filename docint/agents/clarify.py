@@ -9,16 +9,14 @@ from docint.agents.types import (
 
 
 class SimpleClarificationAgent(ClarificationAgent):
-    """
-    Simple clarifier that returns a generic prompt.
+    """Simple clarifier that returns a generic prompt.
     It can also list missing required entities from the analysis.
     """
 
     def __init__(
         self, prompt: str | None = None, required_entities: list[str] | None = None
     ) -> None:
-        """
-        Initialize the SimpleClarificationAgent.
+        """Initialize the SimpleClarificationAgent.
 
         Args:
             prompt (str | None, optional): The clarification prompt to use. Defaults to None.
@@ -28,8 +26,7 @@ class SimpleClarificationAgent(ClarificationAgent):
         self.required_entities = required_entities or ["query"]
 
     def build(self, turn: Turn, analysis: IntentAnalysis) -> ClarificationRequest:
-        """
-        Return a clarification request, listing missing entities if any.
+        """Return a clarification request, listing missing entities if any.
 
         Args:
             turn (Turn): The current turn in the conversation.

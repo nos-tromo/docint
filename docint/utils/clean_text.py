@@ -2,8 +2,7 @@ import re
 
 
 def basic_clean(text: str) -> str:
-    """
-    Cleans the input text by normalizing whitespace and line breaks.
+    """Cleans the input text by normalizing whitespace and line breaks.
 
     Args:
         text (str): The text to clean.

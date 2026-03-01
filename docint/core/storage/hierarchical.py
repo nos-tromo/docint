@@ -12,8 +12,7 @@ from docint.utils.env_cfg import load_ingestion_env
 
 
 class HierarchicalNodeParser(NodeParser):
-    """
-    Splits documents into a hierarchy of nodes:
+    """Splits documents into a hierarchy of nodes:
     - Level 0: Document (Implicit)
     - Level 1: Coarse Chunks (Sections/Paragraphs/Large blocks)
     - Level 2: Fine Chunks (Sentence-based)
@@ -34,9 +33,8 @@ class HierarchicalNodeParser(NodeParser):
         fine_chunk_size: int = 1024,
         fine_chunk_overlap: int = 0,
         **kwargs,
-    ):
-        """
-        Initialize the HierarchicalNodeParser.
+    ) -> None:
+        """Initialize the HierarchicalNodeParser.
 
         Args:
             coarse_chunk_size (int): Size of coarse chunks (Level 1).
@@ -54,8 +52,7 @@ class HierarchicalNodeParser(NodeParser):
     def _parse_nodes(
         self, nodes: Sequence[BaseNode], show_progress: bool = False, **kwargs
     ) -> list[BaseNode]:
-        """
-        Parse nodes into hierarchical chunks.
+        """Parse nodes into hierarchical chunks.
 
         If the input nodes are Documents (Level 0), we first create Coarse Chunks (Level 1),
         then Fine Chunks (Level 2).

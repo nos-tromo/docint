@@ -3,18 +3,13 @@ import types
 
 
 class _MagicModule(types.ModuleType):
-    """
-    Magic module for handling file types.
-    """
+    """Magic module for handling file types."""
 
     class Magic:  # type: ignore[override]
-        """
-        Magic class for handling file types.
-        """
+        """Magic class for handling file types."""
 
         def __init__(self, mime: bool = True) -> None:
-            """
-            Initialize the Magic class.
+            """Initialize the Magic class.
 
             Args:
                 mime (bool, optional): Whether to use MIME types. Defaults to True.
@@ -22,8 +17,7 @@ class _MagicModule(types.ModuleType):
             self.mime = mime
 
         def from_file(self, path: str) -> str:
-            """
-            Get the MIME type of a file.
+            """Get the MIME type of a file.
 
             Args:
                 path (str): The path to the file.
@@ -35,16 +29,12 @@ class _MagicModule(types.ModuleType):
 
 
 def _install_magic_stub() -> None:
-    """
-    Install a stub for the magic module.
-    """
+    """Install a stub for the magic module."""
     sys.modules.setdefault("magic", _MagicModule("magic"))
 
 
 def _install_whisper_stub() -> None:
-    """
-    Install a stub for the whisper module.
-    """
+    """Install a stub for the whisper module."""
     module = types.ModuleType("whisper")
 
     class Whisper:  # type: ignore[too-many-ancestors]
@@ -67,8 +57,6 @@ def _install_whisper_stub() -> None:
 
 
 def pytest_configure() -> None:
-    """
-    Configure pytest by installing necessary stubs.
-    """
+    """Configure pytest by installing necessary stubs."""
     _install_magic_stub()
     _install_whisper_stub()

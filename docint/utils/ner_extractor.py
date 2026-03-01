@@ -11,8 +11,8 @@ from docint.utils.env_cfg import load_model_env, load_path_env, resolve_hf_cache
 
 
 def _parse_ner_payload(raw: str) -> dict[str, Any]:
-    """
-    Parse a raw NER model response into JSON-like payload.
+    """Parse a raw NER model response into JSON-like payload.
+
     Args:
         raw (str): The raw response string from the NER model.
 
@@ -36,8 +36,7 @@ def _parse_ner_payload(raw: str) -> dict[str, Any]:
 def build_llm_ner_extractor(
     model: Any, prompt: str, max_chars: int
 ) -> Callable[[str], tuple[list[dict], list[dict]]]:
-    """
-    Create an NER extractor bound to a model and prompt template.
+    """Create an NER extractor bound to a model and prompt template.
 
     Args:
         model (Any): The language model instance with a 'complete' method.
@@ -49,8 +48,7 @@ def build_llm_ner_extractor(
     """
 
     def _extract(text: str) -> tuple[list[dict], list[dict]]:
-        """
-        Extract entities and relations from text using the bound model and prompt.
+        """Extract entities and relations from text using the bound model and prompt.
 
         Args:
             text (str): The input text to extract entities and relations from.
@@ -113,8 +111,7 @@ def build_gliner_ner_extractor(
     labels: list[str] | None = None,
     threshold: float = 0.3,
 ) -> Callable[[str], tuple[list[dict], list[dict]]]:
-    """
-    Create an NER extractor bound to a GLiNER model.
+    """Create an NER extractor bound to a GLiNER model.
 
     Args:
         labels (list[str] | None): The entity labels to extract.
@@ -161,8 +158,7 @@ def build_gliner_ner_extractor(
         logger.info("GLiNER moved to MPS")
 
     def _extract(text: str) -> tuple[list[dict], list[dict]]:
-        """
-        Extract entities using GLiNER.
+        """Extract entities using GLiNER.
 
         Args:
             text (str): Input text.

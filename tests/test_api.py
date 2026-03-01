@@ -9,13 +9,10 @@ import docint.core.api as api_module
 
 
 class DummySessionManager:
-    """
-    Dummy session manager for testing purposes.
-    """
+    """Dummy session manager for testing purposes."""
 
     def list_sessions(self) -> list[dict[str, Any]]:
-        """
-        List all sessions.
+        """List all sessions.
 
         Returns:
             list[dict[str, Any]]: A list of session dictionaries.
@@ -23,8 +20,7 @@ class DummySessionManager:
         return [{"id": "123", "created_at": "2023-01-01", "title": "Test Chat"}]
 
     def get_session_history(self, session_id: str) -> list[dict[str, Any]]:
-        """
-        Get the message history for a session.
+        """Get the message history for a session.
 
         Args:
             session_id (str): The ID of the session.
@@ -35,8 +31,7 @@ class DummySessionManager:
         return [{"role": "user", "content": "hi"}]
 
     def delete_session(self, session_id: str) -> bool:
-        """
-        Delete a session by ID.
+        """Delete a session by ID.
 
         Args:
             session_id (str): The ID of the session.
@@ -54,14 +49,10 @@ class DummySessionManager:
 
 
 class DummyRAG:
-    """
-    Dummy Retrieval-Augmented Generation (RAG) class for testing purposes.
-    """
+    """Dummy Retrieval-Augmented Generation (RAG) class for testing purposes."""
 
     def __init__(self) -> None:
-        """
-        Initialize the DummyRAG instance.
-        """
+        """Initialize the DummyRAG instance."""
         self.qdrant_collection = "alpha"
         self.index = object()
         self.query_engine = object()
@@ -73,8 +64,7 @@ class DummyRAG:
         self.ner_sources: list[dict[str, Any]] = []
 
     def list_collections(self) -> list[str]:
-        """
-        List all available collections.
+        """List all available collections.
 
         Returns:
             list[str]: A list of collection names.
@@ -82,8 +72,7 @@ class DummyRAG:
         return ["alpha", "beta"]
 
     def select_collection(self, name: str) -> None:
-        """
-        Select a collection by name.
+        """Select a collection by name.
 
         Args:
             name (str): The name of the collection to select.
@@ -94,22 +83,17 @@ class DummyRAG:
         self.query_engine = None
 
     def create_index(self) -> None:
-        """
-        Create a new index for the selected collection.
-        """
+        """Create a new index for the selected collection."""
         self.created_index += 1
         self.index = object()
 
     def create_query_engine(self) -> None:
-        """
-        Create a new query engine for the selected collection.
-        """
+        """Create a new query engine for the selected collection."""
         self.created_query_engine += 1
         self.query_engine = object()
 
     def start_session(self, session_id: str | None = None) -> str:
-        """
-        Start a new session or resume an existing one.
+        """Start a new session or resume an existing one.
 
         Args:
             session_id (str | None, optional): The ID of the session to resume. Defaults to None.
@@ -120,8 +104,7 @@ class DummyRAG:
         return session_id or "generated-session"
 
     def chat(self, question: str) -> dict[str, Any]:
-        """
-        Chat with the RAG system.
+        """Chat with the RAG system.
 
         Args:
             question (str): The question to ask the RAG system.
@@ -137,8 +120,7 @@ class DummyRAG:
         yield {"sources": [{"id": 1}], "session_id": "generated-session"}
 
     def get_collection_ner(self) -> list[dict[str, Any]]:
-        """
-        Get information extraction data for the selected collection.
+        """Get information extraction data for the selected collection.
 
         Returns:
             list[dict[str, Any]]: Information extraction data for the selected collection.
@@ -148,8 +130,7 @@ class DummyRAG:
 
 @pytest.fixture(autouse=True)
 def _patch_rag(monkeypatch: pytest.MonkeyPatch) -> Any | None:
-    """
-    Patch the RAG instance for testing.
+    """Patch the RAG instance for testing.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -164,8 +145,7 @@ def _patch_rag(monkeypatch: pytest.MonkeyPatch) -> Any | None:
 
 @pytest.fixture
 def client() -> TestClient:
-    """
-    Create a TestClient for testing the FastAPI application.
+    """Create a TestClient for testing the FastAPI application.
 
     Returns:
         TestClient: The TestClient instance.
@@ -174,8 +154,7 @@ def client() -> TestClient:
 
 
 def test_collections_list_success(client: TestClient) -> None:
-    """
-    Test the successful retrieval of the collections list.
+    """Test the successful retrieval of the collections list.
 
     Args:
         client (TestClient): The TestClient instance.
@@ -188,8 +167,7 @@ def test_collections_list_success(client: TestClient) -> None:
 def test_collections_list_failure(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """
-    Test the failed retrieval of the collections list.
+    """Test the failed retrieval of the collections list.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -208,8 +186,7 @@ def test_collections_list_failure(
 def test_collections_select_success(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """
-    Test the successful selection of a collection.
+    """Test the successful selection of a collection.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -229,8 +206,7 @@ def test_collections_select_success(
 
 
 def test_collections_select_blank_name(client: TestClient) -> None:
-    """
-    Test the selection of a collection with a blank name.
+    """Test the selection of a collection with a blank name.
 
     Args:
         client (TestClient): The TestClient instance.
@@ -241,8 +217,7 @@ def test_collections_select_blank_name(client: TestClient) -> None:
 
 
 def test_collections_ner_success(client: TestClient) -> None:
-    """
-    Test the successful retrieval of information extraction data.
+    """Test the successful retrieval of information extraction data.
 
     Args:
         client (TestClient): The TestClient instance.
@@ -327,8 +302,7 @@ def test_agent_chat_stream_clarifies(
 
 
 def test_collections_ner_requires_selection(client: TestClient) -> None:
-    """
-    Test that information extraction requires a collection to be selected.
+    """Test that information extraction requires a collection to be selected.
 
     Args:
         client (TestClient): The TestClient instance.
@@ -342,8 +316,7 @@ def test_collections_ner_requires_selection(client: TestClient) -> None:
 def test_collections_ner_failure(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """
-    Test the failed retrieval of information extraction data.
+    """Test the failed retrieval of information extraction data.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -351,8 +324,7 @@ def test_collections_ner_failure(
     """
 
     def raiser() -> list[dict[str, Any]]:
-        """
-        Get information extraction data for the selected collection.
+        """Get information extraction data for the selected collection.
 
         Raises:
             RuntimeError: If there is an error retrieving the information extraction data.
@@ -371,8 +343,7 @@ def test_collections_ner_failure(
 def test_query_requires_collection(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """
-    Test the query endpoint requires a collection to be selected.
+    """Test the query endpoint requires a collection to be selected.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -385,8 +356,7 @@ def test_query_requires_collection(
 
 
 def test_query_success(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
-    """
-    Test the successful query execution.
+    """Test the successful query execution.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -408,8 +378,7 @@ def test_query_success(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> N
 def test_query_handles_missing_sources(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """
-    Test the query handles missing sources.
+    """Test the query handles missing sources.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -417,8 +386,7 @@ def test_query_handles_missing_sources(
     """
 
     def fake_chat(question: str) -> str:
-        """
-        Fake chat function for testing.
+        """Fake chat function for testing.
 
         Args:
             question (str): The question to ask.
@@ -440,8 +408,7 @@ def test_query_handles_missing_sources(
 def test_ingest_success(
     monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
 ) -> None:
-    """
-    Test the successful ingestion of documents.
+    """Test the successful ingestion of documents.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -509,8 +476,7 @@ def test_sessions_endpoints(client: TestClient) -> None:
 def test_ingest_missing_directory(
     monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
 ) -> None:
-    """
-    Test the ingestion of documents when the data directory is missing.
+    """Test the ingestion of documents when the data directory is missing.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.

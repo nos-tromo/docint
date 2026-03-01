@@ -1,5 +1,4 @@
-"""
-Shared data-processing helpers and reusable rendering components.
+"""Shared data-processing helpers and reusable rendering components.
 
 This module contains all NER / source data logic previously in ``app.py``,
 plus extracted rendering helpers that are reused across pages.
@@ -18,8 +17,7 @@ from docint.ui.state import BACKEND_PUBLIC_HOST
 
 
 def format_score(score: Any) -> str:
-    """
-    Format score values for display.
+    """Format score values for display.
 
     Args:
         score: The score value to format.

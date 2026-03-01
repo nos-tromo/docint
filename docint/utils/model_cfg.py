@@ -42,8 +42,7 @@ setup_logging()
 
 
 def load_docling_models() -> None:
-    """
-    Preloads Docling models to the HuggingFace cache.
+    """Preloads Docling models to the HuggingFace cache.
 
     We invoke the `download_models` static method of each model class directly.
     This ensures that we use the exact same logic (repo_id, revision, local_dir)
@@ -81,8 +80,7 @@ def load_docling_models() -> None:
 
 
 def load_gliner_model(model_id: str, cache_folder: Path) -> None:
-    """
-    Loads the GLiNER model.
+    """Loads the GLiNER model.
 
     Args:
         model_id (str): The name of the GLiNER model to load.
@@ -107,8 +105,7 @@ def load_gliner_model(model_id: str, cache_folder: Path) -> None:
 def load_hf_model(
     model_id: str, cache_folder: Path, kw: str, trust_remote_code: bool = False
 ) -> None:
-    """
-    Loads and returns the HuggingFace embedding model.
+    """Loads and returns the HuggingFace embedding model.
 
     Args:
         model_id (str): The name of the model to load.
@@ -131,8 +128,7 @@ def load_hf_model(
 
 
 def load_llama_cpp_model(cache_dir: Path, model_id: str, repo_id: str, kw: str) -> None:
-    """
-    Loads the llama.cpp model.
+    """Loads the llama.cpp model.
 
     Args:
         cache_dir (Path): The path to the cache directory.
@@ -211,8 +207,7 @@ def load_llama_cpp_model(cache_dir: Path, model_id: str, repo_id: str, kw: str) 
 def load_ollama_model(
     model_id: str, kw: str, host: str = "http://localhost:11434"
 ) -> None:
-    """
-    Loads the specified model using Ollama.
+    """Loads the specified model using Ollama.
 
     Args:
         model_id (str): The ID of the model to load.
@@ -244,8 +239,7 @@ def load_ollama_model(
 
 
 def load_whisper_model(model_id: str) -> None:
-    """
-    Loads and returns the Whisper model.
+    """Loads and returns the Whisper model.
 
     Args:
         model_id (str): The name of the model to load.
@@ -255,9 +249,7 @@ def load_whisper_model(model_id: str) -> None:
 
 
 def main() -> None:
-    """
-    Main function to verify configuration loading.
-    """
+    """Main function to verify configuration loading."""
     # Load configurations
     path_config = load_path_env()
     model_config = load_model_env()
