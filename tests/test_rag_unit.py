@@ -101,7 +101,7 @@ def test_normalize_response_data_appends_image_sources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Image retrieval results should be appended to normalized sources.
-    
+
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
     """
@@ -169,7 +169,7 @@ def test_select_collection_resets_image_service(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Selecting another collection should reset image ingestion service state.
-    
+
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
     """
@@ -218,11 +218,11 @@ def test_start_session_initializes_memory(
             return cls(**kwargs)
 
     monkeypatch.setattr(
-        "docint.core.session_manager.ChatMemoryBuffer",
+        "docint.core.state.session_manager.ChatMemoryBuffer",
         types.SimpleNamespace(from_defaults=lambda **_: FakeMemory()),
     )
     monkeypatch.setattr(
-        "docint.core.session_manager.CondenseQuestionChatEngine",
+        "docint.core.state.session_manager.CondenseQuestionChatEngine",
         types.SimpleNamespace(from_defaults=lambda **kwargs: FakeChatEngine(**kwargs)),
     )
     session_id = rag.start_session("abc")

@@ -7,7 +7,7 @@ from docint.core.readers.documents import CorePDFPipelineReader
 
 def test_build_nodes_attaches_file_hash_as_doc_id(tmp_path: Path) -> None:
     """The doc_id should appear as file_hash in every node's metadata.
-    
+
     Args:
         tmp_path (Path): Temporary directory path for the test.
     """

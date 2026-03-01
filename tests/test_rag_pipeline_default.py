@@ -132,7 +132,7 @@ def test_reader_applies_ner_metadata(tmp_path: Path) -> None:
 
 def test_reader_ingests_extracted_images_via_shared_service(tmp_path: Path) -> None:
     """Core reader should route pipeline-extracted images through shared service.
-    
+
     Args:
         tmp_path (Path): Temporary directory path for the test.
     """

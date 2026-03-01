@@ -8,8 +8,25 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from docint.core.pipeline.config import PipelineConfig, load_pipeline_config
-from docint.core.pipeline.models import (
+from docint.core.readers.documents.artifacts import (
+    load_manifest,
+    save_chunks,
+    save_image_metadata,
+    save_layout,
+    save_manifest,
+    save_page_text,
+    save_table,
+)
+from docint.core.readers.documents.chunking import chunk_document
+from docint.core.readers.documents.config import PipelineConfig, load_pipeline_config
+from docint.core.readers.documents.extraction import extract_images, extract_tables
+from docint.core.readers.documents.layout import (
+    PypdfLayoutAnalyzer,
+    _extract_image_bboxes_from_stream,
+    _find_table_end,
+    _multiply_matrices,
+)
+from docint.core.readers.documents.models import (
     BBox,
     BlockType,
     ChunkResult,
@@ -21,7 +38,12 @@ from docint.core.pipeline.models import (
     PageText,
     TableResult,
 )
-
+from docint.core.readers.documents.ocr import build_page_text
+from docint.core.readers.documents.orchestrator import (
+    DocumentPipelineOrchestrator,
+)
+from docint.core.readers.documents.triage import triage_pdf
+from docint.utils.hashing import compute_file_hash
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -30,7 +52,11 @@ from docint.core.pipeline.models import (
 
 @pytest.fixture()
 def pipeline_config(tmp_path: Path) -> PipelineConfig:
-    """Return a pipeline config pointing at a temp artifacts dir."""
+    """Return a pipeline config pointing at a temp artifacts dir.
+
+    Args:
+        tmp_path (Path): Temporary directory path for the test.I
+    """
     return PipelineConfig(
         text_coverage_threshold=0.01,
         pipeline_version="test-1.0.0",
@@ -43,6 +69,7 @@ def pipeline_config(tmp_path: Path) -> PipelineConfig:
 
 @pytest.fixture()
 def sample_page_info() -> PageInfo:
+    """Return a sample completed PageInfo for a digital page."""
     return PageInfo(
         page_index=0,
         has_text_layer=True,
@@ -56,6 +83,7 @@ def sample_page_info() -> PageInfo:
 
 @pytest.fixture()
 def sample_layout_block() -> LayoutBlock:
+    """Return a sample full-page TEXT layout block."""
     return LayoutBlock(
         block_id="block-0-abc12345",
         page_index=0,
@@ -73,28 +101,37 @@ def sample_layout_block() -> LayoutBlock:
 
 
 class TestBBox:
+    """Tests for bounding-box geometry helpers."""
+
     def test_area(self) -> None:
+        """Positive-area box returns correct area."""
         bbox = BBox(x0=0, y0=0, x1=10, y1=20)
         assert bbox.area == 200.0
 
     def test_area_degenerate(self) -> None:
+        """Zero-size box returns zero area."""
         bbox = BBox(x0=5, y0=5, x1=5, y1=5)
         assert bbox.area == 0.0
 
     def test_overlaps_true(self) -> None:
+        """Overlapping boxes report True symmetrically."""
         a = BBox(x0=0, y0=0, x1=10, y1=10)
         b = BBox(x0=5, y0=5, x1=15, y1=15)
         assert a.overlaps(b)
         assert b.overlaps(a)
 
     def test_overlaps_false(self) -> None:
+        """Disjoint boxes report False."""
         a = BBox(x0=0, y0=0, x1=5, y1=5)
         b = BBox(x0=10, y0=10, x1=20, y1=20)
         assert not a.overlaps(b)
 
 
 class TestBlockType:
+    """Tests for the BlockType enum values."""
+
     def test_values(self) -> None:
+        """All expected block-type string values are present."""
         assert BlockType.TEXT.value == "text"
         assert BlockType.TABLE.value == "table"
         assert BlockType.FIGURE.value == "figure"
@@ -102,7 +139,10 @@ class TestBlockType:
 
 
 class TestPageInfo:
+    """Tests for PageInfo dataclass defaults."""
+
     def test_default_status(self) -> None:
+        """New PageInfo should default to 'pending' with no error."""
         p = PageInfo(
             page_index=0, has_text_layer=True, text_coverage=1.0, needs_ocr=False
         )
@@ -111,7 +151,10 @@ class TestPageInfo:
 
 
 class TestDocumentManifest:
+    """Tests for DocumentManifest dataclass defaults."""
+
     def test_defaults(self) -> None:
+        """New manifest should default to zero pages and 'pending' status."""
         m = DocumentManifest(
             doc_id="abc",
             file_path="/x.pdf",
@@ -128,7 +171,10 @@ class TestDocumentManifest:
 
 
 class TestPipelineConfig:
+    """Tests for pipeline configuration loading and env overrides."""
+
     def test_load_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Default config values should match documented defaults."""
         # Clear any existing env overrides
         for key in [
             "PIPELINE_TEXT_COVERAGE_THRESHOLD",
@@ -146,6 +192,7 @@ class TestPipelineConfig:
         assert cfg.max_workers == 4
 
     def test_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Environment variables should override default config values."""
         monkeypatch.setenv("PIPELINE_TEXT_COVERAGE_THRESHOLD", "0.5")
         monkeypatch.setenv("PIPELINE_FORCE_REPROCESS", "true")
         cfg = load_pipeline_config()
@@ -160,9 +207,11 @@ class TestPipelineConfig:
 
 class TestTriage:
     def test_digital_pdf(self, pipeline_config: PipelineConfig) -> None:
-        """Pages with sufficient text should not need OCR."""
-        from docint.core.pipeline.triage import triage_pdf
+        """Pages with sufficient text should not need OCR.
 
+        Args:
+            pipeline_config (PipelineConfig): The pipeline configuration fixture.
+        """
         mock_page = MagicMock()
         mock_page.extract_text.return_value = "A" * 500
         mock_mediabox = MagicMock()
@@ -173,7 +222,7 @@ class TestTriage:
         mock_reader = MagicMock()
         mock_reader.pages = [mock_page]
 
-        with patch("docint.core.pipeline.triage.pypdf") as mock_pypdf:
+        with patch("docint.core.readers.documents.triage.pypdf") as mock_pypdf:
             mock_pypdf.PdfReader.return_value = mock_reader
             pages = triage_pdf("/fake/doc.pdf", pipeline_config)
 
@@ -183,9 +232,11 @@ class TestTriage:
         assert pages[0].status == "completed"
 
     def test_scanned_pdf(self, pipeline_config: PipelineConfig) -> None:
-        """Pages with no text should need OCR."""
-        from docint.core.pipeline.triage import triage_pdf
+        """Pages with no text should need OCR.
 
+        Args:
+            pipeline_config (PipelineConfig): The pipeline configuration fixture.
+        """
         mock_page = MagicMock()
         mock_page.extract_text.return_value = ""
         mock_mediabox = MagicMock()
@@ -196,7 +247,7 @@ class TestTriage:
         mock_reader = MagicMock()
         mock_reader.pages = [mock_page]
 
-        with patch("docint.core.pipeline.triage.pypdf") as mock_pypdf:
+        with patch("docint.core.readers.documents.triage.pypdf") as mock_pypdf:
             mock_pypdf.PdfReader.return_value = mock_reader
             pages = triage_pdf("/fake/scan.pdf", pipeline_config)
 
@@ -205,9 +256,11 @@ class TestTriage:
         assert pages[0].needs_ocr is True
 
     def test_mixed_pdf(self, pipeline_config: PipelineConfig) -> None:
-        """A PDF with mixed pages should classify each correctly."""
-        from docint.core.pipeline.triage import triage_pdf
+        """A PDF with mixed pages should classify each correctly.
 
+        Args:
+            pipeline_config (PipelineConfig): The pipeline configuration fixture.
+        """
         digital_page = MagicMock()
         digital_page.extract_text.return_value = "X" * 1000
         digital_mb = MagicMock()
@@ -225,7 +278,7 @@ class TestTriage:
         mock_reader = MagicMock()
         mock_reader.pages = [digital_page, scanned_page]
 
-        with patch("docint.core.pipeline.triage.pypdf") as mock_pypdf:
+        with patch("docint.core.readers.documents.triage.pypdf") as mock_pypdf:
             mock_pypdf.PdfReader.return_value = mock_reader
             pages = triage_pdf("/fake/mixed.pdf", pipeline_config)
 
@@ -234,9 +287,11 @@ class TestTriage:
         assert pages[1].needs_ocr is True
 
     def test_bad_page_does_not_crash(self, pipeline_config: PipelineConfig) -> None:
-        """A page that raises during extraction should be marked failed."""
-        from docint.core.pipeline.triage import triage_pdf
+        """A page that raises during extraction should be marked failed.
 
+        Args:
+            pipeline_config (PipelineConfig): The pipeline configuration fixture.
+        """
         good_page = MagicMock()
         good_page.extract_text.return_value = "A" * 500
         good_mb = MagicMock()
@@ -250,7 +305,7 @@ class TestTriage:
         mock_reader = MagicMock()
         mock_reader.pages = [good_page, bad_page]
 
-        with patch("docint.core.pipeline.triage.pypdf") as mock_pypdf:
+        with patch("docint.core.readers.documents.triage.pypdf") as mock_pypdf:
             mock_pypdf.PdfReader.return_value = mock_reader
             pages = triage_pdf("/fake/bad.pdf", pipeline_config)
 
@@ -266,9 +321,10 @@ class TestTriage:
 
 
 class TestChunking:
-    def test_basic_chunking(self, sample_layout_block: LayoutBlock) -> None:
-        from docint.core.pipeline.chunking import chunk_document
+    """Tests for the document chunking logic."""
 
+    def test_basic_chunking(self, sample_layout_block: LayoutBlock) -> None:
+        """Single-block layout produces at least one chunk with correct metadata."""
         layout = {0: [sample_layout_block]}
         page_texts = {
             0: PageText(
@@ -284,8 +340,7 @@ class TestChunking:
         assert chunks[0].section_path == []
 
     def test_section_path_tracking(self) -> None:
-        from docint.core.pipeline.chunking import chunk_document
-
+        """Chunks following a TITLE block should carry its section path."""
         title_block = LayoutBlock(
             block_id="title-0",
             page_index=0,
@@ -313,8 +368,7 @@ class TestChunking:
         assert "Chapter 1: Introduction" in text_chunks[0].section_path
 
     def test_chunk_size_respected(self) -> None:
-        from docint.core.pipeline.chunking import chunk_document
-
+        """Long text should be split so no chunk exceeds the size limit."""
         long_text = ". ".join(["Sentence number " + str(i) for i in range(100)])
         block = LayoutBlock(
             block_id="long-0",
@@ -336,8 +390,7 @@ class TestChunking:
             assert len(chunk.text) <= 300
 
     def test_stable_chunk_ids(self) -> None:
-        from docint.core.pipeline.chunking import chunk_document
-
+        """Identical inputs should produce deterministic chunk IDs."""
         block = LayoutBlock(
             block_id="stable-block",
             page_index=0,
@@ -356,8 +409,7 @@ class TestChunking:
             assert a.chunk_id == b.chunk_id
 
     def test_ocr_source_mix_propagated(self) -> None:
-        from docint.core.pipeline.chunking import chunk_document
-
+        """Chunks from OCR pages should carry source_mix='ocr'."""
         block = LayoutBlock(
             block_id="ocr-block",
             page_index=0,
@@ -382,9 +434,10 @@ class TestChunking:
 
 
 class TestArtifacts:
-    def test_save_and_load_manifest(self, tmp_path: Path) -> None:
-        from docint.core.pipeline.artifacts import load_manifest, save_manifest
+    """Tests for artifact serialization and deserialization."""
 
+    def test_save_and_load_manifest(self, tmp_path: Path) -> None:
+        """Round-trip save/load of a DocumentManifest preserves all fields."""
         manifest = DocumentManifest(
             doc_id="test-doc-id",
             file_path="/some/file.pdf",
@@ -412,8 +465,7 @@ class TestArtifacts:
         assert loaded.pages[0].page_index == 0
 
     def test_save_layout(self, tmp_path: Path) -> None:
-        from docint.core.pipeline.artifacts import save_layout
-
+        """Saved layout JSON should contain the serialized block."""
         blocks = [
             LayoutBlock(
                 block_id="b1",
@@ -432,8 +484,7 @@ class TestArtifacts:
         assert data[0]["block_id"] == "b1"
 
     def test_save_page_text(self, tmp_path: Path) -> None:
-        from docint.core.pipeline.artifacts import save_page_text
-
+        """Saved page text JSON should preserve the full_text value."""
         pt = PageText(
             page_index=0,
             full_text="hello world",
@@ -446,8 +497,7 @@ class TestArtifacts:
         assert data["full_text"] == "hello world"
 
     def test_save_chunks(self, tmp_path: Path) -> None:
-        from docint.core.pipeline.artifacts import save_chunks
-
+        """Chunks should be saved as one JSONL line per chunk."""
         chunks = [
             ChunkResult(
                 doc_id="d1",
@@ -469,8 +519,7 @@ class TestArtifacts:
         assert data["chunk_id"] == "c1"
 
     def test_save_table(self, tmp_path: Path) -> None:
-        from docint.core.pipeline.artifacts import save_table
-
+        """Saved table metadata file should be created on disk."""
         table = TableResult(
             table_id="t1",
             page_index=0,
@@ -482,8 +531,7 @@ class TestArtifacts:
         assert path.exists()
 
     def test_save_image_metadata(self, tmp_path: Path) -> None:
-        from docint.core.pipeline.artifacts import save_image_metadata
-
+        """Saved image metadata file should be created on disk."""
         image = ImageResult(
             image_id="img1",
             page_index=0,
@@ -499,9 +547,10 @@ class TestArtifacts:
 
 
 class TestExtraction:
-    def test_extract_tables_from_layout(self) -> None:
-        from docint.core.pipeline.extraction import extract_tables
+    """Tests for table and image extraction from layout blocks."""
 
+    def test_extract_tables_from_layout(self) -> None:
+        """TABLE blocks should be extracted; TEXT blocks should be ignored."""
         layout = {
             0: [
                 LayoutBlock(
@@ -530,8 +579,7 @@ class TestExtraction:
         assert "col1" in tables[0].raw_text
 
     def test_extract_images_from_layout(self) -> None:
-        from docint.core.pipeline.extraction import extract_images
-
+        """FIGURE blocks should be extracted with confidence in metadata."""
         layout = {
             0: [
                 LayoutBlock(
@@ -561,8 +609,6 @@ class TestLayoutAnalysis:
 
     def test_detect_images_creates_figure_blocks(self) -> None:
         """Pages with embedded images should produce FIGURE blocks."""
-        from docint.core.pipeline.layout import PypdfLayoutAnalyzer
-
         mock_page = MagicMock()
         mock_mb = MagicMock()
         mock_mb.left = 0.0
@@ -594,7 +640,7 @@ class TestLayoutAnalysis:
         mock_reader = MagicMock()
         mock_reader.pages = [mock_page]
 
-        with patch("docint.core.pipeline.layout.pypdf") as mock_pypdf:
+        with patch("docint.core.readers.documents.layout.pypdf") as mock_pypdf:
             mock_pypdf.PdfReader.return_value = mock_reader
             analyzer = PypdfLayoutAnalyzer("/fake/doc.pdf")
             blocks = analyzer.analyze_page(0)
@@ -606,8 +652,6 @@ class TestLayoutAnalysis:
 
     def test_detect_tables_via_caption(self) -> None:
         """Text containing 'Table N:' captions should produce TABLE blocks."""
-        from docint.core.pipeline.layout import PypdfLayoutAnalyzer
-
         table_text = (
             "Some introductory text about the experiment.\n"
             "Table 1: Results summary\n"
@@ -636,7 +680,7 @@ class TestLayoutAnalysis:
         mock_reader = MagicMock()
         mock_reader.pages = [mock_page]
 
-        with patch("docint.core.pipeline.layout.pypdf") as mock_pypdf:
+        with patch("docint.core.readers.documents.layout.pypdf") as mock_pypdf:
             mock_pypdf.PdfReader.return_value = mock_reader
             analyzer = PypdfLayoutAnalyzer("/fake/doc.pdf")
             blocks = analyzer.analyze_page(0)
@@ -654,8 +698,6 @@ class TestLayoutAnalysis:
 
     def test_no_images_no_tables_produces_text_only(self) -> None:
         """A plain text page should produce only TEXT blocks."""
-        from docint.core.pipeline.layout import PypdfLayoutAnalyzer
-
         mock_page = MagicMock()
         mock_mb = MagicMock()
         mock_mb.left = 0.0
@@ -673,7 +715,7 @@ class TestLayoutAnalysis:
         mock_reader = MagicMock()
         mock_reader.pages = [mock_page]
 
-        with patch("docint.core.pipeline.layout.pypdf") as mock_pypdf:
+        with patch("docint.core.readers.documents.layout.pypdf") as mock_pypdf:
             mock_pypdf.PdfReader.return_value = mock_reader
             analyzer = PypdfLayoutAnalyzer("/fake/doc.pdf")
             blocks = analyzer.analyze_page(0)
@@ -684,8 +726,6 @@ class TestLayoutAnalysis:
 
     def test_empty_page_produces_fallback_block(self) -> None:
         """A page with no text or images should still produce a block."""
-        from docint.core.pipeline.layout import PypdfLayoutAnalyzer
-
         mock_page = MagicMock()
         mock_mb = MagicMock()
         mock_mb.left = 0.0
@@ -703,7 +743,7 @@ class TestLayoutAnalysis:
         mock_reader = MagicMock()
         mock_reader.pages = [mock_page]
 
-        with patch("docint.core.pipeline.layout.pypdf") as mock_pypdf:
+        with patch("docint.core.readers.documents.layout.pypdf") as mock_pypdf:
             mock_pypdf.PdfReader.return_value = mock_reader
             analyzer = PypdfLayoutAnalyzer("/fake/doc.pdf")
             blocks = analyzer.analyze_page(0)
@@ -714,8 +754,6 @@ class TestLayoutAnalysis:
 
     def test_mixed_content_page(self) -> None:
         """A page with images, tables, and text should produce all block types."""
-        from docint.core.pipeline.layout import PypdfLayoutAnalyzer
-
         mixed_text = (
             "Introduction paragraph.\n"
             "Table 1: Key metrics\n"
@@ -754,7 +792,7 @@ class TestLayoutAnalysis:
         mock_reader = MagicMock()
         mock_reader.pages = [mock_page]
 
-        with patch("docint.core.pipeline.layout.pypdf") as mock_pypdf:
+        with patch("docint.core.readers.documents.layout.pypdf") as mock_pypdf:
             mock_pypdf.PdfReader.return_value = mock_reader
             analyzer = PypdfLayoutAnalyzer("/fake/doc.pdf")
             blocks = analyzer.analyze_page(0)
@@ -770,8 +808,6 @@ class TestContentStreamParsing:
 
     def test_extract_image_bbox_from_simple_stream(self) -> None:
         """Should extract correct bbox from cm + Do operators."""
-        from docint.core.pipeline.layout import _extract_image_bboxes_from_stream
-
         stream = "q\n1 0 0 1 100 200 cm\n300 0 0 400 0 0 cm\n/Im1 Do\nQ\n"
         result = _extract_image_bboxes_from_stream(stream, {"/Im1"})
         assert "/Im1" in result
@@ -783,8 +819,6 @@ class TestContentStreamParsing:
 
     def test_extract_with_scaling(self) -> None:
         """Should handle scale + translate combos correctly."""
-        from docint.core.pipeline.layout import _extract_image_bboxes_from_stream
-
         stream = (
             "q\n"
             "1 0 0 1 196.559 397.582 cm\n"
@@ -803,8 +837,6 @@ class TestContentStreamParsing:
 
     def test_unknown_image_name_ignored(self) -> None:
         """Images not in the lookup set should be skipped."""
-        from docint.core.pipeline.layout import _extract_image_bboxes_from_stream
-
         stream = "q\n300 0 0 400 100 200 cm\n/Im99 Do\nQ\n"
         result = _extract_image_bboxes_from_stream(stream, {"/Im1"})
         assert "/Im99" not in result
@@ -812,8 +844,6 @@ class TestContentStreamParsing:
 
     def test_multiple_images(self) -> None:
         """Multiple images on one page should all get bboxes."""
-        from docint.core.pipeline.layout import _extract_image_bboxes_from_stream
-
         stream = (
             "q\n200 0 0 300 50 100 cm\n/Im1 Do\nQ\n"
             "q\n150 0 0 200 400 500 cm\n/Im2 Do\nQ\n"
@@ -831,7 +861,6 @@ class TestTableDetection:
 
     def test_find_table_end_basic(self) -> None:
         """Table end should be found after tabular rows."""
-        from docint.core.pipeline.layout import _find_table_end
 
         lines = [
             "Table 1: Results",
@@ -847,8 +876,6 @@ class TestTableDetection:
 
     def test_find_table_end_stops_at_section(self) -> None:
         """Table detection should stop at a new section heading."""
-        from docint.core.pipeline.layout import _find_table_end
-
         lines = [
             "Table 2: More results",
             "X    Y",
@@ -861,7 +888,6 @@ class TestTableDetection:
 
     def test_detect_tables_removes_table_from_text(self) -> None:
         """Table regions should be excluded from the remaining text."""
-        from docint.core.pipeline.layout import PypdfLayoutAnalyzer
 
         text = (
             "Introduction.\n"
@@ -882,7 +908,6 @@ class TestTableDetection:
 
     def test_no_table_returns_full_text(self) -> None:
         """Without table captions, all text should remain."""
-        from docint.core.pipeline.layout import PypdfLayoutAnalyzer
 
         text = "Just regular text without any tables."
         table_blocks, remaining = PypdfLayoutAnalyzer._detect_tables(
@@ -896,15 +921,13 @@ class TestMatrixMultiplication:
     """Tests for the PDF affine matrix multiplication helper."""
 
     def test_identity(self) -> None:
-        from docint.core.pipeline.layout import _multiply_matrices
-
+        """Multiplying two identity matrices returns identity."""
         identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
         result = _multiply_matrices(identity, identity)
         assert result == pytest.approx(identity)
 
     def test_translate(self) -> None:
-        from docint.core.pipeline.layout import _multiply_matrices
-
+        """Translation matrix preserves tx/ty offsets."""
         identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
         translate = [1.0, 0.0, 0.0, 1.0, 100.0, 200.0]
         result = _multiply_matrices(identity, translate)
@@ -912,8 +935,7 @@ class TestMatrixMultiplication:
         assert result[5] == pytest.approx(200.0)
 
     def test_scale_then_translate(self) -> None:
-        from docint.core.pipeline.layout import _multiply_matrices
-
+        """Scaling after translation preserves the translation offset."""
         translate = [1.0, 0.0, 0.0, 1.0, 50.0, 50.0]
         scale = [2.0, 0.0, 0.0, 3.0, 0.0, 0.0]
         result = _multiply_matrices(translate, scale)
@@ -930,19 +952,19 @@ class TestMatrixMultiplication:
 
 
 class TestOCR:
+    """Tests for OCR page-text assembly."""
+
     def test_build_page_text_pdf_only(
         self, sample_page_info: PageInfo, sample_layout_block: LayoutBlock
     ) -> None:
-        from docint.core.pipeline.ocr import build_page_text
-
+        """Page with layout blocks only should yield source_mix='pdf_text'."""
         result = build_page_text(sample_page_info, [sample_layout_block], [])
         assert result.source_mix == "pdf_text"
         assert "Hello world" in result.full_text
         assert result.confidence == 1.0
 
     def test_build_page_text_ocr_only(self, sample_page_info: PageInfo) -> None:
-        from docint.core.pipeline.ocr import build_page_text
-
+        """Page with OCR spans only should yield source_mix='ocr'."""
         ocr_spans = [
             OCRSpan(
                 text="OCR text",
@@ -959,8 +981,7 @@ class TestOCR:
     def test_build_page_text_mixed(
         self, sample_page_info: PageInfo, sample_layout_block: LayoutBlock
     ) -> None:
-        from docint.core.pipeline.ocr import build_page_text
-
+        """Page with both layout blocks and OCR spans should yield source_mix='mixed'."""
         ocr_spans = [
             OCRSpan(
                 text="Additional OCR text",
@@ -981,11 +1002,12 @@ class TestOCR:
 
 
 class TestOrchestrator:
+    """Tests for the document pipeline orchestrator."""
+
     def test_process_with_mocked_pdf(
         self, pipeline_config: PipelineConfig, tmp_path: Path
     ) -> None:
-        from docint.core.pipeline.orchestrator import DocumentPipelineOrchestrator
-
+        """Processing a mocked PDF should produce a completed manifest with artifacts."""
         # Create a dummy file for hashing
         pdf_file = tmp_path / "test.pdf"
         pdf_file.write_bytes(b"%PDF-1.4 dummy content for hashing")
@@ -1008,9 +1030,9 @@ class TestOrchestrator:
         orch = DocumentPipelineOrchestrator(config=pipeline_config)
 
         with (
-            patch("docint.core.pipeline.triage.pypdf") as mock_triage_pypdf,
-            patch("docint.core.pipeline.layout.pypdf") as mock_layout_pypdf,
-            patch("docint.core.pipeline.ocr.pypdf") as mock_ocr_pypdf,
+            patch("docint.core.readers.documents.triage.pypdf") as mock_triage_pypdf,
+            patch("docint.core.readers.documents.layout.pypdf") as mock_layout_pypdf,
+            patch("docint.core.readers.documents.ocr.pypdf") as mock_ocr_pypdf,
         ):
             mock_triage_pypdf.PdfReader.return_value = mock_reader
             mock_layout_pypdf.PdfReader.return_value = mock_reader
@@ -1023,7 +1045,6 @@ class TestOrchestrator:
         assert manifest.pages_failed == 0
 
         # Check artifacts were created
-        from docint.utils.hashing import compute_file_hash
 
         doc_id = compute_file_hash(pdf_file)
         artifacts_dir = Path(pipeline_config.artifacts_dir)
@@ -1033,7 +1054,6 @@ class TestOrchestrator:
         self, pipeline_config: PipelineConfig, tmp_path: Path
     ) -> None:
         """Second run should reuse artifacts when pipeline version matches."""
-        from docint.core.pipeline.orchestrator import DocumentPipelineOrchestrator
 
         # Disable force to test idempotency
         config = PipelineConfig(
@@ -1066,9 +1086,9 @@ class TestOrchestrator:
 
         # First run
         with (
-            patch("docint.core.pipeline.triage.pypdf") as m1,
-            patch("docint.core.pipeline.layout.pypdf") as m2,
-            patch("docint.core.pipeline.ocr.pypdf") as m3,
+            patch("docint.core.readers.documents.triage.pypdf") as m1,
+            patch("docint.core.readers.documents.layout.pypdf") as m2,
+            patch("docint.core.readers.documents.ocr.pypdf") as m3,
         ):
             m1.PdfReader.return_value = mock_reader
             m2.PdfReader.return_value = mock_reader
@@ -1086,7 +1106,6 @@ class TestOrchestrator:
         self, pipeline_config: PipelineConfig, tmp_path: Path
     ) -> None:
         """A failing page should not crash the whole document."""
-        from docint.core.pipeline.orchestrator import DocumentPipelineOrchestrator
 
         pdf_file = tmp_path / "test.pdf"
         pdf_file.write_bytes(b"%PDF-1.4 failure isolation test")
@@ -1111,9 +1130,9 @@ class TestOrchestrator:
         orch = DocumentPipelineOrchestrator(config=pipeline_config)
 
         with (
-            patch("docint.core.pipeline.triage.pypdf") as m1,
-            patch("docint.core.pipeline.layout.pypdf") as m2,
-            patch("docint.core.pipeline.ocr.pypdf") as m3,
+            patch("docint.core.readers.documents.triage.pypdf") as m1,
+            patch("docint.core.readers.documents.layout.pypdf") as m2,
+            patch("docint.core.readers.documents.ocr.pypdf") as m3,
         ):
             m1.PdfReader.return_value = mock_reader
             m2.PdfReader.return_value = mock_reader
@@ -1127,8 +1146,6 @@ class TestOrchestrator:
 
     def test_retry_logic(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
         """Stages should retry on transient failures."""
-        from docint.core.pipeline.orchestrator import DocumentPipelineOrchestrator
-
         orch = DocumentPipelineOrchestrator(config=pipeline_config)
 
         call_count = 0

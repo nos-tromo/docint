@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from docint.core.session_manager import SessionManager
+from docint.core.state.session_manager import SessionManager
 from docint.core.state.base import Base
 
 
