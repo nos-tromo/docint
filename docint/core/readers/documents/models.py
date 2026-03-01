@@ -32,11 +32,22 @@ class BBox:
 
     @property
     def area(self) -> float:
-        """Return the area of the bounding box."""
+        """Return the area of the bounding box.
+
+        Returns:
+            The area of the bounding box, calculated as width multiplied by height.
+        """
         return max(0.0, self.x1 - self.x0) * max(0.0, self.y1 - self.y0)
 
     def overlaps(self, other: BBox) -> bool:
-        """Return True if this bbox overlaps with *other*."""
+        """Return True if this bbox overlaps with *other*.
+
+        Args:
+            other: Another BBox instance to check for overlap with this one.
+
+        Returns:
+            True if the two bounding boxes overlap, False otherwise.
+        """
         return not (
             self.x1 <= other.x0
             or other.x1 <= self.x0

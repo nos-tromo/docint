@@ -1,55 +1,28 @@
-import base64
 from dataclasses import dataclass, field
-from io import BytesIO
 from pathlib import Path
 
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from llama_index.core.schema import MediaResource
 from loguru import logger
-from PIL import Image
 
+from docint.core.ingest.images_service import (
+    ImageAsset,
+    ImageIngestionService,
+    IngestContext,
+)
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.mimetype import get_mimetype
-from docint.utils.openai_cfg import OpenAIPipeline
 
 
 @dataclass
 class ImageReader(BaseReader):
-    """
-    Image reader that utilizes the OpenAIPipeline for processing images.
-    """
+    """Image reader that routes image ingestion through the shared image service."""
 
-    openai_pipeline: OpenAIPipeline = field(default_factory=OpenAIPipeline, init=False)
-
-    def _load_image(self, file_path: Path, mode: str = "RGB") -> Image.Image:
-        """
-        Load an image from a file path.
-
-        Args:
-            file (str | Path): The path to the image file.
-            mode (str, optional): The mode to convert the image to. Defaults to "RGB".
-
-        Returns:
-            Image.Image: The loaded image.
-        """
-        return Image.open(file_path).convert(mode=mode)
-
-    def _encode_img_to_base64(self, img: Image.Image, format: str = "PNG") -> str:
-        """
-        Encode a PIL Image to a base64 string.
-
-        Args:
-            img (Image.Image): The image to encode.
-            format (str, optional): The format to save the image in. Defaults to "PNG".
-
-        Returns:
-            str: The base64 encoded string of the image.
-        """
-        buffer = BytesIO()
-        img.save(buffer, format=format)
-        img_bytes = buffer.getvalue()
-        return base64.b64encode(img_bytes).decode("utf-8")
+    image_ingestion_service: ImageIngestionService = field(
+        default_factory=ImageIngestionService
+    )
+    source_collection: str | None = None
 
     def _enrich_document(
         self,
@@ -57,6 +30,7 @@ class ImageReader(BaseReader):
         text: str,
         source: str = "image",
         file_hash: str | None = None,
+        image_metadata: dict[str, object] | None = None,
     ) -> Document:
         """Enrich a document with metadata from the image file.
 
@@ -65,6 +39,8 @@ class ImageReader(BaseReader):
             text (str): The text content extracted from the image.
             source (str, optional): The source type. Defaults to "image".
             file_hash (str | None, optional): Pre-computed file hash. Defaults to None.
+            image_metadata (dict[str, object] | None, optional): Additional metadata from image ingestion.
+                Defaults to None.
 
         Returns:
             Document: The enriched document.
@@ -77,7 +53,7 @@ class ImageReader(BaseReader):
             raise ValueError("file_path is not set.")
         filename = file_path.name
         mimetype = get_mimetype(file_path)
-        metadata = {
+        metadata: dict[str, object] = {
             "file_path": str(file_path),
             "file_name": filename,
             "filename": filename,
@@ -89,6 +65,8 @@ class ImageReader(BaseReader):
                 "mimetype": mimetype,
             },
         }
+        if image_metadata:
+            metadata.update(image_metadata)
         ensure_file_hash(
             metadata,
             file_hash=file_hash if file_hash is not None else None,
@@ -104,7 +82,7 @@ class ImageReader(BaseReader):
         """Load and process image data through the shared image ingestion service.
 
         Args:
-            file (str | bytes): The path to the image file or image bytes.
+            file (str | Path): The path to the image file.
             **kwargs: Additional keyword arguments.
 
         Returns:
@@ -120,11 +98,48 @@ class ImageReader(BaseReader):
         if file_hash is None:
             file_hash = compute_file_hash(file_path)
 
-        img = self._load_image(file_path)
-        img_base64 = self._encode_img_to_base64(img)
-        prompt = self.openai_pipeline.load_prompt("describe")
-        self.response = self.openai_pipeline.call_vision(
-            prompt=prompt,
-            img_base64=img_base64,
+        image_bytes = file_path.read_bytes()
+        mime_type = get_mimetype(file_path)
+
+        record = self.image_ingestion_service.ingest_image(
+            ImageAsset(
+                source_type="standalone",
+                image_path=file_path,
+                image_bytes=image_bytes,
+                source_path=str(file_path),
+                mime_type=mime_type,
+            ),
+            context=IngestContext(source_collection=self.source_collection),
         )
-        return [self._enrich_document(file_path, self.response, file_hash=file_hash)]
+        text = record.llm_description.strip()
+        if record.llm_tags:
+            text = (
+                f"{text}\n\nTags: {', '.join(record.llm_tags)}"
+                if text
+                else f"Tags: {', '.join(record.llm_tags)}"
+            )
+        if not text:
+            text = f"Image file: {file_path.name}"
+
+        image_meta: dict[str, object] = {}
+        if record.image_id:
+            image_meta["image_id"] = record.image_id
+        if record.point_id:
+            image_meta["image_point_id"] = record.point_id
+        if record.llm_description:
+            image_meta["llm_description"] = record.llm_description
+        if record.llm_tags:
+            image_meta["llm_tags"] = record.llm_tags
+        if record.error:
+            image_meta["image_ingest_error"] = record.error
+        if record.status:
+            image_meta["image_ingest_status"] = record.status
+
+        return [
+            self._enrich_document(
+                file_path,
+                text,
+                file_hash=file_hash,
+                image_metadata=image_meta,
+            )
+        ]

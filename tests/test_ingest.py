@@ -5,7 +5,7 @@ from typing import Any, Callable, cast
 import pytest
 
 import docint.cli.ingest as ingest
-from docint.core.ingestion_pipeline import DocumentIngestionPipeline
+from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
 from llama_index.core import Document
 
 

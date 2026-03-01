@@ -7,7 +7,7 @@ import re
 
 from loguru import logger
 
-from docint.core.pipeline.models import (
+from docint.core.readers.documents.models import (
     BlockType,
     ChunkResult,
     ImageResult,
@@ -18,7 +18,14 @@ from docint.core.pipeline.models import (
 
 
 def _sentence_split(text: str) -> list[str]:
-    """Split text into sentences using a simple regex heuristic."""
+    """Split text into sentences using a simple regex heuristic.
+
+    Args:
+        text: The input text to split into sentences.
+
+    Returns:
+        A list of sentence strings extracted from the input text.
+    """
     if not text.strip():
         return []
     parts = re.split(r"(?<=[.!?])\s+", text.strip())
@@ -26,7 +33,17 @@ def _sentence_split(text: str) -> list[str]:
 
 
 def _stable_chunk_id(doc_id: str, page_index: int, block_id: str, idx: int) -> str:
-    """Produce a deterministic chunk ID from the given inputs."""
+    """Produce a deterministic chunk ID from the given inputs.
+
+    Args:
+        doc_id: The unique identifier for the document (e.g., sha256 of file bytes).
+        page_index: The index of the page the chunk is derived from.
+        block_id: The identifier of the layout block the chunk is derived from.
+        idx: The index of the chunk within the block (for multiple chunks from the same block
+
+    Returns:
+        A deterministic chunk ID string.
+    """
     raw = f"{doc_id}:{page_index}:{block_id}:{idx}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
@@ -174,7 +191,22 @@ def _make_chunk(
     table_ids: list[str],
     image_ids: list[str],
 ) -> ChunkResult:
-    """Create a single ``ChunkResult``."""
+    """Create a single ``ChunkResult``.
+
+    Args:
+        doc_id: The unique identifier for the document (e.g., sha256 of file bytes).
+        page_idx: The index of the page the chunk is derived from.
+        block: The layout block the chunk is derived from.
+        text: The text content of the chunk.
+        chunk_idx: The index of the chunk within the block (for multiple chunks from the same block).
+        section_path: The hierarchical section path derived from heading/title blocks.
+        source_mix: The source of the text (e.g., "pdf_text", "ocr_text").
+        table_ids: List of related table identifiers that overlap with the block.
+        image_ids: List of related image identifiers that overlap with the block.
+
+    Returns:
+        A ``ChunkResult`` instance representing the chunked text and its metadata.
+    """
     chunk_id = _stable_chunk_id(doc_id, page_idx, block.block_id, chunk_idx)
     return ChunkResult(
         doc_id=doc_id,
@@ -206,6 +238,14 @@ def _update_section_path(
     blocks nest under the current title.  This provides a simple but
     reliable heading hierarchy based on layout block semantics rather
     than string length.
+
+    Args:
+        current_path: The current section path.
+        new_heading: The text of the new heading to add to the path.
+        block_type: The type of the block (TITLE or HEADER) to determine how to update
+
+    Returns:
+        The updated section path list.
     """
     if not current_path:
         return [new_heading]

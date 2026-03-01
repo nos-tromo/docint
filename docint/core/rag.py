@@ -126,6 +126,9 @@ class RAG:
     _qdrant_aclient: AsyncQdrantClient | None = field(
         default=None, init=False, repr=False
     )
+    _image_ingestion_service: ImageIngestionService | None = field(
+        default=None, init=False, repr=False
+    )
 
     # -- Ingested data ---
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
@@ -622,12 +625,102 @@ class RAG:
             # Only use LLM-based NER for OpenAI provider; otherwise use GLiNER
             ner_model = self._create_text_model()
 
+        if self._image_ingestion_service is None:
+            self._image_ingestion_service = ImageIngestionService(device=self.device)
+
         return DocumentIngestionPipeline(
             data_dir=self.data_dir,
             ner_model=ner_model,
             device=self.device,
             progress_callback=progress_callback,
+            target_collection=self.qdrant_collection,
+            image_ingestion_service=self._image_ingestion_service,
         )
+
+    def _retrieve_image_sources(
+        self,
+        query: str,
+        *,
+        top_k: int = 3,
+    ) -> list[dict[str, Any]]:
+        """Retrieve image matches for a text query and normalize them as sources."""
+        if not query.strip() or not self.qdrant_collection:
+            return []
+        if self._image_ingestion_service is None:
+            self._image_ingestion_service = ImageIngestionService(device=self.device)
+
+        try:
+            matches = self._image_ingestion_service.query_similar_images_by_text(
+                query_text=query,
+                top_k=top_k,
+                source_collection=self.qdrant_collection,
+            )
+        except Exception as exc:
+            logger.warning("Image source retrieval failed: {}", exc)
+            return []
+
+        results: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for payload in matches:
+            image_id = str(payload.get("image_id") or "").strip()
+            if image_id:
+                if image_id in seen:
+                    continue
+                seen.add(image_id)
+
+            description = str(payload.get("llm_description") or "").strip()
+            tags_raw = payload.get("llm_tags")
+            tags = [str(tag) for tag in tags_raw] if isinstance(tags_raw, list) else []
+            text_value = description
+            if tags:
+                text_value = (
+                    f"{description}\n\nTags: {', '.join(tags)}"
+                    if description
+                    else f"Tags: {', '.join(tags)}"
+                )
+
+            source_path = payload.get("source_path")
+            file_name = (
+                payload.get("file_name")
+                or payload.get("filename")
+                or (Path(source_path).name if isinstance(source_path, str) else None)
+            )
+            file_type = payload.get("mime_type") or payload.get("mimetype")
+            source_kind = payload.get("source_type") or "image"
+            file_hash = payload.get("source_doc_id") or payload.get("file_hash")
+            page_number = payload.get("page_number")
+            try:
+                page_number = int(page_number) if page_number is not None else None
+            except Exception:
+                page_number = None
+
+            src: dict[str, Any] = {
+                "text": text_value
+                or f"Image match: {image_id or file_name or 'unknown'}",
+                "preview_text": (text_value or "").strip()[:280],
+                "filename": file_name,
+                "filetype": file_type,
+                "source": source_kind,
+                "score": payload.get("score"),
+                "image_id": image_id or None,
+                "image_collection": payload.get("image_collection"),
+            }
+            if file_hash:
+                src["file_hash"] = file_hash
+                preview_url = (
+                    f"/sources/preview?collection={self.qdrant_collection}"
+                    f"&file_hash={file_hash}"
+                )
+                src["preview_url"] = preview_url
+                src["document_url"] = preview_url
+            if page_number is not None:
+                src["page"] = page_number
+            bbox = payload.get("bbox")
+            if isinstance(bbox, dict):
+                src["bbox"] = bbox
+            results.append(src)
+
+        return results
 
     def _index(self, storage_ctx: StorageContext) -> VectorStoreIndex:
         """Creates the vector store index for document embeddings.
@@ -982,6 +1075,14 @@ class RAG:
 
             sources.append(src)
 
+        if query.strip() and query != self.summarize_prompt:
+            sources.extend(
+                self._retrieve_image_sources(
+                    query,
+                    top_k=max(1, self.rerank_top_n // 2),
+                )
+            )
+
         return {
             "query": query,
             "reasoning": reason,
@@ -1105,6 +1206,7 @@ class RAG:
         self.nodes.clear()
         self.index = None
         self.query_engine = None
+        self._image_ingestion_service = None
         self.reset_session_state()
 
     def _prepare_sources_dir(self, data_dir: Path) -> Path:
@@ -1162,10 +1264,13 @@ class RAG:
         pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
         existing_hashes = self._get_existing_file_hashes()
         processed_hashes = set(existing_hashes)
+        image_ingestion_service = getattr(pipeline, "image_ingestion_service", None)
         core_pdf_reader = CorePDFPipelineReader(
             data_dir=prepared_dir,
             entity_extractor=pipeline.entity_extractor,
             ner_max_workers=pipeline.ner_max_workers,
+            source_collection=self.qdrant_collection,
+            image_ingestion_service=image_ingestion_service,
         )
 
         for docs, nodes, file_hash in core_pdf_reader.build(
@@ -1263,10 +1368,13 @@ class RAG:
         pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
         existing_hashes = self._get_existing_file_hashes()
         processed_hashes = set(existing_hashes)
+        image_ingestion_service = getattr(pipeline, "image_ingestion_service", None)
         core_pdf_reader = CorePDFPipelineReader(
             data_dir=prepared_dir,
             entity_extractor=pipeline.entity_extractor,
             ner_max_workers=pipeline.ner_max_workers,
+            source_collection=self.qdrant_collection,
+            image_ingestion_service=image_ingestion_service,
         )
 
         for docs, nodes, file_hash in core_pdf_reader.build(
@@ -1753,6 +1861,7 @@ class RAG:
         self._embed_model = None
         self._text_model = None
         self._reranker = None
+        self._image_ingestion_service = None
 
         gc.collect()
         if torch.cuda.is_available():

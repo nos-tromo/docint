@@ -13,7 +13,12 @@ from llama_index.core import Document
 from llama_index.core.schema import BaseNode, TextNode
 from loguru import logger
 
-from docint.core.pipeline import DocumentPipelineOrchestrator
+from docint.core.ingest.images_service import (
+    ImageAsset,
+    ImageIngestionService,
+    IngestContext,
+)
+from docint.core.readers.documents.orchestrator import DocumentPipelineOrchestrator
 from docint.utils.hashing import compute_file_hash
 from docint.utils.mimetype import get_mimetype
 
@@ -30,6 +35,8 @@ class CorePDFPipelineReader:
     data_dir: Path
     entity_extractor: Callable[[str], tuple[list[dict], list[dict]]] | None = None
     ner_max_workers: int = 1
+    source_collection: str | None = None
+    image_ingestion_service: ImageIngestionService | None = None
     discovered_hashes: set[str] = field(default_factory=set, init=False)
 
     def _apply_ner(
@@ -134,6 +141,145 @@ class CorePDFPipelineReader:
                         exc,
                     )
         return rows
+
+    @staticmethod
+    def _load_pipeline_images(doc_id: str, artifacts_dir: Path) -> list[dict[str, Any]]:
+        """Load image metadata artifacts produced by the core pipeline."""
+        images_dir = artifacts_dir / doc_id / "images"
+        if not images_dir.exists():
+            return []
+
+        rows: list[dict[str, Any]] = []
+        for image_meta in sorted(images_dir.glob("*.json")):
+            try:
+                payload = json.loads(image_meta.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    rows.append(payload)
+            except Exception as exc:
+                logger.warning(
+                    "Skipping malformed image metadata {}: {}",
+                    image_meta,
+                    exc,
+                )
+        return rows
+
+    @staticmethod
+    def _resolve_pipeline_image_path(
+        image_path: str,
+        *,
+        artifacts_dir: Path,
+        doc_id: str,
+    ) -> Path | None:
+        """Resolve best-effort path for an extracted image artifact."""
+        path = Path(image_path)
+        if path.exists():
+            return path
+        candidate = artifacts_dir / doc_id / "images" / path.name
+        if candidate.exists():
+            return candidate
+        return None
+
+    def _ingest_pipeline_images(
+        self,
+        *,
+        file_path: Path,
+        doc_id: str,
+        artifacts_dir: Path,
+    ) -> None:
+        """Ingest extracted document images through the shared image service."""
+        if self.image_ingestion_service is None:
+            return
+
+        rows = self._load_pipeline_images(doc_id, artifacts_dir)
+        if not rows:
+            return
+
+        total = 0
+        stored = 0
+        cached = 0
+        failed = 0
+
+        for row in rows:
+            image_path_raw = row.get("image_path")
+            if not isinstance(image_path_raw, str) or not image_path_raw.strip():
+                continue
+            image_path = self._resolve_pipeline_image_path(
+                image_path_raw,
+                artifacts_dir=artifacts_dir,
+                doc_id=doc_id,
+            )
+            if image_path is None:
+                logger.warning(
+                    "Extracted image path not found for doc {}: {}",
+                    doc_id[:12],
+                    image_path_raw,
+                )
+                continue
+
+            page_idx = row.get("page_index")
+            page_number: int | None = None
+            if isinstance(page_idx, int):
+                # Pipeline uses zero-based page indices.
+                page_number = page_idx + 1
+
+            bbox_raw = row.get("bbox")
+            bbox: dict[str, float] | None = None
+            if isinstance(bbox_raw, dict):
+                try:
+                    bbox = {
+                        "x0": float(bbox_raw["x0"]),
+                        "y0": float(bbox_raw["y0"]),
+                        "x1": float(bbox_raw["x1"]),
+                        "y1": float(bbox_raw["y1"]),
+                    }
+                except Exception:
+                    bbox = None
+
+            extra_metadata: dict[str, Any] = {
+                "pipeline_image_id": row.get("image_id"),
+            }
+            details = row.get("metadata")
+            if isinstance(details, dict):
+                if "block_id" in details:
+                    extra_metadata["pipeline_block_id"] = details.get("block_id")
+                if "confidence" in details:
+                    extra_metadata["pipeline_confidence"] = details.get("confidence")
+
+            total += 1
+            record = self.image_ingestion_service.ingest_image(
+                ImageAsset.from_path(
+                    path=image_path,
+                    source_type="document",
+                    source_doc_id=doc_id,
+                    source_path=str(file_path),
+                    page_number=page_number,
+                    bbox=bbox,
+                    extra_metadata=extra_metadata,
+                ),
+                context=IngestContext(source_collection=self.source_collection),
+            )
+            if record.status == "stored":
+                stored += 1
+            elif record.status == "cached":
+                cached += 1
+            else:
+                failed += 1
+                logger.warning(
+                    "Image ingest failed for doc {} image {}: {}",
+                    doc_id[:12],
+                    row.get("image_id"),
+                    record.error or record.status,
+                )
+
+        logger.info(
+            "Core pipeline image ingestion for {}: "
+            "total={} stored={} cached={} failed={}",
+            file_path.name,
+            total,
+            stored,
+            cached,
+            failed,
+        )
 
     @staticmethod
     def _build_nodes(
@@ -288,6 +434,12 @@ class CorePDFPipelineReader:
             if not nodes:
                 logger.warning("Core pipeline produced no chunks for {}", pdf_path.name)
                 continue
+
+            self._ingest_pipeline_images(
+                file_path=pdf_path,
+                doc_id=manifest.doc_id,
+                artifacts_dir=artifacts_dir,
+            )
 
             self._apply_ner(nodes, progress_callback=progress_callback)
             emitted_hashes.add(manifest.doc_id)

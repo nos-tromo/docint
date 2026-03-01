@@ -8,7 +8,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from docint.core.pipeline.models import (
+from docint.core.readers.documents.models import (
     ChunkResult,
     DocumentManifest,
     ImageResult,
@@ -19,7 +19,14 @@ from docint.core.pipeline.models import (
 
 
 def _ensure_dir(path: Path) -> Path:
-    """Create *path* if it does not exist and return it."""
+    """Create *path* if it does not exist and return it.
+
+    Args:
+        path: The directory path to ensure exists.
+
+    Returns:
+        The same path that was ensured to exist.
+    """
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -159,7 +166,7 @@ def load_manifest(doc_id: str, artifacts_dir: Path) -> DocumentManifest | None:
         return None
     try:
         data = json.loads(manifest_path.read_text())
-        from docint.core.pipeline.models import PageInfo
+        from docint.core.readers.documents.models import PageInfo
 
         pages = [PageInfo(**p) for p in data.pop("pages", [])]
         return DocumentManifest(pages=pages, **data)

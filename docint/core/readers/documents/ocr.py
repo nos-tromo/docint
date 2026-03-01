@@ -8,7 +8,13 @@ from pathlib import Path
 import pypdf
 from loguru import logger
 
-from docint.core.pipeline.models import BBox, LayoutBlock, OCRSpan, PageInfo, PageText
+from docint.core.readers.documents.models import (
+    BBox,
+    LayoutBlock,
+    OCRSpan,
+    PageInfo,
+    PageText,
+)
 
 
 class OCREngine(ABC):
@@ -37,13 +43,28 @@ class PypdfTextEngine(OCREngine):
     """
 
     def __init__(self, file_path: str | Path) -> None:
+        """Initialize the engine with the PDF file path.
+
+        Args:
+            file_path (str | Path): Path to the PDF file.
+        """
         self._file_path = Path(file_path)
         self._reader = pypdf.PdfReader(self._file_path)
 
     def ocr_page(
         self, page_index: int, *, file_path: Path | None = None
     ) -> list[OCRSpan]:
-        """Extract text from a page using pypdf (no actual OCR)."""
+        """Extract text from a page using pypdf (no actual OCR).
+        This method attempts to extract text directly from the PDF page
+        without performing any OCR.
+
+        Args:
+            page_index: Zero-based page number.
+            file_path: Ignored (present for interface compatibility).
+
+        Returns:
+            List of ``OCRSpan`` items containing the extracted text and its bounding box.
+        """
         spans: list[OCRSpan] = []
         try:
             page = self._reader.pages[page_index]

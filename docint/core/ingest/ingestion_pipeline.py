@@ -17,8 +17,8 @@ from llama_index.llms.openai import OpenAI
 from llama_index.node_parser.docling import DoclingNodeParser
 from loguru import logger
 
+from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.readers.audio import AudioReader
-from docint.core.readers.documents import CustomDoclingReader
 from docint.core.readers.images import ImageReader
 from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.tables import TableReader
@@ -65,6 +65,8 @@ class DocumentIngestionPipeline:
     table_metadata_cols: list[str] | str | None = None
     table_id_col: str | None = None
     table_excel_sheet: str | int | None = None
+    target_collection: str | None = None
+    image_ingestion_service: ImageIngestionService | None = None
 
     # --- Named entity recognition (NER) ---
     ner_max_workers: int = field(default=4, init=False)
@@ -311,7 +313,12 @@ class DocumentIngestionPipeline:
     def _load_doc_readers(self) -> None:
         """Load document readers for various file types."""
         audio_reader = AudioReader(device=self.device)
-        image_reader = ImageReader()
+        image_reader = ImageReader(
+            image_ingestion_service=(
+                self.image_ingestion_service or ImageIngestionService()
+            ),
+            source_collection=self.target_collection,
+        )
         table_reader = TableReader(
             text_cols=self.table_text_cols,
             metadata_cols=self.table_metadata_cols
@@ -370,8 +377,6 @@ class DocumentIngestionPipeline:
                 ".m4v": audio_reader,
                 ".wmv": audio_reader,
                 ".json": CustomJSONReader(),
-                ".docx": CustomDoclingReader(device=self.device),
-                ".pdf": CustomDoclingReader(device=self.device),
                 ".gif": image_reader,
                 ".jpeg": image_reader,
                 ".jpg": image_reader,

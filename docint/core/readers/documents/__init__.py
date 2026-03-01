@@ -1,7 +1,7 @@
 """Document processing pipeline with page-level triage, layout analysis, and artifact persistence."""
 
-from docint.core.pipeline.config import PipelineConfig
-from docint.core.pipeline.models import (
+from docint.core.readers.documents.config import PipelineConfig
+from docint.core.readers.documents.models import (
     BBox,
     BlockType,
     ChunkResult,
@@ -13,12 +13,14 @@ from docint.core.pipeline.models import (
     PageText,
     TableResult,
 )
-from docint.core.pipeline.orchestrator import DocumentPipelineOrchestrator
+from docint.core.readers.documents.orchestrator import DocumentPipelineOrchestrator
+from docint.core.readers.documents.reader import CorePDFPipelineReader
 
 __all__ = [
     "BBox",
     "BlockType",
     "ChunkResult",
+    "CorePDFPipelineReader",
     "DocumentManifest",
     "DocumentPipelineOrchestrator",
     "ImageResult",

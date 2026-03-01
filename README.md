@@ -188,6 +188,49 @@ The backend logic is standard OpenAI-compatible. The `docker-compose.yml` profil
 
 See `docint/utils/env_cfg.py` for the full list of configuration options and defaults.
 
+## Image Ingestion and Retrieval
+
+Image ingestion is unified across both paths:
+
+- standalone image files (`.png`, `.jpg`, `.jpeg`, `.gif`) read by `ImageReader`
+- images extracted from PDFs by the core pipeline (`artifacts/<doc_id>/images/*.json`)
+
+Both paths call the same shared service: `docint/core/ingest/images_service.py`.
+
+For each image, DocInt stores:
+
+- deterministic `image_id` (SHA-256 of image bytes)
+- image embedding vector (named vector, default `image-dense`)
+- LLM-generated `llm_description` and `llm_tags`
+- normalized metadata (`source_type`, `source_doc_id`, `page_number`, `bbox`, `mime_type`, `width`, `height`, etc.)
+
+By default, image embeddings are written to a per-collection Qdrant collection (`{collection}_images`, e.g. `test-1_images`) and validated/created automatically.
+
+### Image Config Knobs
+
+- `IMAGE_INGESTION_ENABLED` (default `true`)
+- `IMAGE_EMBEDDING_ENABLED` (default `true`)
+- `IMAGE_TAGGING_ENABLED` (default `true`)
+- `IMAGE_QDRANT_COLLECTION` (default `{collection}_images`)
+- `IMAGE_QDRANT_VECTOR_NAME` (default `image-dense`)
+- `IMAGE_EMBED_MODEL` (default `openai/clip-vit-base-patch32`)
+- `IMAGE_CACHE_BY_HASH` (default `true`)
+- `IMAGE_FAIL_ON_EMBED_ERROR` (default `false`)
+- `IMAGE_FAIL_ON_TAG_ERROR` (default `false`)
+
+### Image-to-Image Query
+
+`ImageIngestionService.query_similar_images(...)` can be used to query nearest image neighbors by embedding:
+
+```python
+from pathlib import Path
+
+from docint.core.ingest.images_service import ImageIngestionService
+
+service = ImageIngestionService()
+matches = service.query_similar_images(Path("query.png"), top_k=5)
+```
+
 ## Usage
 
 ### Ingesting Data
@@ -344,7 +387,7 @@ Pipeline behaviour is controlled via environment variables:
 ### Programmatic Usage
 
 ```python
-from docint.core.pipeline import DocumentPipelineOrchestrator, PipelineConfig
+from docint.core.readers.documents import DocumentPipelineOrchestrator, PipelineConfig
 
 config = PipelineConfig(
     text_coverage_threshold=0.01,

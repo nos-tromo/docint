@@ -214,6 +214,93 @@ def load_host_env(
     )
 
 
+@dataclass(frozen=True)
+class ImageIngestionConfig:
+    """Configuration for image ingestion and image-vector indexing."""
+
+    enabled: bool
+    embedding_enabled: bool
+    tagging_enabled: bool
+    collection_name: str
+    vector_name: str
+    cache_by_hash: bool
+    fail_on_embedding_error: bool
+    fail_on_tagging_error: bool
+
+
+def load_image_ingestion_config(
+    default_image_ingestion_enabled: bool = True,
+    default_image_embedding_enabled: bool = True,
+    default_image_tagging_enabled: bool = True,
+    default_image_qdrant_collection: str = "{collection}_images",
+    default_image_qdrant_vector_name: str = "image-dense",
+    default_image_cache_by_hash: bool = True,
+    default_fail_on_embedding_error: bool = False,
+    default_fail_on_tagging_error: bool = False,
+) -> ImageIngestionConfig:
+    """Load image ingestion settings from environment variables.
+
+    Returns:
+        ImageIngestionConfig: Dataclass containing image ingestion configuration.
+        - enabled (bool): Whether image ingestion is enabled.
+        - embedding_enabled (bool): Whether to generate embeddings for images.
+        - tagging_enabled (bool): Whether to generate tags for images.
+        - collection_name (str): The Qdrant collection name for storing image vectors.
+        - vector_name (str): The name of the vector field in Qdrant.
+        - cache_by_hash (bool): Whether to cache image embeddings by hash to avoid redundant computation.
+        - fail_on_embedding_error (bool): Whether to fail the entire ingestion if image embedding fails.
+        - fail_on_tagging_error (bool): Whether to fail the entire ingestion if image tagging fails.
+    """
+    return ImageIngestionConfig(
+        enabled=str(
+            os.getenv("IMAGE_INGESTION_ENABLED", default_image_ingestion_enabled)
+        ).lower()
+        in {"1", "true", "yes"},
+        embedding_enabled=str(
+            os.getenv("IMAGE_EMBEDDING_ENABLED", default_image_embedding_enabled)
+        ).lower()
+        in {"1", "true", "yes"},
+        tagging_enabled=str(
+            os.getenv("IMAGE_TAGGING_ENABLED", default_image_tagging_enabled)
+        ).lower()
+        in {"1", "true", "yes"},
+        collection_name=os.getenv(
+            "IMAGE_QDRANT_COLLECTION", default_image_qdrant_collection
+        ),
+        vector_name=os.getenv(
+            "IMAGE_QDRANT_VECTOR_NAME", default_image_qdrant_vector_name
+        ),
+        cache_by_hash=str(
+            os.getenv("IMAGE_CACHE_BY_HASH", default_image_cache_by_hash)
+        ).lower()
+        in {"1", "true", "yes"},
+        fail_on_embedding_error=str(
+            os.getenv("IMAGE_FAIL_ON_EMBED_ERROR", default_fail_on_embedding_error)
+        ).lower()
+        in {"1", "true", "yes"},
+        fail_on_tagging_error=str(
+            os.getenv("IMAGE_FAIL_ON_TAG_ERROR", default_fail_on_tagging_error)
+        ).lower()
+        in {"1", "true", "yes"},
+    )
+
+
+@dataclass(frozen=True)
+class IngestionConfig:
+    """Dataclass for ingestion configuration."""
+
+    coarse_chunk_size: int
+    docling_accelerator_num_threads: int
+    docstore_batch_size: int
+    fine_chunk_overlap: int
+    fine_chunk_size: int
+    hierarchical_chunking_enabled: bool
+    ingestion_batch_size: int
+    sentence_splitter_chunk_overlap: int
+    sentence_splitter_chunk_size: int
+    supported_filetypes: list[str]
+
+
 def load_ingestion_env(
     default_coarse_chunk_size: int = 8192,
     default_docling_accelerator_num_threads: int = 4,

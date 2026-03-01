@@ -11,7 +11,7 @@ from typing import Any
 import pypdf
 from loguru import logger
 
-from docint.core.pipeline.models import BBox, BlockType, LayoutBlock, PageInfo
+from docint.core.readers.documents.models import BBox, BlockType, LayoutBlock, PageInfo
 
 
 class LayoutAnalyzer(ABC):
@@ -62,6 +62,13 @@ class PypdfLayoutAnalyzer(LayoutAnalyzer):
         The method inspects embedded images and text content to produce
         ``FIGURE``, ``TABLE``, and ``TEXT`` blocks sorted by reading
         order.
+
+        Args:
+            page_index: Zero-based page number.
+            file_path: Ignored (present for interface compatibility).
+
+        Returns:
+            List of ``LayoutBlock`` items sorted by ``reading_order``.
         """
         blocks: list[LayoutBlock] = []
         try:

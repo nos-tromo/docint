@@ -54,6 +54,11 @@ def test_normalize_response_data_extracts_sources(
 ) -> None:
     """Test that _normalize_response_data correctly extracts source information."""
     rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(
+        RAG,
+        "_retrieve_image_sources",
+        lambda self, query, top_k=3: [],
+    )
     node = DummyNode(
         "Example text",
         {
@@ -92,6 +97,38 @@ def test_normalize_response_data_extracts_sources(
     assert first_source.get("document_url") == first_source.get("preview_url")
 
 
+def test_normalize_response_data_appends_image_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Image retrieval results should be appended to normalized sources.
+    
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(
+        RAG,
+        "_retrieve_image_sources",
+        lambda self, query, top_k=3: [
+            {
+                "text": "Image shows transformer blocks.",
+                "filename": "attention_is_all_you_need.pdf",
+                "source": "image",
+                "image_id": "img-1",
+                "score": 0.91,
+            }
+        ],
+    )
+    result = DummyResponse("Answer", [])
+
+    normalized = rag._normalize_response_data("transformer diagram", result)
+    sources = normalized["sources"]
+
+    assert len(sources) == 1
+    assert sources[0]["source"] == "image"
+    assert sources[0]["image_id"] == "img-1"
+
+
 def test_directory_ingestion_attaches_file_hash(tmp_path: Path) -> None:
     """Test that directory ingestion attaches file hashes to documents.
 
@@ -126,6 +163,28 @@ def test_start_session_requires_query_engine(tmp_path: Path) -> None:
     rag.query_engine = None
     with pytest.raises(RuntimeError):
         rag.start_session()
+
+
+def test_select_collection_resets_image_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Selecting another collection should reset image ingestion service state.
+    
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="alpha")
+    rag._image_ingestion_service = object()  # type: ignore[assignment]
+    monkeypatch.setattr(
+        RAG,
+        "list_collections",
+        lambda self, prefer_api=True: ["alpha", "beta"],
+    )
+
+    rag.select_collection("beta")
+
+    assert rag.qdrant_collection == "beta"
+    assert rag._image_ingestion_service is None
 
 
 def test_start_session_initializes_memory(

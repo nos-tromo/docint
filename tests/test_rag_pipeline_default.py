@@ -3,11 +3,12 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 import docint.core.rag as rag_module
-from docint.core.readers.pipeline import CorePDFPipelineReader
+from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.rag import RAG
 from docint.utils.hashing import compute_file_hash
 
@@ -79,7 +80,7 @@ def test_reader_skips_existing_hashes(
             raise AssertionError("process() should not run for existing hashes")
 
     monkeypatch.setattr(
-        "docint.core.readers.pipeline.DocumentPipelineOrchestrator",
+        "docint.core.readers.documents.reader.DocumentPipelineOrchestrator",
         FakeOrchestrator,
     )
 
@@ -111,7 +112,13 @@ def test_reader_applies_ner_metadata(tmp_path: Path) -> None:
         data_dir=tmp_path,
         entity_extractor=lambda text: (
             [{"text": "Ada Lovelace", "type": "person"}],
-            [{"head": "Ada Lovelace", "tail": "Charles Babbage", "label": "worked_with"}],
+            [
+                {
+                    "head": "Ada Lovelace",
+                    "tail": "Charles Babbage",
+                    "label": "worked_with",
+                }
+            ],
         ),
         ner_max_workers=1,
     )
@@ -121,6 +128,68 @@ def test_reader_applies_ner_metadata(tmp_path: Path) -> None:
     assert nodes[0].metadata["relations"] == [
         {"head": "Ada Lovelace", "tail": "Charles Babbage", "label": "worked_with"}
     ]
+
+
+def test_reader_ingests_extracted_images_via_shared_service(tmp_path: Path) -> None:
+    """Core reader should route pipeline-extracted images through shared service.
+    
+    Args:
+        tmp_path (Path): Temporary directory path for the test.
+    """
+    doc_id = "doc-hash-1"
+    artifacts_dir = tmp_path / "artifacts"
+    images_dir = artifacts_dir / doc_id / "images"
+    images_dir.mkdir(parents=True)
+
+    image_path = images_dir / "image-1.png"
+    image_path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc``\x00\x00\x00\x04"
+        b"\x00\x01\xf3\x17\xbd\xa5\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    (images_dir / "image-1.json").write_text(
+        (
+            "{"
+            '"image_id":"image-1",'
+            '"page_index":2,'
+            '"bbox":{"x0":1,"y0":2,"x1":3,"y1":4},'
+            f'"image_path":"{image_path}",'
+            '"metadata":{"block_id":"figure-2-a","confidence":0.91}'
+            "}"
+        ),
+        encoding="utf-8",
+    )
+
+    calls: list[tuple[Any, Any]] = []
+
+    class RecordingService:
+        def ingest_image(self, asset, *, context):
+            calls.append((asset, context))
+            return SimpleNamespace(status="stored", error=None)
+
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    reader = CorePDFPipelineReader(
+        data_dir=tmp_path,
+        source_collection="att-2",
+        image_ingestion_service=RecordingService(),  # type: ignore[arg-type]
+    )
+    reader._ingest_pipeline_images(
+        file_path=pdf_path,
+        doc_id=doc_id,
+        artifacts_dir=artifacts_dir,
+    )
+
+    assert len(calls) == 1
+    asset, context = calls[0]
+    assert asset.source_type == "document"
+    assert asset.source_doc_id == doc_id
+    assert asset.source_path == str(pdf_path)
+    assert asset.page_number == 3
+    assert asset.bbox == {"x0": 1.0, "y0": 2.0, "x1": 3.0, "y1": 4.0}
+    assert asset.extra_metadata["pipeline_image_id"] == "image-1"
+    assert context.source_collection == "att-2"
 
 
 def test_rag_excludes_pdfs_from_legacy_ingestion(
@@ -145,7 +214,16 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(
             data_dir: Path,
             entity_extractor=None,
             ner_max_workers: int = 1,
+            source_collection: str | None = None,
+            image_ingestion_service=None,
         ) -> None:
+            _ = (
+                data_dir,
+                entity_extractor,
+                ner_max_workers,
+                source_collection,
+                image_ingestion_service,
+            )
             self.discovered_hashes = {"pdf-hash-1"}
 
         def build(self, existing_hashes, progress_callback=None):

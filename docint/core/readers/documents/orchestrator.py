@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from loguru import logger
 
-from docint.core.pipeline.artifacts import (
+from docint.core.readers.documents.artifacts import (
     load_manifest,
     save_chunks,
     save_image_metadata,
@@ -17,11 +17,11 @@ from docint.core.pipeline.artifacts import (
     save_page_text,
     save_table,
 )
-from docint.core.pipeline.chunking import chunk_document
-from docint.core.pipeline.config import PipelineConfig, load_pipeline_config
-from docint.core.pipeline.extraction import extract_images, extract_tables
-from docint.core.pipeline.layout import analyze_document
-from docint.core.pipeline.models import (
+from docint.core.readers.documents.chunking import chunk_document
+from docint.core.readers.documents.config import PipelineConfig, load_pipeline_config
+from docint.core.readers.documents.extraction import extract_images, extract_tables
+from docint.core.readers.documents.layout import analyze_document
+from docint.core.readers.documents.models import (
     ChunkResult,
     DocumentManifest,
     ImageResult,
@@ -29,8 +29,8 @@ from docint.core.pipeline.models import (
     PageText,
     TableResult,
 )
-from docint.core.pipeline.ocr import extract_text_for_pages
-from docint.core.pipeline.triage import triage_pdf
+from docint.core.readers.documents.ocr import extract_text_for_pages
+from docint.core.readers.documents.triage import triage_pdf
 from docint.utils.hashing import compute_file_hash
 
 
@@ -41,13 +41,15 @@ class DocumentPipelineOrchestrator:
     Failures on individual pages are isolated — they do not crash the
     entire document.  Results are persisted as artifacts for debugging
     and reprocessing.
-
-    Args:
-        config: Pipeline configuration.  When ``None`` the config is
-            loaded from environment variables.
     """
 
     def __init__(self, config: PipelineConfig | None = None) -> None:
+        """Initialize the orchestrator with the given configuration.
+
+        Args:
+            config (PipelineConfig | None, optional): Pipeline configuration. When ``None``
+            the config is loaded from environment variables.
+        """
         self.config = config or load_pipeline_config()
 
     # ------------------------------------------------------------------
@@ -229,7 +231,13 @@ class DocumentPipelineOrchestrator:
     def _log_summary(
         manifest: DocumentManifest, duration_ms: int, chunks_count: int
     ) -> None:
-        """Emit a structured summary log for the processed document."""
+        """Emit a structured summary log for the processed document.
+
+        Args:
+            manifest: The document manifest containing processing details.
+            duration_ms: Total processing time in milliseconds.
+            chunks_count: Total number of chunks produced.
+        """
         logger.info(
             "Pipeline complete | doc_id={} file={} duration_ms={} "
             "pages_total={} pages_ocr={} pages_failed={} "

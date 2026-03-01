@@ -9,7 +9,7 @@ from typing import Any
 import pypdf
 from loguru import logger
 
-from docint.core.pipeline.models import (
+from docint.core.readers.documents.models import (
     BBox,
     BlockType,
     ImageResult,
@@ -205,5 +205,12 @@ def _try_extract_xobject_image(
 
 
 def _bbox_to_dict(bbox: BBox) -> dict[str, float]:
-    """Serialise a ``BBox`` to a plain dict."""
+    """Serialise a ``BBox`` to a plain dict.
+
+    Args:
+        bbox: The bounding box to serialise.
+
+    Returns:
+        A dictionary with keys "x0", "y0", "x1", "y1" representing the bounding box coordinates.
+    """
     return {"x0": bbox.x0, "y0": bbox.y0, "x1": bbox.x1, "y1": bbox.y1}
