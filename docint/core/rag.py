@@ -472,6 +472,8 @@ class RAG:
 
         Raises:
             ValueError: If rerank_model_id is None.
+            NotImplementedError: If FlagEmbeddingReranker fails to initialize due to an unsupported operation (e.g., missing GPU support).
+            RuntimeError: If FlagEmbeddingReranker fails to initialize due to a meta-tensor device transfer issue.
         """
         if self.rerank_model_id is None:
             raise ValueError("rerank_model_id cannot be None")
@@ -493,14 +495,29 @@ class RAG:
                 resolved_model = str(resolved) if resolved else self.rerank_model_id
                 if resolved:
                     logger.info("Using local reranker model path: {}", resolved_model)
-                self._reranker = FlagEmbeddingReranker(
+                flag_reranker = FlagEmbeddingReranker(
                     top_n=self.rerank_top_n,
                     model=resolved_model,
+                    use_fp16=self.rerank_use_fp16,
                 )
-                logger.info(
-                    "Initializing FlagEmbeddingReranker with model: {}",
-                    self.rerank_model_id,
-                )
+                try:
+                    flag_reranker._model.compute_score([("healthcheck", "healthcheck")])
+                    self._reranker = flag_reranker
+                    logger.info(
+                        "Initializing FlagEmbeddingReranker with model: {}",
+                        self.rerank_model_id,
+                    )
+                except (NotImplementedError, RuntimeError) as exc:
+                    if "meta tensor" not in str(exc).lower():
+                        raise
+                    logger.warning(
+                        "FlagEmbeddingReranker failed to initialize due to a meta-tensor device transfer issue: {}. Falling back to LLMRerank.",
+                        exc,
+                    )
+                    self._reranker = LLMRerank(
+                        top_n=self.rerank_top_n,
+                        llm=self.text_model,
+                    )
         return self._reranker
 
     def _create_text_model(self) -> OpenAI:

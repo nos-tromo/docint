@@ -325,3 +325,79 @@ def test_filter_docs_skips_existing_hashes(monkeypatch: pytest.MonkeyPatch) -> N
 
         resolved = rag.sparse_model
         assert resolved == str(snap)
+
+
+def test_reranker_passes_configured_fp16(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reranker should pass the configured fp16 setting to FlagEmbeddingReranker.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+
+    captured: dict[str, object] = {}
+
+    class FakeFlagReranker:
+        def __init__(self, top_n: int, model: str, use_fp16: bool) -> None:
+            captured["top_n"] = top_n
+            captured["model"] = model
+            captured["use_fp16"] = use_fp16
+            self._model = types.SimpleNamespace(compute_score=lambda _: [0.0])
+
+    monkeypatch.setattr(rag_module, "FlagEmbeddingReranker", FakeFlagReranker)
+    monkeypatch.setattr(
+        rag_module,
+        "resolve_hf_cache_path",
+        lambda cache_dir, repo_id: None,
+    )
+
+    rag = RAG(qdrant_collection="test")
+    rag.openai_model_provider = "ollama"
+    rag.rerank_use_fp16 = True
+    rag.rerank_top_n = 7
+
+    _ = rag.reranker
+
+    assert captured["top_n"] == 7
+    assert captured["model"] == rag.rerank_model_id
+    assert captured["use_fp16"] is True
+
+
+def test_reranker_falls_back_to_llm_on_meta_tensor_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reranker should fallback to LLMRerank when FlagEmbedding hits meta tensor errors.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+
+    class FakeFlagReranker:
+        def __init__(self, top_n: int, model: str, use_fp16: bool) -> None:
+            _ = (top_n, model, use_fp16)
+
+            def _raise(_pairs) -> list[float]:
+                raise NotImplementedError(
+                    "Cannot copy out of meta tensor; no data!"
+                )
+
+            self._model = types.SimpleNamespace(compute_score=_raise)
+
+    llm_reranker_obj = object()
+
+    monkeypatch.setattr(rag_module, "FlagEmbeddingReranker", FakeFlagReranker)
+    monkeypatch.setattr(
+        rag_module,
+        "LLMRerank",
+        lambda top_n, llm: llm_reranker_obj,
+    )
+    monkeypatch.setattr(
+        rag_module,
+        "resolve_hf_cache_path",
+        lambda cache_dir, repo_id: None,
+    )
+
+    rag = RAG(qdrant_collection="test")
+    rag.openai_model_provider = "ollama"
+    rag._text_model = None
+
+    assert rag.reranker is llm_reranker_obj
