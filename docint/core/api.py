@@ -56,12 +56,14 @@ def _build_orchestrator() -> AgentOrchestrator:
         AgentOrchestrator: The constructed agent orchestrator.
     """
     retrieval_agent = RAGRetrievalAgent(rag)
-    understanding = _understanding_agent
+    understanding: SimpleUnderstandingAgent | ContextualUnderstandingAgent = (
+        _understanding_agent
+    )
 
     # Use contextual understanding if LLM is configured
-    if getattr(rag, "gen_model_id", None):
+    if getattr(rag, "text_model_id", None):
         try:
-            understanding = ContextualUnderstandingAgent(llm=rag.gen_model)
+            understanding = ContextualUnderstandingAgent(llm=rag.text_model)
         except Exception as e:
             logger.warning("Failed to init ContextualUnderstandingAgent: {}", e)
 
