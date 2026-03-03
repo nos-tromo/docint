@@ -271,10 +271,19 @@ class VisionJSONTagger:
             deduped.append(tag)
         return description, deduped[:20]
 
+    # MIME types commonly supported by vision APIs.
+    _SUPPORTED_MIME_TYPES: frozenset[str] = frozenset(
+        {"image/jpeg", "image/png", "image/gif", "image/webp"}
+    )
+
     def describe_and_tag(
         self, image_bytes: bytes, mime_type: str
     ) -> tuple[str, list[str]]:
         """Generate image description/tags via OpenAI-compatible vision API.
+
+        If the image is not in a format natively supported by most vision
+        models (JPEG, PNG, GIF, WebP), it is transparently converted to PNG
+        before being sent.
 
         Args:
             image_bytes: Raw bytes of the image to describe and tag.
@@ -283,9 +292,47 @@ class VisionJSONTagger:
         Returns:
             A tuple of (description, tags) generated for the image.
         """
+        image_bytes, mime_type = self._normalize_image(image_bytes, mime_type)
         encoded = base64.b64encode(image_bytes).decode("utf-8")
-        raw = self.pipeline.call_vision(prompt=self.prompt_template, img_base64=encoded)
+        raw = self.pipeline.call_vision(
+            prompt=self.prompt_template,
+            img_base64=encoded,
+            mime_type=mime_type,
+        )
         return self.parse_tag_payload(raw)
+
+    def _normalize_image(self, image_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
+        """Ensure image bytes are in a vision-API-friendly format.
+
+        If *mime_type* is not one of the commonly supported types (JPEG, PNG,
+        GIF, WebP), the image is re-encoded as PNG so the vision model can
+        process it.
+
+        Args:
+            image_bytes: Raw image data.
+            mime_type: Original MIME type.
+
+        Returns:
+            A tuple of ``(possibly converted bytes, mime_type)``.
+        """
+        if mime_type in self._SUPPORTED_MIME_TYPES:
+            return image_bytes, mime_type
+
+        try:
+            img = Image.open(BytesIO(image_bytes))
+            buf = BytesIO()
+            img.convert("RGB").save(buf, format="PNG")
+            logger.debug(
+                "Converted image from {} to image/png for vision API",
+                mime_type,
+            )
+            return buf.getvalue(), "image/png"
+        except Exception:
+            logger.warning(
+                "Cannot convert image (mime_type={}); sending as-is",
+                mime_type,
+            )
+            return image_bytes, mime_type
 
 
 @dataclass

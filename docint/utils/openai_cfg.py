@@ -138,12 +138,16 @@ class OpenAIPipeline:
             logger.error("Error during chat inference: {}", e)
             raise RuntimeError(f"Chat inference failed: {e}")
 
-    def call_vision(self, prompt: str, img_base64: str) -> str:
+    def call_vision(
+        self, prompt: str, img_base64: str, mime_type: str = "image/jpeg"
+    ) -> str:
         """Call OpenAI (or compatible) Vision model.
 
         Args:
             prompt (str): The prompt text.
             img_base64 (str): Base64 encoded image string.
+            mime_type (str): MIME type of the encoded image (e.g. ``image/png``).
+                Defaults to ``image/jpeg``.
 
         Returns:
             str: The model's response.
@@ -152,15 +156,11 @@ class OpenAIPipeline:
             RuntimeError: If the vision inference fails.
         """
         try:
-            # Construct message with image
-            # Note: We assume the image is JPEG or PNG. Data URL handling might need refinement
-            # if we strictly need to support other formats, but standardizing on jpeg/png for base64 is common.
-            # The prompt argument is treated as the user query.
             content_parts: list[ChatCompletionContentPartParam] = [
                 {"type": "text", "text": prompt},
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{img_base64}"},
+                    "image_url": {"url": f"data:{mime_type};base64,{img_base64}"},
                 },
             ]
             messages: list[ChatCompletionMessageParam] = [

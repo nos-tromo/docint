@@ -328,6 +328,49 @@ def test_ingest_image_degrades_when_embedding_backend_init_fails() -> None:
     assert "clip init failed" in (record.error or "")
 
 
+def _make_bmp_bytes(color: tuple[int, int, int] = (50, 50, 50)) -> bytes:
+    """Create a small BMP image so we can test unsupported-format normalisation."""
+    img = Image.new("RGB", (4, 4), color=color)
+    buffer = BytesIO()
+    img.save(buffer, format="BMP")
+    return buffer.getvalue()
+
+
+def test_normalize_image_passes_supported_formats_through() -> None:
+    """JPEG, PNG, GIF, and WebP must not be re-encoded."""
+    tagger = VisionJSONTagger.__new__(VisionJSONTagger)
+    png_bytes = _make_png_bytes()
+
+    for mime in ("image/jpeg", "image/png", "image/gif", "image/webp"):
+        out_bytes, out_mime = tagger._normalize_image(png_bytes, mime)
+        assert out_bytes is png_bytes, f"{mime} should pass through unchanged"
+        assert out_mime == mime
+
+
+def test_normalize_image_converts_unsupported_format_to_png() -> None:
+    """Non-standard MIME types (e.g. BMP) should be re-encoded as PNG."""
+    tagger = VisionJSONTagger.__new__(VisionJSONTagger)
+    bmp_bytes = _make_bmp_bytes()
+
+    out_bytes, out_mime = tagger._normalize_image(bmp_bytes, "image/bmp")
+
+    assert out_mime == "image/png"
+    assert out_bytes != bmp_bytes
+    # Verify the output is valid PNG
+    img = Image.open(BytesIO(out_bytes))
+    assert img.format == "PNG"
+
+
+def test_normalize_image_returns_original_on_corrupt_bytes() -> None:
+    """If Pillow cannot open the bytes, return them unchanged."""
+    tagger = VisionJSONTagger.__new__(VisionJSONTagger)
+    bad_bytes = b"not-an-image"
+
+    out_bytes, out_mime = tagger._normalize_image(bad_bytes, "application/octet-stream")
+    assert out_bytes is bad_bytes
+    assert out_mime == "application/octet-stream"
+
+
 def test_collection_template_resolves_with_source_collection() -> None:
     cfg = ImageIngestionConfig(
         enabled=True,
