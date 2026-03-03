@@ -125,7 +125,17 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    - **Inference Server**: An OpenAI-compatible server (Ollama, LocalAI, vLLM, or `llama-server`) must be accessible.
      - By default, the app expects an endpoint at `http://localhost:8080/v1` (or `11434` for Ollama). Configure `OPENAI_API_BASE` in `.env` accordingly.
 
-2. **Install Dependencies**
+2. **Create a Local Environment File**
+
+   Copy the example config and adjust values for your local stack:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   At minimum, confirm `MODEL_PROVIDER`, `OPENAI_API_BASE`, and model IDs (`EMBED_MODEL`, `LLM`, `VLM`) match your inference backend.
+
+3. **Install Dependencies**
 
    Navigate to the project root and synchronize dependencies:
 
@@ -133,7 +143,7 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    uv sync
    ```
 
-3. **Download Embedding/Rerank Models**
+4. **Download Embedding/Rerank Models**
 
    Pre-download required local models (Embeddings, Sparse, Rerank, Text, Vision, Whisper) to your local cache:
 
@@ -141,7 +151,7 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    uv run load-models
    ```
 
-4. **Run the Application**
+5. **Run the Application**
 
    The application consists of a FastAPI backend and a Streamlit UI. You can run both locally.
 
@@ -166,16 +176,25 @@ The application is configured via environment variables. Key variables include:
 **General:**
 
 - `DOCINT_OFFLINE`: Set to `true` to force offline mode (fails if models aren't cached).
-- `NER_ENABLED`: Enable scalable entity/relation extraction during ingestion (default: `false`). Uses parallel execution for maximum throughput.
+- `NER_ENABLED`: Enable scalable entity/relation extraction during ingestion (default: `true`). Uses parallel execution for maximum throughput.
 - `NER_MAX_WORKERS`: Number of parallel workers for entity extraction (default: `4`).
 - `PRELOAD_MODELS`: Set to `true` to download all ML models at container startup (default: unset/disabled). Used by `docker-compose.yml` to populate the `model-cache` volume on first run.
+
+**Hosts / Service Endpoints:**
+
+- `BACKEND_HOST`: Backend base URL used by API/UI clients (default: `http://localhost:8000`).
+- `BACKEND_PUBLIC_HOST`: Public backend URL used for preview/download links (defaults to `BACKEND_HOST`).
+- `QDRANT_HOST`: Qdrant endpoint (default: `http://localhost:6333`).
+- `CORS_ALLOWED_ORIGINS`: Comma-separated allow-list for API CORS.
 
 **Model Selection (Environment Variables):**
 
 - `OPENAI_API_KEY`: API key for the LLM provider (default: `sk-no-key-required`).
 - `OPENAI_API_BASE`: Base API URL. In Docker, this is set automatically per profile (e.g. `http://llamacpp-server:8080/v1` for `*-llamacpp`). For local development, point this to your provider (e.g., `http://localhost:11434/v1`).
+- `MODEL_PROVIDER`: Inference provider type (`llama.cpp`, `ollama`, `openai`).
 - `LLM`: Repo ID (e.g., `bartowski/Meta-Llama-3-8B-Instruct-GGUF`) for automatic download.
 - `EMBED_MODEL`: HuggingFace repo ID for the embedding model (e.g. `ggml-org/bge-m3-Q8_0-GGUF`).
+- `VLM`: Vision-language model ID (GGUF `repo;filename` for `llama.cpp` or model tag for Ollama/OpenAI).
 
 **Note on Provider Agnosticism:**
 The backend logic is standard OpenAI-compatible. The `docker-compose.yml` profiles bundle `llama.cpp` and Ollama servers, but you can also point to any external API by selecting a `*-openai` profile and setting `OPENAI_API_BASE` and `OPENAI_API_KEY` in `.env.docker`.
@@ -217,6 +236,20 @@ By default, image embeddings are written to a per-collection Qdrant collection (
 - `IMAGE_CACHE_BY_HASH` (default `true`)
 - `IMAGE_FAIL_ON_EMBED_ERROR` (default `false`)
 - `IMAGE_FAIL_ON_TAG_ERROR` (default `false`)
+- `IMAGE_TAGGING_MAX_IMAGE_DIM` (default `1024`)
+
+### Document Pipeline Config Knobs
+
+- `PIPELINE_TEXT_COVERAGE_THRESHOLD` (default `0.01`)
+- `PIPELINE_ARTIFACTS_DIR` (default `artifacts` under the project root)
+- `PIPELINE_MAX_RETRIES` (default `2`)
+- `PIPELINE_FORCE_REPROCESS` (default `false`)
+- `PIPELINE_MAX_WORKERS` (default `4`)
+- `PIPELINE_ENABLE_VISION_OCR` (default `true`)
+- `PIPELINE_VISION_OCR_TIMEOUT` (default `60.0`)
+- `PIPELINE_VISION_OCR_MAX_RETRIES` (default `1`)
+- `PIPELINE_VISION_OCR_MAX_IMAGE_DIM` (default `1024`)
+- `PIPELINE_VISION_OCR_MAX_TOKENS` (default `4096`)
 
 ### Image-to-Image Query
 
@@ -325,13 +358,28 @@ matches = service.query_similar_images(Path("query.png"), top_k=5)
 
 ### Additional Configuration
 
-For additional configuration, populate an `.env` (local usage) or `.env.docker` file in the project's root. Example:
+For additional configuration:
+
+- Local usage: copy `.env.example` to `.env`
+- Docker usage: copy `.env.docker.example` to `.env.docker`
+
+Quick start:
+
+```bash
+cp .env.example .env
+cp .env.docker.example .env.docker
+```
+
+Minimal local example (`.env`):
 
 ```env
-DOCINT_OFFLINE=true
+DOCINT_OFFLINE=false
+MODEL_PROVIDER=ollama
+OPENAI_API_BASE=http://localhost:11434/v1
 OPENAI_API_KEY=sk-no-key-required
-LLM=gpt-4o
-EMBED_MODEL=text-embedding-3-small
+EMBED_MODEL=bge-m3
+LLM=gpt-oss:20b
+VLM=qwen3-vl:8b
 NER_ENABLED=true
 NER_MAX_WORKERS=4
 ```
@@ -383,6 +431,11 @@ Pipeline behaviour is controlled via environment variables:
 | `PIPELINE_MAX_RETRIES` | `2` | Max retry attempts per processing stage |
 | `PIPELINE_FORCE_REPROCESS` | `false` | Ignore existing artifacts and reprocess |
 | `PIPELINE_MAX_WORKERS` | `4` | Document-level parallelism |
+| `PIPELINE_ENABLE_VISION_OCR` | `true` | Enable vision-LLM OCR fallback for scanned pages |
+| `PIPELINE_VISION_OCR_TIMEOUT` | `60.0` | Per-request timeout (seconds) for vision OCR calls |
+| `PIPELINE_VISION_OCR_MAX_RETRIES` | `1` | Retry count for a single vision OCR call |
+| `PIPELINE_VISION_OCR_MAX_IMAGE_DIM` | `1024` | Max image dimension before downscaling for OCR |
+| `PIPELINE_VISION_OCR_MAX_TOKENS` | `4096` | Max output tokens for vision OCR responses |
 
 ### Programmatic Usage
 
@@ -396,6 +449,11 @@ config = PipelineConfig(
     max_retries=2,
     force_reprocess=False,
     max_workers=4,
+      enable_vision_ocr=True,
+      vision_ocr_timeout=60.0,
+      vision_ocr_max_retries=1,
+      vision_ocr_max_image_dimension=1024,
+      vision_ocr_max_tokens=4096,
 )
 orchestrator = DocumentPipelineOrchestrator(config=config)
 manifest = orchestrator.process("path/to/document.pdf")
@@ -414,4 +472,4 @@ Failures on individual pages do not crash the entire document. Failed pages are 
 
 ### Offline Compliance
 
-All processing runs locally. No network calls are made. Set `DOCINT_OFFLINE=true` to enforce offline mode for all Hugging Face model loading.
+Core PDF processing runs locally. Vision OCR fallback uses the configured OpenAI-compatible inference endpoint (local or remote), and can be disabled with `PIPELINE_ENABLE_VISION_OCR=false`. Set `DOCINT_OFFLINE=true` to enforce offline mode for Hugging Face model loading.
