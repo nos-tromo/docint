@@ -431,15 +431,27 @@ class CorePDFPipelineReader:
                 pipeline_version=manifest.pipeline_version,
                 chunks=chunks,
             )
-            if not nodes:
-                logger.warning("Core pipeline produced no chunks for {}", pdf_path.name)
-                continue
 
+            # Always attempt image ingestion — even when no text chunks
+            # were produced (e.g. screenshot PDFs).
             self._ingest_pipeline_images(
                 file_path=pdf_path,
                 doc_id=manifest.doc_id,
                 artifacts_dir=artifacts_dir,
             )
+
+            if not nodes:
+                logger.warning(
+                    "Core pipeline produced no text chunks for {} (images_found={})",
+                    pdf_path.name,
+                    manifest.images_found,
+                )
+                # Still track the hash so the file is not re-processed on
+                # subsequent runs, and yield so downstream consumers can
+                # register the document even when it only contains images.
+                emitted_hashes.add(manifest.doc_id)
+                yield docs, nodes, manifest.doc_id
+                continue
 
             self._apply_ner(nodes, progress_callback=progress_callback)
             emitted_hashes.add(manifest.doc_id)

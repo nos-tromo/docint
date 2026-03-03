@@ -249,10 +249,23 @@ class SessionManager:
         )
 
         response = streaming_engine.query(retrieval_query)
+        response_gen = getattr(response, "response_gen", None)
+        if response_gen is None:
+            logger.error("RuntimeError: Streaming response generator is unavailable.")
+            raise RuntimeError("Streaming response generator is unavailable.")
+        if hasattr(response_gen, "__aiter__"):
+            logger.error(
+                "RuntimeError: Async streaming is not supported by this interface."
+            )
+            raise RuntimeError("Async streaming is not supported by this interface.")
+        if not hasattr(response_gen, "__iter__"):
+            logger.error("RuntimeError: Invalid streaming response generator.")
+            raise RuntimeError("Invalid streaming response generator.")
 
+        token_iter = cast(Iterator[str], response_gen)
         full_text = ""
         # response.response_gen is the generator
-        for token in response.response_gen:
+        for token in token_iter:
             full_text += token
             yield token
 
@@ -315,7 +328,7 @@ class SessionManager:
                     "embed_model_id": self.rag.embed_model_id,
                     "sparse_model_id": self.rag.sparse_model_id,
                     "rerank_model_id": self.rag.text_model_id,
-                    "gen_model_id": self.rag.text_model_id,
+                    "text_model_id": self.rag.text_model_id,
                 },
                 "retrieval": {
                     "similarity_top_k": self.rag.retrieve_similarity_top_k,

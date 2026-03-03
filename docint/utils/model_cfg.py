@@ -27,6 +27,9 @@ from docling.models.stages.picture_classifier.document_picture_classifier import
     DocumentPictureClassifier,
     DocumentPictureClassifierOptions,
 )
+from docling.models.inference_engines.image_classification.transformers_engine import (
+    TransformersImageClassificationEngineOptions,
+)
 from docling.models.stages.table_structure.table_structure_model import (
     TableStructureModel,
 )
@@ -102,9 +105,10 @@ def load_docling_models() -> None:
         logger.info("Loaded Code/Formula model")
 
         # 5. Picture Classifier (Standard HF cache)
-        DocumentPictureClassifier.download_models(
-            repo_id=DocumentPictureClassifierOptions().repo_id, progress=True
+        opts = DocumentPictureClassifierOptions(
+            engine_options=TransformersImageClassificationEngineOptions()
         )
+        DocumentPictureClassifier.download_models(repo_id=opts.repo_id, progress=True)
         logger.info("Loaded Picture Classifier model")
 
     except Exception as e:

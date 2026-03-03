@@ -1,6 +1,6 @@
 """Document processing pipeline with page-level triage, layout analysis, and artifact persistence."""
 
-from docint.core.readers.documents.config import PipelineConfig
+from docint.utils.env_cfg import PipelineConfig
 from docint.core.readers.documents.models import (
     BBox,
     BlockType,

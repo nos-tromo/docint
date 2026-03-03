@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal, cast
 
-import anyio
+from anyio import to_thread
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
@@ -843,7 +843,7 @@ async def ingest_upload(
             async def run_ingestion() -> None:
                 """Run the ingestion process in a separate thread."""
                 try:
-                    await anyio.to_thread.run_sync(
+                    await to_thread.run_sync(
                         ingest_module.ingest_docs,
                         name,
                         batch_dir,

@@ -268,3 +268,97 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(
 
     assert fake_pipeline.seen_hashes is not None
     assert "pdf-hash-1" in fake_pipeline.seen_hashes
+
+
+def test_reader_yields_and_ingests_images_when_no_text_chunks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Image-only PDFs (e.g. screenshots) must still ingest images and yield.
+
+    Previously, the reader's ``build`` method would ``continue`` past
+    image ingestion when no text chunks were produced, silently
+    dropping the document and its images.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Fixture to override environment.
+        tmp_path (Path): Temporary directory path for the test.
+    """
+    pdf_path = tmp_path / "screenshot.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    doc_id = compute_file_hash(pdf_path)
+
+    artifacts_dir = tmp_path / "artifacts"
+    images_dir = artifacts_dir / doc_id / "images"
+    images_dir.mkdir(parents=True)
+
+    # Write a 1x1 PNG and its JSON sidecar so image ingestion finds it.
+    image_path = images_dir / "img-0.png"
+    image_path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc``\x00\x00\x00\x04"
+        b"\x00\x01\xf3\x17\xbd\xa5\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    (images_dir / "img-0.json").write_text(
+        '{"image_id":"img-0","page_index":0,"bbox":{"x0":0,"y0":0,"x1":100,"y1":100},'
+        f'"image_path":"{image_path}","metadata":{{}}}}'
+        "",
+        encoding="utf-8",
+    )
+
+    # Write an empty chunks file (no text chunks).
+    chunks_path = artifacts_dir / doc_id / "chunks.jsonl"
+    chunks_path.parent.mkdir(parents=True, exist_ok=True)
+    chunks_path.write_text("")
+
+    # Fake manifest returned by the orchestrator.
+    manifest = SimpleNamespace(
+        doc_id=doc_id,
+        status="completed",
+        pipeline_version="1.0.0",
+        images_found=1,
+        error=None,
+    )
+
+    class FakeOrchestrator:
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(artifacts_dir=str(artifacts_dir))
+
+        def process(self, _fp: Any) -> SimpleNamespace:
+            return manifest
+
+    monkeypatch.setattr(
+        "docint.core.readers.documents.reader.DocumentPipelineOrchestrator",
+        FakeOrchestrator,
+    )
+    monkeypatch.setattr(
+        CorePDFPipelineReader,
+        "_iter_pdf_files",
+        staticmethod(lambda _: [pdf_path]),
+    )
+
+    image_calls: list[tuple[Any, Any]] = []
+
+    class RecordingImageService:
+        def ingest_image(self, asset: Any, *, context: Any) -> SimpleNamespace:
+            image_calls.append((asset, context))
+            return SimpleNamespace(status="stored", error=None)
+
+    reader = CorePDFPipelineReader(
+        data_dir=tmp_path,
+        source_collection="test-col",
+        image_ingestion_service=RecordingImageService(),  # type: ignore[arg-type]
+    )
+    batches = list(reader.build(existing_hashes=set()))
+
+    # The reader should still yield one batch (with empty nodes).
+    assert len(batches) == 1
+    docs, nodes, returned_hash = batches[0]
+    assert returned_hash == doc_id
+    assert nodes == []
+
+    # The image service should have been invoked for the extracted image.
+    assert len(image_calls) == 1
+
+    # The hash should be tracked so subsequent runs skip this file.
+    assert doc_id in reader.discovered_hashes

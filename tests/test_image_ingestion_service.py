@@ -381,6 +381,7 @@ def test_collection_template_resolves_with_source_collection() -> None:
         cache_by_hash=True,
         fail_on_embedding_error=False,
         fail_on_tagging_error=False,
+        tagging_max_image_dimension=1024,
     )
     model_cfg = SimpleNamespace(image_embed_model="openai/clip-vit-base-patch32")
     client = FakeQdrantClient()
@@ -406,3 +407,35 @@ def test_collection_template_resolves_with_source_collection() -> None:
 
     assert record.status == "stored"
     assert record.payload["image_collection"] == "att-2_images"
+
+
+def test_cap_image_size_shrinks_large_image() -> None:
+    """Images exceeding max_image_dimension should be resized and re-encoded as JPEG."""
+    tagger = VisionJSONTagger.__new__(VisionJSONTagger)
+    tagger.max_image_dimension = 512
+
+    big_img = Image.new("RGB", (2048, 1024), color=(100, 100, 100))
+    buf = BytesIO()
+    big_img.save(buf, format="PNG")
+    big_bytes = buf.getvalue()
+
+    out_bytes, out_mime = tagger._cap_image_size(big_bytes, "image/png")
+
+    assert out_mime == "image/jpeg"
+    result = Image.open(BytesIO(out_bytes))
+    assert max(result.width, result.height) == 512
+    assert result.width == 512
+    assert result.height == 256
+
+
+def test_cap_image_size_passes_small_image_through() -> None:
+    """Small images should be returned unchanged."""
+    tagger = VisionJSONTagger.__new__(VisionJSONTagger)
+    tagger.max_image_dimension = 1024
+
+    small_bytes = _make_png_bytes()  # 6×4
+
+    out_bytes, out_mime = tagger._cap_image_size(small_bytes, "image/png")
+
+    assert out_bytes is small_bytes
+    assert out_mime == "image/png"

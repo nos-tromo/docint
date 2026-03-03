@@ -209,6 +209,7 @@ class VisionJSONTagger:
     """OpenAI-compatible vision tagger that returns structured description/tags."""
 
     pipeline: OpenAIPipeline = field(default_factory=OpenAIPipeline)
+    max_image_dimension: int = 1024
     prompt_template: str = field(
         default=(
             "Return strict JSON with keys description and tags.\n"
@@ -283,7 +284,9 @@ class VisionJSONTagger:
 
         If the image is not in a format natively supported by most vision
         models (JPEG, PNG, GIF, WebP), it is transparently converted to PNG
-        before being sent.
+        before being sent.  Images larger than ``max_image_dimension`` in
+        either axis are proportionally down-scaled and re-encoded as JPEG
+        to reduce the payload size and inference time.
 
         Args:
             image_bytes: Raw bytes of the image to describe and tag.
@@ -293,6 +296,7 @@ class VisionJSONTagger:
             A tuple of (description, tags) generated for the image.
         """
         image_bytes, mime_type = self._normalize_image(image_bytes, mime_type)
+        image_bytes, mime_type = self._cap_image_size(image_bytes, mime_type)
         encoded = base64.b64encode(image_bytes).decode("utf-8")
         raw = self.pipeline.call_vision(
             prompt=self.prompt_template,
@@ -332,6 +336,43 @@ class VisionJSONTagger:
                 "Cannot convert image (mime_type={}); sending as-is",
                 mime_type,
             )
+            return image_bytes, mime_type
+
+    def _cap_image_size(self, image_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
+        """Down-scale image if either dimension exceeds ``max_image_dimension``.
+
+        The image is re-encoded as JPEG to keep the payload small.
+
+        Args:
+            image_bytes: Raw image data.
+            mime_type: Current MIME type.
+
+        Returns:
+            A tuple of ``(possibly resized bytes, mime_type)``.
+        """
+        try:
+            with Image.open(BytesIO(image_bytes)) as img_file:
+                max_dim = max(img_file.width, img_file.height)
+                if max_dim <= self.max_image_dimension:
+                    return image_bytes, mime_type
+                ratio = self.max_image_dimension / max_dim
+                new_w = max(int(img_file.width * ratio), 1)
+                new_h = max(int(img_file.height * ratio), 1)
+                resized_img = img_file.resize((new_w, new_h))
+                if resized_img.mode in ("RGBA", "P"):
+                    resized_img = resized_img.convert("RGB")
+                buf = BytesIO()
+                resized_img.save(buf, format="JPEG", quality=80)
+                logger.debug(
+                    "Capped tagging image from {}×{} to {}×{} (JPEG)",
+                    img_file.width,
+                    img_file.height,
+                    new_w,
+                    new_h,
+                )
+                return buf.getvalue(), "image/jpeg"
+        except Exception:
+            logger.warning("Cannot resize image for tagging; sending as-is")
             return image_bytes, mime_type
 
 
@@ -447,7 +488,9 @@ class ImageIngestionService:
         if not self.img_ingestion_config.tagging_enabled:
             return None
         try:
-            self.tagging_backend = VisionJSONTagger()
+            self.tagging_backend = VisionJSONTagger(
+                max_image_dimension=self.img_ingestion_config.tagging_max_image_dimension,
+            )
         except Exception as exc:
             self._tagging_backend_error = str(exc)
             if self.img_ingestion_config.fail_on_tagging_error:

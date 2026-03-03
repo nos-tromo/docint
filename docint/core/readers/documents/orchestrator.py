@@ -18,10 +18,12 @@ from docint.core.readers.documents.artifacts import (
     save_table,
 )
 from docint.core.readers.documents.chunking import chunk_document
-from docint.core.readers.documents.config import PipelineConfig, load_pipeline_config
+from docint.utils.env_cfg import PipelineConfig, load_pipeline_config
 from docint.core.readers.documents.extraction import extract_images, extract_tables
 from docint.core.readers.documents.layout import analyze_document
 from docint.core.readers.documents.models import (
+    BBox,
+    BlockType,
     ChunkResult,
     DocumentManifest,
     ImageResult,
@@ -29,7 +31,11 @@ from docint.core.readers.documents.models import (
     PageText,
     TableResult,
 )
-from docint.core.readers.documents.ocr import extract_text_for_pages
+from docint.core.readers.documents.ocr import (
+    OCREngine,
+    VisionOCREngine,
+    extract_text_for_pages,
+)
 from docint.core.readers.documents.triage import triage_pdf
 from docint.utils.hashing import compute_file_hash
 
@@ -113,11 +119,14 @@ class DocumentPipelineOrchestrator:
             if page_info.status == "failed":
                 layout[page_info.page_index] = []
                 continue
+
+            def _analyze_layout(pi=page_info) -> dict[int, list[LayoutBlock]]:
+                result = analyze_document(file_path, [pi])
+                return result if result is not None else {}
+
             result = self._run_with_retry(
                 f"layout-page-{page_info.page_index}",
-                lambda pi=page_info: analyze_document(  # type: ignore[misc]
-                    file_path, [pi]
-                ),
+                _analyze_layout,
             )
             if result is not None:
                 layout.update(result)
@@ -133,15 +142,39 @@ class DocumentPipelineOrchestrator:
                 page_info.error = "Layout analysis failed"
 
         # --- Stage 3: OCR / text extraction ---
+        vision_engine: OCREngine | None = None
+        if self.config.enable_vision_ocr and any(p.needs_ocr for p in pages):
+            try:
+                vision_engine = VisionOCREngine(
+                    file_path,
+                    timeout=self.config.vision_ocr_timeout,
+                    max_retries=self.config.vision_ocr_max_retries,
+                    max_image_dimension=self.config.vision_ocr_max_image_dimension,
+                    max_tokens=self.config.vision_ocr_max_tokens,
+                )
+                logger.info("Vision OCR engine initialised for {}", file_path.name)
+            except Exception as exc:
+                logger.debug("Vision OCR engine not available: {}", exc)
+
         page_texts: dict[int, PageText] = {}
         for page_info in pages:
             if page_info.status == "failed":
                 continue
+
+            def _extract_text(pi=page_info) -> dict[int, PageText]:
+                return (
+                    extract_text_for_pages(
+                        file_path,
+                        [pi],
+                        layout,
+                        vision_engine=vision_engine,
+                    )
+                    or {}
+                )
+
             result = self._run_with_retry(
                 f"ocr-page-{page_info.page_index}",
-                lambda pi=page_info: extract_text_for_pages(  # type: ignore[misc]
-                    file_path, [pi], layout
-                ),
+                _extract_text,
             )
             if result is not None:
                 page_texts.update(result)
@@ -150,6 +183,44 @@ class DocumentPipelineOrchestrator:
             else:
                 page_info.status = "failed"
                 page_info.error = "Text extraction failed"
+
+        if vision_engine is not None and hasattr(vision_engine, "close"):
+            vision_engine.close()
+
+        # Inject synthetic TEXT blocks for OCR pages whose layout only
+        # contains non-text blocks (e.g. a lone FIGURE for a scanned
+        # page).  Without a TEXT block the chunker has nothing to emit.
+        for page_info in pages:
+            idx = page_info.page_index
+            pt = page_texts.get(idx)
+            if not pt or not pt.full_text.strip():
+                continue
+            page_blocks = layout.get(idx, [])
+            if any(b.type == BlockType.TEXT for b in page_blocks):
+                continue
+            next_order = max((b.reading_order for b in page_blocks), default=-1) + 1
+            page_blocks.append(
+                LayoutBlock(
+                    block_id=f"ocr-text-{idx}-synth",
+                    page_index=idx,
+                    type=BlockType.TEXT,
+                    bbox=BBox(
+                        x0=0.0,
+                        y0=0.0,
+                        x1=page_info.width or 612.0,
+                        y1=page_info.height or 792.0,
+                    ),
+                    reading_order=next_order,
+                    confidence=pt.confidence,
+                    text=pt.full_text,
+                )
+            )
+            save_layout(doc_id, idx, page_blocks, artifacts_dir)
+            logger.info(
+                "Injected synthetic TEXT block for OCR page {} (text_len={})",
+                idx,
+                len(pt.full_text),
+            )
 
         # --- Stage 4: Table extraction ---
         tables: list[TableResult] = (

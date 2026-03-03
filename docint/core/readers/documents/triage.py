@@ -7,7 +7,7 @@ from pathlib import Path
 import pypdf
 from loguru import logger
 
-from docint.core.readers.documents.config import PipelineConfig
+from docint.utils.env_cfg import PipelineConfig
 from docint.core.readers.documents.models import PageInfo
 
 

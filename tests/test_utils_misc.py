@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from docint.utils.clean_text import basic_clean
+from docint.utils.env_cfg import load_path_env
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.logging_cfg import setup_logging
 from loguru import logger
@@ -56,6 +57,33 @@ def test_ensure_file_hash_requires_inputs() -> None:
     """Test that ensure_file_hash raises ValueError if neither path nor file_hash is provided."""
     with pytest.raises(ValueError):
         ensure_file_hash({}, path=None, file_hash=None)
+
+
+def test_path_config_artifacts_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PathConfig.artifacts should default to ``<project_root>/artifacts``.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Fixture to override environment.
+    """
+    monkeypatch.delenv("PIPELINE_ARTIFACTS_DIR", raising=False)
+    cfg = load_path_env()
+    assert cfg.artifacts.name == "artifacts"
+    assert cfg.artifacts.is_absolute()
+
+
+def test_path_config_artifacts_env_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PIPELINE_ARTIFACTS_DIR env var should override the default artifacts path.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Fixture to override environment.
+        tmp_path (Path): Temporary path fixture.
+    """
+    custom = tmp_path / "my-artifacts"
+    monkeypatch.setenv("PIPELINE_ARTIFACTS_DIR", str(custom))
+    cfg = load_path_env()
+    assert cfg.artifacts == custom
 
 
 def test_setup_logging_respects_env_path(

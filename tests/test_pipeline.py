@@ -18,7 +18,7 @@ from docint.core.readers.documents.artifacts import (
     save_table,
 )
 from docint.core.readers.documents.chunking import chunk_document
-from docint.core.readers.documents.config import PipelineConfig, load_pipeline_config
+from docint.utils.env_cfg import PipelineConfig, load_pipeline_config
 from docint.core.readers.documents.extraction import extract_images, extract_tables
 from docint.core.readers.documents.layout import (
     PypdfLayoutAnalyzer,
@@ -38,7 +38,10 @@ from docint.core.readers.documents.models import (
     PageText,
     TableResult,
 )
-from docint.core.readers.documents.ocr import build_page_text
+from docint.core.readers.documents.ocr import (
+    build_page_text,
+    extract_text_for_pages,
+)
 from docint.core.readers.documents.orchestrator import (
     DocumentPipelineOrchestrator,
 )
@@ -64,6 +67,11 @@ def pipeline_config(tmp_path: Path) -> PipelineConfig:
         max_retries=1,
         force_reprocess=True,
         max_workers=1,
+        enable_vision_ocr=False,
+        vision_ocr_timeout=60.0,
+        vision_ocr_max_retries=1,
+        vision_ocr_max_image_dimension=1024,
+        vision_ocr_max_tokens=4096,
     )
 
 
@@ -198,6 +206,20 @@ class TestPipelineConfig:
         cfg = load_pipeline_config()
         assert cfg.text_coverage_threshold == 0.5
         assert cfg.force_reprocess is True
+
+    def test_artifacts_dir_from_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """PIPELINE_ARTIFACTS_DIR env var should propagate into PipelineConfig.
+
+        Args:
+            monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture for env manipulation.
+            tmp_path (Path): The temporary path fixture for creating test directories.
+        """
+        custom = str(tmp_path / "custom-artifacts")
+        monkeypatch.setenv("PIPELINE_ARTIFACTS_DIR", custom)
+        cfg = load_pipeline_config()
+        assert cfg.artifacts_dir == custom
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +447,40 @@ class TestChunking:
         }
         chunks = chunk_document("ocr-doc", layout, page_texts, [], [])
         assert len(chunks) >= 1
+        assert chunks[0].source_mix == "ocr"
+
+    def test_figure_only_page_with_ocr_text_produces_chunks(self) -> None:
+        """A page with only FIGURE blocks should chunk page_text.full_text via fallback."""
+        figure_block = LayoutBlock(
+            block_id="fig-0",
+            page_index=0,
+            type=BlockType.FIGURE,
+            bbox=BBox(x0=0, y0=0, x1=612, y1=792),
+            reading_order=0,
+            confidence=0.9,
+            text="",
+        )
+        text_block = LayoutBlock(
+            block_id="ocr-text-0-synth",
+            page_index=0,
+            type=BlockType.TEXT,
+            bbox=BBox(x0=0, y0=0, x1=612, y1=792),
+            reading_order=1,
+            confidence=0.7,
+            text="Vision OCR extracted text from scanned page.",
+        )
+        layout = {0: [figure_block, text_block]}
+        page_texts = {
+            0: PageText(
+                page_index=0,
+                full_text="Vision OCR extracted text from scanned page.",
+                source_mix="ocr",
+                confidence=0.7,
+            )
+        }
+        chunks = chunk_document("scan-doc", layout, page_texts, [], [])
+        assert len(chunks) >= 1
+        assert "Vision OCR" in chunks[0].text
         assert chunks[0].source_mix == "ocr"
 
 
@@ -995,6 +1051,315 @@ class TestOCR:
         assert "Hello world" in result.full_text
         assert "Additional OCR text" in result.full_text
 
+    def test_extract_text_for_pages_vision_fallback(self) -> None:
+        """Vision engine should be tried when pypdf yields nothing on OCR pages."""
+        page_info = PageInfo(
+            page_index=0,
+            has_text_layer=False,
+            text_coverage=0.0,
+            needs_ocr=True,
+            width=612.0,
+            height=792.0,
+            status="completed",
+        )
+        layout: dict[int, list[LayoutBlock]] = {0: []}
+
+        mock_vision = MagicMock()
+        mock_vision.ocr_page.return_value = [
+            OCRSpan(
+                text="Vision-extracted text from scanned page.",
+                bbox=BBox(x0=0, y0=0, x1=612, y1=792),
+                confidence=0.7,
+                source="vision_ocr",
+            )
+        ]
+
+        with patch("docint.core.readers.documents.ocr.pypdf") as mock_pypdf:
+            mock_page = MagicMock()
+            mock_page.extract_text.return_value = ""
+            mock_mb = MagicMock()
+            mock_mb.left = 0.0
+            mock_mb.bottom = 0.0
+            mock_mb.right = 612.0
+            mock_mb.top = 792.0
+            mock_page.mediabox = mock_mb
+            mock_reader = MagicMock()
+            mock_reader.pages = [mock_page]
+            mock_pypdf.PdfReader.return_value = mock_reader
+
+            result = extract_text_for_pages(
+                "/fake/scan.pdf",
+                [page_info],
+                layout,
+                vision_engine=mock_vision,
+            )
+
+        assert 0 in result
+        assert "Vision-extracted text" in result[0].full_text
+        assert result[0].source_mix == "ocr"
+        mock_vision.ocr_page.assert_called_once()
+
+    def test_extract_text_for_pages_no_vision_when_text_found(self) -> None:
+        """Vision engine should NOT be called when pypdf yields text."""
+        page_info = PageInfo(
+            page_index=0,
+            has_text_layer=True,
+            text_coverage=0.5,
+            needs_ocr=True,
+            width=612.0,
+            height=792.0,
+            status="completed",
+        )
+        layout: dict[int, list[LayoutBlock]] = {0: []}
+
+        mock_vision = MagicMock()
+
+        with patch("docint.core.readers.documents.ocr.pypdf") as mock_pypdf:
+            mock_page = MagicMock()
+            mock_page.extract_text.return_value = "Some actual text."
+            mock_mb = MagicMock()
+            mock_mb.left = 0.0
+            mock_mb.bottom = 0.0
+            mock_mb.right = 612.0
+            mock_mb.top = 792.0
+            mock_page.mediabox = mock_mb
+            mock_reader = MagicMock()
+            mock_reader.pages = [mock_page]
+            mock_pypdf.PdfReader.return_value = mock_reader
+
+            result = extract_text_for_pages(
+                "/fake/doc.pdf",
+                [page_info],
+                layout,
+                vision_engine=mock_vision,
+            )
+
+        assert 0 in result
+        assert "Some actual text" in result[0].full_text
+        mock_vision.ocr_page.assert_not_called()
+
+    def test_vision_ocr_engine_downscales_large_images(self) -> None:
+        """VisionOCREngine should resize images exceeding max_image_dimension."""
+        from docint.core.readers.documents.ocr import VisionOCREngine
+
+        mock_page = MagicMock()
+        mock_page.get_width.return_value = 612.0
+        mock_page.get_height.return_value = 792.0
+
+        # Simulate a 3000×4000 rendered bitmap that exceeds the 1024 cap.
+        from PIL import Image as PILImage
+
+        large_img = PILImage.new("RGB", (3000, 4000), color="white")
+        mock_bitmap = MagicMock()
+        mock_bitmap.to_pil.return_value = large_img
+
+        mock_page.render.return_value = mock_bitmap
+
+        mock_pdf = MagicMock()
+        mock_pdf.__getitem__ = MagicMock(return_value=mock_page)
+
+        with (
+            patch("docint.core.readers.documents.ocr.pypdfium2") as mock_pdfium,
+            patch("docint.core.readers.documents.ocr.OpenAIPipeline") as MockPipeline,
+            patch("docint.core.readers.documents.ocr._OpenAI"),
+            patch("docint.core.readers.documents.ocr.load_openai_env"),
+            patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+        ):
+            mock_pdfium.PdfDocument.return_value = mock_pdf
+            pipeline_instance = MagicMock()
+            pipeline_instance.load_prompt.return_value = "Extract text"
+            pipeline_instance.seed = 42
+            pipeline_instance.temperature = 0.0
+            pipeline_instance.top_p = 0.0
+            MockPipeline.return_value = pipeline_instance
+
+            mock_model_env.return_value.vision_model_file = "test-vision.gguf"
+
+            # Mock the vision client response
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "Arabic text from OCR"
+
+            engine = VisionOCREngine(
+                "/fake/large.pdf",
+                timeout=30.0,
+                max_retries=0,
+                max_image_dimension=1024,
+                max_tokens=4096,
+            )
+            with patch.object(
+                engine._vision_client.chat.completions,
+                "create",
+                return_value=mock_response,
+            ) as mock_create:
+                spans = engine.ocr_page(0)
+
+        assert len(spans) == 1
+        assert "Arabic text from OCR" in spans[0].text
+        # Verify the render used scaled DPI (120/72 ≈ 1.667)
+        mock_page.render.assert_called_once()
+        call_kwargs = mock_page.render.call_args
+        assert abs(call_kwargs[1]["scale"] - 120 / 72) < 0.01
+        # Verify max_tokens was passed to the API call
+        create_kwargs = mock_create.call_args[1]
+        assert create_kwargs["max_tokens"] == 4096
+
+    def test_vision_ocr_engine_respects_timeout_config(self) -> None:
+        """VisionOCREngine should create client with OCR-specific timeout."""
+        from docint.core.readers.documents.ocr import VisionOCREngine
+
+        with (
+            patch("docint.core.readers.documents.ocr.pypdfium2"),
+            patch("docint.core.readers.documents.ocr.OpenAIPipeline") as MockPipeline,
+            patch("docint.core.readers.documents.ocr._OpenAI") as MockOpenAI,
+            patch("docint.core.readers.documents.ocr.load_openai_env") as mock_oai_env,
+        ):
+            mock_oai_env.return_value.api_key = "sk-test"
+            mock_oai_env.return_value.api_base = "http://localhost:8080/v1"
+            pipeline_instance = MagicMock()
+            pipeline_instance.load_prompt.return_value = "Extract text"
+            MockPipeline.return_value = pipeline_instance
+
+            VisionOCREngine(
+                "/fake/doc.pdf",
+                timeout=60.0,
+                max_retries=0,
+                max_image_dimension=1024,
+                max_tokens=2048,
+            )
+
+            MockOpenAI.assert_called_once_with(
+                api_key="sk-test",
+                base_url="http://localhost:8080/v1",
+                timeout=60.0,
+                max_retries=0,
+            )
+
+    def test_vision_ocr_retries_at_half_resolution_on_timeout(self) -> None:
+        """On timeout, VisionOCREngine should retry at half the max dimension."""
+        from docint.core.readers.documents.ocr import VisionOCREngine
+
+        mock_page = MagicMock()
+        mock_page.get_width.return_value = 612.0
+        mock_page.get_height.return_value = 792.0
+
+        from PIL import Image as PILImage
+
+        img = PILImage.new("RGB", (800, 1000), color="white")
+        mock_bitmap = MagicMock()
+        mock_bitmap.to_pil.return_value = img
+        mock_page.render.return_value = mock_bitmap
+
+        mock_pdf = MagicMock()
+        mock_pdf.__getitem__ = MagicMock(return_value=mock_page)
+
+        with (
+            patch("docint.core.readers.documents.ocr.pypdfium2") as mock_pdfium,
+            patch("docint.core.readers.documents.ocr.OpenAIPipeline") as MockPipeline,
+            patch("docint.core.readers.documents.ocr._OpenAI"),
+            patch("docint.core.readers.documents.ocr.load_openai_env"),
+            patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+        ):
+            mock_pdfium.PdfDocument.return_value = mock_pdf
+            pipeline_instance = MagicMock()
+            pipeline_instance.load_prompt.return_value = "Extract text"
+            pipeline_instance.seed = 42
+            pipeline_instance.temperature = 0.0
+            pipeline_instance.top_p = 0.0
+            MockPipeline.return_value = pipeline_instance
+            mock_model_env.return_value.vision_model_file = "test-vision.gguf"
+
+            # First call raises timeout, second succeeds
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "Recovered text"
+
+            engine = VisionOCREngine(
+                "/fake/doc.pdf",
+                timeout=10.0,
+                max_retries=0,
+                max_image_dimension=1024,
+                max_tokens=4096,
+            )
+
+            with patch.object(
+                engine._vision_client.chat.completions,
+                "create",
+                side_effect=[
+                    RuntimeError("Request timed out."),
+                    mock_response,
+                ],
+            ) as mock_create:
+                spans = engine.ocr_page(0)
+
+        assert len(spans) == 1
+        assert "Recovered text" in spans[0].text
+        # Two API calls: initial attempt + reduced-resolution retry
+        assert mock_create.call_count == 2
+
+    def test_vision_ocr_retries_on_empty_with_higher_detail(self) -> None:
+        """When OCR returns empty text, VisionOCREngine should retry at higher detail."""
+        from docint.core.readers.documents.ocr import VisionOCREngine
+
+        mock_page = MagicMock()
+        mock_page.get_width.return_value = 612.0
+        mock_page.get_height.return_value = 792.0
+
+        from PIL import Image as PILImage
+
+        # Tall page to mirror screenshot-style scanned PDFs.
+        img = PILImage.new("RGB", (900, 3000), color="white")
+        mock_bitmap = MagicMock()
+        mock_bitmap.to_pil.return_value = img
+        mock_page.render.return_value = mock_bitmap
+
+        mock_pdf = MagicMock()
+        mock_pdf.__getitem__ = MagicMock(return_value=mock_page)
+
+        with (
+            patch("docint.core.readers.documents.ocr.pypdfium2") as mock_pdfium,
+            patch("docint.core.readers.documents.ocr.OpenAIPipeline") as MockPipeline,
+            patch("docint.core.readers.documents.ocr._OpenAI"),
+            patch("docint.core.readers.documents.ocr.load_openai_env"),
+            patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+        ):
+            mock_pdfium.PdfDocument.return_value = mock_pdf
+            pipeline_instance = MagicMock()
+            pipeline_instance.load_prompt.return_value = "Extract text"
+            pipeline_instance.seed = 42
+            pipeline_instance.temperature = 0.0
+            pipeline_instance.top_p = 0.0
+            MockPipeline.return_value = pipeline_instance
+            mock_model_env.return_value.vision_model_file = "test-vision.gguf"
+
+            # First call returns empty content; second (higher-detail) succeeds.
+            first = MagicMock()
+            first.choices = [MagicMock()]
+            first.choices[0].message.content = ""
+
+            second = MagicMock()
+            second.choices = [MagicMock()]
+            second.choices[0].message.content = "نص عربي مستخرج"
+
+            engine = VisionOCREngine(
+                "/fake/doc.pdf",
+                timeout=10.0,
+                max_retries=0,
+                max_image_dimension=1024,
+                max_tokens=4096,
+            )
+
+            with patch.object(
+                engine._vision_client.chat.completions,
+                "create",
+                side_effect=[first, second],
+            ) as mock_create:
+                spans = engine.ocr_page(0)
+
+        assert len(spans) == 1
+        assert spans[0].text == "نص عربي مستخرج"
+        assert mock_create.call_count == 2
+
 
 # ---------------------------------------------------------------------------
 # Orchestrator tests
@@ -1063,6 +1428,11 @@ class TestOrchestrator:
             max_retries=pipeline_config.max_retries,
             force_reprocess=False,
             max_workers=pipeline_config.max_workers,
+            enable_vision_ocr=False,
+            vision_ocr_timeout=60.0,
+            vision_ocr_max_retries=1,
+            vision_ocr_max_image_dimension=1024,
+            vision_ocr_max_tokens=4096,
         )
 
         pdf_file = tmp_path / "test.pdf"
@@ -1160,3 +1530,106 @@ class TestOrchestrator:
         result = orch._run_with_retry("test-stage", flaky_fn)
         assert result == "success"
         assert call_count == 2
+
+    def test_scanned_pdf_injects_text_block(self, tmp_path: Path) -> None:
+        """A scanned PDF should get a synthetic TEXT block after vision OCR.
+
+        Args:
+            tmp_path: pytest fixture providing a temporary directory for test files.
+        """
+        config = PipelineConfig(
+            text_coverage_threshold=0.01,
+            pipeline_version="test-1.0.0",
+            artifacts_dir=str(tmp_path / "artifacts"),
+            max_retries=1,
+            force_reprocess=True,
+            max_workers=1,
+            enable_vision_ocr=True,
+            vision_ocr_timeout=30.0,
+            vision_ocr_max_retries=0,
+            vision_ocr_max_image_dimension=1024,
+            vision_ocr_max_tokens=4096,
+        )
+
+        pdf_file = tmp_path / "scan.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4 scanned page test")
+
+        # Scanned page: no text, but an embedded image
+        mock_page = MagicMock()
+        mock_page.extract_text.return_value = ""
+        mock_mb = MagicMock()
+        mock_mb.width = 612.0
+        mock_mb.height = 792.0
+        mock_mb.left = 0.0
+        mock_mb.bottom = 0.0
+        mock_mb.right = 612.0
+        mock_mb.top = 792.0
+        mock_page.mediabox = mock_mb
+
+        # Image XObject so layout produces a FIGURE block
+        mock_image_obj = MagicMock()
+        mock_image_obj.get.side_effect = lambda k, d="": (
+            "/Image" if k == "/Subtype" else d
+        )
+        mock_image_obj.get_object.return_value = mock_image_obj
+        mock_xobj_dict = {"/Im1": mock_image_obj}
+        mock_xobj = MagicMock()
+        mock_xobj.get_object.return_value = mock_xobj_dict
+        mock_resources = MagicMock()
+        mock_resources.get.side_effect = lambda k, d=None: (
+            mock_xobj if k == "/XObject" else d
+        )
+        mock_page.get.side_effect = lambda k, d=None: (
+            mock_resources if k == "/Resources" else (None if k == "/Contents" else d)
+        )
+
+        mock_reader = MagicMock()
+        mock_reader.pages = [mock_page]
+
+        # Mock the vision OCR engine to return extracted text
+        mock_vision_engine = MagicMock()
+        mock_vision_engine.ocr_page.return_value = [
+            OCRSpan(
+                text="Text from scanned page via vision OCR.",
+                bbox=BBox(x0=0, y0=0, x1=612, y1=792),
+                confidence=0.7,
+                source="vision_ocr",
+            )
+        ]
+
+        orch = DocumentPipelineOrchestrator(config=config)
+
+        with (
+            patch("docint.core.readers.documents.triage.pypdf") as m1,
+            patch("docint.core.readers.documents.layout.pypdf") as m2,
+            patch("docint.core.readers.documents.ocr.pypdf") as m3,
+            patch(
+                "docint.core.readers.documents.orchestrator.VisionOCREngine",
+                return_value=mock_vision_engine,
+            ),
+        ):
+            m1.PdfReader.return_value = mock_reader
+            m2.PdfReader.return_value = mock_reader
+            m3.PdfReader.return_value = mock_reader
+            manifest = orch.process(pdf_file)
+
+        assert manifest.status == "completed"
+        assert manifest.pages_total == 1
+        assert manifest.pages_ocr == 1
+
+        # Verify chunks were produced from the vision OCR text
+        doc_id = compute_file_hash(pdf_file)
+        artifacts_dir = Path(config.artifacts_dir)
+        chunks_path = artifacts_dir / doc_id / "chunks.jsonl"
+        assert chunks_path.exists(), "Expected chunks.jsonl to be created"
+        lines = [
+            line for line in chunks_path.read_text().strip().split("\n") if line.strip()
+        ]
+        assert len(lines) >= 1
+        import json
+
+        chunk_data = json.loads(lines[0])
+        assert (
+            "vision OCR" in chunk_data["text"].lower()
+            or "scanned" in chunk_data["text"].lower()
+        )

@@ -201,7 +201,7 @@ class PypdfLayoutAnalyzer(LayoutAnalyzer):
             resources = page.get("/Resources")
             if not resources:
                 return names
-            xobjects = resources.get("/XObject")  # type: ignore[union-attr]
+            xobjects = resources.get("/XObject")
             if not xobjects:
                 return names
             xobj_dict = (
