@@ -17,13 +17,18 @@ def render_sidebar() -> None:
         st.divider()
 
         # ── Navigation ───────────────────────────────────────────
-        st.radio(
+        selected_page = st.radio(
             "Navigation",
             options=PAGES,
             format_func=lambda p: f"{PAGE_ICONS.get(p, '')}  {p}",
-            key="current_page",
+            index=PAGES.index(st.session_state.current_page)
+            if st.session_state.current_page in PAGES
+            else 0,
             label_visibility="collapsed",
         )
+        if selected_page != st.session_state.current_page:
+            st.session_state.current_page = selected_page
+            st.rerun()
 
         st.divider()
 
