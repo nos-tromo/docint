@@ -11,9 +11,7 @@ from docint.ui.state import BACKEND_HOST
 
 
 def render_ingestion() -> None:
-    """
-    Render the ingestion interface.
-    """
+    """Render the ingestion interface."""
     st.header("📥 Ingest")
 
     collection = st.session_state.selected_collection
@@ -65,8 +63,7 @@ def render_ingestion() -> None:
 
 
 def _render_ingest_summary(summary: dict[str, Any] | None) -> None:
-    """
-    Render the last-ingestion summary card.
+    """Render the last-ingestion summary card.
 
     Args:
         summary: Ingestion summary dict (may be ``None``).
@@ -95,8 +92,7 @@ def _render_ingest_summary(summary: dict[str, Any] | None) -> None:
 
 
 def _run_ingestion(target_col: str, uploaded_files: list) -> None:
-    """
-    Execute the upload-and-ingest workflow with streaming progress.
+    """Execute the upload-and-ingest workflow with streaming progress.
 
     Args:
         target_col: Name of the collection to ingest into.
@@ -116,8 +112,7 @@ def _run_ingestion(target_col: str, uploaded_files: list) -> None:
     summary_ph = st.empty()
 
     def _render_board(current_stage: str) -> None:
-        """
-        Render the main progress board with file statuses and overall progress.
+        """Render the main progress board with file statuses and overall progress.
 
         Args:
             current_stage (str): Description of the current stage of the ingestion process.
@@ -151,9 +146,7 @@ def _run_ingestion(target_col: str, uploaded_files: list) -> None:
         board_ph.markdown("\n".join(pill_rows))
 
     def _render_feed() -> None:
-        """
-        Render the event feed sidebar with recent ingestion events.
-        """
+        """Render the event feed sidebar with recent ingestion events."""
         if events:
             feed_ph.markdown("\n".join(events[-8:]))
 

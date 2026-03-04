@@ -17,8 +17,8 @@ from llama_index.llms.openai import OpenAI
 from llama_index.node_parser.docling import DoclingNodeParser
 from loguru import logger
 
+from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.readers.audio import AudioReader
-from docint.core.readers.documents import CustomDoclingReader
 from docint.core.readers.images import ImageReader
 from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.tables import TableReader
@@ -37,9 +37,7 @@ CleanFn = Callable[[str], str]
 
 @dataclass(slots=True)
 class DocumentIngestionPipeline:
-    """
-    Encapsulates document loading, cleaning, and node construction.
-    """
+    """Encapsulates document loading, cleaning, and node construction."""
 
     # --- Constructor args ---
     data_dir: Path
@@ -67,6 +65,8 @@ class DocumentIngestionPipeline:
     table_metadata_cols: list[str] | str | None = None
     table_id_col: str | None = None
     table_excel_sheet: str | int | None = None
+    target_collection: str | None = None
+    image_ingestion_service: ImageIngestionService | None = None
 
     # --- Named entity recognition (NER) ---
     ner_max_workers: int = field(default=4, init=False)
@@ -86,9 +86,7 @@ class DocumentIngestionPipeline:
     file_hash_cache: dict[str, str] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
-        """
-        Post-initialization to load configurations and set up components.
-        """
+        """Post-initialization to load configurations and set up components."""
         # --- Named Entity Recognition (NER) config ---
         _ner_config = load_ner_env()
         ner_enabled = _ner_config.enabled
@@ -138,8 +136,7 @@ class DocumentIngestionPipeline:
     def build(
         self, existing_hashes: set[str] | None = None
     ) -> Iterable[tuple[list[Document], list[BaseNode]]]:
-        """
-        Execute the full ingestion pipeline and yield batches of cleaned docs + nodes.
+        """Execute the full ingestion pipeline and yield batches of cleaned docs + nodes.
 
         Args:
             existing_hashes (set[str] | None): A set of existing document hashes to filter out already processed documents.
@@ -181,8 +178,7 @@ class DocumentIngestionPipeline:
     def _process_batch(
         self, docs: list[Document], existing_hashes: set[str] | None
     ) -> tuple[list[Document], list[BaseNode]]:
-        """
-        Process a batch of documents through cleaning, hashing, filtering, and node creation.
+        """Process a batch of documents through cleaning, hashing, filtering, and node creation.
 
         Args:
             docs (list[Document]): The list of documents to process.
@@ -204,8 +200,7 @@ class DocumentIngestionPipeline:
         return docs, nodes
 
     def _filter_input_files(self, existing_hashes: set[str]) -> None:
-        """
-        Filter self.dir_reader.input_files based on existing hashes. Populates self.file_hash_cache.
+        """Filter self.dir_reader.input_files based on existing hashes. Populates self.file_hash_cache.
 
         Args:
             existing_hashes (set[str]): A set of existing document hashes to filter out already processed documents.
@@ -245,8 +240,7 @@ class DocumentIngestionPipeline:
             self.dir_reader.input_files = filtered_files
 
     def _ensure_file_hashes(self, docs: list[Document]) -> list[Document]:
-        """
-        Ensure every document has a file_hash in its metadata. Computes it from the file path if missing.
+        """Ensure every document has a file_hash in its metadata. Computes it from the file path if missing.
 
         Args:
             docs (list[Document]): The list of documents to process.
@@ -298,8 +292,7 @@ class DocumentIngestionPipeline:
         return docs
 
     def _attach_clean_text(self, docs: Iterable[Document]) -> list[Document]:
-        """
-        Attach cleaned text to each document.
+        """Attach cleaned text to each document.
 
         Args:
             docs (Iterable[Document]): The documents to process.
@@ -318,11 +311,14 @@ class DocumentIngestionPipeline:
         return cleaned
 
     def _load_doc_readers(self) -> None:
-        """
-        Load document readers for various file types.
-        """
+        """Load document readers for various file types."""
         audio_reader = AudioReader(device=self.device)
-        image_reader = ImageReader()
+        image_reader = ImageReader(
+            image_ingestion_service=(
+                self.image_ingestion_service or ImageIngestionService()
+            ),
+            source_collection=self.target_collection,
+        )
         table_reader = TableReader(
             text_cols=self.table_text_cols,
             metadata_cols=self.table_metadata_cols
@@ -333,8 +329,7 @@ class DocumentIngestionPipeline:
         )
 
         def _metadata(path: str | Path) -> dict[str, str]:
-            """
-            Get metadata for a file.
+            """Get metadata for a file.
 
             Args:
                 path (str | Path): The path to the file.
@@ -382,8 +377,6 @@ class DocumentIngestionPipeline:
                 ".m4v": audio_reader,
                 ".wmv": audio_reader,
                 ".json": CustomJSONReader(),
-                ".docx": CustomDoclingReader(device=self.device),
-                ".pdf": CustomDoclingReader(device=self.device),
                 ".gif": image_reader,
                 ".jpeg": image_reader,
                 ".jpg": image_reader,
@@ -410,16 +403,13 @@ class DocumentIngestionPipeline:
         )
 
     def _load_node_parsers(self) -> None:
-        """
-        Load document parsers for various file types.
-        """
+        """Load document parsers for various file types."""
         self.md_node_parser = MarkdownNodeParser()
         self.docling_node_parser = DoclingNodeParser()
 
     @staticmethod
     def _extract_file_hash(data: dict | None) -> str | None:
-        """
-        Extract the file hash from the given data.
+        """Extract the file hash from the given data.
 
         Args:
             data (dict | None): The input data.
@@ -459,8 +449,7 @@ class DocumentIngestionPipeline:
     def _filter_docs_by_existing_hashes(
         self, docs: Iterable[Document], existing_hashes: set[str] | None
     ) -> list[Document]:
-        """
-        Filter documents by their existing hashes.
+        """Filter documents by their existing hashes.
 
         Args:
             docs (Iterable[Document]): The documents to filter.
@@ -512,8 +501,7 @@ class DocumentIngestionPipeline:
     def _process_docs_hierarchical(
         self, docs: list[Document], base_parser: NodeParser | None = None
     ) -> list[BaseNode]:
-        """
-        Process documents possibly using hierarchical chunking.
+        """Process documents possibly using hierarchical chunking.
 
         Args:
             docs (list[Document]): Documents to process.
@@ -544,8 +532,7 @@ class DocumentIngestionPipeline:
         return parser.get_nodes_from_documents(docs)
 
     def _create_nodes(self, docs: list[Document]) -> list[BaseNode]:
-        """
-        Create nodes from the provided documents.
+        """Create nodes from the provided documents.
 
         Args:
             docs (list[Document]): The documents to process.
@@ -630,8 +617,7 @@ class DocumentIngestionPipeline:
         if document_docs:
 
             def _is_docling_json(doc: Document) -> bool:
-                """
-                Check if the document text is valid Docling JSON.
+                """Check if the document text is valid Docling JSON.
 
                 Args:
                     doc (Document): The document to check.

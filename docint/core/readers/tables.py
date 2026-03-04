@@ -18,8 +18,7 @@ ORIGINAL_INDEX_COL = "_original_row_index"
 
 @dataclass(slots=True)
 class TableReader(BaseReader):
-    """
-    Reads tabular data from CSV, TSV, XLSX, or Parquet files.
+    """Reads tabular data from CSV, TSV, XLSX, or Parquet files.
 
     Args:
         BaseReader (_type_): _base class for all readers_
@@ -77,9 +76,7 @@ class TableReader(BaseReader):
     csv_sep: str | None = None  # allow overriding delimiter
 
     def __post_init__(self) -> None:
-        """
-        Normalize configuration options.
-        """
+        """Normalize configuration options."""
         # Normalize config
         if isinstance(self.text_cols, str):
             self.text_cols = [self.text_cols]
@@ -94,8 +91,7 @@ class TableReader(BaseReader):
 
     # --- Helpers ---
     def _guess_text_cols(self, df: pd.DataFrame) -> list[str]:
-        """
-        Guess the text columns in a DataFrame based on common patterns.
+        """Guess the text columns in a DataFrame based on common patterns.
 
         Args:
             df (pd.DataFrame): The input DataFrame.
@@ -133,8 +129,7 @@ class TableReader(BaseReader):
         return [c for c, _ in candidates[:3]] or [df.columns[0]]
 
     def _combine_text(self, row: pd.Series, cols: list[str]) -> str:
-        """
-        Combine text from specified columns in a DataFrame row.
+        """Combine text from specified columns in a DataFrame row.
 
         Args:
             row (pd.Series): The input DataFrame row.
@@ -152,8 +147,7 @@ class TableReader(BaseReader):
         return self.combine_with.join(parts).strip()
 
     def load_data(self, file: str | Path, **kwargs) -> list[Document]:
-        """
-        Load data from a file into a list of Document objects.
+        """Load data from a file into a list of Document objects.
 
         Args:
             file (str | Path): The path to the file to load.

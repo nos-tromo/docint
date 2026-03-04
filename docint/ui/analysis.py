@@ -1,6 +1,4 @@
-"""
-Analysis page: collection summarisation and NER overview.
-"""
+"""Analysis page: collection summarisation and NER overview."""
 
 import json
 from typing import Any
@@ -17,9 +15,7 @@ from docint.ui.state import BACKEND_HOST
 
 
 def render_analysis() -> None:
-    """
-    Render the analysis interface.
-    """
+    """Render the analysis interface."""
     st.header("📈 Analysis")
 
     collection = st.session_state.selected_collection
@@ -45,8 +41,7 @@ def render_analysis() -> None:
 
 
 def _execute_analysis(collection: str) -> None:
-    """
-    Run summarisation and NER extraction, storing results in session state.
+    """Run summarisation and NER extraction, storing results in session state.
 
     Args:
         collection: Currently selected collection name.
@@ -106,8 +101,7 @@ def _execute_analysis(collection: str) -> None:
 
 
 def _render_analysis_result(result: dict[str, Any], collection: str) -> None:
-    """
-    Render a previously computed analysis result.
+    """Render a previously computed analysis result.
 
     Args:
         result: Stored analysis dict with keys ``summary``, ``sources``,

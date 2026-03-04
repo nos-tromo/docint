@@ -6,8 +6,7 @@ from docint.utils import mimetype
 
 
 def test_guess_from_extension(tmp_path: Path) -> None:
-    """
-    Test that _guess_from_extension correctly identifies the mimetype from the file extension.
+    """Test that _guess_from_extension correctly identifies the mimetype from the file extension.
 
     Args:
         tmp_path (Path): The temporary path fixture.
@@ -20,8 +19,7 @@ def test_guess_from_extension(tmp_path: Path) -> None:
 def test_get_mimetype_falls_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """
-    Test that get_mimetype falls back to a default when magic detection fails.
+    """Test that get_mimetype falls back to a default when magic detection fails.
 
     Args:
         tmp_path (Path): The temporary path fixture.

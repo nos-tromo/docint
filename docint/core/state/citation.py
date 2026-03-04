@@ -11,8 +11,7 @@ from docint.core.state.base import Base
 
 
 class Citation(Base):
-    """
-    Represents a citation within a turn of a conversation.
+    """Represents a citation within a turn of a conversation.
 
     Args:
         Base (declarative_base): The declarative base class for SQLAlchemy models.

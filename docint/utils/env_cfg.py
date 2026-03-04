@@ -9,8 +9,7 @@ load_dotenv()
 
 
 def set_offline_env() -> None:
-    """
-    Log the current offline mode status.
+    """Log the current offline mode status.
 
     The actual env vars (HF_HUB_OFFLINE, TRANSFORMERS_OFFLINE, etc.) are set at
     module level immediately after ``load_dotenv()`` so they are available before
@@ -21,7 +20,6 @@ def set_offline_env() -> None:
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
-        os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
         os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
         os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
@@ -44,8 +42,7 @@ set_offline_env()  # Apply offline settings at module load time
 def resolve_hf_cache_path(
     cache_dir: Path, repo_id: str, filename: str | None = None
 ) -> Path | None:
-    """
-    Resolve a HuggingFace model or file path from the local HF cache.
+    """Resolve a HuggingFace model or file path from the local HF cache.
 
     HF hub stores downloads under:
         {cache_dir}/models--{org}--{repo}/snapshots/{commit_hash}/
@@ -82,9 +79,7 @@ def resolve_hf_cache_path(
 
 @dataclass(frozen=True)
 class HostConfig:
-    """
-    Dataclass for host configuration.
-    """
+    """Dataclass for host configuration."""
 
     backend_host: str
     backend_public_host: str
@@ -92,111 +87,12 @@ class HostConfig:
     cors_allowed_origins: str
 
 
-@dataclass(frozen=True)
-class IngestionConfig:
-    coarse_chunk_size: int
-    docling_accelerator_num_threads: int
-    docstore_batch_size: int
-    fine_chunk_overlap: int
-    fine_chunk_size: int
-    hierarchical_chunking_enabled: bool
-    ingestion_batch_size: int
-    sentence_splitter_chunk_overlap: int
-    sentence_splitter_chunk_size: int
-    supported_filetypes: list[str]
-
-
-@dataclass(frozen=True)
-class ModelConfig:
-    """
-    Dataclass for model configuration.
-    """
-
-    embed_model_file: str
-    embed_model_repo: str
-    ner_model: str
-    rerank_model: str
-    sparse_model: str
-    text_model_file: str
-    text_model_repo: str
-    vision_model_file: str
-    vision_model_repo: str
-    whisper_model: str
-
-
-@dataclass(frozen=True)
-class NERConfig:
-    """
-    Dataclass for information extraction configuration.
-    """
-
-    enabled: bool
-    max_chars: int
-    max_workers: int
-
-
-@dataclass(frozen=True)
-class OpenAIConfig:
-    """
-    Dataclass for OpenAI-compatible API configuration.
-    """
-
-    api_base: str
-    api_key: str
-    ctx_window: int
-    dimensions: int
-    max_retries: int
-    model_provider: str
-    reuse_client: bool
-    seed: int
-    temperature: float
-    timeout: float
-    top_p: float
-
-
-@dataclass(frozen=True)
-class PathConfig:
-    """
-    Dataclass for path configuration.
-    """
-
-    data: Path
-    logs: Path
-    queries: Path
-    results: Path
-    prompts: Path
-    qdrant_collections: Path
-    qdrant_sources: Path
-    hf_hub_cache: Path
-    llama_cpp_cache: Path
-
-
-@dataclass(frozen=True)
-class RetrievalConfig:
-    """
-    Dataclass for RAG (Retrieval-Augmented Generation) configuration.
-    """
-
-    rerank_use_fp16: bool
-    retrieve_top_k: int
-
-
-@dataclass(frozen=True)
-class SessionConfig:
-    """
-    Dataclass for session configuration.
-    """
-
-    session_store: str
-
-
 def load_host_env(
     default_backend_host: str = "http://localhost:8000",
     default_qdrant_host: str = "http://localhost:6333",
     default_cors_origins: str = "http://localhost:8501,http://127.0.0.1:8501",
 ) -> HostConfig:
-    """
-    Loads host configuration from environment variables or defaults.
+    """Loads host configuration from environment variables or defaults.
 
     Args:
         default_backend_host (str): Default backend host URL.
@@ -217,6 +113,102 @@ def load_host_env(
         qdrant_host=os.getenv("QDRANT_HOST", default_qdrant_host),
         cors_allowed_origins=os.getenv("CORS_ALLOWED_ORIGINS", default_cors_origins),
     )
+
+
+@dataclass(frozen=True)
+class ImageIngestionConfig:
+    """Configuration for image ingestion and image-vector indexing."""
+
+    enabled: bool
+    embedding_enabled: bool
+    tagging_enabled: bool
+    collection_name: str
+    vector_name: str
+    cache_by_hash: bool
+    fail_on_embedding_error: bool
+    fail_on_tagging_error: bool
+    tagging_max_image_dimension: int = 1024
+
+
+def load_image_ingestion_config(
+    default_image_ingestion_enabled: bool = True,
+    default_image_embedding_enabled: bool = True,
+    default_image_tagging_enabled: bool = True,
+    default_image_qdrant_collection: str = "{collection}_images",
+    default_image_qdrant_vector_name: str = "image-dense",
+    default_image_cache_by_hash: bool = True,
+    default_fail_on_embedding_error: bool = False,
+    default_fail_on_tagging_error: bool = False,
+    default_tagging_max_image_dimension: int = 1024,
+) -> ImageIngestionConfig:
+    """Load image ingestion settings from environment variables.
+
+    Returns:
+        ImageIngestionConfig: Dataclass containing image ingestion configuration.
+        - enabled (bool): Whether image ingestion is enabled.
+        - embedding_enabled (bool): Whether to generate embeddings for images.
+        - tagging_enabled (bool): Whether to generate tags for images.
+        - collection_name (str): The Qdrant collection name for storing image vectors.
+        - vector_name (str): The name of the vector field in Qdrant.
+        - cache_by_hash (bool): Whether to cache image embeddings by hash to avoid redundant computation.
+        - fail_on_embedding_error (bool): Whether to fail the entire ingestion if image embedding fails.
+        - fail_on_tagging_error (bool): Whether to fail the entire ingestion if image tagging fails.
+        - tagging_max_image_dimension (int): Maximum pixel dimension (width or height) for
+            images sent to the vision tagging endpoint. Larger images are down-scaled.
+    """
+    return ImageIngestionConfig(
+        enabled=str(
+            os.getenv("IMAGE_INGESTION_ENABLED", default_image_ingestion_enabled)
+        ).lower()
+        in {"1", "true", "yes"},
+        embedding_enabled=str(
+            os.getenv("IMAGE_EMBEDDING_ENABLED", default_image_embedding_enabled)
+        ).lower()
+        in {"1", "true", "yes"},
+        tagging_enabled=str(
+            os.getenv("IMAGE_TAGGING_ENABLED", default_image_tagging_enabled)
+        ).lower()
+        in {"1", "true", "yes"},
+        collection_name=os.getenv(
+            "IMAGE_QDRANT_COLLECTION", default_image_qdrant_collection
+        ),
+        vector_name=os.getenv(
+            "IMAGE_QDRANT_VECTOR_NAME", default_image_qdrant_vector_name
+        ),
+        cache_by_hash=str(
+            os.getenv("IMAGE_CACHE_BY_HASH", default_image_cache_by_hash)
+        ).lower()
+        in {"1", "true", "yes"},
+        fail_on_embedding_error=str(
+            os.getenv("IMAGE_FAIL_ON_EMBED_ERROR", default_fail_on_embedding_error)
+        ).lower()
+        in {"1", "true", "yes"},
+        fail_on_tagging_error=str(
+            os.getenv("IMAGE_FAIL_ON_TAG_ERROR", default_fail_on_tagging_error)
+        ).lower()
+        in {"1", "true", "yes"},
+        tagging_max_image_dimension=int(
+            os.getenv(
+                "IMAGE_TAGGING_MAX_IMAGE_DIM", default_tagging_max_image_dimension
+            )
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class IngestionConfig:
+    """Dataclass for ingestion configuration."""
+
+    coarse_chunk_size: int
+    docling_accelerator_num_threads: int
+    docstore_batch_size: int
+    fine_chunk_overlap: int
+    fine_chunk_size: int
+    hierarchical_chunking_enabled: bool
+    ingestion_batch_size: int
+    sentence_splitter_chunk_overlap: int
+    sentence_splitter_chunk_size: int
+    supported_filetypes: list[str]
 
 
 def load_ingestion_env(
@@ -260,8 +252,7 @@ def load_ingestion_env(
         ".xlsx",
     ],
 ) -> IngestionConfig:
-    """
-    Loads ingestion configuration from environment variables or defaults.
+    """Loads ingestion configuration from environment variables or defaults.
 
     Returns:
         IngestionConfig: Dataclass containing ingestion configuration.
@@ -315,8 +306,26 @@ def load_ingestion_env(
     )
 
 
+@dataclass(frozen=True)
+class ModelConfig:
+    """Dataclass for model configuration."""
+
+    embed_model_file: str
+    embed_model_repo: str
+    image_embed_model: str
+    ner_model: str
+    rerank_model: str
+    sparse_model: str
+    text_model_file: str
+    text_model_repo: str
+    vision_model_file: str
+    vision_model_repo: str
+    whisper_model: str
+
+
 def load_model_env(
     default_embed_model_str: str = "ggml-org/bge-m3-Q8_0-GGUF;bge-m3-q8_0.gguf",
+    default_image_embed_model: str = "openai/clip-vit-base-patch32",
     default_ner_model: str = "gliner-community/gliner_large-v2.5",
     default_rerank_model: str = "BAAI/bge-reranker-v2-m3",
     default_sparse_model: str = "Qdrant/all_miniLM_L6_v2_with_attentions",
@@ -324,11 +333,11 @@ def load_model_env(
     default_vision_model_str: str = "Qwen/Qwen3-VL-8B-Instruct-GGUF;Qwen3VL-8B-Instruct-Q4_K_M.gguf",
     default_whisper_model: str = "turbo",
 ) -> ModelConfig:
-    """
-    Loads model configuration from environment variables or defaults.
+    """Loads model configuration from environment variables or defaults.
 
     Args:
         default_embed_model_str (str): Default embedding model identifier.
+        default_image_embed_model (str): Default image embedding model identifier.
         default_ner_model (str): Default NER model identifier.
         default_rerank_model (str): Default reranker model identifier.
         default_sparse_model (str): Default sparse model identifier.
@@ -351,8 +360,7 @@ def load_model_env(
     """
 
     def resolve_model_name(model_str: str) -> tuple[str, str]:
-        """
-        Resolve a model string into its repo ID and file name components.
+        """Resolve a model string into its repo ID and file name components.
 
         The model string can be in the format "repo_id;file_name" (required for llama.cpp) or just "model_name".
         If only "model_name" is provided, it is treated as both the repo ID and file name.
@@ -382,6 +390,7 @@ def load_model_env(
     return ModelConfig(
         embed_model_file=embed_model_file,
         embed_model_repo=embed_model_repo,
+        image_embed_model=os.getenv("IMAGE_EMBED_MODEL", default_image_embed_model),
         ner_model=os.getenv("NER_MODEL", default_ner_model),
         rerank_model=os.getenv("RERANK_MODEL", default_rerank_model),
         sparse_model=os.getenv("SPARSE_MODEL", default_sparse_model),
@@ -393,13 +402,21 @@ def load_model_env(
     )
 
 
+@dataclass(frozen=True)
+class NERConfig:
+    """Dataclass for information extraction configuration."""
+
+    enabled: bool
+    max_chars: int
+    max_workers: int
+
+
 def load_ner_env(
     default_enabled: bool = True,
     default_max_chars: int = 1024,
     default_max_workers: int = 4,
 ) -> NERConfig:
-    """
-    Loads information extraction configuration from environment variables or defaults.
+    """Loads information extraction configuration from environment variables or defaults.
 
     Args:
         default_enabled (bool): Default value to enable NER extraction. Set to True to enable by default.
@@ -423,6 +440,23 @@ def load_ner_env(
     )
 
 
+@dataclass(frozen=True)
+class OpenAIConfig:
+    """Dataclass for OpenAI-compatible API configuration."""
+
+    api_base: str
+    api_key: str
+    ctx_window: int
+    dimensions: int
+    max_retries: int
+    model_provider: str
+    reuse_client: bool
+    seed: int
+    temperature: float
+    timeout: float
+    top_p: float
+
+
 def load_openai_env(
     default_api_base: str = "http://localhost:8080/v1",
     default_api_key: str = "sk-no-key-required",
@@ -436,8 +470,7 @@ def load_openai_env(
     default_timeout: float = 300.0,
     default_top_p: float = 0.0,
 ) -> OpenAIConfig:
-    """
-    Loads OpenAI configuration from environment variables or defaults.
+    """Loads OpenAI configuration from environment variables or defaults.
 
     Args:
         default_api_base (str): Default OpenAI API base URL.
@@ -487,12 +520,28 @@ def load_openai_env(
     )
 
 
+@dataclass(frozen=True)
+class PathConfig:
+    """Dataclass for path configuration."""
+
+    artifacts: Path
+    data: Path
+    logs: Path
+    queries: Path
+    results: Path
+    prompts: Path
+    qdrant_collections: Path
+    qdrant_sources: Path
+    hf_hub_cache: Path
+    llama_cpp_cache: Path
+
+
 def load_path_env() -> PathConfig:
-    """
-    Loads path configuration from environment variables or defaults.
+    """Loads path configuration from environment variables or defaults.
 
     Returns:
         PathConfig: Dataclass containing path configuration.
+        - artifacts (Path): Root directory for pipeline processing artifacts.
         - data (Path): Path to the data directory.
         - logs (Path): Path to the logs file.
         - queries (Path): Path to the queries file.
@@ -533,7 +582,12 @@ def load_path_env() -> PathConfig:
         )
         default_qdrant_sources = (default_sources_base / "sources").expanduser()
 
+    default_artifacts_dir: Path = project_root / "artifacts"
+
     return PathConfig(
+        artifacts=Path(
+            os.getenv("PIPELINE_ARTIFACTS_DIR", default_artifacts_dir)
+        ).expanduser(),
         data=Path(os.getenv("DATA_PATH", default_data_dir)).expanduser(),
         logs=Path(os.getenv("LOG_PATH", default_log_dir)).expanduser(),
         queries=Path(os.getenv("QUERIES_PATH", default_query_dir)).expanduser(),
@@ -548,12 +602,19 @@ def load_path_env() -> PathConfig:
     )
 
 
+@dataclass(frozen=True)
+class RetrievalConfig:
+    """Dataclass for RAG (Retrieval-Augmented Generation) configuration."""
+
+    rerank_use_fp16: bool
+    retrieve_top_k: int
+
+
 def load_retrieval_env(
     default_rerank_use_fp16: bool = False,
     default_retrieve_top_k: int = 20,
 ) -> RetrievalConfig:
-    """
-    Loads retrieval configuration from environment variables or defaults.
+    """Loads retrieval configuration from environment variables or defaults.
 
     Args:
         default_rerank_use_fp16 (bool): Default flag to use FP16 for reranker model. Default is False.
@@ -573,11 +634,17 @@ def load_retrieval_env(
     )
 
 
+@dataclass(frozen=True)
+class SessionConfig:
+    """Dataclass for session configuration."""
+
+    session_store: str
+
+
 def load_session_env(
     default_session_store: str = "sqlite:///sessions.db",
 ) -> SessionConfig:
-    """
-    Loads session configuration from environment variables or defaults.
+    """Loads session configuration from environment variables or defaults.
 
     Args:
         default_session_store (str): Default session store configuration (e.g. database URL or file path).
@@ -589,4 +656,107 @@ def load_session_env(
     """
     return SessionConfig(
         session_store=os.getenv("SESSION_STORE", default_session_store)
+    )
+
+
+PIPELINE_VERSION = "1.0.0"
+
+
+@dataclass(frozen=True)
+class PipelineConfig:
+    """Configuration for the document processing pipeline.
+
+    Attributes:
+        text_coverage_threshold: Minimum characters-per-area ratio below which
+            a page is classified as needing OCR.
+        pipeline_version: Semver string identifying the pipeline logic version.
+        artifacts_dir: Root directory for artifact output.
+        max_retries: Maximum retry attempts per stage on a given page.
+        force_reprocess: When True, ignore existing artifacts and reprocess.
+        max_workers: Maximum parallel workers for document-level processing.
+        enable_vision_ocr: When True, use the vision LLM as a fallback OCR
+            engine for scanned pages that have no extractable text layer.
+        vision_ocr_timeout: Per-request timeout in seconds for vision OCR API
+            calls (separate from the global ``OPENAI_TIMEOUT``).
+        vision_ocr_max_retries: Maximum retries for a single vision OCR API call.
+        vision_ocr_max_image_dimension: Maximum pixel dimension (width or height)
+            for images sent to the vision OCR endpoint.  Larger renders are
+            down-scaled proportionally before encoding.
+        vision_ocr_max_tokens: Maximum number of tokens the vision LLM may
+            generate per OCR request.  Keeps response time bounded.
+    """
+
+    text_coverage_threshold: float
+    pipeline_version: str
+    artifacts_dir: str
+    max_retries: int
+    force_reprocess: bool
+    max_workers: int
+    enable_vision_ocr: bool
+    vision_ocr_timeout: float
+    vision_ocr_max_retries: int
+    vision_ocr_max_image_dimension: int
+    vision_ocr_max_tokens: int
+
+
+def load_pipeline_config(
+    default_text_coverage_threshold: float = 0.01,
+    default_pipeline_version: str = PIPELINE_VERSION,
+    default_artifacts_dir: str | None = None,
+    default_max_retries: int = 2,
+    default_force_reprocess: bool = False,
+    default_max_workers: int = 4,
+    default_enable_vision_ocr: bool = True,
+    default_vision_ocr_timeout: float = 60.0,
+    default_vision_ocr_max_retries: int = 1,
+    default_vision_ocr_max_image_dimension: int = 1024,
+    default_vision_ocr_max_tokens: int = 4096,
+) -> PipelineConfig:
+    """Build a ``PipelineConfig`` from environment variables with sensible defaults.
+
+    Args:
+        default_text_coverage_threshold: Default characters-per-area threshold for OCR classification.
+        default_pipeline_version: Default pipeline version string.
+        default_artifacts_dir: Default root directory for artifacts. If None, uses the value from ``load_path_env().artifacts``.
+        default_max_retries: Default maximum retry attempts per page stage.
+        default_force_reprocess: Default flag to force reprocessing of pages.
+        default_max_workers: Default maximum number of parallel workers for document processing.
+        default_enable_vision_ocr: Default flag to enable vision OCR fallback for scanned pages.
+        default_vision_ocr_timeout: Default per-request timeout in seconds for vision OCR API calls.
+        default_vision_ocr_max_retries: Default maximum retries for a single vision OCR API call.
+        default_vision_ocr_max_image_dimension: Default maximum pixel dimension for images sent to the vision OCR endpoint.
+        default_vision_ocr_max_tokens: Default maximum number of tokens the vision LLM may generate per OCR request.
+
+    Returns:
+        A fully-initialised ``PipelineConfig``.
+    """
+    return PipelineConfig(
+        text_coverage_threshold=float(
+            os.getenv(
+                "PIPELINE_TEXT_COVERAGE_THRESHOLD", default_text_coverage_threshold
+            )
+        ),
+        pipeline_version=PIPELINE_VERSION,
+        artifacts_dir=str(load_path_env().artifacts),
+        max_retries=int(os.getenv("PIPELINE_MAX_RETRIES", default_max_retries)),
+        force_reprocess=os.getenv("PIPELINE_FORCE_REPROCESS", "false").lower()
+        in {"true", "1", "yes"},
+        max_workers=int(os.getenv("PIPELINE_MAX_WORKERS", default_max_workers)),
+        enable_vision_ocr=os.getenv("PIPELINE_ENABLE_VISION_OCR", "true").lower()
+        in {"true", "1", "yes"},
+        vision_ocr_timeout=float(
+            os.getenv("PIPELINE_VISION_OCR_TIMEOUT", default_vision_ocr_timeout)
+        ),
+        vision_ocr_max_retries=int(
+            os.getenv("PIPELINE_VISION_OCR_MAX_RETRIES", default_vision_ocr_max_retries)
+        ),
+        vision_ocr_max_image_dimension=int(
+            os.getenv(
+                "PIPELINE_VISION_OCR_MAX_IMAGE_DIM",
+                default_vision_ocr_max_image_dimension,
+            )
+        ),
+        vision_ocr_max_tokens=int(
+            os.getenv("PIPELINE_VISION_OCR_MAX_TOKENS", default_vision_ocr_max_tokens)
+        ),
     )

@@ -1,142 +1,88 @@
-from types import SimpleNamespace
+"""Tests for the CorePDFPipelineReader document hash and node-building logic."""
+
 from pathlib import Path
 
-import pytest
-
-from docint.core.readers.documents import CustomDoclingReader
+from docint.core.readers.documents import CorePDFPipelineReader
 
 
-def test_file_hash_computed_once_when_no_extra_info(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """
-    Test that the file hash is computed only once when no extra_info is provided.
+def test_build_nodes_attaches_file_hash_as_doc_id(tmp_path: Path) -> None:
+    """The doc_id should appear as file_hash in every node's metadata.
 
     Args:
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
-        tmp_path (Path): The temporary path fixture.
+        tmp_path (Path): Temporary directory path for the test.
     """
-    calls = {"count": 0}
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
 
-    def fake_compute_file_hash(path):
-        calls["count"] += 1
-        return "deadbeef"
+    chunks = [
+        {
+            "chunk_id": "c1",
+            "text": "First chunk.",
+            "page_range": [0],
+        },
+        {
+            "chunk_id": "c2",
+            "text": "Second chunk.",
+            "page_range": [1],
+        },
+    ]
 
-    # Patch compute_file_hash used by the reader module
-    monkeypatch.setattr(
-        "docint.core.readers.documents.compute_file_hash",
-        fake_compute_file_hash,
+    docs, nodes = CorePDFPipelineReader._build_nodes(
+        file_path=pdf_path,
+        doc_id="abc123",
+        pipeline_version="1.0.0",
+        chunks=chunks,
     )
 
-    # Mock DoclingReader
-    class DummyDoclingReader:
-        class ExportType:
-            JSON = "json"
-            MARKDOWN = "markdown"
-
-        def __init__(self, export_type=None, doc_converter=None):
-            pass
-
-        def load_data(self, path):
-            return [
-                SimpleNamespace(text="page1", metadata={"page": 1}, id_="doc1"),
-                SimpleNamespace(text="page2", metadata={"page": 2}, id_="doc2"),
-            ]
-
-    # Mock DocumentConverter and options to avoid loading real models
-    monkeypatch.setattr(
-        "docint.core.readers.documents.DocumentConverter", lambda **kwargs: None
-    )
-    monkeypatch.setattr(
-        "docint.core.readers.documents.PdfFormatOption", lambda **kwargs: None
-    )
-    monkeypatch.setattr(
-        "docint.core.readers.documents.PdfPipelineOptions", lambda **kwargs: None
-    )
-    monkeypatch.setattr(
-        "docint.core.readers.documents.AcceleratorOptions", lambda **kwargs: None
-    )
-
-    monkeypatch.setattr(
-        "docint.core.readers.documents.DoclingReader",
-        DummyDoclingReader,
-    )
-
-    # Create a dummy file to represent the PDF
-    p = tmp_path / "doc.pdf"
-    p.write_bytes(b"dummy pdf content")
-
-    r = CustomDoclingReader()
-    docs = r.load_data(p)
-
-    # Ensure file_hash was computed once and attached to both pages
-    assert calls["count"] == 1
     assert len(docs) == 2
-    assert docs[0].metadata["file_hash"] == "deadbeef"
-    assert docs[1].metadata["file_hash"] == "deadbeef"
-    assert docs[0].text == "page1"
-    assert docs[1].text == "page2"
+    assert len(nodes) == 2
+    for node in nodes:
+        assert node.metadata["file_hash"] == "abc123"
 
 
-def test_file_hash_respects_extra_info_and_not_recomputed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """
-    Test that the file hash from extra_info is used and not recomputed.
+def test_build_nodes_skips_empty_text_chunks(tmp_path: Path) -> None:
+    """Chunks with empty or whitespace-only text should be omitted."""
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
 
-    Args:
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
-        tmp_path (Path): The temporary path fixture.
-    """
-    calls = {"count": 0}
+    chunks = [
+        {"chunk_id": "c1", "text": "Real content.", "page_range": [0]},
+        {"chunk_id": "c2", "text": "", "page_range": [1]},
+        {"chunk_id": "c3", "text": "   ", "page_range": [2]},
+    ]
 
-    def fake_compute_file_hash(path):
-        calls["count"] += 1
-        return "noop"
-
-    monkeypatch.setattr(
-        "docint.core.readers.documents.compute_file_hash",
-        fake_compute_file_hash,
+    docs, nodes = CorePDFPipelineReader._build_nodes(
+        file_path=pdf_path,
+        doc_id="hash1",
+        pipeline_version="1.0.0",
+        chunks=chunks,
     )
 
-    # Mock DoclingReader
-    class DummyDoclingReader:
-        class ExportType:
-            JSON = "json"
-            MARKDOWN = "markdown"
+    assert len(nodes) == 1
+    assert nodes[0].text == "Real content."
 
-        def __init__(self, export_type=None, doc_converter=None):
-            pass
 
-        def load_data(self, path):
-            return [SimpleNamespace(text="only", metadata={"page": 1}, id_="doc3")]
+def test_iter_pdf_files_single_file(tmp_path: Path) -> None:
+    """When data_dir is a single PDF, only that file is returned."""
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    txt = tmp_path / "readme.txt"
+    txt.write_text("not a pdf")
 
-    monkeypatch.setattr(
-        "docint.core.readers.documents.DoclingReader",
-        DummyDoclingReader,
-    )
+    assert CorePDFPipelineReader._iter_pdf_files(pdf) == [pdf]
+    assert CorePDFPipelineReader._iter_pdf_files(txt) == []
 
-    # Mock DocumentConverter and options to avoid loading real models
-    monkeypatch.setattr(
-        "docint.core.readers.documents.DocumentConverter", lambda **kwargs: None
-    )
-    monkeypatch.setattr(
-        "docint.core.readers.documents.PdfFormatOption", lambda **kwargs: None
-    )
-    monkeypatch.setattr(
-        "docint.core.readers.documents.PdfPipelineOptions", lambda **kwargs: None
-    )
-    monkeypatch.setattr(
-        "docint.core.readers.documents.AcceleratorOptions", lambda **kwargs: None
-    )
 
-    p = tmp_path / "doc2.pdf"
-    p.write_bytes(b"another content")
+def test_iter_pdf_files_directory(tmp_path: Path) -> None:
+    """When data_dir is a directory, all nested PDFs are found."""
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (tmp_path / "a.pdf").write_bytes(b"%PDF")
+    (sub / "b.pdf").write_bytes(b"%PDF")
+    (tmp_path / "c.txt").write_text("nope")
 
-    r = CustomDoclingReader()
-    docs = r.load_data(p, extra_info={"file_hash": "explicit-hash"})
-
-    # compute_file_hash should not be called because extra_info supplied it
-    assert calls["count"] == 0
-    assert docs[0].metadata["file_hash"] == "explicit-hash"
-    assert docs[0].text == "only"
+    result = CorePDFPipelineReader._iter_pdf_files(tmp_path)
+    names = [p.name for p in result]
+    assert "a.pdf" in names
+    assert "b.pdf" in names
+    assert "c.txt" not in names

@@ -8,8 +8,7 @@ _MAGIC = magic.Magic(mime=True)
 
 
 def _guess_from_extension(path: Path) -> str | None:
-    """
-    Best-effort MIME guess based on the file extension.
+    """Best-effort MIME guess based on the file extension.
 
     Args:
         path (Path): The path to the file.
@@ -23,8 +22,7 @@ def _guess_from_extension(path: Path) -> str | None:
 
 
 def get_mimetype(file_path: str | Path) -> str:
-    """
-    Get the MIME type of a file.
+    """Get the MIME type of a file.
 
     Args:
         file_path (str | Path): The path to the file.

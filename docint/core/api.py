@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal, cast
 
-import anyio
+from anyio import to_thread
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
@@ -50,19 +50,20 @@ _clarification_policy = ClarificationPolicy(ClarificationConfig())
 
 
 def _build_orchestrator() -> AgentOrchestrator:
-    """
-    Construct an orchestrator bound to the current RAG instance.
+    """Construct an orchestrator bound to the current RAG instance.
 
     Returns:
         AgentOrchestrator: The constructed agent orchestrator.
     """
     retrieval_agent = RAGRetrievalAgent(rag)
-    understanding = _understanding_agent
+    understanding: SimpleUnderstandingAgent | ContextualUnderstandingAgent = (
+        _understanding_agent
+    )
 
     # Use contextual understanding if LLM is configured
-    if getattr(rag, "gen_model_id", None):
+    if getattr(rag, "text_model_id", None):
         try:
-            understanding = ContextualUnderstandingAgent(llm=rag.gen_model)
+            understanding = ContextualUnderstandingAgent(llm=rag.text_model)
         except Exception as e:
             logger.warning("Failed to init ContextualUnderstandingAgent: {}", e)
 
@@ -78,8 +79,7 @@ def _build_orchestrator() -> AgentOrchestrator:
 
 
 def _resolve_data_dir() -> Path:
-    """
-    Return the configured data directory for ingestion.
+    """Return the configured data directory for ingestion.
 
     Returns:
         Path: The path to the data directory.
@@ -89,8 +89,7 @@ def _resolve_data_dir() -> Path:
 
 
 def _resolve_qdrant_col_dir() -> Path:
-    """
-    Return the configured Qdrant collections directory.
+    """Return the configured Qdrant collections directory.
 
     Returns:
         Path: The path to the Qdrant collections directory.
@@ -99,8 +98,7 @@ def _resolve_qdrant_col_dir() -> Path:
 
 
 def _resolve_qdrant_src_dir() -> Path:
-    """
-    Return the configured Qdrant sources directory (separate from collections).
+    """Return the configured Qdrant sources directory (separate from collections).
 
     Returns:
         Path: The path to the Qdrant sources directory.
@@ -115,8 +113,7 @@ def _resolve_qdrant_src_dir() -> Path:
 
 
 def _format_sse(event: str, data: dict[str, Any]) -> str:
-    """
-    Return a serialized Server-Sent Event payload.
+    """Return a serialized Server-Sent Event payload.
 
     Args:
         event (str): The event type.
@@ -199,8 +196,7 @@ class AgentChatOut(BaseModel):
 
 @app.get("/collections/list", response_model=list[str], tags=["Collections"])
 def collections_list() -> list[str]:
-    """
-    List existing collections.
+    """List existing collections.
 
     Returns:
         list[str]: A list of collection names.
@@ -219,8 +215,7 @@ def collections_list() -> list[str]:
     "/collections/select", response_model=SelectCollectionOut, tags=["Collections"]
 )
 def collections_select(payload: SelectCollectionIn) -> dict[str, bool | str]:
-    """
-    Select a collection to use for queries.
+    """Select a collection to use for queries.
 
     Args:
         payload (SelectCollectionIn): The payload containing the collection name.
@@ -263,8 +258,7 @@ def collections_select(payload: SelectCollectionIn) -> dict[str, bool | str]:
 
 @app.delete("/collections/{name}", tags=["Collections"])
 def collections_delete(name: str) -> dict[str, bool]:
-    """
-    Delete a collection.
+    """Delete a collection.
 
     Args:
         name (str): The name of the collection to delete.
@@ -285,8 +279,7 @@ def collections_delete(name: str) -> dict[str, bool]:
 
 @app.post("/query", response_model=QueryOut, tags=["Query"])
 def query(payload: QueryIn) -> dict[str, list[dict] | str]:
-    """
-    Handle a query request.
+    """Handle a query request.
 
     Args:
         payload (QueryIn): The query payload containing the question and session ID.
@@ -325,8 +318,7 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str]:
 
 @app.post("/stream_query", tags=["Query"])
 async def stream_query(payload: QueryIn) -> StreamingResponse:
-    """
-    Handle a streaming query request.
+    """Handle a streaming query request.
 
     Args:
         payload (QueryIn): The query payload containing the question and session ID.
@@ -347,8 +339,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
     rag.start_session(payload.session_id)
 
     async def event_generator() -> AsyncIterator[str]:
-        """
-        Generate SSE events for the streaming query.
+        """Generate SSE events for the streaming query.
 
         Returns:
             AsyncIterator[str]: An asynchronous iterator yielding SSE events.
@@ -372,8 +363,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
 
 @app.post("/summarize", response_model=SummarizeOut, tags=["Query"])
 def summarize() -> dict[str, list[dict] | str]:
-    """
-    Generate a summary for the currently selected collection.
+    """Generate a summary for the currently selected collection.
 
     Returns:
         dict[str, list[dict] | str]: A dictionary containing the summary and sources.
@@ -408,8 +398,7 @@ def summarize() -> dict[str, list[dict] | str]:
 
 @app.post("/summarize/stream", tags=["Query"])
 async def summarize_stream() -> StreamingResponse:
-    """
-    Generate a streaming summary for the currently selected collection.
+    """Generate a streaming summary for the currently selected collection.
 
     Returns:
         StreamingResponse: A streaming response that yields SSE events during summarization.
@@ -421,8 +410,7 @@ async def summarize_stream() -> StreamingResponse:
         raise HTTPException(status_code=400, detail="No collection selected")
 
     async def event_generator() -> AsyncIterator[str]:
-        """
-        Generate SSE events for the streaming summary.
+        """Generate SSE events for the streaming summary.
 
         Yields:
             AsyncIterator[str]: An asynchronous iterator yielding SSE events.
@@ -442,8 +430,7 @@ async def summarize_stream() -> StreamingResponse:
 
 @app.get("/collections/ie", tags=["Query"])
 def get_collection_ner() -> dict[str, list[dict]]:
-    """
-    Get all NER data (entities and relations) for the currently selected collection.
+    """Get all NER data (entities and relations) for the currently selected collection.
 
     Returns:
         dict[str, list[dict]]: A dictionary containing the list of NER sources.
@@ -463,8 +450,7 @@ def get_collection_ner() -> dict[str, list[dict]]:
 
 @app.get("/collections/documents", tags=["Query"])
 def get_collection_documents() -> dict[str, list[dict]]:
-    """
-    Get list of documents in the currently selected collection.
+    """Get list of documents in the currently selected collection.
 
     Returns:
         dict[str, list[dict]]: A dictionary containing the list of documents.
@@ -484,8 +470,7 @@ def get_collection_documents() -> dict[str, list[dict]]:
 
 @app.get("/sessions/list", response_model=SessionListOut, tags=["Sessions"])
 def list_sessions() -> dict[str, list[dict]]:
-    """
-    List all available chat sessions.
+    """List all available chat sessions.
 
     Returns:
         dict[str, list[dict]]: A dictionary containing the list of sessions.
@@ -514,8 +499,7 @@ def list_sessions() -> dict[str, list[dict]]:
     tags=["Sessions"],
 )
 def get_session_history(session_id: str) -> dict[str, list[dict]]:
-    """
-    Get history for a specific session.
+    """Get history for a specific session.
 
     Args:
         session_id (str): The ID of the session.
@@ -543,8 +527,7 @@ def get_session_history(session_id: str) -> dict[str, list[dict]]:
 
 @app.delete("/sessions/{session_id}", tags=["Sessions"])
 def delete_session(session_id: str) -> dict[str, bool]:
-    """
-    Delete a session.
+    """Delete a session.
 
     Args:
         session_id (str): The ID of the session to delete.
@@ -572,8 +555,7 @@ def delete_session(session_id: str) -> dict[str, bool]:
 
 @app.post("/agent/chat", response_model=AgentChatOut, tags=["Agent"])
 def agent_chat(payload: AgentChatIn) -> AgentChatOut:
-    """
-    Agentic chat endpoint: understand → maybe clarify → retrieve/respond.
+    """Agentic chat endpoint: understand → maybe clarify → retrieve/respond.
 
     Args:
         payload (AgentChatIn): Message and optional session id.
@@ -626,8 +608,7 @@ def agent_chat(payload: AgentChatIn) -> AgentChatOut:
 
 @app.post("/ingest", response_model=IngestOut, tags=["Ingestion"])
 def ingest(payload: IngestIn) -> dict[str, bool | str]:
-    """
-    Trigger ingestion for the requested collection using the configured data directory.
+    """Trigger ingestion for the requested collection using the configured data directory.
 
     Args:
         payload (IngestIn): The ingestion payload containing the collection name and hybrid flag.
@@ -695,8 +676,7 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
 
 @app.post("/agent/chat/stream", tags=["Agent"])
 async def agent_chat_stream(payload: AgentChatIn) -> StreamingResponse:
-    """
-    Streaming variant of agent chat with token events and final metadata.
+    """Streaming variant of agent chat with token events and final metadata.
 
     Args:
         payload (AgentChatIn): Message and optional session id.
@@ -706,8 +686,7 @@ async def agent_chat_stream(payload: AgentChatIn) -> StreamingResponse:
     """
 
     async def event_generator() -> AsyncIterator[str]:
-        """
-        Generate SSE events for the agent chat stream.
+        """Generate SSE events for the agent chat stream.
 
         Yields:
             AsyncIterator[str]: An asynchronous iterator yielding SSE events.
@@ -766,8 +745,7 @@ async def ingest_upload(
     files: list[UploadFile] = File(...),
     hybrid: bool | None = Form(True),
 ) -> StreamingResponse:
-    """
-    Upload files for ingestion and stream progress as SSE events.
+    """Upload files for ingestion and stream progress as SSE events.
 
     Args:
         collection (str): The name of the collection to ingest into.
@@ -794,8 +772,7 @@ async def ingest_upload(
     # The files are ingested into Qdrant and kept in the collection directory.
 
     async def event_stream() -> AsyncIterator[str]:
-        """
-        Stream SSE events during the ingestion process.
+        """Stream SSE events during the ingestion process.
 
         Returns:
             AsyncIterator[str]: A stream of Server-Sent Events (SSE) as strings.
@@ -858,8 +835,7 @@ async def ingest_upload(
             loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
 
             def progress_callback(msg: str) -> None:
-                """
-                Callback function to report progress during ingestion.
+                """Callback function to report progress during ingestion.
 
                 Args:
                     msg (str): Progress message to be reported.
@@ -867,11 +843,9 @@ async def ingest_upload(
                 loop.call_soon_threadsafe(queue.put_nowait, msg)
 
             async def run_ingestion() -> None:
-                """
-                Run the ingestion process in a separate thread.
-                """
+                """Run the ingestion process in a separate thread."""
                 try:
-                    await anyio.to_thread.run_sync(
+                    await to_thread.run_sync(
                         ingest_module.ingest_docs,
                         name,
                         batch_dir,
@@ -918,8 +892,7 @@ async def ingest_upload(
 
 @app.get("/sources/preview", tags=["Sources"])
 def preview_source(collection: str, file_hash: str) -> FileResponse:
-    """
-    Serve a previously ingested source file for preview purposes.
+    """Serve a previously ingested source file for preview purposes.
 
     Args:
         collection (str): The name of the collection.

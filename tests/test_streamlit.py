@@ -4,8 +4,7 @@ from streamlit.testing.v1 import AppTest
 
 @patch("requests.get")
 def test_streamlit_app_loads(mock_get: MagicMock) -> None:
-    """
-    Test that the Streamlit app loads without errors.
+    """Test that the Streamlit app loads without errors.
 
     Args:
         mock_get (MagicMock): The mock object for requests.get.

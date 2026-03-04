@@ -6,9 +6,7 @@ from typing import Any, Protocol
 
 @dataclass
 class Turn:
-    """
-    Represents a single user turn.
-    """
+    """Represents a single user turn."""
 
     user_input: str
     session_id: str | None = None
@@ -16,9 +14,7 @@ class Turn:
 
 @dataclass
 class IntentAnalysis:
-    """
-    Intent and entity analysis result.
-    """
+    """Intent and entity analysis result."""
 
     intent: str
     confidence: float
@@ -30,9 +26,7 @@ class IntentAnalysis:
 
 @dataclass
 class ClarificationRequest:
-    """
-    Clarification request returned by the policy or clarifier.
-    """
+    """Clarification request returned by the policy or clarifier."""
 
     needed: bool
     message: str | None = None
@@ -41,9 +35,7 @@ class ClarificationRequest:
 
 @dataclass
 class RetrievalRequest:
-    """
-    Input to the retrieval agent.
-    """
+    """Input to the retrieval agent."""
 
     turn: Turn
     analysis: IntentAnalysis
@@ -51,9 +43,7 @@ class RetrievalRequest:
 
 @dataclass
 class RetrievalResult:
-    """
-    Output from retrieval or generation step.
-    """
+    """Output from retrieval or generation step."""
 
     answer: str | None
     sources: list[dict[str, Any]]
@@ -66,9 +56,7 @@ class RetrievalResult:
 
 @dataclass
 class OrchestratorResult:
-    """
-    Top-level result for a single orchestrated turn.
-    """
+    """Top-level result for a single orchestrated turn."""
 
     clarification: ClarificationRequest | None
     retrieval: RetrievalResult | None
@@ -76,9 +64,7 @@ class OrchestratorResult:
 
 
 class UnderstandingAgent(Protocol):
-    """
-    Interface for understanding user input.
-    """
+    """Interface for understanding user input."""
 
     def analyze(
         self, turn: Turn, context: Any | None = None
@@ -97,9 +83,7 @@ class UnderstandingAgent(Protocol):
 
 
 class ClarificationAgent(Protocol):
-    """
-    Interface for clarification generation.
-    """
+    """Interface for clarification generation."""
 
     def build(
         self, turn: Turn, analysis: IntentAnalysis
@@ -118,9 +102,7 @@ class ClarificationAgent(Protocol):
 
 
 class RetrievalAgent(Protocol):
-    """
-    Interface for retrieval.
-    """
+    """Interface for retrieval."""
 
     def retrieve(
         self, request: RetrievalRequest
@@ -138,9 +120,7 @@ class RetrievalAgent(Protocol):
 
 
 class ResponseAgent(Protocol):
-    """
-    Interface for response post-processing.
-    """
+    """Interface for response post-processing."""
 
     def finalize(
         self, result: RetrievalResult, turn: Turn

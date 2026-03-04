@@ -6,8 +6,7 @@ from docint.core.storage.hierarchical import HierarchicalNodeParser
 
 @pytest.fixture
 def sample_document() -> Document:
-    """
-    Create a sample document with multiple sections and sentences.
+    """Create a sample document with multiple sections and sentences.
 
     Returns:
         Document: A sample document with multiple sections and sentences.
@@ -20,8 +19,7 @@ def sample_document() -> Document:
 
 
 def test_hierarchical_structure(sample_document: Document) -> None:
-    """
-    Test that the parser produces Level 1 and Level 2 chunks with correct metadata.
+    """Test that the parser produces Level 1 and Level 2 chunks with correct metadata.
 
     Args:
         sample_document (Document): A sample document for testing.
@@ -61,9 +59,7 @@ def test_hierarchical_structure(sample_document: Document) -> None:
 
 
 def test_sentence_boundaries() -> None:
-    """
-    Test that fine chunks respect sentence boundaries even with small chunk size.
-    """
+    """Test that fine chunks respect sentence boundaries even with small chunk size."""
     text = "Sentence one. Sentence two. Sentence three."
     doc = Document(text=text)
 
@@ -106,9 +102,7 @@ def test_sentence_boundaries() -> None:
 
 
 def test_input_nodes() -> None:
-    """
-    Test that the parser can handle input nodes (e.g. from MarkdownParser)
-    """
+    """Test that the parser can handle input nodes (e.g. from MarkdownParser)"""
     # Simulate a node from Markdown parser
     # node = Document(
     #     text="Section text. Sentence inside.", metadata={"header_path": "/Section 1"}

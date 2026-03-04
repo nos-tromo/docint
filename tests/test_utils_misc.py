@@ -5,23 +5,21 @@ from pathlib import Path
 import pytest
 
 from docint.utils.clean_text import basic_clean
+from docint.utils.env_cfg import load_path_env
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.logging_cfg import setup_logging
 from loguru import logger
 
 
 def test_basic_clean_normalizes_whitespace() -> None:
-    """
-    Test that basic_clean normalizes whitespace and newlines.
-    """
+    """Test that basic_clean normalizes whitespace and newlines."""
     text = "Line 1\r\n\r\nLine 2\n\n\nLine 3   \n"
     cleaned = basic_clean(text)
     assert cleaned == "Line 1\nLine 2\nLine 3"
 
 
 def test_compute_file_hash(tmp_path: Path) -> None:
-    """
-    Test that compute_file_hash correctly calculates the SHA256 hash of a file.
+    """Test that compute_file_hash correctly calculates the SHA256 hash of a file.
 
     Args:
         tmp_path (Path): The temporary path fixture.
@@ -33,8 +31,7 @@ def test_compute_file_hash(tmp_path: Path) -> None:
 
 
 def test_compute_file_hash_missing(tmp_path: Path) -> None:
-    """
-    Test that compute_file_hash raises FileNotFoundError for missing files.
+    """Test that compute_file_hash raises FileNotFoundError for missing files.
 
     Args:
         tmp_path (Path): The temporary path fixture.
@@ -44,8 +41,7 @@ def test_compute_file_hash_missing(tmp_path: Path) -> None:
 
 
 def test_ensure_file_hash_mutates_metadata(tmp_path: Path) -> None:
-    """
-    Test that ensure_file_hash adds the file hash to the metadata dictionary.
+    """Test that ensure_file_hash adds the file hash to the metadata dictionary.
 
     Args:
         tmp_path (Path): The temporary path fixture.
@@ -58,18 +54,42 @@ def test_ensure_file_hash_mutates_metadata(tmp_path: Path) -> None:
 
 
 def test_ensure_file_hash_requires_inputs() -> None:
-    """
-    Test that ensure_file_hash raises ValueError if neither path nor file_hash is provided.
-    """
+    """Test that ensure_file_hash raises ValueError if neither path nor file_hash is provided."""
     with pytest.raises(ValueError):
         ensure_file_hash({}, path=None, file_hash=None)
+
+
+def test_path_config_artifacts_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PathConfig.artifacts should default to ``<project_root>/artifacts``.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Fixture to override environment.
+    """
+    monkeypatch.delenv("PIPELINE_ARTIFACTS_DIR", raising=False)
+    cfg = load_path_env()
+    assert cfg.artifacts.name == "artifacts"
+    assert cfg.artifacts.is_absolute()
+
+
+def test_path_config_artifacts_env_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PIPELINE_ARTIFACTS_DIR env var should override the default artifacts path.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Fixture to override environment.
+        tmp_path (Path): Temporary path fixture.
+    """
+    custom = tmp_path / "my-artifacts"
+    monkeypatch.setenv("PIPELINE_ARTIFACTS_DIR", str(custom))
+    cfg = load_path_env()
+    assert cfg.artifacts == custom
 
 
 def test_setup_logging_respects_env_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """
-    setup_logging should honor LOG_PATH and create the log file.
+    """setup_logging should honor LOG_PATH and create the log file.
 
     Args:
         tmp_path (Path): Temporary directory.

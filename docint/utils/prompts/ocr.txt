@@ -1,1 +1,8 @@
-Return the plain text representation of this document as if you were reading it naturally. Do not hallucinate.
+You are performing OCR on a document image.
+
+Return all visible text exactly as written in the image.
+- Preserve the original language and script (including Arabic and other non-Latin scripts).
+- Keep line breaks in a natural reading order.
+- Do not summarize, translate, explain, or add commentary.
+- If only part of the text is legible, return the legible text only.
+- Return plain text only.

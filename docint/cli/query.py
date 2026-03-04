@@ -11,8 +11,7 @@ from docint.utils.logging_cfg import setup_logging
 
 
 def get_col_name() -> str:
-    """
-    Prompts the user to enter a collection name.
+    """Prompts the user to enter a collection name.
 
     Returns:
         str: The entered collection name.
@@ -21,8 +20,7 @@ def get_col_name() -> str:
 
 
 def rag_pipeline(col_name: str) -> RAG:
-    """
-    Initializes a Retrieval-Augmented Generation (RAG) session.
+    """Initializes a Retrieval-Augmented Generation (RAG) session.
 
     Args:
         col_name (str): The name of the collection to use.
@@ -38,8 +36,7 @@ def rag_pipeline(col_name: str) -> RAG:
 
 
 def load_queries(queries_path: Path, prompts_path: Path) -> list[str]:
-    """
-    Loads query strings from a text file. Defaults to creating a file with a default query if none exists.
+    """Loads query strings from a text file. Defaults to creating a file with a default query if none exists.
 
     Args:
         queries_path (Path): The path to the query text file.
@@ -66,8 +63,7 @@ def load_queries(queries_path: Path, prompts_path: Path) -> list[str]:
 
 
 def _store_output(filename: str, data: dict | list, output_path: str | Path) -> None:
-    """
-    Stores the output data to a JSON file.
+    """Stores the output data to a JSON file.
 
     Args:
         filename (str): The name of the output file (without extension).
@@ -100,8 +96,7 @@ def _store_output(filename: str, data: dict | list, output_path: str | Path) -> 
 
 
 def run_query(rag: RAG, query: str, index: int, output_path: str | Path) -> None:
-    """
-    Runs a query against the RAG instance and stores the result.
+    """Runs a query against the RAG instance and stores the result.
 
     Args:
         rag (RAG): The RAG instance to query.
@@ -118,9 +113,7 @@ def run_query(rag: RAG, query: str, index: int, output_path: str | Path) -> None
 
 
 def main() -> None:
-    """
-    Main entry point for the CLI. Initializes the RAG pipeline, loads queries, and processes each query.
-    """
+    """Main entry point for the CLI. Initializes the RAG pipeline, loads queries, and processes each query."""
     setup_logging()
     set_offline_env()
     col_name = get_col_name()

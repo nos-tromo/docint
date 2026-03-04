@@ -27,6 +27,9 @@ from docling.models.stages.picture_classifier.document_picture_classifier import
     DocumentPictureClassifier,
     DocumentPictureClassifierOptions,
 )
+from docling.models.inference_engines.image_classification.transformers_engine import (
+    TransformersImageClassificationEngineOptions,
+)
 from docling.models.stages.table_structure.table_structure_model import (
     TableStructureModel,
 )
@@ -34,6 +37,7 @@ from dotenv import load_dotenv
 from gliner import GLiNER
 from huggingface_hub import hf_hub_download, snapshot_download
 from loguru import logger
+from transformers import AutoProcessor, CLIPModel
 
 from docint.utils.logging_cfg import setup_logging
 
@@ -41,9 +45,39 @@ load_dotenv()
 setup_logging()
 
 
-def load_docling_models() -> None:
+def load_clip_model(model_id: str, cache_folder: Path) -> None:
+    """Preloads the CLIP model to the HuggingFace cache.
+
+    Args:
+        model_id (str): The name of the CLIP model to load.
+        cache_folder (Path): The path to the HuggingFace cache folder.
     """
-    Preloads Docling models to the HuggingFace cache.
+    resolved = resolve_hf_cache_path(cache_dir=cache_folder, repo_id=model_id)
+    if resolved:
+        logger.info("Found local cache for CLIP at {}", resolved)
+        try:
+            CLIPModel.from_pretrained(
+                pretrained_model_name_or_path=str(resolved),
+                local_files_only=True,
+            )
+            AutoProcessor.from_pretrained(
+                pretrained_model_name_or_path=str(resolved),
+                local_files_only=True,
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to load CLIP from local cache: {}. Retrying with download...", e
+            )
+            CLIPModel.from_pretrained(pretrained_model_name_or_path=model_id)
+            AutoProcessor.from_pretrained(pretrained_model_name_or_path=model_id)
+    else:
+        CLIPModel.from_pretrained(pretrained_model_name_or_path=model_id)
+        AutoProcessor.from_pretrained(pretrained_model_name_or_path=model_id)
+    logger.info("Loaded CLIP model: {}", model_id)
+
+
+def load_docling_models() -> None:
+    """Preloads Docling models to the HuggingFace cache.
 
     We invoke the `download_models` static method of each model class directly.
     This ensures that we use the exact same logic (repo_id, revision, local_dir)
@@ -71,9 +105,10 @@ def load_docling_models() -> None:
         logger.info("Loaded Code/Formula model")
 
         # 5. Picture Classifier (Standard HF cache)
-        DocumentPictureClassifier.download_models(
-            repo_id=DocumentPictureClassifierOptions().repo_id, progress=True
+        opts = DocumentPictureClassifierOptions(
+            engine_options=TransformersImageClassificationEngineOptions()
         )
+        DocumentPictureClassifier.download_models(repo_id=opts.repo_id, progress=True)
         logger.info("Loaded Picture Classifier model")
 
     except Exception as e:
@@ -81,8 +116,7 @@ def load_docling_models() -> None:
 
 
 def load_gliner_model(model_id: str, cache_folder: Path) -> None:
-    """
-    Loads the GLiNER model.
+    """Loads the GLiNER model.
 
     Args:
         model_id (str): The name of the GLiNER model to load.
@@ -107,8 +141,7 @@ def load_gliner_model(model_id: str, cache_folder: Path) -> None:
 def load_hf_model(
     model_id: str, cache_folder: Path, kw: str, trust_remote_code: bool = False
 ) -> None:
-    """
-    Loads and returns the HuggingFace embedding model.
+    """Loads and returns the HuggingFace embedding model.
 
     Args:
         model_id (str): The name of the model to load.
@@ -131,8 +164,7 @@ def load_hf_model(
 
 
 def load_llama_cpp_model(cache_dir: Path, model_id: str, repo_id: str, kw: str) -> None:
-    """
-    Loads the llama.cpp model.
+    """Loads the llama.cpp model.
 
     Args:
         cache_dir (Path): The path to the cache directory.
@@ -211,8 +243,7 @@ def load_llama_cpp_model(cache_dir: Path, model_id: str, repo_id: str, kw: str) 
 def load_ollama_model(
     model_id: str, kw: str, host: str = "http://localhost:11434"
 ) -> None:
-    """
-    Loads the specified model using Ollama.
+    """Loads the specified model using Ollama.
 
     Args:
         model_id (str): The ID of the model to load.
@@ -244,8 +275,7 @@ def load_ollama_model(
 
 
 def load_whisper_model(model_id: str) -> None:
-    """
-    Loads and returns the Whisper model.
+    """Loads and returns the Whisper model.
 
     Args:
         model_id (str): The name of the model to load.
@@ -255,9 +285,7 @@ def load_whisper_model(model_id: str) -> None:
 
 
 def main() -> None:
-    """
-    Main function to verify configuration loading.
-    """
+    """Main function to verify configuration loading."""
     # Load configurations
     path_config = load_path_env()
     model_config = load_model_env()
@@ -270,6 +298,11 @@ def main() -> None:
         logger.info("{}: {}", model_id, getattr(model_config, model_id))
 
     # Load the app's models
+    # CLIP (used by Picture Classifier and Layout Model)
+    load_clip_model(
+        model_id=model_config.image_embed_model, cache_folder=path_config.hf_hub_cache
+    )
+
     # Docling
     load_docling_models()
 

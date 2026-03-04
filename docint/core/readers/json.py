@@ -13,9 +13,7 @@ from docint.utils.mimetype import get_mimetype
 
 
 class CustomJSONReader(BaseReader):
-    """
-    Custom JSON reader to handle specific JSON structures.
-    """
+    """Custom JSON reader to handle specific JSON structures."""
 
     def __init__(
         self,
@@ -27,8 +25,7 @@ class CustomJSONReader(BaseReader):
         schema_sample_size: int = 200,
         list_sample_size: int = 50,
     ) -> None:
-        """
-        Initializes the CustomJSONReader with specific parameters.
+        """Initializes the CustomJSONReader with specific parameters.
 
         Args:
             levels_back (int | None, optional): The number of levels to go back in the JSON structure. Defaults to 0.
@@ -49,8 +46,7 @@ class CustomJSONReader(BaseReader):
         self.list_sample_size = max(list_sample_size, 0)
 
     def _sample_list_items(self, values: Sequence[Any]) -> Iterable[Any]:
-        """
-        Samples a subset of items from a list.
+        """Samples a subset of items from a list.
 
         Args:
             values (Sequence[Any]): The list of values to sample from.
@@ -76,8 +72,7 @@ class CustomJSONReader(BaseReader):
         return sampled
 
     def _collect_nested_keys(self, data: Any, prefix: str = "") -> set[str]:
-        """
-        Collects nested keys from a JSON-like structure.
+        """Collects nested keys from a JSON-like structure.
 
         Args:
             data (Any): The JSON-like data to inspect.
@@ -98,8 +93,7 @@ class CustomJSONReader(BaseReader):
         return keys
 
     def _infer_schema(self, file_path: Path, is_jsonl: bool) -> dict[str, list[str]]:
-        """
-        Infers the schema of the JSON data by collecting nested keys.
+        """Infers the schema of the JSON data by collecting nested keys.
 
         Args:
             file_path (Path): The path to the JSON file.
@@ -142,8 +136,7 @@ class CustomJSONReader(BaseReader):
         return {"nested_keys": sorted(nested_keys)}
 
     def load_data(self, file: str | Path, **kwargs) -> list[Document]:
-        """
-        Load data from a JSON file and return a list of Document objects.
+        """Load data from a JSON file and return a list of Document objects.
 
         Args:
             file (str | Path): The path to the JSON file.

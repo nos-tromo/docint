@@ -10,8 +10,7 @@ from qdrant_client.http import models as rest
 
 
 def _generate_id(key: str, collection: str) -> str:
-    """
-    Generate a deterministic UUID from the key and collection.
+    """Generate a deterministic UUID from the key and collection.
 
     Args:
         key (str): The key.
@@ -25,8 +24,7 @@ def _generate_id(key: str, collection: str) -> str:
 
 
 class QdrantKVStore(BaseKVStore):
-    """
-    A Key-Value Store implementation backed by Qdrant.
+    """A Key-Value Store implementation backed by Qdrant.
     It uses a dedicated Qdrant collection to store key-value pairs as points.
     """
 
@@ -36,8 +34,7 @@ class QdrantKVStore(BaseKVStore):
         collection_name: str,
         batch_size: int = 100,
     ) -> None:
-        """
-        Initialize the QdrantKVStore.
+        """Initialize the QdrantKVStore.
 
         Args:
             client (QdrantClient): The Qdrant client instance.
@@ -68,8 +65,7 @@ class QdrantKVStore(BaseKVStore):
         val: dict,
         collection: str = DEFAULT_COLLECTION,
     ) -> None:
-        """
-        Store a key-value pair in the Qdrant collection.
+        """Store a key-value pair in the Qdrant collection.
 
         Args:
             key (str): The key.
@@ -101,8 +97,7 @@ class QdrantKVStore(BaseKVStore):
         collection: str = DEFAULT_COLLECTION,
         batch_size: int | None = None,
     ) -> None:
-        """
-        Store multiple key-value pairs in the Qdrant collection.
+        """Store multiple key-value pairs in the Qdrant collection.
 
         Args:
             kv_pairs (list[tuple[str, dict[str, Any]]]): list of key-value pairs.
@@ -143,8 +138,7 @@ class QdrantKVStore(BaseKVStore):
         key: str,
         collection: str = DEFAULT_COLLECTION,
     ) -> dict | None:
-        """
-        Retrieve a value by key from the Qdrant collection.
+        """Retrieve a value by key from the Qdrant collection.
 
         Args:
             key (str): The key.
@@ -165,8 +159,7 @@ class QdrantKVStore(BaseKVStore):
         return None
 
     def get_all(self, collection: str = DEFAULT_COLLECTION) -> dict[str, Any]:
-        """
-        Retrieve all key-value pairs from the specified collection.
+        """Retrieve all key-value pairs from the specified collection.
 
         Args:
             collection (str, optional): The collection name. Defaults to DEFAULT_COLLECTION.
@@ -206,8 +199,7 @@ class QdrantKVStore(BaseKVStore):
         return data
 
     def delete(self, key: str, collection: str = DEFAULT_COLLECTION) -> bool:
-        """
-        Delete a key-value pair from the Qdrant collection.
+        """Delete a key-value pair from the Qdrant collection.
 
         Args:
             key (str): The key.
@@ -229,8 +221,7 @@ class QdrantKVStore(BaseKVStore):
         val: dict,
         collection: str = DEFAULT_COLLECTION,
     ) -> None:
-        """
-        Store a key-value pair in the Qdrant collection.
+        """Store a key-value pair in the Qdrant collection.
 
         Args:
             key (str): The key.
@@ -245,8 +236,7 @@ class QdrantKVStore(BaseKVStore):
         collection: str = DEFAULT_COLLECTION,
         batch_size: int | None = None,
     ) -> None:
-        """
-        Store multiple key-value pairs in the Qdrant collection.
+        """Store multiple key-value pairs in the Qdrant collection.
 
         Args:
             kv_pairs (list[tuple[str, dict[str, Any]]]): The key-value pairs to store.

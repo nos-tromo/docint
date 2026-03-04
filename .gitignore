@@ -44,6 +44,7 @@
 
 # directories
 **/__pycache__/
+**/artifacts/
 **/build/
 **/data/
 **/dist/
@@ -79,6 +80,7 @@ docker-compose.override.yml
 !.github/workflows/
 !.github/workflows/ci.yml
 !.dockerignore
+!.env.example
 !.env.docker.example
 !.pre-commit-config.yaml
 !**/prompts/*.txt

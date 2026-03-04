@@ -1,6 +1,4 @@
-"""
-Understanding agent implementations.
-"""
+"""Understanding agent implementations."""
 
 import json
 import re
@@ -13,9 +11,7 @@ from docint.agents.types import IntentAnalysis, Turn, UnderstandingAgent
 
 
 class SimpleUnderstandingAgent(UnderstandingAgent):
-    """
-    Heuristic understanding with intent mapping and lightweight entity extraction.
-    """
+    """Heuristic understanding with intent mapping and lightweight entity extraction."""
 
     def __init__(
         self,
@@ -23,8 +19,7 @@ class SimpleUnderstandingAgent(UnderstandingAgent):
         default_confidence: float = 0.6,
         intent_keywords: dict[str, Iterable[str]] | None = None,
     ) -> None:
-        """
-        Initialize the SimpleUnderstandingAgent.
+        """Initialize the SimpleUnderstandingAgent.
 
         Args:
             default_intent (str, optional): The default intent to use when no keywords match. Defaults to "qa".
@@ -40,8 +35,7 @@ class SimpleUnderstandingAgent(UnderstandingAgent):
         }
 
     def _detect_intent(self, text: str) -> tuple[str, float, str | None]:
-        """
-        Detect intent based on keyword matching.
+        """Detect intent based on keyword matching.
 
         Args:
             text (str): The input text to analyze for intent.
@@ -56,8 +50,7 @@ class SimpleUnderstandingAgent(UnderstandingAgent):
         return self.default_intent, self.default_confidence, None
 
     def _extract_entities(self, text: str) -> dict[str, str]:
-        """
-        Simple entity extraction for 'query' and 'page' entities.
+        """Simple entity extraction for 'query' and 'page' entities.
 
         Args:
             text (str): The input text from which to extract entities.
@@ -74,8 +67,7 @@ class SimpleUnderstandingAgent(UnderstandingAgent):
         return entities
 
     def analyze(self, turn: Turn, context: Any | None = None) -> IntentAnalysis:
-        """
-        Return intent, confidence, entities, and reason.
+        """Return intent, confidence, entities, and reason.
 
         Args:
             turn (Turn): The current turn in the conversation.
@@ -96,8 +88,7 @@ class SimpleUnderstandingAgent(UnderstandingAgent):
 
 
 class ContextualUnderstandingAgent(UnderstandingAgent):
-    """
-    Understanding agent that uses an LLM to determine intent and rewrite queries.
+    """Understanding agent that uses an LLM to determine intent and rewrite queries.
     Replaces keyword matching with semantic reasoning via the LLM.
     """
 
@@ -105,8 +96,7 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
         self.llm = llm
 
     def analyze(self, turn: Turn, context: Any | None = None) -> IntentAnalysis:
-        """
-        Analyze the turn using LLM reasoning.
+        """Analyze the turn using LLM reasoning.
 
         Args:
             turn (Turn): The current turn.
@@ -142,8 +132,7 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
             )
 
     def _format_history(self, history: list[dict[str, str]]) -> str:
-        """
-        Format the conversation history into a string.
+        """Format the conversation history into a string.
 
         Args:
             history (list[dict[str, str]]): The conversation history as a list of messages
@@ -161,8 +150,7 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
         return "\n".join(formatted)
 
     def _build_prompt(self, query: str, context_str: str) -> str:
-        """
-        Construct the analysis prompt.
+        """Construct the analysis prompt.
 
         Args:
             query (str): The user's current query.
@@ -190,8 +178,7 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
         )
 
     def _parse_response(self, text: str) -> dict[str, Any]:
-        """
-        Parse the LLM response, handling potential markdown wrapping.
+        """Parse the LLM response, handling potential markdown wrapping.
 
         Args:
             text (str): The raw text response from the LLM.

@@ -7,8 +7,7 @@ import pytest
 
 
 def test_get_col_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    """
-    Test that _get_col_name returns the user input.
+    """Test that _get_col_name returns the user input.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -18,8 +17,7 @@ def test_get_col_name(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_store_output_writes_json(tmp_path: Path) -> None:
-    """
-    Test that _store_output writes the payload to a JSON file.
+    """Test that _store_output writes the payload to a JSON file.
 
     Args:
         tmp_path (Path): The temporary path fixture.
@@ -31,8 +29,7 @@ def test_store_output_writes_json(tmp_path: Path) -> None:
 
 
 def test_store_output_handles_nodes(tmp_path: Path) -> None:
-    """
-    Test that _store_output correctly handles objects with to_dict methods.
+    """Test that _store_output correctly handles objects with to_dict methods.
 
     Args:
         tmp_path (Path): The temporary path fixture.
@@ -62,8 +59,7 @@ def test_store_output_handles_nodes(tmp_path: Path) -> None:
 
 
 def test_rag_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
-    """
-    Test the RAG pipeline execution.
+    """Test the RAG pipeline execution.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.

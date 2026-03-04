@@ -17,13 +17,18 @@ def render_sidebar() -> None:
         st.divider()
 
         # ── Navigation ───────────────────────────────────────────
-        st.radio(
+        selected_page = st.radio(
             "Navigation",
             options=PAGES,
             format_func=lambda p: f"{PAGE_ICONS.get(p, '')}  {p}",
-            key="current_page",
+            index=PAGES.index(st.session_state.current_page)
+            if st.session_state.current_page in PAGES
+            else 0,
             label_visibility="collapsed",
         )
+        if selected_page != st.session_state.current_page:
+            st.session_state.current_page = selected_page
+            st.rerun()
 
         st.divider()
 
@@ -48,7 +53,11 @@ def _render_collection_selector() -> None:
     try:
         resp = requests.get(f"{BACKEND_HOST}/collections/list", timeout=10)
         if resp.status_code == 200:
-            cols = [c for c in resp.json() if not c.endswith("_dockv")]
+            cols = [
+                c
+                for c in resp.json()
+                if not c.endswith("_dockv") and not c.endswith("_images")
+            ]
         else:
             logger.error("Failed to fetch collections: {}", resp.text)
             st.error(f"Failed to fetch collections: {resp.text}")

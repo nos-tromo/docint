@@ -16,14 +16,21 @@ from typing import Any, Callable
 from docint.utils.env_cfg import (
     load_host_env,
     load_ingestion_env,
-    load_ner_env,
     load_model_env,
+    load_ner_env,
     load_openai_env,
     load_path_env,
     load_retrieval_env,
     load_session_env,
     resolve_hf_cache_path,
     PathConfig,
+    HostConfig,
+    IngestionConfig,
+    NERConfig,
+    ModelConfig,
+    OpenAIConfig,
+    RetrievalConfig,
+    SessionConfig,
 )
 # isort: on
 
@@ -48,8 +55,10 @@ from loguru import logger
 from qdrant_client import QdrantClient
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 
-from docint.core.ingestion_pipeline import DocumentIngestionPipeline
-from docint.core.session_manager import SessionManager
+from docint.core.ingest.images_service import ImageIngestionService
+from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
+from docint.core.readers.documents import CorePDFPipelineReader
+from docint.core.state.session_manager import SessionManager
 from docint.core.storage.docstore import QdrantKVStore
 from docint.core.storage.sources import stage_sources_to_qdrant
 from docint.utils.openai_cfg import LocalOpenAI
@@ -57,8 +66,7 @@ from docint.utils.openai_cfg import LocalOpenAI
 
 @dataclass(slots=True)
 class RAG:
-    """
-    Represents a Retrieval-Augmented Generation (RAG) model. Handles configuration,
+    """Represents a Retrieval-Augmented Generation (RAG) model. Handles configuration,
     initialization, and interaction with underlying components like embedding models,
     generation models, and vector stores. Provides methods to start sessions,
     retrieve information, and manage document ingestion.
@@ -68,13 +76,29 @@ class RAG:
     qdrant_collection: str
     enable_hybrid: bool = field(default=True)
 
-    # --- Path setup ---
-    _path_config: PathConfig | None = field(default=None, init=False, repr=False)
-    data_dir: Path | None = field(default=None, init=False)
-    hf_hub_cache: Path | None = field(default=None, init=False)
-
-    # --- Session config ---
-    session_store: str = field(default="", init=False)
+    # --- Environment config ---
+    host_config: HostConfig = field(
+        default_factory=load_host_env, init=False, repr=False
+    )
+    ingestion_config: IngestionConfig = field(
+        default_factory=load_ingestion_env, init=False, repr=False
+    )
+    model_config: ModelConfig = field(
+        default_factory=load_model_env, init=False, repr=False
+    )
+    ner_config: NERConfig = field(default_factory=load_ner_env, init=False, repr=False)
+    openai_config: OpenAIConfig = field(
+        default_factory=load_openai_env, init=False, repr=False
+    )
+    path_config: PathConfig = field(
+        default_factory=load_path_env, init=False, repr=False
+    )
+    retrieval_config: RetrievalConfig = field(
+        default_factory=load_retrieval_env, init=False, repr=False
+    )
+    session_config: SessionConfig = field(
+        default_factory=load_session_env, init=False, repr=False
+    )
 
     # --- Models ---
     embed_model_id: str | None = field(default=None, init=False)
@@ -82,11 +106,9 @@ class RAG:
     rerank_model_id: str | None = field(default=None, init=False)
     text_model_id: str | None = field(default=None, init=False)
 
-    # --- Qdrant controls ---
-    docstore_batch_size: int = field(default=100, init=False)
-    qdrant_host: str | None = field(default=None, init=False)
-    _qdrant_col_dir: Path | None = field(default=None, init=False, repr=False)
-    _qdrant_src_dir: Path | None = field(default=None, init=False, repr=False)
+    # --- Named entity recognition ---
+    ner_enabled: bool = field(default=False, init=False)
+    ner_sources: list[dict[str, Any]] = field(default_factory=list, init=False)
 
     # --- OpenAI parameters ---
     openai_api_base: str | None = field(default=None, init=False)
@@ -101,14 +123,23 @@ class RAG:
     openai_timeout: float = field(default=300.0, init=False)
     openai_top_p: float = field(default=0.0, init=False)
 
-    # --- Information extraction ---
-    ner_enabled: bool = field(default=False, init=False)
-    ner_sources: list[dict[str, Any]] = field(default_factory=list, init=False)
+    # --- Path setup ---
+    data_dir: Path | None = field(default=None, init=False)
+    hf_hub_cache: Path | None = field(default=None, init=False)
 
     # --- Reranking / retrieval ---
     retrieve_similarity_top_k: int = field(default=20, init=False)
     rerank_top_n: int = field(default=5, init=False)
     rerank_use_fp16: bool = field(default=False, init=False)
+
+    # --- Session config ---
+    session_store: str = field(default="", init=False)
+
+    # --- Qdrant controls ---
+    docstore_batch_size: int = field(default=100, init=False)
+    qdrant_host: str | None = field(default=None, init=False)
+    _qdrant_col_dir: Path | None = field(default=None, init=False, repr=False)
+    _qdrant_src_dir: Path | None = field(default=None, init=False, repr=False)
 
     # --- Prompt config ---
     prompt_dir: Path | None = field(default=None, init=False)
@@ -126,6 +157,9 @@ class RAG:
     _qdrant_aclient: AsyncQdrantClient | None = field(
         default=None, init=False, repr=False
     )
+    _image_ingestion_service: ImageIngestionService | None = field(
+        default=None, init=False, repr=False
+    )
 
     # -- Ingested data ---
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
@@ -138,52 +172,47 @@ class RAG:
     sessions: SessionManager | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
-        """
-        Post-initialization to set up any necessary components.
+        """Post-initialization to set up any necessary components.
 
         Raises:
             ValueError: If summarize_prompt_path is not set.
         """
         # --- Host config ---
-        _host_config = load_host_env()
-        self.qdrant_host = _host_config.qdrant_host
+        self.qdrant_host = self.host_config.qdrant_host
 
         # --- Ingestion config ---
-        _ingestion_config = load_ingestion_env()
-        self.docstore_batch_size = _ingestion_config.docstore_batch_size
+        self.docstore_batch_size = self.ingestion_config.docstore_batch_size
 
         # --- Model config ---
-        _model_config = load_model_env()
         suffix = ".gguf"
-        self.embed_model_id = _model_config.embed_model_file.removesuffix(suffix)
-        self.rerank_model_id = _model_config.rerank_model
-        self.sparse_model_id = _model_config.sparse_model
-        self.text_model_id = _model_config.text_model_file.removesuffix(suffix)
+        self.embed_model_id = self.model_config.embed_model_file.removesuffix(suffix)
+        self.rerank_model_id = self.model_config.rerank_model
+        self.sparse_model_id = self.model_config.sparse_model
+        self.text_model_id = self.model_config.text_model_file.removesuffix(suffix)
 
         # --- OpenAI config ---
-        _openai_config = load_openai_env()
-        self.openai_api_key = _openai_config.api_key
-        self.openai_api_base = _openai_config.api_base
-        self.openai_ctx_window = _openai_config.ctx_window
-        self.openai_dimensions = _openai_config.dimensions
-        self.openai_max_retries = _openai_config.max_retries
-        self.openai_model_provider = _openai_config.model_provider
-        self.openai_reuse_client = _openai_config.reuse_client
-        self.openai_seed = _openai_config.seed
-        self.openai_temperature = _openai_config.temperature
-        self.openai_timeout = _openai_config.timeout
-        self.openai_top_p = _openai_config.top_p
+        self.openai_api_key = self.openai_config.api_key
+        self.openai_api_base = self.openai_config.api_base
+        self.openai_ctx_window = self.openai_config.ctx_window
+        self.openai_dimensions = self.openai_config.dimensions
+        self.openai_max_retries = self.openai_config.max_retries
+        self.openai_model_provider = self.openai_config.model_provider
+        self.openai_reuse_client = self.openai_config.reuse_client
+        self.openai_seed = self.openai_config.seed
+        self.openai_temperature = self.openai_config.temperature
+        self.openai_timeout = self.openai_config.timeout
+        self.openai_top_p = self.openai_config.top_p
 
         # --- Named Entity Recognition (NER) config ---
-        self.ner_enabled = load_ner_env().enabled
+        self.ner_enabled = self.ner_config.enabled
 
         # --- Path config ---
-        self._path_config = load_path_env()
-        self.data_dir = self._path_config.data
-        self.prompt_dir = self._path_config.prompts
-        self._qdrant_col_dir = self._path_config.qdrant_collections
-        self._qdrant_src_dir = self._path_config.qdrant_sources
-        self.hf_hub_cache = self._path_config.hf_hub_cache
+        self.path_config = self.path_config
+        self.data_dir = self.path_config.data
+        self.prompt_dir = self.path_config.prompts
+        self._qdrant_col_dir = self.path_config.qdrant_collections
+        self._qdrant_src_dir = self.path_config.qdrant_sources
+        self.hf_hub_cache = self.path_config.hf_hub_cache
 
         ## --- Load prompts ---
         if self.prompt_dir:
@@ -200,19 +229,17 @@ class RAG:
             self.summarize_prompt = f.read()
 
         # --- Retrieval config ---
-        _retrieval_config = load_retrieval_env()
-        self.rerank_use_fp16 = _retrieval_config.rerank_use_fp16
-        self.retrieve_similarity_top_k = _retrieval_config.retrieve_top_k
+        self.rerank_use_fp16 = self.retrieval_config.rerank_use_fp16
+        self.retrieve_similarity_top_k = self.retrieval_config.retrieve_top_k
         self.rerank_top_n = int(self.retrieve_similarity_top_k // 4)
 
         # --- Session config ---
-        self.session_store = load_session_env().session_store
+        self.session_store = self.session_config.session_store
         self.sessions = SessionManager(self)
 
     @property
     def session_id(self) -> str | None:
-        """
-        Get the current session ID.
+        """Get the current session ID.
 
         Returns:
             str | None: The current session ID.
@@ -221,8 +248,7 @@ class RAG:
 
     @session_id.setter
     def session_id(self, value: str | None) -> None:
-        """
-        Set the current session ID.
+        """Set the current session ID.
 
         Args:
             value (str | None): The new session ID.
@@ -232,8 +258,7 @@ class RAG:
 
     @property
     def chat_engine(self) -> Any | None:
-        """
-        Get the current chat engine.
+        """Get the current chat engine.
 
         Returns:
             Any | None: The current chat engine.
@@ -242,8 +267,7 @@ class RAG:
 
     @chat_engine.setter
     def chat_engine(self, value: Any | None) -> None:
-        """
-        Set the current chat engine.
+        """Set the current chat engine.
 
         Args:
             value (Any | None): The new chat engine.
@@ -253,8 +277,7 @@ class RAG:
 
     @property
     def chat_memory(self) -> Any | None:
-        """
-        Get the current chat memory.
+        """Get the current chat memory.
 
         Returns:
             Any | None: The current chat memory.
@@ -263,8 +286,7 @@ class RAG:
 
     @chat_memory.setter
     def chat_memory(self, value: Any | None) -> None:
-        """
-        Set the current chat memory.
+        """Set the current chat memory.
 
         Args:
             value (Any | None): The new chat memory.
@@ -275,8 +297,7 @@ class RAG:
     # --- Properties (lazy loading) ---
     @property
     def qdrant_col_dir(self) -> Path:
-        """
-        Best-effort resolution of the host directory where Qdrant stores data.
+        """Best-effort resolution of the host directory where Qdrant stores data.
         Used only as a *fallback* when we cannot reach the Qdrant API.
         Priority: explicit field -> env var -> platform default under home.
 
@@ -287,10 +308,10 @@ class RAG:
             ValueError: If the path configuration or the Qdrant host directory is not set.
         """
         if self._qdrant_col_dir is None:
-            if self._path_config is None:
+            if self.path_config is None:
                 logger.error("ValueError: Path configuration is not set.")
                 raise ValueError("Path configuration is not set.")
-            env = self._path_config.qdrant_collections
+            env = self.path_config.qdrant_collections
             if env:
                 self._qdrant_col_dir = Path(env) if not env.is_absolute() else env
             else:
@@ -306,8 +327,7 @@ class RAG:
 
     @property
     def qdrant_src_dir(self) -> Path:
-        """
-        Best-effort resolution of the host directory where Qdrant stores source data.
+        """Best-effort resolution of the host directory where Qdrant stores source data.
         Used only as a *fallback* when we cannot reach the Qdrant API.
         Priority: explicit field -> env var -> platform default under home.
 
@@ -318,10 +338,10 @@ class RAG:
             ValueError: If the path configuration or the Qdrant source host directory is not set.
         """
         if self._qdrant_src_dir is None:
-            if self._path_config is None:
+            if self.path_config is None:
                 logger.error("ValueError: Path configuration is not set.")
                 raise ValueError("Path configuration is not set.")
-            env = self._path_config.qdrant_sources
+            env = self.path_config.qdrant_sources
             if env:
                 self._qdrant_src_dir = Path(env) if not env.is_absolute() else env
             else:
@@ -337,8 +357,7 @@ class RAG:
 
     @property
     def device(self) -> str:
-        """
-        Returns the device being used for computation.
+        """Returns the device being used for computation.
 
         Returns:
             str: The device being used ("cpu", "cuda", or "mps").
@@ -361,8 +380,7 @@ class RAG:
 
     @property
     def embed_model(self) -> BaseEmbedding:
-        """
-        Lazily initializes and returns the embedding model.
+        """Lazily initializes and returns the embedding model.
 
         Returns:
             BaseEmbedding: The initialized embedding model.
@@ -389,8 +407,7 @@ class RAG:
 
     @property
     def sparse_model(self) -> str | None:
-        """
-        Returns the configured sparse model id for hybrid retrieval.
+        """Returns the configured sparse model id for hybrid retrieval.
 
         Returns:
             str | None: The sparse model id or None if not enabled.
@@ -446,8 +463,7 @@ class RAG:
 
     @property
     def reranker(self) -> LLMRerank | FlagEmbeddingReranker:
-        """
-        Lazily initializes and returns the reranker model. The type of reranker is determined by the configuration:
+        """Lazily initializes and returns the reranker model. The type of reranker is determined by the configuration:
         - If the openai_model_provider is "openai" or "azure", an LLMRerank is used.
         - Otherwise, a FlagEmbeddingReranker is used with the specified rerank_model_id.
 
@@ -456,6 +472,8 @@ class RAG:
 
         Raises:
             ValueError: If rerank_model_id is None.
+            NotImplementedError: If FlagEmbeddingReranker fails to initialize due to an unsupported operation (e.g., missing GPU support).
+            RuntimeError: If FlagEmbeddingReranker fails to initialize due to a meta-tensor device transfer issue.
         """
         if self.rerank_model_id is None:
             raise ValueError("rerank_model_id cannot be None")
@@ -477,19 +495,33 @@ class RAG:
                 resolved_model = str(resolved) if resolved else self.rerank_model_id
                 if resolved:
                     logger.info("Using local reranker model path: {}", resolved_model)
-                self._reranker = FlagEmbeddingReranker(
+                flag_reranker = FlagEmbeddingReranker(
                     top_n=self.rerank_top_n,
                     model=resolved_model,
+                    use_fp16=self.rerank_use_fp16,
                 )
-                logger.info(
-                    "Initializing FlagEmbeddingReranker with model: {}",
-                    self.rerank_model_id,
-                )
+                try:
+                    flag_reranker._model.compute_score([("healthcheck", "healthcheck")])
+                    self._reranker = flag_reranker
+                    logger.info(
+                        "Initializing FlagEmbeddingReranker with model: {}",
+                        self.rerank_model_id,
+                    )
+                except (NotImplementedError, RuntimeError) as exc:
+                    if "meta tensor" not in str(exc).lower():
+                        raise
+                    logger.warning(
+                        "FlagEmbeddingReranker failed to initialize due to a meta-tensor device transfer issue: {}. Falling back to LLMRerank.",
+                        exc,
+                    )
+                    self._reranker = LLMRerank(
+                        top_n=self.rerank_top_n,
+                        llm=self.text_model,
+                    )
         return self._reranker
 
     def _create_text_model(self) -> OpenAI:
-        """
-        Helper to create an OpenAI (or compatible) model instance.
+        """Helper to create an OpenAI (or compatible) model instance.
 
         Returns:
             OpenAI: The initialized model.
@@ -526,8 +558,7 @@ class RAG:
 
     @property
     def text_model(self) -> OpenAI:
-        """
-        Lazily initializes and returns the generation model (OpenAI).
+        """Lazily initializes and returns the generation model (OpenAI).
 
         Returns:
             OpenAI: The initialized generation model.
@@ -538,8 +569,7 @@ class RAG:
 
     @property
     def qdrant_client(self) -> QdrantClient:
-        """
-        Lazily initializes and returns the Qdrant client.
+        """Lazily initializes and returns the Qdrant client.
 
         Returns:
             QdrantClient: The initialized Qdrant client.
@@ -554,8 +584,7 @@ class RAG:
 
     @property
     def qdrant_aclient(self) -> AsyncQdrantClient:
-        """
-        Lazily initializes and returns the Qdrant async client.
+        """Lazily initializes and returns the Qdrant async client.
 
         Returns:
             AsyncQdrantClient: The initialized Qdrant async client.
@@ -570,8 +599,7 @@ class RAG:
 
     # --- Build pieces ---
     def _vector_store(self) -> QdrantVectorStore:
-        """
-        Creates the vector store for document embeddings.
+        """Creates the vector store for document embeddings.
 
         Returns:
             QdrantVectorStore: The initialized vector store.
@@ -592,8 +620,7 @@ class RAG:
         )
 
     def _storage_context(self, vector_store: QdrantVectorStore) -> StorageContext:
-        """
-        Creates the storage context for document embeddings.
+        """Creates the storage context for document embeddings.
 
         Args:
             vector_store (QdrantVectorStore): The vector store for document embeddings.
@@ -619,8 +646,7 @@ class RAG:
     def _build_ingestion_pipeline(
         self, progress_callback: Callable[[str], None] | None = None
     ) -> DocumentIngestionPipeline:
-        """
-        Instantiate a document ingestion pipeline using current settings.
+        """Instantiate a document ingestion pipeline using current settings.
 
         Args:
             progress_callback (Callable[[str], None] | None): Optional callback for
@@ -642,16 +668,105 @@ class RAG:
             # Only use LLM-based NER for OpenAI provider; otherwise use GLiNER
             ner_model = self._create_text_model()
 
+        if self._image_ingestion_service is None:
+            self._image_ingestion_service = ImageIngestionService(device=self.device)
+
         return DocumentIngestionPipeline(
             data_dir=self.data_dir,
             ner_model=ner_model,
             device=self.device,
             progress_callback=progress_callback,
+            target_collection=self.qdrant_collection,
+            image_ingestion_service=self._image_ingestion_service,
         )
 
+    def _retrieve_image_sources(
+        self,
+        query: str,
+        *,
+        top_k: int = 3,
+    ) -> list[dict[str, Any]]:
+        """Retrieve image matches for a text query and normalize them as sources."""
+        if not query.strip() or not self.qdrant_collection:
+            return []
+        if self._image_ingestion_service is None:
+            self._image_ingestion_service = ImageIngestionService(device=self.device)
+
+        try:
+            matches = self._image_ingestion_service.query_similar_images_by_text(
+                query_text=query,
+                top_k=top_k,
+                source_collection=self.qdrant_collection,
+            )
+        except Exception as exc:
+            logger.warning("Image source retrieval failed: {}", exc)
+            return []
+
+        results: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for payload in matches:
+            image_id = str(payload.get("image_id") or "").strip()
+            if image_id:
+                if image_id in seen:
+                    continue
+                seen.add(image_id)
+
+            description = str(payload.get("llm_description") or "").strip()
+            tags_raw = payload.get("llm_tags")
+            tags = [str(tag) for tag in tags_raw] if isinstance(tags_raw, list) else []
+            text_value = description
+            if tags:
+                text_value = (
+                    f"{description}\n\nTags: {', '.join(tags)}"
+                    if description
+                    else f"Tags: {', '.join(tags)}"
+                )
+
+            source_path = payload.get("source_path")
+            file_name = (
+                payload.get("file_name")
+                or payload.get("filename")
+                or (Path(source_path).name if isinstance(source_path, str) else None)
+            )
+            file_type = payload.get("mime_type") or payload.get("mimetype")
+            source_kind = payload.get("source_type") or "image"
+            file_hash = payload.get("source_doc_id") or payload.get("file_hash")
+            page_number = payload.get("page_number")
+            try:
+                page_number = int(page_number) if page_number is not None else None
+            except Exception:
+                page_number = None
+
+            src: dict[str, Any] = {
+                "text": text_value
+                or f"Image match: {image_id or file_name or 'unknown'}",
+                "preview_text": (text_value or "").strip()[:280],
+                "filename": file_name,
+                "filetype": file_type,
+                "source": source_kind,
+                "score": payload.get("score"),
+                "image_id": image_id or None,
+                "image_collection": payload.get("image_collection"),
+            }
+            if file_hash:
+                src["file_hash"] = file_hash
+                preview_url = (
+                    f"/sources/preview?collection={self.qdrant_collection}"
+                    f"&file_hash={file_hash}"
+                )
+                src["preview_url"] = preview_url
+                src["document_url"] = preview_url
+            if page_number is not None:
+                src["page"] = page_number
+            bbox = payload.get("bbox")
+            if isinstance(bbox, dict):
+                src["bbox"] = bbox
+            results.append(src)
+
+        return results
+
     def _index(self, storage_ctx: StorageContext) -> VectorStoreIndex:
-        """
-        Creates the vector store index for document embeddings.
+        """Creates the vector store index for document embeddings.
 
         Args:
             storage_ctx (StorageContext): The storage context for document embeddings.
@@ -666,9 +781,23 @@ class RAG:
         )
 
     @staticmethod
-    def _extract_file_hash(data: Any) -> str | None:
+    def _select_vector_nodes(nodes: list[BaseNode]) -> list[BaseNode]:
+        """Select nodes that should be inserted into the vector store.
+
+        Args:
+            nodes: Parsed nodes for an ingestion batch.
+
+        Returns:
+            The subset of nodes suitable for vector indexing.
         """
-        Best-effort extraction of a ``file_hash`` value from nested payloads.
+        is_hierarchical = any("docint_hier_type" in n.metadata for n in nodes)
+        if is_hierarchical:
+            return [n for n in nodes if n.metadata.get("docint_hier_type") != "coarse"]
+        return nodes
+
+    @staticmethod
+    def _extract_file_hash(data: Any) -> str | None:
+        """Best-effort extraction of a ``file_hash`` value from nested payloads.
 
         Args:
             data (Any): The data dictionary to search for a file hash.
@@ -711,8 +840,7 @@ class RAG:
         return None
 
     def _get_existing_file_hashes(self) -> set[str]:
-        """
-        Fetch file hashes already stored in the active Qdrant collection.
+        """Fetch file hashes already stored in the active Qdrant collection.
 
         Returns:
             set[str]: A set of existing file hashes.
@@ -779,8 +907,7 @@ class RAG:
         return existing
 
     def create_index(self) -> None:
-        """
-        Materialize a VectorStoreIndex. If nodes are present in memory, create from nodes.
+        """Materialize a VectorStoreIndex. If nodes are present in memory, create from nodes.
         Otherwise, load from vector store.
         """
         vector_store = self._vector_store()
@@ -797,8 +924,7 @@ class RAG:
             )
 
     def create_query_engine(self) -> None:
-        """
-        Create the query engine with a retriever and reranker.
+        """Create the query engine with a retriever and reranker.
 
         Raises:
             RuntimeError: If the index is not initialized.
@@ -816,8 +942,7 @@ class RAG:
     def _normalize_response_data(
         self, query: str, result: Any, reason: str | None = None
     ) -> dict[str, Any]:
-        """
-        Normalize both llama_index.core.Response and AgentChatResponse into a single payload.
+        """Normalize both llama_index.core.Response and AgentChatResponse into a single payload.
         Handles:
         - response text (result.response or result.text)
         - source_nodes (list[NodeWithScore])
@@ -993,6 +1118,14 @@ class RAG:
 
             sources.append(src)
 
+        if query.strip() and query != self.summarize_prompt:
+            sources.extend(
+                self._retrieve_image_sources(
+                    query,
+                    top_k=max(1, self.rerank_top_n // 2),
+                )
+            )
+
         return {
             "query": query,
             "reasoning": reason,
@@ -1002,8 +1135,7 @@ class RAG:
 
     # --- Collection discovery / selection ---
     def list_collections(self, prefer_api: bool = True) -> list[str]:
-        """
-        Return a list of collection names. Uses Qdrant API when available; falls back to listing the host storage path.
+        """Return a list of collection names. Uses Qdrant API when available; falls back to listing the host storage path.
 
         Args:
             prefer_api (bool): Whether to prefer the Qdrant API over filesystem access.
@@ -1035,8 +1167,7 @@ class RAG:
             return []
 
     def delete_collection(self, name: str) -> None:
-        """
-        Delete a collection by name from Qdrant and clean up source files.
+        """Delete a collection by name from Qdrant and clean up source files.
 
         Args:
             name (str): Name of the collection to delete.
@@ -1060,8 +1191,7 @@ class RAG:
             if src_path.exists():
 
                 def on_error(func: Callable, path: str, _exc_info: Any) -> None:
-                    """
-                    Error handler for shutil.rmtree.
+                    """Error handler for shutil.rmtree.
 
                     Attempts to fix permissions/flags and retry operation.
 
@@ -1095,8 +1225,7 @@ class RAG:
             )
 
     def select_collection(self, name: str) -> None:
-        """
-        Switch active collection, ensuring it already exists.
+        """Switch active collection, ensuring it already exists.
 
         Args:
             name: Name of the collection to select.
@@ -1120,11 +1249,11 @@ class RAG:
         self.nodes.clear()
         self.index = None
         self.query_engine = None
+        self._image_ingestion_service = None
         self.reset_session_state()
 
     def _prepare_sources_dir(self, data_dir: Path) -> Path:
-        """
-        Ensure source files live under qdrant_src_dir/<collection> for preview and persistence.
+        """Ensure source files live under qdrant_src_dir/<collection> for preview and persistence.
 
         If the provided data_dir is already under that path, it is returned as-is.
         Otherwise, files/directories are copied into the target.
@@ -1149,8 +1278,7 @@ class RAG:
         build_query_engine: bool = True,
         progress_callback: Callable[[str], None] | None = None,
     ) -> None:
-        """
-        Ingest documents from the specified directory into the Qdrant collection.
+        """Ingest documents from the specified directory into the Qdrant collection.
 
         Args:
             data_dir (str | Path): The directory containing the documents to ingest.
@@ -1164,7 +1292,6 @@ class RAG:
             Path(data_dir) if isinstance(data_dir, str) else data_dir
         )
         self.data_dir = prepared_dir
-        pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
 
         # Initialize index (load existing or create new wrapper)
         vector_store = self._vector_store()
@@ -1177,16 +1304,41 @@ class RAG:
             storage_context=storage_ctx,
         )
 
-        # Process batches from the pipeline generator
-        for docs, nodes in pipeline.build(self._get_existing_file_hashes()):
+        pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
+        existing_hashes = self._get_existing_file_hashes()
+        processed_hashes = set(existing_hashes)
+        image_ingestion_service = getattr(pipeline, "image_ingestion_service", None)
+        core_pdf_reader = CorePDFPipelineReader(
+            data_dir=prepared_dir,
+            entity_extractor=pipeline.entity_extractor,
+            ner_max_workers=pipeline.ner_max_workers,
+            source_collection=self.qdrant_collection,
+            image_ingestion_service=image_ingestion_service,
+        )
+
+        for docs, nodes, file_hash in core_pdf_reader.build(
+            existing_hashes=processed_hashes, progress_callback=progress_callback
+        ):
             if nodes:
-                # Filter nodes for vector indexing (exclude coarse chunks from vector store)
-                is_hierarchical = any("docint_hier_type" in n.metadata for n in nodes)
-                vector_nodes = (
-                    [n for n in nodes if n.metadata.get("docint_hier_type") != "coarse"]
-                    if is_hierarchical
-                    else nodes
+                vector_nodes = self._select_vector_nodes(nodes)
+
+                logger.debug(
+                    "Persisting {} core-pipeline nodes to DocStore...",
+                    len(nodes),
                 )
+                self.index.docstore.add_documents(nodes, allow_update=True)
+                if vector_nodes:
+                    self.index.insert_nodes(vector_nodes)
+                processed_hashes.add(file_hash)
+
+        # PDFs are owned by the core pipeline reader and should not be
+        # re-processed by the legacy ingestion path.
+        processed_hashes.update(core_pdf_reader.discovered_hashes)
+
+        # Process batches from the pipeline generator
+        for docs, nodes in pipeline.build(processed_hashes):
+            if nodes:
+                vector_nodes = self._select_vector_nodes(nodes)
 
                 # Explicitly persist to docstore first to ensure data safety
                 logger.debug("Persisting {} nodes to DocStore...", len(nodes))
@@ -1231,8 +1383,7 @@ class RAG:
         build_query_engine: bool = True,
         progress_callback: Callable[[str], None] | None = None,
     ) -> None:
-        """
-        Asynchronously ingest documents from the specified directory into the Qdrant collection.
+        """Asynchronously ingest documents from the specified directory into the Qdrant collection.
 
         Args:
             data_dir (str | Path): The directory containing the documents to ingest.
@@ -1248,18 +1399,46 @@ class RAG:
             Path(data_dir) if isinstance(data_dir, str) else data_dir
         )
         self.data_dir = prepared_dir
-        pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
-
         # Initialize index
         vector_store = self._vector_store()
-        self.index = VectorStoreIndex.from_vector_store(
-            vector_store=vector_store, embed_model=self.embed_model
+        storage_ctx = self._storage_context(vector_store)
+        self.index = VectorStoreIndex(
+            nodes=[],
+            embed_model=self.embed_model,
+            storage_context=storage_ctx,
         )
 
-        # Process batches
-        for docs, nodes in pipeline.build(self._get_existing_file_hashes()):
+        pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
+        existing_hashes = self._get_existing_file_hashes()
+        processed_hashes = set(existing_hashes)
+        image_ingestion_service = getattr(pipeline, "image_ingestion_service", None)
+        core_pdf_reader = CorePDFPipelineReader(
+            data_dir=prepared_dir,
+            entity_extractor=pipeline.entity_extractor,
+            ner_max_workers=pipeline.ner_max_workers,
+            source_collection=self.qdrant_collection,
+            image_ingestion_service=image_ingestion_service,
+        )
+
+        for docs, nodes, file_hash in core_pdf_reader.build(
+            existing_hashes=processed_hashes, progress_callback=progress_callback
+        ):
             if nodes:
-                await self.index.ainsert_nodes(nodes)
+                vector_nodes = self._select_vector_nodes(nodes)
+                self.index.docstore.add_documents(nodes, allow_update=True)
+                if vector_nodes:
+                    await self.index.ainsert_nodes(vector_nodes)
+                processed_hashes.add(file_hash)
+
+        processed_hashes.update(core_pdf_reader.discovered_hashes)
+
+        # Process batches
+        for docs, nodes in pipeline.build(processed_hashes):
+            if nodes:
+                vector_nodes = self._select_vector_nodes(nodes)
+                self.index.docstore.add_documents(nodes, allow_update=True)
+                if vector_nodes:
+                    await self.index.ainsert_nodes(vector_nodes)
 
         self.dir_reader = pipeline.dir_reader
         self.docs = []
@@ -1291,8 +1470,7 @@ class RAG:
         logger.info("Documents ingested successfully (async path).")
 
     def run_query(self, prompt: str) -> dict[str, Any]:
-        """
-        Run a query against the Qdrant collection.
+        """Run a query against the Qdrant collection.
 
         Args:
             prompt (str): The query prompt.
@@ -1321,8 +1499,7 @@ class RAG:
         return self._normalize_response_data(prompt, result)
 
     async def run_query_async(self, prompt: str) -> dict[str, Any]:
-        """
-        Run a query against the Qdrant collection asynchronously.
+        """Run a query against the Qdrant collection asynchronously.
 
         Args:
             prompt (str): The query prompt.
@@ -1352,8 +1529,7 @@ class RAG:
 
     # --- Session integration ---
     def init_session_store(self, db_url: str) -> None:
-        """
-        Initialize the relational session store via SessionManager.
+        """Initialize the relational session store via SessionManager.
 
         Args:
             db_url (str): The database URL for the session store.
@@ -1363,17 +1539,14 @@ class RAG:
         self.sessions.init_session_store(db_url=db_url)
 
     def reset_session_state(self) -> None:
-        """
-        Clear cached chat state so future sessions start fresh.
-        """
+        """Clear cached chat state so future sessions start fresh."""
         if self.sessions is not None:
             self.sessions.reset_runtime()
 
     def export_session(
         self, session_id: str | None = None, out_dir: str | Path = "session"
     ) -> Path:
-        """
-        Delegate session export to SessionManager.
+        """Delegate session export to SessionManager.
 
         Args:
             session_id (str | None): The session ID to export. If None, exports the
@@ -1388,8 +1561,7 @@ class RAG:
         return self.sessions.export_session(session_id=session_id, out_dir=out_dir)
 
     def start_session(self, session_id: str | None = None) -> str:
-        """
-        Start or resume a chat session through SessionManager.
+        """Start or resume a chat session through SessionManager.
 
         Args:
             session_id (str | None): The session ID to start or resume. If None,
@@ -1400,8 +1572,7 @@ class RAG:
         return self.sessions.start_session(session_id)
 
     def chat(self, user_msg: str) -> dict[str, Any]:
-        """
-        Proxy chat turns to SessionManager.
+        """Proxy chat turns to SessionManager.
 
         Args:
             user_msg (str): The user's chat message.
@@ -1414,8 +1585,7 @@ class RAG:
         return self.sessions.chat(user_msg)
 
     def stream_chat(self, user_msg: str) -> Any:
-        """
-        Proxy stream chat turns to SessionManager.
+        """Proxy stream chat turns to SessionManager.
 
         Args:
             user_msg (str): The user's chat message.
@@ -1428,8 +1598,7 @@ class RAG:
         return self.sessions.stream_chat(user_msg)
 
     def summarize_collection(self) -> dict[str, Any]:
-        """
-        Generate a summary of the currently selected collection.
+        """Generate a summary of the currently selected collection.
 
         Returns:
             dict[str, Any]: Normalized response data containing the summary and sources.
@@ -1454,8 +1623,7 @@ class RAG:
         return self._normalize_response_data(self.summarize_prompt, resp)
 
     def stream_summarize_collection(self) -> Any:
-        """
-        Generate a streaming summary of the currently selected collection.
+        """Generate a streaming summary of the currently selected collection.
 
         Yields:
             str | dict: Chunks of text, followed by a dict with metadata.
@@ -1509,8 +1677,7 @@ class RAG:
         yield normalized
 
     def list_documents(self) -> list[dict[str, Any]]:
-        """
-        List all documents in the current collection by scanning all points.
+        """List all documents in the current collection by scanning all points.
 
         Returns:
             list[dict[str, Any]]: A list of document metadata dictionaries.
@@ -1644,8 +1811,7 @@ class RAG:
         return sorted(results, key=lambda x: str(x["filename"]))
 
     def get_collection_ner(self, refresh: bool = False) -> list[dict[str, Any]]:
-        """
-        Fetch all nodes from the current collection and return their NER metadata.
+        """Fetch all nodes from the current collection and return their NER metadata.
 
         Returns:
             list[dict[str, Any]]: A list of source metadata dictionaries containing NER data.
@@ -1734,12 +1900,11 @@ class RAG:
         return sources
 
     def unload_models(self) -> None:
-        """
-        Unload models to free up memory.
-        """
+        """Unload models to free up memory."""
         self._embed_model = None
         self._text_model = None
         self._reranker = None
+        self._image_ingestion_service = None
 
         gc.collect()
         if torch.cuda.is_available():

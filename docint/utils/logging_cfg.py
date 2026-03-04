@@ -15,8 +15,7 @@ def setup_logging(
     backtrace: bool = False,
     diagnose: bool = False,
 ) -> Path:
-    """
-    Set up logging for the application.
+    """Set up logging for the application.
 
     Args:
         encoding (str, optional): The log file encoding. Defaults to "utf-8".

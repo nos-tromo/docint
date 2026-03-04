@@ -12,16 +12,24 @@ from docint.utils.env_cfg import load_model_env, load_openai_env, load_path_env
 
 
 class LocalOpenAI(LlamaIndexOpenAI):
-    """
-    Subclass of LlamaIndex's OpenAI that handles local models with unknown names gracefully.
-    """
+    """Subclass of LlamaIndex's OpenAI that handles local models with unknown names gracefully."""
 
     def __init__(self, context_window: int = 4096, **kwargs: Any) -> None:
+        """Initialize the LocalOpenAI instance.
+
+        Args:
+            context_window (int, optional): The context window size for the model. Defaults to 4096.
+        """
         super().__init__(**kwargs)
         self._context_window = context_window
 
     @property
     def metadata(self) -> LLMMetadata:
+        """Override the metadata property to provide fallback values for unknown models.
+
+        Returns:
+            LLMMetadata: The metadata for the model, with fallback values if the model name is not recognized.
+        """
         try:
             return super().metadata
         except ValueError:
@@ -37,9 +45,7 @@ class LocalOpenAI(LlamaIndexOpenAI):
 
 @dataclass
 class OpenAIPipeline:
-    """
-    Pipeline for text generation and image processing using OpenAI-compatible APIs.
-    """
+    """Pipeline for text generation and image processing using OpenAI-compatible APIs."""
 
     client: OpenAI = field(init=False)
     vision_client: OpenAI = field(init=False)
@@ -48,9 +54,7 @@ class OpenAIPipeline:
     prompt_dir: Path | None = field(init=False)
 
     def __post_init__(self) -> None:
-        """
-        Post-initialization to load configurations.
-        """
+        """Post-initialization to load configurations."""
         _model_config = load_model_env()
         self.text_model_id = _model_config.text_model_file.removesuffix(".gguf")
         self.vision_model_id = _model_config.vision_model_file.removesuffix(".gguf")
@@ -80,8 +84,7 @@ class OpenAIPipeline:
         self.prompt_dir = load_path_env().prompts
 
     def load_prompt(self, kw: str = "system") -> str:
-        """
-        Load a prompt from the prompts directory based on the given keyword.
+        """Load a prompt from the prompts directory based on the given keyword.
 
         Args:
             kw (str, optional): The keyword to identify the prompt file. Defaults to "system".
@@ -108,8 +111,7 @@ class OpenAIPipeline:
             return f.read()
 
     def call_chat(self, prompt: str, system_prompt: str | None = None) -> str:
-        """
-        Call OpenAI Chat completion.
+        """Call OpenAI Chat completion.
 
         Args:
             prompt (str): The user prompt.
@@ -136,13 +138,16 @@ class OpenAIPipeline:
             logger.error("Error during chat inference: {}", e)
             raise RuntimeError(f"Chat inference failed: {e}")
 
-    def call_vision(self, prompt: str, img_base64: str) -> str:
-        """
-        Call OpenAI (or compatible) Vision model.
+    def call_vision(
+        self, prompt: str, img_base64: str, mime_type: str = "image/jpeg"
+    ) -> str:
+        """Call OpenAI (or compatible) Vision model.
 
         Args:
             prompt (str): The prompt text.
             img_base64 (str): Base64 encoded image string.
+            mime_type (str): MIME type of the encoded image (e.g. ``image/png``).
+                Defaults to ``image/jpeg``.
 
         Returns:
             str: The model's response.
@@ -151,15 +156,11 @@ class OpenAIPipeline:
             RuntimeError: If the vision inference fails.
         """
         try:
-            # Construct message with image
-            # Note: We assume the image is JPEG or PNG. Data URL handling might need refinement
-            # if we strictly need to support other formats, but standardizing on jpeg/png for base64 is common.
-            # The prompt argument is treated as the user query.
             content_parts: list[ChatCompletionContentPartParam] = [
                 {"type": "text", "text": prompt},
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{img_base64}"},
+                    "image_url": {"url": f"data:{mime_type};base64,{img_base64}"},
                 },
             ]
             messages: list[ChatCompletionMessageParam] = [

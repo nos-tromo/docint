@@ -8,8 +8,7 @@ from docint.core.state.citation import Citation
 
 
 def test_make_session_maker_creates_tables(tmp_path: Path) -> None:
-    """
-    Test the creation of database tables by the session maker.
+    """Test the creation of database tables by the session maker.
 
     Args:
         tmp_path (Path): The temporary path fixture.
@@ -26,8 +25,7 @@ def test_make_session_maker_creates_tables(tmp_path: Path) -> None:
 
 
 def test_conversation_relationships(tmp_path: Path) -> None:
-    """
-    Test the relationships between conversation turns and citations.
+    """Test the relationships between conversation turns and citations.
 
     Args:
         tmp_path (Path): The temporary path fixture.

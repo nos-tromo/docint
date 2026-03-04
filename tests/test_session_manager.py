@@ -5,14 +5,13 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from docint.core.session_manager import SessionManager
+from docint.core.state.session_manager import SessionManager
 from docint.core.state.base import Base
 
 
 @pytest.fixture
 def session_manager() -> Generator[SessionManager, None, None]:
-    """
-    Fixture to create a SessionManager with an in-memory SQLite database.
+    """Fixture to create a SessionManager with an in-memory SQLite database.
 
     Returns:
         Generator[SessionManager, None, None]: The SessionManager instance.
@@ -34,8 +33,7 @@ def session_manager() -> Generator[SessionManager, None, None]:
 def test_persist_and_retrieve_citation_with_hash(
     session_manager: SessionManager,
 ) -> None:
-    """
-    Test persisting and retrieving a turn with citations that include file_hash.
+    """Test persisting and retrieving a turn with citations that include file_hash.
 
     Args:
         session_manager (SessionManager): The session manager fixture.

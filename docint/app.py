@@ -1,5 +1,4 @@
-"""
-DocInt Streamlit application entry-point.
+"""DocInt Streamlit application entry-point.
 
 This module wires together the sidebar, page router, and shared chrome.
 All page rendering logic lives in ``docint.ui.*`` sub-modules.
@@ -65,11 +64,8 @@ _PAGE_RENDERERS: dict[str, Callable[[], None]] = {
 # ---------------------------------------------------------------------------
 # Application setup & main loop
 # ---------------------------------------------------------------------------
-
-
 def setup_app() -> None:
-    """
-    Initialise page config, CSS, logging, and session state.
+    """Initialise page config, CSS, logging, and session state.
 
     Must be the first function called during each script run.
     """
@@ -81,9 +77,7 @@ def setup_app() -> None:
 
 
 def main() -> None:
-    """
-    Main Streamlit app entry-point: sidebar -> active page -> footer.
-    """
+    """Main Streamlit app entry-point: sidebar -> active page -> footer."""
     setup_app()
     render_sidebar()
 
@@ -102,8 +96,7 @@ def main() -> None:
 
 # ---- Streamlit CLI wrapper ----------------------------------------------- #
 def run() -> None:
-    """
-    CLI entry-point for the Streamlit app.
+    """CLI entry-point for the Streamlit app.
 
     Re-writes ``sys.argv`` so that ``streamlit run app.py <extra-args>`` is
     invoked transparently when the user runs ``uv run docint``.

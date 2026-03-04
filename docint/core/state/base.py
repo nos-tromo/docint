@@ -8,8 +8,7 @@ Base = declarative_base()
 
 # --- Session maker ---
 def _make_session_maker(db_url: str) -> sessionmaker:
-    """
-    Creates a new SQLAlchemy session maker.
+    """Creates a new SQLAlchemy session maker.
 
     Args:
         db_url (str): The database URL.

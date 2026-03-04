@@ -12,13 +12,10 @@ from docint.utils.hashing import compute_file_hash
 
 
 class DummyNode:
-    """
-    A dummy node class to simulate LlamaIndex nodes.
-    """
+    """A dummy node class to simulate LlamaIndex nodes."""
 
     def __init__(self, text: str, metadata: dict[str, object]) -> None:
-        """
-        Initializes a DummyNode with text and metadata.
+        """Initializes a DummyNode with text and metadata.
 
         Args:
             text (str): The text content of the node.
@@ -29,13 +26,10 @@ class DummyNode:
 
 
 class DummyNodeWithScore:
-    """
-    A dummy node with score class to simulate LlamaIndex nodes with scores.
-    """
+    """A dummy node with score class to simulate LlamaIndex nodes with scores."""
 
     def __init__(self, node: DummyNode) -> None:
-        """
-        Initializes a DummyNodeWithScore with a DummyNode.
+        """Initializes a DummyNodeWithScore with a DummyNode.
 
         Args:
             node (DummyNode): The dummy node associated with this score.
@@ -45,8 +39,7 @@ class DummyNodeWithScore:
 
 class DummyResponse:
     def __init__(self, text: str, nodes: list[DummyNodeWithScore]):
-        """
-        Initializes a DummyResponse with text and source nodes.
+        """Initializes a DummyResponse with text and source nodes.
 
         Args:
             text (str): The response text.
@@ -56,11 +49,16 @@ class DummyResponse:
         self.source_nodes = nodes
 
 
-def test_normalize_response_data_extracts_sources() -> None:
-    """
-    Test that _normalize_response_data correctly extracts source information.
-    """
+def test_normalize_response_data_extracts_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that _normalize_response_data correctly extracts source information."""
     rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(
+        RAG,
+        "_retrieve_image_sources",
+        lambda self, query, top_k=3: [],
+    )
     node = DummyNode(
         "Example text",
         {
@@ -99,9 +97,40 @@ def test_normalize_response_data_extracts_sources() -> None:
     assert first_source.get("document_url") == first_source.get("preview_url")
 
 
-def test_directory_ingestion_attaches_file_hash(tmp_path: Path) -> None:
+def test_normalize_response_data_appends_image_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Image retrieval results should be appended to normalized sources.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
     """
-    Test that directory ingestion attaches file hashes to documents.
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(
+        RAG,
+        "_retrieve_image_sources",
+        lambda self, query, top_k=3: [
+            {
+                "text": "Image shows transformer blocks.",
+                "filename": "attention_is_all_you_need.pdf",
+                "source": "image",
+                "image_id": "img-1",
+                "score": 0.91,
+            }
+        ],
+    )
+    result = DummyResponse("Answer", [])
+
+    normalized = rag._normalize_response_data("transformer diagram", result)
+    sources = normalized["sources"]
+
+    assert len(sources) == 1
+    assert sources[0]["source"] == "image"
+    assert sources[0]["image_id"] == "img-1"
+
+
+def test_directory_ingestion_attaches_file_hash(tmp_path: Path) -> None:
+    """Test that directory ingestion attaches file hashes to documents.
 
     Args:
         tmp_path (Path): The temporary path fixture.
@@ -124,8 +153,7 @@ def test_directory_ingestion_attaches_file_hash(tmp_path: Path) -> None:
 
 
 def test_start_session_requires_query_engine(tmp_path: Path) -> None:
-    """
-    Test that start_session raises RuntimeError if query_engine is not initialized.
+    """Test that start_session raises RuntimeError if query_engine is not initialized.
 
     Args:
         tmp_path (Path): The temporary path fixture.
@@ -137,11 +165,32 @@ def test_start_session_requires_query_engine(tmp_path: Path) -> None:
         rag.start_session()
 
 
+def test_select_collection_resets_image_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Selecting another collection should reset image ingestion service state.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="alpha")
+    rag._image_ingestion_service = object()  # type: ignore[assignment]
+    monkeypatch.setattr(
+        RAG,
+        "list_collections",
+        lambda self, prefer_api=True: ["alpha", "beta"],
+    )
+
+    rag.select_collection("beta")
+
+    assert rag.qdrant_collection == "beta"
+    assert rag._image_ingestion_service is None
+
+
 def test_start_session_initializes_memory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """
-    Test that start_session initializes the chat memory and engine.
+    """Test that start_session initializes the chat memory and engine.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -169,11 +218,11 @@ def test_start_session_initializes_memory(
             return cls(**kwargs)
 
     monkeypatch.setattr(
-        "docint.core.session_manager.ChatMemoryBuffer",
+        "docint.core.state.session_manager.ChatMemoryBuffer",
         types.SimpleNamespace(from_defaults=lambda **_: FakeMemory()),
     )
     monkeypatch.setattr(
-        "docint.core.session_manager.CondenseQuestionChatEngine",
+        "docint.core.state.session_manager.CondenseQuestionChatEngine",
         types.SimpleNamespace(from_defaults=lambda **kwargs: FakeChatEngine(**kwargs)),
     )
     session_id = rag.start_session("abc")
@@ -182,9 +231,7 @@ def test_start_session_initializes_memory(
 
 
 def test_chat_rejects_empty_prompt() -> None:
-    """
-    Test that chat rejects empty prompts.
-    """
+    """Test that chat rejects empty prompts."""
     rag = RAG(qdrant_collection="test")
     with pytest.raises(ValueError):
         rag.chat("   ")
@@ -193,8 +240,7 @@ def test_chat_rejects_empty_prompt() -> None:
 def test_sparse_model_raises_import_error_when_fastembed_broken(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """
-    Test that the sparse_model property raises ImportError when
+    """Test that the sparse_model property raises ImportError when
     SparseTextEmbedding.list_supported_models raises ImportError.
 
     Args:
@@ -218,8 +264,7 @@ def test_sparse_model_raises_import_error_when_fastembed_broken(
 
 
 def test_filter_docs_skips_existing_hashes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """
-    Test that _filter_docs_by_existing_hashes skips documents with existing hashes.
+    """Test that _filter_docs_by_existing_hashes skips documents with existing hashes.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -243,8 +288,7 @@ def test_filter_docs_skips_existing_hashes(monkeypatch: pytest.MonkeyPatch) -> N
     def test_sparse_model_uses_cached_path(
         monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """
-        Ensure sparse_model resolves to a cached snapshot path when available.
+        """Ensure sparse_model resolves to a cached snapshot path when available.
 
         Args:
             monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -281,3 +325,79 @@ def test_filter_docs_skips_existing_hashes(monkeypatch: pytest.MonkeyPatch) -> N
 
         resolved = rag.sparse_model
         assert resolved == str(snap)
+
+
+def test_reranker_passes_configured_fp16(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reranker should pass the configured fp16 setting to FlagEmbeddingReranker.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+
+    captured: dict[str, object] = {}
+
+    class FakeFlagReranker:
+        def __init__(self, top_n: int, model: str, use_fp16: bool) -> None:
+            captured["top_n"] = top_n
+            captured["model"] = model
+            captured["use_fp16"] = use_fp16
+            self._model = types.SimpleNamespace(compute_score=lambda _: [0.0])
+
+    monkeypatch.setattr(rag_module, "FlagEmbeddingReranker", FakeFlagReranker)
+    monkeypatch.setattr(
+        rag_module,
+        "resolve_hf_cache_path",
+        lambda cache_dir, repo_id: None,
+    )
+
+    rag = RAG(qdrant_collection="test")
+    rag.openai_model_provider = "ollama"
+    rag.rerank_use_fp16 = True
+    rag.rerank_top_n = 7
+
+    _ = rag.reranker
+
+    assert captured["top_n"] == 7
+    assert captured["model"] == rag.rerank_model_id
+    assert captured["use_fp16"] is True
+
+
+def test_reranker_falls_back_to_llm_on_meta_tensor_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reranker should fallback to LLMRerank when FlagEmbedding hits meta tensor errors.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+
+    class FakeFlagReranker:
+        def __init__(self, top_n: int, model: str, use_fp16: bool) -> None:
+            _ = (top_n, model, use_fp16)
+
+            def _raise(_pairs) -> list[float]:
+                raise NotImplementedError(
+                    "Cannot copy out of meta tensor; no data!"
+                )
+
+            self._model = types.SimpleNamespace(compute_score=_raise)
+
+    llm_reranker_obj = object()
+
+    monkeypatch.setattr(rag_module, "FlagEmbeddingReranker", FakeFlagReranker)
+    monkeypatch.setattr(
+        rag_module,
+        "LLMRerank",
+        lambda top_n, llm: llm_reranker_obj,
+    )
+    monkeypatch.setattr(
+        rag_module,
+        "resolve_hf_cache_path",
+        lambda cache_dir, repo_id: None,
+    )
+
+    rag = RAG(qdrant_collection="test")
+    rag.openai_model_provider = "ollama"
+    rag._text_model = None
+
+    assert rag.reranker is llm_reranker_obj
