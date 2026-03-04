@@ -441,6 +441,52 @@ def load_ner_env(
 
 
 @dataclass(frozen=True)
+class GraphRAGConfig:
+    """Dataclass for graph-assisted retrieval configuration."""
+
+    enabled: bool
+    neighbor_hops: int
+    top_k_nodes: int
+    min_edge_weight: int
+    max_neighbors: int
+
+
+def load_graphrag_env(
+    default_enabled: bool = False,
+    default_neighbor_hops: int = 1,
+    default_top_k_nodes: int = 100,
+    default_min_edge_weight: int = 1,
+    default_max_neighbors: int = 6,
+) -> GraphRAGConfig:
+    """Load GraphRAG configuration from environment variables.
+
+    Args:
+        default_enabled: Whether graph-assisted retrieval is enabled by default.
+        default_neighbor_hops: Number of graph hops used for query expansion.
+        default_top_k_nodes: Maximum number of graph nodes kept in memory.
+        default_min_edge_weight: Minimum edge weight used for graph filtering.
+        default_max_neighbors: Maximum number of neighbor entities appended to a query.
+
+    Returns:
+        GraphRAGConfig: Parsed graph retrieval settings.
+    """
+    return GraphRAGConfig(
+        enabled=str(os.getenv("GRAPHRAG_ENABLED", default_enabled)).lower()
+        in {"true", "1", "yes"},
+        neighbor_hops=max(
+            1, int(os.getenv("GRAPHRAG_NEIGHBOR_HOPS", default_neighbor_hops))
+        ),
+        top_k_nodes=max(1, int(os.getenv("GRAPHRAG_TOP_K_NODES", default_top_k_nodes))),
+        min_edge_weight=max(
+            1, int(os.getenv("GRAPHRAG_MIN_EDGE_WEIGHT", default_min_edge_weight))
+        ),
+        max_neighbors=max(
+            1, int(os.getenv("GRAPHRAG_MAX_NEIGHBORS", default_max_neighbors))
+        ),
+    )
+
+
+@dataclass(frozen=True)
 class OpenAIConfig:
     """Dataclass for OpenAI-compatible API configuration."""
 

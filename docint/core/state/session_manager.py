@@ -199,6 +199,7 @@ class SessionManager:
             if session_context
             else user_msg
         )
+        retrieval_query = self.rag.expand_query_with_graph(retrieval_query)
 
         resp = engine.query(retrieval_query)
         response = self.rag._normalize_response_data(user_msg, resp)
@@ -247,6 +248,7 @@ class SessionManager:
         retrieval_query = (
             f"{summary}\n\nUser question: {user_msg}" if summary else user_msg
         )
+        retrieval_query = self.rag.expand_query_with_graph(retrieval_query)
 
         response = streaming_engine.query(retrieval_query)
         response_gen = getattr(response, "response_gen", None)
