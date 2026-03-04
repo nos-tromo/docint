@@ -78,6 +78,52 @@ def resolve_hf_cache_path(
 
 
 @dataclass(frozen=True)
+class GraphRAGConfig:
+    """Dataclass for graph-assisted retrieval configuration."""
+
+    enabled: bool
+    neighbor_hops: int
+    top_k_nodes: int
+    min_edge_weight: int
+    max_neighbors: int
+
+
+def load_graphrag_env(
+    default_enabled: bool = False,
+    default_neighbor_hops: int = 1,
+    default_top_k_nodes: int = 100,
+    default_min_edge_weight: int = 1,
+    default_max_neighbors: int = 6,
+) -> GraphRAGConfig:
+    """Load GraphRAG configuration from environment variables.
+
+    Args:
+        default_enabled: Whether graph-assisted retrieval is enabled by default.
+        default_neighbor_hops: Number of graph hops used for query expansion.
+        default_top_k_nodes: Maximum number of graph nodes kept in memory.
+        default_min_edge_weight: Minimum edge weight used for graph filtering.
+        default_max_neighbors: Maximum number of neighbor entities appended to a query.
+
+    Returns:
+        GraphRAGConfig: Parsed graph retrieval settings.
+    """
+    return GraphRAGConfig(
+        enabled=str(os.getenv("GRAPHRAG_ENABLED", default_enabled)).lower()
+        in {"true", "1", "yes"},
+        neighbor_hops=max(
+            1, int(os.getenv("GRAPHRAG_NEIGHBOR_HOPS", default_neighbor_hops))
+        ),
+        top_k_nodes=max(1, int(os.getenv("GRAPHRAG_TOP_K_NODES", default_top_k_nodes))),
+        min_edge_weight=max(
+            1, int(os.getenv("GRAPHRAG_MIN_EDGE_WEIGHT", default_min_edge_weight))
+        ),
+        max_neighbors=max(
+            1, int(os.getenv("GRAPHRAG_MAX_NEIGHBORS", default_max_neighbors))
+        ),
+    )
+
+
+@dataclass(frozen=True)
 class HostConfig:
     """Dataclass for host configuration."""
 
@@ -441,52 +487,6 @@ def load_ner_env(
 
 
 @dataclass(frozen=True)
-class GraphRAGConfig:
-    """Dataclass for graph-assisted retrieval configuration."""
-
-    enabled: bool
-    neighbor_hops: int
-    top_k_nodes: int
-    min_edge_weight: int
-    max_neighbors: int
-
-
-def load_graphrag_env(
-    default_enabled: bool = False,
-    default_neighbor_hops: int = 1,
-    default_top_k_nodes: int = 100,
-    default_min_edge_weight: int = 1,
-    default_max_neighbors: int = 6,
-) -> GraphRAGConfig:
-    """Load GraphRAG configuration from environment variables.
-
-    Args:
-        default_enabled: Whether graph-assisted retrieval is enabled by default.
-        default_neighbor_hops: Number of graph hops used for query expansion.
-        default_top_k_nodes: Maximum number of graph nodes kept in memory.
-        default_min_edge_weight: Minimum edge weight used for graph filtering.
-        default_max_neighbors: Maximum number of neighbor entities appended to a query.
-
-    Returns:
-        GraphRAGConfig: Parsed graph retrieval settings.
-    """
-    return GraphRAGConfig(
-        enabled=str(os.getenv("GRAPHRAG_ENABLED", default_enabled)).lower()
-        in {"true", "1", "yes"},
-        neighbor_hops=max(
-            1, int(os.getenv("GRAPHRAG_NEIGHBOR_HOPS", default_neighbor_hops))
-        ),
-        top_k_nodes=max(1, int(os.getenv("GRAPHRAG_TOP_K_NODES", default_top_k_nodes))),
-        min_edge_weight=max(
-            1, int(os.getenv("GRAPHRAG_MIN_EDGE_WEIGHT", default_min_edge_weight))
-        ),
-        max_neighbors=max(
-            1, int(os.getenv("GRAPHRAG_MAX_NEIGHBORS", default_max_neighbors))
-        ),
-    )
-
-
-@dataclass(frozen=True)
 class OpenAIConfig:
     """Dataclass for OpenAI-compatible API configuration."""
 
@@ -649,6 +649,110 @@ def load_path_env() -> PathConfig:
 
 
 @dataclass(frozen=True)
+class PipelineConfig:
+    """Configuration for the document processing pipeline.
+
+    Attributes:
+        text_coverage_threshold: Minimum characters-per-area ratio below which
+            a page is classified as needing OCR.
+        pipeline_version: Semver string identifying the pipeline logic version.
+        artifacts_dir: Root directory for artifact output.
+        max_retries: Maximum retry attempts per stage on a given page.
+        force_reprocess: When True, ignore existing artifacts and reprocess.
+        max_workers: Maximum parallel workers for document-level processing.
+        enable_vision_ocr: When True, use the vision LLM as a fallback OCR
+            engine for scanned pages that have no extractable text layer.
+        vision_ocr_timeout: Per-request timeout in seconds for vision OCR API
+            calls (separate from the global ``OPENAI_TIMEOUT``).
+        vision_ocr_max_retries: Maximum retries for a single vision OCR API call.
+        vision_ocr_max_image_dimension: Maximum pixel dimension (width or height)
+            for images sent to the vision OCR endpoint.  Larger renders are
+            down-scaled proportionally before encoding.
+        vision_ocr_max_tokens: Maximum number of tokens the vision LLM may
+            generate per OCR request.  Keeps response time bounded.
+    """
+
+    text_coverage_threshold: float
+    pipeline_version: str
+    artifacts_dir: str
+    max_retries: int
+    force_reprocess: bool
+    max_workers: int
+    enable_vision_ocr: bool
+    vision_ocr_timeout: float
+    vision_ocr_max_retries: int
+    vision_ocr_max_image_dimension: int
+    vision_ocr_max_tokens: int
+
+
+def load_pipeline_config(
+    default_text_coverage_threshold: float = 0.01,
+    default_pipeline_version: str = "1.0.0",
+    default_artifacts_dir: str | None = None,
+    default_max_retries: int = 2,
+    default_force_reprocess: bool = False,
+    default_max_workers: int = 4,
+    default_enable_vision_ocr: bool = True,
+    default_vision_ocr_timeout: float = 60.0,
+    default_vision_ocr_max_retries: int = 1,
+    default_vision_ocr_max_image_dimension: int = 1024,
+    default_vision_ocr_max_tokens: int = 4096,
+) -> PipelineConfig:
+    """Build a ``PipelineConfig`` from environment variables with sensible defaults.
+
+    Args:
+        default_text_coverage_threshold: Default characters-per-area threshold for OCR classification.
+        default_pipeline_version: Default pipeline version string.
+        default_artifacts_dir: Default root directory for artifacts. If None, uses the value from ``load_path_env().artifacts``.
+        default_max_retries: Default maximum retry attempts per page stage.
+        default_force_reprocess: Default flag to force reprocessing of pages.
+        default_max_workers: Default maximum number of parallel workers for document processing.
+        default_enable_vision_ocr: Default flag to enable vision OCR fallback for scanned pages.
+        default_vision_ocr_timeout: Default per-request timeout in seconds for vision OCR API calls.
+        default_vision_ocr_max_retries: Default maximum retries for a single vision OCR API call.
+        default_vision_ocr_max_image_dimension: Default maximum pixel dimension for images sent to the vision OCR endpoint.
+        default_vision_ocr_max_tokens: Default maximum number of tokens the vision LLM may generate per OCR request.
+
+    Returns:
+        A fully-initialised ``PipelineConfig``.
+    """
+    pipeline_version = os.getenv("PIPELINE_VERSION", default_pipeline_version).strip()
+    if not pipeline_version:
+        pipeline_version = default_pipeline_version
+
+    return PipelineConfig(
+        text_coverage_threshold=float(
+            os.getenv(
+                "PIPELINE_TEXT_COVERAGE_THRESHOLD", default_text_coverage_threshold
+            )
+        ),
+        pipeline_version=pipeline_version,
+        artifacts_dir=str(load_path_env().artifacts),
+        max_retries=int(os.getenv("PIPELINE_MAX_RETRIES", default_max_retries)),
+        force_reprocess=os.getenv("PIPELINE_FORCE_REPROCESS", "false").lower()
+        in {"true", "1", "yes"},
+        max_workers=int(os.getenv("PIPELINE_MAX_WORKERS", default_max_workers)),
+        enable_vision_ocr=os.getenv("PIPELINE_ENABLE_VISION_OCR", "true").lower()
+        in {"true", "1", "yes"},
+        vision_ocr_timeout=float(
+            os.getenv("PIPELINE_VISION_OCR_TIMEOUT", default_vision_ocr_timeout)
+        ),
+        vision_ocr_max_retries=int(
+            os.getenv("PIPELINE_VISION_OCR_MAX_RETRIES", default_vision_ocr_max_retries)
+        ),
+        vision_ocr_max_image_dimension=int(
+            os.getenv(
+                "PIPELINE_VISION_OCR_MAX_IMAGE_DIM",
+                default_vision_ocr_max_image_dimension,
+            )
+        ),
+        vision_ocr_max_tokens=int(
+            os.getenv("PIPELINE_VISION_OCR_MAX_TOKENS", default_vision_ocr_max_tokens)
+        ),
+    )
+
+
+@dataclass(frozen=True)
 class RetrievalConfig:
     """Dataclass for RAG (Retrieval-Augmented Generation) configuration."""
 
@@ -702,107 +806,4 @@ def load_session_env(
     """
     return SessionConfig(
         session_store=os.getenv("SESSION_STORE", default_session_store)
-    )
-
-
-PIPELINE_VERSION = "1.0.0"
-
-
-@dataclass(frozen=True)
-class PipelineConfig:
-    """Configuration for the document processing pipeline.
-
-    Attributes:
-        text_coverage_threshold: Minimum characters-per-area ratio below which
-            a page is classified as needing OCR.
-        pipeline_version: Semver string identifying the pipeline logic version.
-        artifacts_dir: Root directory for artifact output.
-        max_retries: Maximum retry attempts per stage on a given page.
-        force_reprocess: When True, ignore existing artifacts and reprocess.
-        max_workers: Maximum parallel workers for document-level processing.
-        enable_vision_ocr: When True, use the vision LLM as a fallback OCR
-            engine for scanned pages that have no extractable text layer.
-        vision_ocr_timeout: Per-request timeout in seconds for vision OCR API
-            calls (separate from the global ``OPENAI_TIMEOUT``).
-        vision_ocr_max_retries: Maximum retries for a single vision OCR API call.
-        vision_ocr_max_image_dimension: Maximum pixel dimension (width or height)
-            for images sent to the vision OCR endpoint.  Larger renders are
-            down-scaled proportionally before encoding.
-        vision_ocr_max_tokens: Maximum number of tokens the vision LLM may
-            generate per OCR request.  Keeps response time bounded.
-    """
-
-    text_coverage_threshold: float
-    pipeline_version: str
-    artifacts_dir: str
-    max_retries: int
-    force_reprocess: bool
-    max_workers: int
-    enable_vision_ocr: bool
-    vision_ocr_timeout: float
-    vision_ocr_max_retries: int
-    vision_ocr_max_image_dimension: int
-    vision_ocr_max_tokens: int
-
-
-def load_pipeline_config(
-    default_text_coverage_threshold: float = 0.01,
-    default_pipeline_version: str = PIPELINE_VERSION,
-    default_artifacts_dir: str | None = None,
-    default_max_retries: int = 2,
-    default_force_reprocess: bool = False,
-    default_max_workers: int = 4,
-    default_enable_vision_ocr: bool = True,
-    default_vision_ocr_timeout: float = 60.0,
-    default_vision_ocr_max_retries: int = 1,
-    default_vision_ocr_max_image_dimension: int = 1024,
-    default_vision_ocr_max_tokens: int = 4096,
-) -> PipelineConfig:
-    """Build a ``PipelineConfig`` from environment variables with sensible defaults.
-
-    Args:
-        default_text_coverage_threshold: Default characters-per-area threshold for OCR classification.
-        default_pipeline_version: Default pipeline version string.
-        default_artifacts_dir: Default root directory for artifacts. If None, uses the value from ``load_path_env().artifacts``.
-        default_max_retries: Default maximum retry attempts per page stage.
-        default_force_reprocess: Default flag to force reprocessing of pages.
-        default_max_workers: Default maximum number of parallel workers for document processing.
-        default_enable_vision_ocr: Default flag to enable vision OCR fallback for scanned pages.
-        default_vision_ocr_timeout: Default per-request timeout in seconds for vision OCR API calls.
-        default_vision_ocr_max_retries: Default maximum retries for a single vision OCR API call.
-        default_vision_ocr_max_image_dimension: Default maximum pixel dimension for images sent to the vision OCR endpoint.
-        default_vision_ocr_max_tokens: Default maximum number of tokens the vision LLM may generate per OCR request.
-
-    Returns:
-        A fully-initialised ``PipelineConfig``.
-    """
-    return PipelineConfig(
-        text_coverage_threshold=float(
-            os.getenv(
-                "PIPELINE_TEXT_COVERAGE_THRESHOLD", default_text_coverage_threshold
-            )
-        ),
-        pipeline_version=PIPELINE_VERSION,
-        artifacts_dir=str(load_path_env().artifacts),
-        max_retries=int(os.getenv("PIPELINE_MAX_RETRIES", default_max_retries)),
-        force_reprocess=os.getenv("PIPELINE_FORCE_REPROCESS", "false").lower()
-        in {"true", "1", "yes"},
-        max_workers=int(os.getenv("PIPELINE_MAX_WORKERS", default_max_workers)),
-        enable_vision_ocr=os.getenv("PIPELINE_ENABLE_VISION_OCR", "true").lower()
-        in {"true", "1", "yes"},
-        vision_ocr_timeout=float(
-            os.getenv("PIPELINE_VISION_OCR_TIMEOUT", default_vision_ocr_timeout)
-        ),
-        vision_ocr_max_retries=int(
-            os.getenv("PIPELINE_VISION_OCR_MAX_RETRIES", default_vision_ocr_max_retries)
-        ),
-        vision_ocr_max_image_dimension=int(
-            os.getenv(
-                "PIPELINE_VISION_OCR_MAX_IMAGE_DIM",
-                default_vision_ocr_max_image_dimension,
-            )
-        ),
-        vision_ocr_max_tokens=int(
-            os.getenv("PIPELINE_VISION_OCR_MAX_TOKENS", default_vision_ocr_max_tokens)
-        ),
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import re
 from abc import ABC, abstractmethod
 from io import BytesIO
 from pathlib import Path
@@ -123,6 +124,16 @@ class VisionOCREngine(OCREngine):
     _DEFAULT_RENDER_DPI: int = 120
     _DEFAULT_MAX_TOKENS: int = 4096
     _JPEG_QUALITY: int = 80
+    _REFUSAL_MAX_CHARS: int = 280
+    _REFUSAL_MAX_LINES: int = 4
+    _REFUSAL_PATTERNS: tuple[re.Pattern[str], ...] = (
+        re.compile(r"i(?:'| a)?m sorry[, ]+i (?:can(?:not|'t)|won't) assist"),
+        re.compile(r"i (?:can(?:not|'t)|won't) assist with that"),
+        re.compile(r"i (?:can(?:not|'t)|won't) help with that"),
+        re.compile(r"i(?:'| a)?m unable to help with that"),
+        re.compile(r"as an ai(?: language model)?[, ]+i (?:can(?:not|'t)|won't)"),
+        re.compile(r"i cannot comply with that request"),
+    )
 
     def __init__(
         self,
@@ -395,10 +406,39 @@ class VisionOCREngine(OCREngine):
                 temperature=self._pipeline.temperature,
                 top_p=self._pipeline.top_p,
             )
-            return response.choices[0].message.content or ""
+            text = response.choices[0].message.content or ""
+            if self._looks_like_refusal(text):
+                logger.warning(
+                    "Vision OCR returned refusal-style output; treating as empty text"
+                )
+                return ""
+            return text
         except Exception as e:
             logger.error("Error during vision OCR inference: {}", e)
             raise RuntimeError(f"Vision OCR inference failed: {e}")
+
+    @classmethod
+    def _looks_like_refusal(cls, text: str) -> bool:
+        """Return whether *text* looks like a safety refusal/disclaimer.
+
+        The check is intentionally conservative and only flags short,
+        single-message responses that match common refusal phrases.
+
+        Args:
+            text: OCR model output.
+
+        Returns:
+            True when the text appears to be a refusal message.
+        """
+        normalized = " ".join(text.strip().lower().split())
+        if not normalized:
+            return False
+        if len(normalized) > cls._REFUSAL_MAX_CHARS:
+            return False
+        non_empty_lines = [line for line in text.splitlines() if line.strip()]
+        if len(non_empty_lines) > cls._REFUSAL_MAX_LINES:
+            return False
+        return any(pattern.search(normalized) for pattern in cls._REFUSAL_PATTERNS)
 
     def close(self) -> None:
         """Release the underlying ``pypdfium2`` document handle."""

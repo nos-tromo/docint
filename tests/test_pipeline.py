@@ -187,6 +187,7 @@ class TestPipelineConfig:
         for key in [
             "PIPELINE_TEXT_COVERAGE_THRESHOLD",
             "PIPELINE_ARTIFACTS_DIR",
+            "PIPELINE_VERSION",
             "PIPELINE_MAX_RETRIES",
             "PIPELINE_FORCE_REPROCESS",
             "PIPELINE_MAX_WORKERS",
@@ -195,6 +196,7 @@ class TestPipelineConfig:
 
         cfg = load_pipeline_config()
         assert cfg.text_coverage_threshold == 0.01
+        assert cfg.pipeline_version == "1.0.0"
         assert cfg.max_retries == 2
         assert cfg.force_reprocess is False
         assert cfg.max_workers == 4
@@ -203,9 +205,19 @@ class TestPipelineConfig:
         """Environment variables should override default config values."""
         monkeypatch.setenv("PIPELINE_TEXT_COVERAGE_THRESHOLD", "0.5")
         monkeypatch.setenv("PIPELINE_FORCE_REPROCESS", "true")
+        monkeypatch.setenv("PIPELINE_VERSION", "2.1.0")
         cfg = load_pipeline_config()
         assert cfg.text_coverage_threshold == 0.5
         assert cfg.force_reprocess is True
+        assert cfg.pipeline_version == "2.1.0"
+
+    def test_empty_pipeline_version_falls_back_to_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Empty ``PIPELINE_VERSION`` should fall back to default version."""
+        monkeypatch.setenv("PIPELINE_VERSION", "   ")
+        cfg = load_pipeline_config(default_pipeline_version="9.9.9")
+        assert cfg.pipeline_version == "9.9.9"
 
     def test_artifacts_dir_from_env(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1358,6 +1370,67 @@ class TestOCR:
 
         assert len(spans) == 1
         assert spans[0].text == "نص عربي مستخرج"
+        assert mock_create.call_count == 2
+
+    def test_vision_ocr_treats_refusal_as_empty_and_recovers(self) -> None:
+        """Refusal text should be dropped so higher-detail retry can recover OCR text."""
+        from docint.core.readers.documents.ocr import VisionOCREngine
+
+        mock_page = MagicMock()
+        mock_page.get_width.return_value = 612.0
+        mock_page.get_height.return_value = 792.0
+
+        from PIL import Image as PILImage
+
+        img = PILImage.new("RGB", (900, 3000), color="white")
+        mock_bitmap = MagicMock()
+        mock_bitmap.to_pil.return_value = img
+        mock_page.render.return_value = mock_bitmap
+
+        mock_pdf = MagicMock()
+        mock_pdf.__getitem__ = MagicMock(return_value=mock_page)
+
+        with (
+            patch("docint.core.readers.documents.ocr.pypdfium2") as mock_pdfium,
+            patch("docint.core.readers.documents.ocr.OpenAIPipeline") as MockPipeline,
+            patch("docint.core.readers.documents.ocr._OpenAI"),
+            patch("docint.core.readers.documents.ocr.load_openai_env"),
+            patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+        ):
+            mock_pdfium.PdfDocument.return_value = mock_pdf
+            pipeline_instance = MagicMock()
+            pipeline_instance.load_prompt.return_value = "Extract text"
+            pipeline_instance.seed = 42
+            pipeline_instance.temperature = 0.0
+            pipeline_instance.top_p = 0.0
+            MockPipeline.return_value = pipeline_instance
+            mock_model_env.return_value.vision_model_file = "test-vision.gguf"
+
+            refusal = MagicMock()
+            refusal.choices = [MagicMock()]
+            refusal.choices[0].message.content = "I'm sorry, I can't assist with that."
+
+            recovered = MagicMock()
+            recovered.choices = [MagicMock()]
+            recovered.choices[0].message.content = "Recovered OCR text"
+
+            engine = VisionOCREngine(
+                "/fake/doc.pdf",
+                timeout=10.0,
+                max_retries=0,
+                max_image_dimension=1024,
+                max_tokens=4096,
+            )
+
+            with patch.object(
+                engine._vision_client.chat.completions,
+                "create",
+                side_effect=[refusal, recovered],
+            ) as mock_create:
+                spans = engine.ocr_page(0)
+
+        assert len(spans) == 1
+        assert spans[0].text == "Recovered OCR text"
         assert mock_create.call_count == 2
 
 

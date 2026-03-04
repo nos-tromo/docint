@@ -46,7 +46,7 @@ def _normalize_type(value: Any) -> str:
 
 def _entity_key(text: str, entity_type: str) -> str:
     """Build a canonical entity key.
-    
+
     Args:
         text: Entity text.
         entity_type: Entity type/label.
@@ -286,7 +286,7 @@ def build_ner_stats(
     include_relations: bool = True,
 ) -> dict[str, Any]:
     """Build dashboard-friendly IE statistics from an aggregate payload.
-    
+
     Args:
         aggregate: Output of ``aggregate_ner_sources`` helper.
         top_k: Number of top entities and relations to return.
@@ -430,7 +430,7 @@ def search_entities(
     limit: int = 100,
 ) -> list[dict[str, Any]]:
     """Search canonicalized entities in aggregated IE payloads.
-    
+
     Args:
         aggregate: Output of ``aggregate_ner_sources`` helper.
         q: Optional text query to match against entity text.
@@ -471,7 +471,7 @@ def build_entity_graph(
     min_edge_weight: int = 1,
 ) -> dict[str, Any]:
     """Build a lightweight graph from aggregated entities and relations.
-    
+
     Args:
         aggregate: Output of ``aggregate_ner_sources`` helper.
         top_k_nodes: Maximum number of top entities to include as nodes.
@@ -508,7 +508,7 @@ def build_entity_graph(
             label (str): The label for the edge.
             kind (str): The kind of the edge (e.g., "relation" or "cooccurrence").
             weight (int): The weight of the edge.
-        """        
+        """
         if source == target:
             return
         if kind == "cooccurrence":
@@ -578,14 +578,14 @@ def graph_neighbors(
     hops: int = 1,
 ) -> dict[str, Any]:
     """Return graph neighborhood around an entity (by id or text).
-    
+
     Args:
         graph: Graph dictionary containing "nodes" and "edges".
         entity: Entity text or ID to find the neighborhood for.
         hops: Number of hops to include in the neighborhood.
 
     Returns:
-        A dictionary containing the center node, its neighbors, and the subgraph 
+        A dictionary containing the center node, its neighbors, and the subgraph
         of nodes and edges within the specified hops.
     """
     nodes = list(graph.get("nodes") or [])
