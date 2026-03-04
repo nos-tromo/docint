@@ -202,6 +202,155 @@ def aggregate_ner(
     return entities_sorted, relations_sorted
 
 
+def build_entity_histogram_data(
+    entities: Iterable[dict[str, Any]] | None,
+    *,
+    top_k: int = 15,
+    include_type: bool = True,
+    max_label_len: int | None = None,
+) -> dict[str, int]:
+    """Return a label->mention mapping for top entities.
+
+    Args:
+        entities: Aggregated entity rows.
+        top_k: Maximum number of bars to emit.
+
+    Returns:
+        Mapping suitable for ``st.bar_chart``.
+    """
+    rows = list(entities or [])
+    rows.sort(
+        key=lambda item: (
+            -int(item.get("count", item.get("mentions", 0)) or 0),
+            str(item.get("text") or "").lower(),
+        )
+    )
+    chart: dict[str, int] = {}
+    for ent in rows[: max(1, int(top_k))]:
+        text = str(ent.get("text") or "Unknown")
+        if max_label_len is not None and max_label_len > 0:
+            if len(text) > max_label_len:
+                text = f"{text[: max_label_len - 1].rstrip()}…"
+        kind = str(ent.get("type") or "Unlabeled")
+        label = f"{text} ({kind})" if include_type else text
+        base_label = label
+        suffix = 2
+        while label in chart:
+            label = f"{base_label} #{suffix}"
+            suffix += 1
+        chart[label] = int(ent.get("count", ent.get("mentions", 0)) or 0)
+    return chart
+
+
+def filter_entities(
+    entities: Iterable[dict[str, Any]] | None,
+    *,
+    query: str = "",
+    entity_type: str | None = None,
+    min_mentions: int = 1,
+    sort_by: str = "mentions",
+) -> list[dict[str, Any]]:
+    """Filter and sort aggregated entity rows.
+
+    Args:
+        entities: Aggregated entity rows.
+        query: Case-insensitive substring applied to entity text.
+        entity_type: Optional type filter (case-insensitive).
+        min_mentions: Minimum mention count.
+        sort_by: ``mentions`` or ``score``.
+
+    Returns:
+        Filtered and sorted entity rows.
+    """
+    query_l = str(query or "").strip().lower()
+    type_l = str(entity_type or "").strip().lower()
+
+    rows: list[dict[str, Any]] = []
+    for ent in entities or []:
+        text = str(ent.get("text") or "")
+        kind = str(ent.get("type") or "Unlabeled")
+        mentions = int(ent.get("count", ent.get("mentions", 0)) or 0)
+        if mentions < max(1, int(min_mentions)):
+            continue
+        if type_l and kind.lower() != type_l:
+            continue
+        if query_l and query_l not in text.lower():
+            continue
+        rows.append(ent)
+
+    if sort_by == "score":
+        rows.sort(
+            key=lambda item: (
+                -(float(item.get("best_score") or 0.0)),
+                -int(item.get("count", item.get("mentions", 0)) or 0),
+                str(item.get("text") or "").lower(),
+            )
+        )
+    else:
+        rows.sort(
+            key=lambda item: (
+                -int(item.get("count", item.get("mentions", 0)) or 0),
+                -(float(item.get("best_score") or 0.0)),
+                str(item.get("text") or "").lower(),
+            )
+        )
+    return rows
+
+
+def entity_density_by_document(
+    sources: Iterable[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Compute entity mention density per document.
+
+    Args:
+        sources: Source rows with optional ``filename`` and ``entities`` keys.
+
+    Returns:
+        Rows sorted by entity mentions desc.
+    """
+    docs: dict[str, dict[str, Any]] = {}
+    for src in sources or []:
+        if not isinstance(src, dict):
+            continue
+        filename = str(src.get("filename") or src.get("file_path") or "Unknown")
+        row = docs.setdefault(
+            filename,
+            {
+                "filename": filename,
+                "ie_sources": 0,
+                "entity_mentions": 0,
+                "unique_entities": set(),
+            },
+        )
+        entities = normalize_entities(src.get("entities"))
+        relations = normalize_relations(src.get("relations"))
+        if entities or relations:
+            row["ie_sources"] += 1
+        for ent in entities:
+            row["entity_mentions"] += 1
+            text = str(ent.get("text") or "").lower()
+            kind = str(ent.get("type") or "unlabeled").lower()
+            row["unique_entities"].add((text, kind))
+
+    rows: list[dict[str, Any]] = []
+    for value in docs.values():
+        ie_sources = int(value["ie_sources"])
+        entity_mentions = int(value["entity_mentions"])
+        rows.append(
+            {
+                "filename": value["filename"],
+                "ie_sources": ie_sources,
+                "entity_mentions": entity_mentions,
+                "unique_entities": len(value["unique_entities"]),
+                "entity_density": (
+                    float(entity_mentions) / float(ie_sources) if ie_sources else 0.0
+                ),
+            }
+        )
+    rows.sort(key=lambda item: (-int(item["entity_mentions"]), item["filename"]))
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Rendering helpers (use Streamlit)
 # ---------------------------------------------------------------------------

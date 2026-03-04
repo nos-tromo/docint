@@ -178,6 +178,11 @@ The application is configured via environment variables. Key variables include:
 - `DOCINT_OFFLINE`: Set to `true` to force offline mode (fails if models aren't cached).
 - `NER_ENABLED`: Enable scalable entity/relation extraction during ingestion (default: `true`). Uses parallel execution for maximum throughput.
 - `NER_MAX_WORKERS`: Number of parallel workers for entity extraction (default: `4`).
+- `GRAPHRAG_ENABLED`: Enable graph-assisted query expansion during chat/query retrieval (default: `false`).
+- `GRAPHRAG_NEIGHBOR_HOPS`: Neighborhood depth for graph expansion (default: `1`).
+- `GRAPHRAG_TOP_K_NODES`: Graph node cap used for derived in-memory graph construction (default: `100`).
+- `GRAPHRAG_MIN_EDGE_WEIGHT`: Minimum edge weight included in the graph (default: `1`).
+- `GRAPHRAG_MAX_NEIGHBORS`: Maximum neighbor entities appended to a retrieval query (default: `6`).
 - `PRELOAD_MODELS`: Set to `true` to download all ML models at container startup (default: unset/disabled). Used by `docker-compose.yml` to populate the `model-cache` volume on first run.
 
 **Hosts / Service Endpoints:**
@@ -248,6 +253,16 @@ By default, image embeddings are written to a per-collection Qdrant collection (
 - `PIPELINE_ENABLE_VISION_OCR` (default `true`)
 - `PIPELINE_VISION_OCR_TIMEOUT` (default `60.0`)
 - `PIPELINE_VISION_OCR_MAX_RETRIES` (default `1`)
+
+## Information Extraction Endpoints
+
+DocInt exposes collection-level IE APIs in addition to raw source payloads:
+
+- `GET /collections/ner`: Raw source-level entities/relations for the selected collection.
+- `GET /collections/ner/stats`: Aggregated IE metrics and top entities/relations.
+- `GET /collections/ner/search`: Entity search with optional type filter.
+- `GET /collections/ner/graph`: Derived entity graph (relations + co-occurrence edges).
+- `GET /collections/ner/graph/neighbors`: Local neighborhood view around a given entity.
 - `PIPELINE_VISION_OCR_MAX_IMAGE_DIM` (default `1024`)
 - `PIPELINE_VISION_OCR_MAX_TOKENS` (default `4096`)
 

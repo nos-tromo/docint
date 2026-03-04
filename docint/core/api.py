@@ -173,6 +173,32 @@ class SessionHistoryOut(BaseModel):
     messages: list[dict]
 
 
+class IEStatsOut(BaseModel):
+    totals: dict[str, int]
+    top_entities: list[dict] = []
+    entity_types: list[dict] = []
+    top_relations: list[dict] = []
+    documents: list[dict] = []
+
+
+class IESearchOut(BaseModel):
+    results: list[dict] = []
+
+
+class IEGraphOut(BaseModel):
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    meta: dict[str, int] = {}
+
+
+class IENeighborsOut(BaseModel):
+    center: dict[str, Any] | None = None
+    neighbors: list[dict] = []
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    meta: dict[str, Any] = {}
+
+
 class AgentChatIn(BaseModel):
     message: str
     session_id: str | None = None
@@ -428,7 +454,7 @@ async def summarize_stream() -> StreamingResponse:
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
-@app.get("/collections/ie", tags=["Query"])
+@app.get("/collections/ner", tags=["Query"])
 def get_collection_ner() -> dict[str, list[dict]]:
     """Get all NER data (entities and relations) for the currently selected collection.
 
@@ -445,6 +471,119 @@ def get_collection_ner() -> dict[str, list[dict]]:
         return {"sources": sources}
     except Exception as e:
         logger.error("Error fetching collection NER: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/collections/ner/stats", response_model=IEStatsOut, tags=["Query"])
+def get_collection_ner_stats(
+    top_k: int = 15,
+    min_mentions: int = 2,
+    entity_type: str | None = None,
+    include_relations: bool = True,
+) -> dict[str, Any]:
+    """Get collection-wide IE statistics.
+
+    Args:
+        top_k: Maximum number of top entities/relations to include.
+        min_mentions: Minimum mention count for ranked outputs.
+        entity_type: Optional case-insensitive entity type filter.
+        include_relations: Whether relation aggregates are included.
+
+    Returns:
+        A dashboard-friendly IE stats payload.
+
+    Raises:
+        HTTPException: If no collection is selected or an internal error occurs.
+    """
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+    try:
+        return rag.get_collection_ner_stats(
+            top_k=top_k,
+            min_mentions=min_mentions,
+            entity_type=entity_type,
+            include_relations=include_relations,
+        )
+    except Exception as e:
+        logger.error("Error fetching collection NER stats: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/collections/ner/search", response_model=IESearchOut, tags=["Query"])
+def search_collection_ner_entities(
+    q: str = "",
+    entity_type: str | None = None,
+    limit: int = 100,
+) -> dict[str, list[dict]]:
+    """Search entities across the selected collection.
+
+    Args:
+        q: Substring query applied to entity text.
+        entity_type: Optional case-insensitive type filter.
+        limit: Maximum number of rows to return.
+
+    Returns:
+        Dictionary containing matched entities.
+
+    Raises:
+        HTTPException: If no collection is selected or an internal error occurs.
+    """
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+    try:
+        return {
+            "results": rag.search_collection_ner_entities(
+                q=q,
+                entity_type=entity_type,
+                limit=limit,
+            )
+        }
+    except Exception as e:
+        logger.error("Error searching collection entities: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/collections/ner/graph", response_model=IEGraphOut, tags=["Query"])
+def get_collection_ner_graph(
+    top_k_nodes: int = 100,
+    min_edge_weight: int = 1,
+) -> dict[str, Any]:
+    """Build and return a derived IE graph for the selected collection."""
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+    try:
+        return rag.get_collection_ner_graph(
+            top_k_nodes=top_k_nodes,
+            min_edge_weight=min_edge_weight,
+        )
+    except Exception as e:
+        logger.error("Error building collection IE graph: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/collections/ner/graph/neighbors",
+    response_model=IENeighborsOut,
+    tags=["Query"],
+)
+def get_collection_ner_graph_neighbors(
+    entity: str,
+    hops: int = 1,
+    top_k_nodes: int = 100,
+    min_edge_weight: int = 1,
+) -> dict[str, Any]:
+    """Return graph neighbors around a specific entity."""
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+    try:
+        return rag.get_collection_ner_graph_neighbors(
+            entity=entity,
+            hops=hops,
+            top_k_nodes=top_k_nodes,
+            min_edge_weight=min_edge_weight,
+        )
+    except Exception as e:
+        logger.error("Error fetching collection IE graph neighbors: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import types
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from llama_index.core import Document
@@ -185,6 +186,121 @@ def test_select_collection_resets_image_service(
 
     assert rag.qdrant_collection == "beta"
     assert rag._image_ingestion_service is None
+
+
+def test_select_collection_invalidates_ner_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Selecting a collection should clear stale IE caches."""
+    rag = RAG(qdrant_collection="alpha")
+    rag.ner_sources = [{"filename": "a.pdf", "entities": [{"text": "Acme"}]}]
+    rag.ner_aggregate_cache["alpha"] = {"entities": []}
+    rag.ner_graph_cache[("alpha", 100, 1)] = {"nodes": [], "edges": [], "meta": {}}
+    monkeypatch.setattr(
+        RAG,
+        "list_collections",
+        lambda self, prefer_api=True: ["alpha", "beta"],
+    )
+
+    rag.select_collection("beta")
+
+    assert rag.ner_sources == []
+    assert rag.ner_aggregate_cache.get("alpha") is None
+    assert ("alpha", 100, 1) not in rag.ner_graph_cache
+
+
+def test_get_collection_ner_refresh_bypasses_cache() -> None:
+    """Refreshing collection IE should re-fetch data instead of returning stale cache."""
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = MagicMock()
+
+    point1 = MagicMock()
+    point1.payload = {"filename": "doc1.pdf", "entities": [{"text": "Acme"}]}
+    point2 = MagicMock()
+    point2.payload = {"filename": "doc2.pdf", "entities": [{"text": "Widget"}]}
+
+    rag._qdrant_client.scroll = MagicMock(
+        side_effect=[([point1], None), ([point2], None)]
+    )
+
+    first = rag.get_collection_ner()
+    second = rag.get_collection_ner()
+    refreshed = rag.get_collection_ner(refresh=True)
+
+    assert first == second
+    assert rag._qdrant_client.scroll.call_count == 2
+    assert refreshed != first
+    assert refreshed[0]["filename"] == "doc2.pdf"
+
+
+def test_collection_ner_stats_and_search() -> None:
+    """Stats/search should canonicalize entities and support filtering."""
+    rag = RAG(qdrant_collection="test")
+    sources = [
+        {
+            "filename": "a.pdf",
+            "entities": [{"text": "Acme", "type": "ORG", "score": 0.8}],
+        },
+        {
+            "filename": "a.pdf",
+            "entities": [{"text": "acme", "type": "ORG", "score": 0.9}],
+        },
+        {"filename": "b.pdf", "entities": [{"text": "Rivertown", "type": "LOC"}]},
+        {
+            "filename": "b.pdf",
+            "entities": [{"text": "Acme", "type": "ORG"}],
+            "relations": [{"head": "Acme", "label": "located_in", "tail": "Rivertown"}],
+        },
+    ]
+    rag.ner_sources = sources
+
+    stats = rag.get_collection_ner_stats(top_k=10, min_mentions=2)
+    assert stats["totals"]["unique_entities"] == 2
+    assert stats["totals"]["entity_mentions"] == 4
+    assert stats["top_entities"][0]["text"] == "Acme"
+    assert stats["top_entities"][0]["mentions"] == 3
+
+    loc_stats = rag.get_collection_ner_stats(
+        top_k=10, min_mentions=1, entity_type="loc", include_relations=False
+    )
+    assert loc_stats["totals"]["unique_entities"] == 1
+    assert loc_stats["totals"]["unique_relations"] == 0
+
+    results = rag.search_collection_ner_entities(q="ac", limit=10)
+    assert results[0]["text"] == "Acme"
+    assert results[0]["mentions"] == 3
+
+
+def test_collection_ner_graph_and_neighbors() -> None:
+    """Graph endpoints should expose relation and co-occurrence edges."""
+    rag = RAG(qdrant_collection="test")
+    sources = [
+        {
+            "filename": "a.pdf",
+            "entities": [
+                {"text": "Acme", "type": "ORG"},
+                {"text": "Rivertown", "type": "LOC"},
+            ],
+            "relations": [{"head": "Acme", "label": "located_in", "tail": "Rivertown"}],
+        },
+        {
+            "filename": "b.pdf",
+            "entities": [
+                {"text": "Acme", "type": "ORG"},
+                {"text": "Widget", "type": "PRODUCT"},
+            ],
+        },
+    ]
+    rag.ner_sources = sources
+
+    graph = rag.get_collection_ner_graph(top_k_nodes=10, min_edge_weight=1)
+    assert graph["meta"]["node_count"] >= 3
+    assert graph["meta"]["edge_count"] >= 2
+
+    neighbors = rag.get_collection_ner_graph_neighbors(entity="Acme", hops=1)
+    assert neighbors["center"] is not None
+    assert neighbors["center"]["text"] == "Acme"
+    assert neighbors["neighbors"]
 
 
 def test_start_session_initializes_memory(
@@ -376,9 +492,7 @@ def test_reranker_falls_back_to_llm_on_meta_tensor_error(
             _ = (top_n, model, use_fp16)
 
             def _raise(_pairs) -> list[float]:
-                raise NotImplementedError(
-                    "Cannot copy out of meta tensor; no data!"
-                )
+                raise NotImplementedError("Cannot copy out of meta tensor; no data!")
 
             self._model = types.SimpleNamespace(compute_score=_raise)
 

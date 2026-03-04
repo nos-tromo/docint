@@ -2,6 +2,8 @@
 
 from typing import Any
 
+import altair as alt
+import pandas as pd
 import requests
 import streamlit as st
 
@@ -28,9 +30,11 @@ def render_dashboard() -> None:
     # Fetch document count for the selected collection
     doc_count: int | None = None
     docs: list[dict[str, Any]] = []
+    ie_stats: dict[str, Any] | None = None
     if collection:
         docs = _fetch_documents(collection)
         doc_count = len(docs) if docs is not None else None
+        ie_stats = _fetch_ie_stats(collection, top_k=15, min_mentions=2)
 
     # ── KPI cards ──────────────────────────────────────────────
     c1, c2, c3, c4 = st.columns(4)
@@ -69,6 +73,127 @@ def render_dashboard() -> None:
 
     with col_left:
         st.subheader(f"📁 {collection}")
+
+        if ie_stats:
+            totals = ie_stats.get("totals", {})
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Unique entities", int(totals.get("unique_entities", 0) or 0))
+            m2.metric("Entity mentions", int(totals.get("entity_mentions", 0) or 0))
+            m3.metric("Unique relations", int(totals.get("unique_relations", 0) or 0))
+
+            available_types = [
+                str(row.get("type"))
+                for row in ie_stats.get("entity_types", [])
+                if str(row.get("type") or "").strip()
+            ]
+            type_options = ["All"] + sorted(set(available_types))
+
+            c_top, c_type, c_singleton = st.columns([2, 2, 2])
+            with c_top:
+                top_k = st.slider(
+                    "Top entities",
+                    min_value=5,
+                    max_value=50,
+                    value=15,
+                    step=1,
+                    key=f"dash_top_k_{collection}",
+                )
+            with c_type:
+                selected_type = st.selectbox(
+                    "Entity type",
+                    options=type_options,
+                    key=f"dash_entity_type_{collection}",
+                )
+            with c_singleton:
+                include_singletons = st.toggle(
+                    "Include singletons",
+                    value=False,
+                    key=f"dash_singletons_{collection}",
+                )
+
+            filtered_stats = _fetch_ie_stats(
+                collection,
+                top_k=top_k,
+                min_mentions=1 if include_singletons else 2,
+                entity_type=None if selected_type == "All" else selected_type,
+            )
+            if filtered_stats:
+                st.caption("Top entities by mentions")
+                rows = list(filtered_stats.get("top_entities", []))
+                if rows:
+                    chart_rows: list[dict[str, Any]] = []
+                    seen_labels: set[str] = set()
+                    for row in rows[:top_k]:
+                        full_entity = str(row.get("text") or "Unknown")
+                        display_entity = full_entity
+                        max_len = 24
+                        if len(display_entity) > max_len:
+                            display_entity = (
+                                f"{display_entity[: max_len - 1].rstrip()}…"
+                            )
+                        label = display_entity
+                        suffix = 2
+                        while label in seen_labels:
+                            label = f"{display_entity} #{suffix}"
+                            suffix += 1
+                        seen_labels.add(label)
+                        chart_rows.append(
+                            {
+                                "Entity": label,
+                                "FullEntity": full_entity,
+                                "Type": str(row.get("type") or "Unlabeled"),
+                                "Mentions": int(row.get("mentions", 0) or 0),
+                            }
+                        )
+
+                    chart_df = pd.DataFrame(chart_rows).sort_values(
+                        by="Mentions", ascending=False
+                    )
+                    entity_chart = (
+                        alt.Chart(chart_df)
+                        .mark_bar()
+                        .encode(
+                            x=alt.X("Mentions:Q", title="Mentions"),
+                            y=alt.Y("Entity:N", sort="-x", title=None),
+                            tooltip=[
+                                alt.Tooltip("FullEntity:N", title="Entity"),
+                                alt.Tooltip("Type:N", title="Type"),
+                                alt.Tooltip("Mentions:Q", title="Mentions"),
+                            ],
+                        )
+                        .properties(height=max(220, min(700, len(chart_rows) * 28)))
+                    )
+                    st.altair_chart(entity_chart, use_container_width=True)
+                    with st.expander("Show full entity labels"):
+                        st.dataframe(
+                            {
+                                "Entity": [str(r.get("text") or "") for r in rows],
+                                "Type": [
+                                    str(r.get("type") or "Unlabeled") for r in rows
+                                ],
+                                "Mentions": [
+                                    int(r.get("mentions", 0) or 0) for r in rows
+                                ],
+                            },
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                else:
+                    st.caption("No entities available for the current filters.")
+
+                st.caption("Entity type distribution")
+                type_data = {
+                    str(row.get("type") or "Unlabeled"): int(
+                        row.get("mentions", 0) or 0
+                    )
+                    for row in filtered_stats.get("entity_types", [])
+                }
+                if type_data:
+                    st.bar_chart(type_data)
+                else:
+                    st.caption("No entity-type data available.")
+        else:
+            st.caption("No information extraction statistics available yet.")
 
         # Document-type distribution chart
         if docs:
@@ -130,6 +255,43 @@ def _fetch_documents(collection: str) -> list[dict[str, Any]]:
     except Exception:
         pass
     return []
+
+
+def _fetch_ie_stats(
+    collection: str,
+    *,
+    top_k: int = 15,
+    min_mentions: int = 2,
+    entity_type: str | None = None,
+) -> dict[str, Any] | None:
+    """Fetch IE statistics for *collection*.
+
+    Args:
+        collection: Collection name (used for UI cache keying).
+        top_k: Maximum number of top entities/relations.
+        min_mentions: Mention threshold for ranked rows.
+        entity_type: Optional entity type filter.
+
+    Returns:
+        Stats payload, or ``None`` when unavailable.
+    """
+    _ = collection
+    params: dict[str, Any] = {
+        "top_k": top_k,
+        "min_mentions": min_mentions,
+        "include_relations": True,
+    }
+    if entity_type:
+        params["entity_type"] = entity_type
+    try:
+        resp = requests.get(
+            f"{BACKEND_HOST}/collections/ner/stats", params=params, timeout=20
+        )
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        pass
+    return None
 
 
 def _render_welcome(sessions: list[dict[str, Any]]) -> None:

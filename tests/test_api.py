@@ -127,6 +127,118 @@ class DummyRAG:
         """
         return self.ner_sources
 
+    def get_collection_ner_stats(
+        self,
+        *,
+        top_k: int = 15,
+        min_mentions: int = 2,
+        entity_type: str | None = None,
+        include_relations: bool = True,
+    ) -> dict[str, Any]:
+        """Return canned IE stats payload."""
+        _ = (top_k, min_mentions, entity_type, include_relations)
+        return {
+            "totals": {
+                "unique_entities": 1,
+                "entity_mentions": 3,
+                "unique_relations": 1,
+            },
+            "top_entities": [
+                {
+                    "text": "Acme",
+                    "type": "ORG",
+                    "mentions": 3,
+                    "best_score": 0.9,
+                    "source_count": 2,
+                }
+            ],
+            "entity_types": [{"type": "ORG", "mentions": 3, "unique_entities": 1}],
+            "top_relations": [
+                {"head": "Acme", "label": "owns", "tail": "Widget", "mentions": 2}
+            ],
+            "documents": [
+                {
+                    "filename": "doc1.pdf",
+                    "entity_mentions": 3,
+                    "unique_entities": 1,
+                    "ie_source_count": 2,
+                    "entity_density": 1.5,
+                }
+            ],
+        }
+
+    def search_collection_ner_entities(
+        self,
+        *,
+        q: str = "",
+        entity_type: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return simple entity search results."""
+        _ = (entity_type, limit)
+        if q and q.lower() not in "acme":
+            return []
+        return [
+            {
+                "text": "Acme",
+                "type": "ORG",
+                "mentions": 3,
+                "best_score": 0.9,
+                "source_count": 2,
+            }
+        ]
+
+    def get_collection_ner_graph(
+        self,
+        *,
+        top_k_nodes: int = 100,
+        min_edge_weight: int = 1,
+    ) -> dict[str, Any]:
+        """Return a minimal graph payload."""
+        _ = (top_k_nodes, min_edge_weight)
+        return {
+            "nodes": [
+                {"id": "acme::org", "text": "Acme", "type": "ORG", "mentions": 3}
+            ],
+            "edges": [
+                {
+                    "source": "acme::org",
+                    "target": "widget::unlabeled",
+                    "label": "owns",
+                    "kind": "relation",
+                    "weight": 2,
+                }
+            ],
+            "meta": {"node_count": 1, "edge_count": 1},
+        }
+
+    def get_collection_ner_graph_neighbors(
+        self,
+        *,
+        entity: str,
+        hops: int = 1,
+        top_k_nodes: int = 100,
+        min_edge_weight: int = 1,
+    ) -> dict[str, Any]:
+        """Return canned neighborhood payload."""
+        _ = (entity, hops, top_k_nodes, min_edge_weight)
+        return {
+            "center": {"id": "acme::org", "text": "Acme", "type": "ORG", "mentions": 3},
+            "neighbors": [
+                {
+                    "id": "widget::unlabeled",
+                    "text": "Widget",
+                    "type": "Unlabeled",
+                    "mentions": 1,
+                    "depth": 1,
+                    "score": 2.0,
+                }
+            ],
+            "nodes": [],
+            "edges": [],
+            "meta": {"hops": 1, "node_count": 2, "edge_count": 1},
+        }
+
 
 @pytest.fixture(autouse=True)
 def _patch_rag(monkeypatch: pytest.MonkeyPatch) -> Any | None:
@@ -225,9 +337,47 @@ def test_collections_ner_success(client: TestClient) -> None:
     api_module.rag.ner_sources = [
         {"filename": "doc1.pdf", "page": 1, "row": 2, "entities": [], "relations": []}
     ]
-    response = client.get("/collections/ie")
+    response = client.get("/collections/ner")
     assert response.status_code == 200
     assert response.json() == {"sources": api_module.rag.ner_sources}
+
+
+def test_collections_ner_stats_success(client: TestClient) -> None:
+    """Stats endpoint should return IE summary payload."""
+    response = client.get("/collections/ner/stats")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["totals"]["unique_entities"] == 1
+    assert payload["top_entities"][0]["text"] == "Acme"
+
+
+def test_collections_ner_search_success(client: TestClient) -> None:
+    """Search endpoint should return matching entities."""
+    response = client.get("/collections/ner/search", params={"q": "ac"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["results"][0]["text"] == "Acme"
+
+
+def test_collections_ner_graph_success(client: TestClient) -> None:
+    """Graph endpoint should return graph payload."""
+    response = client.get("/collections/ner/graph")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["meta"]["edge_count"] == 1
+    assert payload["nodes"][0]["text"] == "Acme"
+
+
+def test_collections_ner_graph_neighbors_success(client: TestClient) -> None:
+    """Neighbors endpoint should return center + neighbors."""
+    response = client.get(
+        "/collections/ner/graph/neighbors",
+        params={"entity": "Acme", "hops": 1},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["center"]["text"] == "Acme"
+    assert payload["neighbors"][0]["text"] == "Widget"
 
 
 def test_agent_chat_answers(
@@ -308,7 +458,23 @@ def test_collections_ner_requires_selection(client: TestClient) -> None:
         client (TestClient): The TestClient instance.
     """
     api_module.rag.qdrant_collection = ""
-    response = client.get("/collections/ie")
+    response = client.get("/collections/ner")
+    assert response.status_code == 400
+    assert "No collection selected" in response.json()["detail"]
+
+
+def test_collections_ner_stats_requires_selection(client: TestClient) -> None:
+    """Stats endpoint should require active collection selection."""
+    api_module.rag.qdrant_collection = ""
+    response = client.get("/collections/ner/stats")
+    assert response.status_code == 400
+    assert "No collection selected" in response.json()["detail"]
+
+
+def test_collections_ner_search_requires_selection(client: TestClient) -> None:
+    """Search endpoint should require active collection selection."""
+    api_module.rag.qdrant_collection = ""
+    response = client.get("/collections/ner/search", params={"q": "acme"})
     assert response.status_code == 400
     assert "No collection selected" in response.json()["detail"]
 
@@ -335,7 +501,37 @@ def test_collections_ner_failure(
         raise RuntimeError("boom")
 
     monkeypatch.setattr(api_module.rag, "get_collection_ner", raiser)
-    response = client.get("/collections/ie")
+    response = client.get("/collections/ner")
+    assert response.status_code == 500
+    assert response.json()["detail"] == "boom"
+
+
+def test_collections_ner_stats_failure(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Stats endpoint should surface backend failures."""
+
+    def raiser(**kwargs) -> dict[str, Any]:
+        _ = kwargs
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(api_module.rag, "get_collection_ner_stats", raiser)
+    response = client.get("/collections/ner/stats")
+    assert response.status_code == 500
+    assert response.json()["detail"] == "boom"
+
+
+def test_collections_ner_search_failure(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Search endpoint should surface backend failures."""
+
+    def raiser(**kwargs) -> list[dict[str, Any]]:
+        _ = kwargs
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(api_module.rag, "search_collection_ner_entities", raiser)
+    response = client.get("/collections/ner/search", params={"q": "ac"})
     assert response.status_code == 500
     assert response.json()["detail"] == "boom"
 

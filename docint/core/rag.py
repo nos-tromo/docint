@@ -14,7 +14,9 @@ from typing import Any, Callable
 # Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
 # TRANSFORMERS_OFFLINE env vars are set before huggingface_hub caches them.
 from docint.utils.env_cfg import (
+    GraphRAGConfig,
     load_host_env,
+    load_graphrag_env,
     load_ingestion_env,
     load_model_env,
     load_ner_env,
@@ -55,6 +57,13 @@ from loguru import logger
 from qdrant_client import QdrantClient
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 
+from docint.core.ner import (
+    aggregate_ner_sources,
+    build_entity_graph,
+    build_ner_stats,
+    graph_neighbors,
+    search_entities,
+)
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.readers.documents import CorePDFPipelineReader
@@ -93,6 +102,9 @@ class RAG:
     path_config: PathConfig = field(
         default_factory=load_path_env, init=False, repr=False
     )
+    graphrag_config: GraphRAGConfig = field(
+        default_factory=load_graphrag_env, init=False, repr=False
+    )
     retrieval_config: RetrievalConfig = field(
         default_factory=load_retrieval_env, init=False, repr=False
     )
@@ -109,6 +121,12 @@ class RAG:
     # --- Named entity recognition ---
     ner_enabled: bool = field(default=False, init=False)
     ner_sources: list[dict[str, Any]] = field(default_factory=list, init=False)
+    ner_aggregate_cache: dict[str, dict[str, Any]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    ner_graph_cache: dict[tuple[str, int, int], dict[str, Any]] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     # --- OpenAI parameters ---
     openai_api_base: str | None = field(default=None, init=False)
@@ -131,6 +149,11 @@ class RAG:
     retrieve_similarity_top_k: int = field(default=20, init=False)
     rerank_top_n: int = field(default=5, init=False)
     rerank_use_fp16: bool = field(default=False, init=False)
+    graphrag_enabled: bool = field(default=False, init=False)
+    graphrag_neighbor_hops: int = field(default=1, init=False)
+    graphrag_top_k_nodes: int = field(default=100, init=False)
+    graphrag_min_edge_weight: int = field(default=1, init=False)
+    graphrag_max_neighbors: int = field(default=6, init=False)
 
     # --- Session config ---
     session_store: str = field(default="", init=False)
@@ -232,6 +255,11 @@ class RAG:
         self.rerank_use_fp16 = self.retrieval_config.rerank_use_fp16
         self.retrieve_similarity_top_k = self.retrieval_config.retrieve_top_k
         self.rerank_top_n = int(self.retrieve_similarity_top_k // 4)
+        self.graphrag_enabled = self.graphrag_config.enabled
+        self.graphrag_neighbor_hops = self.graphrag_config.neighbor_hops
+        self.graphrag_top_k_nodes = self.graphrag_config.top_k_nodes
+        self.graphrag_min_edge_weight = self.graphrag_config.min_edge_weight
+        self.graphrag_max_neighbors = self.graphrag_config.max_neighbors
 
         # --- Session config ---
         self.session_store = self.session_config.session_store
@@ -676,6 +704,7 @@ class RAG:
             ner_model=ner_model,
             device=self.device,
             progress_callback=progress_callback,
+            openai_model_provider=self.openai_model_provider,
             target_collection=self.qdrant_collection,
             image_ingestion_service=self._image_ingestion_service,
         )
@@ -1177,17 +1206,19 @@ class RAG:
         """
         if not name or not name.strip():
             raise ValueError("Collection name cannot be empty")
+        target = name.strip()
+        self._invalidate_ner_cache(target)
 
         # 1. Delete from Qdrant API
         try:
-            self.qdrant_client.delete_collection(name)
-            logger.info("Deleted collection '{}' from Qdrant.", name)
+            self.qdrant_client.delete_collection(target)
+            logger.info("Deleted collection '{}' from Qdrant.", target)
         except Exception as e:
-            logger.error("Failed to delete collection '{}' via API: {}", name, e)
+            logger.error("Failed to delete collection '{}' via API: {}", target, e)
 
         # 2. Cleanup source files
         try:
-            src_path = self.qdrant_src_dir / name
+            src_path = self.qdrant_src_dir / target
             if src_path.exists():
 
                 def on_error(func: Callable, path: str, _exc_info: Any) -> None:
@@ -1218,10 +1249,10 @@ class RAG:
                         logger.warning("Failed to force delete {}: {}", path, e)
 
                 shutil.rmtree(path=src_path, onerror=on_error)
-                logger.info("Deleted source directory for collection '{}'.", name)
+                logger.info("Deleted source directory for collection '{}'.", target)
         except Exception as e:
             logger.error(
-                f"Failed to delete source directory for collection '{name}': {e}"
+                f"Failed to delete source directory for collection '{target}': {e}"
             )
 
     def select_collection(self, name: str) -> None:
@@ -1241,6 +1272,7 @@ class RAG:
             logger.error("ValueError: Collection '{}' does not exist.", name)
             raise ValueError(f"Collection '{name}' does not exist.")
 
+        previous_collection = self.qdrant_collection
         self.qdrant_collection = name
 
         # Reset any state tied to the previously selected collection so that
@@ -1251,6 +1283,8 @@ class RAG:
         self.query_engine = None
         self._image_ingestion_service = None
         self.reset_session_state()
+        self._invalidate_ner_cache(previous_collection)
+        self._invalidate_ner_cache(name)
 
     def _prepare_sources_dir(self, data_dir: Path) -> Path:
         """Ensure source files live under qdrant_src_dir/<collection> for preview and persistence.
@@ -1358,6 +1392,7 @@ class RAG:
             self.query_engine = None
 
         self.reset_session_state()
+        self._invalidate_ner_cache(self.qdrant_collection)
 
         eff_k = None
         if self.query_engine is not None and hasattr(self.query_engine, "retriever"):
@@ -1451,6 +1486,7 @@ class RAG:
             self.query_engine = None
 
         self.reset_session_state()
+        self._invalidate_ner_cache(self.qdrant_collection)
 
         eff_k = None
         if self.query_engine is not None and hasattr(self.query_engine, "retriever"):
@@ -1543,6 +1579,26 @@ class RAG:
         if self.sessions is not None:
             self.sessions.reset_runtime()
 
+    def _invalidate_ner_cache(self, collection: str | None = None) -> None:
+        """Invalidate cached IE payloads for one or all collections.
+
+        Args:
+            collection: Optional collection name. If omitted, clears all IE caches.
+        """
+        if collection is None:
+            self.ner_sources = []
+            self.ner_aggregate_cache.clear()
+            self.ner_graph_cache.clear()
+            return
+
+        self.ner_aggregate_cache.pop(collection, None)
+        stale_graph_keys = [k for k in self.ner_graph_cache if k[0] == collection]
+        for key in stale_graph_keys:
+            self.ner_graph_cache.pop(key, None)
+
+        if collection == self.qdrant_collection:
+            self.ner_sources = []
+
     def export_session(
         self, session_id: str | None = None, out_dir: str | Path = "session"
     ) -> Path:
@@ -1596,6 +1652,78 @@ class RAG:
         if self.sessions is None:
             self.sessions = SessionManager(self)
         return self.sessions.stream_chat(user_msg)
+
+    def expand_query_with_graph(self, query: str) -> str:
+        """Optionally expand a query using graph-neighbor entities.
+
+        This is a lightweight GraphRAG bridge: when enabled, entity mentions
+        already present in the query are used as anchors, and high-scoring
+        neighboring entities are appended to improve recall during retrieval.
+
+        Args:
+            query: Original retrieval query.
+
+        Returns:
+            Expanded query when graph expansion is enabled and applicable,
+            otherwise the original query.
+        """
+        if not self.graphrag_enabled or not query.strip() or not self.qdrant_collection:
+            return query
+
+        try:
+            aggregate = self._get_collection_ner_aggregate(refresh=False)
+            entities = list(aggregate.get("entities") or [])
+            query_l = query.lower()
+            anchors = [
+                ent
+                for ent in entities
+                if str(ent.get("text") or "").strip()
+                and str(ent.get("text")).lower() in query_l
+            ]
+            anchors.sort(
+                key=lambda item: (
+                    -int(item.get("mentions", 0) or 0),
+                    str(item.get("text") or "").lower(),
+                )
+            )
+            if not anchors:
+                return query
+
+            selected_anchors = anchors[:2]
+            anchor_texts = {
+                str(ent.get("text") or "").strip() for ent in selected_anchors
+            }
+            neighbor_texts: list[str] = []
+            seen: set[str] = set()
+            for ent in selected_anchors:
+                neighborhood = self.get_collection_ner_graph_neighbors(
+                    entity=str(ent.get("text") or ""),
+                    hops=self.graphrag_neighbor_hops,
+                    top_k_nodes=self.graphrag_top_k_nodes,
+                    min_edge_weight=self.graphrag_min_edge_weight,
+                    refresh=False,
+                )
+                for nbr in neighborhood.get("neighbors") or []:
+                    text = str(nbr.get("text") or "").strip()
+                    if (
+                        not text
+                        or text in anchor_texts
+                        or text.lower() in seen
+                        or len(neighbor_texts) >= self.graphrag_max_neighbors
+                    ):
+                        continue
+                    seen.add(text.lower())
+                    neighbor_texts.append(text)
+                if len(neighbor_texts) >= self.graphrag_max_neighbors:
+                    break
+
+            if not neighbor_texts:
+                return query
+            related = ", ".join(neighbor_texts)
+            return f"{query}\n\nRelated entities for retrieval: {related}"
+        except Exception as exc:
+            logger.warning("Graph query expansion skipped: {}", exc)
+            return query
 
     def summarize_collection(self) -> dict[str, Any]:
         """Generate a summary of the currently selected collection.
@@ -1813,19 +1941,22 @@ class RAG:
     def get_collection_ner(self, refresh: bool = False) -> list[dict[str, Any]]:
         """Fetch all nodes from the current collection and return their NER metadata.
 
+        Args:
+            refresh: If ``True``, bypass in-memory IE cache and re-fetch from Qdrant.
+
         Returns:
             list[dict[str, Any]]: A list of source metadata dictionaries containing NER data.
         """
         if not self.qdrant_collection:
             return []
 
+        if refresh:
+            self._invalidate_ner_cache(self.qdrant_collection)
+
         if self.ner_sources and not refresh:
             return self.ner_sources
 
-        if self.ner_sources:
-            return self.ner_sources
-
-        sources = []
+        sources: list[dict[str, Any]] = []
         offset = None
         while True:
             try:
@@ -1899,12 +2030,164 @@ class RAG:
         self.ner_sources = sources
         return sources
 
+    def _get_collection_ner_aggregate(self, refresh: bool = False) -> dict[str, Any]:
+        """Return cached aggregate IE payload for the active collection.
+
+        Args:
+            refresh: If ``True``, recompute aggregate from fresh collection IE rows.
+
+        Returns:
+            Aggregation dictionary for stats/search/graph operations.
+        """
+        if not self.qdrant_collection:
+            return aggregate_ner_sources([])
+        if refresh:
+            self._invalidate_ner_cache(self.qdrant_collection)
+
+        collection = self.qdrant_collection
+        if collection in self.ner_aggregate_cache:
+            return self.ner_aggregate_cache[collection]
+
+        sources = self.get_collection_ner(refresh=refresh)
+        aggregate = aggregate_ner_sources(sources)
+        self.ner_aggregate_cache[collection] = aggregate
+        return aggregate
+
+    def get_collection_ner_stats(
+        self,
+        *,
+        top_k: int = 15,
+        min_mentions: int = 2,
+        entity_type: str | None = None,
+        include_relations: bool = True,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        """Return collection-wide IE statistics for dashboard and analysis views.
+
+        Args:
+            top_k: Maximum number of top entities/relations to include.
+            min_mentions: Minimum mention count for ranked outputs.
+            entity_type: Optional case-insensitive entity-type filter.
+            include_relations: Whether relation aggregates are included.
+            refresh: If ``True``, recompute from fresh collection data.
+
+        Returns:
+            IE stats payload.
+        """
+        aggregate = self._get_collection_ner_aggregate(refresh=refresh)
+        return build_ner_stats(
+            aggregate,
+            top_k=max(1, int(top_k)),
+            min_mentions=max(1, int(min_mentions)),
+            entity_type=entity_type,
+            include_relations=bool(include_relations),
+        )
+
+    def search_collection_ner_entities(
+        self,
+        *,
+        q: str = "",
+        entity_type: str | None = None,
+        limit: int = 100,
+        refresh: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Search canonicalized entities across the selected collection.
+
+        Args:
+            q: Case-insensitive text query applied to entity names.
+            entity_type: Optional case-insensitive type filter.
+            limit: Maximum number of entities to return.
+            refresh: If ``True``, recompute from fresh collection data.
+
+        Returns:
+            Search result rows sorted by mention frequency.
+        """
+        aggregate = self._get_collection_ner_aggregate(refresh=refresh)
+        return search_entities(
+            aggregate,
+            q=q,
+            entity_type=entity_type,
+            limit=max(1, int(limit)),
+        )
+
+    def get_collection_ner_graph(
+        self,
+        *,
+        top_k_nodes: int = 100,
+        min_edge_weight: int = 1,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        """Build a derived IE graph for the selected collection.
+
+        Args:
+            top_k_nodes: Maximum number of highest-mention entity nodes to include.
+            min_edge_weight: Minimum edge weight threshold.
+            refresh: If ``True``, recompute graph from fresh collection data.
+
+        Returns:
+            Graph payload containing ``nodes``, ``edges``, and ``meta``.
+        """
+        if not self.qdrant_collection:
+            return {
+                "nodes": [],
+                "edges": [],
+                "meta": {"node_count": 0, "edge_count": 0},
+            }
+        if refresh:
+            self._invalidate_ner_cache(self.qdrant_collection)
+
+        cache_key = (
+            self.qdrant_collection,
+            max(1, int(top_k_nodes)),
+            max(1, int(min_edge_weight)),
+        )
+        if cache_key in self.ner_graph_cache:
+            return self.ner_graph_cache[cache_key]
+
+        aggregate = self._get_collection_ner_aggregate(refresh=refresh)
+        graph = build_entity_graph(
+            aggregate,
+            top_k_nodes=max(1, int(top_k_nodes)),
+            min_edge_weight=max(1, int(min_edge_weight)),
+        )
+        self.ner_graph_cache[cache_key] = graph
+        return graph
+
+    def get_collection_ner_graph_neighbors(
+        self,
+        *,
+        entity: str,
+        hops: int = 1,
+        top_k_nodes: int = 100,
+        min_edge_weight: int = 1,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        """Return a local graph neighborhood around a specific entity.
+
+        Args:
+            entity: Entity text or canonical node id.
+            hops: Number of graph hops to traverse.
+            top_k_nodes: Graph node cap used to build the base graph.
+            min_edge_weight: Graph edge threshold used to build the base graph.
+            refresh: If ``True``, recompute graph from fresh collection data.
+
+        Returns:
+            Neighborhood payload with ``center`` and ``neighbors``.
+        """
+        graph = self.get_collection_ner_graph(
+            top_k_nodes=top_k_nodes,
+            min_edge_weight=min_edge_weight,
+            refresh=refresh,
+        )
+        return graph_neighbors(graph, entity=entity, hops=max(1, int(hops)))
+
     def unload_models(self) -> None:
         """Unload models to free up memory."""
         self._embed_model = None
         self._text_model = None
         self._reranker = None
         self._image_ingestion_service = None
+        self._invalidate_ner_cache()
 
         gc.collect()
         if torch.cuda.is_available():
