@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import docint.core.api as api_module
+from docint.agents.types import IntentAnalysis, OrchestratorResult, RetrievalResult
 
 
 class DummySessionManager:
@@ -427,6 +428,37 @@ def test_agent_chat_clarifies(
     assert data["message"]
     assert data["intent"] is not None
     assert data["confidence"] is not None
+
+
+def test_agent_chat_returns_validation_alert(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Agent chat should surface response-validation metadata."""
+
+    class _StubOrchestrator:
+        def handle_turn(self, turn, context=None):
+            _ = turn, context
+            analysis = IntentAnalysis(intent="qa", confidence=0.9, entities={"query": "hello"})
+            retrieval = RetrievalResult(
+                answer="answer",
+                sources=[{"id": 1}],
+                session_id="generated-session",
+                validation_checked=True,
+                validation_mismatch=True,
+                validation_reason="mismatch",
+            )
+            return OrchestratorResult(clarification=None, retrieval=retrieval, analysis=analysis)
+
+    monkeypatch.setattr(api_module, "_build_orchestrator", lambda: _StubOrchestrator())
+
+    response = client.post("/agent/chat", json={"message": "hello"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "answer"
+    assert data["validation_checked"] is True
+    assert data["validation_mismatch"] is True
+    assert data["validation_reason"] == "mismatch"
 
 
 def test_agent_chat_stream_clarifies(

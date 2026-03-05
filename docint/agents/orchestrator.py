@@ -9,6 +9,7 @@ from docint.agents.types import (
     RetrievalAgent,
     RetrievalRequest,
     RetrievalResult,
+    ResponseAgent,
     Turn,
     UnderstandingAgent,
 )
@@ -25,6 +26,7 @@ class AgentOrchestrator:
         understanding: UnderstandingAgent,
         clarifier: ClarificationAgent,
         retriever: RetrievalAgent,
+        responder: ResponseAgent | None = None,
         policy: ClarificationPolicy | None = None,
     ) -> None:
         """Initialize the AgentOrchestrator.
@@ -33,11 +35,13 @@ class AgentOrchestrator:
             understanding (UnderstandingAgent): The agent responsible for understanding user input.
             clarifier (ClarificationAgent): The agent responsible for handling clarifications.
             retriever (RetrievalAgent): The agent responsible for retrieving information.
+            responder (ResponseAgent | None, optional): The agent responsible for response validation/post-processing.
             policy (ClarificationPolicy | None, optional): The policy to decide when clarification is needed. Defaults to None.
         """
         self.understanding = understanding
         self.clarifier = clarifier
         self.retriever = retriever
+        self.responder = responder
         self.policy = policy or ClarificationPolicy()
 
     def handle_turn(
@@ -73,6 +77,8 @@ class AgentOrchestrator:
 
         retrieval_request = RetrievalRequest(turn=turn, analysis=analysis)
         retrieval: RetrievalResult = self.retriever.retrieve(retrieval_request)
+        if self.responder is not None:
+            retrieval = self.responder.finalize(retrieval, turn)
         return OrchestratorResult(
             clarification=None, retrieval=retrieval, analysis=analysis
         )

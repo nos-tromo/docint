@@ -15,6 +15,7 @@ from docint.agents import (
     AgentOrchestrator,
     ClarificationConfig,
     ClarificationPolicy,
+    ResultValidationResponseAgent,
     RAGRetrievalAgent,
     SimpleClarificationAgent,
     SimpleUnderstandingAgent,
@@ -23,7 +24,11 @@ from docint.agents import (
 )
 from docint.cli import ingest as ingest_module
 from docint.core.rag import RAG
-from docint.utils.env_cfg import load_host_env, load_path_env
+from docint.utils.env_cfg import (
+    load_host_env,
+    load_path_env,
+    load_response_validation_env,
+)
 from docint.utils.hashing import compute_file_hash
 from docint.utils.logging_cfg import setup_logging
 
@@ -59,11 +64,14 @@ def _build_orchestrator() -> AgentOrchestrator:
     understanding: SimpleUnderstandingAgent | ContextualUnderstandingAgent = (
         _understanding_agent
     )
+    validation_cfg = load_response_validation_env()
+    validation_llm = None
 
     # Use contextual understanding if LLM is configured
     if getattr(rag, "text_model_id", None):
         try:
             understanding = ContextualUnderstandingAgent(llm=rag.text_model)
+            validation_llm = rag.text_model
         except Exception as e:
             logger.warning("Failed to init ContextualUnderstandingAgent: {}", e)
 
@@ -71,6 +79,10 @@ def _build_orchestrator() -> AgentOrchestrator:
         understanding=understanding,
         clarifier=_clarification_agent,
         retriever=retrieval_agent,
+        responder=ResultValidationResponseAgent(
+            enabled=validation_cfg.enabled,
+            llm=validation_llm,
+        ),
         policy=_clarification_policy,
     )
 
@@ -215,6 +227,9 @@ class AgentChatOut(BaseModel):
     confidence: float | None = None
     tool_used: str | None = None
     latency_ms: float | None = None
+    validation_checked: bool | None = None
+    validation_mismatch: bool | None = None
+    validation_reason: str | None = None
 
 
 # --- API Endpoints ---
@@ -742,6 +757,9 @@ def agent_chat(payload: AgentChatIn) -> AgentChatOut:
         confidence=retrieval.confidence,
         tool_used=retrieval.tool_used,
         latency_ms=retrieval.latency_ms,
+        validation_checked=retrieval.validation_checked,
+        validation_mismatch=retrieval.validation_mismatch,
+        validation_reason=retrieval.validation_reason,
     )
 
 

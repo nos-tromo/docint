@@ -1,6 +1,15 @@
-"""Response agent stubs."""
+"""Response agent implementations."""
+
+import json
+import re
+from typing import TYPE_CHECKING, Any
+
+from loguru import logger
 
 from docint.agents.types import ResponseAgent, RetrievalResult, Turn
+
+if TYPE_CHECKING:
+    from llama_index.core.llms import LLM
 
 
 class PassthroughResponseAgent(ResponseAgent):
@@ -20,3 +29,126 @@ class PassthroughResponseAgent(ResponseAgent):
         """
         _ = turn  # placeholder until custom formatting is needed
         return result
+
+
+class ResultValidationResponseAgent(ResponseAgent):
+    """Validate response quality against retrieved chunks using an LLM."""
+
+    def __init__(self, enabled: bool, llm: "LLM | None" = None) -> None:
+        """Initialize the validation agent.
+
+        Args:
+            enabled (bool): Whether result validation is enabled.
+            llm (LLM | None): LLM used for validation.
+        """
+        self.enabled = enabled
+        self.llm = llm
+
+    def finalize(self, result: RetrievalResult, turn: Turn) -> RetrievalResult:
+        """Validate the answer against retrieved sources and set alert metadata.
+
+        Args:
+            result (RetrievalResult): The retrieval result to validate.
+            turn (Turn): Current conversation turn.
+
+        Returns:
+            RetrievalResult: The retrieval result annotated with validation metadata.
+        """
+        if not self.enabled:
+            return result
+        if self.llm is None or not result.answer:
+            result.validation_checked = False
+            return result
+
+        try:
+            prompt = self._build_prompt(
+                query=turn.user_input, answer=result.answer, sources=result.sources
+            )
+            response = self.llm.complete(prompt)
+            parsed = self._parse_response(response.text)
+            summary_grounded = bool(parsed.get("summary_grounded", True))
+            sources_relevant = bool(parsed.get("sources_relevant", True))
+            mismatch = not (summary_grounded and sources_relevant)
+
+            result.validation_checked = True
+            result.validation_mismatch = mismatch
+            result.validation_reason = (
+                str(parsed.get("reason", "Validation mismatch detected"))
+                if mismatch
+                else None
+            )
+            return result
+        except Exception as exc:
+            logger.warning("Response validation failed: {}", exc)
+            result.validation_checked = False
+            return result
+
+    def _build_prompt(self, query: str, answer: str, sources: list[dict[str, Any]]) -> str:
+        """Build validation prompt for the secondary LLM check.
+
+        Args:
+            query (str): User query.
+            answer (str): Generated answer.
+            sources (list[dict[str, Any]]): Retrieved chunks/sources.
+
+        Returns:
+            str: Prompt asking for groundedness/relevance validation.
+        """
+        sources_text = self._sources_to_text(sources)
+        return (
+            "You are a strict response validator for a RAG system.\n"
+            "Assess if the answer is faithful to the retrieved sources and if sources fit the query.\n"
+            "Return JSON only with this schema:\n"
+            "{\n"
+            '  "summary_grounded": true|false,\n'
+            '  "sources_relevant": true|false,\n'
+            '  "reason": "short reason"\n'
+            "}\n\n"
+            f"Query:\n{query}\n\n"
+            f"Answer:\n{answer}\n\n"
+            f"Retrieved sources:\n{sources_text}\n"
+        )
+
+    def _sources_to_text(self, sources: list[dict[str, Any]]) -> str:
+        """Convert source dictionaries to compact text snippets for validation.
+
+        Args:
+            sources (list[dict[str, Any]]): Retrieved sources.
+
+        Returns:
+            str: Joined source snippets.
+        """
+        snippets: list[str] = []
+        for idx, source in enumerate(sources[:6], start=1):
+            text = ""
+            for key in ("text", "content", "chunk", "snippet", "node_text"):
+                value = source.get(key)
+                if value:
+                    text = str(value)
+                    break
+            if not text:
+                text = json.dumps(source, ensure_ascii=False)
+            snippets.append(f"Source {idx}: {text[:1200]}")
+        return "\n\n".join(snippets) if snippets else "(none)"
+
+    def _parse_response(self, text: str) -> dict[str, Any]:
+        """Parse JSON payload from the validator model response.
+
+        Args:
+            text (str): Raw model output.
+
+        Returns:
+            dict[str, Any]: Parsed validation result.
+        """
+        clean_text = text.strip()
+        if clean_text.startswith("```"):
+            clean_text = clean_text.split("```", 2)[1]
+            if clean_text.startswith("json"):
+                clean_text = clean_text[4:]
+        try:
+            return json.loads(clean_text)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", clean_text, re.DOTALL)
+            if match:
+                return json.loads(match.group(0))
+            raise

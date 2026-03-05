@@ -14,7 +14,7 @@ from docint.agents import (
     SimpleUnderstandingAgent,
     Turn,
 )
-from docint.agents.types import RetrievalAgent, Turn as TurnType
+from docint.agents.types import ResponseAgent, RetrievalAgent, Turn as TurnType
 
 
 @dataclass
@@ -30,6 +30,19 @@ class _StubRetrievalAgent(RetrievalAgent):
     def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
         self.called_with = request
         return RetrievalResult(answer="ok", sources=[{"id": 1}], session_id="s1")
+
+
+class _StubResponseAgent(ResponseAgent):
+    def __init__(self) -> None:
+        self.called = False
+
+    def finalize(self, result: RetrievalResult, turn: TurnType) -> RetrievalResult:
+        _ = turn
+        self.called = True
+        result.validation_checked = True
+        result.validation_mismatch = True
+        result.validation_reason = "mismatch"
+        return result
 
 
 class _NoopClarifier(SimpleClarificationAgent):
@@ -92,3 +105,23 @@ def test_orchestrator_retrieves_when_confident(turn: Turn) -> None:
     assert result.retrieval.answer == "ok"
     assert retriever.called_with is not None
     assert retriever.called_with.turn is turn
+
+
+def test_orchestrator_runs_response_agent(turn: Turn) -> None:
+    retriever = _StubRetrievalAgent()
+    responder = _StubResponseAgent()
+    orchestrator = AgentOrchestrator(
+        understanding=SimpleUnderstandingAgent(default_confidence=0.9),
+        clarifier=_NoopClarifier(),
+        retriever=retriever,
+        responder=responder,
+        policy=_NeverClarifyPolicy(),
+    )
+
+    result = orchestrator.handle_turn(turn)
+
+    assert result.retrieval is not None
+    assert responder.called is True
+    assert result.retrieval.validation_checked is True
+    assert result.retrieval.validation_mismatch is True
+    assert result.retrieval.validation_reason == "mismatch"
