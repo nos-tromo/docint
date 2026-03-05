@@ -438,7 +438,9 @@ def test_agent_chat_returns_validation_alert(
     class _StubOrchestrator:
         def handle_turn(self, turn, context=None):
             _ = turn, context
-            analysis = IntentAnalysis(intent="qa", confidence=0.9, entities={"query": "hello"})
+            analysis = IntentAnalysis(
+                intent="qa", confidence=0.9, entities={"query": "hello"}
+            )
             retrieval = RetrievalResult(
                 answer="answer",
                 sources=[{"id": 1}],
@@ -447,7 +449,9 @@ def test_agent_chat_returns_validation_alert(
                 validation_mismatch=True,
                 validation_reason="mismatch",
             )
-            return OrchestratorResult(clarification=None, retrieval=retrieval, analysis=analysis)
+            return OrchestratorResult(
+                clarification=None, retrieval=retrieval, analysis=analysis
+            )
 
     monkeypatch.setattr(api_module, "_build_orchestrator", lambda: _StubOrchestrator())
 

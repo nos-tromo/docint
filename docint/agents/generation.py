@@ -11,6 +11,9 @@ from docint.agents.types import ResponseAgent, RetrievalResult, Turn
 if TYPE_CHECKING:
     from llama_index.core.llms import LLM
 
+MAX_VALIDATION_SOURCES = 6
+MAX_SOURCE_CHARS = 1200
+
 
 class PassthroughResponseAgent(ResponseAgent):
     """No-op response post-processor.
@@ -66,8 +69,17 @@ class ResultValidationResponseAgent(ResponseAgent):
             )
             response = self.llm.complete(prompt)
             parsed = self._parse_response(response.text)
-            summary_grounded = bool(parsed.get("summary_grounded", True))
-            sources_relevant = bool(parsed.get("sources_relevant", True))
+            summary_grounded = parsed.get("summary_grounded")
+            sources_relevant = parsed.get("sources_relevant")
+
+            if not isinstance(summary_grounded, bool) or not isinstance(
+                sources_relevant, bool
+            ):
+                result.validation_checked = False
+                result.validation_mismatch = True
+                result.validation_reason = "Validation model returned invalid schema"
+                return result
+
             mismatch = not (summary_grounded and sources_relevant)
 
             result.validation_checked = True
@@ -83,7 +95,9 @@ class ResultValidationResponseAgent(ResponseAgent):
             result.validation_checked = False
             return result
 
-    def _build_prompt(self, query: str, answer: str, sources: list[dict[str, Any]]) -> str:
+    def _build_prompt(
+        self, query: str, answer: str, sources: list[dict[str, Any]]
+    ) -> str:
         """Build validation prompt for the secondary LLM check.
 
         Args:
@@ -119,7 +133,7 @@ class ResultValidationResponseAgent(ResponseAgent):
             str: Joined source snippets.
         """
         snippets: list[str] = []
-        for idx, source in enumerate(sources[:6], start=1):
+        for idx, source in enumerate(sources[:MAX_VALIDATION_SOURCES], start=1):
             text = ""
             for key in ("text", "content", "chunk", "snippet", "node_text"):
                 value = source.get(key)
@@ -128,7 +142,7 @@ class ResultValidationResponseAgent(ResponseAgent):
                     break
             if not text:
                 text = json.dumps(source, ensure_ascii=False)
-            snippets.append(f"Source {idx}: {text[:1200]}")
+            snippets.append(f"Source {idx}: {text[:MAX_SOURCE_CHARS]}")
         return "\n\n".join(snippets) if snippets else "(none)"
 
     def _parse_response(self, text: str) -> dict[str, Any]:
@@ -140,15 +154,29 @@ class ResultValidationResponseAgent(ResponseAgent):
         Returns:
             dict[str, Any]: Parsed validation result.
         """
-        clean_text = text.strip()
-        if clean_text.startswith("```"):
-            clean_text = clean_text.split("```", 2)[1]
-            if clean_text.startswith("json"):
-                clean_text = clean_text[4:]
+        clean_text = self._extract_json_candidate(text)
         try:
             return json.loads(clean_text)
         except json.JSONDecodeError:
-            match = re.search(r"\{.*\}", clean_text, re.DOTALL)
+            match = re.search(r"\{.*?\}", clean_text, re.DOTALL)
             if match:
                 return json.loads(match.group(0))
             raise
+
+    def _extract_json_candidate(self, text: str) -> str:
+        """Extract candidate JSON text from potential markdown fenced output.
+
+        Args:
+            text (str): Raw model output.
+
+        Returns:
+            str: Candidate JSON payload.
+        """
+        clean_text = text.strip()
+        if clean_text.startswith("```"):
+            fenced = clean_text.split("```", maxsplit=2)
+            if len(fenced) >= 3:
+                clean_text = fenced[1]
+                if clean_text.startswith("json"):
+                    clean_text = clean_text[4:]
+        return clean_text
