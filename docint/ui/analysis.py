@@ -13,6 +13,7 @@ from docint.ui.components import (
     filter_entities,
     render_ner_overview,
     render_response_validation,
+    render_summary_diagnostics,
     render_source_item,
 )
 from docint.ui.state import BACKEND_HOST
@@ -44,6 +45,25 @@ def render_analysis() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _update_summary_metadata(result: dict[str, Any], data: dict[str, Any]) -> None:
+    """Update summary-related metadata fields in analysis state.
+
+    Args:
+        result: Mutable analysis-result state.
+        data: Parsed SSE event payload.
+    """
+    if "validation_checked" in data:
+        result["validation_checked"] = data.get("validation_checked")
+    if "validation_mismatch" in data:
+        result["validation_mismatch"] = data.get("validation_mismatch")
+    if "validation_reason" in data:
+        result["validation_reason"] = data.get("validation_reason")
+
+    diagnostics = data.get("summary_diagnostics")
+    if isinstance(diagnostics, dict):
+        result["summary_diagnostics"] = diagnostics
+
+
 def _execute_analysis(collection: str) -> None:
     """Run summarisation and NER extraction, storing results in session state.
 
@@ -58,6 +78,7 @@ def _execute_analysis(collection: str) -> None:
         "validation_checked": None,
         "validation_mismatch": None,
         "validation_reason": None,
+        "summary_diagnostics": None,
     }
     summary_placeholder = st.empty()
     full_summary = ""
@@ -82,18 +103,7 @@ def _execute_analysis(collection: str) -> None:
                             summary_placeholder.markdown(full_summary + "▌")
                         elif "sources" in data:
                             current_sources = data["sources"]
-                        if "validation_checked" in data:
-                            st.session_state.analysis_result["validation_checked"] = (
-                                data.get("validation_checked")
-                            )
-                        if "validation_mismatch" in data:
-                            st.session_state.analysis_result["validation_mismatch"] = (
-                                data.get("validation_mismatch")
-                            )
-                        if "validation_reason" in data:
-                            st.session_state.analysis_result["validation_reason"] = (
-                                data.get("validation_reason")
-                            )
+                        _update_summary_metadata(st.session_state.analysis_result, data)
                         if "error" in data:
                             st.error(f"Error: {data['error']}")
                 summary_placeholder.markdown(full_summary)
@@ -134,6 +144,7 @@ def _render_analysis_result(result: dict[str, Any], collection: str) -> None:
         validation_mismatch=result.get("validation_mismatch"),
         validation_reason=result.get("validation_reason"),
     )
+    render_summary_diagnostics(result.get("summary_diagnostics"))
 
     sources = result.get("sources", [])
     analysis_text = f"COLLECTION: {result['collection']}\n\n"
@@ -150,6 +161,20 @@ def _render_analysis_result(result: dict[str, Any], collection: str) -> None:
         )
         if result.get("validation_reason"):
             analysis_text += f"reason={result['validation_reason']}\n"
+        analysis_text += "\n"
+    diagnostics = result.get("summary_diagnostics")
+    if isinstance(diagnostics, dict):
+        analysis_text += "SUMMARY_DIAGNOSTICS:\n"
+        analysis_text += (
+            f"total_documents={diagnostics.get('total_documents')}\n"
+            f"covered_documents={diagnostics.get('covered_documents')}\n"
+            f"coverage_ratio={diagnostics.get('coverage_ratio')}\n"
+            f"coverage_target={diagnostics.get('coverage_target')}\n"
+        )
+        uncovered_docs = diagnostics.get("uncovered_documents")
+        if isinstance(uncovered_docs, list):
+            uncovered_text = ", ".join(str(item) for item in uncovered_docs)
+            analysis_text += f"uncovered_documents={uncovered_text}\n"
         analysis_text += "\n"
 
     if sources:
