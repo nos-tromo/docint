@@ -2,11 +2,18 @@ import json
 import sys
 from pathlib import Path
 from time import time
+from typing import Any
 
 from loguru import logger
 
+from docint.agents.generation import ResultValidationResponseAgent
+from docint.agents.types import RetrievalResult, Turn
 from docint.core.rag import RAG
-from docint.utils.env_cfg import load_path_env, set_offline_env
+from docint.utils.env_cfg import (
+    load_path_env,
+    load_response_validation_env,
+    set_offline_env,
+)
 from docint.utils.logging_cfg import setup_logging
 
 
@@ -106,6 +113,32 @@ def run_query(rag: RAG, query: str, index: int, output_path: str | Path) -> None
     """
     logger.info("Running query {}: {}", index, query)
     result = rag.run_query(query)
+
+    validation_cfg = load_response_validation_env()
+    validation_llm = None
+    if getattr(rag, "text_model_id", None):
+        try:
+            validation_llm = rag.text_model
+        except Exception as exc:
+            logger.warning("Failed to initialize validation LLM: {}", exc)
+    validator = ResultValidationResponseAgent(
+        enabled=validation_cfg.enabled,
+        llm=validation_llm,
+    )
+    raw_sources = result.get("sources")
+    sources: list[dict[str, Any]] = []
+    if isinstance(raw_sources, list):
+        sources = [src for src in raw_sources if isinstance(src, dict)]
+
+    retrieval = RetrievalResult(
+        answer=str(result.get("response") or result.get("answer") or ""),
+        sources=sources,
+    )
+    finalized = validator.finalize(retrieval, Turn(user_input=query))
+    result["validation_checked"] = finalized.validation_checked
+    result["validation_mismatch"] = finalized.validation_mismatch
+    result["validation_reason"] = finalized.validation_reason
+
     timestamp = str(int(time()))
     _store_output(
         filename=f"{timestamp}_{index}_result", data=result, output_path=output_path

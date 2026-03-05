@@ -5,6 +5,7 @@ from docint.ui.components import (
     build_entity_histogram_data,
     entity_density_by_document,
     filter_entities,
+    response_validation_summary,
 )
 
 
@@ -70,3 +71,41 @@ def test_filter_entities_handles_aggregate_ner_payload_shape() -> None:
     filtered = filter_entities(entities, query="ac", min_mentions=2, sort_by="mentions")
     assert len(filtered) == 1
     assert filtered[0]["text"] == "Acme"
+
+
+def test_response_validation_summary_warning_payload() -> None:
+    """Validation summary should return warning details for mismatches."""
+    summary = response_validation_summary(
+        validation_checked=True,
+        validation_mismatch=True,
+        validation_reason="source mismatch",
+    )
+    assert summary == (
+        "warning",
+        "⚠️ Response validation flagged a potential mismatch.",
+        "source mismatch",
+    )
+
+
+def test_response_validation_summary_success_payload() -> None:
+    """Validation summary should return success when check passes."""
+    summary = response_validation_summary(
+        validation_checked=True,
+        validation_mismatch=False,
+        validation_reason=None,
+    )
+    assert summary == ("success", "✅ Response validation passed.", None)
+
+
+def test_response_validation_summary_skipped_payload() -> None:
+    """Validation summary should explain skipped/unavailable validation."""
+    summary = response_validation_summary(
+        validation_checked=False,
+        validation_mismatch=None,
+        validation_reason=None,
+    )
+    assert summary == (
+        "info",
+        "ℹ️ Response validation was not completed.",
+        "Validation was skipped or unavailable for this response.",
+    )

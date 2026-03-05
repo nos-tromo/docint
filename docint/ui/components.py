@@ -351,6 +351,50 @@ def entity_density_by_document(
     return rows
 
 
+def response_validation_summary(
+    *,
+    validation_checked: bool | None,
+    validation_mismatch: bool | None,
+    validation_reason: str | None,
+) -> tuple[str, str, str | None] | None:
+    """Build a user-facing response-validation summary.
+
+    Args:
+        validation_checked: Whether validation executed.
+        validation_mismatch: Whether validation found a mismatch.
+        validation_reason: Optional validator reason.
+
+    Returns:
+        Optional tuple ``(level, title, detail)`` where ``level`` is one of
+        ``success``, ``warning``, or ``info``.
+    """
+    if (
+        validation_checked is None
+        and validation_mismatch is None
+        and not validation_reason
+    ):
+        return None
+
+    if validation_checked is True and validation_mismatch is True:
+        detail = (
+            validation_reason
+            or "Potential mismatch between answer and retrieved sources."
+        )
+        return (
+            "warning",
+            "⚠️ Response validation flagged a potential mismatch.",
+            detail,
+        )
+
+    if validation_checked is True:
+        return ("success", "✅ Response validation passed.", None)
+
+    detail = (
+        validation_reason or "Validation was skipped or unavailable for this response."
+    )
+    return ("info", "ℹ️ Response validation was not completed.", detail)
+
+
 # ---------------------------------------------------------------------------
 # Rendering helpers (use Streamlit)
 # ---------------------------------------------------------------------------
@@ -486,3 +530,36 @@ def render_source_item(src: dict[str, Any], collection: str) -> None:
 
     render_entities_relations(src)
     st.divider()
+
+
+def render_response_validation(
+    *,
+    validation_checked: bool | None,
+    validation_mismatch: bool | None,
+    validation_reason: str | None,
+) -> None:
+    """Render response-validation status and reason when available.
+
+    Args:
+        validation_checked: Whether validation executed.
+        validation_mismatch: Whether validation found a mismatch.
+        validation_reason: Optional validator reason.
+    """
+    summary = response_validation_summary(
+        validation_checked=validation_checked,
+        validation_mismatch=validation_mismatch,
+        validation_reason=validation_reason,
+    )
+    if summary is None:
+        return
+
+    level, title, detail = summary
+    if level == "warning":
+        st.warning(title)
+    elif level == "success":
+        st.success(title)
+    else:
+        st.info(title)
+
+    if detail:
+        st.caption(detail)

@@ -1,4 +1,5 @@
 import types
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any, cast
 
@@ -42,8 +43,20 @@ class DummySessionManager:
         """
         return True
 
-    def get_agent_context(self, session_id: str):
+    def get_agent_context(self, session_id: str) -> Any:
+        """
+        Get the agent context for a session.
+
+        Args:
+            session_id (str): The ID of the session.
+
+        Returns:
+            Any: The agent context for the session.
+        """
+
         class Ctx:
+            """Dummy context object for testing purposes."""
+
             clarifications = 0
 
         return Ctx()
@@ -116,7 +129,17 @@ class DummyRAG:
         self.chats.append(question)
         return {"response": "answer", "sources": [{"id": 1}]}
 
-    def stream_chat(self, question: str):
+    def stream_chat(self, question: str) -> Generator[str | dict[str, Any], None, None]:
+        """
+        Stream chat responses from the RAG system.
+
+        Args:
+            question (str): The question to ask the RAG system.
+
+        Yields:
+            str | dict[str, Any]: Chunks of the chat response as they are generated.
+        """
+        _ = question
         yield "chunk"
         yield {"sources": [{"id": 1}], "session_id": "generated-session"}
 
@@ -344,7 +367,11 @@ def test_collections_ner_success(client: TestClient) -> None:
 
 
 def test_collections_ner_stats_success(client: TestClient) -> None:
-    """Stats endpoint should return IE summary payload."""
+    """Stats endpoint should return IE summary payload.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
     response = client.get("/collections/ner/stats")
     assert response.status_code == 200
     payload = response.json()
@@ -353,7 +380,11 @@ def test_collections_ner_stats_success(client: TestClient) -> None:
 
 
 def test_collections_ner_search_success(client: TestClient) -> None:
-    """Search endpoint should return matching entities."""
+    """Search endpoint should return matching entities.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
     response = client.get("/collections/ner/search", params={"q": "ac"})
     assert response.status_code == 200
     payload = response.json()
@@ -361,7 +392,11 @@ def test_collections_ner_search_success(client: TestClient) -> None:
 
 
 def test_collections_ner_graph_success(client: TestClient) -> None:
-    """Graph endpoint should return graph payload."""
+    """Graph endpoint should return graph payload.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
     response = client.get("/collections/ner/graph")
     assert response.status_code == 200
     payload = response.json()
@@ -370,7 +405,11 @@ def test_collections_ner_graph_success(client: TestClient) -> None:
 
 
 def test_collections_ner_graph_neighbors_success(client: TestClient) -> None:
-    """Neighbors endpoint should return center + neighbors."""
+    """Neighbors endpoint should return center + neighbors.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
     response = client.get(
         "/collections/ner/graph/neighbors",
         params={"entity": "Acme", "hops": 1},
@@ -384,9 +423,23 @@ def test_collections_ner_graph_neighbors_success(client: TestClient) -> None:
 def test_agent_chat_answers(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """Agent chat should return an answer when confidence is sufficient."""
+    """Agent chat should return an answer when confidence is sufficient.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
 
     def fake_chat(question: str) -> dict[str, Any]:
+        """
+        Fake implementation of the RAG chat method for testing purposes.
+
+        Args:
+            question (str): The question to ask the RAG system.
+
+        Returns:
+            dict[str, Any]: The response from the RAG system, including an answer and sources.
+        """
         return {"response": f"echo:{question}", "sources": [{"id": 1}]}
 
     monkeypatch.setattr(api_module.rag, "chat", fake_chat)
@@ -407,7 +460,12 @@ def test_agent_chat_answers(
 def test_agent_chat_clarifies(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """Agent chat should request clarification when policy requires it."""
+    """Agent chat should request clarification when policy requires it.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
 
     monkeypatch.setattr(
         api_module,
@@ -433,10 +491,27 @@ def test_agent_chat_clarifies(
 def test_agent_chat_returns_validation_alert(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """Agent chat should surface response-validation metadata."""
+    """Agent chat should surface response-validation metadata.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
 
     class _StubOrchestrator:
-        def handle_turn(self, turn, context=None):
+        """Stub orchestrator that returns a canned retrieval result with validation metadata for testing purposes."""
+
+        def handle_turn(self, turn, context=None) -> OrchestratorResult:
+            """
+            Handle a turn by returning a canned retrieval result with validation metadata.
+
+            Args:
+                turn (_type_): The user turn to process.
+                context (_type_, optional): The context for the turn. Defaults to None.
+
+            Returns:
+                OrchestratorResult: The result of processing the turn.
+            """
             _ = turn, context
             analysis = IntentAnalysis(
                 intent="qa", confidence=0.9, entities={"query": "hello"}
@@ -468,7 +543,12 @@ def test_agent_chat_returns_validation_alert(
 def test_agent_chat_stream_clarifies(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """Streaming endpoint should emit clarification event when policy demands it."""
+    """Streaming endpoint should emit clarification event when policy demands it.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
 
     monkeypatch.setattr(
         api_module,
@@ -487,6 +567,19 @@ def test_agent_chat_stream_clarifies(
     assert "status" in text
 
 
+def test_stream_query_includes_validation_metadata(client: TestClient) -> None:
+    """Streaming query endpoint should emit validation metadata in final payload.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    with client.stream("POST", "/stream_query", json={"question": "hello"}) as resp:
+        assert resp.status_code == 200
+        text = "".join([chunk.decode() for chunk in resp.iter_raw()])
+    assert '"validation_checked"' in text
+    assert '"validation_mismatch"' in text
+
+
 def test_collections_ner_requires_selection(client: TestClient) -> None:
     """Test that information extraction requires a collection to be selected.
 
@@ -500,7 +593,11 @@ def test_collections_ner_requires_selection(client: TestClient) -> None:
 
 
 def test_collections_ner_stats_requires_selection(client: TestClient) -> None:
-    """Stats endpoint should require active collection selection."""
+    """Stats endpoint should require active collection selection.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
     api_module.rag.qdrant_collection = ""
     response = client.get("/collections/ner/stats")
     assert response.status_code == 400
@@ -508,7 +605,11 @@ def test_collections_ner_stats_requires_selection(client: TestClient) -> None:
 
 
 def test_collections_ner_search_requires_selection(client: TestClient) -> None:
-    """Search endpoint should require active collection selection."""
+    """Search endpoint should require active collection selection.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
     api_module.rag.qdrant_collection = ""
     response = client.get("/collections/ner/search", params={"q": "acme"})
     assert response.status_code == 400
@@ -545,9 +646,20 @@ def test_collections_ner_failure(
 def test_collections_ner_stats_failure(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """Stats endpoint should surface backend failures."""
+    """Stats endpoint should surface backend failures.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
 
     def raiser(**kwargs) -> dict[str, Any]:
+        """
+        Fake implementation of get_collection_ner_stats that raises an error for testing purposes.
+
+        Raises:
+            RuntimeError: If there is an error retrieving the information extraction stats.
+        """
         _ = kwargs
         raise RuntimeError("boom")
 
@@ -560,9 +672,23 @@ def test_collections_ner_stats_failure(
 def test_collections_ner_search_failure(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """Search endpoint should surface backend failures."""
+    """Search endpoint should surface backend failures.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
 
     def raiser(**kwargs) -> list[dict[str, Any]]:
+        """
+        Fake implementation of search_collection_ner_entities that raises an error for testing purposes.
+
+        Raises:
+            RuntimeError: If there is an error during the search.
+
+        Returns:
+            list[dict[str, Any]]: The search results.
+        """
         _ = kwargs
         raise RuntimeError("boom")
 
@@ -658,6 +784,15 @@ def test_ingest_success(
         hybrid: bool = True,
         progress_callback=None,
     ) -> None:
+        """
+        Fake implementation of the ingest_docs function for testing purposes.
+
+        Args:
+            collection (str): The name of the collection to ingest into.
+            path (Path): The path to the data to ingest.
+            hybrid (bool, optional): Whether to use hybrid ingestion. Defaults to True.
+            progress_callback (callable, optional): A callback function for progress updates. Defaults to None.
+        """
         called.args = (
             collection,
             path,
@@ -684,7 +819,11 @@ def test_ingest_success(
 
 
 def test_sessions_endpoints(client: TestClient) -> None:
-    """Test session management endpoints."""
+    """Test session management endpoints.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
     # List
     resp = client.get("/sessions/list")
     assert resp.status_code == 200

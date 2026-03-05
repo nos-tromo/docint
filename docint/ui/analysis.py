@@ -12,6 +12,7 @@ from docint.ui.components import (
     entity_density_by_document,
     filter_entities,
     render_ner_overview,
+    render_response_validation,
     render_source_item,
 )
 from docint.ui.state import BACKEND_HOST
@@ -54,6 +55,9 @@ def _execute_analysis(collection: str) -> None:
         "sources": [],
         "ie": None,
         "collection": collection,
+        "validation_checked": None,
+        "validation_mismatch": None,
+        "validation_reason": None,
     }
     summary_placeholder = st.empty()
     full_summary = ""
@@ -78,7 +82,19 @@ def _execute_analysis(collection: str) -> None:
                             summary_placeholder.markdown(full_summary + "▌")
                         elif "sources" in data:
                             current_sources = data["sources"]
-                        elif "error" in data:
+                        if "validation_checked" in data:
+                            st.session_state.analysis_result["validation_checked"] = (
+                                data.get("validation_checked")
+                            )
+                        if "validation_mismatch" in data:
+                            st.session_state.analysis_result["validation_mismatch"] = (
+                                data.get("validation_mismatch")
+                            )
+                        if "validation_reason" in data:
+                            st.session_state.analysis_result["validation_reason"] = (
+                                data.get("validation_reason")
+                            )
+                        if "error" in data:
                             st.error(f"Error: {data['error']}")
                 summary_placeholder.markdown(full_summary)
                 st.session_state.analysis_result["summary"] = full_summary
@@ -113,10 +129,28 @@ def _render_analysis_result(result: dict[str, Any], collection: str) -> None:
     """
     st.markdown(f"### Summary of '{result['collection']}'")
     st.markdown(result["summary"])
+    render_response_validation(
+        validation_checked=result.get("validation_checked"),
+        validation_mismatch=result.get("validation_mismatch"),
+        validation_reason=result.get("validation_reason"),
+    )
 
     sources = result.get("sources", [])
     analysis_text = f"COLLECTION: {result['collection']}\n\n"
     analysis_text += f"SUMMARY:\n{result['summary']}\n\n"
+    if (
+        result.get("validation_checked") is not None
+        or result.get("validation_mismatch") is not None
+        or result.get("validation_reason")
+    ):
+        analysis_text += "VALIDATION:\n"
+        analysis_text += (
+            f"checked={result.get('validation_checked')}\n"
+            f"mismatch={result.get('validation_mismatch')}\n"
+        )
+        if result.get("validation_reason"):
+            analysis_text += f"reason={result['validation_reason']}\n"
+        analysis_text += "\n"
 
     if sources:
         with st.expander("Sources used for summary"):

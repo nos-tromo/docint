@@ -36,17 +36,41 @@ def test_store_output_handles_nodes(tmp_path: Path) -> None:
     """
 
     class Node:
+        """Simple Node class for testing purposes."""
+
         def __init__(self, text: str) -> None:
+            """Initialize the Node with text.
+
+            Args:
+                text (str): The text content of the node.
+            """
             self.text = text
 
         def to_dict(self) -> dict[str, str]:
+            """Convert the Node to a dictionary representation.
+
+            Returns:
+                dict[str, str]: Dictionary containing the node's text.
+            """
             return {"text": self.text}
 
     class NodeWithScore:
+        """Wrapper for Node that includes a score, used to test nested to_dict handling."""
+
         def __init__(self, text: str) -> None:
+            """Initialize the NodeWithScore with text.
+
+            Args:
+                text (str): The text content of the node.
+            """
             self.node = Node(text)
 
         def to_dict(self) -> dict[str, str]:
+            """Convert the NodeWithScore to a dictionary by delegating to the contained Node's to_dict method.
+
+            Returns:
+                dict[str, str]: Dictionary containing the node's text from the contained Node.
+            """
             return {"text": self.node.text}
 
     query_cli._store_output(
@@ -66,15 +90,28 @@ def test_rag_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
     """
 
     class DummyRAG:
+        """Dummy RAG class for testing the pipeline creation."""
+
         def __init__(self, qdrant_collection: str) -> None:
+            """Initialize the DummyRAG with a collection name.
+
+            Args:
+                qdrant_collection (str): The name of the Qdrant collection.
+            """
             self.qdrant_collection = qdrant_collection
             self.index_built = False
             self.engine_built = False
 
         def create_index(self) -> None:
+            """Simulate index creation by setting the index_built flag to True."""
             self.index_built = True
 
         def create_query_engine(self) -> None:
+            """Simulate query engine creation by setting the engine_built flag to True.
+
+            Raises:
+                AssertionError: If the index has not been built yet.
+            """
             if not self.index_built:
                 raise AssertionError("index must be built first")
             self.engine_built = True
@@ -87,6 +124,12 @@ def test_rag_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_load_queries_existing_file(tmp_path: Path) -> None:
+    """
+    Test that load_queries reads queries from an existing file and ignores empty lines.
+
+    Args:
+        tmp_path (Path): The temporary path fixture.
+    """
     file = tmp_path / "queries.txt"
     file.write_text("one\n\ntwo\n")
     result = query_cli.load_queries(file, prompts_path=tmp_path)
@@ -94,6 +137,12 @@ def test_load_queries_existing_file(tmp_path: Path) -> None:
 
 
 def test_load_queries_falls_back_to_summarize_prompt(tmp_path: Path) -> None:
+    """
+    Test that load_queries falls back to the summarize prompt if no queries file exists.
+
+    Args:
+        tmp_path (Path): The temporary path fixture.
+    """
     target = tmp_path / "missing.txt"
     prompts = tmp_path / "prompts"
     prompts.mkdir()
@@ -106,6 +155,14 @@ def test_load_queries_falls_back_to_summarize_prompt(tmp_path: Path) -> None:
 def test_run_query_records_results(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """
+    Test that run_query executes a query and stores the results with validation metadata.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path (Path): The temporary path fixture.
+    """
+
     class DummyRAG:
         def run_query(self, query: str) -> dict[str, str]:
             return {"response": query}
@@ -113,6 +170,14 @@ def test_run_query_records_results(
     calls: list[tuple[str, dict]] = []
 
     def fake_store(filename: str, data: dict, output_path: Path | None = None) -> None:
+        """
+        Fake implementation of _store_output for testing purposes.
+
+        Args:
+            filename (str): The name of the output file (without extension).
+            data (dict): The data to store.
+            output_path (Path | None, optional): The directory to store the output file. Defaults to None.
+        """
         calls.append((filename, data))
 
     monkeypatch.setattr(query_cli, "_store_output", fake_store)
@@ -122,41 +187,94 @@ def test_run_query_records_results(
     assert calls
     name, data = calls[0]
     assert "_3_result" in name
-    assert data == {"response": "hello"}
+    assert data["response"] == "hello"
+    assert "validation_checked" in data
+    assert "validation_mismatch" in data
+    assert "validation_reason" in data
 
 
 def test_main_executes_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Test that the main function executes the full pipeline in order.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
     sequence: list[str] = []
 
     class DummyRAG:
+        """Dummy RAG class for testing the main function execution."""
+
         def run_query(self, q: str) -> dict[str, str]:
+            """Simulate running a query by returning the query in the response.
+
+            Args:
+                q (str): The query string to run.
+
+            Returns:
+                dict[str, str]: A dictionary containing the query as the response.
+            """
             sequence.append(f"query:{q}")
             return {"response": q}
 
         def unload_models(self) -> None:
+            """Simulate unloading models. No-op for testing purposes."""
             # No-op for test double
             return None
 
     def fake_setup() -> None:
+        """Fake implementation of setup_logging for testing purposes."""
         sequence.append("setup")
 
     def fake_pipeline(col_name: str | None = None) -> DummyRAG:
+        """Fake implementation of rag_pipeline for testing purposes.
+
+        Args:
+            col_name (str | None, optional): The name of the collection. Defaults to None.
+
+        Returns:
+            DummyRAG: A dummy RAG instance for testing purposes.
+        """
         sequence.append("pipeline")
         return DummyRAG()
 
     def fake_load(queries_path: Path, prompts_path: Path) -> list[str]:
+        """Fake implementation of load_queries for testing purposes.
+
+        Args:
+            queries_path (Path): The path to the queries file.
+            prompts_path (Path): The path to the prompts directory.
+
+        Returns:
+            list[str]: A list of queries loaded from the queries file.
+        """
         sequence.append("load")
         return ["one", "two"]
 
     def fake_run(rag, query: str, index: int, output_path: Path) -> None:
+        """Fake implementation of run_query for testing purposes.
+
+        Args:
+            rag (DummyRAG): The dummy RAG instance to use for the query.
+            query (str): The query string to run.
+            index (int): The index of the query in the sequence.
+            output_path (Path): The path to the output directory.
+        """
         sequence.append(f"run:{index}:{query}")
 
     class FakePathConfig:
+        """Fake path configuration for testing purposes, simulating environment variable loading."""
+
         queries = Path("/tmp/queries.txt")
         prompts = Path("/tmp/prompts")
         results = Path("/tmp/results")
 
     def fake_load_path_env() -> FakePathConfig:
+        """Fake implementation of load_path_env for testing purposes.
+
+        Returns:
+            FakePathConfig: A fake path configuration instance with predefined paths.
+        """
         sequence.append("env")
         return FakePathConfig()
 
