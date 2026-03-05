@@ -29,13 +29,15 @@ class DummyNode:
 class DummyNodeWithScore:
     """A dummy node with score class to simulate LlamaIndex nodes with scores."""
 
-    def __init__(self, node: DummyNode) -> None:
+    def __init__(self, node: DummyNode, score: float = 0.0) -> None:
         """Initializes a DummyNodeWithScore with a DummyNode.
 
         Args:
             node (DummyNode): The dummy node associated with this score.
+            score (float): The relevance score for this node. Defaults to 0.0.
         """
         self.node = node
+        self.score = score
 
 
 class DummyResponse:
@@ -515,3 +517,186 @@ def test_reranker_falls_back_to_llm_on_meta_tensor_error(
     rag._text_model = None
 
     assert rag.reranker is llm_reranker_obj
+
+
+class _FakeCompletion:
+    """A simple class to simulate LLM completion responses for testing purposes."""
+
+    def __init__(self, text: str) -> None:
+        """Initializes a _FakeCompletion with the given text.
+
+        Args:
+            text (str): The text of the completion.
+        """
+        self.text = text
+
+
+class _FakeSummaryLLM:
+    """A simple class to simulate an LLM for testing the RAG summarization logic."""
+
+    def __init__(self, text: str) -> None:
+        """Initializes a _FakeSummaryLLM with the given text.
+
+        Args:
+            text (str): The text of the summary.
+        """
+        self.text = text
+        self.prompts: list[str] = []
+
+    def complete(self, prompt: str) -> _FakeCompletion:
+        """Simulates completing a prompt by recording the prompt and returning a fixed completion.
+        Args:
+            prompt (str): The input prompt to complete.
+
+        Returns:
+            _FakeCompletion: A fixed completion object.
+        """
+        self.prompts.append(prompt)
+        return _FakeCompletion(self.text)
+
+
+def _summary_node(
+    *,
+    text: str,
+    filename: str,
+    file_hash: str,
+    page: int = 1,
+    score: float = 0.9,
+) -> DummyNodeWithScore:
+    """Helper function to create a DummyNodeWithScore with the appropriate metadata for summarization tests.
+
+    Args:
+        text (str): The text of the node.
+        filename (str): The name of the file the node belongs to.
+        file_hash (str): The hash of the file the node belongs to.
+        page (int, optional): The page number of the node. Defaults to 1.
+        score (float, optional): The score of the node. Defaults to 0.9.
+
+    Returns:
+        DummyNodeWithScore: A DummyNodeWithScore instance with the specified metadata.
+    """
+    node = DummyNode(
+        text,
+        {
+            "origin": {
+                "filename": filename,
+                "mimetype": "application/pdf",
+                "file_hash": file_hash,
+            },
+            "page_number": page,
+            "source": "document",
+        },
+    )
+    nws = DummyNodeWithScore(node)
+    nws.score = score
+    return nws
+
+
+def test_summarize_collection_reports_coverage_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that summarize_collection returns diagnostics about document coverage and uncovered documents.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture for modifying attributes during the test.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag._text_model = _FakeSummaryLLM("Collection summary")  # type: ignore[assignment]
+
+    docs = [
+        {"filename": "a.pdf", "file_hash": "ha", "node_count": 9},
+        {"filename": "b.pdf", "file_hash": "hb", "node_count": 7},
+        {"filename": "c.pdf", "file_hash": "hc", "node_count": 5},
+    ]
+    nodes_by_file = {
+        "a.pdf": [
+            _summary_node(text="A key finding", filename="a.pdf", file_hash="ha")
+        ],
+        "b.pdf": [
+            _summary_node(text="B key finding", filename="b.pdf", file_hash="hb")
+        ],
+        "c.pdf": [],
+    }
+
+    monkeypatch.setattr(RAG, "_summary_document_targets", lambda self: docs)
+    monkeypatch.setattr(
+        RAG,
+        "_retrieve_summary_nodes_for_document",
+        lambda self, **kwargs: nodes_by_file.get(str(kwargs["filename"]), []),
+    )
+
+    summary = rag.summarize_collection()
+
+    diagnostics = summary["summary_diagnostics"]
+    assert summary["response"] == "Collection summary"
+    assert diagnostics["total_documents"] == 3
+    assert diagnostics["covered_documents"] == 2
+    assert diagnostics["coverage_ratio"] == 0.6667
+    assert diagnostics["uncovered_documents"] == ["c.pdf"]
+    assert len(summary["sources"]) == 2
+
+
+def test_merge_summary_sources_deduplicates_and_preserves_doc_coverage() -> None:
+    """Test that _merge_summary_sources deduplicates sources by filename while preserving coverage information.
+    This ensures that when multiple nodes from the same document are included in the summary, they are correctly merged into a single source entry without losing track of how many nodes from that document contributed to the summary.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag.summary_final_source_cap = 5
+
+    doc_a_source = {
+        "filename": "a.pdf",
+        "file_hash": "ha",
+        "page": 1,
+        "preview_text": "A finding",
+    }
+    duplicate_doc_a = dict(doc_a_source)
+    doc_b_source = {
+        "filename": "b.pdf",
+        "file_hash": "hb",
+        "page": 2,
+        "preview_text": "B finding",
+    }
+
+    merged = rag._merge_summary_sources(
+        {
+            "a.pdf": [doc_a_source, duplicate_doc_a],
+            "b.pdf": [doc_b_source],
+        }
+    )
+
+    filenames = [str(item.get("filename")) for item in merged]
+    assert filenames.count("a.pdf") == 1
+    assert "b.pdf" in filenames
+
+
+def test_summarize_collection_handles_no_documents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that summarize_collection returns an appropriate response and diagnostics when there are no documents to summarize.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture for modifying attributes during the test.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag._text_model = _FakeSummaryLLM("unused")  # type: ignore[assignment]
+    rag.summary_coverage_target = 0.7
+    rag.summary_max_docs = 30
+
+    monkeypatch.setattr(RAG, "_summary_document_targets", lambda self: [])
+    summary = rag.summarize_collection()
+
+    assert summary["response"] == "No documents available in the selected collection."
+    diagnostics = summary["summary_diagnostics"]
+    assert diagnostics["total_documents"] == 0
+    assert diagnostics["covered_documents"] == 0
+    assert diagnostics["coverage_ratio"] == 0.0
+    assert diagnostics["uncovered_documents"] == []
+
+
+def test_summarize_collection_requires_collection() -> None:
+    """Test that summarize_collection raises a ValueError if no collection is selected, ensuring
+    that the method cannot be called without a valid collection context.
+    """
+    rag = RAG(qdrant_collection="")
+    with pytest.raises(ValueError, match="No collection selected"):
+        rag.summarize_collection()

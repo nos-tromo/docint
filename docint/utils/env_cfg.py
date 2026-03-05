@@ -753,6 +753,30 @@ def load_pipeline_config(
 
 
 @dataclass(frozen=True)
+class ResponseValidationConfig:
+    """Dataclass for response validation configuration."""
+
+    enabled: bool
+
+
+def load_response_validation_env(
+    default_enabled: bool = True,
+) -> ResponseValidationConfig:
+    """Load response-validation configuration from environment variables.
+
+    Args:
+        default_enabled (bool): Whether response validation is enabled by default.
+
+    Returns:
+        ResponseValidationConfig: Parsed response-validation settings.
+    """
+    return ResponseValidationConfig(
+        enabled=str(os.getenv("RESPONSE_VALIDATION_ENABLED", default_enabled)).lower()
+        in {"true", "1", "yes"}
+    )
+
+
+@dataclass(frozen=True)
 class RetrievalConfig:
     """Dataclass for RAG (Retrieval-Augmented Generation) configuration."""
 
@@ -810,24 +834,41 @@ def load_session_env(
 
 
 @dataclass(frozen=True)
-class ResponseValidationConfig:
-    """Dataclass for response validation configuration."""
+class SummaryConfig:
+    """Dataclass for collection summarization precision settings."""
 
-    enabled: bool
+    coverage_target: float
+    max_docs: int
+    per_doc_top_k: int
+    final_source_cap: int
 
 
-def load_response_validation_env(
-    default_enabled: bool = False,
-) -> ResponseValidationConfig:
-    """Load response-validation configuration from environment variables.
+def load_summary_env(
+    default_coverage_target: float = 0.70,
+    default_max_docs: int = 30,
+    default_per_doc_top_k: int = 4,
+    default_final_source_cap: int = 24,
+) -> SummaryConfig:
+    """Load collection summary precision settings from environment variables.
 
     Args:
-        default_enabled (bool): Whether response validation is enabled by default.
+        default_coverage_target (float): Target minimum document coverage ratio.
+        default_max_docs (int): Maximum number of documents sampled for summary.
+        default_per_doc_top_k (int): Maximum evidence chunks retrieved per document.
+        default_final_source_cap (int): Maximum number of merged summary sources.
 
     Returns:
-        ResponseValidationConfig: Parsed response-validation settings.
+        SummaryConfig: Parsed summary precision settings.
     """
-    return ResponseValidationConfig(
-        enabled=str(os.getenv("RESPONSE_VALIDATION_ENABLED", default_enabled)).lower()
-        in {"true", "1", "yes"}
+    raw_target = float(os.getenv("SUMMARY_COVERAGE_TARGET", default_coverage_target))
+    target = min(1.0, max(0.0, raw_target))
+    return SummaryConfig(
+        coverage_target=target,
+        max_docs=max(1, int(os.getenv("SUMMARY_MAX_DOCS", default_max_docs))),
+        per_doc_top_k=max(
+            1, int(os.getenv("SUMMARY_PER_DOC_TOP_K", default_per_doc_top_k))
+        ),
+        final_source_cap=max(
+            1, int(os.getenv("SUMMARY_FINAL_SOURCE_CAP", default_final_source_cap))
+        ),
     )

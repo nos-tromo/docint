@@ -184,6 +184,10 @@ The application is configured via environment variables. Key variables include:
 - `GRAPHRAG_MIN_EDGE_WEIGHT`: Minimum edge weight included in the graph (default: `1`).
 - `GRAPHRAG_MAX_NEIGHBORS`: Maximum neighbor entities appended to a retrieval query (default: `6`).
 - `RESPONSE_VALIDATION_ENABLED`: Enable a second-pass LLM check that verifies answer grounding and source/query fit, and flags mismatches (default: `false`).
+- `SUMMARY_COVERAGE_TARGET`: Minimum document coverage ratio considered sufficient for collection summaries (default: `0.70`).
+- `SUMMARY_MAX_DOCS`: Maximum number of documents sampled when building collection summaries (default: `30`).
+- `SUMMARY_PER_DOC_TOP_K`: Maximum evidence chunks retrieved per document during summary preparation (default: `4`).
+- `SUMMARY_FINAL_SOURCE_CAP`: Maximum number of merged sources returned with a collection summary (default: `24`).
 - `PRELOAD_MODELS`: Set to `true` to download all ML models at container startup (default: unset/disabled). Used by `docker-compose.yml` to populate the `model-cache` volume on first run.
 
 **Hosts / Service Endpoints:**
@@ -212,6 +216,14 @@ The backend logic is standard OpenAI-compatible. The `docker-compose.yml` profil
 - `NER_MODEL`: Local GLiNER model for entity extraction (default: `gliner-community/gliner_large-v2.5`).
 
 See `docint/utils/env_cfg.py` for the full list of configuration options and defaults.
+
+Collection summary responses (`POST /summarize`, `POST /summarize/stream`) include an optional `summary_diagnostics` object:
+
+- `total_documents`: Number of documents sampled for summarization.
+- `covered_documents`: Number of sampled documents with extracted evidence.
+- `coverage_ratio`: `covered_documents / total_documents` (or `0.0` when no documents are available).
+- `uncovered_documents`: Filenames with no extracted evidence.
+- `coverage_target`: Configured threshold from `SUMMARY_COVERAGE_TARGET`.
 
 ## Image Ingestion and Retrieval
 

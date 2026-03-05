@@ -15,8 +15,17 @@ from typing import Any, Callable
 # TRANSFORMERS_OFFLINE env vars are set before huggingface_hub caches them.
 from docint.utils.env_cfg import (
     GraphRAGConfig,
-    load_host_env,
+    HostConfig,
+    IngestionConfig,
+    NERConfig,
+    ModelConfig,
+    OpenAIConfig,
+    PathConfig,
+    RetrievalConfig,
+    SessionConfig,
+    SummaryConfig,
     load_graphrag_env,
+    load_host_env,
     load_ingestion_env,
     load_model_env,
     load_ner_env,
@@ -24,15 +33,8 @@ from docint.utils.env_cfg import (
     load_path_env,
     load_retrieval_env,
     load_session_env,
+    load_summary_env,
     resolve_hf_cache_path,
-    PathConfig,
-    HostConfig,
-    IngestionConfig,
-    NERConfig,
-    ModelConfig,
-    OpenAIConfig,
-    RetrievalConfig,
-    SessionConfig,
 )
 # isort: on
 
@@ -49,6 +51,12 @@ from llama_index.core.postprocessor import LLMRerank
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.schema import BaseNode, Document
 from llama_index.core.storage.docstore.keyval_docstore import KVDocumentStore
+from llama_index.core.vector_stores.types import (
+    FilterCondition,
+    FilterOperator,
+    MetadataFilter,
+    MetadataFilters,
+)
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai import OpenAI
 from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
@@ -108,6 +116,9 @@ class RAG:
     retrieval_config: RetrievalConfig = field(
         default_factory=load_retrieval_env, init=False, repr=False
     )
+    summary_config: SummaryConfig = field(
+        default_factory=load_summary_env, init=False, repr=False
+    )
     session_config: SessionConfig = field(
         default_factory=load_session_env, init=False, repr=False
     )
@@ -154,6 +165,10 @@ class RAG:
     graphrag_top_k_nodes: int = field(default=100, init=False)
     graphrag_min_edge_weight: int = field(default=1, init=False)
     graphrag_max_neighbors: int = field(default=6, init=False)
+    summary_coverage_target: float = field(default=0.70, init=False)
+    summary_max_docs: int = field(default=30, init=False)
+    summary_per_doc_top_k: int = field(default=4, init=False)
+    summary_final_source_cap: int = field(default=24, init=False)
 
     # --- Session config ---
     session_store: str = field(default="", init=False)
@@ -264,6 +279,12 @@ class RAG:
         # --- Session config ---
         self.session_store = self.session_config.session_store
         self.sessions = SessionManager(self)
+
+        # --- Summary config ---
+        self.summary_coverage_target = self.summary_config.coverage_target
+        self.summary_max_docs = self.summary_config.max_docs
+        self.summary_per_doc_top_k = self.summary_config.per_doc_top_k
+        self.summary_final_source_cap = self.summary_config.final_source_cap
 
     @property
     def session_id(self) -> str | None:
@@ -968,6 +989,125 @@ class RAG:
             node_postprocessors=[self.reranker],
         )
 
+    def _source_from_node_with_score(self, nws: Any) -> dict[str, Any] | None:
+        """Normalize one ``NodeWithScore`` item into a source dictionary.
+
+        Args:
+            nws (Any): A ``NodeWithScore``-like object.
+
+        Returns:
+            dict[str, Any] | None: Normalized source payload, or ``None``.
+        """
+        node = getattr(nws, "node", None)
+        if node is None:
+            return None
+
+        meta = getattr(node, "metadata", {}) or {}
+        origin = meta.get("origin") or {}
+        filename = (
+            origin.get("filename")
+            or meta.get("file_name")
+            or meta.get("filename")
+            or meta.get("file_path")
+        )
+        filetype = (
+            origin.get("filetype")
+            or origin.get("mimetype")
+            or meta.get("filetype")
+            or meta.get("mimetype")
+            or meta.get("file_type")
+            or meta.get("file_format")
+        )
+        source_kind = (
+            meta.get("source") or meta.get("source_type") or meta.get("reader")
+        )
+        file_hash = (
+            origin.get("file_hash")
+            or meta.get("file_hash")
+            or self._extract_file_hash(meta)
+        )
+
+        page = (
+            meta.get("page")
+            or meta.get("page_number")
+            or origin.get("page")
+            or origin.get("page_number")
+        )
+        provenance = meta.get("provenance") or meta.get("provenances") or []
+        if page is None and isinstance(provenance, list):
+            for prov in provenance:
+                if isinstance(prov, dict):
+                    page = prov.get("page_no")
+                    if page is not None:
+                        break
+
+        if page is None:
+            doc_items = meta.get("doc_items")
+            if isinstance(doc_items, list):
+                for item in doc_items:
+                    if not isinstance(item, dict):
+                        continue
+                    provs = item.get("prov")
+                    if not isinstance(provs, list):
+                        continue
+                    for prov_item in provs:
+                        if isinstance(prov_item, dict):
+                            page = prov_item.get("page_no")
+                            if page is not None:
+                                break
+                    if page is not None:
+                        break
+
+        try:
+            page = int(page) if page is not None else None
+        except Exception:
+            page = None
+
+        table_meta = meta.get("table") or {}
+        row_index = table_meta.get("row_index")
+        try:
+            row_index = int(row_index) if row_index is not None else None
+        except Exception:
+            row_index = None
+
+        location_label = (
+            "page" if page is not None else ("row" if row_index is not None else None)
+        )
+        location_value = page if page is not None else row_index
+
+        text_value = getattr(node, "text", "") or ""
+        preview_url: str | None = None
+        if file_hash:
+            preview_url = f"/sources/preview?collection={self.qdrant_collection}&file_hash={file_hash}"
+
+        src: dict[str, Any] = {
+            "text": text_value,
+            "preview_text": text_value[:280].strip(),
+            "filename": filename,
+            "filetype": filetype,
+            "source": source_kind,
+            "score": getattr(nws, "score", None),
+        }
+        entities = meta.get("entities") or origin.get("entities")
+        relations = meta.get("relations") or origin.get("relations")
+        if entities:
+            src["entities"] = entities
+        if relations:
+            src["relations"] = relations
+        if file_hash:
+            src["file_hash"] = file_hash
+        if preview_url:
+            src["preview_url"] = preview_url
+            src["document_url"] = preview_url
+        if location_label:
+            src[location_label] = location_value
+        if source_kind == "table":
+            src["table_info"] = {
+                "n_rows": table_meta.get("n_rows"),
+                "n_cols": table_meta.get("n_cols"),
+            }
+        return src
+
     def _normalize_response_data(
         self, query: str, result: Any, reason: str | None = None
     ) -> dict[str, Any]:
@@ -1028,124 +1168,9 @@ class RAG:
 
         sources: list[dict[str, Any]] = []
         for nws in source_nodes:
-            # nws: NodeWithScore; the node itself:
-            node = getattr(nws, "node", None)
-            if node is None:
-                continue
-            meta = getattr(node, "metadata", {}) or {}
-
-            # common file info (Docling puts origin here)
-            origin = meta.get("origin") or {}
-            filename = (
-                origin.get("filename")
-                or meta.get("file_name")
-                or meta.get("filename")
-                or meta.get("file_path")
-            )
-            filetype = (
-                origin.get("filetype")
-                or origin.get("mimetype")
-                or meta.get("filetype")
-                or meta.get("mimetype")
-                or meta.get("file_type")
-                or meta.get("file_format")
-            )
-            source_kind = (
-                meta.get("source") or meta.get("source_type") or meta.get("reader")
-            )
-            file_hash = (
-                origin.get("file_hash")
-                or meta.get("file_hash")
-                or self._extract_file_hash(meta)
-            )
-
-            # page detection
-            page = (
-                meta.get("page")
-                or meta.get("page_number")
-                or origin.get("page")
-                or origin.get("page_number")
-            )
-            provenance = meta.get("provenance") or meta.get("provenances") or []
-            if page is None and isinstance(provenance, list):
-                for prov in provenance:
-                    if isinstance(prov, dict):
-                        page = prov.get("page_no")
-                        if page is not None:
-                            break
-
-            # doc_items detection (Docling)
-            if page is None:
-                doc_items = meta.get("doc_items")
-                if isinstance(doc_items, list):
-                    for item in doc_items:
-                        if isinstance(item, dict):
-                            provs = item.get("prov")
-                            if isinstance(provs, list):
-                                for p in provs:
-                                    if isinstance(p, dict):
-                                        page = p.get("page_no")
-                                        if page is not None:
-                                            break
-                        if page is not None:
-                            break
-
-            try:
-                page = int(page) if page is not None else None
-            except Exception:
-                pass
-
-            # --- row detection (tables) ---
-            table_meta = meta.get("table") or {}
-            row_index = table_meta.get("row_index")
-            try:
-                row_index = int(row_index) if row_index is not None else None
-            except Exception:
-                pass
-
-            location_label = (
-                "page"
-                if page is not None
-                else ("row" if row_index is not None else None)
-            )
-            location_value = page if page is not None else row_index
-
-            text_value = getattr(node, "text", "") or ""
-            preview_url: str | None = None
-            if file_hash:
-                preview_url = (
-                    f"/sources/preview?collection={self.qdrant_collection}"
-                    f"&file_hash={file_hash}"
-                )
-
-            src = {
-                "text": text_value,
-                "preview_text": text_value[:280].strip(),
-                "filename": filename,
-                "filetype": filetype,
-                "source": source_kind,
-                "score": getattr(nws, "score", None),
-            }
-            entities = meta.get("entities") or origin.get("entities")
-            relations = meta.get("relations") or origin.get("relations")
-            if entities:
-                src["entities"] = entities
-            if relations:
-                src["relations"] = relations
-            if file_hash:
-                src["file_hash"] = file_hash
-            if preview_url:
-                src["preview_url"] = preview_url
-                src["document_url"] = preview_url
-            if location_label:
-                src[location_label] = location_value
-
-            if source_kind == "table":
-                n_rows = table_meta.get("n_rows")
-                n_cols = table_meta.get("n_cols")
-                src["table_info"] = {"n_rows": n_rows, "n_cols": n_cols}
-
-            sources.append(src)
+            normalized = self._source_from_node_with_score(nws)
+            if normalized is not None:
+                sources.append(normalized)
 
         if query.strip() and query != self.summarize_prompt:
             sources.extend(
@@ -1726,29 +1751,343 @@ class RAG:
             return query
 
     def summarize_collection(self) -> dict[str, Any]:
-        """Generate a summary of the currently selected collection.
+        """Generate a coverage-aware summary for the selected collection.
 
         Returns:
-            dict[str, Any]: Normalized response data containing the summary and sources.
+            dict[str, Any]: Summary payload with normalized sources and diagnostics.
 
         Raises:
             ValueError: If no collection is selected.
-            RuntimeError: If the query engine is not initialized for summarization.
         """
-
         if not self.qdrant_collection:
             raise ValueError("No collection selected.")
 
-        if self.query_engine is None:
-            if self.index is None:
-                self.create_index()
-            self.create_query_engine()
-        engine = self.query_engine
-        if engine is None:
-            raise RuntimeError("Query engine failed to initialize for summarization.")
+        context = self._prepare_collection_summary_context()
+        diagnostics = context["summary_diagnostics"]
+        covered_documents = int(diagnostics.get("covered_documents", 0) or 0)
+        total_documents = int(diagnostics.get("total_documents", 0) or 0)
 
-        resp = engine.query(self.summarize_prompt)
-        return self._normalize_response_data(self.summarize_prompt, resp)
+        if total_documents == 0:
+            summary_text = "No documents available in the selected collection."
+        elif covered_documents == 0:
+            summary_text = (
+                "Unable to extract grounded evidence from the selected collection."
+            )
+        else:
+            completion = self.text_model.complete(context["synthesis_prompt"])
+            summary_text = str(getattr(completion, "text", "") or "").strip()
+
+        return {
+            "query": self.summarize_prompt,
+            "reasoning": None,
+            "response": summary_text,
+            "sources": context["sources"],
+            "summary_diagnostics": diagnostics,
+        }
+
+    def _summary_document_targets(self) -> list[dict[str, Any]]:
+        """Return capped document targets ordered by descending node count."""
+        documents = self.list_documents()
+        documents.sort(
+            key=lambda item: (
+                -int(item.get("node_count", 0) or 0),
+                str(item.get("filename") or "").lower(),
+            )
+        )
+        return documents[: self.summary_max_docs]
+
+    def _summary_source_matches_document(
+        self,
+        source: dict[str, Any],
+        *,
+        filename: str,
+        file_hash: str | None,
+    ) -> bool:
+        """Check whether a normalized source belongs to a document target."""
+        if file_hash and str(source.get("file_hash") or "") == file_hash:
+            return True
+
+        src_filename = str(source.get("filename") or "").strip()
+        if not src_filename:
+            return False
+
+        if src_filename == filename:
+            return True
+
+        try:
+            return Path(src_filename).name == Path(filename).name
+        except Exception:
+            return src_filename.lower() == filename.lower()
+
+    def _summary_document_filters(
+        self, *, filename: str, file_hash: str | None
+    ) -> MetadataFilters:
+        """Build metadata filters that scope retrieval to one document."""
+        filters: list[MetadataFilter] = [
+            MetadataFilter(key="filename", value=filename, operator=FilterOperator.EQ),
+            MetadataFilter(key="file_name", value=filename, operator=FilterOperator.EQ),
+            MetadataFilter(key="file_path", value=filename, operator=FilterOperator.EQ),
+        ]
+        if file_hash:
+            filters.append(
+                MetadataFilter(
+                    key="file_hash", value=file_hash, operator=FilterOperator.EQ
+                )
+            )
+        return MetadataFilters(filters=filters, condition=FilterCondition.OR)
+
+    def _retrieve_summary_nodes_for_document(
+        self, *, filename: str, file_hash: str | None
+    ) -> list[Any]:
+        """Retrieve top evidence nodes for a single document."""
+        if self.index is None:
+            self.create_index()
+        if self.index is None:
+            return []
+
+        query = (
+            f"Extract factual highlights and notable findings from '{filename}'. "
+            "Focus on substantive content."
+        )
+        top_k = max(1, self.summary_per_doc_top_k)
+        try:
+            retriever = self.index.as_retriever(
+                similarity_top_k=top_k,
+                filters=self._summary_document_filters(
+                    filename=filename, file_hash=file_hash
+                ),
+            )
+            nodes = retriever.retrieve(query)
+            if isinstance(nodes, list):
+                return nodes[:top_k]
+        except Exception as exc:
+            logger.warning(
+                "Filtered summary retrieval failed for '{}': {}",
+                filename,
+                exc,
+            )
+
+        try:
+            fallback_retriever = self.index.as_retriever(similarity_top_k=top_k * 2)
+            fallback_nodes = fallback_retriever.retrieve(query)
+            if not isinstance(fallback_nodes, list):
+                return []
+            matched_nodes: list[Any] = []
+            for nws in fallback_nodes:
+                source = self._source_from_node_with_score(nws)
+                if source is None:
+                    continue
+                if self._summary_source_matches_document(
+                    source, filename=filename, file_hash=file_hash
+                ):
+                    matched_nodes.append(nws)
+                if len(matched_nodes) >= top_k:
+                    break
+            return matched_nodes
+        except Exception as exc:
+            logger.warning(
+                "Fallback summary retrieval failed for '{}': {}", filename, exc
+            )
+            return []
+
+    def _summary_source_key(self, source: dict[str, Any]) -> str:
+        """Build a deterministic deduplication key for summary sources.
+
+        Args:
+            source: A normalized source dictionary.
+
+        Returns:
+            A string key that uniquely identifies the source for deduplication purposes.
+        """
+        return "||".join(
+            [
+                str(source.get("file_hash") or ""),
+                str(source.get("filename") or ""),
+                str(source.get("page") or ""),
+                str(source.get("row") or ""),
+                str(source.get("preview_text") or source.get("text") or ""),
+            ]
+        )
+
+    def _summary_document_brief(
+        self, *, filename: str, sources: list[dict[str, Any]]
+    ) -> str:
+        """Build one compact, evidence-first brief for a document.
+
+        Args:
+            filename: The name of the document.
+            sources: A list of normalized source dictionaries associated with the document.
+
+        Returns:
+            A formatted string brief that includes key points and evidence snippets from the sources.
+        """
+        snippets: list[str] = []
+        for source in sources:
+            raw_text = str(
+                source.get("preview_text") or source.get("text") or ""
+            ).strip()
+            if not raw_text:
+                continue
+            compact = re.sub(r"\s+", " ", raw_text)
+            snippets.append(compact[:240])
+            if len(snippets) >= 2:
+                break
+
+        if not snippets:
+            return f"- Document: {filename}\n  - Evidence: (none)"
+
+        evidence_lines = "\n".join(
+            f"  - Evidence {idx}: {snippet}"
+            for idx, snippet in enumerate(snippets, start=1)
+        )
+        key_points = " ; ".join(snippets)
+        return f"- Document: {filename}\n  - Key points: {key_points}\n{evidence_lines}"
+
+    def _merge_summary_sources(
+        self, per_doc_sources: dict[str, list[dict[str, Any]]]
+    ) -> list[dict[str, Any]]:
+        """Merge per-document evidence and guarantee broad document coverage.
+
+        Args:
+            per_doc_sources: A dictionary mapping document identifiers to lists of source dictionaries.
+
+        Returns:
+            A merged list of source dictionaries that prioritizes at least one source per document and fills remaining slots with additional evidence.
+        """
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        # Ensure at least one source per covered document.
+        for sources in per_doc_sources.values():
+            if not sources:
+                continue
+            key = self._summary_source_key(sources[0])
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(sources[0])
+            if len(merged) >= self.summary_final_source_cap:
+                return merged
+
+        # Fill remaining slots with additional evidence snippets.
+        for sources in per_doc_sources.values():
+            for source in sources[1:]:
+                key = self._summary_source_key(source)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(source)
+                if len(merged) >= self.summary_final_source_cap:
+                    return merged
+        return merged
+
+    def _build_summary_synthesis_prompt(
+        self,
+        *,
+        briefs: list[str],
+        diagnostics: dict[str, Any],
+    ) -> str:
+        """Build the final synthesis prompt from per-document evidence briefs.
+
+        Args:
+            briefs: A list of evidence briefs for each document.
+            diagnostics: A dictionary containing diagnostic information such as coverage ratio and uncovered documents.
+
+        Returns:
+            A formatted string representing the final synthesis prompt.
+        """
+        coverage_ratio = float(diagnostics.get("coverage_ratio", 0.0) or 0.0)
+        coverage_target = float(diagnostics.get("coverage_target", 0.0) or 0.0)
+        uncovered = diagnostics.get("uncovered_documents") or []
+        uncovered_text = ", ".join(str(item) for item in uncovered) or "(none)"
+        evidence_block = "\n\n".join(briefs) if briefs else "(no evidence extracted)"
+        return (
+            "You are producing a grounded collection summary.\n"
+            "Use only the evidence briefs below. If evidence is insufficient, state that explicitly.\n"
+            "Include cross-document themes, notable differences or outliers, and concrete findings.\n"
+            "Do not introduce claims unsupported by the evidence briefs.\n\n"
+            f"Coverage ratio: {coverage_ratio:.2f}\n"
+            f"Coverage target: {coverage_target:.2f}\n"
+            f"Uncovered documents: {uncovered_text}\n\n"
+            f"Style instructions:\n{self.summarize_prompt.strip()}\n\n"
+            f"Evidence briefs:\n{evidence_block}\n"
+        )
+
+    def _prepare_collection_summary_context(self) -> dict[str, Any]:
+        """Prepare document briefs, merged evidence, and diagnostics for summary.
+
+        Returns:
+            A dictionary containing the synthesis prompt, merged sources, and summary diagnostics.
+        """
+        targets = self._summary_document_targets()
+        target_filenames = [
+            str(doc.get("filename") or "") for doc in targets if doc.get("filename")
+        ]
+        per_doc_sources: dict[str, list[dict[str, Any]]] = {}
+        briefs: list[str] = []
+
+        for doc in targets:
+            filename = str(doc.get("filename") or "").strip()
+            if not filename:
+                continue
+            file_hash_raw = doc.get("file_hash")
+            file_hash = str(file_hash_raw).strip() if file_hash_raw else None
+            nodes = self._retrieve_summary_nodes_for_document(
+                filename=filename,
+                file_hash=file_hash,
+            )
+            normalized_sources: list[dict[str, Any]] = []
+            seen_doc_keys: set[str] = set()
+            for nws in nodes:
+                source = self._source_from_node_with_score(nws)
+                if source is None:
+                    continue
+                if not self._summary_source_matches_document(
+                    source, filename=filename, file_hash=file_hash
+                ):
+                    continue
+                key = self._summary_source_key(source)
+                if key in seen_doc_keys:
+                    continue
+                seen_doc_keys.add(key)
+                normalized_sources.append(source)
+                if len(normalized_sources) >= self.summary_per_doc_top_k:
+                    break
+
+            if normalized_sources:
+                per_doc_sources[filename] = normalized_sources
+                briefs.append(
+                    self._summary_document_brief(
+                        filename=filename,
+                        sources=normalized_sources,
+                    )
+                )
+
+        covered_filenames = list(per_doc_sources.keys())
+        uncovered = [
+            filename for filename in target_filenames if filename not in per_doc_sources
+        ]
+        total_documents = len(target_filenames)
+        covered_documents = len(covered_filenames)
+        coverage_ratio = (
+            covered_documents / total_documents if total_documents > 0 else 0.0
+        )
+        diagnostics = {
+            "total_documents": total_documents,
+            "covered_documents": covered_documents,
+            "coverage_ratio": round(coverage_ratio, 4),
+            "uncovered_documents": uncovered,
+            "coverage_target": self.summary_coverage_target,
+        }
+
+        return {
+            "synthesis_prompt": self._build_summary_synthesis_prompt(
+                briefs=briefs,
+                diagnostics=diagnostics,
+            ),
+            "sources": self._merge_summary_sources(per_doc_sources),
+            "summary_diagnostics": diagnostics,
+        }
 
     def stream_summarize_collection(self) -> Any:
         """Generate a streaming summary of the currently selected collection.
@@ -1758,51 +2097,67 @@ class RAG:
 
         Raises:
             ValueError: If no collection is selected.
-            RuntimeError: If the index is not initialized for streaming summarization.
         """
         if not self.qdrant_collection:
             raise ValueError("No collection selected.")
 
-        if self.index is None:
-            self.create_index()
-        if self.index is None:
-            raise RuntimeError(
-                "Index failed to initialize for streaming summarization."
+        context = self._prepare_collection_summary_context()
+        diagnostics = context["summary_diagnostics"]
+        covered_documents = int(diagnostics.get("covered_documents", 0) or 0)
+        total_documents = int(diagnostics.get("total_documents", 0) or 0)
+
+        if total_documents == 0:
+            full_text = "No documents available in the selected collection."
+            yield full_text
+            yield {
+                "query": self.summarize_prompt,
+                "reasoning": None,
+                "response": full_text,
+                "sources": context["sources"],
+                "summary_diagnostics": diagnostics,
+            }
+            return
+
+        if covered_documents == 0:
+            full_text = (
+                "Unable to extract grounded evidence from the selected collection."
             )
-
-        # Create a temporary streaming engine for summarization
-        k = min(max(self.retrieve_similarity_top_k, self.rerank_top_n * 8), 64)
-        retriever = self.index.as_retriever(similarity_top_k=k)
-        streaming_engine = RetrieverQueryEngine.from_args(
-            retriever=retriever,
-            llm=self.text_model,
-            node_postprocessors=[self.reranker],
-            streaming=True,
-        )
-
-        response = streaming_engine.query(self.summarize_prompt)
+            yield full_text
+            yield {
+                "query": self.summarize_prompt,
+                "reasoning": None,
+                "response": full_text,
+                "sources": context["sources"],
+                "summary_diagnostics": diagnostics,
+            }
+            return
 
         full_text = ""
-        tokens = getattr(response, "response_gen", None)
-        if tokens is not None:
-            for token in tokens:
-                full_text += token
-                yield token
-        else:
-            resp_value = getattr(response, "response", None)
-            if isinstance(resp_value, str):
-                full_text = resp_value
+        running_text = ""
+        for chunk in self.text_model.stream_complete(context["synthesis_prompt"]):
+            delta = getattr(chunk, "delta", None)
+            if isinstance(delta, str) and delta:
+                token = delta
+                running_text += token
+            else:
+                text_value = str(getattr(chunk, "text", "") or "")
+                if text_value.startswith(running_text):
+                    token = text_value[len(running_text) :]
+                else:
+                    token = text_value
+                running_text = text_value
+            if not token:
+                continue
+            full_text += token
+            yield token
 
-        # Create a Response object to reuse normalization logic
-        final_response = Response(
-            response=full_text,
-            source_nodes=getattr(response, "source_nodes", []) or [],
-            metadata=getattr(response, "metadata", {}) or {},
-        )
-        normalized = self._normalize_response_data(
-            self.summarize_prompt, final_response
-        )
-        yield normalized
+        yield {
+            "query": self.summarize_prompt,
+            "reasoning": None,
+            "response": full_text,
+            "sources": context["sources"],
+            "summary_diagnostics": diagnostics,
+        }
 
     def list_documents(self) -> list[dict[str, Any]]:
         """List all documents in the current collection by scanning all points.

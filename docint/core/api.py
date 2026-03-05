@@ -139,7 +139,11 @@ def _format_sse(event: str, data: dict[str, Any]) -> str:
 
 
 def _validation_payload(
-    *, question: str, answer: str | None, sources: list[dict[str, Any]]
+    *,
+    question: str,
+    answer: str | None,
+    sources: list[dict[str, Any]],
+    summary_diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, bool | str | None]:
     """Validate a response against retrieved sources and return metadata.
 
@@ -147,6 +151,7 @@ def _validation_payload(
         question: The user query or summarize prompt.
         answer: The generated answer text.
         sources: Retrieved source payloads.
+        summary_diagnostics: Optional summary coverage diagnostics.
 
     Returns:
         Validation metadata dictionary suitable for API responses.
@@ -166,6 +171,7 @@ def _validation_payload(
     retrieval = RetrievalResult(
         answer=answer,
         sources=sources,
+        summary_diagnostics=summary_diagnostics,
     )
     validated = validator.finalize(retrieval, Turn(user_input=question))
     return {
@@ -201,9 +207,18 @@ class QueryOut(BaseModel):
     validation_reason: str | None = None
 
 
+class SummaryDiagnosticsOut(BaseModel):
+    total_documents: int
+    covered_documents: int
+    coverage_ratio: float
+    uncovered_documents: list[str] = []
+    coverage_target: float
+
+
 class SummarizeOut(BaseModel):
     summary: str
     sources: list[dict] = []
+    summary_diagnostics: SummaryDiagnosticsOut | None = None
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
     validation_reason: str | None = None
@@ -476,7 +491,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
 
 
 @app.post("/summarize", response_model=SummarizeOut, tags=["Query"])
-def summarize() -> dict[str, list[dict] | str | bool | None]:
+def summarize() -> dict[str, Any]:
     """Generate a summary for the currently selected collection.
 
     Returns:
@@ -491,11 +506,6 @@ def summarize() -> dict[str, list[dict] | str | bool | None]:
             logger.error("HTTPException: No collection selected")
             raise HTTPException(status_code=400, detail="No collection selected")
 
-        if getattr(rag, "query_engine", None) is None:
-            if getattr(rag, "index", None) is None:
-                rag.create_index()
-            rag.create_query_engine()
-
         data = rag.summarize_collection()
         summary = (
             str(data.get("response") or data.get("answer") or "")
@@ -503,15 +513,20 @@ def summarize() -> dict[str, list[dict] | str | bool | None]:
             else ""
         )
         sources: list[dict] = data.get("sources", []) if isinstance(data, dict) else []
+        summary_diagnostics = (
+            data.get("summary_diagnostics") if isinstance(data, dict) else None
+        )
 
         validation = _validation_payload(
             question=rag.summarize_prompt,
             answer=summary,
             sources=sources,
+            summary_diagnostics=summary_diagnostics,
         )
         return {
             "summary": summary,
             "sources": sources,
+            "summary_diagnostics": summary_diagnostics,
             **validation,
         }
     except HTTPException as e:
@@ -557,10 +572,14 @@ async def summarize_stream() -> StreamingResponse:
             sources = payload_out.get("sources")
             if not isinstance(sources, list):
                 sources = []
+            summary_diagnostics = payload_out.get("summary_diagnostics")
+            if not isinstance(summary_diagnostics, dict):
+                summary_diagnostics = None
             validation = _validation_payload(
                 question=rag.summarize_prompt,
                 answer=summary,
                 sources=sources,
+                summary_diagnostics=summary_diagnostics,
             )
             payload_out.update(validation)
             if payload_out:
