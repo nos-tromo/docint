@@ -15,7 +15,9 @@ from docint.agents import (
     AgentOrchestrator,
     ClarificationConfig,
     ClarificationPolicy,
+    ResultValidationResponseAgent,
     RAGRetrievalAgent,
+    RetrievalResult,
     SimpleClarificationAgent,
     SimpleUnderstandingAgent,
     ContextualUnderstandingAgent,
@@ -23,7 +25,11 @@ from docint.agents import (
 )
 from docint.cli import ingest as ingest_module
 from docint.core.rag import RAG
-from docint.utils.env_cfg import load_host_env, load_path_env
+from docint.utils.env_cfg import (
+    load_host_env,
+    load_path_env,
+    load_response_validation_env,
+)
 from docint.utils.hashing import compute_file_hash
 from docint.utils.logging_cfg import setup_logging
 
@@ -59,11 +65,14 @@ def _build_orchestrator() -> AgentOrchestrator:
     understanding: SimpleUnderstandingAgent | ContextualUnderstandingAgent = (
         _understanding_agent
     )
+    validation_cfg = load_response_validation_env()
+    validation_llm = None
 
     # Use contextual understanding if LLM is configured
     if getattr(rag, "text_model_id", None):
         try:
             understanding = ContextualUnderstandingAgent(llm=rag.text_model)
+            validation_llm = rag.text_model
         except Exception as e:
             logger.warning("Failed to init ContextualUnderstandingAgent: {}", e)
 
@@ -71,6 +80,10 @@ def _build_orchestrator() -> AgentOrchestrator:
         understanding=understanding,
         clarifier=_clarification_agent,
         retriever=retrieval_agent,
+        responder=ResultValidationResponseAgent(
+            enabled=validation_cfg.enabled,
+            llm=validation_llm,
+        ),
         policy=_clarification_policy,
     )
 
@@ -125,6 +138,43 @@ def _format_sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+def _validation_payload(
+    *, question: str, answer: str | None, sources: list[dict[str, Any]]
+) -> dict[str, bool | str | None]:
+    """Validate a response against retrieved sources and return metadata.
+
+    Args:
+        question: The user query or summarize prompt.
+        answer: The generated answer text.
+        sources: Retrieved source payloads.
+
+    Returns:
+        Validation metadata dictionary suitable for API responses.
+    """
+    validation_cfg = load_response_validation_env()
+    validation_llm = None
+    if getattr(rag, "text_model_id", None):
+        try:
+            validation_llm = rag.text_model
+        except Exception as exc:
+            logger.warning("Failed to initialize validation LLM: {}", exc)
+
+    validator = ResultValidationResponseAgent(
+        enabled=validation_cfg.enabled,
+        llm=validation_llm,
+    )
+    retrieval = RetrievalResult(
+        answer=answer,
+        sources=sources,
+    )
+    validated = validator.finalize(retrieval, Turn(user_input=question))
+    return {
+        "validation_checked": validated.validation_checked,
+        "validation_mismatch": validated.validation_mismatch,
+        "validation_reason": validated.validation_reason,
+    }
+
+
 # --- Pydantic models for request and response payloads ---
 
 
@@ -146,11 +196,17 @@ class QueryOut(BaseModel):
     answer: str
     sources: list[dict] = []
     session_id: str
+    validation_checked: bool | None = None
+    validation_mismatch: bool | None = None
+    validation_reason: str | None = None
 
 
 class SummarizeOut(BaseModel):
     summary: str
     sources: list[dict] = []
+    validation_checked: bool | None = None
+    validation_mismatch: bool | None = None
+    validation_reason: str | None = None
 
 
 class IngestIn(BaseModel):
@@ -215,6 +271,9 @@ class AgentChatOut(BaseModel):
     confidence: float | None = None
     tool_used: str | None = None
     latency_ms: float | None = None
+    validation_checked: bool | None = None
+    validation_mismatch: bool | None = None
+    validation_reason: str | None = None
 
 
 # --- API Endpoints ---
@@ -304,7 +363,7 @@ def collections_delete(name: str) -> dict[str, bool]:
 
 
 @app.post("/query", response_model=QueryOut, tags=["Query"])
-def query(payload: QueryIn) -> dict[str, list[dict] | str]:
+def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
     """Handle a query request.
 
     Args:
@@ -336,7 +395,17 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str]:
         )
         sources: list[dict] = data.get("sources", []) if isinstance(data, dict) else []
 
-        return {"answer": answer, "sources": sources, "session_id": session_id}
+        validation = _validation_payload(
+            question=payload.question,
+            answer=answer,
+            sources=sources,
+        )
+        return {
+            "answer": answer,
+            "sources": sources,
+            "session_id": session_id,
+            **validation,
+        }
     except HTTPException as e:
         logger.error("HTTPException: Error processing query: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -374,12 +443,31 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
             Iterator[AsyncIterator[str]]: An asynchronous iterator yielding SSE events.
         """
         try:
+            full_answer = ""
+            final_payload: dict[str, Any] | None = None
             # Iterate over the sync generator
             for chunk in rag.stream_chat(payload.question):
                 if isinstance(chunk, str):
+                    full_answer += chunk
                     yield f"data: {json.dumps({'token': chunk})}\n\n"
                 elif isinstance(chunk, dict):
-                    yield f"data: {json.dumps(chunk)}\n\n"
+                    final_payload = chunk
+
+            payload_out = dict(final_payload or {})
+            answer = str(payload_out.get("response") or payload_out.get("answer") or "")
+            if not answer:
+                answer = full_answer
+            sources = payload_out.get("sources")
+            if not isinstance(sources, list):
+                sources = []
+            validation = _validation_payload(
+                question=payload.question,
+                answer=answer,
+                sources=sources,
+            )
+            payload_out.update(validation)
+            if payload_out:
+                yield f"data: {json.dumps(payload_out)}\n\n"
         except Exception:
             logger.exception("Stream error during SSE generation")
             yield f"data: {json.dumps({'error': 'Internal server error'})}\n\n"
@@ -388,7 +476,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
 
 
 @app.post("/summarize", response_model=SummarizeOut, tags=["Query"])
-def summarize() -> dict[str, list[dict] | str]:
+def summarize() -> dict[str, list[dict] | str | bool | None]:
     """Generate a summary for the currently selected collection.
 
     Returns:
@@ -416,7 +504,16 @@ def summarize() -> dict[str, list[dict] | str]:
         )
         sources: list[dict] = data.get("sources", []) if isinstance(data, dict) else []
 
-        return {"summary": summary, "sources": sources}
+        validation = _validation_payload(
+            question=rag.summarize_prompt,
+            answer=summary,
+            sources=sources,
+        )
+        return {
+            "summary": summary,
+            "sources": sources,
+            **validation,
+        }
     except HTTPException as e:
         logger.error("HTTPException: Error generating summary: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -442,11 +539,32 @@ async def summarize_stream() -> StreamingResponse:
             AsyncIterator[str]: An asynchronous iterator yielding SSE events.
         """
         try:
+            full_summary = ""
+            final_payload: dict[str, Any] | None = None
             for chunk in rag.stream_summarize_collection():
                 if isinstance(chunk, str):
+                    full_summary += chunk
                     yield f"data: {json.dumps({'token': chunk})}\n\n"
                 elif isinstance(chunk, dict):
-                    yield f"data: {json.dumps(chunk)}\n\n"
+                    final_payload = chunk
+
+            payload_out = dict(final_payload or {})
+            summary = str(
+                payload_out.get("response") or payload_out.get("answer") or ""
+            )
+            if not summary:
+                summary = full_summary
+            sources = payload_out.get("sources")
+            if not isinstance(sources, list):
+                sources = []
+            validation = _validation_payload(
+                question=rag.summarize_prompt,
+                answer=summary,
+                sources=sources,
+            )
+            payload_out.update(validation)
+            if payload_out:
+                yield f"data: {json.dumps(payload_out)}\n\n"
         except Exception as e:
             logger.error("Stream error: {}", e)
             yield f"data: {json.dumps({'error': 'An internal error occurred during streaming.'})}\n\n"
@@ -742,6 +860,9 @@ def agent_chat(payload: AgentChatIn) -> AgentChatOut:
         confidence=retrieval.confidence,
         tool_used=retrieval.tool_used,
         latency_ms=retrieval.latency_ms,
+        validation_checked=retrieval.validation_checked,
+        validation_mismatch=retrieval.validation_mismatch,
+        validation_reason=retrieval.validation_reason,
     )
 
 

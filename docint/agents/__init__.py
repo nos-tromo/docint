@@ -20,7 +20,10 @@ from docint.agents.understanding import (
 )
 from docint.agents.clarify import SimpleClarificationAgent
 from docint.agents.retrieval import RAGRetrievalAgent
-from docint.agents.generation import PassthroughResponseAgent
+from docint.agents.generation import (
+    PassthroughResponseAgent,
+    ResultValidationResponseAgent,
+)
 from docint.agents.context import TurnContext
 from docint.agents.tools import ToolRegistry, default_tool_registry
 
@@ -33,6 +36,7 @@ __all__ = [
     "IntentAnalysis",
     "OrchestratorResult",
     "PassthroughResponseAgent",
+    "ResultValidationResponseAgent",
     "RAGRetrievalAgent",
     "RetrievalRequest",
     "RetrievalResult",

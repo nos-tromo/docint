@@ -52,6 +52,9 @@ class RetrievalResult:
     confidence: float | None = None
     tool_used: str | None = None
     latency_ms: float | None = None
+    validation_checked: bool | None = None
+    validation_mismatch: bool | None = None
+    validation_reason: str | None = None
 
 
 @dataclass

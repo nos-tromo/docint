@@ -7,7 +7,11 @@ import requests
 import streamlit as st
 from loguru import logger
 
-from docint.ui.components import render_ner_overview, render_source_item
+from docint.ui.components import (
+    render_ner_overview,
+    render_response_validation,
+    render_source_item,
+)
 from docint.ui.state import BACKEND_HOST
 
 
@@ -31,6 +35,19 @@ def render_chat() -> None:
             chat_text += f"{msg['role'].upper()}: {msg['content']}\n\n"
             if msg.get("reasoning"):
                 chat_text += f"REASONING: {msg['reasoning']}\n\n"
+            if (
+                msg.get("validation_checked") is not None
+                or msg.get("validation_mismatch") is not None
+                or msg.get("validation_reason")
+            ):
+                chat_text += "VALIDATION: "
+                chat_text += (
+                    f"checked={msg.get('validation_checked')}, "
+                    f"mismatch={msg.get('validation_mismatch')}"
+                )
+                if msg.get("validation_reason"):
+                    chat_text += f", reason={msg['validation_reason']}"
+                chat_text += "\n\n"
 
         st.download_button(
             label="📥 Download chat (.txt)",
@@ -47,6 +64,12 @@ def render_chat() -> None:
             if msg.get("reasoning"):
                 with st.expander("Reasoning"):
                     st.markdown(msg["reasoning"])
+
+            render_response_validation(
+                validation_checked=msg.get("validation_checked"),
+                validation_mismatch=msg.get("validation_mismatch"),
+                validation_reason=msg.get("validation_reason"),
+            )
 
             if msg.get("sources"):
                 with st.expander("View Sources"):
@@ -97,6 +120,9 @@ def render_chat() -> None:
             full_answer = ""
             sources: list[dict[str, Any]] = []
             reasoning: str | None = None
+            validation_checked: bool | None = None
+            validation_mismatch: bool | None = None
+            validation_reason: str | None = None
 
             payload = {
                 "question": prompt,
@@ -126,7 +152,12 @@ def render_chat() -> None:
                             Args:
                                 line: Raw bytes from the streaming response.
                             """
-                            nonlocal full_answer, sources, reasoning
+                            nonlocal full_answer
+                            nonlocal sources
+                            nonlocal reasoning
+                            nonlocal validation_checked
+                            nonlocal validation_mismatch
+                            nonlocal validation_reason
                             if not line:
                                 return
                             decoded = line.decode("utf-8")
@@ -134,6 +165,16 @@ def render_chat() -> None:
                                 return
                             try:
                                 data = json.loads(decoded[6:])
+                                if "validation_checked" in data:
+                                    validation_checked = data.get("validation_checked")
+                                if "validation_mismatch" in data:
+                                    validation_mismatch = data.get(
+                                        "validation_mismatch"
+                                    )
+                                if "validation_reason" in data:
+                                    validation_reason = data.get("validation_reason")
+                                if data.get("session_id"):
+                                    st.session_state.session_id = data.get("session_id")
                                 if "token" in data:
                                     full_answer += data["token"]
                                     st.session_state.current_answer = full_answer
@@ -141,7 +182,6 @@ def render_chat() -> None:
                                 elif "sources" in data:
                                     sources = data.get("sources", [])
                                     reasoning = data.get("reasoning")
-                                    st.session_state.session_id = data.get("session_id")
                                 elif "error" in data:
                                     st.error(f"Stream error: {data['error']}")
                             except json.JSONDecodeError:
@@ -166,6 +206,12 @@ def render_chat() -> None:
                             with st.expander("Reasoning"):
                                 st.markdown(reasoning)
 
+                        render_response_validation(
+                            validation_checked=validation_checked,
+                            validation_mismatch=validation_mismatch,
+                            validation_reason=validation_reason,
+                        )
+
                         if sources:
                             with st.expander("View Sources"):
                                 for src in sources:
@@ -181,6 +227,12 @@ def render_chat() -> None:
                         }
                         if reasoning:
                             msg_entry["reasoning"] = reasoning
+                        if validation_checked is not None:
+                            msg_entry["validation_checked"] = validation_checked
+                        if validation_mismatch is not None:
+                            msg_entry["validation_mismatch"] = validation_mismatch
+                        if validation_reason:
+                            msg_entry["validation_reason"] = validation_reason
                         st.session_state.messages.append(msg_entry)
                         st.session_state.chat_running = False
                         st.rerun()

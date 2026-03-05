@@ -807,3 +807,27 @@ def load_session_env(
     return SessionConfig(
         session_store=os.getenv("SESSION_STORE", default_session_store)
     )
+
+
+@dataclass(frozen=True)
+class ResponseValidationConfig:
+    """Dataclass for response validation configuration."""
+
+    enabled: bool
+
+
+def load_response_validation_env(
+    default_enabled: bool = False,
+) -> ResponseValidationConfig:
+    """Load response-validation configuration from environment variables.
+
+    Args:
+        default_enabled (bool): Whether response validation is enabled by default.
+
+    Returns:
+        ResponseValidationConfig: Parsed response-validation settings.
+    """
+    return ResponseValidationConfig(
+        enabled=str(os.getenv("RESPONSE_VALIDATION_ENABLED", default_enabled)).lower()
+        in {"true", "1", "yes"}
+    )
