@@ -656,7 +656,7 @@ def load_path_env() -> PathConfig:
         )
         default_qdrant_sources = (default_sources_base / "sources").expanduser()
 
-    default_artifacts_dir: Path = project_root / "artifacts"
+    default_artifacts_dir: Path = docint_home_dir / "artifacts"
 
     return PathConfig(
         artifacts=Path(
