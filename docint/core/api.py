@@ -641,7 +641,7 @@ def get_collection_ner_stats(
     entity_type: str | None = None,
     include_relations: bool = True,
 ) -> dict[str, Any]:
-    """Get collection-wide IE statistics.
+    """Get collection-wide NER statistics.
 
     Args:
         top_k: Maximum number of top entities/relations to include.
@@ -650,7 +650,7 @@ def get_collection_ner_stats(
         include_relations: Whether relation aggregates are included.
 
     Returns:
-        A dashboard-friendly IE stats payload.
+        A dashboard-friendly NER stats payload.
 
     Raises:
         HTTPException: If no collection is selected or an internal error occurs.
@@ -708,7 +708,7 @@ def get_collection_ner_graph(
     top_k_nodes: int = 100,
     min_edge_weight: int = 1,
 ) -> dict[str, Any]:
-    """Build and return a derived IE graph for the selected collection."""
+    """Build and return a derived NER graph for the selected collection."""
     if not rag.qdrant_collection:
         raise HTTPException(status_code=400, detail="No collection selected")
     try:
@@ -717,7 +717,7 @@ def get_collection_ner_graph(
             min_edge_weight=min_edge_weight,
         )
     except Exception as e:
-        logger.error("Error building collection IE graph: {}", e)
+        logger.error("Error building collection NER graph: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -743,7 +743,7 @@ def get_collection_ner_graph_neighbors(
             min_edge_weight=min_edge_weight,
         )
     except Exception as e:
-        logger.error("Error fetching collection IE graph neighbors: {}", e)
+        logger.error("Error fetching collection NER graph neighbors: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 

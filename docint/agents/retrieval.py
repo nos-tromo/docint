@@ -37,7 +37,7 @@ class RAGRetrievalAgent(RetrievalAgent):
         intent = analysis.intent
         start = time.monotonic()
 
-        if intent in {"ie", "extract"}:
+        if intent in {"ner", "extract"}:
             raw_sources = self.rag.get_collection_ner()
             sources = self._filter_ner_sources(raw_sources, analysis.entities)
             latency = (time.monotonic() - start) * 1000

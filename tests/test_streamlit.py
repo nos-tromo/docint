@@ -1,4 +1,5 @@
 from unittest.mock import MagicMock, patch
+
 from streamlit.testing.v1 import AppTest
 
 
@@ -22,10 +23,10 @@ def test_streamlit_app_loads(mock_get: MagicMock) -> None:
 
 @patch("requests.post")
 @patch("requests.get")
-def test_streamlit_dashboard_renders_with_ie_stats(
+def test_streamlit_dashboard_renders_with_ner_stats(
     mock_get: MagicMock, mock_post: MagicMock
 ) -> None:
-    """Dashboard should render when IE stats endpoint returns data."""
+    """Dashboard should render when NER stats endpoint returns data."""
 
     def _get_side_effect(url: str, *args, **kwargs):
         response = MagicMock()

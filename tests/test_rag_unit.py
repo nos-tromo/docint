@@ -195,7 +195,7 @@ def test_select_collection_resets_image_service(
 def test_select_collection_invalidates_ner_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Selecting a collection should clear stale IE caches."""
+    """Selecting a collection should clear stale NER caches."""
     rag = RAG(qdrant_collection="alpha")
     rag.ner_sources = [{"filename": "a.pdf", "entities": [{"text": "Acme"}]}]
     rag.ner_aggregate_cache["alpha"] = {"entities": []}
@@ -214,7 +214,7 @@ def test_select_collection_invalidates_ner_cache(
 
 
 def test_get_collection_ner_refresh_bypasses_cache() -> None:
-    """Refreshing collection IE should re-fetch data instead of returning stale cache."""
+    """Refreshing collection NER should re-fetch data instead of returning stale cache."""
     rag = RAG(qdrant_collection="test")
     rag._qdrant_client = MagicMock()
 

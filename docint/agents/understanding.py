@@ -29,7 +29,7 @@ class SimpleUnderstandingAgent(UnderstandingAgent):
         self.default_intent = default_intent
         self.default_confidence = default_confidence
         self.intent_keywords = intent_keywords or {
-            "ie": ["entity", "extract", "ner", "relation"],
+            "ner": ["entity", "extract", "ner", "relation"],
             "table": ["table", "row", "column", "csv"],
             "summary": ["summary", "summarize", "overview"],
         }
@@ -163,13 +163,13 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
             "You are an expert conversation analyst for a RAG system.\n"
             "Your task is to Analyze the User Query and extract the following JSON:\n"
             "{\n"
-            '  "intent": "qa" | "ie" | "table" | "summary",\n'
+            '  "intent": "qa" | "ner" | "table" | "summary",\n'
             '  "rewritten_query": "The fully self-contained query resolving all references using context",\n'
             '  "reason": "Brief explanation of the intent choice"\n'
             "}\n\n"
             "Intents:\n"
             "- 'qa': General questions, searching for information.\n"
-            "- 'ie': Request to extract specific entities (people, orgs) or relations.\n"
+            "- 'ner': Request to extract specific entities (people, orgs) or relations.\n"
             "- 'table': Request to look up or extract tabular data/rows.\n"
             "- 'summary': Request to summarize a document or topic.\n\n"
             f"Conversation Context:\n{context_str}\n\n"

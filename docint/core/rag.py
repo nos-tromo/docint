@@ -1653,10 +1653,10 @@ class RAG:
             self.sessions.reset_runtime()
 
     def _invalidate_ner_cache(self, collection: str | None = None) -> None:
-        """Invalidate cached IE payloads for one or all collections.
+        """Invalidate cached NER payloads for one or all collections.
 
         Args:
-            collection: Optional collection name. If omitted, clears all IE caches.
+            collection: Optional collection name. If omitted, clears all NER caches.
         """
         if collection is None:
             self.ner_sources = []
@@ -2345,7 +2345,7 @@ class RAG:
         """Fetch all nodes from the current collection and return their NER metadata.
 
         Args:
-            refresh: If ``True``, bypass in-memory IE cache and re-fetch from Qdrant.
+            refresh: If ``True``, bypass in-memory NER cache and re-fetch from Qdrant.
 
         Returns:
             list[dict[str, Any]]: A list of source metadata dictionaries containing NER data.
@@ -2523,10 +2523,10 @@ class RAG:
         return findings
 
     def _get_collection_ner_aggregate(self, refresh: bool = False) -> dict[str, Any]:
-        """Return cached aggregate IE payload for the active collection.
+        """Return cached aggregate NER payload for the active collection.
 
         Args:
-            refresh: If ``True``, recompute aggregate from fresh collection IE rows.
+            refresh: If ``True``, recompute aggregate from fresh collection NER rows.
 
         Returns:
             Aggregation dictionary for stats/search/graph operations.
@@ -2554,7 +2554,7 @@ class RAG:
         include_relations: bool = True,
         refresh: bool = False,
     ) -> dict[str, Any]:
-        """Return collection-wide IE statistics for dashboard and analysis views.
+        """Return collection-wide NER statistics for dashboard and analysis views.
 
         Args:
             top_k: Maximum number of top entities/relations to include.
@@ -2564,7 +2564,7 @@ class RAG:
             refresh: If ``True``, recompute from fresh collection data.
 
         Returns:
-            IE stats payload.
+            NER stats payload.
         """
         aggregate = self._get_collection_ner_aggregate(refresh=refresh)
         return build_ner_stats(
@@ -2609,7 +2609,7 @@ class RAG:
         min_edge_weight: int = 1,
         refresh: bool = False,
     ) -> dict[str, Any]:
-        """Build a derived IE graph for the selected collection.
+        """Build a derived NER graph for the selected collection.
 
         Args:
             top_k_nodes: Maximum number of highest-mention entity nodes to include.

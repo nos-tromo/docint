@@ -183,7 +183,7 @@ class DummyRAG:
         """Get information extraction data for the selected collection.
 
         Args:
-            refresh (bool, optional): Whether to bypass cached IE rows.
+            refresh (bool, optional): Whether to bypass cached NER rows.
 
         Returns:
             list[dict[str, Any]]: Information extraction data for the selected collection.
@@ -209,7 +209,7 @@ class DummyRAG:
         entity_type: str | None = None,
         include_relations: bool = True,
     ) -> dict[str, Any]:
-        """Return canned IE stats payload.
+        """Return canned NER stats payload.
 
         Args:
             top_k (int, optional): The number of top entities to return. Defaults to 15.
@@ -451,11 +451,12 @@ def test_collections_ner_success(client: TestClient) -> None:
     response = client.get("/collections/ner")
     assert response.status_code == 200
     assert response.json() == {"sources": api_module.rag.ner_sources}
+    assert cast(DummyRAG, api_module.rag).ner_refresh_calls[-1] is False
 
 
 def test_collections_ner_refresh_success(client: TestClient) -> None:
     """NER endpoint should forward explicit refresh requests.
-    
+
     Args:
         client (TestClient): The TestClient instance.
     """
@@ -470,7 +471,7 @@ def test_collections_ner_refresh_success(client: TestClient) -> None:
 
 
 def test_collections_ner_stats_success(client: TestClient) -> None:
-    """Stats endpoint should return IE summary payload.
+    """Stats endpoint should return NER summary payload.
 
     Args:
         client (TestClient): The TestClient instance.
@@ -799,7 +800,7 @@ def test_collections_ner_failure(
         """Get information extraction data for the selected collection.
 
         Args:
-            refresh (bool, optional): Whether to bypass cached IE rows.
+            refresh (bool, optional): Whether to bypass cached NER rows.
 
         Returns:
             list[dict[str, Any]]: Information extraction data for the selected collection.
