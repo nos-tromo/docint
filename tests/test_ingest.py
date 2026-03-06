@@ -346,13 +346,14 @@ def test_hate_speech_detection_attaches_flagged_metadata(
     class FakeOpenAIPipeline:
         def load_prompt(self, kw: str) -> str:
             assert kw == "hate_speech"
-            return '{"hate_speech": true, "category": "ethnicity", "confidence": "high", "reason": "x"} {text}'
+            return "Analyze this chunk and return JSON only:\n{text}"
 
     class FakeResponse:
         text = '{"hate_speech": true, "category": "ethnicity", "confidence": "high", "reason": "Contains hateful language."}'
 
     class FakeModel:
         def complete(self, prompt: str) -> FakeResponse:
+            assert "Analyze this chunk" in prompt
             assert "Dangerous text" in prompt
             return FakeResponse()
 
@@ -365,13 +366,25 @@ def test_hate_speech_detection_attaches_flagged_metadata(
     )
     monkeypatch.setattr(pipeline_module, "OpenAIPipeline", FakeOpenAIPipeline)
 
-    pipeline, dummy_nodes = _make_pipeline(
-        tmp_path, entity_extractor=lambda _: ([], [])
+    pipeline = DocumentIngestionPipeline(
+        data_dir=tmp_path,
+        device="cpu",
+        ner_model=None,
+        progress_callback=None,
+        hate_speech_model=cast(Any, FakeModel()),
     )
+    dummy_nodes: list[Any] = []
     pipeline.entity_extractor = None
-    pipeline.hate_speech_model = cast(Any, FakeModel())
-    pipeline.hate_speech_enabled = True
-    pipeline.hate_speech_prompt = "Analyze: {text}"
+    pipeline.md_node_parser = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
+    )
+    pipeline.docling_node_parser = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
+    )
+    pipeline.sentence_splitter = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
+    )
+    pipeline.hierarchical_node_parser = None
     dummy_nodes.append(
         SimpleNamespace(
             text="Dangerous text for evaluation.",

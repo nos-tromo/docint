@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import operator
 import os
 import re
 import shutil
@@ -2468,12 +2469,7 @@ class RAG:
             if offset is None:
                 break
 
-        findings.sort(
-            key=lambda row: (
-                str(row.get("source_ref") or ""),
-                str(row.get("chunk_id") or ""),
-            )
-        )
+        findings.sort(key=operator.itemgetter("source_ref", "chunk_id"))
         return findings
 
     def _get_collection_ner_aggregate(self, refresh: bool = False) -> dict[str, Any]:

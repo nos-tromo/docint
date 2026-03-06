@@ -4,7 +4,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, NotRequired, TypedDict
 
 from llama_index.core import Document, SimpleDirectoryReader
 from llama_index.core.node_parser import (
@@ -39,18 +39,35 @@ from docint.utils.openai_cfg import OpenAIPipeline
 CleanFn = Callable[[str], str]
 
 
-def _parse_hate_speech_payload(raw: str) -> dict[str, str | bool]:
+class HateSpeechDetection(TypedDict):
+    """Structured hate-speech detection payload."""
+
+    hate_speech: bool
+    category: str
+    confidence: str
+    reason: str
+    chunk_id: NotRequired[str]
+    chunk_text: NotRequired[str]
+    source_ref: NotRequired[str]
+
+
+def _parse_hate_speech_payload(raw: str) -> HateSpeechDetection:
     """Parse hate-speech detector model output into a structured dictionary."""
     parsed: dict[str, Any] = {}
     try:
         parsed = json.loads(raw)
-    except Exception:
+    except Exception as exc:
+        logger.debug("Failed direct hate-speech JSON parse: {}", exc)
         try:
             start = raw.find("{")
             end = raw.rfind("}")
             if start != -1 and end != -1 and end > start:
                 parsed = json.loads(raw[start : end + 1])
-        except Exception:
+        except Exception as extract_exc:
+            logger.warning(
+                "Failed hate-speech JSON extraction from model response: {}",
+                extract_exc,
+            )
             parsed = {}
 
     if not isinstance(parsed, dict):
@@ -58,7 +75,7 @@ def _parse_hate_speech_payload(raw: str) -> dict[str, str | bool]:
             "hate_speech": False,
             "category": "none",
             "confidence": "low",
-            "reason": "",
+            "reason": "Invalid model response format",
         }
 
     category = str(parsed.get("category") or "none").strip().lower() or "none"

@@ -58,7 +58,7 @@ def _update_summary_metadata(result: dict[str, Any], data: dict[str, Any]) -> No
 
 
 def _execute_analysis(collection: str) -> None:
-    """Run summarisation and IE lookups, storing results in session state.
+    """Run summarization and IE lookups, storing results in session state.
 
     Args:
         collection: Currently selected collection name.
@@ -399,6 +399,32 @@ def _render_analysis_result(result: dict[str, Any], collection: str) -> None:
     sources = result.get("sources", [])
     analysis_text = f"COLLECTION: {result['collection']}\n\n"
     analysis_text += f"SUMMARY:\n{result['summary']}\n\n"
+    if (
+        result.get("validation_checked") is not None
+        or result.get("validation_mismatch") is not None
+        or result.get("validation_reason")
+    ):
+        analysis_text += "VALIDATION:\n"
+        analysis_text += (
+            f"checked={result.get('validation_checked')}\n"
+            f"mismatch={result.get('validation_mismatch')}\n"
+        )
+        if result.get("validation_reason"):
+            analysis_text += f"reason={result['validation_reason']}\n"
+        analysis_text += "\n"
+    diagnostics = result.get("summary_diagnostics")
+    if isinstance(diagnostics, dict):
+        analysis_text += "SUMMARY_DIAGNOSTICS:\n"
+        analysis_text += (
+            f"total_documents={diagnostics.get('total_documents')}\n"
+            f"covered_documents={diagnostics.get('covered_documents')}\n"
+            f"coverage_ratio={diagnostics.get('coverage_ratio')}\n"
+            f"coverage_target={diagnostics.get('coverage_target')}\n\n"
+        )
+        uncovered_docs = diagnostics.get("uncovered_documents")
+        if isinstance(uncovered_docs, list):
+            uncovered_text = ", ".join(str(item) for item in uncovered_docs)
+            analysis_text += f"uncovered_documents={uncovered_text}\n\n"
 
     if sources:
         with st.expander("Sources used for summary"):
@@ -510,6 +536,20 @@ def _render_analysis_result(result: dict[str, Any], collection: str) -> None:
                 file_name=f"relations_{collection}.csv",
                 mime="text/csv",
             )
+
+            analysis_text += "ENTITIES:\n"
+            for ent in entities:
+                analysis_text += (
+                    f"- {ent['text']} ({ent.get('type', 'Unlabeled')}): "
+                    f"{ent['count']} mentions in {', '.join(ent['files'])}\n"
+                )
+            analysis_text += "\nRELATIONS:\n"
+            for rel in relations:
+                analysis_text += (
+                    f"- {rel['head']} --[{rel.get('label', 'rel')}]--> "
+                    f"{rel['tail']}: {rel['count']} mentions in "
+                    f"{', '.join(rel['files'])}\n"
+                )
         else:
             st.info("No entities or relations found in this collection.")
 
