@@ -6,6 +6,7 @@ from docint.ui.components import (
     entity_density_by_document,
     filter_entities,
     response_validation_summary,
+    summary_diagnostics_summary,
 )
 
 
@@ -109,3 +110,40 @@ def test_response_validation_summary_skipped_payload() -> None:
         "ℹ️ Response validation was not completed.",
         "Validation was skipped or unavailable for this response.",
     )
+
+
+def test_summary_diagnostics_summary_formats_payload() -> None:
+    """Summary diagnostics helper should build readable title/detail."""
+    summary = summary_diagnostics_summary(
+        {
+            "total_documents": 10,
+            "covered_documents": 8,
+            "coverage_ratio": 0.8,
+            "coverage_target": 0.7,
+            "uncovered_documents": ["c.pdf", "d.pdf"],
+        }
+    )
+    assert summary == (
+        "Summary coverage: 8/10 documents (80%, target 70%)",
+        "Uncovered documents: c.pdf, d.pdf",
+    )
+
+
+def test_summary_diagnostics_summary_handles_missing_payload() -> None:
+    """Summary diagnostics helper should ignore missing/invalid payloads."""
+    assert summary_diagnostics_summary(None) is None
+    assert summary_diagnostics_summary({"coverage_ratio": object()}) is None
+
+
+def test_summary_diagnostics_summary_uses_singular_for_one_document() -> None:
+    """Summary diagnostics helper should use singular label for one document."""
+    summary = summary_diagnostics_summary(
+        {
+            "total_documents": 1,
+            "covered_documents": 1,
+            "coverage_ratio": 1.0,
+            "coverage_target": 0.7,
+            "uncovered_documents": [],
+        }
+    )
+    assert summary == ("Summary coverage: 1/1 document (100%, target 70%)", None)

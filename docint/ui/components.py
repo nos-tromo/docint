@@ -395,6 +395,41 @@ def response_validation_summary(
     return ("info", "ℹ️ Response validation was not completed.", detail)
 
 
+def summary_diagnostics_summary(
+    summary_diagnostics: dict[str, Any] | None,
+) -> tuple[str, str | None] | None:
+    """Build a user-facing summary-coverage diagnostics message.
+
+    Args:
+        summary_diagnostics: Optional summary diagnostics payload from backend.
+
+    Returns:
+        Optional tuple ``(title, detail)``.
+    """
+    if not isinstance(summary_diagnostics, dict):
+        return None
+
+    try:
+        total_documents = int(summary_diagnostics.get("total_documents", 0) or 0)
+        covered_documents = int(summary_diagnostics.get("covered_documents", 0) or 0)
+        coverage_ratio = float(summary_diagnostics.get("coverage_ratio", 0.0) or 0.0)
+        coverage_target = float(summary_diagnostics.get("coverage_target", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return None
+
+    doc_label = "document" if total_documents == 1 else "documents"
+    title = (
+        "Summary coverage: "
+        f"{covered_documents}/{total_documents} {doc_label} "
+        f"({coverage_ratio:.0%}, target {coverage_target:.0%})"
+    )
+    uncovered = summary_diagnostics.get("uncovered_documents")
+    if not isinstance(uncovered, list) or not uncovered:
+        return (title, None)
+    detail = "Uncovered documents: " + ", ".join(str(item) for item in uncovered)
+    return (title, detail)
+
+
 # ---------------------------------------------------------------------------
 # Rendering helpers (use Streamlit)
 # ---------------------------------------------------------------------------
@@ -561,5 +596,21 @@ def render_response_validation(
     else:
         st.info(title)
 
+    if detail:
+        st.caption(detail)
+
+
+def render_summary_diagnostics(summary_diagnostics: dict[str, Any] | None) -> None:
+    """Render summary coverage diagnostics when available.
+
+    Args:
+        summary_diagnostics: Optional summary diagnostics payload.
+    """
+    summary = summary_diagnostics_summary(summary_diagnostics)
+    if summary is None:
+        return
+
+    title, detail = summary
+    st.caption(title)
     if detail:
         st.caption(detail)

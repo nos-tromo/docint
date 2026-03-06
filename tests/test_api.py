@@ -68,6 +68,7 @@ class DummyRAG:
     def __init__(self) -> None:
         """Initialize the DummyRAG instance."""
         self.qdrant_collection = "alpha"
+        self.summarize_prompt = "Summarize collection"
         self.index = object()
         self.query_engine = object()
         self.selected: list[str] = []
@@ -76,6 +77,17 @@ class DummyRAG:
         self.created_index = 0  # Tracks the number of times an index is created
         self.created_query_engine = 0
         self.ner_sources: list[dict[str, Any]] = []
+        self.summary_payload: dict[str, Any] = {
+            "response": "summary",
+            "sources": [{"id": "s1"}],
+            "summary_diagnostics": {
+                "total_documents": 2,
+                "covered_documents": 2,
+                "coverage_ratio": 1.0,
+                "uncovered_documents": [],
+                "coverage_target": 0.7,
+            },
+        }
 
     def list_collections(self) -> list[str]:
         """List all available collections.
@@ -143,6 +155,28 @@ class DummyRAG:
         yield "chunk"
         yield {"sources": [{"id": 1}], "session_id": "generated-session"}
 
+    def summarize_collection(self) -> dict[str, Any]:
+        """Return canned summarize payload.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the summary response, sources, and diagnostics.
+        """
+        return self.summary_payload
+
+    def stream_summarize_collection(
+        self,
+    ) -> Generator[str | dict[str, Any], None, None]:
+        """Stream canned summary payload.
+
+        Returns:
+            Generator[str | dict[str, Any], None, None]: A generator that yields chunks of the summary response and the final payload.
+
+        Yields:
+            str | dict[str, Any]: Chunks of the summary response as they are generated, followed by the final summary payload.
+        """
+        yield "sum"
+        yield self.summary_payload
+
     def get_collection_ner(self) -> list[dict[str, Any]]:
         """Get information extraction data for the selected collection.
 
@@ -159,7 +193,17 @@ class DummyRAG:
         entity_type: str | None = None,
         include_relations: bool = True,
     ) -> dict[str, Any]:
-        """Return canned IE stats payload."""
+        """Return canned IE stats payload.
+
+        Args:
+            top_k (int, optional): The number of top entities to return. Defaults to 15.
+            min_mentions (int, optional): The minimum number of mentions for an entity to be included. Defaults to 2.
+            entity_type (str | None, optional): Filter entities by type. Defaults to None.
+            include_relations (bool, optional): Whether to include relation statistics. Defaults to True.
+
+        Returns:
+            dict[str, Any]: A dictionary containing information extraction statistics, including totals, top entities, entity types, top relations, and document-level stats.
+        """
         _ = (top_k, min_mentions, entity_type, include_relations)
         return {
             "totals": {
@@ -198,7 +242,16 @@ class DummyRAG:
         entity_type: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        """Return simple entity search results."""
+        """Return simple entity search results.
+
+        Args:
+            q (str, optional): The search query string. Defaults to "".
+            entity_type (str | None, optional): Filter entities by type. Defaults to None.
+            limit (int, optional): The maximum number of results to return. Defaults to 100.
+
+        Returns:
+            list[dict[str, Any]]: A list of entity dictionaries that match the search criteria.
+        """
         _ = (entity_type, limit)
         if q and q.lower() not in "acme":
             return []
@@ -218,7 +271,15 @@ class DummyRAG:
         top_k_nodes: int = 100,
         min_edge_weight: int = 1,
     ) -> dict[str, Any]:
-        """Return a minimal graph payload."""
+        """Return a minimal graph payload.
+
+        Args:
+            top_k_nodes (int, optional): The maximum number of nodes to include in the graph. Defaults to 100.
+            min_edge_weight (int, optional): The minimum weight for edges to be included in the graph. Defaults to 1.
+
+        Returns:
+            dict[str, Any]: A dictionary representing the graph structure, including nodes, edges, and metadata.
+        """
         _ = (top_k_nodes, min_edge_weight)
         return {
             "nodes": [
@@ -244,7 +305,17 @@ class DummyRAG:
         top_k_nodes: int = 100,
         min_edge_weight: int = 1,
     ) -> dict[str, Any]:
-        """Return canned neighborhood payload."""
+        """Return canned neighborhood payload.
+
+        Args:
+            entity (str): The central entity for which to retrieve neighbors.
+            hops (int, optional): The number of hops to include in the neighborhood. Defaults to 1.
+            top_k_nodes (int, optional): The maximum number of neighbor nodes to include. Defaults to 100.
+            min_edge_weight (int, optional): The minimum weight for edges to be included in the neighborhood. Defaults to 1.
+
+        Returns:
+            dict[str, Any]: A dictionary representing the neighborhood of the specified entity, including the center node, neighboring nodes, and metadata.
+        """
         _ = (entity, hops, top_k_nodes, min_edge_weight)
         return {
             "center": {"id": "acme::org", "text": "Acme", "type": "ORG", "mentions": 3},
@@ -502,8 +573,7 @@ def test_agent_chat_returns_validation_alert(
         """Stub orchestrator that returns a canned retrieval result with validation metadata for testing purposes."""
 
         def handle_turn(self, turn, context=None) -> OrchestratorResult:
-            """
-            Handle a turn by returning a canned retrieval result with validation metadata.
+            """Handle a turn by returning a canned retrieval result with validation metadata.
 
             Args:
                 turn (_type_): The user turn to process.
@@ -580,6 +650,37 @@ def test_stream_query_includes_validation_metadata(client: TestClient) -> None:
     assert '"validation_mismatch"' in text
 
 
+def test_summarize_includes_summary_diagnostics(client: TestClient) -> None:
+    """Summarize endpoint should expose summary diagnostics and validation metadata.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    response = client.post("/summarize")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"] == "summary"
+    assert payload["sources"] == [{"id": "s1"}]
+    assert payload["summary_diagnostics"]["total_documents"] == 2
+    assert payload["summary_diagnostics"]["covered_documents"] == 2
+    assert "validation_checked" in payload
+    assert "validation_mismatch" in payload
+    assert "validation_reason" in payload
+
+
+def test_summarize_stream_includes_summary_diagnostics(client: TestClient) -> None:
+    """Streaming summarize endpoint should emit diagnostics in final payload.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    with client.stream("POST", "/summarize/stream") as resp:
+        assert resp.status_code == 200
+        text = "".join([chunk.decode() for chunk in resp.iter_raw()])
+    assert '"summary_diagnostics"' in text
+    assert '"coverage_ratio"' in text
+
+
 def test_collections_ner_requires_selection(client: TestClient) -> None:
     """Test that information extraction requires a collection to be selected.
 
@@ -629,11 +730,11 @@ def test_collections_ner_failure(
     def raiser() -> list[dict[str, Any]]:
         """Get information extraction data for the selected collection.
 
-        Raises:
-            RuntimeError: If there is an error retrieving the information extraction data.
-
         Returns:
             list[dict[str, Any]]: Information extraction data for the selected collection.
+
+        Raises:
+            RuntimeError: If there is an error retrieving the information extraction data.
         """
         raise RuntimeError("boom")
 
@@ -656,6 +757,9 @@ def test_collections_ner_stats_failure(
     def raiser(**kwargs) -> dict[str, Any]:
         """
         Fake implementation of get_collection_ner_stats that raises an error for testing purposes.
+
+        Returns:
+            dict[str, Any]: Information extraction statistics for the selected collection.
 
         Raises:
             RuntimeError: If there is an error retrieving the information extraction stats.
@@ -683,11 +787,11 @@ def test_collections_ner_search_failure(
         """
         Fake implementation of search_collection_ner_entities that raises an error for testing purposes.
 
-        Raises:
-            RuntimeError: If there is an error during the search.
-
         Returns:
             list[dict[str, Any]]: The search results.
+
+        Raises:
+            RuntimeError: If there is an error during the search.
         """
         _ = kwargs
         raise RuntimeError("boom")

@@ -65,7 +65,10 @@ class ResultValidationResponseAgent(ResponseAgent):
 
         try:
             prompt = self._build_prompt(
-                query=turn.user_input, answer=result.answer, sources=result.sources
+                query=turn.user_input,
+                answer=result.answer,
+                sources=result.sources,
+                summary_diagnostics=result.summary_diagnostics,
             )
             response = self.llm.complete(prompt)
             parsed = self._parse_response(response.text)
@@ -81,6 +84,18 @@ class ResultValidationResponseAgent(ResponseAgent):
                 return result
 
             mismatch = not (summary_grounded and sources_relevant)
+            coverage_ratio, coverage_target = self._extract_coverage_metrics(
+                result.summary_diagnostics
+            )
+            if (
+                coverage_ratio is not None
+                and coverage_target is not None
+                and summary_grounded
+                and coverage_ratio >= coverage_target
+            ):
+                # For summary mode, coverage-aware diagnostics may make
+                # per-source relevance checks overly strict.
+                mismatch = False
 
             result.validation_checked = True
             result.validation_mismatch = mismatch
@@ -96,7 +111,11 @@ class ResultValidationResponseAgent(ResponseAgent):
             return result
 
     def _build_prompt(
-        self, query: str, answer: str, sources: list[dict[str, Any]]
+        self,
+        query: str,
+        answer: str,
+        sources: list[dict[str, Any]],
+        summary_diagnostics: dict[str, Any] | None = None,
     ) -> str:
         """Build validation prompt for the secondary LLM check.
 
@@ -104,11 +123,13 @@ class ResultValidationResponseAgent(ResponseAgent):
             query (str): User query.
             answer (str): Generated answer.
             sources (list[dict[str, Any]]): Retrieved chunks/sources.
+            summary_diagnostics (dict[str, Any] | None): Optional summary diagnostics for coverage context.
 
         Returns:
             str: Prompt asking for groundedness/relevance validation.
         """
         sources_text = self._sources_to_text(sources)
+        diagnostics_text = self._summary_diagnostics_to_text(summary_diagnostics)
         return (
             "You are a strict response validator for a RAG system.\n"
             "Assess if the answer is faithful to the retrieved sources and if sources fit the query.\n"
@@ -120,8 +141,66 @@ class ResultValidationResponseAgent(ResponseAgent):
             "}\n\n"
             f"Query:\n{query}\n\n"
             f"Answer:\n{answer}\n\n"
+            f"{diagnostics_text}"
             f"Retrieved sources:\n{sources_text}\n"
         )
+
+    def _summary_diagnostics_to_text(
+        self, summary_diagnostics: dict[str, Any] | None
+    ) -> str:
+        """Render optional summary diagnostics for validator context.
+
+        Args:
+            summary_diagnostics (dict[str, Any] | None): Optional diagnostics payload.
+
+        Returns:
+            str: Prompt context block (or empty string).
+        """
+        if not isinstance(summary_diagnostics, dict):
+            return ""
+        total_documents = summary_diagnostics.get("total_documents")
+        covered_documents = summary_diagnostics.get("covered_documents")
+        coverage_ratio = summary_diagnostics.get("coverage_ratio")
+        coverage_target = summary_diagnostics.get("coverage_target")
+        uncovered = summary_diagnostics.get("uncovered_documents")
+        if isinstance(uncovered, list):
+            uncovered_text = ", ".join(str(item) for item in uncovered if item)
+        else:
+            uncovered_text = ""
+        return (
+            "Summary diagnostics:\n"
+            f"- total_documents: {total_documents}\n"
+            f"- covered_documents: {covered_documents}\n"
+            f"- coverage_ratio: {coverage_ratio}\n"
+            f"- coverage_target: {coverage_target}\n"
+            f"- uncovered_documents: {uncovered_text or '(none)'}\n\n"
+        )
+
+    def _extract_coverage_metrics(
+        self, summary_diagnostics: dict[str, Any] | None
+    ) -> tuple[float | None, float | None]:
+        """Parse optional coverage metrics from summary diagnostics.
+
+        Args:
+            summary_diagnostics (dict[str, Any] | None): Optional diagnostics payload.
+
+        Returns:
+            tuple[float | None, float | None]: Parsed coverage ratio and target.
+        """
+        if not isinstance(summary_diagnostics, dict):
+            return (None, None)
+        coverage_ratio_raw = summary_diagnostics.get("coverage_ratio")
+        coverage_target_raw = summary_diagnostics.get("coverage_target")
+        if not isinstance(coverage_ratio_raw, (int, float, str)):
+            return (None, None)
+        if not isinstance(coverage_target_raw, (int, float, str)):
+            return (None, None)
+        try:
+            coverage_ratio = float(coverage_ratio_raw)
+            coverage_target = float(coverage_target_raw)
+        except (TypeError, ValueError):
+            return (None, None)
+        return (coverage_ratio, coverage_target)
 
     def _sources_to_text(self, sources: list[dict[str, Any]]) -> str:
         """Convert source dictionaries to compact text snippets for validation.
