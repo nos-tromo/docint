@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import json
 import operator
 import os
 import re
@@ -894,6 +895,47 @@ class RAG:
                         if nested_hash:
                             return nested_hash
         return None
+
+    @staticmethod
+    def _extract_payload_text(payload: dict[str, Any]) -> str:
+        """Best-effort extraction of node text from a Qdrant payload.
+
+        Args:
+            payload: Raw point payload returned by Qdrant.
+
+        Returns:
+            Extracted text content, or an empty string if unavailable.
+        """
+        for key in ("text", "chunk_text", "chunk", "content"):
+            candidate = payload.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+
+        node_content = payload.get("_node_content")
+        node_data: dict[str, Any] | None = None
+        if isinstance(node_content, dict):
+            node_data = node_content
+        elif isinstance(node_content, str) and node_content.strip():
+            try:
+                parsed = json.loads(node_content)
+                if isinstance(parsed, dict):
+                    node_data = parsed
+            except Exception:
+                node_data = None
+
+        if isinstance(node_data, dict):
+            for key in ("text", "chunk_text", "chunk", "content"):
+                candidate = node_data.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()
+            metadata = node_data.get("metadata")
+            if isinstance(metadata, dict):
+                for key in ("text", "chunk_text", "chunk", "content"):
+                    candidate = metadata.get(key)
+                    if isinstance(candidate, str) and candidate.strip():
+                        return candidate.strip()
+
+        return ""
 
     def _get_existing_file_hashes(self) -> set[str]:
         """Fetch file hashes already stored in the active Qdrant collection.
@@ -2387,7 +2429,7 @@ class RAG:
                                     or payload.get("id_")
                                     or str(getattr(point, "id", "") or "")
                                 ),
-                                "chunk_text": str(payload.get("text") or ""),
+                                "chunk_text": self._extract_payload_text(payload),
                             }
                         )
 
@@ -2451,7 +2493,9 @@ class RAG:
                             or str(getattr(point, "id", "") or "")
                         ),
                         "chunk_text": str(
-                            detection.get("chunk_text") or payload.get("text") or ""
+                            detection.get("chunk_text")
+                            or self._extract_payload_text(payload)
+                            or ""
                         ),
                         "category": str(detection.get("category") or "none"),
                         "confidence": str(detection.get("confidence") or "low"),

@@ -1,6 +1,8 @@
 from docint.ui.analysis import (
+    _dot_escape,
     _entity_chunks_to_txt,
     _entity_related_chunks,
+    _graph_connected_subgraph,
     _graphviz_dot,
     _hate_speech_chunks_to_txt,
     _update_summary_metadata,
@@ -62,6 +64,33 @@ def test_entity_related_chunks_matches_existing_ner_sources() -> None:
     assert "Acme opened" in rows[0]["chunk_text"]
 
 
+def test_entity_related_chunks_supports_name_key_and_missing_chunk_text() -> None:
+    """Chunk matching should support name/key aliases and keep metadata-only rows."""
+    sources = [
+        {
+            "filename": "docA.pdf",
+            "page": 3,
+            "chunk_id": "n3",
+            "text": "Deutschland appears in this source row.",
+            "entities": [{"name": "Deutschland", "type": "LOC"}],
+        },
+        {
+            "filename": "docB.pdf",
+            "page": 4,
+            "chunk_id": "n4",
+            "entities": [{"key": "deutschland::loc", "type": "LOC"}],
+        },
+    ]
+
+    rows = _entity_related_chunks("Deutschland", sources)
+
+    assert len(rows) == 2
+    assert rows[0]["chunk_id"] == "n3"
+    assert "Deutschland appears" in rows[0]["chunk_text"]
+    assert rows[1]["chunk_id"] == "n4"
+    assert rows[1]["chunk_text"] == ""
+
+
 def test_graphviz_dot_highlights_selected_node() -> None:
     """Entity graph DOT rendering should contain nodes, edges, and selected styling."""
     dot = _graphviz_dot(
@@ -85,6 +114,44 @@ def test_graphviz_dot_highlights_selected_node() -> None:
     assert '"acme::org"' in dot
     assert "located_in (2)" in dot
     assert 'fillcolor="#90CAF9"' in dot
+
+
+def test_graph_connected_subgraph_drops_isolated_nodes() -> None:
+    """Graph render helper should keep only nodes that are connected by edges."""
+    graph = {
+        "nodes": [
+            {"id": "a::org", "text": "A", "mentions": 2},
+            {"id": "b::org", "text": "B", "mentions": 1},
+            {"id": "c::org", "text": "C", "mentions": 1},
+        ],
+        "edges": [{"source": "a::org", "target": "b::org", "weight": 1}],
+        "meta": {"node_count": 3, "edge_count": 1},
+    }
+
+    connected = _graph_connected_subgraph(graph)
+
+    assert [node["id"] for node in connected["nodes"]] == ["a::org", "b::org"]
+    assert connected["edges"] == graph["edges"]
+
+
+def test_graph_connected_subgraph_returns_empty_when_no_edges() -> None:
+    """Graph render helper should avoid plotting isolated-only node rows."""
+    connected = _graph_connected_subgraph(
+        {
+            "nodes": [{"id": "a::org", "text": "A", "mentions": 1}],
+            "edges": [],
+            "meta": {"node_count": 1, "edge_count": 0},
+        }
+    )
+
+    assert connected["nodes"] == []
+    assert connected["edges"] == []
+
+
+def test_dot_escape_handles_quotes_backslashes_and_newlines() -> None:
+    """DOT escaping helper should sanitize strings used in labels/ids."""
+    escaped = _dot_escape('A "quote" \\ path\nnext')
+    assert escaped == 'A \\"quote\\" \\\\ path\\nnext'
 
 
 def test_chunk_download_text_helpers_include_metadata() -> None:

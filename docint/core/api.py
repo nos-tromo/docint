@@ -596,8 +596,11 @@ async def summarize_stream() -> StreamingResponse:
 
 
 @app.get("/collections/ner", tags=["Query"])
-def get_collection_ner() -> dict[str, list[dict]]:
+def get_collection_ner(refresh: bool = False) -> dict[str, list[dict]]:
     """Get all NER data (entities and relations) for the currently selected collection.
+
+    Args:
+        refresh: If ``True``, bypass in-memory cache and re-fetch from storage.
 
     Returns:
         dict[str, list[dict]]: A dictionary containing the list of NER sources.
@@ -608,7 +611,7 @@ def get_collection_ner() -> dict[str, list[dict]]:
     if not rag.qdrant_collection:
         raise HTTPException(status_code=400, detail="No collection selected")
     try:
-        sources = rag.get_collection_ner()
+        sources = rag.get_collection_ner(refresh=refresh)
         return {"sources": sources}
     except Exception as e:
         logger.error("Error fetching collection NER: {}", e)

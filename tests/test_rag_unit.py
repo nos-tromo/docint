@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import types
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -236,6 +238,28 @@ def test_get_collection_ner_refresh_bypasses_cache() -> None:
     assert "chunk_text" in refreshed[0]
 
 
+def test_get_collection_ner_extracts_chunk_text_from_node_content() -> None:
+    """NER collection helper should recover text from serialized node payloads."""
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = MagicMock()
+
+    point = MagicMock()
+    point.id = "pt-1"
+    point.payload = {
+        "filename": "table.csv",
+        "table": {"row_index": 25},
+        "entities": [{"text": "Deutschland"}],
+        "_node_content": json.dumps({"text": "Deutschland"}),
+    }
+    rag._qdrant_client.scroll = MagicMock(side_effect=[([point], None)])
+
+    rows = rag.get_collection_ner()
+
+    assert len(rows) == 1
+    assert rows[0]["chunk_id"] == "pt-1"
+    assert rows[0]["chunk_text"] == "Deutschland"
+
+
 def test_get_collection_hate_speech_filters_flagged_rows() -> None:
     """Hate-speech collection helper should return only flagged chunks."""
     rag = RAG(qdrant_collection="test")
@@ -266,6 +290,30 @@ def test_get_collection_hate_speech_filters_flagged_rows() -> None:
     assert len(rows) == 1
     assert rows[0]["chunk_text"] == "flagged text"
     assert rows[0]["category"] == "ethnicity"
+
+
+def test_get_collection_hate_speech_extracts_chunk_text_from_node_content() -> None:
+    """Hate-speech helper should recover text when payload text field is empty."""
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = MagicMock()
+
+    flagged = MagicMock()
+    flagged.id = "pt-1"
+    flagged.payload = {
+        "hate_speech": {
+            "hate_speech": True,
+            "category": "ethnicity",
+            "confidence": "high",
+            "reason": "Contains a slur",
+        },
+        "_node_content": json.dumps({"text": "table cell value"}),
+    }
+    rag._qdrant_client.scroll = MagicMock(side_effect=[([flagged], None)])
+
+    rows = rag.get_collection_hate_speech()
+
+    assert len(rows) == 1
+    assert rows[0]["chunk_text"] == "table cell value"
 
 
 def test_collection_ner_stats_and_search() -> None:
@@ -349,9 +397,9 @@ def test_start_session_initializes_memory(
     """
     rag = RAG(qdrant_collection="test")
     rag.init_session_store(f"sqlite:///{tmp_path / 'sessions.db'}")
-    rag.index = object()
-    rag.query_engine = object()
-    rag._text_model = object()
+    rag.index = cast(Any, object())
+    rag.query_engine = cast(Any, object())
+    rag._text_model = cast(Any, object())
 
     class FakeMemory:
         def __init__(self) -> None:

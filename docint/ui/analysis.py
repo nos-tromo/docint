@@ -177,14 +177,18 @@ def _entity_related_chunks(
             continue
         if not any(
             isinstance(ent, dict)
-            and str(ent.get("text") or "").strip().lower() == needle
+            and (
+                str(ent.get("text") or ent.get("name") or "").strip().lower() == needle
+                or str(ent.get("key") or "").split("::", maxsplit=1)[0].strip().lower()
+                == needle
+            )
             for ent in entities
         ):
             continue
 
-        chunk_text = str(src.get("chunk_text") or "").strip()
-        if not chunk_text:
-            continue
+        chunk_text = str(
+            src.get("chunk_text") or src.get("text") or src.get("preview_text") or ""
+        ).strip()
         matches.append(
             {
                 "chunk_id": str(src.get("chunk_id") or "").strip(),
@@ -242,6 +246,53 @@ def _hate_speech_chunks_to_txt(chunks: list[dict[str, Any]]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def _dot_escape(value: str) -> str:
+    """Escape text for safe Graphviz DOT labels and identifiers.
+
+    Args:
+        value: Raw text value.
+
+    Returns:
+        Escaped text compatible with double-quoted DOT strings.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def _graph_connected_subgraph(graph: dict[str, Any]) -> dict[str, Any]:
+    """Return only nodes that participate in at least one edge.
+
+    Args:
+        graph: Full graph payload with ``nodes`` and ``edges``.
+
+    Returns:
+        Graph payload restricted to edge-connected nodes. If no edges are present,
+        returns an empty node/edge payload for rendering.
+    """
+    nodes = list(graph.get("nodes") or [])
+    edges = list(graph.get("edges") or [])
+    if not edges:
+        return {
+            "nodes": [],
+            "edges": [],
+            "meta": dict(graph.get("meta") or {}),
+        }
+
+    connected_ids = {
+        str(edge.get("source") or "") for edge in edges if str(edge.get("source") or "")
+    }
+    connected_ids.update(
+        str(edge.get("target") or "") for edge in edges if str(edge.get("target") or "")
+    )
+    filtered_nodes = [
+        node for node in nodes if str(node.get("id") or "") in connected_ids
+    ]
+    return {
+        "nodes": filtered_nodes,
+        "edges": edges,
+        "meta": dict(graph.get("meta") or {}),
+    }
+
+
 def _graphviz_dot(graph: dict[str, Any], selected_entity: str | None = None) -> str:
     """Build a Graphviz DOT representation for entity graph rendering.
 
@@ -265,8 +316,10 @@ def _graphviz_dot(graph: dict[str, Any], selected_entity: str | None = None) -> 
         label = str(node.get("text") or node_id or "Unknown")
         mentions = int(node.get("mentions", 0) or 0)
         fill = "#90CAF9" if label.lower() == selected else "#E3F2FD"
+        escaped_id = _dot_escape(node_id)
+        escaped_label = _dot_escape(label)
         lines.append(
-            f'  "{node_id}" [label="{label}\\n({mentions})", fillcolor="{fill}"];'
+            f'  "{escaped_id}" [label="{escaped_label}\\n({mentions})", fillcolor="{fill}"];'
         )
     for edge in edges:
         source = str(edge.get("source") or "")
@@ -275,8 +328,11 @@ def _graphviz_dot(graph: dict[str, Any], selected_entity: str | None = None) -> 
             continue
         weight = int(edge.get("weight", 0) or 0)
         label = str(edge.get("label") or edge.get("kind") or "related")
+        escaped_source = _dot_escape(source)
+        escaped_target = _dot_escape(target)
+        escaped_label = _dot_escape(label)
         lines.append(
-            f'  "{source}" -- "{target}" [label="{label} ({weight})", penwidth="{max(1, min(weight, 5))}"];'
+            f'  "{escaped_source}" -- "{escaped_target}" [label="{escaped_label} ({weight})", penwidth="{max(1, min(weight, 5))}"];'
         )
     lines.append("}")
     return "\n".join(lines)
@@ -329,11 +385,16 @@ def _render_entities_tab(result: dict[str, Any], collection: str) -> None:
                 graph = graph_resp.json()
                 st.session_state.analysis_result["ie_graph"] = graph
             else:
-                st.warning("Unable to refresh graph.")
+                detail = graph_resp.text.strip()
+                st.warning(
+                    f"Unable to refresh graph ({graph_resp.status_code}): "
+                    f"{detail or 'backend returned an error'}"
+                )
         except Exception:
             st.warning("Unable to refresh graph.")
 
     nodes = list(graph.get("nodes") or [])
+    edges = list(graph.get("edges") or [])
     node_options = sorted(
         {
             str(n.get("text") or "").strip()
@@ -353,16 +414,23 @@ def _render_entities_tab(result: dict[str, Any], collection: str) -> None:
         key=f"analysis_entity_selected_{collection}",
     )
 
-    if nodes:
+    if nodes and not edges:
+        st.info(
+            "No graph edges match the current threshold. "
+            "Lower `Min edge weight` and refresh."
+        )
+
+    graph_for_render = _graph_connected_subgraph(graph)
+    if graph_for_render.get("nodes") and graph_for_render.get("edges"):
         st.graphviz_chart(
-            _graphviz_dot(graph, selected_entity), use_container_width=True
+            _graphviz_dot(graph_for_render, selected_entity), use_container_width=True
         )
     else:
         st.caption("No graph data available.")
 
     if selected_entity:
         chunks = _entity_related_chunks(selected_entity, ner_sources)
-        st.markdown(f"#### Chunks related to **{selected_entity}**")
+        st.markdown(f"#### Chunks related to '**{selected_entity}**'")
         if chunks:
             for idx, chunk in enumerate(chunks, start=1):
                 label = (
@@ -370,7 +438,11 @@ def _render_entities_tab(result: dict[str, Any], collection: str) -> None:
                     f"(page={chunk.get('page')}, row={chunk.get('row')}, id={chunk.get('chunk_id') or 'n/a'})"
                 )
                 with st.expander(f"Chunk {idx}: {label}"):
-                    st.write(chunk.get("chunk_text"))
+                    chunk_text = str(chunk.get("chunk_text") or "").strip()
+                    if chunk_text:
+                        st.write(chunk_text)
+                    else:
+                        st.caption("Chunk text unavailable for this record.")
             st.download_button(
                 label="📥 Download related chunks (.txt)",
                 data=_entity_chunks_to_txt(selected_entity, chunks),
@@ -380,7 +452,7 @@ def _render_entities_tab(result: dict[str, Any], collection: str) -> None:
                 mime="text/plain",
             )
         else:
-            st.caption("No chunk text was available for the selected entity.")
+            st.caption("No chunks were matched for the selected entity.")
 
 
 def _render_hate_speech_tab(result: dict[str, Any], collection: str) -> None:

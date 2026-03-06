@@ -77,6 +77,7 @@ class DummyRAG:
         self.created_index = 0  # Tracks the number of times an index is created
         self.created_query_engine = 0
         self.ner_sources: list[dict[str, Any]] = []
+        self.ner_refresh_calls: list[bool] = []
         self.hate_speech_rows: list[dict[str, Any]] = []
         self.summary_payload: dict[str, Any] = {
             "response": "summary",
@@ -178,12 +179,16 @@ class DummyRAG:
         yield "sum"
         yield self.summary_payload
 
-    def get_collection_ner(self) -> list[dict[str, Any]]:
+    def get_collection_ner(self, refresh: bool = False) -> list[dict[str, Any]]:
         """Get information extraction data for the selected collection.
+
+        Args:
+            refresh (bool, optional): Whether to bypass cached IE rows.
 
         Returns:
             list[dict[str, Any]]: Information extraction data for the selected collection.
         """
+        self.ner_refresh_calls.append(bool(refresh))
         return self.ner_sources
 
     def get_collection_hate_speech(self) -> list[dict[str, Any]]:
@@ -446,6 +451,22 @@ def test_collections_ner_success(client: TestClient) -> None:
     response = client.get("/collections/ner")
     assert response.status_code == 200
     assert response.json() == {"sources": api_module.rag.ner_sources}
+
+
+def test_collections_ner_refresh_success(client: TestClient) -> None:
+    """NER endpoint should forward explicit refresh requests.
+    
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    dummy_rag = cast(DummyRAG, api_module.rag)
+    dummy_rag.ner_sources = [{"filename": "doc1.pdf", "entities": [], "relations": []}]
+
+    response = client.get("/collections/ner", params={"refresh": "true"})
+
+    assert response.status_code == 200
+    assert response.json()["sources"] == dummy_rag.ner_sources
+    assert dummy_rag.ner_refresh_calls[-1] is True
 
 
 def test_collections_ner_stats_success(client: TestClient) -> None:
@@ -774,8 +795,11 @@ def test_collections_ner_failure(
         client (TestClient): The TestClient instance.
     """
 
-    def raiser() -> list[dict[str, Any]]:
+    def raiser(*, refresh: bool = False) -> list[dict[str, Any]]:
         """Get information extraction data for the selected collection.
+
+        Args:
+            refresh (bool, optional): Whether to bypass cached IE rows.
 
         Returns:
             list[dict[str, Any]]: Information extraction data for the selected collection.
@@ -783,6 +807,7 @@ def test_collections_ner_failure(
         Raises:
             RuntimeError: If there is an error retrieving the information extraction data.
         """
+        _ = refresh
         raise RuntimeError("boom")
 
     monkeypatch.setattr(api_module.rag, "get_collection_ner", raiser)
