@@ -346,7 +346,16 @@ def test_hate_speech_detection_attaches_flagged_metadata(
     class FakeOpenAIPipeline:
         def load_prompt(self, kw: str) -> str:
             assert kw == "hate_speech"
-            return "Analyze this chunk and return JSON only:\n{text}"
+            return (
+                "Analyze this chunk and return JSON only:\n"
+                "{\n"
+                '  "hate_speech": true|false,\n'
+                '  "reason": "short explanation"\n'
+                "}\n"
+                "\n"
+                "Text:\n"
+                "{text}"
+            )
 
     class FakeResponse:
         text = '{"hate_speech": true, "category": "ethnicity", "confidence": "high", "reason": "Contains hateful language."}'
