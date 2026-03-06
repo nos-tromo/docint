@@ -810,8 +810,8 @@ class DocumentIngestionPipeline:
                 if not text_value.strip():
                     continue
                 try:
-                    prompt = self.hate_speech_prompt.format(
-                        text=text_value[: self.hate_speech_max_chars]
+                    prompt = self.hate_speech_prompt.replace(
+                        "{text}", text_value[: self.hate_speech_max_chars]
                     )
                     response = self.hate_speech_model.complete(prompt)
                     raw = response.text if hasattr(response, "text") else str(response)
