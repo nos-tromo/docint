@@ -317,3 +317,127 @@ def test_openai_provider_uses_llm_extractor(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert pipeline.entity_extractor is not None
     assert marker == ["fake-llm:extract {text}:256"]
+
+
+def test_hate_speech_detection_attaches_flagged_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Enabled hate-speech detection should attach structured flags to node metadata.
+
+    Args:
+    monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    tmp_path (Path): Temporary directory path for the test.
+    """
+
+    class FakeNERConfig:
+        enabled = False
+        max_chars = 256
+        max_workers = 1
+
+    class FakeHateSpeechConfig:
+        enabled = True
+        max_chars = 128
+
+    class FakeIngestionConfig:
+        ingestion_batch_size = 2
+        sentence_splitter_chunk_size = 512
+        sentence_splitter_chunk_overlap = 64
+        supported_filetypes: list[str] = []
+        hierarchical_chunking_enabled = False
+        coarse_chunk_size = 1024
+        fine_chunk_size = 256
+        fine_chunk_overlap = 32
+
+    class FakeOpenAIPipeline:
+        """Fake OpenAIPipeline class for testing hate-speech detection integration."""
+
+        def load_prompt(self, kw: str) -> str:
+            """Fake load_prompt method to return a structured prompt for hate-speech detection.
+
+            Args:
+                kw (str): The keyword for which to load the prompt.
+
+            Returns:
+                str: The loaded prompt.
+            """
+            assert kw == "hate_speech"
+            return (
+                "Analyze this chunk and return JSON only:\n"
+                "{\n"
+                '  "hate_speech": true|false,\n'
+                '  "reason": "short explanation"\n'
+                "}\n"
+                "\n"
+                "Text:\n"
+                "{text}"
+            )
+
+    class FakeResponse:
+        """Fake response class to simulate the output of the OpenAI API for hate-speech detection."""
+
+        text = '{"hate_speech": true, "category": "ethnicity", "confidence": "high", "reason": "Contains hateful language."}'
+
+    class FakeModel:
+        """Fake model class to simulate the behavior of a hate-speech detection model."""
+
+        def complete(self, prompt: str) -> FakeResponse:
+            """Simulate the completion of a prompt by the fake model.
+
+            Args:
+                prompt (str): The prompt to complete.
+
+            Returns:
+                FakeResponse: The simulated response.
+            """
+            assert "Analyze this chunk" in prompt
+            assert "Dangerous text" in prompt
+            return FakeResponse()
+
+    monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
+    monkeypatch.setattr(
+        pipeline_module, "load_hate_speech_env", lambda: FakeHateSpeechConfig()
+    )
+    monkeypatch.setattr(
+        pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig()
+    )
+    monkeypatch.setattr(pipeline_module, "OpenAIPipeline", FakeOpenAIPipeline)
+
+    pipeline = DocumentIngestionPipeline(
+        data_dir=tmp_path,
+        device="cpu",
+        ner_model=None,
+        progress_callback=None,
+        hate_speech_model=cast(Any, FakeModel()),
+    )
+    dummy_nodes: list[Any] = []
+    pipeline.entity_extractor = None
+    pipeline.md_node_parser = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
+    )
+    pipeline.docling_node_parser = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
+    )
+    pipeline.sentence_splitter = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
+    )
+    pipeline.hierarchical_node_parser = None
+    dummy_nodes.append(
+        SimpleNamespace(
+            text="Dangerous text for evaluation.",
+            node_id="node-1",
+            metadata={"filename": "doc.pdf", "file_path": "doc.pdf"},
+        )
+    )
+
+    nodes = pipeline._create_nodes(
+        [Document(text="Doc", metadata={"file_path": "doc.pdf"})]
+    )
+
+    assert len(nodes) == 1
+    detection = nodes[0].metadata.get("hate_speech")
+    assert isinstance(detection, dict)
+    assert detection["hate_speech"] is True
+    assert detection["category"] == "ethnicity"
+    assert detection["confidence"] == "high"
+    assert detection["chunk_id"] == "node-1"
+    assert "Dangerous text" in detection["chunk_text"]

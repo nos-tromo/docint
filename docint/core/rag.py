@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import gc
+import json
+import operator
 import os
 import re
 import shutil
@@ -25,6 +27,7 @@ from docint.utils.env_cfg import (
     SessionConfig,
     SummaryConfig,
     load_graphrag_env,
+    load_hate_speech_env,
     load_host_env,
     load_ingestion_env,
     load_model_env,
@@ -716,6 +719,9 @@ class RAG:
             # Enforce JSON for NER tasks to ensure structured output
             # Only use LLM-based NER for OpenAI provider; otherwise use GLiNER
             ner_model = self._create_text_model()
+        hate_speech_model = None
+        if load_hate_speech_env().enabled:
+            hate_speech_model = self._create_text_model()
 
         if self._image_ingestion_service is None:
             self._image_ingestion_service = ImageIngestionService(device=self.device)
@@ -725,6 +731,7 @@ class RAG:
             ner_model=ner_model,
             device=self.device,
             progress_callback=progress_callback,
+            hate_speech_model=hate_speech_model,
             openai_model_provider=self.openai_model_provider,
             target_collection=self.qdrant_collection,
             image_ingestion_service=self._image_ingestion_service,
@@ -888,6 +895,47 @@ class RAG:
                         if nested_hash:
                             return nested_hash
         return None
+
+    @staticmethod
+    def _extract_payload_text(payload: dict[str, Any]) -> str:
+        """Best-effort extraction of node text from a Qdrant payload.
+
+        Args:
+            payload: Raw point payload returned by Qdrant.
+
+        Returns:
+            Extracted text content, or an empty string if unavailable.
+        """
+        for key in ("text", "chunk_text", "chunk", "content"):
+            candidate = payload.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+
+        node_content = payload.get("_node_content")
+        node_data: dict[str, Any] | None = None
+        if isinstance(node_content, dict):
+            node_data = node_content
+        elif isinstance(node_content, str) and node_content.strip():
+            try:
+                parsed = json.loads(node_content)
+                if isinstance(parsed, dict):
+                    node_data = parsed
+            except Exception:
+                node_data = None
+
+        if isinstance(node_data, dict):
+            for key in ("text", "chunk_text", "chunk", "content"):
+                candidate = node_data.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()
+            metadata = node_data.get("metadata")
+            if isinstance(metadata, dict):
+                for key in ("text", "chunk_text", "chunk", "content"):
+                    candidate = metadata.get(key)
+                    if isinstance(candidate, str) and candidate.strip():
+                        return candidate.strip()
+
+        return ""
 
     def _get_existing_file_hashes(self) -> set[str]:
         """Fetch file hashes already stored in the active Qdrant collection.
@@ -1605,10 +1653,10 @@ class RAG:
             self.sessions.reset_runtime()
 
     def _invalidate_ner_cache(self, collection: str | None = None) -> None:
-        """Invalidate cached IE payloads for one or all collections.
+        """Invalidate cached NER payloads for one or all collections.
 
         Args:
-            collection: Optional collection name. If omitted, clears all IE caches.
+            collection: Optional collection name. If omitted, clears all NER caches.
         """
         if collection is None:
             self.ner_sources = []
@@ -1823,7 +1871,7 @@ class RAG:
         self, *, filename: str, file_hash: str | None
     ) -> MetadataFilters:
         """Build metadata filters that scope retrieval to one document."""
-        filters: list[MetadataFilter] = [
+        filters: list[MetadataFilter | MetadataFilters] = [
             MetadataFilter(key="filename", value=filename, operator=FilterOperator.EQ),
             MetadataFilter(key="file_name", value=filename, operator=FilterOperator.EQ),
             MetadataFilter(key="file_path", value=filename, operator=FilterOperator.EQ),
@@ -2297,7 +2345,7 @@ class RAG:
         """Fetch all nodes from the current collection and return their NER metadata.
 
         Args:
-            refresh: If ``True``, bypass in-memory IE cache and re-fetch from Qdrant.
+            refresh: If ``True``, bypass in-memory NER cache and re-fetch from Qdrant.
 
         Returns:
             list[dict[str, Any]]: A list of source metadata dictionaries containing NER data.
@@ -2376,6 +2424,12 @@ class RAG:
                                 "relations": payload.get("relations", []),
                                 "page": page,
                                 "row": payload.get("table", {}).get("row_index"),
+                                "chunk_id": (
+                                    payload.get("node_id")
+                                    or payload.get("id_")
+                                    or str(getattr(point, "id", "") or "")
+                                ),
+                                "chunk_text": self._extract_payload_text(payload),
                             }
                         )
 
@@ -2385,11 +2439,94 @@ class RAG:
         self.ner_sources = sources
         return sources
 
+    def get_collection_hate_speech(self) -> list[dict[str, Any]]:
+        """Return flagged hate-speech chunks from the selected collection.
+
+        Returns:
+            list[dict[str, Any]]: A list of dictionaries containing metadata about hate-speech
+            findings, such as chunk ID, text, category, confidence, reason, source reference,
+            and page number.
+        """
+        if not self.qdrant_collection:
+            return []
+
+        findings: list[dict[str, Any]] = []
+        offset = None
+        while True:
+            try:
+                points, offset = self.qdrant_client.scroll(
+                    collection_name=self.qdrant_collection,
+                    limit=100,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to fetch hate-speech rows from '{}': {}",
+                    self.qdrant_collection,
+                    exc,
+                )
+                break
+
+            if not points:
+                break
+
+            for point in points:
+                payload = getattr(point, "payload", None)
+                if not isinstance(payload, dict):
+                    continue
+
+                detection = payload.get("hate_speech")
+                if not isinstance(detection, dict) or not bool(
+                    detection.get("hate_speech")
+                ):
+                    continue
+
+                origin = payload.get("origin") or {}
+                findings.append(
+                    {
+                        "chunk_id": str(
+                            detection.get("chunk_id")
+                            or payload.get("node_id")
+                            or payload.get("id_")
+                            or str(getattr(point, "id", "") or "")
+                        ),
+                        "chunk_text": str(
+                            detection.get("chunk_text")
+                            or self._extract_payload_text(payload)
+                            or ""
+                        ),
+                        "category": str(detection.get("category") or "none"),
+                        "confidence": str(detection.get("confidence") or "low"),
+                        "reason": str(detection.get("reason") or ""),
+                        "source_ref": str(
+                            detection.get("source_ref")
+                            or payload.get("file_path")
+                            or payload.get("filename")
+                            or payload.get("file_name")
+                            or origin.get("filename")
+                            or ""
+                        ),
+                        "page": (
+                            payload.get("page")
+                            or payload.get("page_number")
+                            or origin.get("page_no")
+                        ),
+                    }
+                )
+
+            if offset is None:
+                break
+
+        findings.sort(key=operator.itemgetter("source_ref", "chunk_id"))
+        return findings
+
     def _get_collection_ner_aggregate(self, refresh: bool = False) -> dict[str, Any]:
-        """Return cached aggregate IE payload for the active collection.
+        """Return cached aggregate NER payload for the active collection.
 
         Args:
-            refresh: If ``True``, recompute aggregate from fresh collection IE rows.
+            refresh: If ``True``, recompute aggregate from fresh collection NER rows.
 
         Returns:
             Aggregation dictionary for stats/search/graph operations.
@@ -2417,7 +2554,7 @@ class RAG:
         include_relations: bool = True,
         refresh: bool = False,
     ) -> dict[str, Any]:
-        """Return collection-wide IE statistics for dashboard and analysis views.
+        """Return collection-wide NER statistics for dashboard and analysis views.
 
         Args:
             top_k: Maximum number of top entities/relations to include.
@@ -2427,7 +2564,7 @@ class RAG:
             refresh: If ``True``, recompute from fresh collection data.
 
         Returns:
-            IE stats payload.
+            NER stats payload.
         """
         aggregate = self._get_collection_ner_aggregate(refresh=refresh)
         return build_ner_stats(
@@ -2472,7 +2609,7 @@ class RAG:
         min_edge_weight: int = 1,
         refresh: bool = False,
     ) -> dict[str, Any]:
-        """Build a derived IE graph for the selected collection.
+        """Build a derived NER graph for the selected collection.
 
         Args:
             top_k_nodes: Maximum number of highest-mention entity nodes to include.

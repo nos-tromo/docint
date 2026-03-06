@@ -124,6 +124,34 @@ def load_graphrag_env(
 
 
 @dataclass(frozen=True)
+class HateSpeechConfig:
+    """Dataclass for hate-speech detection configuration."""
+
+    enabled: bool
+    max_chars: int
+
+
+def load_hate_speech_env(
+    default_enabled: bool = False,
+    default_max_chars: int = 2048,
+) -> HateSpeechConfig:
+    """Load hate-speech detection settings from environment variables.
+
+    Args:
+        default_enabled: Whether hate-speech detection runs during ingestion.
+        default_max_chars: Maximum characters from each chunk sent to the detector.
+
+    Returns:
+        HateSpeechConfig: Parsed hate-speech detection configuration.
+    """
+    return HateSpeechConfig(
+        enabled=str(os.getenv("ENABLE_HATE_SPEECH_DETECTION", default_enabled)).lower()
+        in {"true", "1", "yes"},
+        max_chars=max(256, int(os.getenv("HATE_SPEECH_MAX_CHARS", default_max_chars))),
+    )
+
+
+@dataclass(frozen=True)
 class HostConfig:
     """Dataclass for host configuration."""
 
@@ -628,7 +656,7 @@ def load_path_env() -> PathConfig:
         )
         default_qdrant_sources = (default_sources_base / "sources").expanduser()
 
-    default_artifacts_dir: Path = project_root / "artifacts"
+    default_artifacts_dir: Path = docint_home_dir / "artifacts"
 
     return PathConfig(
         artifacts=Path(

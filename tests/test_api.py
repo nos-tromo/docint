@@ -77,6 +77,8 @@ class DummyRAG:
         self.created_index = 0  # Tracks the number of times an index is created
         self.created_query_engine = 0
         self.ner_sources: list[dict[str, Any]] = []
+        self.ner_refresh_calls: list[bool] = []
+        self.hate_speech_rows: list[dict[str, Any]] = []
         self.summary_payload: dict[str, Any] = {
             "response": "summary",
             "sources": [{"id": "s1"}],
@@ -177,13 +179,27 @@ class DummyRAG:
         yield "sum"
         yield self.summary_payload
 
-    def get_collection_ner(self) -> list[dict[str, Any]]:
+    def get_collection_ner(self, refresh: bool = False) -> list[dict[str, Any]]:
         """Get information extraction data for the selected collection.
+
+        Args:
+            refresh (bool, optional): Whether to bypass cached NER rows.
 
         Returns:
             list[dict[str, Any]]: Information extraction data for the selected collection.
         """
+        self.ner_refresh_calls.append(bool(refresh))
         return self.ner_sources
+
+    def get_collection_hate_speech(self) -> list[dict[str, Any]]:
+        """Get hate-speech findings for the selected collection.
+
+        Returns:
+            list[dict[str, Any]]: A list of dictionaries containing metadata about hate-speech
+            findings, such as chunk ID, text, category, confidence, reason, source reference,
+            and page number.
+        """
+        return self.hate_speech_rows
 
     def get_collection_ner_stats(
         self,
@@ -193,7 +209,7 @@ class DummyRAG:
         entity_type: str | None = None,
         include_relations: bool = True,
     ) -> dict[str, Any]:
-        """Return canned IE stats payload.
+        """Return canned NER stats payload.
 
         Args:
             top_k (int, optional): The number of top entities to return. Defaults to 15.
@@ -435,10 +451,27 @@ def test_collections_ner_success(client: TestClient) -> None:
     response = client.get("/collections/ner")
     assert response.status_code == 200
     assert response.json() == {"sources": api_module.rag.ner_sources}
+    assert cast(DummyRAG, api_module.rag).ner_refresh_calls[-1] is False
+
+
+def test_collections_ner_refresh_success(client: TestClient) -> None:
+    """NER endpoint should forward explicit refresh requests.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    dummy_rag = cast(DummyRAG, api_module.rag)
+    dummy_rag.ner_sources = [{"filename": "doc1.pdf", "entities": [], "relations": []}]
+
+    response = client.get("/collections/ner", params={"refresh": "true"})
+
+    assert response.status_code == 200
+    assert response.json()["sources"] == dummy_rag.ner_sources
+    assert dummy_rag.ner_refresh_calls[-1] is True
 
 
 def test_collections_ner_stats_success(client: TestClient) -> None:
-    """Stats endpoint should return IE summary payload.
+    """Stats endpoint should return NER summary payload.
 
     Args:
         client (TestClient): The TestClient instance.
@@ -448,6 +481,30 @@ def test_collections_ner_stats_success(client: TestClient) -> None:
     payload = response.json()
     assert payload["totals"]["unique_entities"] == 1
     assert payload["top_entities"][0]["text"] == "Acme"
+
+
+def test_collections_hate_speech_success(client: TestClient) -> None:
+    """Hate-speech endpoint should return flagged rows.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    dummy_rag = cast(DummyRAG, api_module.rag)
+    dummy_rag.hate_speech_rows = [
+        {
+            "chunk_id": "c1",
+            "chunk_text": "flagged text",
+            "category": "ethnicity",
+            "confidence": "high",
+            "reason": "Contains slur",
+            "source_ref": "doc1.pdf",
+            "page": 2,
+        }
+    ]
+    response = client.get("/collections/hate-speech")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["results"][0]["chunk_id"] == "c1"
 
 
 def test_collections_ner_search_success(client: TestClient) -> None:
@@ -717,6 +774,18 @@ def test_collections_ner_search_requires_selection(client: TestClient) -> None:
     assert "No collection selected" in response.json()["detail"]
 
 
+def test_collections_hate_speech_requires_selection(client: TestClient) -> None:
+    """Hate-speech endpoint should require active collection selection.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    api_module.rag.qdrant_collection = ""
+    response = client.get("/collections/hate-speech")
+    assert response.status_code == 400
+    assert "No collection selected" in response.json()["detail"]
+
+
 def test_collections_ner_failure(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
@@ -727,8 +796,11 @@ def test_collections_ner_failure(
         client (TestClient): The TestClient instance.
     """
 
-    def raiser() -> list[dict[str, Any]]:
+    def raiser(*, refresh: bool = False) -> list[dict[str, Any]]:
         """Get information extraction data for the selected collection.
+
+        Args:
+            refresh (bool, optional): Whether to bypass cached NER rows.
 
         Returns:
             list[dict[str, Any]]: Information extraction data for the selected collection.
@@ -736,6 +808,7 @@ def test_collections_ner_failure(
         Raises:
             RuntimeError: If there is an error retrieving the information extraction data.
         """
+        _ = refresh
         raise RuntimeError("boom")
 
     monkeypatch.setattr(api_module.rag, "get_collection_ner", raiser)
@@ -798,6 +871,35 @@ def test_collections_ner_search_failure(
 
     monkeypatch.setattr(api_module.rag, "search_collection_ner_entities", raiser)
     response = client.get("/collections/ner/search", params={"q": "ac"})
+    assert response.status_code == 500
+    assert response.json()["detail"] == "boom"
+
+
+def test_collections_hate_speech_failure(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Hate-speech endpoint should surface backend failures.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+
+    def raiser() -> list[dict[str, Any]]:
+        """Fake implementation of get_collection_hate_speech that raises an error for testing purposes.
+
+        Returns:
+            list[dict[str, Any]]: A list of dictionaries containing metadata about hate-speech
+            findings, such as chunk ID, text, category, confidence, reason, source reference,
+            and page number.
+
+        Raises:
+            RuntimeError: If there is an error retrieving the hate-speech findings.
+        """
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(api_module.rag, "get_collection_hate_speech", raiser)
+    response = client.get("/collections/hate-speech")
     assert response.status_code == 500
     assert response.json()["detail"] == "boom"
 

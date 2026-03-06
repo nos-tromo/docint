@@ -264,7 +264,7 @@ def _fetch_ie_stats(
     min_mentions: int = 2,
     entity_type: str | None = None,
 ) -> dict[str, Any] | None:
-    """Fetch IE statistics for *collection*.
+    """Fetch NER statistics for *collection*.
 
     Args:
         collection: Collection name (used for UI cache keying).

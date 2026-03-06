@@ -114,7 +114,7 @@ def normalize_relations(relations: list[Any] | None) -> list[dict[str, Any]]:
 
 
 def aggregate_ner_sources(sources: list[dict[str, Any]] | None) -> dict[str, Any]:
-    """Aggregate IE payloads across source rows.
+    """Aggregate NER payloads across source rows.
 
     Args:
         sources: Source metadata rows containing optional ``entities`` and ``relations``.
@@ -285,7 +285,7 @@ def build_ner_stats(
     entity_type: str | None = None,
     include_relations: bool = True,
 ) -> dict[str, Any]:
-    """Build dashboard-friendly IE statistics from an aggregate payload.
+    """Build dashboard-friendly NER statistics from an aggregate payload.
 
     Args:
         aggregate: Output of ``aggregate_ner_sources`` helper.
@@ -295,7 +295,7 @@ def build_ner_stats(
         include_relations: Whether to include relations in the statistics.
 
     Returns:
-        dict[str, Any]: A dictionary containing the dashboard-friendly IE statistics.
+        dict[str, Any]: A dictionary containing the dashboard-friendly NER statistics.
     """
     entities_all = list(aggregate.get("entities") or [])
     relations_all = list(aggregate.get("relations") or [])
@@ -429,7 +429,7 @@ def search_entities(
     entity_type: str | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
-    """Search canonicalized entities in aggregated IE payloads.
+    """Search canonicalized entities in aggregated NER payloads.
 
     Args:
         aggregate: Output of ``aggregate_ner_sources`` helper.
