@@ -1871,7 +1871,7 @@ class RAG:
         self, *, filename: str, file_hash: str | None
     ) -> MetadataFilters:
         """Build metadata filters that scope retrieval to one document."""
-        filters: list[MetadataFilter] = [
+        filters: list[MetadataFilter | MetadataFilters] = [
             MetadataFilter(key="filename", value=filename, operator=FilterOperator.EQ),
             MetadataFilter(key="file_name", value=filename, operator=FilterOperator.EQ),
             MetadataFilter(key="file_path", value=filename, operator=FilterOperator.EQ),

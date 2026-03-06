@@ -45,6 +45,8 @@ def init_session_state() -> None:
         "preview_url": None,
         "chat_running": False,
         "analysis_result": None,
+        "analysis_ner_by_collection": {},
+        "analysis_summary_by_collection": {},
         "ingest_summary": None,
         "inspector_docs": [],
         # Sidebar-fetched caches (written by sidebar, read by dashboard)
