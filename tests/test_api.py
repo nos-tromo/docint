@@ -77,6 +77,7 @@ class DummyRAG:
         self.created_index = 0  # Tracks the number of times an index is created
         self.created_query_engine = 0
         self.ner_sources: list[dict[str, Any]] = []
+        self.hate_speech_rows: list[dict[str, Any]] = []
         self.summary_payload: dict[str, Any] = {
             "response": "summary",
             "sources": [{"id": "s1"}],
@@ -184,6 +185,10 @@ class DummyRAG:
             list[dict[str, Any]]: Information extraction data for the selected collection.
         """
         return self.ner_sources
+
+    def get_collection_hate_speech(self) -> list[dict[str, Any]]:
+        """Get hate-speech findings for the selected collection."""
+        return self.hate_speech_rows
 
     def get_collection_ner_stats(
         self,
@@ -448,6 +453,25 @@ def test_collections_ner_stats_success(client: TestClient) -> None:
     payload = response.json()
     assert payload["totals"]["unique_entities"] == 1
     assert payload["top_entities"][0]["text"] == "Acme"
+
+
+def test_collections_hate_speech_success(client: TestClient) -> None:
+    """Hate-speech endpoint should return flagged rows."""
+    api_module.rag.hate_speech_rows = [
+        {
+            "chunk_id": "c1",
+            "chunk_text": "flagged text",
+            "category": "ethnicity",
+            "confidence": "high",
+            "reason": "Contains slur",
+            "source_ref": "doc1.pdf",
+            "page": 2,
+        }
+    ]
+    response = client.get("/collections/hate-speech")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["results"][0]["chunk_id"] == "c1"
 
 
 def test_collections_ner_search_success(client: TestClient) -> None:
@@ -717,6 +741,14 @@ def test_collections_ner_search_requires_selection(client: TestClient) -> None:
     assert "No collection selected" in response.json()["detail"]
 
 
+def test_collections_hate_speech_requires_selection(client: TestClient) -> None:
+    """Hate-speech endpoint should require active collection selection."""
+    api_module.rag.qdrant_collection = ""
+    response = client.get("/collections/hate-speech")
+    assert response.status_code == 400
+    assert "No collection selected" in response.json()["detail"]
+
+
 def test_collections_ner_failure(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
@@ -798,6 +830,20 @@ def test_collections_ner_search_failure(
 
     monkeypatch.setattr(api_module.rag, "search_collection_ner_entities", raiser)
     response = client.get("/collections/ner/search", params={"q": "ac"})
+    assert response.status_code == 500
+    assert response.json()["detail"] == "boom"
+
+
+def test_collections_hate_speech_failure(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Hate-speech endpoint should surface backend failures."""
+
+    def raiser() -> list[dict[str, Any]]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(api_module.rag, "get_collection_hate_speech", raiser)
+    response = client.get("/collections/hate-speech")
     assert response.status_code == 500
     assert response.json()["detail"] == "boom"
 

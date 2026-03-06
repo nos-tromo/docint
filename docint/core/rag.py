@@ -25,6 +25,7 @@ from docint.utils.env_cfg import (
     SessionConfig,
     SummaryConfig,
     load_graphrag_env,
+    load_hate_speech_env,
     load_host_env,
     load_ingestion_env,
     load_model_env,
@@ -716,6 +717,9 @@ class RAG:
             # Enforce JSON for NER tasks to ensure structured output
             # Only use LLM-based NER for OpenAI provider; otherwise use GLiNER
             ner_model = self._create_text_model()
+        hate_speech_model = None
+        if load_hate_speech_env().enabled:
+            hate_speech_model = self._create_text_model()
 
         if self._image_ingestion_service is None:
             self._image_ingestion_service = ImageIngestionService(device=self.device)
@@ -725,6 +729,7 @@ class RAG:
             ner_model=ner_model,
             device=self.device,
             progress_callback=progress_callback,
+            hate_speech_model=hate_speech_model,
             openai_model_provider=self.openai_model_provider,
             target_collection=self.qdrant_collection,
             image_ingestion_service=self._image_ingestion_service,
@@ -2376,6 +2381,12 @@ class RAG:
                                 "relations": payload.get("relations", []),
                                 "page": page,
                                 "row": payload.get("table", {}).get("row_index"),
+                                "chunk_id": (
+                                    payload.get("node_id")
+                                    or payload.get("id_")
+                                    or str(getattr(point, "id", "") or "")
+                                ),
+                                "chunk_text": str(payload.get("text") or ""),
                             }
                         )
 
@@ -2384,6 +2395,86 @@ class RAG:
 
         self.ner_sources = sources
         return sources
+
+    def get_collection_hate_speech(self) -> list[dict[str, Any]]:
+        """Return flagged hate-speech chunks from the selected collection."""
+        if not self.qdrant_collection:
+            return []
+
+        findings: list[dict[str, Any]] = []
+        offset = None
+        while True:
+            try:
+                points, offset = self.qdrant_client.scroll(
+                    collection_name=self.qdrant_collection,
+                    limit=100,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to fetch hate-speech rows from '{}': {}",
+                    self.qdrant_collection,
+                    exc,
+                )
+                break
+
+            if not points:
+                break
+
+            for point in points:
+                payload = getattr(point, "payload", None)
+                if not isinstance(payload, dict):
+                    continue
+
+                detection = payload.get("hate_speech")
+                if not isinstance(detection, dict) or not bool(
+                    detection.get("hate_speech")
+                ):
+                    continue
+
+                origin = payload.get("origin") or {}
+                findings.append(
+                    {
+                        "chunk_id": str(
+                            detection.get("chunk_id")
+                            or payload.get("node_id")
+                            or payload.get("id_")
+                            or str(getattr(point, "id", "") or "")
+                        ),
+                        "chunk_text": str(
+                            detection.get("chunk_text") or payload.get("text") or ""
+                        ),
+                        "category": str(detection.get("category") or "none"),
+                        "confidence": str(detection.get("confidence") or "low"),
+                        "reason": str(detection.get("reason") or ""),
+                        "source_ref": str(
+                            detection.get("source_ref")
+                            or payload.get("file_path")
+                            or payload.get("filename")
+                            or payload.get("file_name")
+                            or origin.get("filename")
+                            or ""
+                        ),
+                        "page": (
+                            payload.get("page")
+                            or payload.get("page_number")
+                            or origin.get("page_no")
+                        ),
+                    }
+                )
+
+            if offset is None:
+                break
+
+        findings.sort(
+            key=lambda row: (
+                str(row.get("source_ref") or ""),
+                str(row.get("chunk_id") or ""),
+            )
+        )
+        return findings
 
     def _get_collection_ner_aggregate(self, refresh: bool = False) -> dict[str, Any]:
         """Return cached aggregate IE payload for the active collection.

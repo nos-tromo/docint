@@ -270,6 +270,10 @@ class IENeighborsOut(BaseModel):
     meta: dict[str, Any] = {}
 
 
+class HateSpeechOut(BaseModel):
+    results: list[dict] = []
+
+
 class AgentChatIn(BaseModel):
     message: str
     session_id: str | None = None
@@ -608,6 +612,18 @@ def get_collection_ner() -> dict[str, list[dict]]:
         return {"sources": sources}
     except Exception as e:
         logger.error("Error fetching collection NER: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/collections/hate-speech", response_model=HateSpeechOut, tags=["Query"])
+def get_collection_hate_speech() -> dict[str, list[dict]]:
+    """Get flagged hate-speech chunks for the selected collection."""
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+    try:
+        return {"results": rag.get_collection_hate_speech()}
+    except Exception as e:
+        logger.error("Error fetching collection hate-speech results: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -317,3 +317,78 @@ def test_openai_provider_uses_llm_extractor(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert pipeline.entity_extractor is not None
     assert marker == ["fake-llm:extract {text}:256"]
+
+
+def test_hate_speech_detection_attaches_flagged_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Enabled hate-speech detection should attach structured flags to node metadata."""
+
+    class FakeNERConfig:
+        enabled = False
+        max_chars = 256
+        max_workers = 1
+
+    class FakeHateSpeechConfig:
+        enabled = True
+        max_chars = 128
+
+    class FakeIngestionConfig:
+        ingestion_batch_size = 2
+        sentence_splitter_chunk_size = 512
+        sentence_splitter_chunk_overlap = 64
+        supported_filetypes: list[str] = []
+        hierarchical_chunking_enabled = False
+        coarse_chunk_size = 1024
+        fine_chunk_size = 256
+        fine_chunk_overlap = 32
+
+    class FakeOpenAIPipeline:
+        def load_prompt(self, kw: str) -> str:
+            assert kw == "hate_speech"
+            return '{"hate_speech": true, "category": "ethnicity", "confidence": "high", "reason": "x"} {text}'
+
+    class FakeResponse:
+        text = '{"hate_speech": true, "category": "ethnicity", "confidence": "high", "reason": "Contains hateful language."}'
+
+    class FakeModel:
+        def complete(self, prompt: str) -> FakeResponse:
+            assert "Dangerous text" in prompt
+            return FakeResponse()
+
+    monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
+    monkeypatch.setattr(
+        pipeline_module, "load_hate_speech_env", lambda: FakeHateSpeechConfig()
+    )
+    monkeypatch.setattr(
+        pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig()
+    )
+    monkeypatch.setattr(pipeline_module, "OpenAIPipeline", FakeOpenAIPipeline)
+
+    pipeline, dummy_nodes = _make_pipeline(
+        tmp_path, entity_extractor=lambda _: ([], [])
+    )
+    pipeline.entity_extractor = None
+    pipeline.hate_speech_model = cast(Any, FakeModel())
+    pipeline.hate_speech_enabled = True
+    pipeline.hate_speech_prompt = "Analyze: {text}"
+    dummy_nodes.append(
+        SimpleNamespace(
+            text="Dangerous text for evaluation.",
+            node_id="node-1",
+            metadata={"filename": "doc.pdf", "file_path": "doc.pdf"},
+        )
+    )
+
+    nodes = pipeline._create_nodes(
+        [Document(text="Doc", metadata={"file_path": "doc.pdf"})]
+    )
+
+    assert len(nodes) == 1
+    detection = nodes[0].metadata.get("hate_speech")
+    assert isinstance(detection, dict)
+    assert detection["hate_speech"] is True
+    assert detection["category"] == "ethnicity"
+    assert detection["confidence"] == "high"
+    assert detection["chunk_id"] == "node-1"
+    assert "Dangerous text" in detection["chunk_text"]

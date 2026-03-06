@@ -233,6 +233,39 @@ def test_get_collection_ner_refresh_bypasses_cache() -> None:
     assert rag._qdrant_client.scroll.call_count == 2
     assert refreshed != first
     assert refreshed[0]["filename"] == "doc2.pdf"
+    assert "chunk_text" in refreshed[0]
+
+
+def test_get_collection_hate_speech_filters_flagged_rows() -> None:
+    """Hate-speech collection helper should return only flagged chunks."""
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = MagicMock()
+
+    flagged = MagicMock()
+    flagged.id = "pt-1"
+    flagged.payload = {
+        "text": "flagged text",
+        "page": 1,
+        "filename": "doc1.pdf",
+        "hate_speech": {
+            "hate_speech": True,
+            "category": "ethnicity",
+            "confidence": "high",
+            "reason": "Contains a slur",
+        },
+    }
+    clean = MagicMock()
+    clean.payload = {
+        "text": "clean text",
+        "hate_speech": {"hate_speech": False},
+    }
+    rag._qdrant_client.scroll = MagicMock(side_effect=[([flagged, clean], None)])
+
+    rows = rag.get_collection_hate_speech()
+
+    assert len(rows) == 1
+    assert rows[0]["chunk_text"] == "flagged text"
+    assert rows[0]["category"] == "ethnicity"
 
 
 def test_collection_ner_stats_and_search() -> None:

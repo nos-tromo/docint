@@ -4,7 +4,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
 from llama_index.core import Document, SimpleDirectoryReader
 from llama_index.core.node_parser import (
@@ -24,7 +24,11 @@ from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.tables import TableReader
 from docint.core.storage.hierarchical import HierarchicalNodeParser
 from docint.utils.clean_text import basic_clean
-from docint.utils.env_cfg import load_ingestion_env, load_ner_env
+from docint.utils.env_cfg import (
+    load_hate_speech_env,
+    load_ingestion_env,
+    load_ner_env,
+)
 from docint.utils.hashing import compute_file_hash
 from docint.utils.ner_extractor import (
     build_gliner_ner_extractor,
@@ -33,6 +37,41 @@ from docint.utils.ner_extractor import (
 from docint.utils.openai_cfg import OpenAIPipeline
 
 CleanFn = Callable[[str], str]
+
+
+def _parse_hate_speech_payload(raw: str) -> dict[str, str | bool]:
+    """Parse hate-speech detector model output into a structured dictionary."""
+    parsed: dict[str, Any] = {}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        try:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                parsed = json.loads(raw[start : end + 1])
+        except Exception:
+            parsed = {}
+
+    if not isinstance(parsed, dict):
+        return {
+            "hate_speech": False,
+            "category": "none",
+            "confidence": "low",
+            "reason": "",
+        }
+
+    category = str(parsed.get("category") or "none").strip().lower() or "none"
+    confidence = str(parsed.get("confidence") or "low").strip().lower() or "low"
+    if confidence not in {"high", "medium", "low"}:
+        confidence = "low"
+
+    return {
+        "hate_speech": bool(parsed.get("hate_speech")),
+        "category": category,
+        "confidence": confidence,
+        "reason": str(parsed.get("reason") or "").strip(),
+    }
 
 
 @dataclass(slots=True)
@@ -44,6 +83,7 @@ class DocumentIngestionPipeline:
     device: str
     ner_model: OpenAI | None
     progress_callback: Callable[[str], None] | None
+    hate_speech_model: OpenAI | None = None
 
     # --- Cleaning config ---
     clean_fn: CleanFn = basic_clean
@@ -71,6 +111,9 @@ class DocumentIngestionPipeline:
     # --- Named entity recognition (NER) ---
     ner_max_workers: int = field(default=4, init=False)
     entity_extractor: Callable[[str], tuple[list[dict], list[dict]]] | None = None
+    hate_speech_enabled: bool = field(default=False, init=False)
+    hate_speech_max_chars: int = field(default=1500, init=False)
+    hate_speech_prompt: str | None = field(default=None, init=False)
 
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
     md_node_parser: MarkdownNodeParser | None = field(default=None, init=False)
@@ -110,6 +153,19 @@ class DocumentIngestionPipeline:
                 except Exception:
                     logger.warning("GLiNER model unavailable – continuing without NER")
                     self.entity_extractor = None
+
+        _hate_speech_cfg = load_hate_speech_env()
+        self.hate_speech_enabled = _hate_speech_cfg.enabled
+        self.hate_speech_max_chars = _hate_speech_cfg.max_chars
+        if self.hate_speech_enabled and self.hate_speech_model is not None:
+            try:
+                self.hate_speech_prompt = OpenAIPipeline().load_prompt(kw="hate_speech")
+            except Exception as exc:
+                logger.warning(
+                    "Hate-speech prompt unavailable – disabling detector: {}",
+                    exc,
+                )
+                self.hate_speech_enabled = False
 
         # --- Ingestion config ---
         _ingestion_config = load_ingestion_env()
@@ -725,5 +781,49 @@ class DocumentIngestionPipeline:
                         self.progress_callback(
                             f"Extracting entities: {i + 1}/{total_nodes} chunks processed"
                         )
+
+        if (
+            self.hate_speech_enabled
+            and self.hate_speech_prompt
+            and self.hate_speech_model is not None
+        ):
+            total_nodes = len(nodes)
+            for i, node in enumerate(nodes):
+                text_value = getattr(node, "text", "") or ""
+                if not text_value.strip():
+                    continue
+                try:
+                    prompt = self.hate_speech_prompt.format(
+                        text=text_value[: self.hate_speech_max_chars]
+                    )
+                    response = self.hate_speech_model.complete(prompt)
+                    raw = response.text if hasattr(response, "text") else str(response)
+                    parsed = _parse_hate_speech_payload(str(raw))
+                    if bool(parsed.get("hate_speech")):
+                        meta = dict(getattr(node, "metadata", {}) or {})
+                        chunk_id = str(
+                            getattr(node, "node_id", "")
+                            or getattr(node, "id_", "")
+                            or ""
+                        )
+                        source_ref = str(
+                            meta.get("file_path")
+                            or meta.get("filename")
+                            or meta.get("file_name")
+                            or meta.get("source")
+                            or ""
+                        )
+                        parsed["chunk_id"] = chunk_id
+                        parsed["chunk_text"] = text_value
+                        parsed["source_ref"] = source_ref
+                        node.metadata = {**meta, "hate_speech": parsed}
+                except Exception as exc:
+                    logger.warning(
+                        "Hate-speech detection failed on chunk {}: {}", i, exc
+                    )
+                if self.progress_callback:
+                    self.progress_callback(
+                        f"Detecting hate speech: {i + 1}/{total_nodes} chunks processed"
+                    )
 
         return nodes
