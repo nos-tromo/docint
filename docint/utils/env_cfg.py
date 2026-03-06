@@ -124,6 +124,34 @@ def load_graphrag_env(
 
 
 @dataclass(frozen=True)
+class HateSpeechConfig:
+    """Dataclass for hate-speech detection configuration."""
+
+    enabled: bool
+    max_chars: int
+
+
+def load_hate_speech_env(
+    default_enabled: bool = False,
+    default_max_chars: int = 2048,
+) -> HateSpeechConfig:
+    """Load hate-speech detection settings from environment variables.
+
+    Args:
+        default_enabled: Whether hate-speech detection runs during ingestion.
+        default_max_chars: Maximum characters from each chunk sent to the detector.
+
+    Returns:
+        HateSpeechConfig: Parsed hate-speech detection configuration.
+    """
+    return HateSpeechConfig(
+        enabled=str(os.getenv("ENABLE_HATE_SPEECH_DETECTION", default_enabled)).lower()
+        in {"true", "1", "yes"},
+        max_chars=max(256, int(os.getenv("HATE_SPEECH_MAX_CHARS", default_max_chars))),
+    )
+
+
+@dataclass(frozen=True)
 class HostConfig:
     """Dataclass for host configuration."""
 
@@ -483,34 +511,6 @@ def load_ner_env(
         in {"true", "1", "yes"},
         max_chars=int(os.getenv("NER_MAX_CHARS", default_max_chars)),
         max_workers=int(os.getenv("NER_MAX_WORKERS", default_max_workers)),
-    )
-
-
-@dataclass(frozen=True)
-class HateSpeechConfig:
-    """Dataclass for hate-speech detection configuration."""
-
-    enabled: bool
-    max_chars: int
-
-
-def load_hate_speech_env(
-    default_enabled: bool = False,
-    default_max_chars: int = 1500,
-) -> HateSpeechConfig:
-    """Load hate-speech detection settings from environment variables.
-
-    Args:
-        default_enabled: Whether hate-speech detection runs during ingestion.
-        default_max_chars: Maximum characters from each chunk sent to the detector.
-
-    Returns:
-        HateSpeechConfig: Parsed hate-speech detection configuration.
-    """
-    return HateSpeechConfig(
-        enabled=str(os.getenv("ENABLE_HATE_SPEECH_DETECTION", default_enabled)).lower()
-        in {"true", "1", "yes"},
-        max_chars=max(256, int(os.getenv("HATE_SPEECH_MAX_CHARS", default_max_chars))),
     )
 
 

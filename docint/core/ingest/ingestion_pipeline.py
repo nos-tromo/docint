@@ -52,7 +52,14 @@ class HateSpeechDetection(TypedDict):
 
 
 def _parse_hate_speech_payload(raw: str) -> HateSpeechDetection:
-    """Parse hate-speech detector model output into a structured dictionary."""
+    """Parse hate-speech detector model output into a structured dictionary.
+
+    Args:
+        raw (str): The raw string output from the hate-speech detection model.
+
+    Returns:
+        HateSpeechDetection: A structured dictionary containing hate-speech detection results.
+    """
     parsed: dict[str, Any] = {}
     try:
         parsed = json.loads(raw)
@@ -148,10 +155,10 @@ class DocumentIngestionPipeline:
     def __post_init__(self) -> None:
         """Post-initialization to load configurations and set up components."""
         # --- Named Entity Recognition (NER) config ---
-        _ner_config = load_ner_env()
-        ner_enabled = _ner_config.enabled
-        ner_max_chars = _ner_config.max_chars
-        self.ner_max_workers = _ner_config.max_workers
+        ner_cfg = load_ner_env()
+        ner_enabled = ner_cfg.enabled
+        ner_max_chars = ner_cfg.max_chars
+        self.ner_max_workers = ner_cfg.max_workers
 
         if ner_enabled:
             if self.openai_model_provider.lower() in {"openai"}:
@@ -171,9 +178,9 @@ class DocumentIngestionPipeline:
                     logger.warning("GLiNER model unavailable – continuing without NER")
                     self.entity_extractor = None
 
-        _hate_speech_cfg = load_hate_speech_env()
-        self.hate_speech_enabled = _hate_speech_cfg.enabled
-        self.hate_speech_max_chars = _hate_speech_cfg.max_chars
+        hate_speech_cfg = load_hate_speech_env()
+        self.hate_speech_enabled = hate_speech_cfg.enabled
+        self.hate_speech_max_chars = hate_speech_cfg.max_chars
         if self.hate_speech_enabled and self.hate_speech_model is not None:
             try:
                 self.hate_speech_prompt = OpenAIPipeline().load_prompt(kw="hate_speech")
@@ -185,23 +192,21 @@ class DocumentIngestionPipeline:
                 self.hate_speech_enabled = False
 
         # --- Ingestion config ---
-        _ingestion_config = load_ingestion_env()
-        self.ingestion_batch_size = _ingestion_config.ingestion_batch_size
-        sentence_splitter_chunk_size = _ingestion_config.sentence_splitter_chunk_size
-        sentence_splitter_chunk_overlap = (
-            _ingestion_config.sentence_splitter_chunk_overlap
-        )
+        ingestion_cfg = load_ingestion_env()
+        self.ingestion_batch_size = ingestion_cfg.ingestion_batch_size
+        sentence_splitter_chunk_size = ingestion_cfg.sentence_splitter_chunk_size
+        sentence_splitter_chunk_overlap = ingestion_cfg.sentence_splitter_chunk_overlap
         self.sentence_splitter = SentenceSplitter(
             chunk_size=sentence_splitter_chunk_size,
             chunk_overlap=sentence_splitter_chunk_overlap,
         )
-        self.reader_required_exts = _ingestion_config.supported_filetypes
-        if _ingestion_config.hierarchical_chunking_enabled:
+        self.reader_required_exts = ingestion_cfg.supported_filetypes
+        if ingestion_cfg.hierarchical_chunking_enabled:
             logger.info("Hierarchical chunking is ENABLED.")
             self.hierarchical_node_parser = HierarchicalNodeParser(
-                coarse_chunk_size=_ingestion_config.coarse_chunk_size,
-                fine_chunk_size=_ingestion_config.fine_chunk_size,
-                fine_chunk_overlap=_ingestion_config.fine_chunk_overlap,
+                coarse_chunk_size=ingestion_cfg.coarse_chunk_size,
+                fine_chunk_size=ingestion_cfg.fine_chunk_size,
+                fine_chunk_overlap=ingestion_cfg.fine_chunk_overlap,
             )
         else:
             self.hierarchical_node_parser = None

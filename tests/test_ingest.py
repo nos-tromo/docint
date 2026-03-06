@@ -322,7 +322,12 @@ def test_openai_provider_uses_llm_extractor(monkeypatch: pytest.MonkeyPatch) -> 
 def test_hate_speech_detection_attaches_flagged_metadata(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Enabled hate-speech detection should attach structured flags to node metadata."""
+    """Enabled hate-speech detection should attach structured flags to node metadata.
+
+    Args:
+    monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    tmp_path (Path): Temporary directory path for the test.
+    """
 
     class FakeNERConfig:
         enabled = False
@@ -344,7 +349,17 @@ def test_hate_speech_detection_attaches_flagged_metadata(
         fine_chunk_overlap = 32
 
     class FakeOpenAIPipeline:
+        """Fake OpenAIPipeline class for testing hate-speech detection integration."""
+
         def load_prompt(self, kw: str) -> str:
+            """Fake load_prompt method to return a structured prompt for hate-speech detection.
+
+            Args:
+                kw (str): The keyword for which to load the prompt.
+
+            Returns:
+                str: The loaded prompt.
+            """
             assert kw == "hate_speech"
             return (
                 "Analyze this chunk and return JSON only:\n"
@@ -358,10 +373,22 @@ def test_hate_speech_detection_attaches_flagged_metadata(
             )
 
     class FakeResponse:
+        """Fake response class to simulate the output of the OpenAI API for hate-speech detection."""
+
         text = '{"hate_speech": true, "category": "ethnicity", "confidence": "high", "reason": "Contains hateful language."}'
 
     class FakeModel:
+        """Fake model class to simulate the behavior of a hate-speech detection model."""
+
         def complete(self, prompt: str) -> FakeResponse:
+            """Simulate the completion of a prompt by the fake model.
+
+            Args:
+                prompt (str): The prompt to complete.
+
+            Returns:
+                FakeResponse: The simulated response.
+            """
             assert "Analyze this chunk" in prompt
             assert "Dangerous text" in prompt
             return FakeResponse()

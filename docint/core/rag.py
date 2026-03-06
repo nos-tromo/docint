@@ -2398,7 +2398,13 @@ class RAG:
         return sources
 
     def get_collection_hate_speech(self) -> list[dict[str, Any]]:
-        """Return flagged hate-speech chunks from the selected collection."""
+        """Return flagged hate-speech chunks from the selected collection.
+
+        Returns:
+            list[dict[str, Any]]: A list of dictionaries containing metadata about hate-speech
+            findings, such as chunk ID, text, category, confidence, reason, source reference,
+            and page number.
+        """
         if not self.qdrant_collection:
             return []
 

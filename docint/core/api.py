@@ -617,7 +617,11 @@ def get_collection_ner() -> dict[str, list[dict]]:
 
 @app.get("/collections/hate-speech", response_model=HateSpeechOut, tags=["Query"])
 def get_collection_hate_speech() -> dict[str, list[dict]]:
-    """Get flagged hate-speech chunks for the selected collection."""
+    """Get flagged hate-speech chunks for the selected collection.
+
+    Returns:
+        dict[str, list[dict]]: A dictionary containing the list of hate-speech findings.
+    """
     if not rag.qdrant_collection:
         raise HTTPException(status_code=400, detail="No collection selected")
     try:

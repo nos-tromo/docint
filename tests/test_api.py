@@ -187,7 +187,13 @@ class DummyRAG:
         return self.ner_sources
 
     def get_collection_hate_speech(self) -> list[dict[str, Any]]:
-        """Get hate-speech findings for the selected collection."""
+        """Get hate-speech findings for the selected collection.
+
+        Returns:
+            list[dict[str, Any]]: A list of dictionaries containing metadata about hate-speech
+            findings, such as chunk ID, text, category, confidence, reason, source reference,
+            and page number.
+        """
         return self.hate_speech_rows
 
     def get_collection_ner_stats(
@@ -456,8 +462,13 @@ def test_collections_ner_stats_success(client: TestClient) -> None:
 
 
 def test_collections_hate_speech_success(client: TestClient) -> None:
-    """Hate-speech endpoint should return flagged rows."""
-    api_module.rag.hate_speech_rows = [
+    """Hate-speech endpoint should return flagged rows.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    dummy_rag = cast(DummyRAG, api_module.rag)
+    dummy_rag.hate_speech_rows = [
         {
             "chunk_id": "c1",
             "chunk_text": "flagged text",
@@ -742,7 +753,11 @@ def test_collections_ner_search_requires_selection(client: TestClient) -> None:
 
 
 def test_collections_hate_speech_requires_selection(client: TestClient) -> None:
-    """Hate-speech endpoint should require active collection selection."""
+    """Hate-speech endpoint should require active collection selection.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
     api_module.rag.qdrant_collection = ""
     response = client.get("/collections/hate-speech")
     assert response.status_code == 400
@@ -837,9 +852,24 @@ def test_collections_ner_search_failure(
 def test_collections_hate_speech_failure(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """Hate-speech endpoint should surface backend failures."""
+    """Hate-speech endpoint should surface backend failures.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
 
     def raiser() -> list[dict[str, Any]]:
+        """Fake implementation of get_collection_hate_speech that raises an error for testing purposes.
+
+        Returns:
+            list[dict[str, Any]]: A list of dictionaries containing metadata about hate-speech
+            findings, such as chunk ID, text, category, confidence, reason, source reference,
+            and page number.
+
+        Raises:
+            RuntimeError: If there is an error retrieving the hate-speech findings.
+        """
         raise RuntimeError("boom")
 
     monkeypatch.setattr(api_module.rag, "get_collection_hate_speech", raiser)

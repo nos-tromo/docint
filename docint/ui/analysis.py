@@ -157,7 +157,15 @@ def _entity_related_chunks(
     entity: str,
     sources: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Return source chunks that mention a selected entity."""
+    """Return source chunks that mention a selected entity.
+
+    Args:
+        entity: The selected entity text to match.
+        sources: List of source dictionaries containing chunk and entity information.
+
+    Returns:
+        A list of source dictionaries that contain the selected entity.
+    """
     needle = str(entity or "").strip().lower()
     if not needle:
         return []
@@ -190,7 +198,15 @@ def _entity_related_chunks(
 
 
 def _entity_chunks_to_txt(entity: str, chunks: list[dict[str, Any]]) -> str:
-    """Build downloadable text payload for entity-linked chunks."""
+    """Build downloadable text payload for entity-linked chunks.
+
+    Args:
+        entity: The selected entity text.
+        chunks: List of source dictionaries containing chunk information.
+
+    Returns:
+        A formatted string containing metadata and text of chunks related to the entity.
+    """
     lines = [f"Entity: {entity}", ""]
     for idx, chunk in enumerate(chunks, start=1):
         lines.append(
@@ -203,7 +219,14 @@ def _entity_chunks_to_txt(entity: str, chunks: list[dict[str, Any]]) -> str:
 
 
 def _hate_speech_chunks_to_txt(chunks: list[dict[str, Any]]) -> str:
-    """Build downloadable text payload for hate-speech findings."""
+    """Build downloadable text payload for hate-speech findings.
+
+    Args:
+        chunks: List of source dictionaries containing hate-speech finding information.
+
+    Returns:
+        A formatted string containing metadata and text of chunks flagged for hate-speech.
+    """
     lines = ["Flagged hate-speech chunks", ""]
     for idx, chunk in enumerate(chunks, start=1):
         lines.append(
@@ -220,7 +243,15 @@ def _hate_speech_chunks_to_txt(chunks: list[dict[str, Any]]) -> str:
 
 
 def _graphviz_dot(graph: dict[str, Any], selected_entity: str | None = None) -> str:
-    """Build a Graphviz DOT representation for entity graph rendering."""
+    """Build a Graphviz DOT representation for entity graph rendering.
+
+    Args:
+        graph: A dictionary containing 'nodes' and 'edges' for the entity graph.
+        selected_entity: Optional text of the currently selected entity for styling.
+
+    Returns:
+        A string in DOT format representing the graph, suitable for rendering with Graphviz.
+    """
     nodes = list(graph.get("nodes") or [])
     edges = list(graph.get("edges") or [])
     selected = str(selected_entity or "").strip().lower()
@@ -252,7 +283,12 @@ def _graphviz_dot(graph: dict[str, Any], selected_entity: str | None = None) -> 
 
 
 def _render_entities_tab(result: dict[str, Any], collection: str) -> None:
-    """Render entity graph and entity-to-chunk drill-down UI."""
+    """Render entity graph and entity-to-chunk drill-down UI.
+
+    Args:
+        result: The analysis result dictionary containing IE data.
+        collection: The name of the currently selected collection.
+    """
     ner_sources = result.get("ie") or []
     if not ner_sources:
         st.info("No entities or relations found in this collection.")
@@ -348,7 +384,12 @@ def _render_entities_tab(result: dict[str, Any], collection: str) -> None:
 
 
 def _render_hate_speech_tab(result: dict[str, Any], collection: str) -> None:
-    """Render hate-speech findings with expandable chunk details."""
+    """Render hate-speech findings with expandable chunk details.
+
+    Args:
+        result: The analysis result dictionary containing hate-speech findings.
+        collection: The name of the currently selected collection.
+    """
     findings = list(result.get("hate_speech") or [])
     st.markdown("#### Hate-speech findings")
     if not findings:
@@ -386,7 +427,12 @@ def _render_hate_speech_tab(result: dict[str, Any], collection: str) -> None:
 
 
 def _render_analysis_result(result: dict[str, Any], collection: str) -> None:
-    """Render a previously computed analysis result."""
+    """Render a previously computed analysis result.
+
+    Args:
+        result: The analysis result dictionary containing summary, IE data, and metadata.
+        collection: The name of the currently selected collection.
+    """
     st.markdown(f"### Summary of '{result['collection']}'")
     st.markdown(result["summary"])
     render_response_validation(
