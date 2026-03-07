@@ -393,6 +393,7 @@ class ModelConfig:
     text_model_file: str
     text_model_repo: str
     vision_model_file: str
+    vision_model_mmproj_file: str
     vision_model_repo: str
     whisper_model: str
 
@@ -403,8 +404,8 @@ def load_model_env(
     default_ner_model: str = "gliner-community/gliner_large-v2.5",
     default_rerank_model: str = "BAAI/bge-reranker-v2-m3",
     default_sparse_model: str = "Qdrant/all_miniLM_L6_v2_with_attentions",
-    default_text_model_str: str = "unsloth/Qwen3-1.7B-GGUF;Qwen3-1.7B-Q4_K_M.gguf",
-    default_vision_model_str: str = "Qwen/Qwen3-VL-8B-Instruct-GGUF;Qwen3VL-8B-Instruct-Q4_K_M.gguf",
+    default_text_model_str: str = "unsloth/Qwen3.5-4B-GGUF;Qwen3.5-4B-Q8_0.gguf",
+    default_vision_model_str: str = "unsloth/Qwen3.5-9B-GGUF;Qwen3.5-9B-Q4_K_M.gguf;mmproj-F16.gguf",
     default_whisper_model: str = "turbo",
 ) -> ModelConfig:
     """Loads model configuration from environment variables or defaults.
@@ -429,35 +430,39 @@ def load_model_env(
         - text_model_file (str): The text model file name.
         - text_model_repo (str): The text model HuggingFace repo ID for cache resolution
         - vision_model_file (str): The vision model file name.
+        - vision_model_mmproj_file (str): The vision model MMProj file name.
         - vision_model_repo (str): The vision model HuggingFace repo ID for cache resolution
         - whisper_model (str): The Whisper model identifier.
     """
 
-    def resolve_model_name(model_str: str) -> tuple[str, str]:
-        """Resolve a model string into its repo ID and file name components.
-
-        The model string can be in the format "repo_id;file_name" (required for llama.cpp) or just "model_name".
-        If only "model_name" is provided, it is treated as both the repo ID and file name.
+    def resolve_model_name(model_str: str) -> tuple[str, str, str]:
+        """Resolves a model string into its components: repo, model, and mmproj.
 
         Args:
-            model_str (str): The model string to resolve.
+            model_str (str): The model string in the format "repo;model;mmproj".
+
+        Raises:
+            ValueError: If the model string is not in the expected format.
 
         Returns:
-            tuple[str, str] | str: A tuple of (repo_id, file_name) if the input contains a semicolon.
+            tuple[str, str, str]: A tuple containing the repo, model, and mmproj identifiers.
         """
-        if ";" in model_str:
-            repo_id, file_name = model_str.split(";", 1)
-            return repo_id.strip(), file_name.strip()
-        else:
-            return model_str.strip(), model_str.strip()
+        parts = [p.strip() for p in model_str.split(";")]
+        if not 1 <= len(parts) <= 3:
+            raise ValueError(f"Invalid vision model string: {model_str}")
 
-    embed_model_repo, embed_model_file = resolve_model_name(
+        repo = parts[0]
+        model = parts[1] if len(parts) >= 2 else repo
+        mmproj = parts[2] if len(parts) == 3 else model
+        return repo, model, mmproj
+
+    embed_model_repo, embed_model_file, _ = resolve_model_name(
         os.getenv("EMBED_MODEL", default_embed_model_str)
     )
-    text_model_repo, text_model_file = resolve_model_name(
+    text_model_repo, text_model_file, _ = resolve_model_name(
         os.getenv("LLM", default_text_model_str)
     )
-    vision_model_repo, vision_model_file = resolve_model_name(
+    vision_model_repo, vision_model_file, vision_model_mmproj_file = resolve_model_name(
         os.getenv("VLM", default_vision_model_str)
     )
 
@@ -471,6 +476,7 @@ def load_model_env(
         text_model_file=text_model_file,
         text_model_repo=text_model_repo,
         vision_model_file=vision_model_file,
+        vision_model_mmproj_file=vision_model_mmproj_file,
         vision_model_repo=vision_model_repo,
         whisper_model=os.getenv("WHISPER_MODEL", default_whisper_model),
     )
