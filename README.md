@@ -257,6 +257,12 @@ By default, image embeddings are written to a per-collection Qdrant collection (
 - `IMAGE_FAIL_ON_TAG_ERROR` (default `false`)
 - `IMAGE_TAGGING_MAX_IMAGE_DIM` (default `1024`)
 
+If `MODEL_PROVIDER=llama.cpp` and your `llama-server` VLM is started without a
+valid `--mmproj`, image requests can fail with `image input is not supported`.
+DocInt now treats this as non-retryable, logs it once, and disables image
+tagging for the rest of the run. To skip tagging entirely, set
+`IMAGE_TAGGING_ENABLED=false`.
+
 ### Document Pipeline Config Knobs
 
 - `PIPELINE_TEXT_COVERAGE_THRESHOLD` (default `0.01`)
