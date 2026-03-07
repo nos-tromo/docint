@@ -11,7 +11,7 @@ def render_sidebar() -> None:
     """Render the full sidebar: branding, nav, collection control, sessions."""
     with st.sidebar:
         # ── Branding ──────────────────────────────────────────────
-        st.markdown("## 🔍 DocInt")
+        st.markdown("## 🔍 docint")
         st.caption("Document Intelligence")
 
         st.divider()
