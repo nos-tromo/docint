@@ -213,9 +213,23 @@ def load_image_ingestion_config(
     default_image_cache_by_hash: bool = True,
     default_fail_on_embedding_error: bool = False,
     default_fail_on_tagging_error: bool = False,
+    default_retrieve_top_k: int = 5,
     default_tagging_max_image_dimension: int = 1024,
 ) -> ImageIngestionConfig:
     """Load image ingestion settings from environment variables.
+
+    Args:
+        default_image_ingestion_enabled (bool): Whether image ingestion is enabled by default.
+        default_image_embedding_enabled (bool): Whether to generate embeddings for images by default.
+        default_image_tagging_enabled (bool): Whether to generate tags for images by default.
+        default_image_qdrant_collection (str): Default Qdrant collection name for storing image vectors.
+        default_image_qdrant_vector_name (str): Default name of the vector field in Qdrant for image vectors.
+        default_image_cache_by_hash (bool): Whether to cache image embeddings by hash to avoid redundant computation. Default is True.
+        default_fail_on_embedding_error (bool): Whether to fail the entire ingestion if image embedding fails. Default is False.
+        default_fail_on_tagging_error (bool): Whether to fail the entire ingestion if image tagging fails. Default is False.
+        default_retrieve_top_k (int): The number of top image matches to retrieve for a text query. Default is 5.
+        default_tagging_max_image_dimension (int): Maximum pixel dimension (width or height) for
+            images sent to the vision tagging endpoint. Larger images are down-scaled. Default is 1024.
 
     Returns:
         ImageIngestionConfig: Dataclass containing image ingestion configuration.
@@ -227,6 +241,7 @@ def load_image_ingestion_config(
         - cache_by_hash (bool): Whether to cache image embeddings by hash to avoid redundant computation.
         - fail_on_embedding_error (bool): Whether to fail the entire ingestion if image embedding fails.
         - fail_on_tagging_error (bool): Whether to fail the entire ingestion if image tagging fails.
+        - retrieve_top_k (int): The number of top image matches to retrieve for a text query.
         - tagging_max_image_dimension (int): Maximum pixel dimension (width or height) for
             images sent to the vision tagging endpoint. Larger images are down-scaled.
     """
@@ -261,6 +276,7 @@ def load_image_ingestion_config(
             os.getenv("IMAGE_FAIL_ON_TAG_ERROR", default_fail_on_tagging_error)
         ).lower()
         in {"1", "true", "yes"},
+        retrieve_top_k=int(os.getenv("IMAGE_RETRIEVE_TOP_K", default_retrieve_top_k)),
         tagging_max_image_dimension=int(
             os.getenv(
                 "IMAGE_TAGGING_MAX_IMAGE_DIM", default_tagging_max_image_dimension
