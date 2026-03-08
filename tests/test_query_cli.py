@@ -164,7 +164,49 @@ def test_run_query_records_results(
     """
 
     class DummyRAG:
+        """Dummy RAG class for testing the run_query function, simulating query expansion
+        and execution with debug information.
+        """
+
+        def __init__(self) -> None:
+            """Initialize the DummyRAG with an empty list of seen queries."""
+            self.seen_queries: list[str] = []
+
+        def expand_query_with_graph_with_debug(
+            self, query: str
+        ) -> tuple[str, dict[str, Any]]:
+            """Simulate query expansion with graph-assisted retrieval by returning an expanded
+            query and debug information.
+
+            Args:
+                query (str): The original query string to expand.
+
+            Returns:
+                tuple[str, dict[str, Any]]: A tuple containing the expanded query string and a
+                dictionary with debug information about the expansion process.
+            """
+            return (
+                f"{query}\n\nRelated entities for retrieval: Acme",
+                {
+                    "enabled": True,
+                    "applied": True,
+                    "original_query": query,
+                    "expanded_query": f"{query}\n\nRelated entities for retrieval: Acme",
+                    "anchor_entities": ["Acme"],
+                    "neighbor_entities": ["Widget"],
+                },
+            )
+
         def run_query(self, query: str) -> dict[str, str]:
+            """Simulate running a query by returning the query in the response and recording seen queries.
+
+            Args:
+                query (str): The query string to run.
+
+            Returns:
+                dict[str, str]: A dictionary containing the query as the response.
+            """
+            self.seen_queries.append(query)
             return {"response": query}
 
     calls: list[tuple[str, dict]] = []
@@ -187,7 +229,9 @@ def test_run_query_records_results(
     assert calls
     name, data = calls[0]
     assert "_3_result" in name
-    assert data["response"] == "hello"
+    assert data["response"] == "hello\n\nRelated entities for retrieval: Acme"
+    assert data["graph_debug"]["applied"] is True
+    assert data["graph_debug"]["anchor_entities"] == ["Acme"]
     assert "validation_checked" in data
     assert "validation_mismatch" in data
     assert "validation_reason" in data

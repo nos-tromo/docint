@@ -153,7 +153,7 @@ def test_normalize_response_data_falls_back_for_empty_model_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Normalization should return a non-empty fallback when model output is empty.
-    
+
     Args:
         monkeypatch: The monkeypatch fixture.
     """
@@ -432,7 +432,7 @@ def test_expand_query_with_graph_with_debug_applies_neighbors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Graph expansion should return expanded query plus debug anchor/neighbor metadata.
-    
+
     Args:
         monkeypatch: The monkeypatch fixture.
     """
