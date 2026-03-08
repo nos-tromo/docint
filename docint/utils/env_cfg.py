@@ -89,7 +89,7 @@ class GraphRAGConfig:
 
 
 def load_graphrag_env(
-    default_enabled: bool = False,
+    default_enabled: bool = True,
     default_neighbor_hops: int = 1,
     default_top_k_nodes: int = 100,
     default_min_edge_weight: int = 1,

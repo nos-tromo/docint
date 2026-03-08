@@ -143,7 +143,18 @@ class DummyRAG:
             dict[str, Any]: The response from the RAG system.
         """
         self.chats.append(question)
-        return {"response": "answer", "sources": [{"id": 1}]}
+        return {
+            "response": "answer",
+            "sources": [{"id": 1}],
+            "graph_debug": {
+                "enabled": True,
+                "applied": True,
+                "original_query": question,
+                "expanded_query": f"{question}\n\nRelated entities for retrieval: Acme",
+                "anchor_entities": ["Acme"],
+                "neighbor_entities": ["Widget"],
+            },
+        }
 
     def stream_chat(self, question: str) -> Generator[str | dict[str, Any], None, None]:
         """
@@ -157,7 +168,18 @@ class DummyRAG:
         """
         _ = question
         yield "chunk"
-        yield {"sources": [{"id": 1}], "session_id": "generated-session"}
+        yield {
+            "sources": [{"id": 1}],
+            "session_id": "generated-session",
+            "graph_debug": {
+                "enabled": True,
+                "applied": True,
+                "original_query": question,
+                "expanded_query": f"{question}\n\nRelated entities for retrieval: Acme",
+                "anchor_entities": ["Acme"],
+                "neighbor_entities": ["Widget"],
+            },
+        }
 
     def summarize_collection(self, refresh: bool = False) -> dict[str, Any]:
         """Return canned summarize payload.
@@ -716,6 +738,7 @@ def test_stream_query_includes_validation_metadata(client: TestClient) -> None:
         text = "".join([chunk.decode() for chunk in resp.iter_raw()])
     assert '"validation_checked"' in text
     assert '"validation_mismatch"' in text
+    assert '"graph_debug"' in text
 
 
 def test_summarize_includes_summary_diagnostics(client: TestClient) -> None:
@@ -973,6 +996,8 @@ def test_query_success(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> N
     assert body["answer"] == "answer"
     assert body["sources"] == [{"id": 1}]
     assert body["session_id"] == "abc"
+    assert body["graph_debug"]["applied"] is True
+    assert body["graph_debug"]["anchor_entities"] == ["Acme"]
 
 
 def test_query_handles_missing_sources(

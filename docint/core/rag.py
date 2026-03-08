@@ -89,6 +89,10 @@ from docint.utils.openai_cfg import LocalOpenAI
 SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
 SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
 SUMMARY_CACHE_REVISION_KEY = "summary_revision"
+EMPTY_RESPONSE_FALLBACK = (
+    "I couldn't generate a grounded answer from the retrieved context. "
+    "Please try rephrasing the question or ingesting more relevant documents."
+)
 
 
 @dataclass(slots=True)
@@ -1211,6 +1215,9 @@ class RAG:
                 )
             )
 
+        if not str(resp_text or "").strip():
+            resp_text = EMPTY_RESPONSE_FALLBACK
+
         return {
             "query": query,
             "reasoning": reason,
@@ -1699,22 +1706,35 @@ class RAG:
             self.sessions = SessionManager(self)
         return self.sessions.stream_chat(user_msg)
 
-    def expand_query_with_graph(self, query: str) -> str:
-        """Optionally expand a query using graph-neighbor entities.
-
-        This is a lightweight GraphRAG bridge: when enabled, entity mentions
-        already present in the query are used as anchors, and high-scoring
-        neighboring entities are appended to improve recall during retrieval.
+    def expand_query_with_graph_with_debug(
+        self, query: str
+    ) -> tuple[str, dict[str, Any]]:
+        """Optionally expand a query and return GraphRAG debug metadata.
 
         Args:
             query: Original retrieval query.
 
         Returns:
-            Expanded query when graph expansion is enabled and applicable,
-            otherwise the original query.
+            A tuple of ``(expanded_query, debug_payload)``.
         """
-        if not self.graphrag_enabled or not query.strip() or not self.qdrant_collection:
-            return query
+        debug: dict[str, Any] = {
+            "enabled": bool(self.graphrag_enabled),
+            "applied": False,
+            "original_query": query,
+            "expanded_query": query,
+            "anchor_entities": [],
+            "neighbor_entities": [],
+        }
+
+        if not query.strip():
+            debug["reason"] = "empty_query"
+            return query, debug
+        if not self.qdrant_collection:
+            debug["reason"] = "no_collection_selected"
+            return query, debug
+        if not self.graphrag_enabled:
+            debug["reason"] = "graphrag_disabled"
+            return query, debug
 
         try:
             aggregate = self._get_collection_ner_aggregate(refresh=False)
@@ -1733,12 +1753,15 @@ class RAG:
                 )
             )
             if not anchors:
-                return query
+                debug["reason"] = "no_anchor_entities"
+                return query, debug
 
             selected_anchors = anchors[:2]
-            anchor_texts = {
+            anchor_texts = [
                 str(ent.get("text") or "").strip() for ent in selected_anchors
-            }
+            ]
+            debug["anchor_entities"] = [txt for txt in anchor_texts if txt]
+            anchor_text_set = set(debug["anchor_entities"])
             neighbor_texts: list[str] = []
             seen: set[str] = set()
             for ent in selected_anchors:
@@ -1753,7 +1776,7 @@ class RAG:
                     text = str(nbr.get("text") or "").strip()
                     if (
                         not text
-                        or text in anchor_texts
+                        or text in anchor_text_set
                         or text.lower() in seen
                         or len(neighbor_texts) >= self.graphrag_max_neighbors
                     ):
@@ -1763,13 +1786,33 @@ class RAG:
                 if len(neighbor_texts) >= self.graphrag_max_neighbors:
                     break
 
+            debug["neighbor_entities"] = neighbor_texts
             if not neighbor_texts:
-                return query
+                debug["reason"] = "no_neighbors_found"
+                return query, debug
+
             related = ", ".join(neighbor_texts)
-            return f"{query}\n\nRelated entities for retrieval: {related}"
+            expanded = f"{query}\n\nRelated entities for retrieval: {related}"
+            debug["applied"] = True
+            debug["expanded_query"] = expanded
+            return expanded, debug
         except Exception as exc:
             logger.warning("Graph query expansion skipped: {}", exc)
-            return query
+            debug["reason"] = f"error:{type(exc).__name__}"
+            return query, debug
+
+    def expand_query_with_graph(self, query: str) -> str:
+        """Optionally expand a query using graph-neighbor entities.
+
+        Args:
+            query: Original retrieval query.
+
+        Returns:
+            Expanded query when graph expansion is enabled and applicable,
+            otherwise the original query.
+        """
+        expanded_query, _ = self.expand_query_with_graph_with_debug(query)
+        return expanded_query
 
     def _summary_document_targets(self) -> list[dict[str, Any]]:
         """Return capped document targets ordered by descending node count."""

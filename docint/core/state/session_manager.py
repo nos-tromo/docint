@@ -199,10 +199,13 @@ class SessionManager:
             if session_context
             else user_msg
         )
-        retrieval_query = self.rag.expand_query_with_graph(retrieval_query)
+        retrieval_query, graph_debug = self.rag.expand_query_with_graph_with_debug(
+            retrieval_query
+        )
 
         resp = engine.query(retrieval_query)
         response = self.rag._normalize_response_data(user_msg, resp)
+        response["graph_debug"] = graph_debug
         self._persist_turn(session_id, user_msg, resp, response)
         self._maybe_update_summary(session_id)
         return response
@@ -248,7 +251,9 @@ class SessionManager:
         retrieval_query = (
             f"{summary}\n\nUser question: {user_msg}" if summary else user_msg
         )
-        retrieval_query = self.rag.expand_query_with_graph(retrieval_query)
+        retrieval_query, graph_debug = self.rag.expand_query_with_graph_with_debug(
+            retrieval_query
+        )
 
         response = streaming_engine.query(retrieval_query)
         response_gen = getattr(response, "response_gen", None)
@@ -277,6 +282,7 @@ class SessionManager:
         )
 
         normalized = self.rag._normalize_response_data(user_msg, final_response)
+        normalized["graph_debug"] = graph_debug
         self._persist_turn(session_id, user_msg, final_response, normalized)
         self._maybe_update_summary(session_id)
 
@@ -285,6 +291,7 @@ class SessionManager:
             "sources": normalized.get("sources", []),
             "session_id": session_id,
             "reasoning": normalized.get("reasoning"),
+            "graph_debug": normalized.get("graph_debug"),
         }
 
     def export_session(

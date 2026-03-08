@@ -15,6 +15,28 @@ from docint.ui.components import (
 from docint.ui.state import BACKEND_HOST
 
 
+def _format_graph_debug_summary(graph_debug: dict[str, Any] | None) -> str | None:
+    """Build a compact text line for GraphRAG debug metadata.
+
+    Args:
+        graph_debug: Optional GraphRAG debug payload.
+
+    Returns:
+        A compact summary string or ``None`` when unavailable.
+    """
+    if not isinstance(graph_debug, dict):
+        return None
+    enabled = graph_debug.get("enabled")
+    applied = graph_debug.get("applied")
+    reason = graph_debug.get("reason")
+    anchors = graph_debug.get("anchor_entities")
+    neighbors = graph_debug.get("neighbor_entities")
+    return (
+        f"enabled={enabled}, applied={applied}, reason={reason}, "
+        f"anchors={anchors}, neighbors={neighbors}"
+    )
+
+
 def render_chat() -> None:
     """Render the chat interface.
     This includes the message history, chat input, and handling of streaming responses from the backend.
@@ -48,6 +70,9 @@ def render_chat() -> None:
                 if msg.get("validation_reason"):
                     chat_text += f", reason={msg['validation_reason']}"
                 chat_text += "\n\n"
+            graph_line = _format_graph_debug_summary(msg.get("graph_debug"))
+            if graph_line:
+                chat_text += f"GRAPHRAG: {graph_line}\n\n"
 
         st.download_button(
             label="📥 Download chat (.txt)",
@@ -70,6 +95,9 @@ def render_chat() -> None:
                 validation_mismatch=msg.get("validation_mismatch"),
                 validation_reason=msg.get("validation_reason"),
             )
+            if isinstance(msg.get("graph_debug"), dict):
+                with st.expander("GraphRAG Debug"):
+                    st.json(msg["graph_debug"])
 
             if msg.get("sources"):
                 with st.expander("View Sources"):
@@ -123,6 +151,7 @@ def render_chat() -> None:
             validation_checked: bool | None = None
             validation_mismatch: bool | None = None
             validation_reason: str | None = None
+            graph_debug: dict[str, Any] | None = None
 
             payload = {
                 "question": prompt,
@@ -158,6 +187,7 @@ def render_chat() -> None:
                             nonlocal validation_checked
                             nonlocal validation_mismatch
                             nonlocal validation_reason
+                            nonlocal graph_debug
                             if not line:
                                 return
                             decoded = line.decode("utf-8")
@@ -173,6 +203,8 @@ def render_chat() -> None:
                                     )
                                 if "validation_reason" in data:
                                     validation_reason = data.get("validation_reason")
+                                if isinstance(data.get("graph_debug"), dict):
+                                    graph_debug = data.get("graph_debug")
                                 if data.get("session_id"):
                                     st.session_state.session_id = data.get("session_id")
                                 if "token" in data:
@@ -211,6 +243,9 @@ def render_chat() -> None:
                             validation_mismatch=validation_mismatch,
                             validation_reason=validation_reason,
                         )
+                        if graph_debug is not None:
+                            with st.expander("GraphRAG Debug"):
+                                st.json(graph_debug)
 
                         if sources:
                             with st.expander("View Sources"):
@@ -233,6 +268,8 @@ def render_chat() -> None:
                             msg_entry["validation_mismatch"] = validation_mismatch
                         if validation_reason:
                             msg_entry["validation_reason"] = validation_reason
+                        if graph_debug is not None:
+                            msg_entry["graph_debug"] = graph_debug
                         st.session_state.messages.append(msg_entry)
                         st.session_state.chat_running = False
                         st.rerun()
