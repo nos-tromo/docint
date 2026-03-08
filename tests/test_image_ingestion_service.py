@@ -37,7 +37,7 @@ class FakeEmbeddingBackend:
 
         Returns:
             int: The number of dimensions in the embedding vectors.
-        """        
+        """
         return 3
 
     def embed(self, image_bytes: bytes) -> list[float]:
@@ -47,12 +47,12 @@ class FakeEmbeddingBackend:
             image_bytes (bytes): The raw bytes of the image to be embedded.
 
         Returns:
-            list[float]: A list of floats representing the embedding vector for the 
-            input image. The values are derived from the first byte of the image to 
-            ensure consistency across test runs. The vector has a fixed length of 3, 
-            with the first value influenced by the image content and the remaining 
+            list[float]: A list of floats representing the embedding vector for the
+            input image. The values are derived from the first byte of the image to
+            ensure consistency across test runs. The vector has a fixed length of 3,
+            with the first value influenced by the image content and the remaining
             values set to constants for simplicity.
-        """        
+        """
         seed = image_bytes[0] if image_bytes else 1
         return [float(seed), 0.5, 0.25]
 
@@ -339,7 +339,7 @@ def test_ingest_image_stores_expected_payload_and_vector() -> None:
 
 def test_document_and_standalone_follow_same_shared_schema(tmp_path: Path) -> None:
     """Identical images ingested as standalone then document should share a point and track occurrences.
-    
+
     Args:
     tmp_path: pytest fixture providing a temporary directory for test files.
     """
