@@ -445,6 +445,43 @@ class ImageIngestionService:
         self._vector_stores[collection_name] = vector_store
         return vector_store
 
+    def _collection_exists(self, collection_name: str) -> bool:
+        """Return whether a collection exists in Qdrant.
+
+        Args:
+            collection_name: Name of the collection to verify.
+
+        Returns:
+            ``True`` when the collection exists, else ``False``.
+        """
+        if self.qdrant_client is None:
+            return False
+
+        collection_exists = getattr(self.qdrant_client, "collection_exists", None)
+        if callable(collection_exists):
+            try:
+                return bool(collection_exists(collection_name))
+            except Exception:
+                pass
+
+        try:
+            self.qdrant_client.get_collection(collection_name)
+            return True
+        except Exception as exc:
+            message = str(exc).lower()
+            if (
+                "not found" in message
+                or "doesn't exist" in message
+                or "missing" in message
+            ):
+                return False
+            logger.warning(
+                "Image collection existence check failed for '{}': {}",
+                collection_name,
+                exc,
+            )
+            return False
+
     def _get_embedding_backend(self) -> ImageEmbeddingBackend | None:
         """Resolve the configured embedding backend lazily.
 
@@ -962,6 +999,8 @@ class ImageIngestionService:
         except Exception as exc:
             logger.warning("Image query skipped: {}", exc)
             return []
+        if not self._collection_exists(target_collection):
+            return []
         vector_store = self._get_vector_store(target_collection)
 
         if isinstance(image, Path):
@@ -1022,6 +1061,8 @@ class ImageIngestionService:
             target_collection = self._resolve_collection_name(source_collection)
         except Exception as exc:
             logger.warning("Image text-query skipped: {}", exc)
+            return []
+        if not self._collection_exists(target_collection):
             return []
         try:
             query_embedding = embedding_backend.embed_text(query_text)
