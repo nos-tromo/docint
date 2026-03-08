@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import json
 import operator
 import os
@@ -9,6 +10,7 @@ import shutil
 import stat
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -82,6 +84,11 @@ from docint.core.state.session_manager import SessionManager
 from docint.core.storage.docstore import QdrantKVStore
 from docint.core.storage.sources import stage_sources_to_qdrant
 from docint.utils.openai_cfg import LocalOpenAI
+
+
+SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
+SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
+SUMMARY_CACHE_REVISION_KEY = "summary_revision"
 
 
 @dataclass(slots=True)
@@ -1244,6 +1251,7 @@ class RAG:
             raise ValueError("Collection name cannot be empty")
         target = name.strip()
         self._invalidate_ner_cache(target)
+        self._bump_summary_revision(target, allow_create=False)
 
         # 1. Delete from Qdrant API
         try:
@@ -1445,6 +1453,7 @@ class RAG:
                 self.device,
                 self.device,
             )
+        self._bump_summary_revision(self.qdrant_collection)
         logger.info("Documents ingested successfully.")
 
     async def asingest_docs(
@@ -1539,6 +1548,7 @@ class RAG:
                 self.device,
                 self.device,
             )
+        self._bump_summary_revision(self.qdrant_collection)
         logger.info("Documents ingested successfully (async path).")
 
     def run_query(self, prompt: str) -> dict[str, Any]:
@@ -1760,41 +1770,6 @@ class RAG:
         except Exception as exc:
             logger.warning("Graph query expansion skipped: {}", exc)
             return query
-
-    def summarize_collection(self) -> dict[str, Any]:
-        """Generate a coverage-aware summary for the selected collection.
-
-        Returns:
-            dict[str, Any]: Summary payload with normalized sources and diagnostics.
-
-        Raises:
-            ValueError: If no collection is selected.
-        """
-        if not self.qdrant_collection:
-            raise ValueError("No collection selected.")
-
-        context = self._prepare_collection_summary_context()
-        diagnostics = context["summary_diagnostics"]
-        covered_documents = int(diagnostics.get("covered_documents", 0) or 0)
-        total_documents = int(diagnostics.get("total_documents", 0) or 0)
-
-        if total_documents == 0:
-            summary_text = "No documents available in the selected collection."
-        elif covered_documents == 0:
-            summary_text = (
-                "Unable to extract grounded evidence from the selected collection."
-            )
-        else:
-            completion = self.text_model.complete(context["synthesis_prompt"])
-            summary_text = str(getattr(completion, "text", "") or "").strip()
-
-        return {
-            "query": self.summarize_prompt,
-            "reasoning": None,
-            "response": summary_text,
-            "sources": context["sources"],
-            "summary_diagnostics": diagnostics,
-        }
 
     def _summary_document_targets(self) -> list[dict[str, Any]]:
         """Return capped document targets ordered by descending node count."""
@@ -2100,8 +2075,295 @@ class RAG:
             "summary_diagnostics": diagnostics,
         }
 
-    def stream_summarize_collection(self) -> Any:
+    def _summary_kv_store(
+        self,
+        collection: str | None = None,
+        *,
+        allow_create: bool = True,
+    ) -> QdrantKVStore | None:
+        """Return the per-collection KV store used by summary cache operations.
+
+        Args:
+            collection: Optional collection name override.
+            allow_create: Whether creating the dockv collection is allowed.
+
+        Returns:
+            QdrantKVStore | None: A KV store instance when available, else None.
+        """
+        target = str(collection or self.qdrant_collection or "").strip()
+        if not target:
+            return None
+
+        kv_collection = f"{target}_dockv"
+        if not allow_create:
+            try:
+                if not self.qdrant_client.collection_exists(kv_collection):
+                    return None
+            except Exception as exc:
+                logger.warning(
+                    "Unable to check summary cache collection '{}': {}",
+                    kv_collection,
+                    exc,
+                )
+                return None
+
+        try:
+            return QdrantKVStore(
+                client=self.qdrant_client,
+                collection_name=kv_collection,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to initialize summary cache KV store '{}': {}",
+                kv_collection,
+                exc,
+            )
+            return None
+
+    def _summary_prompt_fingerprint(self) -> str:
+        """Build a stable fingerprint for summarize prompt and summary knobs.
+
+        Returns:
+            str: SHA-256 fingerprint used for cache validation.
+        """
+        payload = {
+            "summarize_prompt": self.summarize_prompt,
+            "summary_coverage_target": self.summary_coverage_target,
+            "summary_max_docs": self.summary_max_docs,
+            "summary_per_doc_top_k": self.summary_per_doc_top_k,
+            "summary_final_source_cap": self.summary_final_source_cap,
+        }
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def _get_summary_revision(
+        self,
+        collection: str | None = None,
+        *,
+        allow_create: bool = True,
+    ) -> int:
+        """Load the current summary revision for a collection.
+
+        Args:
+            collection: Optional collection name override.
+            allow_create: Whether creating the dockv collection is allowed.
+
+        Returns:
+            int: Monotonic revision value; defaults to 0 when unavailable.
+        """
+        kv_store = self._summary_kv_store(
+            collection=collection, allow_create=allow_create
+        )
+        if kv_store is None:
+            return 0
+
+        try:
+            stored = kv_store.get(
+                SUMMARY_CACHE_REVISION_KEY,
+                collection=SUMMARY_CACHE_NAMESPACE,
+            )
+        except Exception as exc:
+            logger.warning("Failed to load summary revision: {}", exc)
+            return 0
+
+        if not isinstance(stored, dict):
+            return 0
+        try:
+            revision = int(stored.get("revision", 0))
+        except (TypeError, ValueError):
+            return 0
+        return max(0, revision)
+
+    def _bump_summary_revision(
+        self,
+        collection: str | None = None,
+        *,
+        allow_create: bool = True,
+    ) -> int:
+        """Increment and persist summary revision for a collection.
+
+        Args:
+            collection: Optional collection name override.
+            allow_create: Whether creating the dockv collection is allowed.
+
+        Returns:
+            int: The updated revision.
+        """
+        kv_store = self._summary_kv_store(
+            collection=collection, allow_create=allow_create
+        )
+        if kv_store is None:
+            return 0
+
+        current_revision = self._get_summary_revision(
+            collection=collection,
+            allow_create=allow_create,
+        )
+        next_revision = current_revision + 1
+        try:
+            kv_store.put(
+                SUMMARY_CACHE_REVISION_KEY,
+                {"revision": next_revision},
+                collection=SUMMARY_CACHE_NAMESPACE,
+            )
+        except Exception as exc:
+            logger.warning("Failed to persist summary revision bump: {}", exc)
+            return current_revision
+        return next_revision
+
+    def _load_cached_collection_summary(
+        self, *, refresh: bool
+    ) -> dict[str, Any] | None:
+        """Load a cached summary if revision and prompt fingerprint still match.
+
+        Args:
+            refresh: If ``True``, bypass cache lookup.
+
+        Returns:
+            dict[str, Any] | None: Cached summary payload or None when stale/missing.
+        """
+        if refresh:
+            return None
+
+        kv_store = self._summary_kv_store()
+        if kv_store is None:
+            return None
+
+        try:
+            payload = kv_store.get(
+                SUMMARY_CACHE_PAYLOAD_KEY,
+                collection=SUMMARY_CACHE_NAMESPACE,
+            )
+        except Exception as exc:
+            logger.warning("Failed to load cached collection summary: {}", exc)
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        try:
+            cached_revision = int(payload.get("revision", -1))
+        except (TypeError, ValueError):
+            return None
+        current_revision = self._get_summary_revision()
+        if cached_revision != current_revision:
+            return None
+
+        expected_fingerprint = self._summary_prompt_fingerprint()
+        cached_fingerprint = str(payload.get("prompt_fingerprint") or "")
+        if cached_fingerprint != expected_fingerprint:
+            return None
+
+        sources = payload.get("sources")
+        if not isinstance(sources, list):
+            sources = []
+        summary_diagnostics = payload.get("summary_diagnostics")
+        if not isinstance(summary_diagnostics, dict):
+            summary_diagnostics = {}
+
+        return {
+            "query": self.summarize_prompt,
+            "reasoning": None,
+            "response": str(payload.get("response") or ""),
+            "sources": sources,
+            "summary_diagnostics": summary_diagnostics,
+        }
+
+    def _store_cached_collection_summary(self, payload: dict[str, Any]) -> None:
+        """Persist a collection summary payload in the dockv summary namespace.
+
+        Args:
+            payload: Summary payload to cache.
+        """
+        kv_store = self._summary_kv_store()
+        if kv_store is None:
+            return
+
+        revision = self._get_summary_revision()
+        prompt_fingerprint = self._summary_prompt_fingerprint()
+        sources = payload.get("sources")
+        if not isinstance(sources, list):
+            sources = []
+        summary_diagnostics = payload.get("summary_diagnostics")
+        if not isinstance(summary_diagnostics, dict):
+            summary_diagnostics = {}
+
+        cache_payload = {
+            "revision": revision,
+            "prompt_fingerprint": prompt_fingerprint,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "response": str(payload.get("response") or ""),
+            "sources": sources,
+            "summary_diagnostics": summary_diagnostics,
+        }
+        try:
+            kv_store.put(
+                SUMMARY_CACHE_PAYLOAD_KEY,
+                cache_payload,
+                collection=SUMMARY_CACHE_NAMESPACE,
+            )
+            kv_store.put(
+                SUMMARY_CACHE_REVISION_KEY,
+                {"revision": revision},
+                collection=SUMMARY_CACHE_NAMESPACE,
+            )
+        except Exception as exc:
+            logger.warning("Failed to store cached collection summary: {}", exc)
+
+    def summarize_collection(self, refresh: bool = False) -> dict[str, Any]:
+        """Generate a coverage-aware summary for the selected collection.
+
+        Args:
+            refresh: If ``True``, bypass cached summary payloads.
+
+        Returns:
+            dict[str, Any]: Summary payload with normalized sources and diagnostics.
+
+        Raises:
+            ValueError: If no collection is selected.
+        """
+        if not self.qdrant_collection:
+            raise ValueError("No collection selected.")
+
+        cached_payload = self._load_cached_collection_summary(refresh=refresh)
+        if cached_payload is not None:
+            return cached_payload
+
+        context = self._prepare_collection_summary_context()
+        diagnostics = context["summary_diagnostics"]
+        covered_documents = int(diagnostics.get("covered_documents", 0) or 0)
+        total_documents = int(diagnostics.get("total_documents", 0) or 0)
+
+        if total_documents == 0:
+            summary_text = "No documents available in the selected collection."
+        elif covered_documents == 0:
+            summary_text = (
+                "Unable to extract grounded evidence from the selected collection."
+            )
+        else:
+            completion = self.text_model.complete(context["synthesis_prompt"])
+            summary_text = str(getattr(completion, "text", "") or "").strip()
+
+        payload = {
+            "query": self.summarize_prompt,
+            "reasoning": None,
+            "response": summary_text,
+            "sources": context["sources"],
+            "summary_diagnostics": diagnostics,
+        }
+        self._store_cached_collection_summary(payload)
+        return payload
+
+    def stream_summarize_collection(self, refresh: bool = False) -> Any:
         """Generate a streaming summary of the currently selected collection.
+
+        Args:
+            refresh: If ``True``, bypass cached summary payloads.
 
         Yields:
             str | dict: Chunks of text, followed by a dict with metadata.
@@ -2112,6 +2374,14 @@ class RAG:
         if not self.qdrant_collection:
             raise ValueError("No collection selected.")
 
+        cached_payload = self._load_cached_collection_summary(refresh=refresh)
+        if cached_payload is not None:
+            full_text = str(cached_payload.get("response") or "")
+            if full_text:
+                yield full_text
+            yield cached_payload
+            return
+
         context = self._prepare_collection_summary_context()
         diagnostics = context["summary_diagnostics"]
         covered_documents = int(diagnostics.get("covered_documents", 0) or 0)
@@ -2119,28 +2389,32 @@ class RAG:
 
         if total_documents == 0:
             full_text = "No documents available in the selected collection."
-            yield full_text
-            yield {
+            payload = {
                 "query": self.summarize_prompt,
                 "reasoning": None,
                 "response": full_text,
                 "sources": context["sources"],
                 "summary_diagnostics": diagnostics,
             }
+            self._store_cached_collection_summary(payload)
+            yield full_text
+            yield payload
             return
 
         if covered_documents == 0:
             full_text = (
                 "Unable to extract grounded evidence from the selected collection."
             )
-            yield full_text
-            yield {
+            payload = {
                 "query": self.summarize_prompt,
                 "reasoning": None,
                 "response": full_text,
                 "sources": context["sources"],
                 "summary_diagnostics": diagnostics,
             }
+            self._store_cached_collection_summary(payload)
+            yield full_text
+            yield payload
             return
 
         full_text = ""
@@ -2162,13 +2436,15 @@ class RAG:
             full_text += token
             yield token
 
-        yield {
+        payload = {
             "query": self.summarize_prompt,
             "reasoning": None,
             "response": full_text,
             "sources": context["sources"],
             "summary_diagnostics": diagnostics,
         }
+        self._store_cached_collection_summary(payload)
+        yield payload
 
     def list_documents(self) -> list[dict[str, Any]]:
         """List all documents in the current collection by scanning all points.
