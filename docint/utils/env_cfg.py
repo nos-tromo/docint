@@ -16,7 +16,7 @@ def set_offline_env() -> None:
     ``huggingface_hub`` / ``transformers`` cache their values at import time.
     This function re-applies them (idempotent) and emits a log message.
     """
-    if os.getenv("DOCINT_OFFLINE", "1").lower() in {"1", "true", "yes"}:
+    if str(os.getenv("DOCINT_OFFLINE", "1")).lower() in {"1", "true", "yes"}:
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
@@ -201,6 +201,7 @@ class ImageIngestionConfig:
     cache_by_hash: bool
     fail_on_embedding_error: bool
     fail_on_tagging_error: bool
+    retrieve_top_k: int
     tagging_max_image_dimension: int = 1024
 
 
@@ -440,6 +441,7 @@ def load_model_env(
         ModelConfig: Dataclass containing model configuration.
         - embed_model_file (str): The embedding model file name.
         - embed_model_repo (str): The embedding model HuggingFace repo ID for cache resolution
+        - image_embed_model (str): The image embedding model identifier.
         - ner_model (str): The NER model identifier.
         - rerank_model (str): The reranker model identifier.
         - sparse_model (str): The sparse model identifier.
@@ -516,7 +518,7 @@ def load_ner_env(
 
     Args:
         default_enabled (bool): Default value to enable NER extraction. Set to True to enable by default.
-        default_max_chars (int): Default maximum characters for NER extraction.
+        default_max_chars (int): Default maximum characters for a processed chunk for NER extraction.
         default_max_workers (int): Default maximum worker threads for NER extraction.
 
     Returns:
@@ -556,7 +558,7 @@ class OpenAIConfig:
 def load_openai_env(
     default_api_base: str = "http://localhost:8080/v1",
     default_api_key: str = "sk-no-key-required",
-    default_ctx_window: int = 32768,
+    default_ctx_window: int = 4096,
     default_dimensions: int = 1024,
     default_max_retries: int = 2,
     default_model_provider: str = "llama.cpp",
@@ -583,6 +585,17 @@ def load_openai_env(
 
     Returns:
         OpenAIConfig: Dataclass containing OpenAI configuration.
+        - api_base (str): The OpenAI API base URL.
+        - api_key (str): The OpenAI API key.
+        - ctx_window (int): The context window size for models that support it.
+        - dimensions (int): The embedding dimensions for embedding models.
+        - max_retries (int): The number of retries for API calls.
+        - model_provider (str): The inference server type (e.g. "llama.cpp", "ollama", "openai").
+        - reuse_client (bool): Whether to reuse the OpenAI client across calls.
+        - seed (int): Random seed for reproducibility.
+        - temperature (float): Temperature for text generation.
+        - timeout (float): Timeout in seconds for API calls.
+        - top_p (float): Top_p for nucleus sampling.
 
     Raises:
         ValueError: If an unsupported inference server is specified.
@@ -684,27 +697,7 @@ def load_path_env() -> PathConfig:
 
 @dataclass(frozen=True)
 class PipelineConfig:
-    """Configuration for the document processing pipeline.
-
-    Attributes:
-        text_coverage_threshold: Minimum characters-per-area ratio below which
-            a page is classified as needing OCR.
-        pipeline_version: Semver string identifying the pipeline logic version.
-        artifacts_dir: Root directory for artifact output.
-        max_retries: Maximum retry attempts per stage on a given page.
-        force_reprocess: When True, ignore existing artifacts and reprocess.
-        max_workers: Maximum parallel workers for document-level processing.
-        enable_vision_ocr: When True, use the vision LLM as a fallback OCR
-            engine for scanned pages that have no extractable text layer.
-        vision_ocr_timeout: Per-request timeout in seconds for vision OCR API
-            calls (separate from the global ``OPENAI_TIMEOUT``).
-        vision_ocr_max_retries: Maximum retries for a single vision OCR API call.
-        vision_ocr_max_image_dimension: Maximum pixel dimension (width or height)
-            for images sent to the vision OCR endpoint.  Larger renders are
-            down-scaled proportionally before encoding.
-        vision_ocr_max_tokens: Maximum number of tokens the vision LLM may
-            generate per OCR request.  Keeps response time bounded.
-    """
+    """Configuration for the document processing pipeline."""
 
     text_coverage_threshold: float
     pipeline_version: str
@@ -749,6 +742,17 @@ def load_pipeline_config(
 
     Returns:
         A fully-initialised ``PipelineConfig``.
+        - text_coverage_threshold (float): Characters-per-area threshold for OCR classification.
+        - pipeline_version (str): Semver string identifying the pipeline logic version.
+        - artifacts_dir (str): Root directory for artifact output.
+        - max_retries (int): Maximum retry attempts per stage on a given page.
+        - force_reprocess (bool): When True, ignore existing artifacts and reprocess.
+        - max_workers (int): Maximum parallel workers for document-level processing.
+        - enable_vision_ocr (bool): When True, use the vision LLM as a fallback OCR engine for scanned pages that have no extractable text layer.
+        - vision_ocr_timeout (float): Per-request timeout in seconds for vision OCR API calls (separate from the global ``OPENAI_TIMEOUT``).
+        - vision_ocr_max_retries (int): Maximum retries for a single vision OCR API call.
+        - vision_ocr_max_image_dimension (int): Maximum pixel dimension (width or height) for images sent to the vision OCR endpoint.  Larger renders are down-scaled proportionally before encoding.
+        - vision_ocr_max_tokens (int): Maximum number of tokens the vision LLM may generate per OCR request.  Keeps response time bounded.
     """
     pipeline_version = os.getenv("PIPELINE_VERSION", default_pipeline_version).strip()
     if not pipeline_version:
@@ -803,6 +807,7 @@ def load_response_validation_env(
 
     Returns:
         ResponseValidationConfig: Parsed response-validation settings.
+        - enabled (bool): Whether to run response validation on generated answers.
     """
     return ResponseValidationConfig(
         enabled=str(os.getenv("RESPONSE_VALIDATION_ENABLED", default_enabled)).lower()
@@ -893,6 +898,10 @@ def load_summary_env(
 
     Returns:
         SummaryConfig: Parsed summary precision settings.
+        - coverage_target (float): Target minimum document coverage ratio for summaries. Value is clamped to [0.0, 1.0].
+        - max_docs (int): Maximum number of documents to sample for summarization.
+        - per_doc_top_k (int): Maximum number of evidence chunks to retrieve per document.
+        - final_source_cap (int): Maximum number of merged sources to include in the final summary answer to keep it concise and focused.
     """
     raw_target = float(os.getenv("SUMMARY_COVERAGE_TARGET", default_coverage_target))
     target = min(1.0, max(0.0, raw_target))

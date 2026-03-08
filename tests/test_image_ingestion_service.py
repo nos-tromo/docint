@@ -19,19 +19,52 @@ from docint.core.ingest.images_service import (
     IngestContext,
 )
 
+"""Unit tests for the image ingestion service.
+
+Covers hashing, tagging, embedding, caching, format normalisation,
+image resizing, and graceful degradation when backends fail.
+All tests run without GPU or network access by using fake backends
+and an in-memory Qdrant client double.
+"""
+
 
 class FakeEmbeddingBackend:
     """Deterministic embedding backend for CPU-only tests."""
 
     @property
     def dimension(self) -> int:
+        """Returns the dimensionality of the embedding vectors.
+
+        Returns:
+            int: The number of dimensions in the embedding vectors.
+        """        
         return 3
 
     def embed(self, image_bytes: bytes) -> list[float]:
+        """Generates a deterministic embedding vector based on the input image bytes.
+
+        Args:
+            image_bytes (bytes): The raw bytes of the image to be embedded.
+
+        Returns:
+            list[float]: A list of floats representing the embedding vector for the 
+            input image. The values are derived from the first byte of the image to 
+            ensure consistency across test runs. The vector has a fixed length of 3, 
+            with the first value influenced by the image content and the remaining 
+            values set to constants for simplicity.
+        """        
         seed = image_bytes[0] if image_bytes else 1
         return [float(seed), 0.5, 0.25]
 
     def embed_text(self, text: str) -> list[float]:
+        """Generates a deterministic embedding vector based on the input text.
+
+        Args:
+            text: The input text to be embedded.
+
+        Returns:
+            A 3-element float list derived from the stripped text length.
+        """
         seed = float(len(text.strip()) or 1)
         return [seed, 0.5, 0.25]
 
@@ -42,6 +75,15 @@ class FakeTaggingBackend:
     def describe_and_tag(
         self, image_bytes: bytes, mime_type: str
     ) -> tuple[str, list[str]]:
+        """Return a fixed description and tag list for any image.
+
+        Args:
+            image_bytes: Raw bytes of the image (unused).
+            mime_type: MIME type string included in the description.
+
+        Returns:
+            A tuple of (description, tags).
+        """
         return f"Test image ({mime_type})", ["diagram", "paper", "figure"]
 
 
@@ -49,10 +91,22 @@ class FakeQdrantClient:
     """In-memory qdrant client double for image ingestion tests."""
 
     def __init__(self) -> None:
+        """Initialise empty collection and record stores."""
         self.collections: dict[str, Any] = {}
         self.records: dict[str, dict[str, Any]] = {}
 
     def get_collection(self, collection_name: str) -> Any:
+        """Return collection metadata or raise if it does not exist.
+
+        Args:
+            collection_name: Name of the collection to look up.
+
+        Returns:
+            A ``SimpleNamespace`` that mimics Qdrant collection info.
+
+        Raises:
+            RuntimeError: If the collection has not been created.
+        """
         if collection_name not in self.collections:
             raise RuntimeError("missing")
         return self.collections[collection_name]
@@ -60,6 +114,12 @@ class FakeQdrantClient:
     def create_collection(
         self, collection_name: str, vectors_config: dict[str, Any]
     ) -> None:
+        """Register a new collection with the given vector configuration.
+
+        Args:
+            collection_name: Name of the collection to create.
+            vectors_config: Mapping of vector names to their parameters.
+        """
         self.collections[collection_name] = SimpleNamespace(
             config=SimpleNamespace(params=SimpleNamespace(vectors=vectors_config))
         )
@@ -72,6 +132,18 @@ class FakeQdrantClient:
         with_payload: bool,
         with_vectors: bool,
     ) -> tuple[list[Any], None]:
+        """Search records by ``image_id`` filter, returning at most one match.
+
+        Args:
+            collection_name: Ignored (single-collection fake).
+            scroll_filter: Filter object with a ``must`` list of conditions.
+            limit: Ignored.
+            with_payload: Ignored.
+            with_vectors: Ignored.
+
+        Returns:
+            A tuple of (matching records list, ``None`` cursor).
+        """
         del collection_name, limit, with_payload, with_vectors
         image_id: str | None = None
         must = getattr(scroll_filter, "must", []) or []
@@ -90,6 +162,13 @@ class FakeQdrantClient:
     def set_payload(
         self, collection_name: str, payload: dict[str, Any], points: list[str]
     ) -> None:
+        """Merge *payload* into the stored record for each point.
+
+        Args:
+            collection_name: Ignored.
+            payload: Key-value pairs to merge.
+            points: Point IDs whose payloads are updated.
+        """
         del collection_name
         for point_id in points:
             existing = self.records.get(point_id, {})
@@ -101,10 +180,23 @@ class FakeVectorStore:
     """Captures upserted image nodes."""
 
     def __init__(self, client: FakeQdrantClient) -> None:
+        """Initialise with a reference to the fake Qdrant client.
+
+        Args:
+            client: The ``FakeQdrantClient`` that stores point records.
+        """
         self.client = client
         self.add_calls: list[list[Any]] = []
 
     def add(self, nodes: list[Any]) -> list[str]:
+        """Persist nodes as records in the fake client and track calls.
+
+        Args:
+            nodes: Image nodes to upsert.
+
+        Returns:
+            List of point IDs that were stored.
+        """
         self.add_calls.append(nodes)
         ids: list[str] = []
         for node in nodes:
@@ -115,6 +207,14 @@ class FakeVectorStore:
 
 
 def _make_png_bytes(color: tuple[int, int, int] = (120, 10, 10)) -> bytes:
+    """Create a minimal 6x4 PNG image in memory.
+
+    Args:
+        color: RGB tuple used to fill the image.
+
+    Returns:
+        Raw PNG bytes.
+    """
     img = Image.new("RGB", (6, 4), color=color)
     buffer = BytesIO()
     img.save(buffer, format="PNG")
@@ -122,6 +222,11 @@ def _make_png_bytes(color: tuple[int, int, int] = (120, 10, 10)) -> bytes:
 
 
 def _build_service() -> tuple[ImageIngestionService, FakeQdrantClient, FakeVectorStore]:
+    """Construct an ``ImageIngestionService`` wired to fake backends.
+
+    Returns:
+        A tuple of (service, fake Qdrant client, fake vector store).
+    """
     cfg = ImageIngestionConfig(
         enabled=True,
         embedding_enabled=True,
@@ -131,6 +236,7 @@ def _build_service() -> tuple[ImageIngestionService, FakeQdrantClient, FakeVecto
         cache_by_hash=True,
         fail_on_embedding_error=False,
         fail_on_tagging_error=False,
+        retrieve_top_k=5,
     )
     model_cfg = SimpleNamespace(image_embed_model="openai/clip-vit-base-patch32")
     client = FakeQdrantClient()
@@ -147,6 +253,7 @@ def _build_service() -> tuple[ImageIngestionService, FakeQdrantClient, FakeVecto
 
 
 def test_image_id_and_point_id_are_deterministic() -> None:
+    """Image ID (SHA-256) and derived point ID (UUID-5) must be stable across calls."""
     image_bytes = b"docint-image-bytes"
     image_id = ImageIngestionService._hash_image_bytes(image_bytes)
     expected = hashlib.sha256(image_bytes).hexdigest()
@@ -158,6 +265,7 @@ def test_image_id_and_point_id_are_deterministic() -> None:
 
 
 def test_parse_tag_payload_extracts_structured_json() -> None:
+    """``parse_tag_payload`` should extract description and deduplicated, length-filtered tags."""
     raw = json.dumps(
         {
             "description": "A technical architecture diagram.",
@@ -177,6 +285,7 @@ def test_parse_tag_payload_extracts_structured_json() -> None:
 
 
 def test_ingest_image_stores_expected_payload_and_vector() -> None:
+    """A standalone PNG should be embedded, tagged, and stored with all required payload keys."""
     service, client, vector_store = _build_service()
     img_bytes = _make_png_bytes()
 
@@ -229,6 +338,11 @@ def test_ingest_image_stores_expected_payload_and_vector() -> None:
 
 
 def test_document_and_standalone_follow_same_shared_schema(tmp_path: Path) -> None:
+    """Identical images ingested as standalone then document should share a point and track occurrences.
+    
+    Args:
+    tmp_path: pytest fixture providing a temporary directory for test files.
+    """
     service, client, vector_store = _build_service()
     image_bytes = _make_png_bytes(color=(1, 2, 3))
 
@@ -289,6 +403,7 @@ def test_document_and_standalone_follow_same_shared_schema(tmp_path: Path) -> No
 
 
 def test_ingest_image_degrades_when_embedding_backend_init_fails() -> None:
+    """When the CLIP backend raises on init, ingestion should fail gracefully with an error message."""
     cfg = ImageIngestionConfig(
         enabled=True,
         embedding_enabled=True,
@@ -298,6 +413,7 @@ def test_ingest_image_degrades_when_embedding_backend_init_fails() -> None:
         cache_by_hash=True,
         fail_on_embedding_error=False,
         fail_on_tagging_error=False,
+        retrieve_top_k=5,
     )
     model_cfg = SimpleNamespace(image_embed_model="missing/model")
     client = FakeQdrantClient()
@@ -372,6 +488,7 @@ def test_normalize_image_returns_original_on_corrupt_bytes() -> None:
 
 
 def test_collection_template_resolves_with_source_collection() -> None:
+    """A ``{collection}_images`` template should resolve using the source collection name."""
     cfg = ImageIngestionConfig(
         enabled=True,
         embedding_enabled=True,
@@ -381,6 +498,7 @@ def test_collection_template_resolves_with_source_collection() -> None:
         cache_by_hash=True,
         fail_on_embedding_error=False,
         fail_on_tagging_error=False,
+        retrieve_top_k=5,
         tagging_max_image_dimension=1024,
     )
     model_cfg = SimpleNamespace(image_embed_model="openai/clip-vit-base-patch32")
