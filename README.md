@@ -24,8 +24,8 @@ This is a proof of concept document intelligence platform offering the following
 
    - Utilize large language models (LLMs) and other AI models for advanced processing tasks.
    - **Flexible Backend**: Supports OpenAI-compatible APIs (OpenAI, Ollama, llama.cpp, vLLM, etc.) for text and vision tasks.
-   - **Provider-Agnostic Architecture**: The system is designed to be backend-agnostic. While it includes a highly optimized `llama.cpp` server for local inference by default, it can easily switch to any OpenAI-compatible API (Ollama, vLLM, DeepSeek, etc.) by changing environment variables.
-   - **Performance & Decoupling**: Inference runs in a dedicated container (`llamacpp-server`), ensuring the application logic remains responsive even during heavy model computations.
+   - **Provider-Agnostic Architecture**: The system is designed to be backend-agnostic. It uses Ollama for local inference by default, and can switch to any OpenAI-compatible API (`llama.cpp`, vLLM, DeepSeek, etc.) by changing environment variables.
+   - **Performance & Decoupling**: Inference runs in a dedicated container (`ollama-server` by default; `llamacpp-server` for llama.cpp profiles), ensuring the application logic remains responsive even during heavy model computations.
 
 5. **Extensibility**
 
@@ -42,10 +42,10 @@ The platform is provider-agnostic and works with any OpenAI-compatible inference
 
 | Backend | Description | Link |
 |---------|-------------|------|
-| **llama.cpp** | High-performance local inference for GGUF models (bundled in Docker profiles) | [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) |
 | **Ollama** | Easy-to-use local model runner with built-in model management | [ollama/ollama](https://github.com/ollama/ollama) |
-| **vLLM** *(planned)* | High-throughput serving engine with PagedAttention | [vllm-project/vllm](https://github.com/vllm-project/vllm) |
+| **llama.cpp** | High-performance local inference for GGUF models (bundled in Docker profiles) | [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) |
 | **OpenAI API** | Cloud-hosted models (GPT-4o, etc.) via the official API | [openai/openai-python](https://github.com/openai/openai-python) |
+| **vLLM** *(planned)* | High-throughput serving engine with PagedAttention | [vllm-project/vllm](https://github.com/vllm-project/vllm) |
 
 Any other server exposing an OpenAI-compatible `/v1/chat/completions` endpoint (e.g., [LocalAI](https://github.com/mudler/LocalAI), [LM Studio](https://github.com/lmstudio-ai)) can also be used by setting the `OPENAI_API_BASE` environment variable.
 
@@ -88,11 +88,11 @@ Model files are handled automatically by the ingestion pipeline and do not need 
 
    | Profile | Hardware | Inference Backend |
    |---------|----------|-------------------|
-   | `cpu-llamacpp` | CPU | Llama.cpp (default) |
    | `cpu-ollama` | CPU | Ollama |
+   | `cpu-llamacpp` | CPU | Llama.cpp |
    | `cpu-openai` | CPU | External OpenAI API |
-   | `cuda-llamacpp` | NVIDIA GPU | Llama.cpp |
    | `cuda-ollama` | NVIDIA GPU | Ollama |
+   | `cuda-llamacpp` | NVIDIA GPU | Llama.cpp |
    | `cuda-openai` | NVIDIA GPU | External OpenAI API |
 
    CUDA profiles require a CUDA-compatible GPU and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
@@ -102,12 +102,12 @@ Model files are handled automatically by the ingestion pipeline and do not need 
 4. **Start the Services**
 
    ```bash
-   docker compose --profile cpu-llamacpp up
+   docker compose --profile cpu-ollama up
    ```
 
    **What's Included:**
    - **Backend**: FastAPI application for RAG and orchestration.
-   - **Inference Server**: `llama.cpp`, Ollama, or external OpenAI API (depending on profile).
+   - **Inference Server**: Ollama, `llama.cpp`, or external OpenAI API (depending on profile).
    - **Qdrant**: Vector database for hybrid (semantic, bm42) search.
    - **Frontend**: Streamlit UI.
 
@@ -123,7 +123,7 @@ Model files are handled automatically by the ingestion pipeline and do not need 
 
    - **Qdrant**: Must be running (default: `http://localhost:6333`).
    - **Inference Server**: An OpenAI-compatible server (Ollama, LocalAI, vLLM, or `llama-server`) must be accessible.
-     - By default, the app expects an endpoint at `http://localhost:8080/v1` (or `11434` for Ollama). Configure `OPENAI_API_BASE` in `.env` accordingly.
+     - By default, the app expects Ollama at `http://localhost:11434/v1`. For `llama-server`, use `http://localhost:8080/v1`. Configure `OPENAI_API_BASE` in `.env` accordingly.
 
 2. **Create a Local Environment File**
 
@@ -201,14 +201,14 @@ The application is configured via environment variables. Key variables include:
 **Model Selection (Environment Variables):**
 
 - `OPENAI_API_KEY`: API key for the LLM provider (default: `sk-no-key-required`).
-- `OPENAI_API_BASE`: Base API URL. In Docker, this is set automatically per profile (e.g. `http://llamacpp-server:8080/v1` for `*-llamacpp`). For local development, point this to your provider (e.g., `http://localhost:11434/v1`).
+- `OPENAI_API_BASE`: Base API URL. In Docker, this is set automatically per profile (e.g. `http://ollama-server:11434/v1` for `*-ollama`). For local development, point this to your provider (e.g., `http://localhost:11434/v1`).
 - `MODEL_PROVIDER`: Inference provider type (`llama.cpp`, `ollama`, `openai`).
 - `LLM`: Repo ID (e.g., `bartowski/Meta-Llama-3-8B-Instruct-GGUF`) for automatic download.
 - `EMBED_MODEL`: HuggingFace repo ID for the embedding model (e.g. `ggml-org/bge-m3-Q8_0-GGUF`).
 - `VLM`: Vision-language model ID (GGUF `repo;filename` for `llama.cpp` or model tag for Ollama/OpenAI).
 
 **Note on Provider Agnosticism:**
-The backend logic is standard OpenAI-compatible. The `docker-compose.yml` profiles bundle `llama.cpp` and Ollama servers, but you can also point to any external API by selecting a `*-openai` profile and setting `OPENAI_API_BASE` and `OPENAI_API_KEY` in `.env.docker`.
+The backend logic is standard OpenAI-compatible. The `docker-compose.yml` profiles bundle Ollama and `llama.cpp` servers, but you can also point to any external API by selecting a `*-openai` profile and setting `OPENAI_API_BASE` and `OPENAI_API_KEY` in `.env.docker`.
 
 **Local Models (Hugging Face):**
 
@@ -447,7 +447,7 @@ This pipeline is the default PDF ingestion path used by the API/UI/CLI ingestion
 
 ### Artifact Directory Structure
 
-```
+```text
 artifacts/{doc_id}/
 ├── manifest.json                  # Document-level metadata and page triage results
 ├── pages/{page_index}/
@@ -458,7 +458,7 @@ artifacts/{doc_id}/
 └── chunks.jsonl                   # All chunks with stable IDs and metadata
 ```
 
-### Configuration
+### Document Pipeline Configuration
 
 Pipeline behaviour is controlled via environment variables:
 

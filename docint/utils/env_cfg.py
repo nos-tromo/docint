@@ -416,13 +416,13 @@ class ModelConfig:
 
 
 def load_model_env(
-    default_embed_model_str: str = "ggml-org/bge-m3-Q8_0-GGUF;bge-m3-q8_0.gguf",
+    default_embed_model_str: str = "bge-m3",
     default_image_embed_model: str = "openai/clip-vit-base-patch32",
     default_ner_model: str = "gliner-community/gliner_large-v2.5",
     default_rerank_model: str = "BAAI/bge-reranker-v2-m3",
     default_sparse_model: str = "Qdrant/all_miniLM_L6_v2_with_attentions",
-    default_text_model_str: str = "unsloth/Qwen3.5-4B-GGUF;Qwen3.5-4B-Q8_0.gguf",
-    default_vision_model_str: str = "unsloth/Qwen3.5-9B-GGUF;Qwen3.5-9B-Q4_K_M.gguf;mmproj-F16.gguf",
+    default_text_model_str: str = "gpt-oss:20b",
+    default_vision_model_str: str = "qwen3.5:9b",
     default_whisper_model: str = "turbo",
 ) -> ModelConfig:
     """Loads model configuration from environment variables or defaults.
@@ -556,12 +556,12 @@ class OpenAIConfig:
 
 
 def load_openai_env(
-    default_api_base: str = "http://localhost:8080/v1",
+    default_api_base: str = "http://localhost:11434/v1",
     default_api_key: str = "sk-no-key-required",
     default_ctx_window: int = 4096,
     default_dimensions: int = 1024,
     default_max_retries: int = 2,
-    default_model_provider: str = "llama.cpp",
+    default_model_provider: str = "ollama",
     default_reuse_client: bool = False,
     default_seed: int = 42,
     default_temperature: float = 0.0,
@@ -576,7 +576,7 @@ def load_openai_env(
         default_ctx_window (int): Default context window size for models that support it.
         default_dimensions (int): Default embedding dimensions for embedding models.
         default_max_retries (int): Default number of retries.
-        default_model_provider (str): Default inference server type (e.g. "llama.cpp", "ollama", "openai", "vllm"). Default is "llama.cpp".
+        default_model_provider (str): Default inference server type (e.g. "llama.cpp", "ollama", "openai", "vllm"). Default is "ollama".
         default_reuse_client (bool): Whether to reuse the OpenAI client across calls. Default is False.
         default_seed (int): Default random seed for reproducibility.
         default_temperature (float): Default temperature for text generation.
@@ -610,7 +610,7 @@ def load_openai_env(
     }:
         raise ValueError(
             f"Unsupported inference server: {model_provider}. "
-            f"Supported options are: 'llama.cpp', 'ollama', 'openai'."
+            f"Supported options are: 'ollama', 'llama.cpp', 'openai'."
         )
 
     return OpenAIConfig(
