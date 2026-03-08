@@ -1260,51 +1260,66 @@ class RAG:
         self._invalidate_ner_cache(target)
         self._bump_summary_revision(target, allow_create=False)
 
+        collections_to_delete = [target]
+        if not target.endswith("_images") and not target.endswith("_dockv"):
+            collections_to_delete.extend([f"{target}_images", f"{target}_dockv"])
+
         # 1. Delete from Qdrant API
-        try:
-            self.qdrant_client.delete_collection(target)
-            logger.info("Deleted collection '{}' from Qdrant.", target)
-        except Exception as e:
-            logger.error("Failed to delete collection '{}' via API: {}", target, e)
+        for collection_name in collections_to_delete:
+            try:
+                self.qdrant_client.delete_collection(collection_name)
+                logger.info("Deleted collection '{}' from Qdrant.", collection_name)
+            except Exception as e:
+                logger.error(
+                    "Failed to delete collection '{}' via API: {}",
+                    collection_name,
+                    e,
+                )
 
         # 2. Cleanup source files
-        try:
-            src_path = self.qdrant_src_dir / target
-            if src_path.exists():
+        for collection_name in collections_to_delete:
+            try:
+                src_path = self.qdrant_src_dir / collection_name
+                if src_path.exists():
 
-                def on_error(func: Callable, path: str, _exc_info: Any) -> None:
-                    """Error handler for shutil.rmtree.
+                    def on_error(func: Callable, path: str, _exc_info: Any) -> None:
+                        """Error handler for shutil.rmtree.
 
-                    Attempts to fix permissions/flags and retry operation.
+                        Attempts to fix permissions/flags and retry operation.
 
-                    Args:
-                        func (Callable): The function that raised the exception.
-                        path (str): The path name passed to function.
-                        _exc_info (Any): The exception information returned by sys.exc_info().
-                    """
-                    try:
-                        # 1. Try adding write permission
-                        os.chmod(path, stat.S_IWUSR | stat.S_IREAD)
+                        Args:
+                            func (Callable): The function that raised the exception.
+                            path (str): The path name passed to function.
+                            _exc_info (Any): The exception information returned by sys.exc_info().
+                        """
+                        try:
+                            # 1. Try adding write permission
+                            os.chmod(path, stat.S_IWUSR | stat.S_IREAD)
 
-                        # 2. Try clearing flags (macOS/BSD specific)
-                        if sys.platform == "darwin":
-                            try:
-                                # Clear all file flags (uchg, etc.)
-                                os.chflags(path, 0)
-                            except (AttributeError, OSError):
-                                pass
+                            # 2. Try clearing flags (macOS/BSD specific)
+                            if sys.platform == "darwin":
+                                try:
+                                    # Clear all file flags (uchg, etc.)
+                                    os.chflags(path, 0)
+                                except (AttributeError, OSError):
+                                    pass
 
-                        # 3. Retry the failed operation
-                        func(path)
-                    except Exception as e:
-                        logger.warning("Failed to force delete {}: {}", path, e)
+                            # 3. Retry the failed operation
+                            func(path)
+                        except Exception as e:
+                            logger.warning("Failed to force delete {}: {}", path, e)
 
-                shutil.rmtree(path=src_path, onerror=on_error)
-                logger.info("Deleted source directory for collection '{}'.", target)
-        except Exception as e:
-            logger.error(
-                f"Failed to delete source directory for collection '{target}': {e}"
-            )
+                    shutil.rmtree(path=src_path, onerror=on_error)
+                    logger.info(
+                        "Deleted source directory for collection '{}'.",
+                        collection_name,
+                    )
+            except Exception as e:
+                logger.error(
+                    "Failed to delete source directory for collection '{}': {}",
+                    collection_name,
+                    e,
+                )
 
     def select_collection(self, name: str) -> None:
         """Switch active collection, ensuring it already exists.
