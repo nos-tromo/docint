@@ -231,7 +231,7 @@ def render_ingestion() -> None:
 
     # -- Ingest button & progress --
     if uploaded_files and st.button(
-        "🚀 Upload & Ingest", type="primary", use_container_width=True
+        "🚀 Upload & Ingest", type="primary", width="stretch"
     ):
         if not target_col:
             logger.error("No target collection specified.")
@@ -268,7 +268,7 @@ def _render_ingest_summary(summary: dict[str, Any] | None) -> None:
                 {"File": name, "Status": _normalize_file_status(status)}
                 for name, status in sorted(file_status.items())
             ]
-            st.dataframe(status_rows, use_container_width=True, hide_index=True)
+            st.dataframe(status_rows, width="stretch", hide_index=True)
 
         events = summary.get("events") or []
         if events:

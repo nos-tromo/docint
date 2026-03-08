@@ -489,7 +489,7 @@ def render_ner_overview(sources: list[dict[str, Any]]) -> None:
                 "Best score": [format_score(e.get("best_score")) for e in entities],
                 "Sources": [", ".join(e["files"]) for e in entities],
             },
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
         for ent in entities:
@@ -515,7 +515,7 @@ def render_ner_overview(sources: list[dict[str, Any]]) -> None:
                 "Best score": [format_score(r.get("best_score")) for r in relations],
                 "Sources": [", ".join(r["files"]) for r in relations],
             },
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
         for rel in relations:

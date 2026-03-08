@@ -137,7 +137,7 @@ def _render_chat_sessions() -> None:
     # New chat button
     if st.button(
         "➕ New Chat",
-        use_container_width=True,
+        width="stretch",
         type="primary" if st.session_state.session_id is None else "secondary",
     ):
         st.session_state.session_id = None
@@ -167,7 +167,7 @@ def _render_chat_sessions() -> None:
         if st.button(
             s["title"],
             key=f"sess_{s['id']}",
-            use_container_width=True,
+            width="stretch",
             type=b_type,
         ):
             if st.session_state.session_id != s["id"]:
@@ -209,7 +209,7 @@ def _render_chat_sessions() -> None:
         if st.button(
             "🗑️ Delete Current Chat",
             type="secondary",
-            use_container_width=True,
+            width="stretch",
         ):
             try:
                 requests.delete(

@@ -43,7 +43,7 @@ def render_analysis() -> None:
         collection, _empty_summary_result(collection)
     )
 
-    if st.button("🔄 Refresh NER analysis", use_container_width=True):
+    if st.button("🔄 Refresh NER analysis", width="stretch"):
         ner_result = _load_ner_analysis(collection, refresh=True)
 
     if ner_result.get("error"):
@@ -293,7 +293,7 @@ def _render_summary_section(collection: str) -> dict[str, Any]:
         if not summary_state.get("generated")
         else "Regenerate summary"
     )
-    if st.button(button_label, type="primary", use_container_width=True):
+    if st.button(button_label, type="primary", width="stretch"):
         _generate_summary(collection)
 
     if summary_state.get("error"):
@@ -623,7 +623,7 @@ def _render_entities_tab(result: dict[str, Any], collection: str) -> None:
     graph_for_render = _graph_connected_subgraph(filtered_graph)
     if graph_for_render.get("nodes") and graph_for_render.get("edges"):
         st.graphviz_chart(
-            _graphviz_dot(graph_for_render, selected_entity), use_container_width=True
+            _graphviz_dot(graph_for_render, selected_entity), width="stretch"
         )
     else:
         st.caption("No graph data available.")
@@ -676,7 +676,7 @@ def _render_hate_speech_tab(result: dict[str, Any], collection: str) -> None:
             "Reason": [row.get("reason") for row in findings],
             "Chunk ID": [row.get("chunk_id") for row in findings],
         },
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
     for idx, row in enumerate(findings, start=1):
@@ -801,12 +801,12 @@ def _render_analysis_result(
                     "Best score": [e.get("best_score") for e in filtered_entities],
                     "Sources": [", ".join(e["files"]) for e in filtered_entities],
                 },
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
             if density_rows:
                 st.markdown("#### Entity Density by Document")
-                st.dataframe(density_rows, use_container_width=True, hide_index=True)
+                st.dataframe(density_rows, width="stretch", hide_index=True)
 
             entities_csv = pd.DataFrame(
                 [

@@ -163,7 +163,7 @@ def render_dashboard() -> None:
                         )
                         .properties(height=max(220, min(700, len(chart_rows) * 28)))
                     )
-                    st.altair_chart(entity_chart, use_container_width=True)
+                    st.altair_chart(entity_chart, width="stretch")
                     with st.expander("Show full entity labels"):
                         st.dataframe(
                             {
@@ -175,7 +175,7 @@ def render_dashboard() -> None:
                                     int(r.get("mentions", 0) or 0) for r in rows
                                 ],
                             },
-                            use_container_width=True,
+                            width="stretch",
                             hide_index=True,
                         )
                 else:

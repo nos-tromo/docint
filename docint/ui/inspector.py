@@ -21,7 +21,7 @@ def render_inspector() -> None:
     st.caption(f"📁 {collection}")
 
     # ── Load action ───────────────────────────────────────────
-    if st.button("🔄 Load Documents", type="primary", use_container_width=True):
+    if st.button("🔄 Load Documents", type="primary", width="stretch"):
         with st.spinner("Fetching document list…"):
             try:
                 resp = requests.get(f"{BACKEND_HOST}/collections/documents", timeout=30)
@@ -45,7 +45,7 @@ def render_inspector() -> None:
 
     # ── Table ────────────────────────────────────────────────
     display_data = _build_display_data(docs)
-    st.dataframe(display_data, use_container_width=True, hide_index=True)
+    st.dataframe(display_data, width="stretch", hide_index=True)
 
     csv_data = pd.DataFrame(display_data).to_csv(index=False).encode("utf-8")
     st.download_button(
