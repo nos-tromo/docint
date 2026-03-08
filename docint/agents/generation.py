@@ -59,8 +59,17 @@ class ResultValidationResponseAgent(ResponseAgent):
         """
         if not self.enabled:
             return result
-        if self.llm is None or not result.answer:
-            result.validation_checked = False
+        if self.llm is None:
+            self._set_validation_unavailable(
+                result,
+                reason="Validation model unavailable.",
+            )
+            return result
+        if not result.answer:
+            self._set_validation_unavailable(
+                result,
+                reason="No answer to validate.",
+            )
             return result
 
         try:
@@ -71,16 +80,24 @@ class ResultValidationResponseAgent(ResponseAgent):
                 summary_diagnostics=result.summary_diagnostics,
             )
             response = self.llm.complete(prompt)
-            parsed = self._parse_response(response.text)
+            response_text = str(getattr(response, "text", "") or "").strip()
+            if not response_text:
+                self._set_validation_unavailable(
+                    result,
+                    reason="Validation model returned empty output.",
+                )
+                return result
+            parsed = self._parse_response(response_text)
             summary_grounded = parsed.get("summary_grounded")
             sources_relevant = parsed.get("sources_relevant")
 
             if not isinstance(summary_grounded, bool) or not isinstance(
                 sources_relevant, bool
             ):
-                result.validation_checked = False
-                result.validation_mismatch = True
-                result.validation_reason = "Validation model returned invalid schema"
+                self._set_validation_unavailable(
+                    result,
+                    reason="Validation model returned invalid schema.",
+                )
                 return result
 
             mismatch = not (summary_grounded and sources_relevant)
@@ -105,10 +122,35 @@ class ResultValidationResponseAgent(ResponseAgent):
                 else None
             )
             return result
+        except json.JSONDecodeError:
+            self._set_validation_unavailable(
+                result,
+                reason="Validation model returned non-JSON output.",
+            )
+            return result
         except Exception as exc:
             logger.warning("Response validation failed: {}", exc)
-            result.validation_checked = False
+            self._set_validation_unavailable(
+                result,
+                reason=f"Validation request failed: {exc}",
+            )
             return result
+
+    def _set_validation_unavailable(
+        self,
+        result: RetrievalResult,
+        *,
+        reason: str,
+    ) -> None:
+        """Mark validation as unavailable with a user-facing reason.
+
+        Args:
+            result: Retrieval result to annotate.
+            reason: Explanation why validation was not completed.
+        """
+        result.validation_checked = False
+        result.validation_mismatch = None
+        result.validation_reason = reason
 
     def _build_prompt(
         self,
