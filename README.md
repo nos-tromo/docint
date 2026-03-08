@@ -346,6 +346,8 @@ matches = service.query_similar_images(Path("query.png"), top_k=5)
 3. **Review the Results**
 
    Query results will be saved in the `~/docint/results` directory.
+   When GraphRAG is enabled, each result JSON also includes a `graph_debug`
+   object with query-expansion details (anchors, neighbors, and applied/no-op reason).
 
 ---
 
