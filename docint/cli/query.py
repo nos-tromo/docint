@@ -112,7 +112,22 @@ def run_query(rag: RAG, query: str, index: int, output_path: str | Path) -> None
         output_path (str | Path): The directory to store the output file.
     """
     logger.info("Running query {}: {}", index, query)
-    result = rag.run_query(query)
+
+    retrieval_query = query
+    graph_debug: dict[str, Any] | None = None
+    expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
+    if callable(expand_with_debug):
+        try:
+            expanded, debug_payload = expand_with_debug(query)
+            retrieval_query = str(expanded)
+            if isinstance(debug_payload, dict):
+                graph_debug = debug_payload
+        except Exception as exc:
+            logger.warning("Graph debug expansion failed in query CLI: {}", exc)
+
+    result = rag.run_query(retrieval_query)
+    if graph_debug is not None:
+        result["graph_debug"] = graph_debug
 
     validation_cfg = load_response_validation_env()
     validation_llm = None
