@@ -101,15 +101,6 @@ def _resolve_data_dir() -> Path:
     return load_path_env().data
 
 
-def _resolve_qdrant_col_dir() -> Path:
-    """Return the configured Qdrant collections directory.
-
-    Returns:
-        Path: The path to the Qdrant collections directory.
-    """
-    return load_path_env().qdrant_collections
-
-
 def _resolve_qdrant_src_dir() -> Path:
     """Return the configured Qdrant sources directory (separate from collections).
 
@@ -1207,7 +1198,6 @@ def preview_source(collection: str, file_hash: str) -> FileResponse:
         HTTPException: If an error occurs while retrieving the source preview.
     """
     file_path_str = None
-    qdrant_col_dir = _resolve_qdrant_col_dir()
     qdrant_src_dir = _resolve_qdrant_src_dir()
 
     # 1. Try to resolve filename via Qdrant
@@ -1273,31 +1263,5 @@ def preview_source(collection: str, file_hash: str) -> FileResponse:
         if src_path.exists() and src_path.is_file():
             logger.info("Found file at sources path: {}", src_path)
             return FileResponse(src_path)
-
-        col_path = qdrant_col_dir / collection / "sources" / filename
-        if col_path.exists() and col_path.is_file():
-            logger.info("Found file at legacy collection path: {}", col_path)
-            return FileResponse(col_path)
-
-    # 3. Fallback: Scan the sources directory for a matching hash
-    # This handles cases where Qdrant is down or the file path in Qdrant is invalid
-    try:
-        sources_dir = qdrant_src_dir / collection
-        legacy_sources_dir = qdrant_col_dir / collection / "sources"
-
-        for candidate_dir in (sources_dir, legacy_sources_dir):
-            if not candidate_dir.exists():
-                continue
-            logger.info("Scanning sources directory for file hash: {}", file_hash)
-            for file_path in candidate_dir.iterdir():
-                if file_path.is_file() and not file_path.name.startswith("."):
-                    try:
-                        if compute_file_hash(file_path) == file_hash:
-                            logger.info("Found file via hash scan: {}", file_path)
-                            return FileResponse(file_path)
-                    except Exception:
-                        continue
-    except Exception as e:
-        logger.error("Error scanning sources directory: {}", e)
 
     raise HTTPException(status_code=404, detail="File not found")

@@ -610,7 +610,6 @@ class PathConfig:
     queries: Path
     results: Path
     prompts: Path
-    qdrant_collections: Path
     qdrant_sources: Path
     hf_hub_cache: Path
     llama_cpp_cache: Path
@@ -627,7 +626,6 @@ def load_path_env() -> PathConfig:
         - queries (Path): Path to the queries file.
         - results (Path): Path to the results directory.
         - prompts (Path): Path to the prompts directory.
-        - qdrant_collections (Path): Path to the Qdrant collections directory.
         - qdrant_sources (Path): Path to the Qdrant sources directory.
         - hf_hub_cache (Path): Path to the Hugging Face Hub cache directory.
         - llama_cpp_cache (Path): Path to the llama.cpp cache directory.
@@ -646,22 +644,7 @@ def load_path_env() -> PathConfig:
     project_root: Path = utils_dir.parents[1]
     default_log_dir = project_root / ".logs" / "docint.log"
 
-    default_qdrant_collections = Path(
-        os.getenv("QDRANT_COL_DIR", "qdrant_storage")
-    ).expanduser()
-    qdrant_sources_env = os.getenv("QDRANT_SRC_DIR")
-
-    # Default sources root alongside Qdrant storage; fall back to a "sources" sibling.
-    if qdrant_sources_env:
-        default_qdrant_sources = Path(qdrant_sources_env).expanduser()
-    else:
-        default_sources_base = (
-            default_qdrant_collections.parent
-            if default_qdrant_collections.parent != Path(".")
-            else default_qdrant_collections
-        )
-        default_qdrant_sources = (default_sources_base / "sources").expanduser()
-
+    default_qdrant_sources: Path = docint_home_dir / "qdrant_sources"
     default_artifacts_dir: Path = docint_home_dir / "artifacts"
 
     return PathConfig(
@@ -673,8 +656,9 @@ def load_path_env() -> PathConfig:
         queries=Path(os.getenv("QUERIES_PATH", default_query_dir)).expanduser(),
         results=Path(os.getenv("RESULTS_PATH", default_results_dir)).expanduser(),
         prompts=default_prompts_dir,
-        qdrant_collections=default_qdrant_collections,
-        qdrant_sources=default_qdrant_sources,
+        qdrant_sources=Path(
+            os.getenv("QDRANT_SRC_DIR", default_qdrant_sources)
+        ).expanduser(),
         hf_hub_cache=Path(os.getenv("HF_HUB_CACHE", default_hf_hub_cache)).expanduser(),
         llama_cpp_cache=Path(
             os.getenv("LLAMA_CPP_CACHE", default_llama_cpp_cache)

@@ -179,7 +179,6 @@ class RAG:
     # --- Qdrant controls ---
     docstore_batch_size: int = field(default=100, init=False)
     qdrant_host: str | None = field(default=None, init=False)
-    _qdrant_col_dir: Path | None = field(default=None, init=False, repr=False)
     _qdrant_src_dir: Path | None = field(default=None, init=False, repr=False)
 
     # --- Prompt config ---
@@ -251,7 +250,6 @@ class RAG:
         self.path_config = self.path_config
         self.data_dir = self.path_config.data
         self.prompt_dir = self.path_config.prompts
-        self._qdrant_col_dir = self.path_config.qdrant_collections
         self._qdrant_src_dir = self.path_config.qdrant_sources
         self.hf_hub_cache = self.path_config.hf_hub_cache
 
@@ -347,36 +345,6 @@ class RAG:
             self.sessions.chat_memory = value
 
     # --- Properties (lazy loading) ---
-    @property
-    def qdrant_col_dir(self) -> Path:
-        """Best-effort resolution of the host directory where Qdrant stores data.
-        Used only as a *fallback* when we cannot reach the Qdrant API.
-        Priority: explicit field -> env var -> platform default under home.
-
-        Returns:
-            The Path representing the Qdrant host directory.
-
-        Raises:
-            ValueError: If the path configuration or the Qdrant host directory is not set.
-        """
-        if self._qdrant_col_dir is None:
-            if self.path_config is None:
-                logger.error("ValueError: Path configuration is not set.")
-                raise ValueError("Path configuration is not set.")
-            env = self.path_config.qdrant_collections
-            if env:
-                self._qdrant_col_dir = Path(env) if not env.is_absolute() else env
-            else:
-                home = os.getenv("HOME") or os.getenv("USERPROFILE")
-                if home:
-                    self._qdrant_col_dir = (
-                        Path(home) / ".qdrant" / "storage" / "collections"
-                    )
-        if self._qdrant_col_dir is None:
-            logger.error("ValueError: Qdrant host directory is not set.")
-            raise ValueError("Qdrant host directory is not set.")
-        return self._qdrant_col_dir
-
     @property
     def qdrant_src_dir(self) -> Path:
         """Best-effort resolution of the host directory where Qdrant stores source data.
@@ -743,7 +711,15 @@ class RAG:
         *,
         top_k: int = 3,
     ) -> list[dict[str, Any]]:
-        """Retrieve image matches for a text query and normalize them as sources."""
+        """Retrieve image matches for a text query and normalize them as sources.
+
+        Args:
+            query (str): The text query to find similar images for.
+            top_k (int): The number of top matches to retrieve.
+
+        Returns:
+            list[dict[str, Any]]: A list of source dictionaries representing the matched images.
+        """
         if not query.strip() or not self.qdrant_collection:
             return []
         if self._image_ingestion_service is None:
@@ -1236,37 +1212,24 @@ class RAG:
         }
 
     # --- Collection discovery / selection ---
-    def list_collections(self, prefer_api: bool = True) -> list[str]:
-        """Return a list of collection names. Uses Qdrant API when available; falls back to listing the host storage path.
-
-        Args:
-            prefer_api (bool): Whether to prefer the Qdrant API over filesystem access.
+    def list_collections(self) -> list[str]:
+        """Return a list of collection names via the Qdrant API.
 
         Returns:
             list[str]: A list of collection names.
         """
-        if prefer_api:
-            try:
-                resp = self.qdrant_client.get_collections()
-                names = [c.name for c in getattr(resp, "collections", []) or []]
-                if names:
-                    return sorted(names)
-            except Exception as e:
-                logger.warning(
-                    "Qdrant API list_collections failed, will try FS fallback: {}",
-                    e,
-                )
-        base = self.qdrant_col_dir
-        if base is None:
-            return []
-        collections_dir = base
         try:
-            if not collections_dir.exists():
-                return []
-            return sorted([p.name for p in collections_dir.iterdir() if p.is_dir()])
-        except Exception as e:
-            logger.warning("FS fallback list_collections failed: {}", e)
+            resp = self.qdrant_client.get_collections()
+            names = [c.name for c in getattr(resp, "collections", []) or []]
+            if names:
+                return sorted(names)
             return []
+        except Exception as e:
+            logger.warning(
+                "Qdrant API list_collections failed: {}",
+                e,
+            )
+            raise e
 
     def delete_collection(self, name: str) -> None:
         """Delete a collection by name from Qdrant and clean up source files.
