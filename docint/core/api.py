@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Literal, cast
 
 from anyio import to_thread
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel
@@ -99,15 +99,6 @@ def _resolve_data_dir() -> Path:
     """
 
     return load_path_env().data
-
-
-def _resolve_qdrant_col_dir() -> Path:
-    """Return the configured Qdrant collections directory.
-
-    Returns:
-        Path: The path to the Qdrant collections directory.
-    """
-    return load_path_env().qdrant_collections
 
 
 def _resolve_qdrant_src_dir() -> Path:
@@ -495,8 +486,11 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
 
 
 @app.post("/summarize", response_model=SummarizeOut, tags=["Query"])
-def summarize() -> dict[str, Any]:
+def summarize(refresh: bool = Query(False)) -> dict[str, Any]:
     """Generate a summary for the currently selected collection.
+
+    Args:
+        refresh: If ``True``, bypass cached collection summaries.
 
     Returns:
         dict[str, list[dict] | str]: A dictionary containing the summary and sources.
@@ -510,7 +504,7 @@ def summarize() -> dict[str, Any]:
             logger.error("HTTPException: No collection selected")
             raise HTTPException(status_code=400, detail="No collection selected")
 
-        data = rag.summarize_collection()
+        data = rag.summarize_collection(refresh=refresh)
         summary = (
             str(data.get("response") or data.get("answer") or "")
             if isinstance(data, dict)
@@ -539,8 +533,11 @@ def summarize() -> dict[str, Any]:
 
 
 @app.post("/summarize/stream", tags=["Query"])
-async def summarize_stream() -> StreamingResponse:
+async def summarize_stream(refresh: bool = Query(False)) -> StreamingResponse:
     """Generate a streaming summary for the currently selected collection.
+
+    Args:
+        refresh: If ``True``, bypass cached collection summaries.
 
     Returns:
         StreamingResponse: A streaming response that yields SSE events during summarization.
@@ -560,7 +557,7 @@ async def summarize_stream() -> StreamingResponse:
         try:
             full_summary = ""
             final_payload: dict[str, Any] | None = None
-            for chunk in rag.stream_summarize_collection():
+            for chunk in rag.stream_summarize_collection(refresh=refresh):
                 if isinstance(chunk, str):
                     full_summary += chunk
                     yield f"data: {json.dumps({'token': chunk})}\n\n"
@@ -1207,7 +1204,6 @@ def preview_source(collection: str, file_hash: str) -> FileResponse:
         HTTPException: If an error occurs while retrieving the source preview.
     """
     file_path_str = None
-    qdrant_col_dir = _resolve_qdrant_col_dir()
     qdrant_src_dir = _resolve_qdrant_src_dir()
 
     # 1. Try to resolve filename via Qdrant
@@ -1273,31 +1269,5 @@ def preview_source(collection: str, file_hash: str) -> FileResponse:
         if src_path.exists() and src_path.is_file():
             logger.info("Found file at sources path: {}", src_path)
             return FileResponse(src_path)
-
-        col_path = qdrant_col_dir / collection / "sources" / filename
-        if col_path.exists() and col_path.is_file():
-            logger.info("Found file at legacy collection path: {}", col_path)
-            return FileResponse(col_path)
-
-    # 3. Fallback: Scan the sources directory for a matching hash
-    # This handles cases where Qdrant is down or the file path in Qdrant is invalid
-    try:
-        sources_dir = qdrant_src_dir / collection
-        legacy_sources_dir = qdrant_col_dir / collection / "sources"
-
-        for candidate_dir in (sources_dir, legacy_sources_dir):
-            if not candidate_dir.exists():
-                continue
-            logger.info("Scanning sources directory for file hash: {}", file_hash)
-            for file_path in candidate_dir.iterdir():
-                if file_path.is_file() and not file_path.name.startswith("."):
-                    try:
-                        if compute_file_hash(file_path) == file_hash:
-                            logger.info("Found file via hash scan: {}", file_path)
-                            return FileResponse(file_path)
-                    except Exception:
-                        continue
-    except Exception as e:
-        logger.error("Error scanning sources directory: {}", e)
 
     raise HTTPException(status_code=404, detail="File not found")

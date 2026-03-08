@@ -14,8 +14,8 @@ BACKEND_PUBLIC_HOST: str = _host_cfg.backend_public_host or BACKEND_HOST
 
 PAGES: list[str] = [
     "Dashboard",
-    "Chat",
     "Ingest",
+    "Chat",
     "Analysis",
     "Inspector",
 ]
@@ -23,8 +23,8 @@ PAGES: list[str] = [
 
 PAGE_ICONS: dict[str, str] = {
     "Dashboard": "📊",
-    "Chat": "💬",
     "Ingest": "📥",
+    "Chat": "💬",
     "Analysis": "📈",
     "Inspector": "🔍",
 }

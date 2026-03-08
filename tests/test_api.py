@@ -79,6 +79,8 @@ class DummyRAG:
         self.ner_sources: list[dict[str, Any]] = []
         self.ner_refresh_calls: list[bool] = []
         self.hate_speech_rows: list[dict[str, Any]] = []
+        self.summary_refresh_calls: list[bool] = []
+        self.summary_stream_refresh_calls: list[bool] = []
         self.summary_payload: dict[str, Any] = {
             "response": "summary",
             "sources": [{"id": "s1"}],
@@ -157,18 +159,26 @@ class DummyRAG:
         yield "chunk"
         yield {"sources": [{"id": 1}], "session_id": "generated-session"}
 
-    def summarize_collection(self) -> dict[str, Any]:
+    def summarize_collection(self, refresh: bool = False) -> dict[str, Any]:
         """Return canned summarize payload.
+
+        Args:
+            refresh (bool, optional): Whether to bypass summary cache.
 
         Returns:
             dict[str, Any]: A dictionary containing the summary response, sources, and diagnostics.
         """
+        self.summary_refresh_calls.append(bool(refresh))
         return self.summary_payload
 
     def stream_summarize_collection(
         self,
+        refresh: bool = False,
     ) -> Generator[str | dict[str, Any], None, None]:
         """Stream canned summary payload.
+
+        Args:
+            refresh (bool, optional): Whether to bypass summary cache.
 
         Returns:
             Generator[str | dict[str, Any], None, None]: A generator that yields chunks of the summary response and the final payload.
@@ -176,6 +186,7 @@ class DummyRAG:
         Yields:
             str | dict[str, Any]: Chunks of the summary response as they are generated, followed by the final summary payload.
         """
+        self.summary_stream_refresh_calls.append(bool(refresh))
         yield "sum"
         yield self.summary_payload
 
@@ -725,6 +736,18 @@ def test_summarize_includes_summary_diagnostics(client: TestClient) -> None:
     assert "validation_reason" in payload
 
 
+def test_summarize_refresh_flag_passthrough(client: TestClient) -> None:
+    """Summarize endpoint should pass refresh query parameter to RAG.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    response = client.post("/summarize?refresh=true")
+    assert response.status_code == 200
+    rag = cast(DummyRAG, api_module.rag)
+    assert rag.summary_refresh_calls[-1] is True
+
+
 def test_summarize_stream_includes_summary_diagnostics(client: TestClient) -> None:
     """Streaming summarize endpoint should emit diagnostics in final payload.
 
@@ -736,6 +759,19 @@ def test_summarize_stream_includes_summary_diagnostics(client: TestClient) -> No
         text = "".join([chunk.decode() for chunk in resp.iter_raw()])
     assert '"summary_diagnostics"' in text
     assert '"coverage_ratio"' in text
+
+
+def test_summarize_stream_refresh_flag_passthrough(client: TestClient) -> None:
+    """Streaming summarize endpoint should pass refresh query parameter to RAG.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    with client.stream("POST", "/summarize/stream?refresh=true") as resp:
+        assert resp.status_code == 200
+        _ = "".join([chunk.decode() for chunk in resp.iter_raw()])
+    rag = cast(DummyRAG, api_module.rag)
+    assert rag.summary_stream_refresh_calls[-1] is True
 
 
 def test_collections_ner_requires_selection(client: TestClient) -> None:

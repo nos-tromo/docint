@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -163,7 +164,29 @@ def load_hf_model(
     logger.info("Loaded {} model: {}", kw, model_id)
 
 
-def load_llama_cpp_model(cache_dir: Path, model_id: str, repo_id: str, kw: str) -> None:
+def _link_or_copy_model_file(source: Path, destination: Path) -> None:
+    """Materialize a model file at ``destination`` from ``source``.
+
+    Args:
+        source: Existing source file path.
+        destination: Target file path to create.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        return
+    try:
+        destination.symlink_to(source)
+    except Exception:
+        shutil.copy2(source, destination)
+
+
+def load_llama_cpp_model(
+    cache_dir: Path,
+    model_id: str,
+    repo_id: str | None,
+    kw: str,
+    destination_dir: Path | None = None,
+) -> None:
     """Loads the llama.cpp model.
 
     Args:
@@ -171,13 +194,18 @@ def load_llama_cpp_model(cache_dir: Path, model_id: str, repo_id: str, kw: str) 
         model_id (str): The name of the model to load.
         repo_id (str): The repository ID for the model.
         kw (str): The keyword for the model type (e.g., "text" or "vision").
+        destination_dir (Path | None): Optional explicit directory where the model
+            file should be placed. Defaults to ``cache_dir``.
     """
 
-    # Create cache directory if it doesn't exist
+    # Create cache directories if they don't exist.
     cache_dir.mkdir(parents=True, exist_ok=True)
-    model_path = cache_dir / model_id
+    target_dir = destination_dir or cache_dir
 
-    # Check if model already exists (direct path)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    model_path = target_dir / model_id
+
+    # Check if model already exists at target path.
     if model_path.exists():
         logger.info(
             "{} model '{}' is already available at {}",
@@ -193,6 +221,9 @@ def load_llama_cpp_model(cache_dir: Path, model_id: str, repo_id: str, kw: str) 
             cache_dir=cache_dir, repo_id=repo_id, filename=model_id
         )
         if resolved:
+            if destination_dir is not None and resolved != model_path:
+                _link_or_copy_model_file(resolved, model_path)
+                resolved = model_path
             logger.info(
                 "{} model '{}' is already available at {}",
                 kw.capitalize(),
@@ -201,7 +232,7 @@ def load_llama_cpp_model(cache_dir: Path, model_id: str, repo_id: str, kw: str) 
             )
             return
 
-    if repo_id is None:
+    if not repo_id:
         logger.warning(
             "{} model '{}' not found locally and no repo_id provided for download",
             kw.capitalize(),
@@ -225,10 +256,14 @@ def load_llama_cpp_model(cache_dir: Path, model_id: str, repo_id: str, kw: str) 
             repo_id=repo_id,
             filename=model_id,
             cache_dir=cache_dir,
-            local_dir=cache_dir,  # Download directly to the folder where llama-server looks
+            local_dir=target_dir,  # Download directly to the configured destination folder.
             local_dir_use_symlinks=False,
         )
-        logger.info("Loaded {} model '{}' to {}", kw, model_id, downloaded_path)
+        downloaded_file = Path(downloaded_path)
+        if downloaded_file != model_path and downloaded_file.exists():
+            _link_or_copy_model_file(downloaded_file, model_path)
+            downloaded_file = model_path
+        logger.info("Loaded {} model '{}' to {}", kw, model_id, downloaded_file)
     except Exception as e:
         logger.error("Failed to download {} model '{}': {}", kw, model_id, e)
         # Verify if the file might actually be there under a different name or if the config is wrong
@@ -324,18 +359,39 @@ def main() -> None:
 
     # LLaMA.cpp
     if openai_config.model_provider in {"llama.cpp", "llama_cpp", "llamacpp"}:
-        for model_id, repo_id, kw in [
+        vision_model_dir = (
+            path_config.llama_cpp_cache / Path(model_config.vision_model_file).stem
+        )
+
+        for model_id, repo_id, kw, destination_dir in [
             # model_id refers to the GGUF filename, repo_id is the HuggingFace repo where it lives.
             # We need both to resolve cache correctly.
-            (model_config.embed_model_file, model_config.embed_model_repo, "embedding"),
-            (model_config.text_model_file, model_config.text_model_repo, "text"),
-            (model_config.vision_model_file, model_config.vision_model_repo, "vision"),
+            (
+                model_config.embed_model_file,
+                model_config.embed_model_repo,
+                "embedding",
+                None,
+            ),
+            (model_config.text_model_file, model_config.text_model_repo, "text", None),
+            (
+                model_config.vision_model_file,
+                model_config.vision_model_repo,
+                "vision",
+                vision_model_dir,
+            ),
+            (
+                model_config.vision_model_mmproj_file,
+                model_config.vision_model_repo,
+                "vision_mmproj",
+                vision_model_dir,
+            ),
         ]:
             load_llama_cpp_model(
                 cache_dir=path_config.llama_cpp_cache,
                 model_id=model_id,
                 repo_id=repo_id,
                 kw=kw,
+                destination_dir=destination_dir,
             )
     # Ollama
     if openai_config.model_provider in {"ollama"}:

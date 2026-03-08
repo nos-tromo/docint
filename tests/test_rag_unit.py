@@ -1,5 +1,14 @@
+"""Unit tests for the RAG engine.
+
+Covers response normalisation, source extraction, ingestion hashing,
+session management, collection selection, NER/hate-speech helpers,
+summarisation with caching and diagnostics, sparse model resolution,
+reranker configuration, and summary revision invalidation.
+"""
+
 from __future__ import annotations
 
+import asyncio
 import json
 import types
 from pathlib import Path
@@ -21,8 +30,8 @@ class DummyNode:
         """Initializes a DummyNode with text and metadata.
 
         Args:
-            text (str): The text content of the node.
-            metadata (dict[str, object]): Metadata associated with the node.
+            text: The text content of the node.
+            metadata: Metadata associated with the node.
         """
         self.text = text
         self.metadata = metadata
@@ -35,20 +44,22 @@ class DummyNodeWithScore:
         """Initializes a DummyNodeWithScore with a DummyNode.
 
         Args:
-            node (DummyNode): The dummy node associated with this score.
-            score (float): The relevance score for this node. Defaults to 0.0.
+            node: The dummy node associated with this score.
+            score: The relevance score for this node. Defaults to 0.0.
         """
         self.node = node
         self.score = score
 
 
 class DummyResponse:
+    """Minimal stand-in for a LlamaIndex query response."""
+
     def __init__(self, text: str, nodes: list[DummyNodeWithScore]):
         """Initializes a DummyResponse with text and source nodes.
 
         Args:
-            text (str): The response text.
-            nodes (list[DummyNodeWithScore]): The source nodes associated with the response.
+            text: The response text.
+            nodes: The source nodes associated with the response.
         """
         self.response = text
         self.source_nodes = nodes
@@ -57,7 +68,11 @@ class DummyResponse:
 def test_normalize_response_data_extracts_sources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Test that _normalize_response_data correctly extracts source information."""
+    """Test that _normalize_response_data correctly extracts source information.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
     rag = RAG(qdrant_collection="test")
     monkeypatch.setattr(
         RAG,
@@ -108,7 +123,7 @@ def test_normalize_response_data_appends_image_sources(
     """Image retrieval results should be appended to normalized sources.
 
     Args:
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        monkeypatch: The monkeypatch fixture.
     """
     rag = RAG(qdrant_collection="test")
     monkeypatch.setattr(
@@ -138,7 +153,7 @@ def test_directory_ingestion_attaches_file_hash(tmp_path: Path) -> None:
     """Test that directory ingestion attaches file hashes to documents.
 
     Args:
-        tmp_path (Path): The temporary path fixture.
+        tmp_path: The temporary path fixture.
     """
     file_path = tmp_path / "note.txt"
     file_path.write_text("hello world")
@@ -161,7 +176,7 @@ def test_start_session_requires_query_engine(tmp_path: Path) -> None:
     """Test that start_session raises RuntimeError if query_engine is not initialized.
 
     Args:
-        tmp_path (Path): The temporary path fixture.
+        tmp_path: The temporary path fixture.
     """
     rag = RAG(qdrant_collection="test")
     rag.init_session_store(f"sqlite:///{tmp_path / 'sessions.db'}")
@@ -176,7 +191,7 @@ def test_select_collection_resets_image_service(
     """Selecting another collection should reset image ingestion service state.
 
     Args:
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        monkeypatch: The monkeypatch fixture.
     """
     rag = RAG(qdrant_collection="alpha")
     rag._image_ingestion_service = object()  # type: ignore[assignment]
@@ -195,7 +210,11 @@ def test_select_collection_resets_image_service(
 def test_select_collection_invalidates_ner_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Selecting a collection should clear stale NER caches."""
+    """Selecting a collection should clear stale NER caches.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
     rag = RAG(qdrant_collection="alpha")
     rag.ner_sources = [{"filename": "a.pdf", "entities": [{"text": "Acme"}]}]
     rag.ner_aggregate_cache["alpha"] = {"entities": []}
@@ -392,8 +411,8 @@ def test_start_session_initializes_memory(
     """Test that start_session initializes the chat memory and engine.
 
     Args:
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
-        tmp_path (Path): The temporary path fixture.
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The temporary path fixture.
     """
     rag = RAG(qdrant_collection="test")
     rag.init_session_store(f"sqlite:///{tmp_path / 'sessions.db'}")
@@ -443,7 +462,7 @@ def test_sparse_model_raises_import_error_when_fastembed_broken(
     SparseTextEmbedding.list_supported_models raises ImportError.
 
     Args:
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        monkeypatch: The monkeypatch fixture.
     """
 
     def broken() -> list[dict[str, str]]:
@@ -466,7 +485,7 @@ def test_filter_docs_skips_existing_hashes(monkeypatch: pytest.MonkeyPatch) -> N
     """Test that _filter_docs_by_existing_hashes skips documents with existing hashes.
 
     Args:
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        monkeypatch: The monkeypatch fixture.
     """
     rag = RAG(qdrant_collection="test")
     pipeline = rag._build_ingestion_pipeline()
@@ -530,7 +549,7 @@ def test_reranker_passes_configured_fp16(monkeypatch: pytest.MonkeyPatch) -> Non
     """Reranker should pass the configured fp16 setting to FlagEmbeddingReranker.
 
     Args:
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        monkeypatch: The monkeypatch fixture.
     """
 
     captured: dict[str, object] = {}
@@ -567,7 +586,7 @@ def test_reranker_falls_back_to_llm_on_meta_tensor_error(
     """Reranker should fallback to LLMRerank when FlagEmbedding hits meta tensor errors.
 
     Args:
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        monkeypatch: The monkeypatch fixture.
     """
 
     class FakeFlagReranker:
@@ -607,7 +626,7 @@ class _FakeCompletion:
         """Initializes a _FakeCompletion with the given text.
 
         Args:
-            text (str): The text of the completion.
+            text: The completion text.
         """
         self.text = text
 
@@ -619,18 +638,19 @@ class _FakeSummaryLLM:
         """Initializes a _FakeSummaryLLM with the given text.
 
         Args:
-            text (str): The text of the summary.
+            text: The fixed text every completion returns.
         """
         self.text = text
         self.prompts: list[str] = []
 
     def complete(self, prompt: str) -> _FakeCompletion:
-        """Simulates completing a prompt by recording the prompt and returning a fixed completion.
+        """Record *prompt* and return a fixed completion.
+
         Args:
-            prompt (str): The input prompt to complete.
+            prompt: The input prompt to complete.
 
         Returns:
-            _FakeCompletion: A fixed completion object.
+            A ``_FakeCompletion`` wrapping the pre-configured text.
         """
         self.prompts.append(prompt)
         return _FakeCompletion(self.text)
@@ -647,14 +667,14 @@ def _summary_node(
     """Helper function to create a DummyNodeWithScore with the appropriate metadata for summarization tests.
 
     Args:
-        text (str): The text of the node.
-        filename (str): The name of the file the node belongs to.
-        file_hash (str): The hash of the file the node belongs to.
-        page (int, optional): The page number of the node. Defaults to 1.
-        score (float, optional): The score of the node. Defaults to 0.9.
+        text: The text content of the node.
+        filename: The name of the source file.
+        file_hash: The hash of the source file.
+        page: The page number. Defaults to 1.
+        score: The relevance score. Defaults to 0.9.
 
     Returns:
-        DummyNodeWithScore: A DummyNodeWithScore instance with the specified metadata.
+        A ``DummyNodeWithScore`` with the specified metadata.
     """
     node = DummyNode(
         text,
@@ -679,7 +699,7 @@ def test_summarize_collection_reports_coverage_diagnostics(
     """Test that summarize_collection returns diagnostics about document coverage and uncovered documents.
 
     Args:
-        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture for modifying attributes during the test.
+        monkeypatch: The monkeypatch fixture.
     """
     rag = RAG(qdrant_collection="test")
     rag._text_model = _FakeSummaryLLM("Collection summary")  # type: ignore[assignment]
@@ -704,6 +724,11 @@ def test_summarize_collection_reports_coverage_diagnostics(
         RAG,
         "_retrieve_summary_nodes_for_document",
         lambda self, **kwargs: nodes_by_file.get(str(kwargs["filename"]), []),
+    )
+    monkeypatch.setattr(
+        RAG,
+        "_summary_kv_store",
+        lambda self, collection=None, allow_create=True: None,
     )
 
     summary = rag.summarize_collection()
@@ -756,7 +781,7 @@ def test_summarize_collection_handles_no_documents(
     """Test that summarize_collection returns an appropriate response and diagnostics when there are no documents to summarize.
 
     Args:
-        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture for modifying attributes during the test.
+        monkeypatch: The monkeypatch fixture.
     """
     rag = RAG(qdrant_collection="test")
     rag._text_model = _FakeSummaryLLM("unused")  # type: ignore[assignment]
@@ -764,6 +789,11 @@ def test_summarize_collection_handles_no_documents(
     rag.summary_max_docs = 30
 
     monkeypatch.setattr(RAG, "_summary_document_targets", lambda self: [])
+    monkeypatch.setattr(
+        RAG,
+        "_summary_kv_store",
+        lambda self, collection=None, allow_create=True: None,
+    )
     summary = rag.summarize_collection()
 
     assert summary["response"] == "No documents available in the selected collection."
@@ -781,3 +811,420 @@ def test_summarize_collection_requires_collection() -> None:
     rag = RAG(qdrant_collection="")
     with pytest.raises(ValueError, match="No collection selected"):
         rag.summarize_collection()
+
+
+class _InMemorySummaryKVStore:
+    """In-memory KV store used for summary-cache unit tests."""
+
+    def __init__(self) -> None:
+        """Initialise an empty store."""
+        self._rows: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def put(self, key: str, val: dict[str, Any], collection: str) -> None:
+        """Store *val* under (*collection*, *key*).
+
+        Args:
+            key: Payload key.
+            val: Dictionary payload to store.
+            collection: Namespace for the key.
+        """
+        self._rows[(collection, key)] = dict(val)
+
+    def get(self, key: str, collection: str) -> dict[str, Any] | None:
+        """Retrieve a stored payload, or ``None`` if absent.
+
+        Args:
+            key: Payload key.
+            collection: Namespace for the key.
+
+        Returns:
+            A shallow copy of the stored dict, or ``None``.
+        """
+        row = self._rows.get((collection, key))
+        return dict(row) if isinstance(row, dict) else None
+
+
+def _patch_summary_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch summary retrieval to return one deterministic grounded source.
+
+    Args:
+        monkeypatch: The monkeypatch fixture used to stub RAG methods.
+    """
+    docs = [{"filename": "a.pdf", "file_hash": "ha", "node_count": 3}]
+    nodes_by_file = {
+        "a.pdf": [_summary_node(text="A key finding", filename="a.pdf", file_hash="ha")]
+    }
+    monkeypatch.setattr(RAG, "_summary_document_targets", lambda self: docs)
+    monkeypatch.setattr(
+        RAG,
+        "_retrieve_summary_nodes_for_document",
+        lambda self, **kwargs: nodes_by_file.get(str(kwargs["filename"]), []),
+    )
+
+
+def test_summarize_collection_cache_miss_then_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Summary cache should store on miss and serve on subsequent hit.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="test")
+    llm = _FakeSummaryLLM("Collection summary")
+    rag._text_model = llm  # type: ignore[assignment]
+    _patch_summary_context(monkeypatch)
+
+    kv_store = _InMemorySummaryKVStore()
+
+    def _summary_kv_store(
+        self: RAG,
+        collection: str | None = None,
+        *,
+        allow_create: bool = True,
+    ) -> _InMemorySummaryKVStore:
+        _ = (self, collection, allow_create)
+        return kv_store
+
+    monkeypatch.setattr(RAG, "_summary_kv_store", _summary_kv_store)
+
+    first = rag.summarize_collection()
+    second = rag.summarize_collection()
+
+    assert first["response"] == "Collection summary"
+    assert second["response"] == "Collection summary"
+    assert len(llm.prompts) == 1
+    assert (
+        kv_store.get(
+            rag_module.SUMMARY_CACHE_PAYLOAD_KEY,
+            collection=rag_module.SUMMARY_CACHE_NAMESPACE,
+        )
+        is not None
+    )
+
+
+def test_summarize_collection_refresh_bypasses_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """refresh=True should bypass a valid summary cache entry.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="test")
+    llm = _FakeSummaryLLM("Collection summary")
+    rag._text_model = llm  # type: ignore[assignment]
+    _patch_summary_context(monkeypatch)
+
+    kv_store = _InMemorySummaryKVStore()
+
+    def _summary_kv_store(
+        self: RAG,
+        collection: str | None = None,
+        *,
+        allow_create: bool = True,
+    ) -> _InMemorySummaryKVStore:
+        _ = (self, collection, allow_create)
+        return kv_store
+
+    monkeypatch.setattr(RAG, "_summary_kv_store", _summary_kv_store)
+
+    rag.summarize_collection()
+    rag.summarize_collection(refresh=True)
+
+    assert len(llm.prompts) == 2
+
+
+def test_summarize_collection_prompt_fingerprint_change_forces_recompute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Changing summary knobs should invalidate cached payloads by fingerprint.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="test")
+    llm = _FakeSummaryLLM("Collection summary")
+    rag._text_model = llm  # type: ignore[assignment]
+    _patch_summary_context(monkeypatch)
+
+    kv_store = _InMemorySummaryKVStore()
+
+    def _summary_kv_store(
+        self: RAG,
+        collection: str | None = None,
+        *,
+        allow_create: bool = True,
+    ) -> _InMemorySummaryKVStore:
+        _ = (self, collection, allow_create)
+        return kv_store
+
+    monkeypatch.setattr(RAG, "_summary_kv_store", _summary_kv_store)
+
+    rag.summarize_collection()
+    rag.summary_per_doc_top_k += 1
+    rag.summarize_collection()
+
+    assert len(llm.prompts) == 2
+
+
+def test_summarize_collection_revision_bump_invalidates_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Revision bumps should invalidate previously cached summaries.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="test")
+    llm = _FakeSummaryLLM("Collection summary")
+    rag._text_model = llm  # type: ignore[assignment]
+    _patch_summary_context(monkeypatch)
+
+    kv_store = _InMemorySummaryKVStore()
+
+    def _summary_kv_store(
+        self: RAG,
+        collection: str | None = None,
+        *,
+        allow_create: bool = True,
+    ) -> _InMemorySummaryKVStore:
+        _ = (self, collection, allow_create)
+        return kv_store
+
+    monkeypatch.setattr(RAG, "_summary_kv_store", _summary_kv_store)
+
+    rag.summarize_collection()
+    rag._bump_summary_revision()
+    rag.summarize_collection()
+
+    assert len(llm.prompts) == 2
+
+
+class _FakeDocStore:
+    """Minimal docstore stub for ingest invalidation tests."""
+
+    def add_documents(self, nodes: list[Any], allow_update: bool = True) -> None:
+        """No-op document insertion.
+
+        Args:
+            nodes: Documents to store (ignored).
+            allow_update: Whether to allow overwrites (ignored).
+        """
+        _ = (nodes, allow_update)
+
+
+class _FakeIndex:
+    """Minimal index stub for ingest invalidation tests."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        """Create a fake index with an in-memory docstore.
+
+        Args:
+            **kwargs: Ignored keyword arguments.
+        """
+        _ = kwargs
+        self.docstore = _FakeDocStore()
+
+    def insert_nodes(self, nodes: list[Any]) -> None:
+        """No-op synchronous node insertion.
+
+        Args:
+            nodes: Nodes to insert (ignored).
+        """
+        _ = nodes
+
+    async def ainsert_nodes(self, nodes: list[Any]) -> None:
+        """No-op asynchronous node insertion.
+
+        Args:
+            nodes: Nodes to insert (ignored).
+        """
+        _ = nodes
+
+
+class _FakePipeline:
+    """Minimal pipeline stub for ingest invalidation tests."""
+
+    def __init__(self) -> None:
+        """Initialise with empty reader and extractor fields."""
+        self.dir_reader = None
+        self.entity_extractor = None
+        self.ner_max_workers = 1
+
+    def build(self, processed_hashes: set[str]) -> list[tuple[list[Any], list[Any]]]:
+        """Return an empty batch list.
+
+        Args:
+            processed_hashes: Hashes already ingested (ignored).
+
+        Returns:
+            An empty list.
+        """
+        _ = processed_hashes
+        return []
+
+
+class _FakeCorePDFReader:
+    """Minimal core reader stub for ingest invalidation tests."""
+
+    def __init__(
+        self,
+        data_dir: Path,
+        entity_extractor: Any = None,
+        ner_max_workers: int = 1,
+        source_collection: str | None = None,
+        image_ingestion_service: Any = None,
+    ) -> None:
+        """Record constructor args without touching the filesystem.
+
+        Args:
+            data_dir: Root directory for PDF documents (ignored).
+            entity_extractor: Optional NER extractor (ignored).
+            ner_max_workers: Worker thread count (ignored).
+            source_collection: Qdrant collection name (ignored).
+            image_ingestion_service: Image ingestion service (ignored).
+        """
+        _ = (
+            data_dir,
+            entity_extractor,
+            ner_max_workers,
+            source_collection,
+            image_ingestion_service,
+        )
+        self.discovered_hashes: set[str] = set()
+
+    def build(
+        self,
+        existing_hashes: set[str],
+        progress_callback: Any = None,
+    ) -> list[tuple[list[Any], list[Any], str]]:
+        """Return an empty batch list.
+
+        Args:
+            existing_hashes: Hashes already processed (ignored).
+            progress_callback: Optional progress reporter (ignored).
+
+        Returns:
+            An empty list.
+        """
+        _ = (existing_hashes, progress_callback)
+        return []
+
+
+def _patch_ingest_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch heavy ingest dependencies with minimal in-memory stubs.
+
+    Args:
+        monkeypatch: The monkeypatch fixture used to stub RAG methods
+            and module-level classes.
+    """
+    monkeypatch.setattr(RAG, "_prepare_sources_dir", lambda self, data_dir: data_dir)
+    monkeypatch.setattr(RAG, "_vector_store", lambda self: object())
+    monkeypatch.setattr(RAG, "_storage_context", lambda self, vector_store: object())
+    monkeypatch.setattr(rag_module, "VectorStoreIndex", _FakeIndex)
+    monkeypatch.setattr(
+        RAG,
+        "_build_ingestion_pipeline",
+        lambda self, progress_callback=None: _FakePipeline(),
+    )
+    monkeypatch.setattr(RAG, "_get_existing_file_hashes", lambda self: set())
+    monkeypatch.setattr(rag_module, "CorePDFPipelineReader", _FakeCorePDFReader)
+    monkeypatch.setattr(RAG, "reset_session_state", lambda self: None)
+    monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+
+
+def test_ingest_docs_bumps_summary_revision(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ingest_docs should bump summary revision after successful ingestion.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The temporary path fixture.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag._embed_model = cast(Any, object())
+    _patch_ingest_dependencies(monkeypatch)
+
+    bumps: list[tuple[str | None, bool]] = []
+
+    def _bump_summary_revision(
+        self: RAG,
+        collection: str | None = None,
+        *,
+        allow_create: bool = True,
+    ) -> int:
+        _ = self
+        bumps.append((collection, allow_create))
+        return len(bumps)
+
+    monkeypatch.setattr(RAG, "_bump_summary_revision", _bump_summary_revision)
+
+    rag.ingest_docs(tmp_path, build_query_engine=False)
+
+    assert bumps == [("test", True)]
+
+
+def test_asingest_docs_bumps_summary_revision(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """asingest_docs should bump summary revision after successful ingestion.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The temporary path fixture.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag._embed_model = cast(Any, object())
+    _patch_ingest_dependencies(monkeypatch)
+
+    bumps: list[tuple[str | None, bool]] = []
+
+    def _bump_summary_revision(
+        self: RAG,
+        collection: str | None = None,
+        *,
+        allow_create: bool = True,
+    ) -> int:
+        _ = self
+        bumps.append((collection, allow_create))
+        return len(bumps)
+
+    monkeypatch.setattr(RAG, "_bump_summary_revision", _bump_summary_revision)
+
+    asyncio.run(rag.asingest_docs(tmp_path, build_query_engine=False))
+
+    assert bumps == [("test", True)]
+
+
+def test_delete_collection_attempts_summary_invalidation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """delete_collection should attempt summary revision bump before deletion.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+
+    bumps: list[tuple[str | None, bool]] = []
+
+    def _bump_summary_revision(
+        self: RAG,
+        collection: str | None = None,
+        *,
+        allow_create: bool = True,
+    ) -> int:
+        _ = self
+        bumps.append((collection, allow_create))
+        return 1
+
+    monkeypatch.setattr(RAG, "_bump_summary_revision", _bump_summary_revision)
+
+    rag.delete_collection("target")
+
+    assert bumps == [("target", False)]
+    assert rag._qdrant_client.delete_collection.call_count == 1

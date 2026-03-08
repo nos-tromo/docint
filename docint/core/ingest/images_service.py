@@ -942,7 +942,6 @@ class ImageIngestionService:
     def query_similar_images(
         self,
         image: Path | bytes,
-        top_k: int = 5,
         *,
         source_collection: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -950,7 +949,6 @@ class ImageIngestionService:
 
         Args:
             image: Query image path or bytes.
-            top_k: Number of nearest neighbors to return.
             source_collection: Optional source collection to resolve the target collection.
 
         Returns:
@@ -975,7 +973,10 @@ class ImageIngestionService:
         from llama_index.core.vector_stores.types import VectorStoreQuery
 
         result = vector_store.query(
-            VectorStoreQuery(query_embedding=query_embedding, similarity_top_k=top_k)
+            VectorStoreQuery(
+                query_embedding=query_embedding,
+                similarity_top_k=self.img_ingestion_config.retrieve_top_k,
+            )
         )
         output: list[dict[str, Any]] = []
         nodes = result.nodes or []

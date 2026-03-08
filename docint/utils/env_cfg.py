@@ -16,7 +16,7 @@ def set_offline_env() -> None:
     ``huggingface_hub`` / ``transformers`` cache their values at import time.
     This function re-applies them (idempotent) and emits a log message.
     """
-    if os.getenv("DOCINT_OFFLINE", "1").lower() in {"1", "true", "yes"}:
+    if str(os.getenv("DOCINT_OFFLINE", "1")).lower() in {"1", "true", "yes"}:
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
@@ -201,6 +201,7 @@ class ImageIngestionConfig:
     cache_by_hash: bool
     fail_on_embedding_error: bool
     fail_on_tagging_error: bool
+    retrieve_top_k: int
     tagging_max_image_dimension: int = 1024
 
 
@@ -213,9 +214,23 @@ def load_image_ingestion_config(
     default_image_cache_by_hash: bool = True,
     default_fail_on_embedding_error: bool = False,
     default_fail_on_tagging_error: bool = False,
+    default_retrieve_top_k: int = 5,
     default_tagging_max_image_dimension: int = 1024,
 ) -> ImageIngestionConfig:
     """Load image ingestion settings from environment variables.
+
+    Args:
+        default_image_ingestion_enabled (bool): Whether image ingestion is enabled by default.
+        default_image_embedding_enabled (bool): Whether to generate embeddings for images by default.
+        default_image_tagging_enabled (bool): Whether to generate tags for images by default.
+        default_image_qdrant_collection (str): Default Qdrant collection name for storing image vectors.
+        default_image_qdrant_vector_name (str): Default name of the vector field in Qdrant for image vectors.
+        default_image_cache_by_hash (bool): Whether to cache image embeddings by hash to avoid redundant computation. Default is True.
+        default_fail_on_embedding_error (bool): Whether to fail the entire ingestion if image embedding fails. Default is False.
+        default_fail_on_tagging_error (bool): Whether to fail the entire ingestion if image tagging fails. Default is False.
+        default_retrieve_top_k (int): The number of top image matches to retrieve for a text query. Default is 5.
+        default_tagging_max_image_dimension (int): Maximum pixel dimension (width or height) for
+            images sent to the vision tagging endpoint. Larger images are down-scaled. Default is 1024.
 
     Returns:
         ImageIngestionConfig: Dataclass containing image ingestion configuration.
@@ -227,6 +242,7 @@ def load_image_ingestion_config(
         - cache_by_hash (bool): Whether to cache image embeddings by hash to avoid redundant computation.
         - fail_on_embedding_error (bool): Whether to fail the entire ingestion if image embedding fails.
         - fail_on_tagging_error (bool): Whether to fail the entire ingestion if image tagging fails.
+        - retrieve_top_k (int): The number of top image matches to retrieve for a text query.
         - tagging_max_image_dimension (int): Maximum pixel dimension (width or height) for
             images sent to the vision tagging endpoint. Larger images are down-scaled.
     """
@@ -261,6 +277,7 @@ def load_image_ingestion_config(
             os.getenv("IMAGE_FAIL_ON_TAG_ERROR", default_fail_on_tagging_error)
         ).lower()
         in {"1", "true", "yes"},
+        retrieve_top_k=int(os.getenv("IMAGE_RETRIEVE_TOP_K", default_retrieve_top_k)),
         tagging_max_image_dimension=int(
             os.getenv(
                 "IMAGE_TAGGING_MAX_IMAGE_DIM", default_tagging_max_image_dimension
@@ -393,6 +410,7 @@ class ModelConfig:
     text_model_file: str
     text_model_repo: str
     vision_model_file: str
+    vision_model_mmproj_file: str
     vision_model_repo: str
     whisper_model: str
 
@@ -403,8 +421,8 @@ def load_model_env(
     default_ner_model: str = "gliner-community/gliner_large-v2.5",
     default_rerank_model: str = "BAAI/bge-reranker-v2-m3",
     default_sparse_model: str = "Qdrant/all_miniLM_L6_v2_with_attentions",
-    default_text_model_str: str = "unsloth/Qwen3-1.7B-GGUF;Qwen3-1.7B-Q4_K_M.gguf",
-    default_vision_model_str: str = "Qwen/Qwen3-VL-8B-Instruct-GGUF;Qwen3VL-8B-Instruct-Q4_K_M.gguf",
+    default_text_model_str: str = "unsloth/Qwen3.5-4B-GGUF;Qwen3.5-4B-Q8_0.gguf",
+    default_vision_model_str: str = "unsloth/Qwen3.5-9B-GGUF;Qwen3.5-9B-Q4_K_M.gguf;mmproj-F16.gguf",
     default_whisper_model: str = "turbo",
 ) -> ModelConfig:
     """Loads model configuration from environment variables or defaults.
@@ -423,41 +441,46 @@ def load_model_env(
         ModelConfig: Dataclass containing model configuration.
         - embed_model_file (str): The embedding model file name.
         - embed_model_repo (str): The embedding model HuggingFace repo ID for cache resolution
+        - image_embed_model (str): The image embedding model identifier.
         - ner_model (str): The NER model identifier.
         - rerank_model (str): The reranker model identifier.
         - sparse_model (str): The sparse model identifier.
         - text_model_file (str): The text model file name.
         - text_model_repo (str): The text model HuggingFace repo ID for cache resolution
         - vision_model_file (str): The vision model file name.
+        - vision_model_mmproj_file (str): The vision model MMProj file name.
         - vision_model_repo (str): The vision model HuggingFace repo ID for cache resolution
         - whisper_model (str): The Whisper model identifier.
     """
 
-    def resolve_model_name(model_str: str) -> tuple[str, str]:
-        """Resolve a model string into its repo ID and file name components.
-
-        The model string can be in the format "repo_id;file_name" (required for llama.cpp) or just "model_name".
-        If only "model_name" is provided, it is treated as both the repo ID and file name.
+    def resolve_model_name(model_str: str) -> tuple[str, str, str]:
+        """Resolves a model string into its components: repo, model, and mmproj.
 
         Args:
-            model_str (str): The model string to resolve.
+            model_str (str): The model string in the format "repo;model;mmproj".
+
+        Raises:
+            ValueError: If the model string is not in the expected format.
 
         Returns:
-            tuple[str, str] | str: A tuple of (repo_id, file_name) if the input contains a semicolon.
+            tuple[str, str, str]: A tuple containing the repo, model, and mmproj identifiers.
         """
-        if ";" in model_str:
-            repo_id, file_name = model_str.split(";", 1)
-            return repo_id.strip(), file_name.strip()
-        else:
-            return model_str.strip(), model_str.strip()
+        parts = [p.strip() for p in model_str.split(";")]
+        if not 1 <= len(parts) <= 3:
+            raise ValueError(f"Invalid vision model string: {model_str}")
 
-    embed_model_repo, embed_model_file = resolve_model_name(
+        repo = parts[0]
+        model = parts[1] if len(parts) >= 2 else repo
+        mmproj = parts[2] if len(parts) == 3 else model
+        return repo, model, mmproj
+
+    embed_model_repo, embed_model_file, _ = resolve_model_name(
         os.getenv("EMBED_MODEL", default_embed_model_str)
     )
-    text_model_repo, text_model_file = resolve_model_name(
+    text_model_repo, text_model_file, _ = resolve_model_name(
         os.getenv("LLM", default_text_model_str)
     )
-    vision_model_repo, vision_model_file = resolve_model_name(
+    vision_model_repo, vision_model_file, vision_model_mmproj_file = resolve_model_name(
         os.getenv("VLM", default_vision_model_str)
     )
 
@@ -471,6 +494,7 @@ def load_model_env(
         text_model_file=text_model_file,
         text_model_repo=text_model_repo,
         vision_model_file=vision_model_file,
+        vision_model_mmproj_file=vision_model_mmproj_file,
         vision_model_repo=vision_model_repo,
         whisper_model=os.getenv("WHISPER_MODEL", default_whisper_model),
     )
@@ -494,7 +518,7 @@ def load_ner_env(
 
     Args:
         default_enabled (bool): Default value to enable NER extraction. Set to True to enable by default.
-        default_max_chars (int): Default maximum characters for NER extraction.
+        default_max_chars (int): Default maximum characters for a processed chunk for NER extraction.
         default_max_workers (int): Default maximum worker threads for NER extraction.
 
     Returns:
@@ -534,7 +558,7 @@ class OpenAIConfig:
 def load_openai_env(
     default_api_base: str = "http://localhost:8080/v1",
     default_api_key: str = "sk-no-key-required",
-    default_ctx_window: int = 32768,
+    default_ctx_window: int = 4096,
     default_dimensions: int = 1024,
     default_max_retries: int = 2,
     default_model_provider: str = "llama.cpp",
@@ -561,6 +585,17 @@ def load_openai_env(
 
     Returns:
         OpenAIConfig: Dataclass containing OpenAI configuration.
+        - api_base (str): The OpenAI API base URL.
+        - api_key (str): The OpenAI API key.
+        - ctx_window (int): The context window size for models that support it.
+        - dimensions (int): The embedding dimensions for embedding models.
+        - max_retries (int): The number of retries for API calls.
+        - model_provider (str): The inference server type (e.g. "llama.cpp", "ollama", "openai").
+        - reuse_client (bool): Whether to reuse the OpenAI client across calls.
+        - seed (int): Random seed for reproducibility.
+        - temperature (float): Temperature for text generation.
+        - timeout (float): Timeout in seconds for API calls.
+        - top_p (float): Top_p for nucleus sampling.
 
     Raises:
         ValueError: If an unsupported inference server is specified.
@@ -604,7 +639,6 @@ class PathConfig:
     queries: Path
     results: Path
     prompts: Path
-    qdrant_collections: Path
     qdrant_sources: Path
     hf_hub_cache: Path
     llama_cpp_cache: Path
@@ -621,7 +655,6 @@ def load_path_env() -> PathConfig:
         - queries (Path): Path to the queries file.
         - results (Path): Path to the results directory.
         - prompts (Path): Path to the prompts directory.
-        - qdrant_collections (Path): Path to the Qdrant collections directory.
         - qdrant_sources (Path): Path to the Qdrant sources directory.
         - hf_hub_cache (Path): Path to the Hugging Face Hub cache directory.
         - llama_cpp_cache (Path): Path to the llama.cpp cache directory.
@@ -640,22 +673,7 @@ def load_path_env() -> PathConfig:
     project_root: Path = utils_dir.parents[1]
     default_log_dir = project_root / ".logs" / "docint.log"
 
-    default_qdrant_collections = Path(
-        os.getenv("QDRANT_COL_DIR", "qdrant_storage")
-    ).expanduser()
-    qdrant_sources_env = os.getenv("QDRANT_SRC_DIR")
-
-    # Default sources root alongside Qdrant storage; fall back to a "sources" sibling.
-    if qdrant_sources_env:
-        default_qdrant_sources = Path(qdrant_sources_env).expanduser()
-    else:
-        default_sources_base = (
-            default_qdrant_collections.parent
-            if default_qdrant_collections.parent != Path(".")
-            else default_qdrant_collections
-        )
-        default_qdrant_sources = (default_sources_base / "sources").expanduser()
-
+    default_qdrant_sources: Path = docint_home_dir / "qdrant_sources"
     default_artifacts_dir: Path = docint_home_dir / "artifacts"
 
     return PathConfig(
@@ -667,8 +685,9 @@ def load_path_env() -> PathConfig:
         queries=Path(os.getenv("QUERIES_PATH", default_query_dir)).expanduser(),
         results=Path(os.getenv("RESULTS_PATH", default_results_dir)).expanduser(),
         prompts=default_prompts_dir,
-        qdrant_collections=default_qdrant_collections,
-        qdrant_sources=default_qdrant_sources,
+        qdrant_sources=Path(
+            os.getenv("QDRANT_SRC_DIR", default_qdrant_sources)
+        ).expanduser(),
         hf_hub_cache=Path(os.getenv("HF_HUB_CACHE", default_hf_hub_cache)).expanduser(),
         llama_cpp_cache=Path(
             os.getenv("LLAMA_CPP_CACHE", default_llama_cpp_cache)
@@ -678,27 +697,7 @@ def load_path_env() -> PathConfig:
 
 @dataclass(frozen=True)
 class PipelineConfig:
-    """Configuration for the document processing pipeline.
-
-    Attributes:
-        text_coverage_threshold: Minimum characters-per-area ratio below which
-            a page is classified as needing OCR.
-        pipeline_version: Semver string identifying the pipeline logic version.
-        artifacts_dir: Root directory for artifact output.
-        max_retries: Maximum retry attempts per stage on a given page.
-        force_reprocess: When True, ignore existing artifacts and reprocess.
-        max_workers: Maximum parallel workers for document-level processing.
-        enable_vision_ocr: When True, use the vision LLM as a fallback OCR
-            engine for scanned pages that have no extractable text layer.
-        vision_ocr_timeout: Per-request timeout in seconds for vision OCR API
-            calls (separate from the global ``OPENAI_TIMEOUT``).
-        vision_ocr_max_retries: Maximum retries for a single vision OCR API call.
-        vision_ocr_max_image_dimension: Maximum pixel dimension (width or height)
-            for images sent to the vision OCR endpoint.  Larger renders are
-            down-scaled proportionally before encoding.
-        vision_ocr_max_tokens: Maximum number of tokens the vision LLM may
-            generate per OCR request.  Keeps response time bounded.
-    """
+    """Configuration for the document processing pipeline."""
 
     text_coverage_threshold: float
     pipeline_version: str
@@ -743,6 +742,17 @@ def load_pipeline_config(
 
     Returns:
         A fully-initialised ``PipelineConfig``.
+        - text_coverage_threshold (float): Characters-per-area threshold for OCR classification.
+        - pipeline_version (str): Semver string identifying the pipeline logic version.
+        - artifacts_dir (str): Root directory for artifact output.
+        - max_retries (int): Maximum retry attempts per stage on a given page.
+        - force_reprocess (bool): When True, ignore existing artifacts and reprocess.
+        - max_workers (int): Maximum parallel workers for document-level processing.
+        - enable_vision_ocr (bool): When True, use the vision LLM as a fallback OCR engine for scanned pages that have no extractable text layer.
+        - vision_ocr_timeout (float): Per-request timeout in seconds for vision OCR API calls (separate from the global ``OPENAI_TIMEOUT``).
+        - vision_ocr_max_retries (int): Maximum retries for a single vision OCR API call.
+        - vision_ocr_max_image_dimension (int): Maximum pixel dimension (width or height) for images sent to the vision OCR endpoint.  Larger renders are down-scaled proportionally before encoding.
+        - vision_ocr_max_tokens (int): Maximum number of tokens the vision LLM may generate per OCR request.  Keeps response time bounded.
     """
     pipeline_version = os.getenv("PIPELINE_VERSION", default_pipeline_version).strip()
     if not pipeline_version:
@@ -797,6 +807,7 @@ def load_response_validation_env(
 
     Returns:
         ResponseValidationConfig: Parsed response-validation settings.
+        - enabled (bool): Whether to run response validation on generated answers.
     """
     return ResponseValidationConfig(
         enabled=str(os.getenv("RESPONSE_VALIDATION_ENABLED", default_enabled)).lower()
@@ -887,6 +898,10 @@ def load_summary_env(
 
     Returns:
         SummaryConfig: Parsed summary precision settings.
+        - coverage_target (float): Target minimum document coverage ratio for summaries. Value is clamped to [0.0, 1.0].
+        - max_docs (int): Maximum number of documents to sample for summarization.
+        - per_doc_top_k (int): Maximum number of evidence chunks to retrieve per document.
+        - final_source_cap (int): Maximum number of merged sources to include in the final summary answer to keep it concise and focused.
     """
     raw_target = float(os.getenv("SUMMARY_COVERAGE_TARGET", default_coverage_target))
     target = min(1.0, max(0.0, raw_target))

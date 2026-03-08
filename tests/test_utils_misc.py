@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from docint.utils.clean_text import basic_clean
-from docint.utils.env_cfg import load_path_env, load_summary_env
+from docint.utils.env_cfg import load_model_env, load_path_env, load_summary_env
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.logging_cfg import setup_logging
 from loguru import logger
@@ -142,3 +142,23 @@ def test_load_summary_env_clamps_and_parses(monkeypatch: pytest.MonkeyPatch) -> 
     assert cfg.max_docs == 12
     assert cfg.per_doc_top_k == 6
     assert cfg.final_source_cap == 10
+
+
+def test_load_model_env_parses_vision_mmproj_repo_and_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model env loader should split ``VLM`` into repo/model/mmproj fields.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Fixture to set environment variables.
+    """
+    monkeypatch.setenv(
+        "VLM",
+        "Qwen/Qwen3-VL-8B-Instruct-GGUF;Qwen3VL-8B-Instruct-Q4_K_M.gguf;mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf",
+    )
+
+    cfg = load_model_env()
+
+    assert cfg.vision_model_repo == "Qwen/Qwen3-VL-8B-Instruct-GGUF"
+    assert cfg.vision_model_file == "Qwen3VL-8B-Instruct-Q4_K_M.gguf"
+    assert cfg.vision_model_mmproj_file == "mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf"
