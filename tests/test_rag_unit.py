@@ -149,6 +149,29 @@ def test_normalize_response_data_appends_image_sources(
     assert sources[0]["image_id"] == "img-1"
 
 
+def test_normalize_response_data_falls_back_for_empty_model_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normalization should return a non-empty fallback when model output is empty.
+    
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(
+        RAG,
+        "_retrieve_image_sources",
+        lambda self, query, top_k=3: [],
+    )
+
+    # Simulates models that emit only hidden reasoning.
+    result = DummyResponse("<think>internal reasoning</think>", [])
+    normalized = rag._normalize_response_data("frage", result)
+
+    assert normalized["response"] == rag_module.EMPTY_RESPONSE_FALLBACK
+    assert normalized["reasoning"] == "internal reasoning"
+
+
 def test_directory_ingestion_attaches_file_hash(tmp_path: Path) -> None:
     """Test that directory ingestion attaches file hashes to documents.
 
@@ -403,6 +426,64 @@ def test_collection_ner_graph_and_neighbors() -> None:
     assert neighbors["center"] is not None
     assert neighbors["center"]["text"] == "Acme"
     assert neighbors["neighbors"]
+
+
+def test_expand_query_with_graph_with_debug_applies_neighbors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Graph expansion should return expanded query plus debug anchor/neighbor metadata.
+    
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag.graphrag_enabled = True
+    rag.graphrag_max_neighbors = 3
+    rag.graphrag_neighbor_hops = 1
+    rag.graphrag_top_k_nodes = 100
+    rag.graphrag_min_edge_weight = 1
+
+    monkeypatch.setattr(
+        RAG,
+        "_get_collection_ner_aggregate",
+        lambda self, refresh=False: {
+            "entities": [
+                {"text": "Acme", "mentions": 10},
+                {"text": "Widget", "mentions": 3},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        RAG,
+        "get_collection_ner_graph_neighbors",
+        lambda self, *, entity, hops, top_k_nodes, min_edge_weight, refresh=False: {
+            "neighbors": [{"text": "Widget"}, {"text": "Rivertown"}]
+        },
+    )
+
+    query = "What changed for Acme this quarter?"
+    expanded, debug = rag.expand_query_with_graph_with_debug(query)
+
+    assert expanded.endswith("Related entities for retrieval: Widget, Rivertown")
+    assert debug["enabled"] is True
+    assert debug["applied"] is True
+    assert debug["original_query"] == query
+    assert debug["expanded_query"] == expanded
+    assert debug["anchor_entities"] == ["Acme"]
+    assert debug["neighbor_entities"] == ["Widget", "Rivertown"]
+
+
+def test_expand_query_with_graph_with_debug_reports_disabled_state() -> None:
+    """Graph debug payload should report no-op reason when GraphRAG is disabled."""
+    rag = RAG(qdrant_collection="test")
+    rag.graphrag_enabled = False
+
+    query = "Acme outlook?"
+    expanded, debug = rag.expand_query_with_graph_with_debug(query)
+
+    assert expanded == query
+    assert debug["applied"] is False
+    assert debug["reason"] == "graphrag_disabled"
 
 
 def test_start_session_initializes_memory(

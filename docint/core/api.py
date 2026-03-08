@@ -193,6 +193,7 @@ class QueryOut(BaseModel):
     answer: str
     sources: list[dict] = []
     session_id: str
+    graph_debug: dict[str, Any] | None = None
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
     validation_reason: str | None = None
@@ -404,6 +405,11 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
             else ""
         )
         sources: list[dict] = data.get("sources", []) if isinstance(data, dict) else []
+        graph_debug = (
+            data.get("graph_debug")
+            if isinstance(data, dict) and isinstance(data.get("graph_debug"), dict)
+            else None
+        )
 
         validation = _validation_payload(
             question=payload.question,
@@ -414,6 +420,7 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
             "answer": answer,
             "sources": sources,
             "session_id": session_id,
+            "graph_debug": graph_debug,
             **validation,
         }
     except HTTPException as e:
