@@ -693,14 +693,17 @@ class RAG:
             logger.error("ValueError: data_dir cannot be None for ingestion pipeline.")
             raise ValueError("data_dir cannot be None for ingestion pipeline.")
 
-        ner_model = None
-        if self.ner_enabled and self.openai_model_provider.lower() in {"openai"}:
-            # Enforce JSON for NER tasks to ensure structured output
-            # Only use LLM-based NER for OpenAI provider; otherwise use GLiNER
-            ner_model = self._create_text_model()
-        hate_speech_model = None
-        if load_hate_speech_env().enabled:
-            hate_speech_model = self._create_text_model()
+        hate_speech_enabled = load_hate_speech_env().enabled
+        use_llm_ner = self.ner_enabled and self.openai_model_provider.lower() in {
+            "openai"
+        }
+
+        shared_text_model: OpenAI | None = None
+        if use_llm_ner or hate_speech_enabled:
+            shared_text_model = self.text_model
+
+        ner_model = shared_text_model if use_llm_ner else None
+        hate_speech_model = shared_text_model if hate_speech_enabled else None
 
         if self._image_ingestion_service is None:
             self._image_ingestion_service = ImageIngestionService(device=self.device)
@@ -735,6 +738,15 @@ class RAG:
             return []
         if self._image_ingestion_service is None:
             self._image_ingestion_service = ImageIngestionService(device=self.device)
+
+        try:
+            image_collection = self._image_ingestion_service._resolve_collection_name(
+                self.qdrant_collection
+            )
+        except Exception:
+            return []
+        if not self._collection_exists(image_collection):
+            return []
 
         try:
             matches = self._image_ingestion_service.query_similar_images_by_text(
@@ -808,6 +820,39 @@ class RAG:
             results.append(src)
 
         return results
+
+    def _collection_exists(self, collection_name: str) -> bool:
+        """Return whether a Qdrant collection exists.
+
+        Args:
+            collection_name: Collection name to verify.
+
+        Returns:
+            ``True`` if the collection exists, else ``False``.
+        """
+        collection_exists = getattr(self.qdrant_client, "collection_exists", None)
+        if callable(collection_exists):
+            try:
+                return bool(collection_exists(collection_name))
+            except Exception:
+                pass
+        try:
+            self.qdrant_client.get_collection(collection_name)
+            return True
+        except Exception as exc:
+            message = str(exc).lower()
+            if (
+                "not found" in message
+                or "doesn't exist" in message
+                or "missing" in message
+            ):
+                return False
+            logger.warning(
+                "Collection existence check failed for '{}': {}",
+                collection_name,
+                exc,
+            )
+            return False
 
     def _index(self, storage_ctx: StorageContext) -> VectorStoreIndex:
         """Creates the vector store index for document embeddings.
