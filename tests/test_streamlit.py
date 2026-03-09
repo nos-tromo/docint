@@ -260,7 +260,7 @@ def test_streamlit_analysis_inspect_tab_shows_zip_download_for_session_sources(
     mock_post: MagicMock,
 ) -> None:
     """Inspector page should expose ZIP download when session sources exist.
-    
+
     Args:
         mock_get (MagicMock): Mocked requests.get function.
         mock_post (MagicMock): Mocked requests.post function.

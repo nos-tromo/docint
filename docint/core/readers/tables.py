@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -53,7 +54,8 @@ class TableReader(BaseReader):
             If None, will read the first sheet.
             Defaults to None.
         csv_sep (str | None, optional): Separator for CSV/TSV files.
-            If None, will use "," for CSV and "\t" for TSV.
+            If None, TSV files use "\t" and CSV files use automatic delimiter
+            detection with a fallback to ",".
 
     Raises:
         ValueError: If an unsupported file type is provided.
@@ -146,6 +148,38 @@ class TableReader(BaseReader):
             parts.append(str(v))
         return self.combine_with.join(parts).strip()
 
+    def _detect_csv_separator(self, file_path: Path) -> str:
+        """Detect the delimiter used by a CSV file.
+
+        Args:
+            file_path (Path): Path to the CSV file.
+
+        Returns:
+            str: The detected delimiter, or "," as a safe fallback.
+        """
+        default_separator = ","
+        candidates = [",", ";", "\t", "|"]
+        try:
+            sample = file_path.read_text(encoding=self.encoding, errors="replace")[
+                :8192
+            ]
+        except OSError:
+            return default_separator
+
+        if not sample.strip():
+            return default_separator
+
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters="".join(candidates))
+            if dialect.delimiter in candidates:
+                return dialect.delimiter
+        except csv.Error:
+            pass
+
+        counts = {delimiter: sample.count(delimiter) for delimiter in candidates}
+        detected = max(counts, key=lambda delimiter: counts[delimiter])
+        return detected if counts[detected] > 0 else default_separator
+
     def load_data(self, file: str | Path, **kwargs) -> list[Document]:
         """Load data from a file into a list of Document objects.
 
@@ -174,7 +208,12 @@ class TableReader(BaseReader):
 
         # --- Load to DataFrame ---
         if suffix in {".csv", ".tsv"}:
-            sep = self.csv_sep if self.csv_sep else ("\t" if suffix == ".tsv" else ",")
+            if self.csv_sep:
+                sep = self.csv_sep
+            elif suffix == ".tsv":
+                sep = "\t"
+            else:
+                sep = self._detect_csv_separator(file_path)
             df = pd.read_csv(file_path, sep=sep, encoding=self.encoding)
             ft_extras = {"csv": {"sep": sep}}
         elif suffix in {".xlsx", ".xls"}:
