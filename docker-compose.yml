@@ -228,7 +228,7 @@ services:
               count: all
               capabilities: [gpu]
     runtime: nvidia
-    restart: always
+    restart: unless-stopped
     networks:
       docint-net:
         aliases:
