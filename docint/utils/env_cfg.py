@@ -129,17 +129,20 @@ class HateSpeechConfig:
 
     enabled: bool
     max_chars: int
+    max_workers: int
 
 
 def load_hate_speech_env(
     default_enabled: bool = False,
     default_max_chars: int = 2048,
+    default_max_workers: int = 1,
 ) -> HateSpeechConfig:
     """Load hate-speech detection settings from environment variables.
 
     Args:
         default_enabled: Whether hate-speech detection runs during ingestion.
         default_max_chars: Maximum characters from each chunk sent to the detector.
+        default_max_workers: Maximum worker threads for parallel hate-speech detection.
 
     Returns:
         HateSpeechConfig: Parsed hate-speech detection configuration.
@@ -148,6 +151,9 @@ def load_hate_speech_env(
         enabled=str(os.getenv("ENABLE_HATE_SPEECH_DETECTION", default_enabled)).lower()
         in {"true", "1", "yes"},
         max_chars=max(256, int(os.getenv("HATE_SPEECH_MAX_CHARS", default_max_chars))),
+        max_workers=max(
+            1, int(os.getenv("HATE_SPEECH_MAX_WORKERS", default_max_workers))
+        ),
     )
 
 
