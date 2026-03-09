@@ -122,6 +122,8 @@ def _analysis_get_side_effect(url: str, *args, **kwargs) -> MagicMock:
         }
     elif url.endswith("/collections/hate-speech"):
         response.json.return_value = {"results": []}
+    elif url.endswith("/sources/preview"):
+        response.content = b"source-bytes"
     else:
         response.json.return_value = {}
     return response
@@ -248,4 +250,68 @@ def test_streamlit_analysis_manual_ner_refresh_refetches(
     assert len(ner_calls) == 2
     assert ner_calls[0].kwargs.get("params") == {"refresh": "true"}
     assert ner_calls[1].kwargs.get("params") == {"refresh": "true"}
+    assert mock_post.call_count == 0
+
+
+@patch("requests.post")
+@patch("requests.get")
+def test_streamlit_analysis_inspect_tab_shows_zip_download_for_session_sources(
+    mock_get: MagicMock,
+    mock_post: MagicMock,
+) -> None:
+    """Inspect tab should expose ZIP download when current-session sources exist."""
+    mock_get.side_effect = _analysis_get_side_effect
+
+    at = AppTest.from_file("docint/app.py")
+    at.session_state["current_page"] = "Analysis"
+    at.session_state["selected_collection"] = "alpha"
+    at.session_state["_cached_collections"] = ["alpha"]
+    at.session_state["_cached_sessions"] = []
+    at.session_state["_backend_online"] = True
+    at.session_state["messages"] = [
+        {
+            "role": "assistant",
+            "content": "hello",
+            "sources": [{"filename": "doc.pdf", "file_hash": "hash-doc"}],
+        }
+    ]
+    at.session_state["analysis_summary_by_collection"] = {
+        "alpha": {
+            "collection": "alpha",
+            "generated": True,
+            "summary": "Summary text.",
+            "sources": [{"filename": "doc.pdf", "file_hash": "hash-doc"}],
+            "validation_checked": None,
+            "validation_mismatch": None,
+            "validation_reason": None,
+            "summary_diagnostics": None,
+            "error": None,
+        }
+    }
+    at.run(timeout=30)
+
+    labels = [str(widget.proto.label) for widget in at.get("download_button")]
+    assert "📦 Download referenced source files (.zip)" in labels
+    assert mock_post.call_count == 0
+
+
+@patch("requests.post")
+@patch("requests.get")
+def test_streamlit_analysis_inspect_tab_hides_zip_download_without_session_sources(
+    mock_get: MagicMock,
+    mock_post: MagicMock,
+) -> None:
+    """Inspect tab should not show ZIP download when no session sources exist."""
+    mock_get.side_effect = _analysis_get_side_effect
+
+    at = AppTest.from_file("docint/app.py")
+    at.session_state["current_page"] = "Analysis"
+    at.session_state["selected_collection"] = "alpha"
+    at.session_state["_cached_collections"] = ["alpha"]
+    at.session_state["_cached_sessions"] = []
+    at.session_state["_backend_online"] = True
+    at.run(timeout=30)
+
+    labels = [str(widget.proto.label) for widget in at.get("download_button")]
+    assert "📦 Download referenced source files (.zip)" not in labels
     assert mock_post.call_count == 0
