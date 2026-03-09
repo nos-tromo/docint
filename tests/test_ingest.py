@@ -113,7 +113,7 @@ def test_ingest_docs_invokes_rag(
             *,
             build_query_engine: bool = True,
             progress_callback: Callable[[str], None] | None = None,
-        ) -> None:  # type: ignore[override]
+        ) -> None:
             """
             Placeholder ingest_docs method for the test double.
 
@@ -162,20 +162,20 @@ def _make_pipeline(
         clean_fn=lambda x: x,
         ner_model=None,
         progress_callback=None,
-    )  # type: ignore[arg-type]
+    )
 
     pipeline.entity_extractor = entity_extractor
 
     # Minimal parser stubs to satisfy _create_nodes preconditions
     pipeline.md_node_parser = cast(
         Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
-    )  # type: ignore[assignment]
+    )
     pipeline.docling_node_parser = cast(
         Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
-    )  # type: ignore[assignment]
+    )
     pipeline.sentence_splitter = cast(
         Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
-    )  # type: ignore[assignment]
+    )
     # Disable hierarchical node parser to ensure flat chunking (which uses the mocked splitters)
     pipeline.hierarchical_node_parser = None
     return pipeline, dummy_nodes
@@ -339,6 +339,7 @@ def test_hate_speech_detection_attaches_flagged_metadata(
     class FakeHateSpeechConfig:
         enabled = True
         max_chars = 128
+        max_workers = 1
 
     class FakeIngestionConfig:
         ingestion_batch_size = 2
@@ -443,3 +444,137 @@ def test_hate_speech_detection_attaches_flagged_metadata(
     assert detection["confidence"] == "high"
     assert detection["chunk_id"] == "node-1"
     assert "Dangerous text" in detection["chunk_text"]
+
+
+def test_hate_speech_detection_parallel_workers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Multi-worker hate-speech detection should process all nodes concurrently.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Temporary directory path for the test.
+    """
+
+    class FakeNERConfig:
+        """NER config stub with extraction disabled."""
+
+        enabled = False
+        max_chars = 256
+        max_workers = 1
+
+    class FakeHateSpeechConfig:
+        """Hate-speech config stub with two workers enabled."""
+
+        enabled = True
+        max_chars = 128
+        max_workers = 2
+
+    class FakeIngestionConfig:
+        """Ingestion config stub with default settings."""
+
+        ingestion_batch_size = 2
+        sentence_splitter_chunk_size = 512
+        sentence_splitter_chunk_overlap = 64
+        supported_filetypes: list[str] = []
+        hierarchical_chunking_enabled = False
+        coarse_chunk_size = 1024
+        fine_chunk_size = 256
+        fine_chunk_overlap = 32
+
+    class FakeOpenAIPipeline:
+        """Fake OpenAIPipeline that returns a hate-speech prompt."""
+
+        def load_prompt(self, kw: str) -> str:
+            """Return a canned hate-speech detection prompt.
+
+            Args:
+                kw: The prompt keyword.
+
+            Returns:
+                A placeholder prompt template.
+            """
+            return "Detect hate speech:\n{text}"
+
+    call_count = 0
+
+    class FakeResponse:
+        """Fake LLM response indicating hate speech detected."""
+
+        text = (
+            '{"hate_speech": true, "category": "ethnicity",'
+            ' "confidence": "high", "reason": "offensive"}'
+        )
+
+    class FakeModel:
+        """Fake model that counts invocations."""
+
+        def complete(self, prompt: str) -> FakeResponse:
+            """Increment invocation count and return a flagged response.
+
+            Args:
+                prompt: The prompt text.
+
+            Returns:
+                A ``FakeResponse`` with hate-speech flagged.
+            """
+            nonlocal call_count
+            call_count += 1
+            return FakeResponse()
+
+    monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
+    monkeypatch.setattr(
+        pipeline_module, "load_hate_speech_env", lambda: FakeHateSpeechConfig()
+    )
+    monkeypatch.setattr(
+        pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig()
+    )
+    monkeypatch.setattr(pipeline_module, "OpenAIPipeline", FakeOpenAIPipeline)
+
+    pipeline = DocumentIngestionPipeline(
+        data_dir=tmp_path,
+        device="cpu",
+        ner_model=None,
+        progress_callback=None,
+        hate_speech_model=cast(Any, FakeModel()),
+    )
+    pipeline.entity_extractor = None
+    pipeline.md_node_parser = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
+    )
+    pipeline.docling_node_parser = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
+    )
+    pipeline.sentence_splitter = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
+    )
+    pipeline.hierarchical_node_parser = None
+
+    dummy_nodes: list[Any] = [
+        SimpleNamespace(
+            text="Bad text one.",
+            node_id="n-1",
+            metadata={"filename": "a.pdf", "file_path": "a.pdf"},
+        ),
+        SimpleNamespace(
+            text="Bad text two.",
+            node_id="n-2",
+            metadata={"filename": "b.pdf", "file_path": "b.pdf"},
+        ),
+        SimpleNamespace(
+            text="Bad text three.",
+            node_id="n-3",
+            metadata={"filename": "c.pdf", "file_path": "c.pdf"},
+        ),
+    ]
+
+    nodes = pipeline._create_nodes(
+        [Document(text="Doc", metadata={"file_path": "doc.pdf"})]
+    )
+
+    assert call_count == 3
+    assert pipeline.hate_speech_max_workers == 2
+    for node in nodes:
+        detection = node.metadata.get("hate_speech")
+        assert isinstance(detection, dict)
+        assert detection["hate_speech"] is True

@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 
 from docint.utils.clean_text import basic_clean
-from docint.utils.env_cfg import load_model_env, load_path_env, load_summary_env
+from docint.utils.env_cfg import (
+    load_hate_speech_env,
+    load_model_env,
+    load_path_env,
+    load_summary_env,
+)
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.logging_cfg import setup_logging
 from loguru import logger
@@ -164,3 +169,54 @@ def test_load_model_env_parses_vision_mmproj_repo_and_file(
     assert cfg.vision_model_repo == "Qwen/Qwen3-VL-8B-Instruct-GGUF"
     assert cfg.vision_model_file == "Qwen3VL-8B-Instruct-Q4_K_M.gguf"
     assert cfg.vision_model_mmproj_file == "mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf"
+
+
+def test_load_hate_speech_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default hate-speech config should be disabled with one worker.
+
+    Args:
+        monkeypatch: Fixture to clear environment variables.
+    """
+    monkeypatch.delenv("ENABLE_HATE_SPEECH_DETECTION", raising=False)
+    monkeypatch.delenv("HATE_SPEECH_MAX_CHARS", raising=False)
+    monkeypatch.delenv("HATE_SPEECH_MAX_WORKERS", raising=False)
+
+    cfg = load_hate_speech_env()
+
+    assert cfg.enabled is False
+    assert cfg.max_chars == 2048
+    assert cfg.max_workers == 1
+
+
+def test_load_hate_speech_env_parses_max_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HATE_SPEECH_MAX_WORKERS env var should configure worker count.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.setenv("ENABLE_HATE_SPEECH_DETECTION", "true")
+    monkeypatch.setenv("HATE_SPEECH_MAX_CHARS", "512")
+    monkeypatch.setenv("HATE_SPEECH_MAX_WORKERS", "4")
+
+    cfg = load_hate_speech_env()
+
+    assert cfg.enabled is True
+    assert cfg.max_chars == 512
+    assert cfg.max_workers == 4
+
+
+def test_load_hate_speech_env_clamps_max_workers_minimum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HATE_SPEECH_MAX_WORKERS should be clamped to at least 1.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.setenv("HATE_SPEECH_MAX_WORKERS", "0")
+
+    cfg = load_hate_speech_env()
+
+    assert cfg.max_workers == 1

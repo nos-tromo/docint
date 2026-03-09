@@ -658,6 +658,10 @@ def _render_entities_tab(result: dict[str, Any], collection: str) -> None:
 def _render_hate_speech_tab(result: dict[str, Any], collection: str) -> None:
     """Render hate-speech findings with expandable chunk details.
 
+    Displays a numbered summary table followed by expanders whose labels
+    reference the corresponding table row so users can cross-reference
+    findings easily.
+
     Args:
         result: The analysis result dictionary containing hate-speech findings.
         collection: The name of the currently selected collection.
@@ -670,25 +674,34 @@ def _render_hate_speech_tab(result: dict[str, Any], collection: str) -> None:
 
     st.dataframe(
         {
-            "Source": [row.get("source_ref") for row in findings],
+            "#": list(range(1, len(findings) + 1)),
             "Category": [row.get("category") for row in findings],
             "Confidence": [row.get("confidence") for row in findings],
             "Reason": [row.get("reason") for row in findings],
+            "Source": [row.get("source_ref") for row in findings],
             "Chunk ID": [row.get("chunk_id") for row in findings],
         },
         width="stretch",
         hide_index=True,
     )
+    st.caption("Expand a row below to view the flagged chunk text.")
     for idx, row in enumerate(findings, start=1):
-        with st.expander(
-            f"{idx}. {row.get('source_ref') or 'Unknown source'} "
-            f"(confidence: {row.get('confidence')})"
-        ):
-            st.caption(
-                f"Category: {row.get('category')} · Page: {row.get('page')} · "
-                f"Chunk ID: {row.get('chunk_id')}"
+        category = row.get("category") or "unknown"
+        confidence = row.get("confidence") or "unknown"
+        reason = row.get("reason") or ""
+        with st.expander(f"Row {idx} — {category.capitalize()}: {reason} (confidence: {confidence})"):
+            source = row.get("source_ref") or "Unknown source"
+            page = row.get("page")
+            chunk_id = row.get("chunk_id") or "n/a"
+            reason = row.get("reason") or ""
+            chunk_text = (row.get("chunk_text") or "").strip()
+            st.markdown(
+                f"**Source:** {source}  \n"
+                f"**Page:** {page if page is not None else 'n/a'}  \n"
+                f"**Chunk ID:** {chunk_id}  \n"
+                f"**Reason:** {reason}  \n"
+                f"**Text:** {chunk_text if chunk_text else 'n/a'}"
             )
-            st.write(row.get("chunk_text") or "")
 
     st.download_button(
         label="📥 Download flagged chunks (.txt)",

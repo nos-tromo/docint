@@ -137,6 +137,7 @@ class DocumentIngestionPipeline:
     entity_extractor: Callable[[str], tuple[list[dict], list[dict]]] | None = None
     hate_speech_enabled: bool = field(default=False, init=False)
     hate_speech_max_chars: int = field(default=1500, init=False)
+    hate_speech_max_workers: int = field(default=1, init=False)
     hate_speech_prompt: str | None = field(default=None, init=False)
 
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
@@ -181,6 +182,7 @@ class DocumentIngestionPipeline:
         hate_speech_cfg = load_hate_speech_env()
         self.hate_speech_enabled = hate_speech_cfg.enabled
         self.hate_speech_max_chars = hate_speech_cfg.max_chars
+        self.hate_speech_max_workers = hate_speech_cfg.max_workers
         if self.hate_speech_enabled and self.hate_speech_model is not None:
             try:
                 self.hate_speech_prompt = OpenAIPipeline().load_prompt(kw="hate_speech")
@@ -810,15 +812,16 @@ class DocumentIngestionPipeline:
             and self.hate_speech_model is not None
         ):
             total_nodes = len(nodes)
-            for i, node in enumerate(nodes):
+
+            def _process_hate_speech(idx: int, node: BaseNode) -> None:
                 text_value = getattr(node, "text", "") or ""
                 if not text_value.strip():
-                    continue
+                    return
                 try:
-                    prompt = self.hate_speech_prompt.replace(
+                    prompt = self.hate_speech_prompt.replace(  # type: ignore[union-attr]
                         "{text}", text_value[: self.hate_speech_max_chars]
                     )
-                    response = self.hate_speech_model.complete(prompt)
+                    response = self.hate_speech_model.complete(prompt)  # type: ignore[union-attr]
                     raw = response.text if hasattr(response, "text") else str(response)
                     parsed = _parse_hate_speech_payload(str(raw))
                     if bool(parsed.get("hate_speech")):
@@ -841,11 +844,28 @@ class DocumentIngestionPipeline:
                         node.metadata = {**meta, "hate_speech": parsed}
                 except Exception as exc:
                     logger.warning(
-                        "Hate-speech detection failed on chunk {}: {}", i, exc
+                        "Hate-speech detection failed on chunk {}: {}", idx, exc
                     )
-                if self.progress_callback:
-                    self.progress_callback(
-                        f"Detecting hate speech: {i + 1}/{total_nodes} chunks processed"
-                    )
+
+            if self.hate_speech_max_workers > 1:
+                with ThreadPoolExecutor(
+                    max_workers=self.hate_speech_max_workers
+                ) as executor:
+                    futures = [
+                        executor.submit(_process_hate_speech, i, node)
+                        for i, node in enumerate(nodes)
+                    ]
+                    for i, _ in enumerate(as_completed(futures)):
+                        if self.progress_callback:
+                            self.progress_callback(
+                                f"Detecting hate speech: {i + 1}/{total_nodes} chunks processed"
+                            )
+            else:
+                for i, node in enumerate(nodes):
+                    _process_hate_speech(i, node)
+                    if self.progress_callback:
+                        self.progress_callback(
+                            f"Detecting hate speech: {i + 1}/{total_nodes} chunks processed"
+                        )
 
         return nodes
