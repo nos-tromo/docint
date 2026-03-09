@@ -14,6 +14,8 @@ import streamlit as st
 
 from docint.ui.state import BACKEND_HOST, BACKEND_PUBLIC_HOST
 
+DEFAULT_ARCHIVE_NAME = "source"
+
 
 # ---------------------------------------------------------------------------
 # Data-processing helpers (pure functions – no Streamlit calls)
@@ -472,22 +474,22 @@ def unique_referenced_sources(
     """Deduplicate source rows while preserving first-seen ordering.
 
     Args:
-        sources: Source rows from chat and/or analysis contexts.
+        sources: Source rows from chat and/or analysis contexts. Each row may
+            include ``file_hash``, ``file_path``, ``filename``, and ``context``
+            keys.
 
     Returns:
         Unique source rows keyed by file hash when available, else by file path
         or filename.
     """
-    unique: dict[str, dict[str, Any]] = {}
-    ordered_keys: list[str] = []
+    unique: dict[tuple[str, str], dict[str, Any]] = {}
+    ordered_keys: list[tuple[str, str]] = []
 
     for src in sources or []:
         if not isinstance(src, dict):
             continue
-        key = str(
-            src.get("file_hash") or src.get("file_path") or src.get("filename") or ""
-        ).strip()
-        if not key:
+        key = _source_identity_key(src)
+        if key is None:
             continue
         if key not in unique:
             unique[key] = dict(src)
@@ -516,7 +518,9 @@ def build_source_files_zip(
 
     Args:
         collection: Active collection name used for backend download requests.
-        sources: Source rows from the current session context.
+        sources: Source rows from the current session context. Each row may
+            include ``file_hash``, ``file_path``, ``filename``, and ``context``
+            keys.
         fetch_source: Optional file-fetching callback for tests.
 
     Returns:
@@ -547,7 +551,7 @@ def build_source_files_zip(
 
             try:
                 content = fetcher(collection_name, file_hash)
-            except Exception as exc:
+            except (requests.RequestException, ValueError) as exc:
                 warnings.append(f"{filename}: {exc}")
                 continue
 
@@ -765,15 +769,17 @@ def _fetch_source_file(collection: str, file_hash: str) -> bytes:
 
 def _source_archive_name(src: dict[str, Any]) -> str:
     """Return a safe archive name for a referenced source row."""
-    raw_name = str(src.get("filename") or src.get("file_path") or "source").strip()
+    raw_name = str(
+        src.get("filename") or src.get("file_path") or DEFAULT_ARCHIVE_NAME
+    ).strip()
     safe_name = Path(raw_name).name.strip()
-    return safe_name or "source"
+    return safe_name or DEFAULT_ARCHIVE_NAME
 
 
 def _unique_archive_name(filename: str, used_names: set[str]) -> str:
     """Return a unique ZIP entry name while preserving the original filename."""
-    candidate = Path(str(filename or "source")).name or "source"
-    stem = Path(candidate).stem or "source"
+    candidate = Path(str(filename or DEFAULT_ARCHIVE_NAME)).name or DEFAULT_ARCHIVE_NAME
+    stem = Path(candidate).stem or DEFAULT_ARCHIVE_NAME
     suffix = Path(candidate).suffix
     unique_name = candidate
     counter = 2
@@ -782,3 +788,20 @@ def _unique_archive_name(filename: str, used_names: set[str]) -> str:
         counter += 1
     used_names.add(unique_name)
     return unique_name
+
+
+def _source_identity_key(src: dict[str, Any]) -> tuple[str, str] | None:
+    """Return a tagged key used to identify unique referenced source files."""
+    file_hash = str(src.get("file_hash") or "").strip()
+    if file_hash:
+        return ("file_hash", file_hash)
+
+    file_path = str(src.get("file_path") or "").strip()
+    if file_path:
+        return ("file_path", file_path)
+
+    filename = str(src.get("filename") or "").strip()
+    if filename:
+        return ("filename", filename)
+
+    return None

@@ -692,7 +692,9 @@ def _render_hate_speech_tab(result: dict[str, Any], collection: str) -> None:
         category = row.get("category") or "unknown"
         confidence = row.get("confidence") or "unknown"
         reason = row.get("reason") or ""
-        with st.expander(f"Row {idx} — {category.capitalize()}: {reason} (confidence: {confidence})"):
+        with st.expander(
+            f"Row {idx} — {category.capitalize()}: {reason} (confidence: {confidence})"
+        ):
             source = row.get("source_ref") or "Unknown source"
             page = row.get("page")
             chunk_id = row.get("chunk_id") or "n/a"
@@ -732,7 +734,9 @@ def _render_inspect_tab(collection: str, summary_state: dict[str, Any] | None) -
         st.info("No referenced source files are available in this session yet.")
         return
 
-    chat_refs = sum(1 for src in unique_sources if "chat" in str(src.get("context") or ""))
+    chat_refs = sum(
+        1 for src in unique_sources if "chat" in str(src.get("context") or "")
+    )
     analysis_refs = sum(
         1 for src in unique_sources if "analysis" in str(src.get("context") or "")
     )

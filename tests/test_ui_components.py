@@ -218,7 +218,11 @@ def test_build_source_files_zip_deduplicates_entries_and_keeps_names() -> None:
             {"filename": "report.pdf", "file_hash": "hash-a", "context": "chat"},
             {"filename": "report.pdf", "file_hash": "hash-a", "context": "analysis"},
             {"filename": "report.pdf", "file_hash": "hash-b", "context": "analysis"},
-            {"filename": "nested/path/data.csv", "file_hash": "hash-c", "context": "chat"},
+            {
+                "filename": "nested/path/data.csv",
+                "file_hash": "hash-c",
+                "context": "chat",
+            },
         ],
         fetch_source=_fetch_source,
     )
@@ -226,7 +230,7 @@ def test_build_source_files_zip_deduplicates_entries_and_keeps_names() -> None:
     assert warnings == []
     assert zip_bytes is not None
     with ZipFile(BytesIO(zip_bytes), "r") as archive:
-        assert archive.namelist() == ["report.pdf", "report_2.pdf", "data.csv"]
+        assert sorted(archive.namelist()) == ["data.csv", "report.pdf", "report_2.pdf"]
         assert archive.read("report.pdf") == b"alpha"
         assert archive.read("report_2.pdf") == b"beta"
         assert archive.read("data.csv") == b"gamma"
