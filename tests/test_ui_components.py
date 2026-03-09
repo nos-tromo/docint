@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+from io import BytesIO
+from zipfile import ZipFile
+
 from docint.ui.components import (
     aggregate_ner,
+    build_source_files_zip,
     build_entity_histogram_data,
+    collect_session_referenced_sources,
     entity_density_by_document,
     filter_entities,
     response_validation_summary,
     summary_diagnostics_summary,
+    unique_referenced_sources,
 )
 
 
@@ -149,3 +155,94 @@ def test_summary_diagnostics_summary_uses_singular_for_one_document() -> None:
         }
     )
     assert summary == ("Summary coverage: 1/1 document (100%, target 70%)", None)
+
+
+def test_collect_session_referenced_sources_combines_chat_and_analysis() -> None:
+    """Session source collector should merge chat and analysis references."""
+    combined = collect_session_referenced_sources(
+        [
+            {
+                "role": "assistant",
+                "sources": [
+                    {"filename": "chat.pdf", "file_hash": "hash-chat"},
+                    {"filename": "shared.pdf", "file_hash": "hash-shared"},
+                ],
+            },
+            {"role": "user", "content": "ignore me"},
+        ],
+        [
+            {"filename": "analysis.pdf", "file_hash": "hash-analysis"},
+            {"filename": "shared.pdf", "file_hash": "hash-shared"},
+        ],
+    )
+
+    assert [row["context"] for row in combined] == [
+        "chat",
+        "chat",
+        "analysis",
+        "analysis",
+    ]
+    assert combined[0]["filename"] == "chat.pdf"
+    assert combined[-1]["filename"] == "shared.pdf"
+
+
+def test_unique_referenced_sources_deduplicates_by_hash_and_merges_contexts() -> None:
+    """Unique source helper should collapse duplicate files across contexts."""
+    unique = unique_referenced_sources(
+        [
+            {"filename": "shared.pdf", "file_hash": "same", "context": "chat"},
+            {"filename": "shared.pdf", "file_hash": "same", "context": "analysis"},
+            {"filename": "other.pdf", "file_hash": "other", "context": "analysis"},
+        ]
+    )
+
+    assert len(unique) == 2
+    assert unique[0]["filename"] == "shared.pdf"
+    assert unique[0]["context"] == "analysis, chat"
+    assert unique[1]["filename"] == "other.pdf"
+
+
+def test_build_source_files_zip_deduplicates_entries_and_keeps_names() -> None:
+    """ZIP builder should keep source names and avoid duplicate file entries."""
+
+    def _fetch_source(_: str, file_hash: str) -> bytes:
+        return {
+            "hash-a": b"alpha",
+            "hash-b": b"beta",
+            "hash-c": b"gamma",
+        }[file_hash]
+
+    zip_bytes, warnings = build_source_files_zip(
+        "alpha",
+        [
+            {"filename": "report.pdf", "file_hash": "hash-a", "context": "chat"},
+            {"filename": "report.pdf", "file_hash": "hash-a", "context": "analysis"},
+            {"filename": "report.pdf", "file_hash": "hash-b", "context": "analysis"},
+            {
+                "filename": "nested/path/data.csv",
+                "file_hash": "hash-c",
+                "context": "chat",
+            },
+        ],
+        fetch_source=_fetch_source,
+    )
+
+    assert warnings == []
+    assert zip_bytes is not None
+    with ZipFile(BytesIO(zip_bytes), "r") as archive:
+        assert sorted(archive.namelist()) == ["data.csv", "report.pdf", "report_2.pdf"]
+        assert archive.read("report.pdf") == b"alpha"
+        assert archive.read("report_2.pdf") == b"beta"
+        assert archive.read("data.csv") == b"gamma"
+
+
+def test_build_source_files_zip_handles_missing_hashes_gracefully() -> None:
+    """ZIP builder should fail visibly when no downloadable sources are available."""
+    zip_bytes, warnings = build_source_files_zip(
+        "alpha",
+        [{"filename": "report.pdf", "context": "chat"}],
+        fetch_source=lambda *_: b"",
+    )
+
+    assert zip_bytes is None
+    assert warnings == ["report.pdf: original file is unavailable."]

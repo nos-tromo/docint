@@ -4,11 +4,17 @@ This module contains all NER / source data logic previously in ``app.py``,
 plus extracted rendering helpers that are reused across pages.
 """
 
-from typing import Any, Iterable
+from io import BytesIO
+from pathlib import Path
+from typing import Any, Callable, Iterable
+from zipfile import ZIP_DEFLATED, ZipFile
 
+import requests
 import streamlit as st
 
-from docint.ui.state import BACKEND_PUBLIC_HOST
+from docint.ui.state import BACKEND_HOST, BACKEND_PUBLIC_HOST
+
+DEFAULT_ARCHIVE_NAME = "source"
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +436,139 @@ def summary_diagnostics_summary(
     return (title, detail)
 
 
+def collect_session_referenced_sources(
+    messages: Iterable[dict[str, Any]] | None,
+    analysis_sources: Iterable[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Collect referenced source rows from the current session context.
+
+    Args:
+        messages: Current chat-session messages.
+        analysis_sources: Current analysis/summary source rows.
+
+    Returns:
+        Combined source rows tagged with ``context`` set to ``chat`` or
+        ``analysis``.
+    """
+    collected: list[dict[str, Any]] = []
+
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        for src in message.get("sources") or []:
+            if not isinstance(src, dict):
+                continue
+            collected.append({**src, "context": "chat"})
+
+    for src in analysis_sources or []:
+        if not isinstance(src, dict):
+            continue
+        collected.append({**src, "context": "analysis"})
+
+    return collected
+
+
+def unique_referenced_sources(
+    sources: Iterable[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Deduplicate source rows while preserving first-seen ordering.
+
+    Args:
+        sources: Source rows from chat and/or analysis contexts. Each row may
+            include ``file_hash``, ``file_path``, ``filename``, and ``context``
+            keys.
+
+    Returns:
+        Unique source rows keyed by file hash when available, else by file path
+        or filename.
+    """
+    unique: dict[tuple[str, str], dict[str, Any]] = {}
+    ordered_keys: list[tuple[str, str]] = []
+
+    for src in sources or []:
+        if not isinstance(src, dict):
+            continue
+        key = _source_identity_key(src)
+        if key is None:
+            continue
+        if key not in unique:
+            unique[key] = dict(src)
+            ordered_keys.append(key)
+            continue
+
+        existing = unique[key]
+        contexts = {
+            str(existing.get("context") or "").strip(),
+            str(src.get("context") or "").strip(),
+        }
+        contexts.discard("")
+        if contexts:
+            existing["context"] = ", ".join(sorted(contexts))
+
+    return [unique[key] for key in ordered_keys]
+
+
+def build_source_files_zip(
+    collection: str,
+    sources: Iterable[dict[str, Any]] | None,
+    *,
+    fetch_source: Callable[[str, str], bytes] | None = None,
+) -> tuple[bytes | None, list[str]]:
+    """Build a ZIP archive for unique referenced source files.
+
+    Args:
+        collection: Active collection name used for backend download requests.
+        sources: Source rows from the current session context. Each row may
+            include ``file_hash``, ``file_path``, ``filename``, and ``context``
+            keys.
+        fetch_source: Optional file-fetching callback for tests.
+
+    Returns:
+        Tuple ``(zip_bytes, warnings)``. ``zip_bytes`` is ``None`` when no files
+        could be archived successfully.
+    """
+    collection_name = str(collection or "").strip()
+    if not collection_name:
+        return (None, ["No collection is selected for source export."])
+
+    fetcher = fetch_source or _fetch_source_file
+    warnings: list[str] = []
+    unique_sources = unique_referenced_sources(sources)
+    if not unique_sources:
+        return (None, ["No referenced source files are available."])
+
+    buffer = BytesIO()
+    written = 0
+    used_names: set[str] = set()
+
+    with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
+        for src in unique_sources:
+            filename = _source_archive_name(src)
+            file_hash = str(src.get("file_hash") or "").strip()
+            if not file_hash:
+                warnings.append(f"{filename}: original file is unavailable.")
+                continue
+
+            try:
+                content = fetcher(collection_name, file_hash)
+            except (requests.RequestException, ValueError) as exc:
+                warnings.append(f"{filename}: {exc}")
+                continue
+
+            if not isinstance(content, (bytes, bytearray)) or not content:
+                warnings.append(f"{filename}: downloaded file was empty.")
+                continue
+
+            archive_name = _unique_archive_name(filename, used_names)
+            archive.writestr(archive_name, bytes(content))
+            written += 1
+
+    if written == 0:
+        return (None, warnings or ["Could not create the source ZIP archive."])
+
+    return (buffer.getvalue(), warnings)
+
+
 # ---------------------------------------------------------------------------
 # Rendering helpers (use Streamlit)
 # ---------------------------------------------------------------------------
@@ -614,3 +753,55 @@ def render_summary_diagnostics(summary_diagnostics: dict[str, Any] | None) -> No
     st.caption(title)
     if detail:
         st.caption(detail)
+
+
+def _fetch_source_file(collection: str, file_hash: str) -> bytes:
+    """Download a single original source file from the backend."""
+    response = requests.get(
+        f"{BACKEND_HOST}/sources/preview",
+        params={"collection": collection, "file_hash": file_hash},
+        timeout=60,
+    )
+    if response.status_code != 200:
+        raise ValueError(f"download failed ({response.status_code})")
+    return response.content
+
+
+def _source_archive_name(src: dict[str, Any]) -> str:
+    """Return a safe archive name for a referenced source row."""
+    raw_name = str(
+        src.get("filename") or src.get("file_path") or DEFAULT_ARCHIVE_NAME
+    ).strip()
+    safe_name = Path(raw_name).name.strip()
+    return safe_name or DEFAULT_ARCHIVE_NAME
+
+
+def _unique_archive_name(filename: str, used_names: set[str]) -> str:
+    """Return a unique ZIP entry name while preserving the original filename."""
+    candidate = Path(str(filename or DEFAULT_ARCHIVE_NAME)).name or DEFAULT_ARCHIVE_NAME
+    stem = Path(candidate).stem or DEFAULT_ARCHIVE_NAME
+    suffix = Path(candidate).suffix
+    unique_name = candidate
+    counter = 2
+    while unique_name in used_names:
+        unique_name = f"{stem}_{counter}{suffix}"
+        counter += 1
+    used_names.add(unique_name)
+    return unique_name
+
+
+def _source_identity_key(src: dict[str, Any]) -> tuple[str, str] | None:
+    """Return a tagged key used to identify unique referenced source files."""
+    file_hash = str(src.get("file_hash") or "").strip()
+    if file_hash:
+        return ("file_hash", file_hash)
+
+    file_path = str(src.get("file_path") or "").strip()
+    if file_path:
+        return ("file_path", file_path)
+
+    filename = str(src.get("filename") or "").strip()
+    if filename:
+        return ("filename", filename)
+
+    return None

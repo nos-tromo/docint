@@ -14,8 +14,8 @@ from docint.ui.components import (
     filter_entities,
     render_ner_overview,
     render_response_validation,
-    render_summary_diagnostics,
     render_source_item,
+    render_summary_diagnostics,
 )
 from docint.ui.state import BACKEND_HOST
 
@@ -689,7 +689,9 @@ def _render_hate_speech_tab(result: dict[str, Any], collection: str) -> None:
         category = row.get("category") or "unknown"
         confidence = row.get("confidence") or "unknown"
         reason = row.get("reason") or ""
-        with st.expander(f"Row {idx} — {category.capitalize()}: {reason} (confidence: {confidence})"):
+        with st.expander(
+            f"Row {idx} — {category.capitalize()}: {reason} (confidence: {confidence})"
+        ):
             source = row.get("source_ref") or "Unknown source"
             page = row.get("page")
             chunk_id = row.get("chunk_id") or "n/a"
