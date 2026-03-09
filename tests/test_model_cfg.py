@@ -1,3 +1,5 @@
+"""Tests for model configuration loading utilities."""
+
 from pathlib import Path
 
 from docint.utils.model_cfg import load_llama_cpp_model

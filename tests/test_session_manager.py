@@ -1,3 +1,5 @@
+"""Tests for the session manager citation persistence."""
+
 from typing import Generator
 from unittest.mock import MagicMock
 

@@ -1,3 +1,5 @@
+"""Tests for analysis UI helper functions."""
+
 from docint.ui.analysis import (
     _dot_escape,
     _entity_chunks_to_txt,

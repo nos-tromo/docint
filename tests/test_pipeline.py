@@ -240,6 +240,8 @@ class TestPipelineConfig:
 
 
 class TestTriage:
+    """Tests for the PDF triage stage (digital, scanned, mixed detection)."""
+
     def test_digital_pdf(self, pipeline_config: PipelineConfig) -> None:
         """Pages with sufficient text should not need OCR.
 

@@ -1,3 +1,5 @@
+"""Tests for miscellaneous utilities (hashing, cleaning, env config)."""
+
 import hashlib
 import json
 from pathlib import Path

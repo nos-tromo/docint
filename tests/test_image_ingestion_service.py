@@ -557,3 +557,46 @@ def test_cap_image_size_passes_small_image_through() -> None:
 
     assert out_bytes is small_bytes
     assert out_mime == "image/png"
+
+
+def test_query_similar_images_by_text_returns_empty_when_collection_missing() -> None:
+    """Text-image retrieval should return empty when the image collection does not exist."""
+
+    class NoEmbedBackend:
+        def embed_text(self, text: str) -> list[float]:
+            raise AssertionError("embed_text should not be called")
+
+    service, _, _ = _build_service()
+    service.qdrant_client = cast(
+        Any, SimpleNamespace(collection_exists=lambda collection_name: False)
+    )
+    service.embedding_backend = cast(Any, NoEmbedBackend())
+
+    matches = service.query_similar_images_by_text(
+        query_text="diagram",
+        top_k=3,
+        source_collection="spiegel-data",
+    )
+
+    assert matches == []
+
+
+def test_query_similar_images_returns_empty_when_collection_missing() -> None:
+    """Image-image retrieval should return empty when the image collection does not exist."""
+
+    class NoImageEmbedBackend:
+        def embed(self, image_bytes: bytes) -> list[float]:
+            raise AssertionError("embed should not be called")
+
+    service, _, _ = _build_service()
+    service.qdrant_client = cast(
+        Any, SimpleNamespace(collection_exists=lambda collection_name: False)
+    )
+    service.embedding_backend = cast(Any, NoImageEmbedBackend())
+
+    matches = service.query_similar_images(
+        image=b"binary-image-data",
+        source_collection="spiegel-data",
+    )
+
+    assert matches == []

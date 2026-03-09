@@ -1,3 +1,5 @@
+"""Tests for SQLAlchemy-based conversation/turn/citation models."""
+
 from sqlalchemy import inspect
 from pathlib import Path
 

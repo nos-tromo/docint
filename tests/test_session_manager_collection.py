@@ -1,3 +1,5 @@
+"""Tests for session manager collection-scoped conversations."""
+
 from typing import Generator, cast
 from unittest.mock import MagicMock
 

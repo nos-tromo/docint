@@ -172,6 +172,45 @@ def test_normalize_response_data_falls_back_for_empty_model_output(
     assert normalized["reasoning"] == "internal reasoning"
 
 
+def test_retrieve_image_sources_skips_when_image_collection_missing() -> None:
+    """Image retrieval should short-circuit when the image collection is absent."""
+
+    class DummyImageService:
+        """Image service stub that raises if unexpectedly queried."""
+
+        def __init__(self) -> None:
+            self.called = False
+
+        def _resolve_collection_name(self, source_collection: str | None = None) -> str:
+            return f"{source_collection}_images"
+
+        def query_similar_images_by_text(
+            self,
+            query_text: str,
+            top_k: int = 3,
+            *,
+            source_collection: str | None = None,
+        ) -> list[dict[str, Any]]:
+            self.called = True
+            raise AssertionError("query_similar_images_by_text should not be called")
+
+    rag = RAG(qdrant_collection="spiegel-data")
+    image_service = DummyImageService()
+    rag._image_ingestion_service = cast(Any, image_service)
+
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(
+            collection_exists=lambda collection_name: False,
+        ),
+    )
+
+    sources = rag._retrieve_image_sources("any query", top_k=3)
+
+    assert sources == []
+    assert image_service.called is False
+
+
 def test_directory_ingestion_attaches_file_hash(tmp_path: Path) -> None:
     """Test that directory ingestion attaches file hashes to documents.
 
@@ -583,6 +622,70 @@ def test_filter_docs_skips_existing_hashes(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert len(filtered) == 1
     assert filtered[0].metadata.get("file_hash") == fresh_hash
+
+
+def test_build_ingestion_pipeline_reuses_text_model_for_ner_and_hate_speech(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """LLM-NER and hate-speech should share one cached text model instance."""
+    rag = RAG(qdrant_collection="test")
+    rag.data_dir = tmp_path
+    rag.ner_enabled = True
+    rag.openai_model_provider = "openai"
+
+    monkeypatch.setattr(
+        rag_module,
+        "load_hate_speech_env",
+        lambda: types.SimpleNamespace(enabled=True),
+    )
+
+    created: list[object] = []
+
+    def _fake_create_text_model(self: RAG) -> object:
+        model = object()
+        created.append(model)
+        return model
+
+    monkeypatch.setattr(RAG, "_create_text_model", _fake_create_text_model)
+
+    pipeline = rag._build_ingestion_pipeline()
+
+    assert len(created) == 1
+    assert pipeline.ner_model is created[0]
+    assert pipeline.hate_speech_model is created[0]
+
+
+def test_build_ingestion_pipeline_non_openai_keeps_gliner_ner_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Non-OpenAI provider should not wire LLM NER model into the pipeline."""
+    rag = RAG(qdrant_collection="test")
+    rag.data_dir = tmp_path
+    rag.ner_enabled = True
+    rag.openai_model_provider = "llama.cpp"
+
+    monkeypatch.setattr(
+        rag_module,
+        "load_hate_speech_env",
+        lambda: types.SimpleNamespace(enabled=True),
+    )
+
+    created: list[object] = []
+
+    def _fake_create_text_model(self: RAG) -> object:
+        model = object()
+        created.append(model)
+        return model
+
+    monkeypatch.setattr(RAG, "_create_text_model", _fake_create_text_model)
+
+    pipeline = rag._build_ingestion_pipeline()
+
+    assert pipeline.ner_model is None
+    assert pipeline.hate_speech_model is created[0]
+    assert len(created) == 1
 
     def test_sparse_model_uses_cached_path(
         monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1308,4 +1411,30 @@ def test_delete_collection_attempts_summary_invalidation(
     rag.delete_collection("target")
 
     assert bumps == [("target", False)]
-    assert rag._qdrant_client.delete_collection.call_count == 1
+    deleted = [
+        str(call.args[0])
+        for call in cast(Any, rag._qdrant_client.delete_collection).call_args_list
+    ]
+    assert deleted == ["target", "target_images", "target_dockv"]
+
+
+def test_delete_collection_companion_name_does_not_expand(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deleting a companion collection directly should not expand to siblings."""
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+    monkeypatch.setattr(
+        RAG,
+        "_bump_summary_revision",
+        lambda self, collection=None, allow_create=True: 1,
+    )
+
+    rag.delete_collection("target_images")
+
+    deleted = [
+        str(call.args[0])
+        for call in cast(Any, rag._qdrant_client.delete_collection).call_args_list
+    ]
+    assert deleted == ["target_images"]

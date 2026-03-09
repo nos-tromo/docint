@@ -1,3 +1,5 @@
+"""Shared pytest configuration and fixtures for the docint test suite."""
+
 import sys
 import types
 

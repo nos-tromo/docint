@@ -1,3 +1,5 @@
+"""Tests for RAG collection listing functionality."""
+
 from unittest.mock import MagicMock
 
 from docint.core.rag import RAG

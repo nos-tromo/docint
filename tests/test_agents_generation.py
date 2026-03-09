@@ -1,25 +1,50 @@
+"""Tests for :class:`ResultValidationResponseAgent` in the generation module."""
+
 from docint.agents.generation import ResultValidationResponseAgent
 from docint.agents.types import RetrievalResult, Turn
 
 
 class _FakeLLMResponse:
+    """Minimal stand-in for an LLM completion response."""
+
     def __init__(self, text: str) -> None:
+        """Initialise with a canned response text.
+
+        Args:
+            text: The response text to return.
+        """
         self.text = text
 
 
 class _FakeLLM:
+    """Controllable fake LLM that returns a pre-configured response."""
+
     def __init__(self, response_text: str) -> None:
+        """Initialise with the text the fake LLM should return.
+
+        Args:
+            response_text: The canned completion text.
+        """
         self.response_text = response_text
         self.calls = 0
         self.last_prompt: str | None = None
 
     def complete(self, prompt: str) -> _FakeLLMResponse:
+        """Record the prompt and return the pre-configured response.
+
+        Args:
+            prompt: The prompt string sent to the LLM.
+
+        Returns:
+            A ``_FakeLLMResponse`` with the canned text.
+        """
         self.calls += 1
         self.last_prompt = prompt
         return _FakeLLMResponse(text=self.response_text)
 
 
 def test_validation_agent_sets_alert_on_mismatch() -> None:
+    """Grounding mismatch from the LLM should set the validation alert flag."""
     llm = _FakeLLM(
         '{"summary_grounded": false, "sources_relevant": true, "reason":"hallucinated fact"}'
     )
@@ -38,6 +63,7 @@ def test_validation_agent_sets_alert_on_mismatch() -> None:
 
 
 def test_validation_agent_disabled_is_noop() -> None:
+    """Disabled validator should not invoke the LLM or set any flags."""
     llm = _FakeLLM(
         '{"summary_grounded": false, "sources_relevant": false, "reason":"bad"}'
     )
@@ -53,6 +79,7 @@ def test_validation_agent_disabled_is_noop() -> None:
 
 
 def test_validation_agent_parses_markdown_wrapped_json() -> None:
+    """Markdown-fenced JSON from the LLM should be unwrapped and parsed."""
     llm = _FakeLLM(
         '```json\n{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}\n```'
     )
@@ -67,6 +94,7 @@ def test_validation_agent_parses_markdown_wrapped_json() -> None:
 
 
 def test_validation_agent_handles_invalid_schema() -> None:
+    """Invalid JSON schema should mark validation as unavailable."""
     llm = _FakeLLM('{"reason":"missing booleans"}')
     agent = ResultValidationResponseAgent(enabled=True, llm=llm)
     result = RetrievalResult(answer="answer", sources=[{"content": "source"}])
@@ -74,8 +102,8 @@ def test_validation_agent_handles_invalid_schema() -> None:
     finalized = agent.finalize(result, Turn(user_input="question"))
 
     assert finalized.validation_checked is False
-    assert finalized.validation_mismatch is True
-    assert finalized.validation_reason == "Validation model returned invalid schema"
+    assert finalized.validation_mismatch is None
+    assert finalized.validation_reason == "Validation model returned invalid schema."
 
 
 def test_validation_agent_summary_coverage_threshold_overrides_relevance() -> None:
@@ -133,3 +161,41 @@ def test_validation_agent_summary_coverage_does_not_override_grounding() -> None
     assert finalized.validation_checked is True
     assert finalized.validation_mismatch is True
     assert finalized.validation_reason == "unsupported claim"
+
+
+def test_validation_agent_empty_response_skips_validation() -> None:
+    """Empty validator output should mark validation as not checked without error."""
+    llm = _FakeLLM("")
+    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    result = RetrievalResult(answer="answer", sources=[{"text": "source evidence"}])
+
+    finalized = agent.finalize(result, Turn(user_input="question"))
+
+    assert finalized.validation_checked is False
+    assert finalized.validation_mismatch is None
+    assert finalized.validation_reason == "Validation model returned empty output."
+
+
+def test_validation_agent_non_json_response_skips_validation() -> None:
+    """Non-JSON validator output should be treated as validation unavailable."""
+    llm = _FakeLLM("not-json")
+    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    result = RetrievalResult(answer="answer", sources=[{"text": "source evidence"}])
+
+    finalized = agent.finalize(result, Turn(user_input="question"))
+
+    assert finalized.validation_checked is False
+    assert finalized.validation_mismatch is None
+    assert finalized.validation_reason == "Validation model returned non-JSON output."
+
+
+def test_validation_agent_without_model_reports_unavailable_reason() -> None:
+    """Missing validator model should yield an explicit unavailable reason."""
+    agent = ResultValidationResponseAgent(enabled=True, llm=None)
+    result = RetrievalResult(answer="answer", sources=[{"text": "source evidence"}])
+
+    finalized = agent.finalize(result, Turn(user_input="question"))
+
+    assert finalized.validation_checked is False
+    assert finalized.validation_mismatch is None
+    assert finalized.validation_reason == "Validation model unavailable."

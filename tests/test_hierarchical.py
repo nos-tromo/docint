@@ -1,3 +1,5 @@
+"""Tests for the hierarchical node parser used in document storage."""
+
 import pytest
 from llama_index.core import Document
 

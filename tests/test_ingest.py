@@ -1,3 +1,5 @@
+"""Tests for the CLI ingest entry point and ingestion pipeline."""
+
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, cast
@@ -127,7 +129,7 @@ def test_ingest_docs_invokes_rag(
             calls.build_query_engine = build_query_engine
 
         def unload_models(self) -> None:
-            # No-op for test double
+            """No-op model unload for the test double."""
             return None
 
     monkeypatch.setattr(ingest, "RAG", DummyRAG)

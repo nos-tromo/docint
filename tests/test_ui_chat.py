@@ -1,3 +1,5 @@
+"""Tests for chat UI helper functions."""
+
 from docint.ui.chat import _format_graph_debug_summary
 
 

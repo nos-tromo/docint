@@ -1,3 +1,5 @@
+"""Tests for the audio reader (Whisper-based transcription)."""
+
 from __future__ import annotations
 
 from pathlib import Path

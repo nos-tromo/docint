@@ -1,3 +1,5 @@
+"""Tests for the FastAPI application endpoints."""
+
 import types
 from collections.abc import Generator
 from pathlib import Path

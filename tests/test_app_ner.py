@@ -1,3 +1,5 @@
+"""Tests for the NER aggregation logic in the Streamlit app module."""
+
 from typing import Any
 
 from docint import app

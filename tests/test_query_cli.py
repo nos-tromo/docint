@@ -1,3 +1,5 @@
+"""Tests for the CLI query entry point."""
+
 import json
 from pathlib import Path
 from typing import Any, cast

@@ -1,3 +1,5 @@
+"""Tests for reusable UI component helpers."""
+
 from __future__ import annotations
 
 from docint.ui.components import (

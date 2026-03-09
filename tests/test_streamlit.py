@@ -1,3 +1,5 @@
+"""Integration tests for the Streamlit UI pages."""
+
 from unittest.mock import MagicMock, patch
 
 from streamlit.testing.v1 import AppTest

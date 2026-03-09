@@ -1,3 +1,5 @@
+"""Tests for the core PDF pipeline reader and default RAG ingestion path."""
+
 from __future__ import annotations
 
 import uuid
@@ -74,9 +76,21 @@ def test_reader_skips_existing_hashes(
         """Raise if process is called; existing hash path should skip it."""
 
         def __init__(self) -> None:
+            """Initialise with a stub artifacts directory."""
             self.config = SimpleNamespace(artifacts_dir=str(tmp_path / "artifacts"))
 
         def process(self, file_path: str | Path) -> SimpleNamespace:
+            """Raise if called; existing hashes should prevent invocation.
+
+            Args:
+                file_path: Path to the PDF file.
+
+            Returns:
+                Never returns.
+
+            Raises:
+                AssertionError: Always, since this should not be reached.
+            """
             raise AssertionError("process() should not run for existing hashes")
 
     monkeypatch.setattr(
@@ -198,17 +212,26 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(
     """RAG should pass discovered PDF hashes into legacy pipeline filters."""
 
     class FakeDocStore:
+        """No-op document store for testing."""
+
         def add_documents(self, nodes, allow_update=True) -> None:
+            """Accept documents without storing them."""
             return None
 
     class FakeIndex:
+        """Minimal vector store index stub."""
+
         def __init__(self, **kwargs) -> None:
+            """Initialise with a fake doc store."""
             self.docstore = FakeDocStore()
 
         def insert_nodes(self, nodes) -> None:
+            """Accept nodes without indexing them."""
             return None
 
     class FakeCoreReader:
+        """Core reader stub that reports pre-set discovered hashes."""
+
         def __init__(
             self,
             data_dir: Path,
@@ -217,6 +240,7 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(
             source_collection: str | None = None,
             image_ingestion_service=None,
         ) -> None:
+            """Initialise and discard all arguments."""
             _ = (
                 data_dir,
                 entity_extractor,
@@ -227,18 +251,23 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(
             self.discovered_hashes = {"pdf-hash-1"}
 
         def build(self, existing_hashes, progress_callback=None):
+            """Yield nothing; the stub reader produces no batches."""
             if False:
                 yield
             return
 
     class FakeLegacyPipeline:
+        """Legacy ingestion pipeline stub that records seen hashes."""
+
         def __init__(self) -> None:
+            """Initialise with empty state."""
             self.dir_reader = None
             self.seen_hashes: set[str] | None = None
             self.entity_extractor = None
             self.ner_max_workers = 1
 
         def build(self, existing_hashes):
+            """Record the hashes passed into the legacy pipeline."""
             self.seen_hashes = set(existing_hashes)
             if False:
                 yield
@@ -321,10 +350,21 @@ def test_reader_yields_and_ingests_images_when_no_text_chunks(
     )
 
     class FakeOrchestrator:
+        """Pipeline orchestrator stub that returns a pre-built manifest."""
+
         def __init__(self) -> None:
+            """Initialise with a stub artifacts directory."""
             self.config = SimpleNamespace(artifacts_dir=str(artifacts_dir))
 
         def process(self, _fp: Any) -> SimpleNamespace:
+            """Return the pre-built manifest.
+
+            Args:
+                _fp: File path (unused).
+
+            Returns:
+                A ``SimpleNamespace`` manifest.
+            """
             return manifest
 
     monkeypatch.setattr(
@@ -340,7 +380,18 @@ def test_reader_yields_and_ingests_images_when_no_text_chunks(
     image_calls: list[tuple[Any, Any]] = []
 
     class RecordingImageService:
+        """Image service stub that records ingest calls."""
+
         def ingest_image(self, asset: Any, *, context: Any) -> SimpleNamespace:
+            """Record the ingest call and return a success status.
+
+            Args:
+                asset: The image asset to ingest.
+                context: Ingestion context with collection info.
+
+            Returns:
+                A ``SimpleNamespace`` with ``status='stored'``.
+            """
             image_calls.append((asset, context))
             return SimpleNamespace(status="stored", error=None)
 
