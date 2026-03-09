@@ -259,11 +259,16 @@ def test_streamlit_analysis_inspect_tab_shows_zip_download_for_session_sources(
     mock_get: MagicMock,
     mock_post: MagicMock,
 ) -> None:
-    """Inspect tab should expose ZIP download when current-session sources exist."""
+    """Inspector page should expose ZIP download when session sources exist.
+    
+    Args:
+        mock_get (MagicMock): Mocked requests.get function.
+        mock_post (MagicMock): Mocked requests.post function.
+    """
     mock_get.side_effect = _analysis_get_side_effect
 
     at = AppTest.from_file("docint/app.py")
-    at.session_state["current_page"] = "Analysis"
+    at.session_state["current_page"] = "Inspector"
     at.session_state["selected_collection"] = "alpha"
     at.session_state["_cached_collections"] = ["alpha"]
     at.session_state["_cached_sessions"] = []
@@ -301,11 +306,16 @@ def test_streamlit_analysis_inspect_tab_hides_zip_download_without_session_sourc
     mock_get: MagicMock,
     mock_post: MagicMock,
 ) -> None:
-    """Inspect tab should not show ZIP download when no session sources exist."""
+    """Inspector page should not show ZIP download without session sources.
+
+    Args:
+        mock_get (MagicMock): Mocked requests.get function.
+        mock_post (MagicMock): Mocked requests.post function.
+    """
     mock_get.side_effect = _analysis_get_side_effect
 
     at = AppTest.from_file("docint/app.py")
-    at.session_state["current_page"] = "Analysis"
+    at.session_state["current_page"] = "Inspector"
     at.session_state["selected_collection"] = "alpha"
     at.session_state["_cached_collections"] = ["alpha"]
     at.session_state["_cached_sessions"] = []

@@ -6,6 +6,12 @@ import pandas as pd
 import requests
 import streamlit as st
 
+from docint.ui.components import (
+    build_source_files_zip,
+    collect_session_referenced_sources,
+    render_source_item,
+    unique_referenced_sources,
+)
 from docint.ui.state import BACKEND_HOST, BACKEND_PUBLIC_HOST
 
 
@@ -19,6 +25,8 @@ def render_inspector() -> None:
         return
 
     st.caption(f"📁 {collection}")
+
+    _render_session_source_exports(collection)
 
     # ── Load action ───────────────────────────────────────────
     if st.button("🔄 Load Documents", type="primary", width="stretch"):
@@ -132,3 +140,55 @@ def _build_display_data(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             entry["Length"] = "—"
         display.append(entry)
     return display
+
+
+def _render_session_source_exports(collection: str) -> None:
+    """Render ZIP export controls for session-referenced source files.
+
+    Args:
+        collection: Active collection name.
+    """
+    summary_by_collection = st.session_state.get("analysis_summary_by_collection") or {}
+    summary_state = summary_by_collection.get(collection) or {}
+    session_sources = collect_session_referenced_sources(
+        st.session_state.get("messages"),
+        summary_state.get("sources"),
+    )
+    unique_sources = unique_referenced_sources(session_sources)
+
+    st.markdown("#### Session-referenced source files")
+    if not unique_sources:
+        st.info("No referenced source files are available in this session yet.")
+        return
+
+    chat_refs = sum(
+        1 for src in unique_sources if "chat" in str(src.get("context") or "")
+    )
+    analysis_refs = sum(
+        1 for src in unique_sources if "analysis" in str(src.get("context") or "")
+    )
+    metrics = st.columns(3)
+    metrics[0].metric("Unique files", len(unique_sources))
+    metrics[1].metric("Chat files", chat_refs)
+    metrics[2].metric("Analysis files", analysis_refs)
+
+    zip_bytes, warnings = build_source_files_zip(collection, unique_sources)
+    if zip_bytes is not None:
+        st.download_button(
+            label="📦 Download referenced source files (.zip)",
+            data=zip_bytes,
+            file_name=f"referenced_sources_{collection}.zip",
+            mime="application/zip",
+        )
+    else:
+        st.error("Could not create a ZIP archive for the referenced source files.")
+
+    for warning in warnings:
+        st.warning(warning)
+
+    with st.expander("Inspect referenced files"):
+        for src in unique_sources:
+            context = str(src.get("context") or "").strip()
+            if context:
+                st.caption(f"Context: {context}")
+            render_source_item(src, collection)

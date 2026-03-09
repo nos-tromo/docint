@@ -10,15 +10,12 @@ import streamlit as st
 
 from docint.ui.components import (
     aggregate_ner,
-    build_source_files_zip,
-    collect_session_referenced_sources,
     entity_density_by_document,
     filter_entities,
     render_ner_overview,
     render_response_validation,
     render_source_item,
     render_summary_diagnostics,
-    unique_referenced_sources,
 )
 from docint.ui.state import BACKEND_HOST
 
@@ -716,57 +713,6 @@ def _render_hate_speech_tab(result: dict[str, Any], collection: str) -> None:
     )
 
 
-def _render_inspect_tab(collection: str, summary_state: dict[str, Any] | None) -> None:
-    """Render current-session source inspection and ZIP export controls.
-
-    Args:
-        collection: Currently selected collection name.
-        summary_state: Current analysis summary state.
-    """
-    session_sources = collect_session_referenced_sources(
-        st.session_state.get("messages"),
-        (summary_state or {}).get("sources"),
-    )
-    unique_sources = unique_referenced_sources(session_sources)
-
-    st.markdown("#### Session-referenced source files")
-    if not unique_sources:
-        st.info("No referenced source files are available in this session yet.")
-        return
-
-    chat_refs = sum(
-        1 for src in unique_sources if "chat" in str(src.get("context") or "")
-    )
-    analysis_refs = sum(
-        1 for src in unique_sources if "analysis" in str(src.get("context") or "")
-    )
-    metrics = st.columns(3)
-    metrics[0].metric("Unique files", len(unique_sources))
-    metrics[1].metric("Chat files", chat_refs)
-    metrics[2].metric("Analysis files", analysis_refs)
-
-    zip_bytes, warnings = build_source_files_zip(collection, unique_sources)
-    if zip_bytes is not None:
-        st.download_button(
-            label="📦 Download referenced source files (.zip)",
-            data=zip_bytes,
-            file_name=f"referenced_sources_{collection}.zip",
-            mime="application/zip",
-        )
-    else:
-        st.error("Could not create a ZIP archive for the referenced source files.")
-
-    for warning in warnings:
-        st.warning(warning)
-
-    with st.expander("Inspect referenced files", expanded=True):
-        for src in unique_sources:
-            context = str(src.get("context") or "").strip()
-            if context:
-                st.caption(f"Context: {context}")
-            render_source_item(src, collection)
-
-
 def _render_analysis_result(
     result: dict[str, Any],
     collection: str,
@@ -812,7 +758,7 @@ def _render_analysis_result(
             analysis_text += f"uncovered_documents={uncovered_text}\n\n"
 
     st.markdown("---")
-    tabs = st.tabs(["Overview", "Entities", "Hate Speech", "Inspect"])
+    tabs = st.tabs(["Overview", "Entities", "Hate Speech"])
 
     with tabs[0]:
         st.markdown("### Collection-wide Information Extraction")
@@ -938,9 +884,6 @@ def _render_analysis_result(
 
     with tabs[2]:
         _render_hate_speech_tab(result, collection)
-
-    with tabs[3]:
-        _render_inspect_tab(collection, summary_payload)
 
     st.download_button(
         label="📥 Download analysis (.txt)",
