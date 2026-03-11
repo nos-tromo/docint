@@ -8,7 +8,9 @@ import requests
 import streamlit as st
 from loguru import logger
 
-from docint.ui.state import BACKEND_HOST
+from docint.utils.env_cfg import load_host_env
+
+BACKEND_HOST = load_host_env().backend_host
 
 
 def _normalize_file_status(raw: str | None) -> str:

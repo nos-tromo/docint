@@ -7,7 +7,10 @@ import pandas as pd
 import requests
 import streamlit as st
 
-from docint.ui.state import BACKEND_HOST, navigate_to
+from docint.ui.state import navigate_to
+from docint.utils.env_cfg import load_host_env
+
+BACKEND_HOST = load_host_env().backend_host
 
 
 def render_dashboard() -> None:

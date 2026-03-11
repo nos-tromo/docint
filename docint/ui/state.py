@@ -4,12 +4,10 @@ import streamlit as st
 
 from docint.utils.env_cfg import load_host_env
 
-_host_cfg = load_host_env()
+host_cfg = load_host_env()
 
-BACKEND_HOST: str = _host_cfg.backend_host
-"""Base URL of the docint FastAPI backend."""
-
-BACKEND_PUBLIC_HOST: str = _host_cfg.backend_public_host or BACKEND_HOST
+BACKEND_HOST: str = host_cfg.backend_host
+BACKEND_PUBLIC_HOST: str = host_cfg.backend_public_host or BACKEND_HOST
 """Public-facing backend URL (used for download / preview links shown to the user)."""
 
 PAGES: list[str] = [
