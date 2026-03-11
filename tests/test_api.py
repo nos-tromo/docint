@@ -316,75 +316,6 @@ class DummyRAG:
             }
         ]
 
-    def get_collection_ner_graph(
-        self,
-        *,
-        top_k_nodes: int = 100,
-        min_edge_weight: int = 1,
-    ) -> dict[str, Any]:
-        """Return a minimal graph payload.
-
-        Args:
-            top_k_nodes (int, optional): The maximum number of nodes to include in the graph. Defaults to 100.
-            min_edge_weight (int, optional): The minimum weight for edges to be included in the graph. Defaults to 1.
-
-        Returns:
-            dict[str, Any]: A dictionary representing the graph structure, including nodes, edges, and metadata.
-        """
-        _ = (top_k_nodes, min_edge_weight)
-        return {
-            "nodes": [
-                {"id": "acme::org", "text": "Acme", "type": "ORG", "mentions": 3}
-            ],
-            "edges": [
-                {
-                    "source": "acme::org",
-                    "target": "widget::unlabeled",
-                    "label": "owns",
-                    "kind": "relation",
-                    "weight": 2,
-                }
-            ],
-            "meta": {"node_count": 1, "edge_count": 1},
-        }
-
-    def get_collection_ner_graph_neighbors(
-        self,
-        *,
-        entity: str,
-        hops: int = 1,
-        top_k_nodes: int = 100,
-        min_edge_weight: int = 1,
-    ) -> dict[str, Any]:
-        """Return canned neighborhood payload.
-
-        Args:
-            entity (str): The central entity for which to retrieve neighbors.
-            hops (int, optional): The number of hops to include in the neighborhood. Defaults to 1.
-            top_k_nodes (int, optional): The maximum number of neighbor nodes to include. Defaults to 100.
-            min_edge_weight (int, optional): The minimum weight for edges to be included in the neighborhood. Defaults to 1.
-
-        Returns:
-            dict[str, Any]: A dictionary representing the neighborhood of the specified entity, including the center node, neighboring nodes, and metadata.
-        """
-        _ = (entity, hops, top_k_nodes, min_edge_weight)
-        return {
-            "center": {"id": "acme::org", "text": "Acme", "type": "ORG", "mentions": 3},
-            "neighbors": [
-                {
-                    "id": "widget::unlabeled",
-                    "text": "Widget",
-                    "type": "Unlabeled",
-                    "mentions": 1,
-                    "depth": 1,
-                    "score": 2.0,
-                }
-            ],
-            "nodes": [],
-            "edges": [],
-            "meta": {"hops": 1, "node_count": 2, "edge_count": 1},
-        }
-
 
 @pytest.fixture(autouse=True)
 def _patch_rag(monkeypatch: pytest.MonkeyPatch) -> Any | None:
@@ -552,35 +483,6 @@ def test_collections_ner_search_success(client: TestClient) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["results"][0]["text"] == "Acme"
-
-
-def test_collections_ner_graph_success(client: TestClient) -> None:
-    """Graph endpoint should return graph payload.
-
-    Args:
-        client (TestClient): The TestClient instance.
-    """
-    response = client.get("/collections/ner/graph")
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["meta"]["edge_count"] == 1
-    assert payload["nodes"][0]["text"] == "Acme"
-
-
-def test_collections_ner_graph_neighbors_success(client: TestClient) -> None:
-    """Neighbors endpoint should return center + neighbors.
-
-    Args:
-        client (TestClient): The TestClient instance.
-    """
-    response = client.get(
-        "/collections/ner/graph/neighbors",
-        params={"entity": "Acme", "hops": 1},
-    )
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["center"]["text"] == "Acme"
-    assert payload["neighbors"][0]["text"] == "Widget"
 
 
 def test_agent_chat_answers(

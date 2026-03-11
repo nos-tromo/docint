@@ -1,11 +1,8 @@
 """Tests for analysis UI helper functions."""
 
 from docint.ui.analysis import (
-    _dot_escape,
     _entity_chunks_to_txt,
     _entity_related_chunks,
-    _graph_connected_subgraph,
-    _graphviz_dot,
     _hate_speech_chunks_to_txt,
     _update_summary_metadata,
 )
@@ -64,6 +61,7 @@ def test_entity_related_chunks_matches_existing_ner_sources() -> None:
     assert len(rows) == 1
     assert rows[0]["chunk_id"] == "n1"
     assert "Acme opened" in rows[0]["chunk_text"]
+    assert rows[0]["reference_metadata"] is None
 
 
 def test_entity_related_chunks_supports_name_key_and_missing_chunk_text() -> None:
@@ -93,69 +91,6 @@ def test_entity_related_chunks_supports_name_key_and_missing_chunk_text() -> Non
     assert rows[1]["chunk_text"] == ""
 
 
-def test_graphviz_dot_highlights_selected_node() -> None:
-    """Entity graph DOT rendering should contain nodes, edges, and selected styling."""
-    dot = _graphviz_dot(
-        {
-            "nodes": [
-                {"id": "acme::org", "text": "Acme", "mentions": 2},
-                {"id": "river::loc", "text": "Rivertown", "mentions": 1},
-            ],
-            "edges": [
-                {
-                    "source": "acme::org",
-                    "target": "river::loc",
-                    "label": "located_in",
-                    "weight": 2,
-                }
-            ],
-        },
-        selected_entity="Acme",
-    )
-
-    assert '"acme::org"' in dot
-    assert "located_in (2)" in dot
-    assert 'fillcolor="#90CAF9"' in dot
-
-
-def test_graph_connected_subgraph_drops_isolated_nodes() -> None:
-    """Graph render helper should keep only nodes that are connected by edges."""
-    graph = {
-        "nodes": [
-            {"id": "a::org", "text": "A", "mentions": 2},
-            {"id": "b::org", "text": "B", "mentions": 1},
-            {"id": "c::org", "text": "C", "mentions": 1},
-        ],
-        "edges": [{"source": "a::org", "target": "b::org", "weight": 1}],
-        "meta": {"node_count": 3, "edge_count": 1},
-    }
-
-    connected = _graph_connected_subgraph(graph)
-
-    assert [node["id"] for node in connected["nodes"]] == ["a::org", "b::org"]
-    assert connected["edges"] == graph["edges"]
-
-
-def test_graph_connected_subgraph_returns_empty_when_no_edges() -> None:
-    """Graph render helper should avoid plotting isolated-only node rows."""
-    connected = _graph_connected_subgraph(
-        {
-            "nodes": [{"id": "a::org", "text": "A", "mentions": 1}],
-            "edges": [],
-            "meta": {"node_count": 1, "edge_count": 0},
-        }
-    )
-
-    assert connected["nodes"] == []
-    assert connected["edges"] == []
-
-
-def test_dot_escape_handles_quotes_backslashes_and_newlines() -> None:
-    """DOT escaping helper should sanitize strings used in labels/ids."""
-    escaped = _dot_escape('A "quote" \\ path\nnext')
-    assert escaped == 'A \\"quote\\" \\\\ path\\nnext'
-
-
 def test_chunk_download_text_helpers_include_metadata() -> None:
     """Download text helpers should include chunk metadata and body text."""
     entity_text = _entity_chunks_to_txt(
@@ -167,6 +102,16 @@ def test_chunk_download_text_helpers_include_metadata() -> None:
                 "row": None,
                 "chunk_id": "c1",
                 "chunk_text": "Acme content",
+                "reference_metadata": {
+                    "network": "Telegram",
+                    "type": "comment",
+                    "timestamp": "2026-01-02T10:00:00Z",
+                    "author": "Alice",
+                    "author_id": "a1",
+                    "vanity": "alice-v",
+                    "text": "Acme content",
+                    "text_id": "c1",
+                },
             }
         ],
     )
@@ -174,17 +119,31 @@ def test_chunk_download_text_helpers_include_metadata() -> None:
         [
             {
                 "source_ref": "docB.pdf",
-                "page": 3,
+                "page": None,
+                "row": 5,
                 "chunk_id": "c9",
                 "category": "ethnicity",
                 "confidence": "high",
                 "reason": "Derogatory language",
                 "chunk_text": "flagged chunk body",
+                "reference_metadata": {
+                    "network": "Facebook",
+                    "type": "posting",
+                    "timestamp": "2026-01-02T10:00:00Z",
+                    "author": "Bob",
+                    "author_id": "b2",
+                    "vanity": "bob-v",
+                    "text": "flagged chunk body",
+                    "text_id": "p1",
+                },
             }
         ]
     )
 
     assert "chunk_id=c1" in entity_text
     assert "Acme content" in entity_text
-    assert "category=ethnicity" in hate_text
+    assert "- Network: Telegram" in entity_text
+    assert "- category: ethnicity" in hate_text
     assert "flagged chunk body" in hate_text
+    assert "- row: 5" in hate_text
+    assert "- Text ID: p1" in hate_text
