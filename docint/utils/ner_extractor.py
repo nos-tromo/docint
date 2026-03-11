@@ -125,11 +125,20 @@ def build_gliner_ner_extractor(
     # Default labels if none provided - covering general domain
     if not labels:
         labels = [
-            "person",
-            "organization",
-            "location",
-            "date",
-            "event",
+            "bank_account",  # Bank account numbers
+            "date",  # Absolute or relative dates or periods.
+            "event",  # Named hurricanes, battles, wars, sports events, etc.
+            "fac",  # Buildings, airports, highways, bridges, etc.
+            "group",  # Nationalities or religious or political groups.
+            "lang",  # Any named language.
+            "loc",  # Locations, such as countries, cities, states, regions.
+            "mail",  # E-Mail addresses.
+            "money",  # Monetary values, including unit.
+            "org",  # Companies, agencies, institutions, etc.
+            "person",  # People, including fictional.
+            "phone",  # Phone numbers.
+            "time",  # Times smaller than a day.
+            "weapon",  # Named vehicles, weapons, or products.
         ]
 
     logger.info("Loading GLiNER model: {}", model_id)
