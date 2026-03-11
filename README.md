@@ -281,8 +281,6 @@ DocInt exposes collection-level IE APIs in addition to raw source payloads:
 - `GET /collections/ner`: Raw source-level entities/relations for the selected collection.
 - `GET /collections/ner/stats`: Aggregated IE metrics and top entities/relations.
 - `GET /collections/ner/search`: Entity search with optional type filter.
-- `GET /collections/ner/graph`: Derived entity graph (relations + co-occurrence edges).
-- `GET /collections/ner/graph/neighbors`: Local neighborhood view around a given entity.
 - `PIPELINE_VISION_OCR_MAX_IMAGE_DIM` (default `1024`)
 - `PIPELINE_VISION_OCR_MAX_TOKENS` (default `4096`)
 

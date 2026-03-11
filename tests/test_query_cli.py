@@ -199,17 +199,34 @@ def test_run_query_records_results(
                 },
             )
 
-        def run_query(self, query: str) -> dict[str, str]:
+        def run_query(self, query: str) -> dict[str, Any]:
             """Simulate running a query by returning the query in the response and recording seen queries.
 
             Args:
                 query (str): The query string to run.
 
             Returns:
-                dict[str, str]: A dictionary containing the query as the response.
+                dict[str, Any]: A dictionary containing the query result payload.
             """
             self.seen_queries.append(query)
-            return {"response": query}
+            return {
+                "response": query,
+                "sources": [
+                    {
+                        "filename": "social.csv",
+                        "reference_metadata": {
+                            "network": "Telegram",
+                            "type": "comment",
+                            "timestamp": "2026-01-02T10:00:00Z",
+                            "author": "Alice",
+                            "author_id": "a1",
+                            "vanity": "alice-v",
+                            "text": "Example text",
+                            "text_id": "c1",
+                        },
+                    }
+                ],
+            }
 
     calls: list[tuple[str, dict]] = []
 
@@ -234,6 +251,7 @@ def test_run_query_records_results(
     assert data["response"] == "hello\n\nRelated entities for retrieval: Acme"
     assert data["graph_debug"]["applied"] is True
     assert data["graph_debug"]["anchor_entities"] == ["Acme"]
+    assert data["sources"][0]["reference_metadata"]["text_id"] == "c1"
     assert "validation_checked" in data
     assert "validation_mismatch" in data
     assert "validation_reason" in data

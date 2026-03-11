@@ -109,16 +109,20 @@ def _analysis_get_side_effect(url: str, *args, **kwargs) -> MagicMock:
                     "page": 1,
                     "chunk_id": "n1",
                     "chunk_text": "Acme in Rivertown",
+                    "reference_metadata": {
+                        "network": "Telegram",
+                        "type": "comment",
+                        "timestamp": "2026-01-02T10:00:00Z",
+                        "author": "Alice",
+                        "author_id": "a1",
+                        "vanity": "alice-v",
+                        "text": "Acme in Rivertown",
+                        "text_id": "c1",
+                    },
                     "entities": [{"text": "Acme", "type": "ORG"}],
                     "relations": [],
                 }
             ]
-        }
-    elif url.endswith("/collections/ner/graph"):
-        response.json.return_value = {
-            "nodes": [{"id": "acme::org", "text": "Acme", "mentions": 1}],
-            "edges": [],
-            "meta": {"node_count": 1, "edge_count": 0},
         }
     elif url.endswith("/collections/hate-speech"):
         response.json.return_value = {"results": []}
@@ -152,6 +156,9 @@ def test_streamlit_analysis_auto_loads_ner_without_summary_call(
     at.run(timeout=30)
     assert not at.exception
     assert mock_post.call_count == 0
+    labels = [str(widget.proto.label) for widget in at.get("number_input")]
+    assert "Min edge weight" not in labels
+    assert "Top nodes" not in labels
 
     ner_calls = [
         call
@@ -277,7 +284,22 @@ def test_streamlit_analysis_inspect_tab_shows_zip_download_for_session_sources(
         {
             "role": "assistant",
             "content": "hello",
-            "sources": [{"filename": "doc.pdf", "file_hash": "hash-doc"}],
+            "sources": [
+                {
+                    "filename": "doc.pdf",
+                    "file_hash": "hash-doc",
+                    "reference_metadata": {
+                        "network": "Telegram",
+                        "type": "comment",
+                        "timestamp": "2026-01-02T10:00:00Z",
+                        "author": "Alice",
+                        "author_id": "a1",
+                        "vanity": "alice-v",
+                        "text": "Hello",
+                        "text_id": "c1",
+                    },
+                }
+            ],
         }
     ]
     at.session_state["analysis_summary_by_collection"] = {
@@ -285,7 +307,22 @@ def test_streamlit_analysis_inspect_tab_shows_zip_download_for_session_sources(
             "collection": "alpha",
             "generated": True,
             "summary": "Summary text.",
-            "sources": [{"filename": "doc.pdf", "file_hash": "hash-doc"}],
+            "sources": [
+                {
+                    "filename": "doc.pdf",
+                    "file_hash": "hash-doc",
+                    "reference_metadata": {
+                        "network": "Telegram",
+                        "type": "comment",
+                        "timestamp": "2026-01-02T10:00:00Z",
+                        "author": "Alice",
+                        "author_id": "a1",
+                        "vanity": "alice-v",
+                        "text": "Hello",
+                        "text_id": "c1",
+                    },
+                }
+            ],
             "validation_checked": None,
             "validation_mismatch": None,
             "validation_reason": None,

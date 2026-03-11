@@ -638,24 +638,37 @@ class SessionManager:
                 # Assistant message
                 sources = []
                 for c in t.citations:
-                    text_val = ""
+                    src: dict[str, Any] | None = None
                     if c.node_id:
                         try:
-                            text_val = self._get_node_text_by_id(c.node_id) or ""
+                            src = self.rag.get_source_by_node_id(
+                                c.node_id,
+                                score=c.score,
+                            )
                         except Exception:
-                            pass
+                            src = None
 
-                    src = {
-                        "text": text_val,
-                        "preview_text": text_val[:280].strip() if text_val else "",
-                        "filename": c.filename,
-                        "filetype": c.filetype,
-                        "source": c.source,
-                        "score": c.score,
-                        "page": c.page,
-                        "row": c.row,
-                        "file_hash": c.file_hash,
-                    }
+                    text_val = ""
+                    if src is None:
+                        if c.node_id:
+                            try:
+                                text_val = self._get_node_text_by_id(c.node_id) or ""
+                            except Exception:
+                                text_val = ""
+                        src = {
+                            "text": text_val,
+                            "preview_text": text_val[:280].strip() if text_val else "",
+                        }
+
+                    src.setdefault("filename", c.filename)
+                    src.setdefault("filetype", c.filetype)
+                    src.setdefault("source", c.source)
+                    src.setdefault("score", c.score)
+                    if c.page is not None:
+                        src.setdefault("page", c.page)
+                    if c.row is not None:
+                        src.setdefault("row", c.row)
+                    src.setdefault("file_hash", c.file_hash)
                     sources.append(src)
 
                 msg_entry = {

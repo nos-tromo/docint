@@ -89,6 +89,16 @@ def test_normalize_response_data_extracts_sources(
             },
             "page_number": 3,
             "source": "document",
+            "reference_metadata": {
+                "network": "Telegram",
+                "type": "comment",
+                "timestamp": "2026-01-02T10:00:00Z",
+                "author": "Alice",
+                "author_id": "a1",
+                "vanity": "alice-v",
+                "text": "Example text",
+                "text_id": "c1",
+            },
         },
     )
     result = DummyResponse("<think>reason</think>Answer", [DummyNodeWithScore(node)])
@@ -110,6 +120,8 @@ def test_normalize_response_data_extracts_sources(
     }
     for key, value in expected.items():
         assert first_source.get(key) == value
+    assert first_source["reference_metadata"]["type"] == "comment"
+    assert first_source["reference_metadata"]["author"] == "Alice"
 
     # ensure preview helpers are attached when file hashes are present
     assert first_source.get("preview_text") == "Example text"
@@ -330,6 +342,16 @@ def test_get_collection_ner_extracts_chunk_text_from_node_content() -> None:
         "filename": "table.csv",
         "table": {"row_index": 25},
         "entities": [{"text": "Deutschland"}],
+        "reference_metadata": {
+            "network": "Telegram",
+            "type": "comment",
+            "timestamp": "2026-01-02T10:00:00Z",
+            "author": "Alice",
+            "author_id": "a1",
+            "vanity": "alice-v",
+            "text": "Deutschland",
+            "text_id": "c1",
+        },
         "_node_content": json.dumps({"text": "Deutschland"}),
     }
     rag._qdrant_client.scroll = MagicMock(side_effect=[([point], None)])
@@ -339,6 +361,7 @@ def test_get_collection_ner_extracts_chunk_text_from_node_content() -> None:
     assert len(rows) == 1
     assert rows[0]["chunk_id"] == "pt-1"
     assert rows[0]["chunk_text"] == "Deutschland"
+    assert rows[0]["reference_metadata"]["text_id"] == "c1"
 
 
 def test_get_collection_hate_speech_filters_flagged_rows() -> None:
@@ -352,6 +375,16 @@ def test_get_collection_hate_speech_filters_flagged_rows() -> None:
         "text": "flagged text",
         "page": 1,
         "filename": "doc1.pdf",
+        "reference_metadata": {
+            "network": "Facebook",
+            "type": "posting",
+            "timestamp": "2026-01-02T10:00:00Z",
+            "author": "Alice",
+            "author_id": "a1",
+            "vanity": "alice-v",
+            "text": "flagged text",
+            "text_id": "p1",
+        },
         "hate_speech": {
             "hate_speech": True,
             "category": "ethnicity",
@@ -371,6 +404,7 @@ def test_get_collection_hate_speech_filters_flagged_rows() -> None:
     assert len(rows) == 1
     assert rows[0]["chunk_text"] == "flagged text"
     assert rows[0]["category"] == "ethnicity"
+    assert rows[0]["reference_metadata"]["network"] == "Facebook"
 
 
 def test_get_collection_hate_speech_extracts_chunk_text_from_node_content() -> None:

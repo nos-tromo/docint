@@ -84,6 +84,7 @@ from docint.core.state.session_manager import SessionManager
 from docint.core.storage.docstore import QdrantKVStore
 from docint.core.storage.sources import stage_sources_to_qdrant
 from docint.utils.openai_cfg import LocalOpenAI
+from docint.utils.reference_metadata import REFERENCE_METADATA_FIELDS
 
 
 SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
@@ -969,6 +970,238 @@ class RAG:
 
         return ""
 
+    @staticmethod
+    def _extract_reference_metadata(data: Any) -> dict[str, Any] | None:
+        """Best-effort extraction of stable reference metadata from nested payloads.
+
+        Args:
+            data (Any): The data dictionary to search for reference metadata.
+
+        Returns:
+            dict[str, Any] | None: A dictionary containing the extracted reference metadata fields, or
+        """
+        if not isinstance(data, dict):
+            return None
+
+        candidate = data.get("reference_metadata")
+        if isinstance(candidate, dict):
+            return {
+                field: candidate.get(field) if field in candidate else None
+                for field in REFERENCE_METADATA_FIELDS.keys()
+            }
+
+        for key in ("origin", "metadata", "meta", "extra_info"):
+            nested = data.get(key)
+            extracted = RAG._extract_reference_metadata(nested)
+            if extracted is not None:
+                return extracted
+
+        for value in data.values():
+            if isinstance(value, dict):
+                extracted = RAG._extract_reference_metadata(value)
+                if extracted is not None:
+                    return extracted
+        return None
+
+    @staticmethod
+    def _source_from_payload(
+        *,
+        collection: str,
+        payload: dict[str, Any],
+        score: float | None = None,
+        text_value: str | None = None,
+    ) -> dict[str, Any]:
+        """Normalize a raw metadata/payload dictionary into a source dictionary.
+
+        Args:
+            collection: The Qdrant collection name associated with the payload.
+            payload: The raw point payload returned by Qdrant.
+            score: Optional similarity score to include in the source.
+            text_value: Optional pre-extracted text value to use instead of extracting from payload.
+
+        Returns:
+            A normalized source dictionary containing standardized fields for downstream processing.
+        """
+        origin = payload.get("origin") or {}
+        filename = (
+            origin.get("filename")
+            or payload.get("file_name")
+            or payload.get("filename")
+            or payload.get("file_path")
+        )
+        filetype = (
+            origin.get("filetype")
+            or origin.get("mimetype")
+            or payload.get("filetype")
+            or payload.get("mimetype")
+            or payload.get("file_type")
+            or payload.get("file_format")
+        )
+        source_kind = (
+            payload.get("source") or payload.get("source_type") or payload.get("reader")
+        )
+        file_hash = (
+            origin.get("file_hash")
+            or payload.get("file_hash")
+            or RAG._extract_file_hash(payload)
+        )
+
+        page = (
+            payload.get("page")
+            or payload.get("page_number")
+            or origin.get("page")
+            or origin.get("page_number")
+            or origin.get("page_no")
+        )
+        provenance = payload.get("provenance") or payload.get("provenances") or []
+        if page is None and isinstance(provenance, list):
+            for prov in provenance:
+                if isinstance(prov, dict):
+                    page = prov.get("page_no")
+                    if page is not None:
+                        break
+
+        if page is None:
+            doc_items = payload.get("doc_items")
+            if isinstance(doc_items, list):
+                for item in doc_items:
+                    if not isinstance(item, dict):
+                        continue
+                    provs = item.get("prov")
+                    if not isinstance(provs, list):
+                        continue
+                    for prov_item in provs:
+                        if isinstance(prov_item, dict):
+                            page = prov_item.get("page_no")
+                            if page is not None:
+                                break
+                    if page is not None:
+                        break
+
+        try:
+            page = int(page) if page is not None else None
+        except Exception:
+            page = None
+
+        table_meta = payload.get("table") or {}
+        row_index = table_meta.get("row_index")
+        try:
+            row_index = int(row_index) if row_index is not None else None
+        except Exception:
+            row_index = None
+
+        resolved_text = (
+            text_value if text_value is not None else RAG._extract_payload_text(payload)
+        )
+        preview_url: str | None = None
+        if file_hash:
+            preview_url = (
+                f"/sources/preview?collection={collection}&file_hash={file_hash}"
+            )
+
+        src: dict[str, Any] = {
+            "text": resolved_text,
+            "preview_text": resolved_text[:280].strip(),
+            "filename": filename,
+            "filetype": filetype,
+            "source": source_kind,
+            "score": score,
+        }
+        entities = payload.get("entities") or origin.get("entities")
+        relations = payload.get("relations") or origin.get("relations")
+        if entities:
+            src["entities"] = entities
+        if relations:
+            src["relations"] = relations
+        if file_hash:
+            src["file_hash"] = file_hash
+        if preview_url:
+            src["preview_url"] = preview_url
+            src["document_url"] = preview_url
+        if page is not None:
+            src["page"] = page
+        if row_index is not None:
+            src["row"] = row_index
+        reference_metadata = RAG._extract_reference_metadata(payload)
+        if reference_metadata is not None:
+            src["reference_metadata"] = reference_metadata
+        if source_kind == "table":
+            src["table_info"] = {
+                "n_rows": table_meta.get("n_rows"),
+                "n_cols": table_meta.get("n_cols"),
+                "style": table_meta.get("style"),
+            }
+        return src
+
+    def get_source_by_node_id(
+        self,
+        node_id: str,
+        *,
+        score: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Resolve a stored node id back into a normalized source payload."""
+        payload: dict[str, Any] | None = None
+        try:
+            index = self.index
+            if index is not None:
+                docstore = getattr(index, "storage_context", None)
+                if docstore is not None:
+                    docstore = getattr(docstore, "docstore", None)
+                else:
+                    docstore = getattr(index, "docstore", None)
+                if docstore is not None:
+                    for getter in ("get_node", "get", "get_document"):
+                        fn = getattr(docstore, getter, None)
+                        if not callable(fn):
+                            continue
+                        try:
+                            node = fn(node_id)
+                        except Exception:
+                            continue
+                        if node is None:
+                            continue
+                        payload = dict(getattr(node, "metadata", {}) or {})
+                        text_value = getattr(node, "text", None)
+                        if not isinstance(text_value, str) or not text_value.strip():
+                            if (
+                                isinstance(node, BaseNode)
+                                and hasattr(node, "get_content")
+                                and callable(node.get_content)
+                            ):
+                                content = node.get_content()
+                                if isinstance(content, str) and content.strip():
+                                    text_value = content
+                        if isinstance(text_value, str) and text_value.strip():
+                            payload.setdefault("text", text_value.strip())
+                        payload.setdefault(
+                            "node_id",
+                            getattr(node, "node_id", None)
+                            or getattr(node, "id_", None),
+                        )
+                        break
+        except Exception:
+            payload = None
+
+        if payload is None:
+            try:
+                recs = self.qdrant_client.retrieve(
+                    collection_name=self.qdrant_collection, ids=[node_id]
+                )
+                if recs:
+                    candidate = getattr(recs[0], "payload", None)
+                    if isinstance(candidate, dict):
+                        payload = dict(candidate)
+            except Exception:
+                payload = None
+
+        if payload is None:
+            return None
+        return self._source_from_payload(
+            collection=self.qdrant_collection,
+            payload=payload,
+            score=score,
+        )
+
     def _get_existing_file_hashes(self) -> set[str]:
         """Fetch file hashes already stored in the active Qdrant collection.
 
@@ -1082,111 +1315,14 @@ class RAG:
         if node is None:
             return None
 
-        meta = getattr(node, "metadata", {}) or {}
-        origin = meta.get("origin") or {}
-        filename = (
-            origin.get("filename")
-            or meta.get("file_name")
-            or meta.get("filename")
-            or meta.get("file_path")
-        )
-        filetype = (
-            origin.get("filetype")
-            or origin.get("mimetype")
-            or meta.get("filetype")
-            or meta.get("mimetype")
-            or meta.get("file_type")
-            or meta.get("file_format")
-        )
-        source_kind = (
-            meta.get("source") or meta.get("source_type") or meta.get("reader")
-        )
-        file_hash = (
-            origin.get("file_hash")
-            or meta.get("file_hash")
-            or self._extract_file_hash(meta)
-        )
-
-        page = (
-            meta.get("page")
-            or meta.get("page_number")
-            or origin.get("page")
-            or origin.get("page_number")
-        )
-        provenance = meta.get("provenance") or meta.get("provenances") or []
-        if page is None and isinstance(provenance, list):
-            for prov in provenance:
-                if isinstance(prov, dict):
-                    page = prov.get("page_no")
-                    if page is not None:
-                        break
-
-        if page is None:
-            doc_items = meta.get("doc_items")
-            if isinstance(doc_items, list):
-                for item in doc_items:
-                    if not isinstance(item, dict):
-                        continue
-                    provs = item.get("prov")
-                    if not isinstance(provs, list):
-                        continue
-                    for prov_item in provs:
-                        if isinstance(prov_item, dict):
-                            page = prov_item.get("page_no")
-                            if page is not None:
-                                break
-                    if page is not None:
-                        break
-
-        try:
-            page = int(page) if page is not None else None
-        except Exception:
-            page = None
-
-        table_meta = meta.get("table") or {}
-        row_index = table_meta.get("row_index")
-        try:
-            row_index = int(row_index) if row_index is not None else None
-        except Exception:
-            row_index = None
-
-        location_label = (
-            "page" if page is not None else ("row" if row_index is not None else None)
-        )
-        location_value = page if page is not None else row_index
-
         text_value = getattr(node, "text", "") or ""
-        preview_url: str | None = None
-        if file_hash:
-            preview_url = f"/sources/preview?collection={self.qdrant_collection}&file_hash={file_hash}"
-
-        src: dict[str, Any] = {
-            "text": text_value,
-            "preview_text": text_value[:280].strip(),
-            "filename": filename,
-            "filetype": filetype,
-            "source": source_kind,
-            "score": getattr(nws, "score", None),
-        }
-        entities = meta.get("entities") or origin.get("entities")
-        relations = meta.get("relations") or origin.get("relations")
-        if entities:
-            src["entities"] = entities
-        if relations:
-            src["relations"] = relations
-        if file_hash:
-            src["file_hash"] = file_hash
-        if preview_url:
-            src["preview_url"] = preview_url
-            src["document_url"] = preview_url
-        if location_label:
-            src[location_label] = location_value
-        if source_kind == "table":
-            src["table_info"] = {
-                "n_rows": table_meta.get("n_rows"),
-                "n_cols": table_meta.get("n_cols"),
-            }
-        return src
+        meta = getattr(node, "metadata", {}) or {}
+        return self._source_from_payload(
+            collection=self.qdrant_collection,
+            payload=meta,
+            score=getattr(nws, "score", None),
+            text_value=text_value,
+        )
 
     def _normalize_response_data(
         self, query: str, result: Any, reason: str | None = None
@@ -2726,54 +2862,17 @@ class RAG:
                 if isinstance(payload, dict):
                     # We only care about nodes that have NER data
                     if "entities" in payload or "relations" in payload:
-                        # Normalize payload to match what _normalize_response_data produces
-                        # so that _render_ner_overview in app.py can handle it.
-
-                        # Extract filename/filetype/etc.
-                        origin = payload.get("origin") or {}
-                        filename = (
-                            origin.get("filename")
-                            or payload.get("file_name")
-                            or payload.get("filename")
-                            or payload.get("file_path")
+                        source = self._source_from_payload(
+                            collection=self.qdrant_collection,
+                            payload=payload,
                         )
-
-                        # Extract page number
-                        page = (
-                            payload.get("page")
-                            or payload.get("page_number")
-                            or origin.get("page_no")
+                        source["chunk_id"] = (
+                            payload.get("node_id")
+                            or payload.get("id_")
+                            or str(getattr(point, "id", "") or "")
                         )
-                        if page is None:
-                            doc_items = payload.get("doc_items")
-                            if isinstance(doc_items, list):
-                                for item in doc_items:
-                                    if isinstance(item, dict):
-                                        provs = item.get("prov")
-                                        if isinstance(provs, list):
-                                            for p in provs:
-                                                if isinstance(p, dict):
-                                                    page = p.get("page_no")
-                                                    if page is not None:
-                                                        break
-                                    if page is not None:
-                                        break
-
-                        sources.append(
-                            {
-                                "filename": filename,
-                                "entities": payload.get("entities", []),
-                                "relations": payload.get("relations", []),
-                                "page": page,
-                                "row": payload.get("table", {}).get("row_index"),
-                                "chunk_id": (
-                                    payload.get("node_id")
-                                    or payload.get("id_")
-                                    or str(getattr(point, "id", "") or "")
-                                ),
-                                "chunk_text": self._extract_payload_text(payload),
-                            }
-                        )
+                        source["chunk_text"] = str(source.get("text") or "")
+                        sources.append(source)
 
             if offset is None:
                 break
@@ -2825,38 +2924,32 @@ class RAG:
                 ):
                     continue
 
-                origin = payload.get("origin") or {}
-                findings.append(
-                    {
-                        "chunk_id": str(
-                            detection.get("chunk_id")
-                            or payload.get("node_id")
-                            or payload.get("id_")
-                            or str(getattr(point, "id", "") or "")
-                        ),
-                        "chunk_text": str(
-                            detection.get("chunk_text")
-                            or self._extract_payload_text(payload)
-                            or ""
-                        ),
-                        "category": str(detection.get("category") or "none"),
-                        "confidence": str(detection.get("confidence") or "low"),
-                        "reason": str(detection.get("reason") or ""),
-                        "source_ref": str(
-                            detection.get("source_ref")
-                            or payload.get("file_path")
-                            or payload.get("filename")
-                            or payload.get("file_name")
-                            or origin.get("filename")
-                            or ""
-                        ),
-                        "page": (
-                            payload.get("page")
-                            or payload.get("page_number")
-                            or origin.get("page_no")
-                        ),
-                    }
+                source = self._source_from_payload(
+                    collection=self.qdrant_collection,
+                    payload=payload,
+                    text_value=str(
+                        detection.get("chunk_text")
+                        or self._extract_payload_text(payload)
+                        or ""
+                    ),
                 )
+                source["chunk_id"] = str(
+                    detection.get("chunk_id")
+                    or payload.get("node_id")
+                    or payload.get("id_")
+                    or str(getattr(point, "id", "") or "")
+                )
+                source["chunk_text"] = str(source.get("text") or "")
+                source["category"] = str(detection.get("category") or "none")
+                source["confidence"] = str(detection.get("confidence") or "low")
+                source["reason"] = str(detection.get("reason") or "")
+                source["source_ref"] = str(
+                    detection.get("source_ref")
+                    or source.get("filename")
+                    or payload.get("file_path")
+                    or ""
+                )
+                findings.append(source)
 
             if offset is None:
                 break

@@ -12,7 +12,11 @@ from docint.ui.components import (
     render_source_item,
     unique_referenced_sources,
 )
-from docint.ui.state import BACKEND_HOST, BACKEND_PUBLIC_HOST
+from docint.utils.env_cfg import load_host_env
+
+host_cfg = load_host_env()
+BACKEND_HOST = host_cfg.backend_host
+BACKEND_PUBLIC_HOST = host_cfg.backend_public_host
 
 
 def render_inspector() -> None:

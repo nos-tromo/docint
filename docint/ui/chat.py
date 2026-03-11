@@ -8,11 +8,14 @@ import streamlit as st
 from loguru import logger
 
 from docint.ui.components import (
+    reference_metadata_text_block,
     render_ner_overview,
     render_response_validation,
     render_source_item,
 )
-from docint.ui.state import BACKEND_HOST
+from docint.utils.env_cfg import load_host_env
+
+BACKEND_HOST = load_host_env().backend_host
 
 
 def _format_graph_debug_summary(graph_debug: dict[str, Any] | None) -> str | None:
@@ -73,6 +76,23 @@ def render_chat() -> None:
             graph_line = _format_graph_debug_summary(msg.get("graph_debug"))
             if graph_line:
                 chat_text += f"GRAPHRAG: {graph_line}\n\n"
+            if msg.get("sources"):
+                chat_text += "SOURCES:\n"
+                for idx, src in enumerate(msg["sources"], start=1):
+                    chat_text += (
+                        f"[{idx}] {src.get('filename')} "
+                        f"page={src.get('page')} row={src.get('row')} "
+                        f"score={src.get('score')}\n"
+                    )
+                    preview = str(
+                        src.get("preview_text") or src.get("text") or ""
+                    ).strip()
+                    if preview:
+                        chat_text += f"{preview}\n"
+                    metadata_block = reference_metadata_text_block(src)
+                    if metadata_block:
+                        chat_text += f"{metadata_block}\n"
+                    chat_text += "\n"
 
         st.download_button(
             label="📥 Download chat (.txt)",

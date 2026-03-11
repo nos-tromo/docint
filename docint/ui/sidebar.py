@@ -4,7 +4,10 @@ import requests
 import streamlit as st
 from loguru import logger
 
-from docint.ui.state import BACKEND_HOST, PAGE_ICONS, PAGES
+from docint.ui.state import PAGE_ICONS, PAGES
+from docint.utils.env_cfg import load_host_env
+
+BACKEND_HOST = load_host_env().backend_host
 
 
 def render_sidebar() -> None:

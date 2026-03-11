@@ -236,7 +236,7 @@ class SessionHistoryOut(BaseModel):
     messages: list[dict]
 
 
-class IEStatsOut(BaseModel):
+class NERStatsOut(BaseModel):
     totals: dict[str, int]
     top_entities: list[dict] = []
     entity_types: list[dict] = []
@@ -244,22 +244,8 @@ class IEStatsOut(BaseModel):
     documents: list[dict] = []
 
 
-class IESearchOut(BaseModel):
+class NERSearchOut(BaseModel):
     results: list[dict] = []
-
-
-class IEGraphOut(BaseModel):
-    nodes: list[dict] = []
-    edges: list[dict] = []
-    meta: dict[str, int] = {}
-
-
-class IENeighborsOut(BaseModel):
-    center: dict[str, Any] | None = None
-    neighbors: list[dict] = []
-    nodes: list[dict] = []
-    edges: list[dict] = []
-    meta: dict[str, Any] = {}
 
 
 class HateSpeechOut(BaseModel):
@@ -638,7 +624,7 @@ def get_collection_hate_speech() -> dict[str, list[dict]]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/collections/ner/stats", response_model=IEStatsOut, tags=["Query"])
+@app.get("/collections/ner/stats", response_model=NERStatsOut, tags=["Query"])
 def get_collection_ner_stats(
     top_k: int = 15,
     min_mentions: int = 2,
@@ -673,7 +659,7 @@ def get_collection_ner_stats(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/collections/ner/search", response_model=IESearchOut, tags=["Query"])
+@app.get("/collections/ner/search", response_model=NERSearchOut, tags=["Query"])
 def search_collection_ner_entities(
     q: str = "",
     entity_type: str | None = None,
@@ -704,50 +690,6 @@ def search_collection_ner_entities(
         }
     except Exception as e:
         logger.error("Error searching collection entities: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/collections/ner/graph", response_model=IEGraphOut, tags=["Query"])
-def get_collection_ner_graph(
-    top_k_nodes: int = 100,
-    min_edge_weight: int = 1,
-) -> dict[str, Any]:
-    """Build and return a derived NER graph for the selected collection."""
-    if not rag.qdrant_collection:
-        raise HTTPException(status_code=400, detail="No collection selected")
-    try:
-        return rag.get_collection_ner_graph(
-            top_k_nodes=top_k_nodes,
-            min_edge_weight=min_edge_weight,
-        )
-    except Exception as e:
-        logger.error("Error building collection NER graph: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get(
-    "/collections/ner/graph/neighbors",
-    response_model=IENeighborsOut,
-    tags=["Query"],
-)
-def get_collection_ner_graph_neighbors(
-    entity: str,
-    hops: int = 1,
-    top_k_nodes: int = 100,
-    min_edge_weight: int = 1,
-) -> dict[str, Any]:
-    """Return graph neighbors around a specific entity."""
-    if not rag.qdrant_collection:
-        raise HTTPException(status_code=400, detail="No collection selected")
-    try:
-        return rag.get_collection_ner_graph_neighbors(
-            entity=entity,
-            hops=hops,
-            top_k_nodes=top_k_nodes,
-            min_edge_weight=min_edge_weight,
-        )
-    except Exception as e:
-        logger.error("Error fetching collection NER graph neighbors: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 

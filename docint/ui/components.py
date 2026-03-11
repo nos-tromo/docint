@@ -1,6 +1,6 @@
 """Shared data-processing helpers and reusable rendering components.
 
-This module contains all NER / source data logic previously in ``app.py``,
+This module contains all NER / source data logic,
 plus extracted rendering helpers that are reused across pages.
 """
 
@@ -12,7 +12,12 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import requests
 import streamlit as st
 
-from docint.ui.state import BACKEND_HOST, BACKEND_PUBLIC_HOST
+from docint.utils.env_cfg import load_host_env
+from docint.utils.reference_metadata import REFERENCE_METADATA_FIELDS
+
+host_cfg = load_host_env()
+BACKEND_HOST = host_cfg.backend_host
+BACKEND_PUBLIC_HOST = host_cfg.backend_public_host
 
 DEFAULT_ARCHIVE_NAME = "source"
 
@@ -109,6 +114,69 @@ def source_label(src: dict) -> str:
     if src.get("row") is not None:
         parts.append(f"row {src['row']}")
     return f"{filename} ({', '.join(parts)})" if parts else filename
+
+
+def reference_metadata_items(
+    src: dict[str, Any],
+    *,
+    include_text: bool = True,
+) -> list[tuple[str, str]]:
+    """Return ordered reference-metadata label/value pairs for display/export.
+
+    Args:
+        src: Source dictionary containing a possible ``reference_metadata`` dict.
+        include_text: Whether to include the raw ``text`` field in the results.
+
+    Returns:
+        List of label/value pairs for known reference metadata keys, in display order.
+    """
+    raw = src.get("reference_metadata")
+    if not isinstance(raw, dict):
+        return []
+
+    items: list[tuple[str, str]] = []
+    for key, label in REFERENCE_METADATA_FIELDS.items():
+        if not include_text and key == "text":
+            continue
+        value = raw.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        items.append((label, text))
+    return items
+
+
+def reference_metadata_inline(src: dict[str, Any]) -> str | None:
+    """Return a compact inline summary for source reference metadata.
+
+    Args:
+        src: Source dictionary containing a possible ``reference_metadata`` dict.
+
+    Returns:
+        A single-line string summarising available reference metadata, or ``None``
+    """
+    items = reference_metadata_items(src, include_text=False)
+    if not items:
+        return None
+    return "  \n".join(f"**{label}**: {value}" for label, value in items)
+
+
+def reference_metadata_text_block(src: dict[str, Any]) -> str:
+    """Return a multiline text block for source reference metadata exports.
+
+    Args:
+        src: Source dictionary containing a possible ``reference_metadata`` dict.
+
+    Returns:
+        A multiline string summarising available reference metadata, or an empty string if none is available.
+    """
+    items = reference_metadata_items(src)
+    if not items:
+        return ""
+    lines: list[str] = [f"- {label}: {value}" for label, value in items]
+    return "\n".join(lines)
 
 
 def aggregate_ner(
@@ -691,6 +759,9 @@ def render_source_item(src: dict[str, Any], collection: str) -> None:
 
     st.markdown(f"**{src.get('filename')}{loc}**{score}")
     st.caption(src.get("preview_text", ""))
+    reference_line = reference_metadata_inline(src)
+    if reference_line:
+        st.caption(reference_line)
 
     if src.get("file_hash"):
         link = (
