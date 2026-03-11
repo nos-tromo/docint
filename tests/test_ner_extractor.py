@@ -1,6 +1,7 @@
 """Tests for NER extractor helpers."""
 
 from types import SimpleNamespace
+from typing import cast
 
 from docint.utils import ner_extractor as ner_extractor_module
 
@@ -70,7 +71,7 @@ def test_build_gliner_ner_extractor_uses_expanded_default_labels(
     assert relations == []
     assert seen["text"] == "Alice met Bob in Berlin"
     assert seen["threshold"] == 0.3
-    labels = set(seen["labels"])
+    labels = set(cast(list[str], seen["labels"]))
     assert {"bank_account", "fac", "group", "loc", "org", "phone", "weapon"} <= labels
     assert "organization" not in labels
     assert "location" not in labels
