@@ -12,6 +12,8 @@ from docint.ui.components import (
     collect_session_referenced_sources,
     entity_density_by_document,
     filter_entities,
+    reference_metadata_inline,
+    reference_metadata_text_block,
     response_validation_summary,
     summary_diagnostics_summary,
     unique_referenced_sources,
@@ -200,6 +202,33 @@ def test_unique_referenced_sources_deduplicates_by_hash_and_merges_contexts() ->
     assert unique[0]["filename"] == "shared.pdf"
     assert unique[0]["context"] == "analysis, chat"
     assert unique[1]["filename"] == "other.pdf"
+
+
+def test_reference_metadata_helpers_format_compact_and_multiline_text() -> None:
+    """Reference metadata helpers should emit stable compact and text formats."""
+    source = {
+        "reference_metadata": {
+            "network": "Telegram",
+            "type": "comment",
+            "timestamp": "2026-01-02T10:00:00Z",
+            "author": "Alice",
+            "author_id": "a1",
+            "vanity": "alice-v",
+            "text": "Acme content",
+            "text_id": "c1",
+        }
+    }
+
+    inline = reference_metadata_inline(source)
+    text_block = reference_metadata_text_block(source)
+
+    assert inline is not None
+    assert "**Network**: Telegram" in inline
+    assert "**Text ID**: c1" in inline
+    assert "Text: Acme content" not in inline
+    assert text_block.startswith("- Network: Telegram\n")
+    assert "- Author: Alice" in text_block
+    assert "- Text: Acme content" in text_block
 
 
 def test_build_source_files_zip_deduplicates_entries_and_keeps_names() -> None:
