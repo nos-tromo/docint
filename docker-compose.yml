@@ -10,7 +10,6 @@ x-backend-cpu: &backend-cpu
   environment: &backend-cpu-env
     DATA_PATH: /app/data
     LOG_PATH: /app/.logs/backend-cpu.log
-    QDRANT_COL_DIR: /qdrant/storage/collections
     QDRANT_HOST: http://qdrant:6333
     QDRANT_SRC_DIR: /qdrant/storage/sources
     QUERIES_PATH: /app/data/queries.txt
@@ -38,7 +37,6 @@ x-backend-cuda: &backend-cuda
     DATA_PATH: /app/data/in
     LOG_PATH: /app/.logs/backend-cuda.log
     NVIDIA_VISIBLE_DEVICES: all
-    QDRANT_COL_DIR: /qdrant/storage/collections
     QDRANT_HOST: http://qdrant:6333
     QDRANT_SRC_DIR: /qdrant/storage/sources
     QUERIES_PATH: /app/data/queries.txt

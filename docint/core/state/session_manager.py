@@ -347,7 +347,6 @@ class SessionManager:
                     "type": "qdrant",
                     "url": self.rag.qdrant_host,
                     "collection": self.rag.qdrant_collection,
-                    "host_dir": str(self.rag.qdrant_col_dir or ""),
                 },
             }
             (out_dir / "session.json").write_text(
