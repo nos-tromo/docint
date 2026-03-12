@@ -181,3 +181,45 @@ def test_export_session_omits_stale_host_dir_and_succeeds(
     assert session_meta["vector_store"]["url"] == "http://qdrant:6333"
     assert session_meta["vector_store"]["collection"] == "test_collection"
     assert "host_dir" not in session_meta["vector_store"]
+
+
+def test_chat_uses_request_scoped_filtered_engine(
+    session_manager: SessionManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Chat should use a temporary filtered engine when request filters are present.
+
+    Args:
+        session_manager (SessionManager): The session manager fixture.
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+    """
+    filtered_engine = MagicMock()
+    filtered_response = MagicMock()
+    filtered_engine.query.return_value = filtered_response
+
+    session_manager.rag.query_engine = MagicMock()
+    session_manager.rag.build_query_engine.return_value = filtered_engine
+    session_manager.rag.expand_query_with_graph_with_debug.return_value = ("hello", {})
+    session_manager.rag._normalize_response_data.return_value = {
+        "response": "Hi",
+        "sources": [],
+    }
+    session_manager.session_id = "session-1"
+    session_manager.chat_engine = object()
+
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args: None)
+    monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
+
+    response = session_manager.chat(
+        "hello",
+        metadata_filters=cast(Any, object()),
+        metadata_filters_active=True,
+    )
+
+    session_manager.rag.build_query_engine.assert_called_once()
+    filtered_engine.query.assert_called_once_with("hello")
+    session_manager.rag._normalize_response_data.assert_called_once_with(
+        "hello",
+        filtered_response,
+        metadata_filters_active=True,
+    )
+    assert response["response"] == "Hi"

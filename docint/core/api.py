@@ -7,7 +7,7 @@ from anyio import to_thread
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from qdrant_client import models
 from starlette.middleware.cors import CORSMiddleware
 
@@ -25,6 +25,7 @@ from docint.agents import (
 )
 from docint.cli import ingest as ingest_module
 from docint.core.rag import RAG
+from docint.core.retrieval_filters import build_metadata_filters, build_qdrant_filter
 from docint.utils.env_cfg import (
     load_host_env,
     load_path_env,
@@ -184,9 +185,31 @@ class SelectCollectionOut(BaseModel):
     name: str
 
 
+class MetadataFilterIn(BaseModel):
+    field: str
+    operator: Literal[
+        "eq",
+        "neq",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "in",
+        "contains",
+        "mime_match",
+        "date_after",
+        "date_on_or_after",
+        "date_before",
+        "date_on_or_before",
+    ]
+    value: str | int | float | bool | None = None
+    values: list[str | int | float | bool] = Field(default_factory=list)
+
+
 class QueryIn(BaseModel):
     question: str
     session_id: str | None = None
+    metadata_filters: list[MetadataFilterIn] = Field(default_factory=list)
 
 
 class QueryOut(BaseModel):
@@ -383,7 +406,19 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
             rag.create_query_engine()
 
         session_id = rag.start_session(payload.session_id)
-        data = rag.chat(payload.question)
+        metadata_filters = build_metadata_filters(payload.metadata_filters)
+        vector_store_kwargs = {}
+        qdrant_filter = build_qdrant_filter(payload.metadata_filters)
+        if qdrant_filter is not None:
+            vector_store_kwargs["qdrant_filters"] = qdrant_filter
+        data = rag.chat(
+            payload.question,
+            metadata_filters=metadata_filters,
+            metadata_filters_active=(
+                metadata_filters is not None or bool(vector_store_kwargs)
+            ),
+            vector_store_kwargs=vector_store_kwargs or None,
+        )
 
         answer = (
             str(data.get("response") or data.get("answer") or "")
@@ -435,6 +470,11 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
         rag.create_index()
 
     rag.start_session(payload.session_id)
+    metadata_filters = build_metadata_filters(payload.metadata_filters)
+    vector_store_kwargs = {}
+    qdrant_filter = build_qdrant_filter(payload.metadata_filters)
+    if qdrant_filter is not None:
+        vector_store_kwargs["qdrant_filters"] = qdrant_filter
 
     async def event_generator() -> AsyncIterator[str]:
         """Generate SSE events for the streaming query.
@@ -449,7 +489,14 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
             full_answer = ""
             final_payload: dict[str, Any] | None = None
             # Iterate over the sync generator
-            for chunk in rag.stream_chat(payload.question):
+            for chunk in rag.stream_chat(
+                payload.question,
+                metadata_filters=metadata_filters,
+                metadata_filters_active=(
+                    metadata_filters is not None or bool(vector_store_kwargs)
+                ),
+                vector_store_kwargs=vector_store_kwargs or None,
+            ):
                 if isinstance(chunk, str):
                     full_answer += chunk
                     yield f"data: {json.dumps({'token': chunk})}\n\n"

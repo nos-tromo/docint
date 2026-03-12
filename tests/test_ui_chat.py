@@ -5,7 +5,7 @@ from contextlib import nullcontext
 import pytest
 
 from docint.ui import chat as chat_module
-from docint.ui.chat import _format_graph_debug_summary
+from docint.ui.chat import _format_graph_debug_summary, build_chat_metadata_filters
 
 
 def test_format_graph_debug_summary_includes_core_fields() -> None:
@@ -30,10 +30,75 @@ def test_format_graph_debug_summary_none_returns_none() -> None:
     assert _format_graph_debug_summary(None) is None
 
 
+def test_build_chat_metadata_filters_combines_scope_date_and_custom_rules() -> None:
+    """Chat helper should serialize enabled UI filters into API payload rules."""
+    filters = build_chat_metadata_filters(
+        {
+            "enabled": True,
+            "scope": "Images only",
+            "mime_pattern": "",
+            "date_field": "reference_metadata.timestamp",
+            "start_date": "2026-01-01",
+            "end_date": "2026-01-31",
+            "hate_speech_only": True,
+        },
+        custom_rules=[
+            {
+                "field": "reference_metadata.author_id",
+                "operator": "eq",
+                "value": "alice",
+            }
+        ],
+    )
+
+    assert filters == [
+        {"field": "mimetype", "operator": "mime_match", "value": "image/*"},
+        {
+            "field": "reference_metadata.timestamp",
+            "operator": "date_on_or_after",
+            "value": "2026-01-01",
+        },
+        {
+            "field": "reference_metadata.timestamp",
+            "operator": "date_on_or_before",
+            "value": "2026-01-31",
+        },
+        {
+            "field": "hate_speech.hate_speech",
+            "operator": "eq",
+            "value": True,
+        },
+        {
+            "field": "reference_metadata.author_id",
+            "operator": "eq",
+            "value": "alice",
+        },
+    ]
+
+
+def test_build_chat_metadata_filters_returns_empty_when_disabled() -> None:
+    """Disabled chat filters should not send metadata filter payloads."""
+    assert (
+        build_chat_metadata_filters(
+            {
+                "enabled": False,
+                "scope": "Images only",
+                "date_field": "timestamp",
+                "start_date": "2026-01-01",
+            }
+        )
+        == []
+    )
+
+
 def test_render_sources_panel_uses_popover_with_scrolling_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Chat source browser should avoid page growth by using a fixed-height panel."""
+    """Chat source browser should avoid page growth by using a fixed-height panel.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+    """
     events: list[tuple[str, object]] = []
 
     def _popover(label: str):
@@ -46,8 +111,11 @@ def test_render_sources_panel_uses_popover_with_scrolling_container(
 
     monkeypatch.setattr(chat_module.st, "popover", _popover)
     monkeypatch.setattr(chat_module.st, "container", _container)
+    monkeypatch.setattr(chat_module.st, "caption", lambda text: None)
     monkeypatch.setattr(
-        chat_module.st, "markdown", lambda text: events.append(("markdown", text))
+        chat_module.st,
+        "markdown",
+        lambda text: events.append(("markdown", text)),
     )
     monkeypatch.setattr(
         chat_module,
@@ -70,7 +138,7 @@ def test_render_sources_panel_uses_popover_with_scrolling_container(
         "collection-a",
     )
 
-    assert ("popover", "View Sources") in events
+    assert ("popover", "Sources") in events
     assert ("container", chat_module.CHAT_SOURCES_CONTAINER_HEIGHT) in events
     assert ("source", "alpha.pdf::collection-a") in events
     assert ("source", "beta.pdf::collection-a") in events
@@ -81,7 +149,11 @@ def test_render_sources_panel_uses_popover_with_scrolling_container(
 def test_render_graph_debug_panel_uses_popover_with_scrolling_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """GraphRAG debug details should render in a fixed-height popover."""
+    """GraphRAG debug details should render in a fixed-height popover.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+    """
     events: list[tuple[str, object]] = []
 
     def _popover(label: str):
@@ -110,7 +182,11 @@ def test_render_graph_debug_panel_uses_popover_with_scrolling_container(
 def test_render_answer_tool_panels_aligns_buttons_horizontally(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Graph debug and source controls should share one horizontal row."""
+    """Graph debug and source controls should share one horizontal row.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+    """
     events: list[tuple[str, object]] = []
 
     def _columns(count: int):

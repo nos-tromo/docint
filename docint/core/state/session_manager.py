@@ -16,6 +16,7 @@ from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.schema import BaseNode
+from llama_index.core.vector_stores.types import MetadataFilters
 from loguru import logger
 from sqlalchemy.orm import Session
 
@@ -164,11 +165,24 @@ class SessionManager:
 
             return "\n\n".join(parts)
 
-    def chat(self, user_msg: str) -> dict[str, Any]:
+    def chat(
+        self,
+        user_msg: str,
+        *,
+        metadata_filters: MetadataFilters | None = None,
+        metadata_filters_active: bool = False,
+        vector_store_kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Handle a chat message from the user.
 
         Args:
             user_msg (str): The message from the user.
+            metadata_filters (MetadataFilters | None): Optional vector-store
+                metadata filters for this turn only.
+            metadata_filters_active (bool): Whether a request-scoped metadata
+                filter was supplied.
+            vector_store_kwargs (dict[str, Any] | None): Optional native
+                vector-store query kwargs.
 
         Returns:
             dict[str, Any]: The response data.
@@ -181,7 +195,14 @@ class SessionManager:
             logger.error("ValueError: Chat prompt cannot be empty.")
             raise ValueError("Chat prompt cannot be empty.")
 
-        engine = self.rag.query_engine
+        engine = (
+            self.rag.build_query_engine(
+                metadata_filters=metadata_filters,
+                vector_store_kwargs=vector_store_kwargs,
+            )
+            if metadata_filters is not None or vector_store_kwargs
+            else self.rag.query_engine
+        )
         if engine is None:
             logger.error("RuntimeError: Query engine has not been initialized.")
             raise RuntimeError(
@@ -204,17 +225,34 @@ class SessionManager:
         )
 
         resp = engine.query(retrieval_query)
-        response = self.rag._normalize_response_data(user_msg, resp)
+        response = self.rag._normalize_response_data(
+            user_msg,
+            resp,
+            metadata_filters_active=metadata_filters_active,
+        )
         response["graph_debug"] = graph_debug
         self._persist_turn(session_id, user_msg, resp, response)
         self._maybe_update_summary(session_id)
         return response
 
-    def stream_chat(self, user_msg: str) -> Iterator[str | dict]:
+    def stream_chat(
+        self,
+        user_msg: str,
+        *,
+        metadata_filters: MetadataFilters | None = None,
+        metadata_filters_active: bool = False,
+        vector_store_kwargs: dict[str, Any] | None = None,
+    ) -> Iterator[str | dict]:
         """Handle a streaming chat message from the user.
 
         Args:
             user_msg (str): The message from the user.
+            metadata_filters (MetadataFilters | None): Optional vector-store
+                metadata filters for this turn only.
+            metadata_filters_active (bool): Whether a request-scoped metadata
+                filter was supplied.
+            vector_store_kwargs (dict[str, Any] | None): Optional native
+                vector-store query kwargs.
 
         Yields:
             str | dict: Chunks of text, followed by a dict with metadata.
@@ -234,13 +272,10 @@ class SessionManager:
         if self.rag.index is None:
             raise RuntimeError("Index not initialized")
 
-        # Create a temporary streaming engine
-        k = min(max(self.rag.retrieve_similarity_top_k, self.rag.rerank_top_n * 8), 64)
-        streaming_engine = RetrieverQueryEngine.from_args(
-            retriever=self.rag.index.as_retriever(similarity_top_k=k),
-            llm=self.rag.text_model,
-            node_postprocessors=[self.rag.reranker],
+        streaming_engine = self.rag.build_query_engine(
+            metadata_filters=metadata_filters,
             streaming=True,
+            vector_store_kwargs=vector_store_kwargs,
         )
 
         session_id = self.session_id
@@ -281,7 +316,11 @@ class SessionManager:
             response=full_text, source_nodes=response.source_nodes
         )
 
-        normalized = self.rag._normalize_response_data(user_msg, final_response)
+        normalized = self.rag._normalize_response_data(
+            user_msg,
+            final_response,
+            metadata_filters_active=metadata_filters_active,
+        )
         normalized["graph_debug"] = graph_debug
         self._persist_turn(session_id, user_msg, final_response, normalized)
         self._maybe_update_summary(session_id)
