@@ -1292,14 +1292,65 @@ class RAG:
         Raises:
             RuntimeError: If the index is not initialized.
         """
+        self.query_engine = self.build_query_engine()
+
+    def _build_retriever(
+        self,
+        *,
+        metadata_filters: MetadataFilters | None = None,
+        similarity_top_k: int | None = None,
+        vector_store_kwargs: dict[str, Any] | None = None,
+    ) -> Any:
+        """Build a retriever, optionally scoped by metadata filters.
+
+        Args:
+            metadata_filters: Optional request-scoped metadata filters.
+            similarity_top_k: Optional override for retrieval depth.
+            vector_store_kwargs: Optional native vector-store query kwargs.
+        """
+        if self.index is None:
+            logger.error("RuntimeError: Index is not initialized.")
+            raise RuntimeError("Index is not initialized. Cannot create retriever.")
+
+        k = similarity_top_k or min(
+            max(self.retrieve_similarity_top_k, self.rerank_top_n * 8),
+            64,
+        )
+        retriever_kwargs: dict[str, Any] = {"similarity_top_k": k}
+        if metadata_filters is not None:
+            retriever_kwargs["filters"] = metadata_filters
+        if vector_store_kwargs:
+            retriever_kwargs["vector_store_kwargs"] = vector_store_kwargs
+        return self.index.as_retriever(**retriever_kwargs)
+
+    def build_query_engine(
+        self,
+        *,
+        metadata_filters: MetadataFilters | None = None,
+        streaming: bool = False,
+        vector_store_kwargs: dict[str, Any] | None = None,
+    ) -> RetrieverQueryEngine:
+        """Construct a query engine for the current index.
+
+        Args:
+            metadata_filters: Optional request-scoped metadata filters.
+            streaming: Whether the query engine should stream token output.
+            vector_store_kwargs: Optional native vector-store query kwargs.
+        """
+        if self.index is None:
+            self.create_index()
         if self.index is None:
             logger.error("RuntimeError: Index is not initialized.")
             raise RuntimeError("Index is not initialized. Cannot create query engine.")
-        k = min(max(self.retrieve_similarity_top_k, self.rerank_top_n * 8), 64)
-        self.query_engine = RetrieverQueryEngine.from_args(
-            retriever=self.index.as_retriever(similarity_top_k=k),
+
+        return RetrieverQueryEngine.from_args(
+            retriever=self._build_retriever(
+                metadata_filters=metadata_filters,
+                vector_store_kwargs=vector_store_kwargs,
+            ),
             llm=self.text_model,
             node_postprocessors=[self.reranker],
+            streaming=streaming,
         )
 
     def _source_from_node_with_score(self, nws: Any) -> dict[str, Any] | None:
@@ -1325,7 +1376,12 @@ class RAG:
         )
 
     def _normalize_response_data(
-        self, query: str, result: Any, reason: str | None = None
+        self,
+        query: str,
+        result: Any,
+        reason: str | None = None,
+        *,
+        metadata_filters_active: bool = False,
     ) -> dict[str, Any]:
         """Normalize both llama_index.core.Response and AgentChatResponse into a single payload.
         Handles:
@@ -1337,6 +1393,8 @@ class RAG:
             query (str): The original query string.
             result (Any): The response object from the query engine.
             reason (str | None): Optional reasoning string.
+            metadata_filters_active (bool): Whether request-scoped metadata
+                filters were active for the retrieval.
 
         Returns:
             dict[str, Any]: A dictionary containing:
@@ -1388,7 +1446,11 @@ class RAG:
             if normalized is not None:
                 sources.append(normalized)
 
-        if query.strip() and query != self.summarize_prompt:
+        if (
+            not metadata_filters_active
+            and query.strip()
+            and query != self.summarize_prompt
+        ):
             sources.extend(
                 self._retrieve_image_sources(
                     query,
@@ -1754,11 +1816,21 @@ class RAG:
         self._bump_summary_revision(self.qdrant_collection)
         logger.info("Documents ingested successfully (async path).")
 
-    def run_query(self, prompt: str) -> dict[str, Any]:
+    def run_query(
+        self,
+        prompt: str,
+        *,
+        metadata_filters: MetadataFilters | None = None,
+        vector_store_kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Run a query against the Qdrant collection.
 
         Args:
             prompt (str): The query prompt.
+            metadata_filters (MetadataFilters | None): Optional request-scoped
+                metadata filters.
+            vector_store_kwargs (dict[str, Any] | None): Optional native
+                vector-store query kwargs.
 
         Returns:
             dict[str, Any]: The query results.
@@ -1771,7 +1843,14 @@ class RAG:
         if not prompt.strip():
             logger.error("ValueError: Query prompt cannot be empty.")
             raise ValueError("Query prompt cannot be empty.")
-        engine = self.query_engine
+        engine = (
+            self.build_query_engine(
+                metadata_filters=metadata_filters,
+                vector_store_kwargs=vector_store_kwargs,
+            )
+            if metadata_filters is not None or vector_store_kwargs
+            else self.query_engine
+        )
         if engine is None:
             logger.error("RuntimeError: Query engine has not been initialized.")
             raise RuntimeError(
@@ -1781,13 +1860,29 @@ class RAG:
         if not isinstance(result, Response):
             logger.error("TypeError: Expected Response, got {}.", type(result).__name__)
             raise TypeError(f"Expected Response, got {type(result).__name__}")
-        return self._normalize_response_data(prompt, result)
+        return self._normalize_response_data(
+            prompt,
+            result,
+            metadata_filters_active=(
+                metadata_filters is not None or bool(vector_store_kwargs)
+            ),
+        )
 
-    async def run_query_async(self, prompt: str) -> dict[str, Any]:
+    async def run_query_async(
+        self,
+        prompt: str,
+        *,
+        metadata_filters: MetadataFilters | None = None,
+        vector_store_kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Run a query against the Qdrant collection asynchronously.
 
         Args:
             prompt (str): The query prompt.
+            metadata_filters (MetadataFilters | None): Optional request-scoped
+                metadata filters.
+            vector_store_kwargs (dict[str, Any] | None): Optional native
+                vector-store query kwargs.
 
         Returns:
             dict[str, Any]: The query results.
@@ -1800,7 +1895,14 @@ class RAG:
         if not prompt.strip():
             logger.error("ValueError: Query prompt cannot be empty.")
             raise ValueError("Query prompt cannot be empty.")
-        engine = self.query_engine
+        engine = (
+            self.build_query_engine(
+                metadata_filters=metadata_filters,
+                vector_store_kwargs=vector_store_kwargs,
+            )
+            if metadata_filters is not None or vector_store_kwargs
+            else self.query_engine
+        )
         if engine is None:
             logger.error("RuntimeError: Query engine has not been initialized.")
             raise RuntimeError(
@@ -1810,7 +1912,13 @@ class RAG:
         if not isinstance(result, Response):
             logger.error("TypeError: Expected Response, got {}.", type(result).__name__)
             raise TypeError(f"Expected Response, got {type(result).__name__}")
-        return self._normalize_response_data(prompt, result)
+        return self._normalize_response_data(
+            prompt,
+            result,
+            metadata_filters_active=(
+                metadata_filters is not None or bool(vector_store_kwargs)
+            ),
+        )
 
     # --- Session integration ---
     def init_session_store(self, db_url: str) -> None:
@@ -1876,31 +1984,67 @@ class RAG:
             self.sessions = SessionManager(self)
         return self.sessions.start_session(session_id)
 
-    def chat(self, user_msg: str) -> dict[str, Any]:
+    def chat(
+        self,
+        user_msg: str,
+        *,
+        metadata_filters: MetadataFilters | None = None,
+        metadata_filters_active: bool = False,
+        vector_store_kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Proxy chat turns to SessionManager.
 
         Args:
             user_msg (str): The user's chat message.
+            metadata_filters (MetadataFilters | None): Optional request-scoped
+                metadata filters.
+            metadata_filters_active (bool): Whether request-scoped metadata
+                filters were active for the retrieval.
+            vector_store_kwargs (dict[str, Any] | None): Optional native
+                vector-store query kwargs.
 
         Returns:
             dict[str, Any]: The chat response data.
         """
         if self.sessions is None:
             self.sessions = SessionManager(self)
-        return self.sessions.chat(user_msg)
+        return self.sessions.chat(
+            user_msg,
+            metadata_filters=metadata_filters,
+            metadata_filters_active=metadata_filters_active,
+            vector_store_kwargs=vector_store_kwargs,
+        )
 
-    def stream_chat(self, user_msg: str) -> Any:
+    def stream_chat(
+        self,
+        user_msg: str,
+        *,
+        metadata_filters: MetadataFilters | None = None,
+        metadata_filters_active: bool = False,
+        vector_store_kwargs: dict[str, Any] | None = None,
+    ) -> Any:
         """Proxy stream chat turns to SessionManager.
 
         Args:
             user_msg (str): The user's chat message.
+            metadata_filters (MetadataFilters | None): Optional request-scoped
+                metadata filters.
+            metadata_filters_active (bool): Whether request-scoped metadata
+                filters were active for the retrieval.
+            vector_store_kwargs (dict[str, Any] | None): Optional native
+                vector-store query kwargs.
 
         Returns:
             Any: A generator yielding response chunks.
         """
         if self.sessions is None:
             self.sessions = SessionManager(self)
-        return self.sessions.stream_chat(user_msg)
+        return self.sessions.stream_chat(
+            user_msg,
+            metadata_filters=metadata_filters,
+            metadata_filters_active=metadata_filters_active,
+            vector_store_kwargs=vector_store_kwargs,
+        )
 
     def expand_query_with_graph_with_debug(
         self, query: str

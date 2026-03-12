@@ -19,6 +19,46 @@ BACKEND_HOST = load_host_env().backend_host
 CHAT_SOURCES_CONTAINER_HEIGHT = 420
 CHAT_DEBUG_CONTAINER_HEIGHT = 280
 
+CHAT_SCOPE_OPTIONS = [
+    "All content",
+    "Images only",
+    "Documents only",
+    "Custom MIME",
+]
+DATE_FIELD_OPTIONS = [
+    "None",
+    "timestamp",
+    "reference_metadata.timestamp",
+    "created_at",
+    "updated_at",
+]
+CUSTOM_FIELD_OPTIONS = [
+    "mimetype",
+    "file_type",
+    "source",
+    "filename",
+    "file_name",
+    "timestamp",
+    "reference_metadata.timestamp",
+    "hate_speech.hate_speech",
+    "Custom field",
+]
+CUSTOM_OPERATOR_OPTIONS = {
+    "Equals": "eq",
+    "Greater than": "gt",
+    "Greater or equal": "gte",
+    "Less than": "lt",
+    "Less or equal": "lte",
+}
+DOCUMENT_SOURCE_VALUES = [
+    "document",
+    "json",
+    "table",
+    "audio",
+    "text",
+    "transcript",
+]
+
 
 def _format_graph_debug_summary(graph_debug: dict[str, Any] | None) -> str | None:
     """Build a compact text line for GraphRAG debug metadata.
@@ -42,6 +82,133 @@ def _format_graph_debug_summary(graph_debug: dict[str, Any] | None) -> str | Non
     )
 
 
+def _build_custom_metadata_rules(count: int) -> list[dict[str, Any]]:
+    """Build request payloads for user-defined custom metadata rules.
+
+    Args:
+        count: Number of custom rules to process, as specified by the user in the UI.
+
+    Returns:
+        A list of metadata filter rules derived from the UI state.
+    """
+    rules: list[dict[str, Any]] = []
+    for index in range(count):
+        selected_field = st.session_state.get(
+            f"chat_filter_custom_field_{index}",
+            "mimetype",
+        )
+        field = (
+            str(
+                st.session_state.get(f"chat_filter_custom_field_name_{index}", "")
+            ).strip()
+            if selected_field == "Custom field"
+            else str(selected_field).strip()
+        )
+        operator_label = str(
+            st.session_state.get(
+                f"chat_filter_custom_operator_{index}",
+                "Equals",
+            )
+        )
+        value = str(
+            st.session_state.get(f"chat_filter_custom_value_{index}", "")
+        ).strip()
+        operator = CUSTOM_OPERATOR_OPTIONS.get(operator_label)
+        if field and operator and value:
+            rules.append({"field": field, "operator": operator, "value": value})
+    return rules
+
+
+def build_chat_metadata_filters(
+    filter_state: Mapping[str, Any],
+    *,
+    custom_rules: Sequence[Mapping[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Translate chat filter state into the backend request payload.
+
+    Args:
+        filter_state: Mapping of chat filter UI state keys to their current values.
+        custom_rules: Optional sequence of additional custom filter rules to include.
+
+    Returns:
+        A list of metadata filter rules to apply to the next chat retrieval request.
+    """
+    if not bool(filter_state.get("enabled")):
+        return []
+
+    filters: list[dict[str, Any]] = []
+    scope = str(filter_state.get("scope") or "All content")
+    if scope == "Images only":
+        filters.append(
+            {"field": "mimetype", "operator": "mime_match", "value": "image/*"}
+        )
+    elif scope == "Documents only":
+        filters.append(
+            {
+                "field": "source",
+                "operator": "in",
+                "values": list(DOCUMENT_SOURCE_VALUES),
+            }
+        )
+    elif scope == "Custom MIME":
+        mime_pattern = str(filter_state.get("mime_pattern") or "").strip()
+        if mime_pattern:
+            filters.append(
+                {
+                    "field": "mimetype",
+                    "operator": "mime_match",
+                    "value": mime_pattern,
+                }
+            )
+
+    date_field = str(filter_state.get("date_field") or "None").strip()
+    if date_field and date_field != "None":
+        start_date = str(filter_state.get("start_date") or "").strip()
+        end_date = str(filter_state.get("end_date") or "").strip()
+        if start_date:
+            filters.append(
+                {
+                    "field": date_field,
+                    "operator": "date_on_or_after",
+                    "value": start_date,
+                }
+            )
+        if end_date:
+            filters.append(
+                {
+                    "field": date_field,
+                    "operator": "date_on_or_before",
+                    "value": end_date,
+                }
+            )
+
+    if bool(filter_state.get("hate_speech_only")):
+        filters.append(
+            {
+                "field": "hate_speech.hate_speech",
+                "operator": "eq",
+                "value": True,
+            }
+        )
+
+    for rule in custom_rules or []:
+        field = str(rule.get("field") or "").strip()
+        operator = str(rule.get("operator") or "").strip()
+        value = rule.get("value")
+        values = rule.get("values")
+        if field and operator:
+            payload: dict[str, Any] = {"field": field, "operator": operator}
+            if values:
+                payload["values"] = list(values)
+            elif value not in (None, ""):
+                payload["value"] = value
+            else:
+                continue
+            filters.append(payload)
+
+    return filters
+
+
 def _render_sources_panel(
     sources: Sequence[Mapping[str, Any]],
     collection: str,
@@ -55,7 +222,7 @@ def _render_sources_panel(
     if not sources:
         return
 
-    with st.popover("View Sources"):
+    with st.popover("Sources"):
         with st.container(height=CHAT_SOURCES_CONTAINER_HEIGHT):
             for src in sources:
                 render_source_item(dict(src), collection)
@@ -159,7 +326,7 @@ def render_chat() -> None:
                     chat_text += "\n"
 
         st.download_button(
-            label="📥 Download chat (.txt)",
+            label="Download",
             data=chat_text,
             file_name=(f"chat_{st.session_state.session_id or 'session'}.txt"),
             mime="text/plain",
@@ -184,6 +351,86 @@ def render_chat() -> None:
                 sources=msg.get("sources"),
                 collection=collection,
             )
+
+    with st.expander("Retrieval filters", expanded=False):
+        st.checkbox(
+            "Enable metadata filtering",
+            key="chat_filter_enabled",
+            help="Apply metadata constraints to the next retrieval request.",
+        )
+        st.selectbox(
+            "Scope",
+            options=CHAT_SCOPE_OPTIONS,
+            key="chat_filter_scope",
+        )
+        if st.session_state.chat_filter_scope == "Custom MIME":
+            st.text_input(
+                "MIME pattern",
+                key="chat_filter_mime_pattern",
+                placeholder="image/*, application/pdf, text/*",
+            )
+        st.selectbox(
+            "Date field",
+            options=DATE_FIELD_OPTIONS,
+            key="chat_filter_date_field",
+        )
+        if st.session_state.chat_filter_date_field != "None":
+            date_cols = st.columns(2)
+            with date_cols[0]:
+                st.text_input(
+                    "Start date",
+                    key="chat_filter_start_date",
+                    placeholder="YYYY-MM-DD",
+                )
+            with date_cols[1]:
+                st.text_input(
+                    "End date",
+                    key="chat_filter_end_date",
+                    placeholder="YYYY-MM-DD",
+                )
+        st.checkbox(
+            "Only hate-speech positive chunks",
+            key="chat_filter_hate_speech_only",
+        )
+        st.selectbox(
+            "Additional custom filters",
+            options=[0, 1, 2, 3],
+            key="chat_filter_custom_count",
+        )
+        for index in range(int(st.session_state.chat_filter_custom_count or 0)):
+            st.markdown(f"Custom filter {index + 1}")
+            cols = st.columns([1.4, 1.1, 1.5])
+            with cols[0]:
+                st.selectbox(
+                    "Field",
+                    options=CUSTOM_FIELD_OPTIONS,
+                    key=f"chat_filter_custom_field_{index}",
+                    label_visibility="collapsed",
+                )
+                if (
+                    st.session_state.get(f"chat_filter_custom_field_{index}")
+                    == "Custom field"
+                ):
+                    st.text_input(
+                        "Metadata field",
+                        key=f"chat_filter_custom_field_name_{index}",
+                        placeholder="reference_metadata.author_id",
+                        label_visibility="collapsed",
+                    )
+            with cols[1]:
+                st.selectbox(
+                    "Operator",
+                    options=list(CUSTOM_OPERATOR_OPTIONS.keys()),
+                    key=f"chat_filter_custom_operator_{index}",
+                    label_visibility="collapsed",
+                )
+            with cols[2]:
+                st.text_input(
+                    "Value",
+                    key=f"chat_filter_custom_value_{index}",
+                    placeholder="value",
+                    label_visibility="collapsed",
+                )
 
     # ── Callbacks ────────────────────────────────────────────
 
@@ -231,10 +478,25 @@ def render_chat() -> None:
             validation_mismatch: bool | None = None
             validation_reason: str | None = None
             graph_debug: dict[str, Any] | None = None
+            metadata_filters = build_chat_metadata_filters(
+                {
+                    "enabled": st.session_state.chat_filter_enabled,
+                    "scope": st.session_state.chat_filter_scope,
+                    "mime_pattern": st.session_state.chat_filter_mime_pattern,
+                    "date_field": st.session_state.chat_filter_date_field,
+                    "start_date": st.session_state.chat_filter_start_date,
+                    "end_date": st.session_state.chat_filter_end_date,
+                    "hate_speech_only": st.session_state.chat_filter_hate_speech_only,
+                },
+                custom_rules=_build_custom_metadata_rules(
+                    int(st.session_state.chat_filter_custom_count or 0)
+                ),
+            )
 
             payload = {
                 "question": prompt,
                 "session_id": st.session_state.session_id,
+                "metadata_filters": metadata_filters,
             }
             try:
                 with requests.post(

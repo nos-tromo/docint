@@ -375,6 +375,13 @@ matches = service.query_similar_images(Path("query.png"), top_k=5)
 
    The backend will be available at `http://localhost:8000/docs`.
 
+3. **Use Retrieval Filters in Chat**
+
+   Open the `Retrieval filters` panel on the Chat page to restrict retrieval by
+   metadata before querying the vector store. Supported filters include MIME
+   patterns (for example `image/*` or `application/pdf`), date boundaries on
+   timestamp fields, and additional custom metadata rules.
+
 ---
 
 ### Launching via Docker

@@ -20,6 +20,7 @@ from llama_index.core import Document
 
 from docint.core import rag as rag_module
 from docint.core.rag import RAG
+from docint.core.retrieval_filters import build_metadata_filters, build_qdrant_filter
 from docint.utils.hashing import compute_file_hash
 
 
@@ -161,6 +162,37 @@ def test_normalize_response_data_appends_image_sources(
     assert sources[0]["image_id"] == "img-1"
 
 
+def test_normalize_response_data_skips_aux_image_sources_when_filters_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Request-scoped metadata filtering should not append unfiltered image extras.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(
+        RAG,
+        "_retrieve_image_sources",
+        lambda self, query, top_k=3: [
+            {
+                "text": "Image-only source.",
+                "filename": "img.png",
+                "source": "image",
+            }
+        ],
+    )
+    result = DummyResponse("Answer", [])
+
+    normalized = rag._normalize_response_data(
+        "transformer diagram",
+        result,
+        metadata_filters_active=True,
+    )
+
+    assert normalized["sources"] == []
+
+
 def test_normalize_response_data_falls_back_for_empty_model_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -182,6 +214,64 @@ def test_normalize_response_data_falls_back_for_empty_model_output(
 
     assert normalized["response"] == rag_module.EMPTY_RESPONSE_FALLBACK
     assert normalized["reasoning"] == "internal reasoning"
+
+
+def test_build_metadata_filters_supports_mime_and_date_rules() -> None:
+    """Metadata filter builder should compile MIME and date request rules."""
+    compiled = build_metadata_filters(
+        [
+            {
+                "field": "mimetype",
+                "operator": "mime_match",
+                "value": "image/*",
+            },
+            {
+                "field": "reference_metadata.timestamp",
+                "operator": "date_on_or_after",
+                "value": "2026-01-01",
+            },
+        ]
+    )
+
+    assert compiled is not None
+    assert len(compiled.filters) == 2
+    assert compiled.filters[0].operator.value == "text_match_insensitive"
+    assert compiled.filters[1].operator.value == ">="
+    assert str(compiled.filters[1].value).startswith("2026-01-01T00:00:00")
+
+
+def test_build_qdrant_filter_supports_boolean_rules() -> None:
+    """Native Qdrant filters should support boolean metadata matches."""
+    compiled = build_qdrant_filter(
+        [
+            {
+                "field": "hate_speech.hate_speech",
+                "operator": "eq",
+                "value": True,
+            }
+        ]
+    )
+
+    assert compiled is not None
+    assert compiled.must is not None
+    condition = compiled.must[0]
+    assert condition.key == "hate_speech.hate_speech"
+    assert condition.match.value is True
+
+
+def test_build_metadata_filters_skips_invalid_date_values() -> None:
+    """Invalid date filter inputs should be ignored rather than raising."""
+    compiled = build_metadata_filters(
+        [
+            {
+                "field": "timestamp",
+                "operator": "date_on_or_after",
+                "value": "not-a-date",
+            }
+        ]
+    )
+
+    assert compiled is None
 
 
 def test_retrieve_image_sources_skips_when_image_collection_missing() -> None:

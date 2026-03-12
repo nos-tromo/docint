@@ -76,6 +76,8 @@ class DummyRAG:
         self.selected: list[str] = []
         self.sessions = DummySessionManager()
         self.chats: list[str] = []
+        self.chat_filters: list[Any] = []
+        self.stream_filters: list[Any] = []
         self.created_index = 0  # Tracks the number of times an index is created
         self.created_query_engine = 0
         self.ner_sources: list[dict[str, Any]] = []
@@ -135,16 +137,33 @@ class DummyRAG:
         """
         return session_id or "generated-session"
 
-    def chat(self, question: str) -> dict[str, Any]:
+    def chat(
+        self,
+        question: str,
+        *,
+        metadata_filters: Any = None,
+        metadata_filters_active: bool = False,
+        vector_store_kwargs: Any = None,
+    ) -> dict[str, Any]:
         """Chat with the RAG system.
 
         Args:
             question (str): The question to ask the RAG system.
+            metadata_filters (Any): Optional compiled metadata filters.
+            metadata_filters_active (bool): Whether request filters were active.
+            vector_store_kwargs (Any): Optional native vector-store query kwargs.
 
         Returns:
             dict[str, Any]: The response from the RAG system.
         """
         self.chats.append(question)
+        self.chat_filters.append(
+            {
+                "filters": metadata_filters,
+                "active": metadata_filters_active,
+                "vector_store_kwargs": vector_store_kwargs,
+            }
+        )
         return {
             "response": "answer",
             "sources": [{"id": 1}],
@@ -158,17 +177,33 @@ class DummyRAG:
             },
         }
 
-    def stream_chat(self, question: str) -> Generator[str | dict[str, Any], None, None]:
+    def stream_chat(
+        self,
+        question: str,
+        *,
+        metadata_filters: Any = None,
+        metadata_filters_active: bool = False,
+        vector_store_kwargs: Any = None,
+    ) -> Generator[str | dict[str, Any], None, None]:
         """
         Stream chat responses from the RAG system.
 
         Args:
             question (str): The question to ask the RAG system.
+            metadata_filters (Any): Optional compiled metadata filters.
+            metadata_filters_active (bool): Whether request filters were active.
+            vector_store_kwargs (Any): Optional native vector-store query kwargs.
 
         Yields:
             str | dict[str, Any]: Chunks of the chat response as they are generated.
         """
-        _ = question
+        self.stream_filters.append(
+            {
+                "filters": metadata_filters,
+                "active": metadata_filters_active,
+                "vector_store_kwargs": vector_store_kwargs,
+            }
+        )
         yield "chunk"
         yield {
             "sources": [{"id": 1}],
@@ -495,7 +530,7 @@ def test_agent_chat_answers(
         client (TestClient): The TestClient instance.
     """
 
-    def fake_chat(question: str) -> dict[str, Any]:
+    def fake_chat(question: str, **_: Any) -> dict[str, Any]:
         """
         Fake implementation of the RAG chat method for testing purposes.
 
@@ -904,6 +939,68 @@ def test_query_success(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> N
     assert body["graph_debug"]["anchor_entities"] == ["Acme"]
 
 
+def test_query_builds_and_passes_metadata_filters(client: TestClient) -> None:
+    """Query endpoint should compile request filters and pass them to RAG chat.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    response = client.post(
+        "/query",
+        json={
+            "question": "What?",
+            "metadata_filters": [
+                {
+                    "field": "mimetype",
+                    "operator": "mime_match",
+                    "value": "image/*",
+                },
+                {
+                    "field": "reference_metadata.timestamp",
+                    "operator": "date_on_or_after",
+                    "value": "2026-01-01",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    last_filters = api_module.rag.chat_filters[-1]
+    assert last_filters["active"] is True
+    compiled = last_filters["filters"]
+    assert compiled is not None
+    assert len(compiled.filters) == 2
+    assert last_filters["vector_store_kwargs"]["qdrant_filters"] is not None
+
+
+def test_stream_query_passes_metadata_filters(client: TestClient) -> None:
+    """Streaming query endpoint should compile and pass request filters.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    with client.stream(
+        "POST",
+        "/stream_query",
+        json={
+            "question": "hello",
+            "metadata_filters": [
+                {
+                    "field": "hate_speech.hate_speech",
+                    "operator": "eq",
+                    "value": True,
+                }
+            ],
+        },
+    ) as resp:
+        assert resp.status_code == 200
+        assert any(line for line in resp.iter_lines())
+
+    last_filters = api_module.rag.stream_filters[-1]
+    assert last_filters["active"] is True
+    assert last_filters["vector_store_kwargs"]["qdrant_filters"] is not None
+
+
 def test_query_handles_missing_sources(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
@@ -914,7 +1011,7 @@ def test_query_handles_missing_sources(
         client (TestClient): The TestClient instance.
     """
 
-    def fake_chat(question: str) -> str:
+    def fake_chat(question: str, **_: Any) -> str:
         """Fake chat function for testing.
 
         Args:
