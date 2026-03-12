@@ -19,46 +19,6 @@ BACKEND_HOST = load_host_env().backend_host
 CHAT_SOURCES_CONTAINER_HEIGHT = 420
 CHAT_DEBUG_CONTAINER_HEIGHT = 280
 
-CHAT_SCOPE_OPTIONS = [
-    "All content",
-    "Images only",
-    "Documents only",
-    "Custom MIME",
-]
-DATE_FIELD_OPTIONS = [
-    "None",
-    "timestamp",
-    "reference_metadata.timestamp",
-    "created_at",
-    "updated_at",
-]
-CUSTOM_FIELD_OPTIONS = [
-    "mimetype",
-    "file_type",
-    "source",
-    "filename",
-    "file_name",
-    "timestamp",
-    "reference_metadata.timestamp",
-    "hate_speech.hate_speech",
-    "Custom field",
-]
-CUSTOM_OPERATOR_OPTIONS = {
-    "Equals": "eq",
-    "Greater than": "gt",
-    "Greater or equal": "gte",
-    "Less than": "lt",
-    "Less or equal": "lte",
-}
-DOCUMENT_SOURCE_VALUES = [
-    "document",
-    "json",
-    "table",
-    "audio",
-    "text",
-    "transcript",
-]
-
 
 def _format_graph_debug_summary(graph_debug: dict[str, Any] | None) -> str | None:
     """Build a compact text line for GraphRAG debug metadata.
