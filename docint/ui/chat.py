@@ -1,7 +1,7 @@
 """Chat page: streaming Q&A with source rendering and NER."""
 
 import json
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 import requests
 import streamlit as st
@@ -16,6 +16,8 @@ from docint.ui.components import (
 from docint.utils.env_cfg import load_host_env
 
 BACKEND_HOST = load_host_env().backend_host
+CHAT_SOURCES_CONTAINER_HEIGHT = 420
+CHAT_DEBUG_CONTAINER_HEIGHT = 280
 
 
 def _format_graph_debug_summary(graph_debug: dict[str, Any] | None) -> str | None:
@@ -38,6 +40,68 @@ def _format_graph_debug_summary(graph_debug: dict[str, Any] | None) -> str | Non
         f"enabled={enabled}, applied={applied}, reason={reason}, "
         f"anchors={anchors}, neighbors={neighbors}"
     )
+
+
+def _render_sources_panel(
+    sources: Sequence[Mapping[str, Any]],
+    collection: str,
+) -> None:
+    """Render chat source details in a stable-height popover.
+
+    Args:
+        sources: Source rows associated with a chat answer.
+        collection: Active collection name for source downloads.
+    """
+    if not sources:
+        return
+
+    with st.popover("View Sources"):
+        with st.container(height=CHAT_SOURCES_CONTAINER_HEIGHT):
+            for src in sources:
+                render_source_item(dict(src), collection)
+            st.markdown("**Information Extraction Overview**")
+            render_ner_overview([dict(src) for src in sources])
+
+
+def _render_graph_debug_panel(graph_debug: Mapping[str, Any]) -> None:
+    """Render GraphRAG debug details in a popover.
+
+    Args:
+        graph_debug: GraphRAG debug payload for the current answer.
+    """
+    with st.popover("GraphRAG Debug"):
+        with st.container(height=CHAT_DEBUG_CONTAINER_HEIGHT):
+            st.json(dict(graph_debug))
+
+
+def _render_answer_tool_panels(
+    *,
+    graph_debug: Mapping[str, Any] | None,
+    sources: Sequence[Mapping[str, Any]] | None,
+    collection: str,
+) -> None:
+    """Render optional chat detail controls in one horizontal row.
+
+    Args:
+        graph_debug: Optional GraphRAG debug payload.
+        sources: Optional source rows associated with a chat answer.
+        collection: Active collection name for source downloads.
+    """
+    tool_count = int(bool(sources)) + int(isinstance(graph_debug, Mapping))
+    if tool_count == 0:
+        return
+
+    columns = st.columns(tool_count)
+    column_index = 0
+
+    if sources:
+        with columns[column_index]:
+            _render_sources_panel(sources, collection)
+        column_index += 1
+
+    if isinstance(graph_debug, Mapping):
+        with columns[column_index]:
+            _render_graph_debug_panel(graph_debug)
 
 
 def render_chat() -> None:
@@ -115,16 +179,11 @@ def render_chat() -> None:
                 validation_mismatch=msg.get("validation_mismatch"),
                 validation_reason=msg.get("validation_reason"),
             )
-            if isinstance(msg.get("graph_debug"), dict):
-                with st.expander("GraphRAG Debug"):
-                    st.json(msg["graph_debug"])
-
-            if msg.get("sources"):
-                with st.expander("View Sources"):
-                    for src in msg["sources"]:
-                        render_source_item(src, collection)
-                    st.markdown("**Information Extraction Overview**")
-                    render_ner_overview(msg["sources"])
+            _render_answer_tool_panels(
+                graph_debug=msg.get("graph_debug"),
+                sources=msg.get("sources"),
+                collection=collection,
+            )
 
     # ── Callbacks ────────────────────────────────────────────
 
@@ -263,16 +322,11 @@ def render_chat() -> None:
                             validation_mismatch=validation_mismatch,
                             validation_reason=validation_reason,
                         )
-                        if graph_debug is not None:
-                            with st.expander("GraphRAG Debug"):
-                                st.json(graph_debug)
-
-                        if sources:
-                            with st.expander("View Sources"):
-                                for src in sources:
-                                    render_source_item(src, collection)
-                            st.markdown("**Information Extraction Overview**")
-                            render_ner_overview(sources)
+                        _render_answer_tool_panels(
+                            graph_debug=graph_debug,
+                            sources=sources,
+                            collection=collection,
+                        )
 
                         # Persist message
                         msg_entry: dict[str, Any] = {
