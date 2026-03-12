@@ -99,7 +99,7 @@ def test_get_session_history_enriches_sources_from_node_lookup(
     session_manager: SessionManager,
 ) -> None:
     """Session history should reuse normalized source payloads when available.
-    
+
     Args:
         session_manager (SessionManager): The session manager fixture.
     """
