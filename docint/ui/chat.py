@@ -1,7 +1,7 @@
 """Chat page: streaming Q&A with source rendering and NER."""
 
 import json
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 import requests
 import streamlit as st
@@ -16,6 +16,7 @@ from docint.ui.components import (
 from docint.utils.env_cfg import load_host_env
 
 BACKEND_HOST = load_host_env().backend_host
+CHAT_SOURCES_CONTAINER_HEIGHT = 420
 
 
 def _format_graph_debug_summary(graph_debug: dict[str, Any] | None) -> str | None:
@@ -38,6 +39,27 @@ def _format_graph_debug_summary(graph_debug: dict[str, Any] | None) -> str | Non
         f"enabled={enabled}, applied={applied}, reason={reason}, "
         f"anchors={anchors}, neighbors={neighbors}"
     )
+
+
+def _render_sources_panel(
+    sources: Sequence[Mapping[str, Any]],
+    collection: str,
+) -> None:
+    """Render chat source details in a stable-height popover.
+
+    Args:
+        sources: Source rows associated with a chat answer.
+        collection: Active collection name for source downloads.
+    """
+    if not sources:
+        return
+
+    with st.popover("View Sources"):
+        with st.container(height=CHAT_SOURCES_CONTAINER_HEIGHT):
+            for src in sources:
+                render_source_item(dict(src), collection)
+            st.markdown("**Information Extraction Overview**")
+            render_ner_overview([dict(src) for src in sources])
 
 
 def render_chat() -> None:
@@ -120,11 +142,7 @@ def render_chat() -> None:
                     st.json(msg["graph_debug"])
 
             if msg.get("sources"):
-                with st.expander("View Sources"):
-                    for src in msg["sources"]:
-                        render_source_item(src, collection)
-                    st.markdown("**Information Extraction Overview**")
-                    render_ner_overview(msg["sources"])
+                _render_sources_panel(msg["sources"], collection)
 
     # ── Callbacks ────────────────────────────────────────────
 
@@ -268,11 +286,7 @@ def render_chat() -> None:
                                 st.json(graph_debug)
 
                         if sources:
-                            with st.expander("View Sources"):
-                                for src in sources:
-                                    render_source_item(src, collection)
-                            st.markdown("**Information Extraction Overview**")
-                            render_ner_overview(sources)
+                            _render_sources_panel(sources, collection)
 
                         # Persist message
                         msg_entry: dict[str, Any] = {
