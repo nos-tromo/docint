@@ -75,6 +75,7 @@ from docint.core.ner import (
     build_entity_graph,
     build_ner_stats,
     graph_neighbors,
+    match_entity_text,
     search_entities,
 )
 from docint.core.ingest.images_service import ImageIngestionService
@@ -2079,24 +2080,27 @@ class RAG:
         try:
             aggregate = self._get_collection_ner_aggregate(refresh=False)
             entities = list(aggregate.get("entities") or [])
-            query_l = query.lower()
-            anchors = [
-                ent
-                for ent in entities
-                if str(ent.get("text") or "").strip()
-                and str(ent.get("text")).lower() in query_l
-            ]
+            anchors = []
+            for ent in entities:
+                text = str(ent.get("text") or "").strip()
+                if not text:
+                    continue
+                match = match_entity_text(text, query)
+                if match is None:
+                    continue
+                anchors.append((match[0], ent))
             anchors.sort(
                 key=lambda item: (
-                    -int(item.get("mentions", 0) or 0),
-                    str(item.get("text") or "").lower(),
+                    int(item[0]),
+                    -int(item[1].get("mentions", 0) or 0),
+                    str(item[1].get("text") or "").lower(),
                 )
             )
             if not anchors:
                 debug["reason"] = "no_anchor_entities"
                 return query, debug
 
-            selected_anchors = anchors[:2]
+            selected_anchors = [ent for _, ent in anchors[:2]]
             anchor_texts = [
                 str(ent.get("text") or "").strip() for ent in selected_anchors
             ]

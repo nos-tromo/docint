@@ -559,6 +559,28 @@ def test_collection_ner_stats_and_search() -> None:
     assert results[0]["mentions"] == 3
 
 
+def test_collection_ner_search_matches_entity_acronyms() -> None:
+    """Entity search should match acronym queries against multi-word entities."""
+    rag = RAG(qdrant_collection="test")
+    rag.ner_sources = [
+        {
+            "filename": "a.pdf",
+            "entities": [{"text": "European Union", "type": "ORG"}],
+        },
+        {
+            "filename": "b.pdf",
+            "entities": [{"text": "European Union", "type": "ORG"}],
+        },
+        {"filename": "c.pdf", "entities": [{"text": "Europe", "type": "LOC"}]},
+    ]
+
+    results = rag.search_collection_ner_entities(q="eu", limit=10)
+
+    assert results
+    assert results[0]["text"] == "European Union"
+    assert results[0]["mentions"] == 2
+
+
 def test_collection_ner_graph_and_neighbors() -> None:
     """Graph endpoints should expose relation and co-occurrence edges."""
     rag = RAG(qdrant_collection="test")
@@ -634,6 +656,44 @@ def test_expand_query_with_graph_with_debug_applies_neighbors(
     assert debug["expanded_query"] == expanded
     assert debug["anchor_entities"] == ["Acme"]
     assert debug["neighbor_entities"] == ["Widget", "Rivertown"]
+
+
+def test_expand_query_with_graph_with_debug_matches_acronym_anchors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Graph expansion should anchor acronym mentions to the canonical entity."""
+    rag = RAG(qdrant_collection="test")
+    rag.graphrag_enabled = True
+    rag.graphrag_max_neighbors = 3
+    rag.graphrag_neighbor_hops = 1
+    rag.graphrag_top_k_nodes = 100
+    rag.graphrag_min_edge_weight = 1
+
+    monkeypatch.setattr(
+        RAG,
+        "_get_collection_ner_aggregate",
+        lambda self, refresh=False: {
+            "entities": [
+                {"text": "European Union", "mentions": 10},
+                {"text": "Brussels", "mentions": 4},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        RAG,
+        "get_collection_ner_graph_neighbors",
+        lambda self, *, entity, hops, top_k_nodes, min_edge_weight, refresh=False: {
+            "neighbors": [{"text": "Brussels"}]
+        },
+    )
+
+    query = "What is said about the EU?"
+    expanded, debug = rag.expand_query_with_graph_with_debug(query)
+
+    assert expanded.endswith("Related entities for retrieval: Brussels")
+    assert debug["applied"] is True
+    assert debug["anchor_entities"] == ["European Union"]
+    assert debug["neighbor_entities"] == ["Brussels"]
 
 
 def test_expand_query_with_graph_with_debug_reports_disabled_state() -> None:

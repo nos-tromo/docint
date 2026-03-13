@@ -11,7 +11,53 @@ from __future__ import annotations
 
 from collections import defaultdict
 from itertools import combinations
+import re
 from typing import Any
+
+
+_LOOKUP_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+_ACRONYM_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "at",
+    "by",
+    "for",
+    "from",
+    "in",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+}
+_SHORT_ALIAS_STOPWORDS = {
+    "am",
+    "an",
+    "as",
+    "at",
+    "be",
+    "by",
+    "do",
+    "go",
+    "he",
+    "if",
+    "in",
+    "is",
+    "it",
+    "me",
+    "my",
+    "no",
+    "of",
+    "on",
+    "or",
+    "so",
+    "to",
+    "up",
+    "us",
+    "we",
+}
 
 
 def _safe_float(value: Any) -> float | None:
@@ -55,6 +101,112 @@ def _entity_key(text: str, entity_type: str) -> str:
         Canonical key for indexing.
     """
     return f"{text.lower()}::{entity_type.lower()}"
+
+
+def _tokenize_lookup(text: str) -> list[str]:
+    """Split text into alphanumeric lookup tokens.
+
+    Args:
+        text: Raw text to tokenize.
+
+    Returns:
+        Lower-noise lookup tokens.
+    """
+    return _LOOKUP_TOKEN_RE.findall(str(text or ""))
+
+
+def _compact_lookup(text: str) -> str:
+    """Return an alphanumeric-only lowercase lookup string.
+
+    Args:
+        text: Raw text to compact.
+
+    Returns:
+        Lowercase compact lookup form.
+    """
+    return "".join(token.lower() for token in _tokenize_lookup(text))
+
+
+def _entity_aliases(text: str) -> set[str]:
+    """Build query-time aliases for an entity label.
+
+    Args:
+        text: Canonical entity text.
+
+    Returns:
+        Alias set including compact and acronym forms.
+    """
+    entity_text = str(text or "").strip()
+    if not entity_text:
+        return set()
+
+    aliases = {entity_text.lower()}
+    compact = _compact_lookup(entity_text)
+    if compact:
+        aliases.add(compact)
+
+    tokens = _tokenize_lookup(entity_text)
+    significant = [tok for tok in tokens if tok.lower() not in _ACRONYM_STOPWORDS]
+    if len(significant) >= 2:
+        acronym = "".join(tok[0] for tok in significant if tok).lower()
+        if len(acronym) >= 2:
+            aliases.add(acronym)
+
+    return aliases
+
+
+def match_entity_text(entity_text: str, query: str) -> tuple[int, str] | None:
+    """Return match rank and alias when a query refers to an entity.
+
+    Lower ranks are stronger matches. The matcher keeps exact/full-name behavior,
+    while also recognizing compact forms and short acronyms such as ``EU`` for
+    ``European Union``.
+
+    Args:
+        entity_text: Canonical entity text.
+        query: Raw user query or search input.
+
+    Returns:
+        Tuple of ``(rank, matched_alias)`` or ``None`` when unmatched.
+    """
+    text = str(entity_text or "").strip()
+    query_text = str(query or "").strip()
+    if not text or not query_text:
+        return None
+
+    text_lower = text.lower()
+    query_lower = query_text.lower()
+    if query_lower == text_lower:
+        return (0, text)
+    if text_lower in query_lower:
+        return (1, text)
+    if query_lower in text_lower:
+        return (2, text)
+
+    text_compact = _compact_lookup(text)
+    query_compact = _compact_lookup(query_text)
+    if text_compact and query_compact:
+        if query_compact == text_compact:
+            return (0, text_compact)
+        if len(query_compact) >= 3 and query_compact in text_compact:
+            return (2, text_compact)
+
+    query_tokens_raw = _tokenize_lookup(query_text)
+    query_tokens = {token.lower() for token in query_tokens_raw}
+    query_tokens_raw_set = set(query_tokens_raw)
+    for alias in sorted(_entity_aliases(text)):
+        if alias in {text_lower, text_compact}:
+            continue
+        if alias == query_lower:
+            return (1, alias)
+        if alias not in query_tokens:
+            continue
+        if alias in query_tokens_raw_set:
+            return (1, alias)
+        if len(alias) >= 3 or alias not in _SHORT_ALIAS_STOPWORDS:
+            return (1, alias)
+
+    return None
 
 
 def normalize_entities(entities: list[Any] | None) -> list[dict[str, Any]]:
@@ -448,7 +600,8 @@ def search_entities(
     for ent in entities:
         if type_filter and str(ent.get("type") or "").lower() != type_filter:
             continue
-        if query and query not in str(ent.get("text") or "").lower():
+        match = match_entity_text(str(ent.get("text") or ""), query) if query else None
+        if query and match is None:
             continue
         rows.append(
             {
@@ -457,11 +610,21 @@ def search_entities(
                 "mentions": int(ent.get("mentions", 0) or 0),
                 "best_score": ent.get("best_score"),
                 "source_count": int(ent.get("source_count", 0) or 0),
+                "_match_rank": match[0] if match else 99,
             }
         )
 
-    rows.sort(key=lambda x: (-int(x["mentions"]), str(x.get("text") or "").lower()))
-    return rows[: max(1, int(limit))]
+    rows.sort(
+        key=lambda x: (
+            int(x.get("_match_rank", 99)),
+            -int(x["mentions"]),
+            str(x.get("text") or "").lower(),
+        )
+    )
+    return [
+        {key: value for key, value in row.items() if key != "_match_rank"}
+        for row in rows[: max(1, int(limit))]
+    ]
 
 
 def build_entity_graph(

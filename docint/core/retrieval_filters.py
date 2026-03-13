@@ -54,7 +54,7 @@ def build_metadata_filters(
 
 def build_qdrant_filter(raw_rules: Sequence[Any] | None) -> models.Filter | None:
     """Build a native Qdrant filter for request-scoped retrieval.
-    
+
     Args:
         raw_rules: Sequence of filter-like mappings or objects exposing ``field``,
             ``operator``, ``value``, and optional ``values`` attributes.
@@ -84,7 +84,7 @@ def build_qdrant_filter(raw_rules: Sequence[Any] | None) -> models.Filter | None
 
 def _coerce_rule(raw_rule: Any) -> dict[str, Any] | None:
     """Normalize a raw filter payload into a plain dictionary.
-    
+
     Args:
     raw_rule: A filter-like mapping or object exposing ``field``, ``operator``,
         ``value``, and optional ``values`` attributes.
@@ -122,12 +122,12 @@ def _coerce_rule(raw_rule: Any) -> dict[str, Any] | None:
 
 def _compile_rule(rule: dict[str, Any]) -> MetadataFilter | MetadataFilters | None:
     """Translate a normalized rule dictionary into a vector-store filter.
-    
+
     Args:
         rule: A dictionary with keys ``field``, ``operator``, ``value``, and optional
             ``values``, where ``field`` is the metadata key to filter on, and
             ``operator`` is one of the supported filter operations.
-    
+
     Returns:
         A ``MetadataFilter`` or ``MetadataFilters`` instance, or ``None`` if the rule
         cannot be compiled.
@@ -163,8 +163,15 @@ def _compile_rule(rule: dict[str, Any]) -> MetadataFilter | MetadataFilters | No
     if operator == "mime_match":
         return _compile_mime_rule(field=field, raw_value=rule.get("value"))
 
-    if operator in {"date_after", "date_on_or_after", "date_before", "date_on_or_before"}:
-        return _compile_date_rule(field=field, operator=operator, raw_value=rule.get("value"))
+    if operator in {
+        "date_after",
+        "date_on_or_after",
+        "date_before",
+        "date_on_or_before",
+    }:
+        return _compile_date_rule(
+            field=field, operator=operator, raw_value=rule.get("value")
+        )
 
     logger.warning("Ignoring unsupported metadata filter operator '{}'.", operator)
     return None
@@ -176,7 +183,7 @@ def _compile_mime_rule(
     raw_value: Any,
 ) -> MetadataFilter | None:
     """Compile MIME filters, including simple ``type/*`` wildcard patterns.
-    
+
     Args:
         field: The metadata field to filter on, typically ``mimetype``.
         raw_value: The raw MIME pattern value, which may include a ``/*`` suffix for wildcard matching.
@@ -203,12 +210,12 @@ def _compile_date_rule(
     raw_value: Any,
 ) -> MetadataFilter | None:
     """Compile date operators into ISO-8601 string comparisons.
-    
+
     Args:
         field: The metadata field to filter on, e.g. ``reference_metadata.timestamp``.
-        operator: The date comparison operator, one of ``date_after``, ``date_on_or_after``, 
+        operator: The date comparison operator, one of ``date_after``, ``date_on_or_after``,
             ``date_before``, or ``date_on_or_before``.
-        raw_value: The raw date or datetime value, which may be a string, date/datetime object, 
+        raw_value: The raw date or datetime value, which may be a string, date/datetime object,
             or other type coercible to a date.
 
     Returns:
@@ -236,15 +243,15 @@ def _compile_qdrant_rule(
     rule: dict[str, Any],
 ) -> tuple[models.FieldCondition | models.Filter | None, bool]:
     """Translate a normalized rule into a native Qdrant condition.
-    
+
     Args:
-        rule: A dictionary with keys ``field``, ``operator``, ``value``, and optional ``values``, 
-            where ``field`` is the metadata key to filter on, and ``operator`` is one of the 
+        rule: A dictionary with keys ``field``, ``operator``, ``value``, and optional ``values``,
+            where ``field`` is the metadata key to filter on, and ``operator`` is one of the
             supported filter operations.
-    
+
     Returns:
-        A tuple of (compiled_condition, negate), where ``compiled_condition`` is a Qdrant-compatible 
-            condition or filter, and ``negate`` is a boolean indicating whether the condition should be 
+        A tuple of (compiled_condition, negate), where ``compiled_condition`` is a Qdrant-compatible
+            condition or filter, and ``negate`` is a boolean indicating whether the condition should be
             negated (i.e., added to the ``must_not`` list instead of ``must``).
     """
     field = rule["field"]
@@ -307,7 +314,12 @@ def _compile_qdrant_rule(
             False,
         )
 
-    if operator in {"date_after", "date_on_or_after", "date_before", "date_on_or_before"}:
+    if operator in {
+        "date_after",
+        "date_on_or_after",
+        "date_before",
+        "date_on_or_before",
+    }:
         boundary = _parse_date_value(
             rule.get("value"),
             upper_bound=operator.endswith("before"),
@@ -339,12 +351,12 @@ def _compile_qdrant_rule(
 
 def _normalize_scalar(value: Any) -> str | int | float | bool | None:
     """Return a vector-store-safe scalar, skipping empty values.
-    
+
     Args:
         value: The raw input value to normalize, which may be of any type.
 
     Returns:
-        A normalized scalar value (string, number, or boolean), or ``None`` if the 
+        A normalized scalar value (string, number, or boolean), or ``None`` if the
             value is empty or cannot be coerced into a valid scalar.
     """
     if isinstance(value, bool):
@@ -359,13 +371,13 @@ def _normalize_scalar(value: Any) -> str | int | float | bool | None:
 
 def _normalize_values(values: Any) -> list[str | int | float | bool]:
     """Normalize a sequence of scalar values for ``IN`` filters.
-    
+
     Args:
-        values: The raw input value to normalize, which may be a list, tuple, or 
+        values: The raw input value to normalize, which may be a list, tuple, or
             other iterable of scalar values.
 
     Returns:
-        A list of normalized scalar values. Empty or invalid entries will be skipped, 
+        A list of normalized scalar values. Empty or invalid entries will be skipped,
             and non-list inputs will return an empty list.
     """
     if not isinstance(values, list):
@@ -380,11 +392,11 @@ def _normalize_values(values: Any) -> list[str | int | float | bool]:
 
 def _normalize_date_value(value: Any, *, upper_bound: bool) -> str | None:
     """Normalize a date or datetime input into a UTC ISO-8601 string.
-    
+
     Args:
-        value: The raw date or datetime value, which may be a string, date/datetime object, 
+        value: The raw date or datetime value, which may be a string, date/datetime object,
             or other type coercible to a date.
-        upper_bound: Whether the value represents an upper bound (i.e., "before" operator) 
+        upper_bound: Whether the value represents an upper bound (i.e., "before" operator)
             that should be normalized.
 
     Returns:
@@ -398,11 +410,11 @@ def _normalize_date_value(value: Any, *, upper_bound: bool) -> str | None:
 
 def _parse_date_value(value: Any, *, upper_bound: bool) -> datetime | None:
     """Parse a date or datetime input into a UTC datetime.
-    
+
     Args:
-        value: The raw date or datetime value, which may be a string, date/datetime 
+        value: The raw date or datetime value, which may be a string, date/datetime
             object, or other type coercible to a date.
-        upper_bound: Whether the value represents an upper bound (i.e., "before" operator) 
+        upper_bound: Whether the value represents an upper bound (i.e., "before" operator)
             that should be normalized with time.max.
 
     Returns:
