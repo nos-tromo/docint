@@ -661,7 +661,11 @@ def test_expand_query_with_graph_with_debug_applies_neighbors(
 def test_expand_query_with_graph_with_debug_matches_acronym_anchors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Graph expansion should anchor acronym mentions to the canonical entity."""
+    """Graph expansion should anchor acronym mentions to the canonical entity.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
     rag = RAG(qdrant_collection="test")
     rag.graphrag_enabled = True
     rag.graphrag_max_neighbors = 3
