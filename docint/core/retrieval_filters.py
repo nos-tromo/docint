@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, TypeAlias
 
 from llama_index.core.vector_stores.types import (
     FilterCondition,
@@ -23,6 +23,16 @@ _SCALAR_OPERATORS: dict[str, FilterOperator] = {
     "lte": FilterOperator.LTE,
     "contains": FilterOperator.CONTAINS,
 }
+
+_QdrantCondition: TypeAlias = (
+    models.FieldCondition
+    | models.IsEmptyCondition
+    | models.IsNullCondition
+    | models.HasIdCondition
+    | models.HasVectorCondition
+    | models.NestedCondition
+    | models.Filter
+)
 
 
 def build_metadata_filters(
@@ -62,8 +72,8 @@ def build_qdrant_filter(raw_rules: Sequence[Any] | None) -> models.Filter | None
     Returns:
         A Qdrant ``models.Filter`` instance, or ``None`` when no valid rules were supplied.
     """
-    must: list[models.FieldCondition | models.Filter] = []
-    must_not: list[models.FieldCondition | models.Filter] = []
+    must: list[_QdrantCondition] = []
+    must_not: list[_QdrantCondition] = []
 
     for raw_rule in raw_rules or []:
         rule = _coerce_rule(raw_rule)
@@ -241,7 +251,7 @@ def _compile_date_rule(
 
 def _compile_qdrant_rule(
     rule: dict[str, Any],
-) -> tuple[models.FieldCondition | models.Filter | None, bool]:
+) -> tuple[_QdrantCondition | None, bool]:
     """Translate a normalized rule into a native Qdrant condition.
 
     Args:
