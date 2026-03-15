@@ -283,6 +283,25 @@ class DocumentIngestionPipeline:
             ".wmv",
         }
 
+    def _audio_stream_window_size(self) -> int:
+        """Return the bounded audio window size used for streaming ingestion.
+
+        The window is intentionally larger than the worker count so the audio
+        reader can keep workers busy without forcing the pipeline to accumulate
+        an unbounded number of audio paths in memory.
+
+        Returns:
+            int: The maximum number of audio files buffered before dispatch.
+
+        Raises:
+            RuntimeError: If the audio reader has not been initialized.
+        """
+
+        if self.audio_reader is None:
+            raise RuntimeError("Audio reader is not initialized.")
+
+        return max(1, self.ingestion_batch_size, self.audio_reader.max_workers * 2)
+
     def _iter_loaded_documents(self) -> Iterable[list[Document]]:
         """Yield loaded documents, batching audio files when configured.
 
@@ -298,6 +317,7 @@ class DocumentIngestionPipeline:
         if self.dir_reader is None:
             raise RuntimeError("Directory reader failed to initialize.")
         dir_reader = self.dir_reader
+        audio_window_size = self._audio_stream_window_size()
 
         pending_audio_paths: list[Path] = []
         pending_audio_metadata: list[dict[str, Any]] = []
@@ -326,6 +346,9 @@ class DocumentIngestionPipeline:
             if self._is_audio_input_file(input_file):
                 pending_audio_paths.append(Path(input_file))
                 pending_audio_metadata.append(dir_reader.file_metadata(str(input_file)))
+                if len(pending_audio_paths) >= audio_window_size:
+                    for audio_docs in _flush_audio_batch():
+                        yield audio_docs
                 continue
 
             for audio_docs in _flush_audio_batch():
