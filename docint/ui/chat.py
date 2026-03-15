@@ -18,6 +18,41 @@ from docint.utils.env_cfg import load_host_env
 BACKEND_HOST = load_host_env().backend_host
 CHAT_SOURCES_CONTAINER_HEIGHT = 420
 CHAT_DEBUG_CONTAINER_HEIGHT = 280
+CHAT_SCOPE_OPTIONS: tuple[str, ...] = (
+    "All content",
+    "Images only",
+    "Documents only",
+    "Custom MIME",
+)
+DATE_FIELD_OPTIONS: tuple[str, ...] = (
+    "None",
+    "reference_metadata.timestamp",
+    "created_at",
+    "updated_at",
+)
+DOCUMENT_SOURCE_VALUES: tuple[str, ...] = ("document", "pdf_text", "vision_ocr")
+CUSTOM_FIELD_OPTIONS: tuple[str, ...] = (
+    "mimetype",
+    "source",
+    "filename",
+    "reference_metadata.timestamp",
+    "reference_metadata.author",
+    "reference_metadata.author_id",
+    "hate_speech.hate_speech",
+    "Custom field",
+)
+CUSTOM_OPERATOR_OPTIONS: dict[str, str] = {
+    "Equals": "eq",
+    "Not equals": "neq",
+    "Contains": "contains",
+    "Greater than": "gt",
+    "Greater than or equal": "gte",
+    "Less than": "lt",
+    "Less than or equal": "lte",
+    "MIME match": "mime_match",
+    "Date on or after": "date_on_or_after",
+    "Date on or before": "date_on_or_before",
+}
 
 
 def _format_graph_debug_summary(graph_debug: dict[str, Any] | None) -> str | None:

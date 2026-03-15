@@ -133,7 +133,7 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    cp .env.example .env
    ```
 
-   At minimum, confirm `MODEL_PROVIDER`, `OPENAI_API_BASE`, and model IDs (`EMBED_MODEL`, `LLM`, `VLM`) match your inference backend.
+   At minimum, confirm `MODEL_PROVIDER`, `OPENAI_API_BASE`, `EMBED_MODEL_PROVIDER`, and model IDs (`EMBED_MODEL`, `LLM`, `VLM`) match your stack.
 
 3. **Install Dependencies**
 
@@ -203,8 +203,9 @@ The application is configured via environment variables. Key variables include:
 - `OPENAI_API_KEY`: API key for the LLM provider (default: `sk-no-key-required`).
 - `OPENAI_API_BASE`: Base API URL. In Docker, this is set automatically per profile (e.g. `http://ollama-server:11434/v1` for `*-ollama`). For local development, point this to your provider (e.g., `http://localhost:11434/v1`).
 - `MODEL_PROVIDER`: Inference provider type (`llama.cpp`, `ollama`, `openai`).
+- `EMBED_MODEL_PROVIDER`: Embedding backend selector (`huggingface`, `ollama`, `openai`, or `llama.cpp`). When omitted, Docint defaults to the native embedding backend for `MODEL_PROVIDER`; if no provider-native backend is inferred, it falls back to `huggingface`.
 - `LLM`: Repo ID (e.g., `bartowski/Meta-Llama-3-8B-Instruct-GGUF`) for automatic download.
-- `EMBED_MODEL`: HuggingFace repo ID for the embedding model (e.g. `ggml-org/bge-m3-Q8_0-GGUF`).
+- `EMBED_MODEL`: Embedding model ID for the selected embedding backend. Use an Ollama tag (for example `bge-m3`) with `EMBED_MODEL_PROVIDER=ollama`, an OpenAI embedding model name (for example `text-embedding-3-small`) with `EMBED_MODEL_PROVIDER=openai`, a GGUF spec (for example `ggml-org/bge-m3-Q8_0-GGUF;bge-m3-q8_0.gguf`) with `EMBED_MODEL_PROVIDER=llama.cpp`, or a Hugging Face repo ID (for example `BAAI/bge-m3`) with `EMBED_MODEL_PROVIDER=huggingface`.
 - `VLM`: Vision-language model ID (GGUF `repo;filename` for `llama.cpp` or model tag for Ollama/OpenAI).
 
 **Note on Provider Agnosticism:**
@@ -515,4 +516,4 @@ Failures on individual pages do not crash the entire document. Failed pages are 
 
 ### Offline Compliance
 
-Core PDF processing runs locally. Vision OCR fallback uses the configured OpenAI-compatible inference endpoint (local or remote), and can be disabled with `PIPELINE_ENABLE_VISION_OCR=false`. Set `DOCINT_OFFLINE=true` to enforce offline mode for Hugging Face model loading.
+Core PDF processing runs locally. Vision OCR fallback uses the configured OpenAI-compatible inference endpoint (local or remote), and can be disabled with `PIPELINE_ENABLE_VISION_OCR=false`. Set `DOCINT_OFFLINE=true` to enforce offline mode for Hugging Face model loading. When `EMBED_MODEL_PROVIDER=huggingface`, `uv run load-models` must be run before startup so the embedding snapshot is present in the local cache.

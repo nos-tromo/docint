@@ -62,6 +62,7 @@ from llama_index.core.vector_stores.types import (
     MetadataFilter,
     MetadataFilters,
 )
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai import OpenAI
 from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
@@ -75,6 +76,7 @@ from docint.core.ner import (
     build_entity_graph,
     build_ner_stats,
     graph_neighbors,
+    match_entity_text,
     search_entities,
 )
 from docint.core.ingest.images_service import ImageIngestionService
@@ -155,6 +157,7 @@ class RAG:
     )
 
     # --- OpenAI parameters ---
+    embed_model_provider: str = field(default="huggingface", init=False)
     openai_api_base: str | None = field(default=None, init=False)
     openai_api_key: str | None = field(default=None, init=False)
     openai_ctx_window: int = field(default=4096, init=False)
@@ -237,7 +240,13 @@ class RAG:
 
         # --- Model config ---
         suffix = ".gguf"
-        self.embed_model_id = self.model_config.embed_model_file.removesuffix(suffix)
+        self.embed_model_provider = self.model_config.embed_model_provider
+        if self.embed_model_provider == "huggingface":
+            self.embed_model_id = self.model_config.embed_model_repo
+        else:
+            self.embed_model_id = self.model_config.embed_model_file.removesuffix(
+                suffix
+            )
         self.rerank_model_id = self.model_config.rerank_model
         self.sparse_model_id = self.model_config.sparse_model
         self.text_model_id = self.model_config.text_model_file.removesuffix(suffix)
@@ -419,21 +428,52 @@ class RAG:
 
         Raises:
             ValueError: If embed_model_id is None.
+            FileNotFoundError: If the specified Hugging Face embedding model is not found in the local
+                cache while in offline mode.
         """
         if self._embed_model is None:
             if self.embed_model_id is None:
                 raise ValueError("embed_model_id cannot be None")
 
             logger.info("Initializing embedding model: {}", self.embed_model_id)
-            self._embed_model = OpenAIEmbedding(
-                api_base=self.openai_api_base,
-                api_key=self.openai_api_key,
-                dimensions=self.openai_dimensions,
-                max_retries=self.openai_max_retries,
-                model_name=self.embed_model_id,
-                reuse_client=False,
-                timeout=self.openai_timeout,
-            )
+            if self.embed_model_provider in {"huggingface", "hf"}:
+                cache_dir = (
+                    self.hf_hub_cache or Path.home() / ".cache" / "huggingface" / "hub"
+                )
+                resolved = resolve_hf_cache_path(cache_dir, self.embed_model_id)
+                if resolved is None and str(
+                    os.getenv("DOCINT_OFFLINE", "1")
+                ).lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                }:
+                    raise FileNotFoundError(
+                        "Embedding model "
+                        f"{self.embed_model_id!r} is not present in the local "
+                        "Hugging Face cache. Run `uv run load-models` before "
+                        "starting in offline mode."
+                    )
+                resolved_model = str(resolved) if resolved else self.embed_model_id
+                if resolved:
+                    logger.info("Using local embedding model path: {}", resolved_model)
+                self._embed_model = HuggingFaceEmbedding(
+                    cache_folder=str(cache_dir),
+                    device=self.device,
+                    model_name=resolved_model,
+                    normalize=True,
+                    trust_remote_code=False,
+                )
+            else:
+                self._embed_model = OpenAIEmbedding(
+                    api_base=self.openai_api_base,
+                    api_key=self.openai_api_key,
+                    dimensions=self.openai_dimensions,
+                    max_retries=self.openai_max_retries,
+                    model_name=self.embed_model_id,
+                    reuse_client=False,
+                    timeout=self.openai_timeout,
+                )
 
         return self._embed_model
 
@@ -2079,24 +2119,27 @@ class RAG:
         try:
             aggregate = self._get_collection_ner_aggregate(refresh=False)
             entities = list(aggregate.get("entities") or [])
-            query_l = query.lower()
-            anchors = [
-                ent
-                for ent in entities
-                if str(ent.get("text") or "").strip()
-                and str(ent.get("text")).lower() in query_l
-            ]
+            anchors = []
+            for ent in entities:
+                text = str(ent.get("text") or "").strip()
+                if not text:
+                    continue
+                match = match_entity_text(text, query)
+                if match is None:
+                    continue
+                anchors.append((match[0], ent))
             anchors.sort(
                 key=lambda item: (
-                    -int(item.get("mentions", 0) or 0),
-                    str(item.get("text") or "").lower(),
+                    int(item[0]),
+                    -int(item[1].get("mentions", 0) or 0),
+                    str(item[1].get("text") or "").lower(),
                 )
             )
             if not anchors:
                 debug["reason"] = "no_anchor_entities"
                 return query, debug
 
-            selected_anchors = anchors[:2]
+            selected_anchors = [ent for _, ent in anchors[:2]]
             anchor_texts = [
                 str(ent.get("text") or "").strip() for ent in selected_anchors
             ]
