@@ -1,6 +1,7 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, cast
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -951,4 +952,68 @@ def load_summary_env(
         final_source_cap=max(
             1, int(os.getenv("SUMMARY_FINAL_SOURCE_CAP", default_final_source_cap))
         ),
+    )
+
+
+@dataclass(frozen=True)
+class WhisperConfig:
+    """Dataclass for Whisper runtime configuration."""
+
+    max_workers: int
+    task: Literal["transcribe", "translate"]
+
+
+def load_whisper_env(
+    default_max_workers: int = 1,
+    default_task: Literal["transcribe", "translate"] = "transcribe",
+) -> WhisperConfig:
+    """Load Whisper runtime settings from environment variables.
+
+    Args:
+        default_max_workers: Default number of file-level Whisper workers.
+        default_task: Default Whisper task selector.
+
+    Returns:
+        WhisperConfig: Parsed Whisper runtime configuration.
+
+    Raises:
+        ValueError: If an invalid value is provided for WHISPER_TASK or WHISPER_MAX_WORKERS.
+    """
+
+    raw_max_workers = os.getenv("WHISPER_MAX_WORKERS")
+    if raw_max_workers is None:
+        max_workers = default_max_workers
+    else:
+        try:
+            parsed_max_workers = int(raw_max_workers)
+        except ValueError:
+            logger.warning(
+                "Invalid WHISPER_MAX_WORKERS value '{}'; falling back to {}.",
+                raw_max_workers,
+                default_max_workers,
+            )
+            parsed_max_workers = default_max_workers
+
+        if parsed_max_workers < 1:
+            logger.warning(
+                "WHISPER_MAX_WORKERS must be >= 1; received '{}'. Falling back to {}.",
+                raw_max_workers,
+                default_max_workers,
+            )
+            parsed_max_workers = default_max_workers
+        max_workers = parsed_max_workers
+
+    raw_task = os.getenv("WHISPER_TASK", default_task)
+    task = raw_task.strip().lower()
+    if task not in {"transcribe", "translate"}:
+        logger.warning(
+            "Invalid WHISPER_TASK value '{}'; falling back to '{}'.",
+            raw_task,
+            default_task,
+        )
+        task = default_task
+
+    return WhisperConfig(
+        max_workers=max_workers,
+        task=cast(Literal["transcribe", "translate"], task),
     )
