@@ -140,6 +140,7 @@ class DocumentIngestionPipeline:
     hate_speech_max_workers: int = field(default=1, init=False)
     hate_speech_prompt: str | None = field(default=None, init=False)
 
+    audio_reader: AudioReader | None = field(default=None, init=False)
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
     md_node_parser: MarkdownNodeParser | None = field(default=None, init=False)
     docling_node_parser: DoclingNodeParser | None = field(default=None, init=False)
@@ -242,8 +243,7 @@ class DocumentIngestionPipeline:
         current_docs: list[Document] = []
         files_processed = 0
 
-        # iter_data() yields List[Document] per file
-        for file_docs in self.dir_reader.iter_data():
+        for file_docs in self._iter_loaded_documents():
             current_docs.extend(file_docs)
             files_processed += 1
 
@@ -254,6 +254,98 @@ class DocumentIngestionPipeline:
 
         if current_docs:
             yield self._process_batch(current_docs, existing_hashes)
+
+    @staticmethod
+    def _is_audio_input_file(file_path: Path | PurePosixPath) -> bool:
+        """Return True when the input path should use the audio reader.
+
+        Args:
+            file_path (Path | PurePosixPath): The input file path to classify.
+
+        Returns:
+            bool: True when the path should be routed through ``AudioReader``.
+        """
+
+        return file_path.suffix.lower() in {
+            ".avi",
+            ".flv",
+            ".m4a",
+            ".m4v",
+            ".mkv",
+            ".mov",
+            ".mp3",
+            ".mp4",
+            ".mpeg",
+            ".mpg",
+            ".ogg",
+            ".wav",
+            ".webm",
+            ".wmv",
+        }
+
+    def _iter_loaded_documents(self) -> Iterable[list[Document]]:
+        """Yield loaded documents, batching audio files when configured.
+
+        Yields:
+            list[Document]: The loaded documents for each processed file or
+            flushed audio batch entry.
+
+        Raises:
+            RuntimeError: If the directory reader or audio reader is not
+                initialized.
+        """
+
+        if self.dir_reader is None:
+            raise RuntimeError("Directory reader failed to initialize.")
+        dir_reader = self.dir_reader
+
+        pending_audio_paths: list[Path] = []
+        pending_audio_metadata: list[dict[str, Any]] = []
+
+        def _flush_audio_batch() -> Iterable[list[Document]]:
+            if not pending_audio_paths:
+                return []
+            if self.audio_reader is None:
+                raise RuntimeError("Audio reader is not initialized.")
+
+            loaded_batches = self.audio_reader.load_batch_data(
+                pending_audio_paths,
+                extra_info=pending_audio_metadata,
+            )
+            pending_audio_paths.clear()
+            pending_audio_metadata.clear()
+
+            yielded_batches: list[list[Document]] = []
+            for docs in loaded_batches:
+                if not docs:
+                    continue
+                yielded_batches.append(dir_reader._exclude_metadata(docs))
+            return yielded_batches
+
+        for input_file in dir_reader.input_files:
+            if self._is_audio_input_file(input_file):
+                pending_audio_paths.append(Path(input_file))
+                pending_audio_metadata.append(dir_reader.file_metadata(str(input_file)))
+                continue
+
+            for audio_docs in _flush_audio_batch():
+                yield audio_docs
+
+            docs = SimpleDirectoryReader.load_file(
+                input_file=input_file,
+                file_metadata=dir_reader.file_metadata,
+                file_extractor=dir_reader.file_extractor,
+                filename_as_id=dir_reader.filename_as_id,
+                encoding=dir_reader.encoding,
+                errors=dir_reader.errors,
+                raise_on_error=dir_reader.raise_on_error,
+                fs=dir_reader.fs,
+            )
+            if docs:
+                yield dir_reader._exclude_metadata(docs)
+
+        for audio_docs in _flush_audio_batch():
+            yield audio_docs
 
     def _process_batch(
         self, docs: list[Document], existing_hashes: set[str] | None
@@ -392,7 +484,7 @@ class DocumentIngestionPipeline:
 
     def _load_doc_readers(self) -> None:
         """Load document readers for various file types."""
-        audio_reader = AudioReader(device=self.device)
+        self.audio_reader = AudioReader(device=self.device)
         image_reader = ImageReader(
             image_ingestion_service=(
                 self.image_ingestion_service or ImageIngestionService()
@@ -442,20 +534,20 @@ class DocumentIngestionPipeline:
             required_exts=self.reader_required_exts,
             file_metadata=_metadata,
             file_extractor={
-                ".mpeg": audio_reader,
-                ".mp3": audio_reader,
-                ".m4a": audio_reader,
-                ".ogg": audio_reader,
-                ".wav": audio_reader,
-                ".webm": audio_reader,
-                ".avi": audio_reader,
-                ".flv": audio_reader,
-                ".mkv": audio_reader,
-                ".mov": audio_reader,
-                ".mpg": audio_reader,
-                ".mp4": audio_reader,
-                ".m4v": audio_reader,
-                ".wmv": audio_reader,
+                ".mpeg": self.audio_reader,
+                ".mp3": self.audio_reader,
+                ".m4a": self.audio_reader,
+                ".ogg": self.audio_reader,
+                ".wav": self.audio_reader,
+                ".webm": self.audio_reader,
+                ".avi": self.audio_reader,
+                ".flv": self.audio_reader,
+                ".mkv": self.audio_reader,
+                ".mov": self.audio_reader,
+                ".mpg": self.audio_reader,
+                ".mp4": self.audio_reader,
+                ".m4v": self.audio_reader,
+                ".wmv": self.audio_reader,
                 ".json": CustomJSONReader(),
                 ".gif": image_reader,
                 ".jpeg": image_reader,
