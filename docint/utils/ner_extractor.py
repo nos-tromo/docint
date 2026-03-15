@@ -1,13 +1,23 @@
+import hashlib
 import json
 import os
+import shutil
+import tempfile
 import warnings
+from pathlib import Path
 from typing import Any, Callable
 
 import torch
 from loguru import logger
-from gliner import GLiNER
 
-from docint.utils.env_cfg import load_model_env, load_path_env, resolve_hf_cache_path
+from docint.utils.env_cfg import (
+    load_model_env,
+    load_path_env,
+    resolve_hf_cache_path,
+    set_offline_env,
+)
+
+_GLINER_OFFLINE_DIR = Path(tempfile.gettempdir()) / "docint-gliner-offline"
 
 
 def _parse_ner_payload(raw: str) -> dict[str, Any]:
@@ -107,6 +117,187 @@ def build_llm_ner_extractor(
     return _extract
 
 
+def _get_gliner_class() -> type[Any]:
+    """Import GLiNER after offline env vars are applied."""
+    set_offline_env()
+
+    from gliner import GLiNER
+
+    return GLiNER
+
+
+def _load_gliner_config(model_dir: Path) -> dict[str, Any]:
+    """Load the GLiNER config for a local model directory.
+
+    Args:
+        model_dir: Directory containing ``gliner_config.json``.
+
+    Returns:
+        Parsed GLiNER configuration payload.
+
+    Raises:
+        FileNotFoundError: If the config file does not exist.
+    """
+    config_path = model_dir / "gliner_config.json"
+    if not config_path.is_file():
+        raise FileNotFoundError(f"No GLiNER config file found in {model_dir}")
+
+    return json.loads(config_path.read_text(encoding="utf-8"))
+
+
+def _link_or_copy_path(source: Path, destination: Path) -> None:
+    """Materialize a file or directory at ``destination`` from ``source``.
+
+    Args:
+        source: Existing source path.
+        destination: Target path to create.
+    """
+    if destination.exists():
+        return
+
+    try:
+        destination.symlink_to(source, target_is_directory=source.is_dir())
+    except Exception:
+        if source.is_dir():
+            shutil.copytree(source, destination, dirs_exist_ok=True)
+        else:
+            shutil.copy2(source, destination)
+
+
+def _resolve_local_gliner_dependency(cache_dir: Path, dependency: str) -> Path:
+    """Resolve a GLiNER dependency path without allowing network access.
+
+    Args:
+        cache_dir: Hugging Face hub cache directory.
+        dependency: Repo ID or local filesystem path referenced by GLiNER config.
+
+    Returns:
+        Local filesystem path for the dependency.
+
+    Raises:
+        FileNotFoundError: If the dependency is unavailable locally.
+    """
+    dependency_path = Path(dependency).expanduser()
+    if dependency_path.exists():
+        return dependency_path.resolve()
+
+    resolved = resolve_hf_cache_path(cache_dir=cache_dir, repo_id=dependency)
+    if resolved is None:
+        raise FileNotFoundError(
+            "GLiNER offline load requires a local snapshot for "
+            f"'{dependency}', but none was found in {cache_dir}."
+        )
+
+    return resolved
+
+
+def _materialize_offline_gliner_dir(model_dir: Path, config: dict[str, Any]) -> Path:
+    """Create a local-only GLiNER directory with patched config references.
+
+    Args:
+        model_dir: Original local GLiNER model directory.
+        config: GLiNER config payload to write into the offline runtime directory.
+
+    Returns:
+        Local runtime directory that contains the patched config and links to the
+        original model assets.
+    """
+    digest = hashlib.sha256(
+        f"{model_dir.resolve()}\0{json.dumps(config, sort_keys=True)}".encode("utf-8")
+    ).hexdigest()[:16]
+    runtime_dir = _GLINER_OFFLINE_DIR / digest
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+
+    for item in model_dir.iterdir():
+        if item.name == "gliner_config.json":
+            continue
+        _link_or_copy_path(item, runtime_dir / item.name)
+
+    (runtime_dir / "gliner_config.json").write_text(
+        json.dumps(config, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return runtime_dir
+
+
+def _prepare_local_gliner_model_dir(model_dir: Path, cache_dir: Path) -> Path:
+    """Prepare a GLiNER directory for strict offline loading.
+
+    GLiNER configs often refer to the backbone model by Hugging Face repo ID
+    (for example ``microsoft/deberta-v3-large``). The upstream loader may hand
+    that repo ID back to ``transformers`` even when the GLiNER snapshot itself
+    was found locally, which can trigger outbound hub resolution attempts. This
+    helper rewrites those config references to local snapshot paths only.
+
+    Args:
+        model_dir: Local GLiNER model directory or snapshot path.
+        cache_dir: Hugging Face hub cache directory.
+
+    Returns:
+        A local model directory that is safe to hand to ``GLiNER.from_pretrained``.
+    """
+    config = _load_gliner_config(model_dir)
+    patched = False
+
+    for field in ("model_name", "labels_encoder", "labels_decoder"):
+        value = config.get(field)
+        if not isinstance(value, str) or not value.strip():
+            continue
+
+        resolved = _resolve_local_gliner_dependency(
+            cache_dir=cache_dir, dependency=value
+        )
+        resolved_str = str(resolved)
+        if value != resolved_str:
+            config[field] = resolved_str
+            patched = True
+
+    if not patched:
+        return model_dir
+
+    runtime_dir = _materialize_offline_gliner_dir(model_dir=model_dir, config=config)
+    logger.info("Prepared offline GLiNER runtime directory: {}", runtime_dir)
+    return runtime_dir
+
+
+def _resolve_gliner_load_target(model_id: str, cache_dir: Path) -> tuple[str, bool]:
+    """Resolve the load target for GLiNER without allowing accidental hub access.
+
+    Args:
+        model_id: GLiNER repo ID or local filesystem path.
+        cache_dir: Hugging Face hub cache directory.
+
+    Returns:
+        Tuple of ``(load_target, local_only)`` suitable for ``from_pretrained``.
+
+    Raises:
+        FileNotFoundError: If offline mode is enabled and the model is not cached
+            locally.
+    """
+    local_model_dir = Path(model_id).expanduser()
+    if local_model_dir.exists():
+        prepared = _prepare_local_gliner_model_dir(
+            model_dir=local_model_dir.resolve(),
+            cache_dir=cache_dir,
+        )
+        return str(prepared), True
+
+    resolved = resolve_hf_cache_path(cache_dir=cache_dir, repo_id=model_id)
+    if resolved is not None:
+        logger.info("Using local GLiNER model path: {}", resolved)
+        prepared = _prepare_local_gliner_model_dir(
+            model_dir=resolved, cache_dir=cache_dir
+        )
+        return str(prepared), True
+
+    if os.getenv("HF_HUB_OFFLINE", "0") == "1":
+        raise FileNotFoundError(
+            f"GLiNER model '{model_id}' is not available in the local cache {cache_dir}."
+        )
+
+    return model_id, False
+
+
 def build_gliner_ner_extractor(
     labels: list[str] | None = None,
     threshold: float = 0.3,
@@ -143,18 +334,15 @@ def build_gliner_ner_extractor(
 
     logger.info("Loading GLiNER model: {}", model_id)
 
-    # Resolve from local HF cache when available to avoid network requests
     hf_cache = load_path_env().hf_hub_cache
-    resolved = resolve_hf_cache_path(hf_cache, model_id)
-    load_id = str(resolved) if resolved else model_id
-    local_only = resolved is not None or os.getenv("HF_HUB_OFFLINE", "0") == "1"
-
-    if resolved:
-        logger.info("Using local GLiNER model path: {}", resolved)
+    load_id, local_only = _resolve_gliner_load_target(
+        model_id=model_id, cache_dir=hf_cache
+    )
+    gliner_class = _get_gliner_class()
 
     # We load initially; moving to device happens if available
     try:
-        model = GLiNER.from_pretrained(load_id, local_files_only=local_only)
+        model = gliner_class.from_pretrained(load_id, local_files_only=local_only)
     except Exception as e:
         logger.error("Failed to load GLiNER model: {}. Error: {}", model_id, e)
         raise
