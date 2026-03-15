@@ -407,6 +407,7 @@ def load_ingestion_env(
 class ModelConfig:
     """Dataclass for model configuration."""
 
+    embed_model_provider: str
     embed_model_file: str
     embed_model_repo: str
     image_embed_model: str
@@ -422,7 +423,8 @@ class ModelConfig:
 
 
 def load_model_env(
-    default_embed_model_str: str = "bge-m3",
+    default_embed_model_provider: str = "huggingface",
+    default_embed_model: str = "BAAI/bge-m3",
     default_image_embed_model: str = "openai/clip-vit-base-patch32",
     default_ner_model: str = "gliner-community/gliner_large-v2.5",
     default_rerank_model: str = "BAAI/bge-reranker-v2-m3",
@@ -434,7 +436,8 @@ def load_model_env(
     """Loads model configuration from environment variables or defaults.
 
     Args:
-        default_embed_model_str (str): Default embedding model identifier.
+        default_embed_model_provider (str): Default embedding backend selector.
+        default_embed_model(str): Default embedding model identifier for Ollama-compatible embeddings.
         default_image_embed_model (str): Default image embedding model identifier.
         default_ner_model (str): Default NER model identifier.
         default_rerank_model (str): Default reranker model identifier.
@@ -445,6 +448,7 @@ def load_model_env(
 
     Returns:
         ModelConfig: Dataclass containing model configuration.
+        - embed_model_provider (str): Embedding backend selector (`huggingface`, `ollama`, `openai`, or `llama.cpp`).
         - embed_model_file (str): The embedding model file name.
         - embed_model_repo (str): The embedding model HuggingFace repo ID for cache resolution
         - image_embed_model (str): The image embedding model identifier.
@@ -458,6 +462,32 @@ def load_model_env(
         - vision_model_repo (str): The vision model HuggingFace repo ID for cache resolution
         - whisper_model (str): The Whisper model identifier.
     """
+
+    model_provider = load_openai_env().model_provider
+    embed_model_provider_env = os.getenv("EMBED_MODEL_PROVIDER")
+    native_embed_provider = (
+        model_provider
+        if model_provider in {"ollama", "openai", "llama.cpp", "llama_cpp", "llamacpp"}
+        else None
+    )
+    embed_model_provider = (
+        embed_model_provider_env
+        or native_embed_provider
+        or default_embed_model_provider
+    )
+
+    default_embed_model_name_by_provider = {
+        "huggingface": default_embed_model,
+        "hf": default_embed_model,
+        "ollama": "bge-m3",
+        "openai": "text-embedding-3-small",
+        "llama.cpp": "ggml-org/bge-m3-Q8_0-GGUF;bge-m3-q8_0.gguf",
+        "llama_cpp": "ggml-org/bge-m3-Q8_0-GGUF;bge-m3-q8_0.gguf",
+        "llamacpp": "ggml-org/bge-m3-Q8_0-GGUF;bge-m3-q8_0.gguf",
+    }
+    default_embed_model_name = default_embed_model_name_by_provider.get(
+        embed_model_provider.lower(), "BAAI/bge-m3"
+    )
 
     def resolve_model_name(model_str: str) -> tuple[str, str, str]:
         """Resolves a model string into its components: repo, model, and mmproj.
@@ -481,7 +511,7 @@ def load_model_env(
         return repo, model, mmproj
 
     embed_model_repo, embed_model_file, _ = resolve_model_name(
-        os.getenv("EMBED_MODEL", default_embed_model_str)
+        os.getenv("EMBED_MODEL", default_embed_model_name)
     )
     text_model_repo, text_model_file, _ = resolve_model_name(
         os.getenv("LLM", default_text_model_str)
@@ -491,6 +521,7 @@ def load_model_env(
     )
 
     return ModelConfig(
+        embed_model_provider=embed_model_provider.lower(),
         embed_model_file=embed_model_file,
         embed_model_repo=embed_model_repo,
         image_embed_model=os.getenv("IMAGE_EMBED_MODEL", default_image_embed_model),

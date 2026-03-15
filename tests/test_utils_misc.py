@@ -171,6 +171,82 @@ def test_load_model_env_parses_vision_mmproj_repo_and_file(
     assert cfg.vision_model_mmproj_file == "mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf"
 
 
+def test_load_model_env_defaults_to_openai_embeddings_for_openai(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenAI stacks should default embeddings to the OpenAI-compatible backend.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    monkeypatch.setenv("MODEL_PROVIDER", "openai")
+    monkeypatch.delenv("EMBED_MODEL_PROVIDER", raising=False)
+    monkeypatch.delenv("EMBED_MODEL", raising=False)
+
+    cfg = load_model_env()
+
+    assert cfg.embed_model_provider == "openai"
+    assert cfg.embed_model_repo == "text-embedding-3-small"
+    assert cfg.embed_model_file == "text-embedding-3-small"
+
+
+def test_load_model_env_defaults_to_ollama_embeddings_for_ollama(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ollama stacks should continue using Ollama embeddings by default.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    monkeypatch.setenv("MODEL_PROVIDER", "ollama")
+    monkeypatch.delenv("EMBED_MODEL_PROVIDER", raising=False)
+    monkeypatch.delenv("EMBED_MODEL", raising=False)
+
+    cfg = load_model_env()
+
+    assert cfg.embed_model_provider == "ollama"
+    assert cfg.embed_model_repo == "bge-m3"
+    assert cfg.embed_model_file == "bge-m3"
+
+
+def test_load_model_env_defaults_to_llamacpp_embeddings_for_llamacpp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Llama.cpp stacks should default embeddings to llama.cpp-compatible GGUF assets.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    monkeypatch.setenv("MODEL_PROVIDER", "llama.cpp")
+    monkeypatch.delenv("EMBED_MODEL_PROVIDER", raising=False)
+    monkeypatch.delenv("EMBED_MODEL", raising=False)
+
+    cfg = load_model_env()
+
+    assert cfg.embed_model_provider == "llama.cpp"
+    assert cfg.embed_model_repo == "ggml-org/bge-m3-Q8_0-GGUF"
+    assert cfg.embed_model_file == "bge-m3-q8_0.gguf"
+
+
+def test_load_model_env_explicit_embedding_provider_overrides_native_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit embedding provider config should override provider-derived defaults.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    monkeypatch.setenv("MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("EMBED_MODEL_PROVIDER", "huggingface")
+    monkeypatch.delenv("EMBED_MODEL", raising=False)
+
+    cfg = load_model_env()
+
+    assert cfg.embed_model_provider == "huggingface"
+    assert cfg.embed_model_repo == "BAAI/bge-m3"
+    assert cfg.embed_model_file == "BAAI/bge-m3"
+
+
 def test_load_hate_speech_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default hate-speech config should be disabled with one worker.
 

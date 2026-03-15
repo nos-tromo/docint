@@ -235,9 +235,11 @@ def test_build_metadata_filters_supports_mime_and_date_rules() -> None:
 
     assert compiled is not None
     assert len(compiled.filters) == 2
-    assert compiled.filters[0].operator.value == "text_match_insensitive"
-    assert compiled.filters[1].operator.value == ">="
-    assert str(compiled.filters[1].value).startswith("2026-01-01T00:00:00")
+    first_filter = cast(Any, compiled.filters[0])
+    second_filter = cast(Any, compiled.filters[1])
+    assert first_filter.operator.value == "text_match_insensitive"
+    assert second_filter.operator.value == ">="
+    assert str(second_filter.value).startswith("2026-01-01T00:00:00")
 
 
 def test_build_qdrant_filter_supports_boolean_rules() -> None:
@@ -254,7 +256,12 @@ def test_build_qdrant_filter_supports_boolean_rules() -> None:
 
     assert compiled is not None
     assert compiled.must is not None
-    condition = compiled.must[0]
+    must = compiled.must
+    if isinstance(must, list):
+        assert must
+        condition = cast(Any, must[0])
+    else:
+        condition = cast(Any, must)
     assert condition.key == "hate_speech.hate_speech"
     assert condition.match.value is True
 
@@ -952,6 +959,94 @@ def test_reranker_passes_configured_fp16(monkeypatch: pytest.MonkeyPatch) -> Non
     assert captured["use_fp16"] is True
 
 
+def test_embed_model_uses_ollama_embedding_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ollama embeddings should use the OpenAI-compatible embedding client.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    captured: dict[str, object] = {}
+
+    class FakeOpenAIEmbedding:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(rag_module, "OpenAIEmbedding", FakeOpenAIEmbedding)
+
+    rag = RAG(qdrant_collection="test")
+    rag.embed_model_provider = "ollama"
+    rag.embed_model_id = "bge-m3"
+
+    _ = rag.embed_model
+
+    assert captured["model_name"] == "bge-m3"
+    assert captured["api_base"] == rag.openai_api_base
+    assert captured["dimensions"] == rag.openai_dimensions
+
+
+def test_embed_model_uses_cached_hf_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """HF embeddings should resolve to a local snapshot path when cached.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The temporary path fixture.
+    """
+    captured: dict[str, object] = {}
+    snapshot_path = tmp_path / "snapshot"
+    snapshot_path.mkdir()
+
+    class FakeHuggingFaceEmbedding:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(rag_module, "HuggingFaceEmbedding", FakeHuggingFaceEmbedding)
+    monkeypatch.setattr(
+        rag_module,
+        "resolve_hf_cache_path",
+        lambda cache_dir, repo_id: snapshot_path,
+    )
+
+    rag = RAG(qdrant_collection="test")
+    rag._device = "cpu"
+    rag.embed_model_provider = "huggingface"
+    rag.embed_model_id = "BAAI/bge-m3"
+    rag.hf_hub_cache = tmp_path
+
+    _ = rag.embed_model
+
+    assert captured["model_name"] == str(snapshot_path)
+    assert captured["cache_folder"] == str(tmp_path)
+    assert captured["device"] == "cpu"
+    assert captured["normalize"] is True
+
+
+def test_embed_model_hf_requires_local_cache_in_offline_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Offline HF embeddings should fail if the snapshot is not cached locally.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    monkeypatch.setenv("DOCINT_OFFLINE", "true")
+    monkeypatch.setattr(
+        rag_module,
+        "resolve_hf_cache_path",
+        lambda cache_dir, repo_id: None,
+    )
+
+    rag = RAG(qdrant_collection="test")
+    rag.embed_model_provider = "huggingface"
+    rag.embed_model_id = "BAAI/bge-m3"
+
+    with pytest.raises(FileNotFoundError, match="local Hugging Face cache"):
+        _ = rag.embed_model
+
+
 def test_reranker_falls_back_to_llm_on_meta_tensor_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1601,7 +1696,7 @@ def test_delete_collection_attempts_summary_invalidation(
     assert bumps == [("target", False)]
     deleted = [
         str(call.args[0])
-        for call in cast(Any, rag._qdrant_client.delete_collection).call_args_list
+        for call in rag._qdrant_client.delete_collection.call_args_list
     ]
     assert deleted == ["target", "target_images", "target_dockv"]
 
@@ -1623,6 +1718,6 @@ def test_delete_collection_companion_name_does_not_expand(
 
     deleted = [
         str(call.args[0])
-        for call in cast(Any, rag._qdrant_client.delete_collection).call_args_list
+        for call in rag._qdrant_client.delete_collection.call_args_list
     ]
     assert deleted == ["target_images"]
