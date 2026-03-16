@@ -37,7 +37,6 @@ from docling.models.stages.table_structure.table_structure_model import (
 from dotenv import load_dotenv
 from gliner import GLiNER
 from huggingface_hub import hf_hub_download, snapshot_download
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from loguru import logger
 from transformers import AutoProcessor, CLIPModel
 
@@ -156,11 +155,6 @@ def load_hf_model(
     if resolved:
         logger.info("Found local cache for {} at {}", model_id, resolved)
         model_id = str(resolved)
-    elif kw == "embedding":
-        HuggingFaceEmbedding(
-            model_name=model_id,
-            trust_remote_code=trust_remote_code,
-        )
     else:
         snapshot_download(
             repo_id=model_id,
@@ -362,12 +356,6 @@ def main() -> None:
             cache_folder=path_config.hf_hub_cache,
             kw=kw,
         )
-    if model_config.embed_model_provider in {"huggingface", "hf"}:
-        load_hf_model(
-            model_id=model_config.embed_model_file,
-            cache_folder=path_config.hf_hub_cache,
-            kw="embedding",
-        )
 
     # LLaMA.cpp
     if openai_config.model_provider in {"llama.cpp", "llama_cpp", "llamacpp"}:
@@ -378,6 +366,12 @@ def main() -> None:
         for model_id, repo_id, kw, destination_dir in [
             # model_id refers to the GGUF filename, repo_id is the HuggingFace repo where it lives.
             # We need both to resolve cache correctly.
+            (
+                model_config.embed_model_file,
+                model_config.embed_model_repo,
+                "embedding",
+                None,
+            ),
             (model_config.text_model_file, model_config.text_model_repo, "text", None),
             (
                 model_config.vision_model_file,
@@ -399,26 +393,15 @@ def main() -> None:
                 kw=kw,
                 destination_dir=destination_dir,
             )
-        if model_config.embed_model_provider in {"llama.cpp", "llama_cpp", "llamacpp"}:
-            load_llama_cpp_model(
-                cache_dir=path_config.llama_cpp_cache,
-                model_id=model_config.embed_model_file,
-                repo_id=model_config.embed_model_repo,
-                kw="embedding",
-            )
+
     # Ollama
     if openai_config.model_provider in {"ollama"}:
         for model_id, kw in [
+            (model_config.embed_model_file, "embedding"),
             (model_config.text_model_file, "text"),
             (model_config.vision_model_file, "vision"),
         ]:
             load_ollama_model(model_id=model_id, kw=kw, host=openai_config.api_base)
-        if model_config.embed_model_provider == "ollama":
-            load_ollama_model(
-                model_id=model_config.embed_model_file,
-                kw="embedding",
-                host=openai_config.api_base,
-            )
 
     # vLLM
     if openai_config.model_provider in {"vllm"}:

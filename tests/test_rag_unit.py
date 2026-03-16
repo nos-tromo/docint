@@ -948,7 +948,7 @@ def test_reranker_passes_configured_fp16(monkeypatch: pytest.MonkeyPatch) -> Non
     )
 
     rag = RAG(qdrant_collection="test")
-    rag.openai_model_provider = "ollama"
+    rag.openai_model_provider = "llama.cpp"
     rag.rerank_use_fp16 = True
     rag.rerank_top_n = 7
 
@@ -976,7 +976,6 @@ def test_embed_model_uses_ollama_embedding_backend(
     monkeypatch.setattr(rag_module, "OpenAIEmbedding", FakeOpenAIEmbedding)
 
     rag = RAG(qdrant_collection="test")
-    rag.embed_model_provider = "ollama"
     rag.embed_model_id = "bge-m3"
 
     _ = rag.embed_model
@@ -984,67 +983,6 @@ def test_embed_model_uses_ollama_embedding_backend(
     assert captured["model_name"] == "bge-m3"
     assert captured["api_base"] == rag.openai_api_base
     assert captured["dimensions"] == rag.openai_dimensions
-
-
-def test_embed_model_uses_cached_hf_snapshot(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """HF embeddings should resolve to a local snapshot path when cached.
-
-    Args:
-        monkeypatch: The monkeypatch fixture.
-        tmp_path: The temporary path fixture.
-    """
-    captured: dict[str, object] = {}
-    snapshot_path = tmp_path / "snapshot"
-    snapshot_path.mkdir()
-
-    class FakeHuggingFaceEmbedding:
-        def __init__(self, **kwargs: object) -> None:
-            captured.update(kwargs)
-
-    monkeypatch.setattr(rag_module, "HuggingFaceEmbedding", FakeHuggingFaceEmbedding)
-    monkeypatch.setattr(
-        rag_module,
-        "resolve_hf_cache_path",
-        lambda cache_dir, repo_id: snapshot_path,
-    )
-
-    rag = RAG(qdrant_collection="test")
-    rag._device = "cpu"
-    rag.embed_model_provider = "huggingface"
-    rag.embed_model_id = "BAAI/bge-m3"
-    rag.hf_hub_cache = tmp_path
-
-    _ = rag.embed_model
-
-    assert captured["model_name"] == str(snapshot_path)
-    assert captured["cache_folder"] == str(tmp_path)
-    assert captured["device"] == "cpu"
-    assert captured["normalize"] is True
-
-
-def test_embed_model_hf_requires_local_cache_in_offline_mode(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Offline HF embeddings should fail if the snapshot is not cached locally.
-
-    Args:
-        monkeypatch: The monkeypatch fixture.
-    """
-    monkeypatch.setenv("DOCINT_OFFLINE", "true")
-    monkeypatch.setattr(
-        rag_module,
-        "resolve_hf_cache_path",
-        lambda cache_dir, repo_id: None,
-    )
-
-    rag = RAG(qdrant_collection="test")
-    rag.embed_model_provider = "huggingface"
-    rag.embed_model_id = "BAAI/bge-m3"
-
-    with pytest.raises(FileNotFoundError, match="local Hugging Face cache"):
-        _ = rag.embed_model
 
 
 def test_reranker_falls_back_to_llm_on_meta_tensor_error(
@@ -1080,7 +1018,7 @@ def test_reranker_falls_back_to_llm_on_meta_tensor_error(
     )
 
     rag = RAG(qdrant_collection="test")
-    rag.openai_model_provider = "ollama"
+    rag.openai_model_provider = "llama.cpp"
     rag._text_model = None
 
     assert rag.reranker is llm_reranker_obj
