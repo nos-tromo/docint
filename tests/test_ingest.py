@@ -578,3 +578,273 @@ def test_hate_speech_detection_parallel_workers(
         detection = node.metadata.get("hate_speech")
         assert isinstance(detection, dict)
         assert detection["hate_speech"] is True
+
+
+def test_pipeline_batches_audio_files_with_audio_reader(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The ingestion pipeline should batch audio files through AudioReader.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+    """
+
+    first_audio = tmp_path / "first.wav"
+    second_audio = tmp_path / "second.mp3"
+    text_file = tmp_path / "notes.txt"
+    first_audio.write_bytes(b"a")
+    second_audio.write_bytes(b"b")
+    text_file.write_text("plain text", encoding="utf-8")
+
+    class FakeNERConfig:
+        """NER config stub with extraction disabled."""
+
+        enabled = False
+        max_chars = 256
+        max_workers = 1
+
+    class FakeIngestionConfig:
+        """Ingestion config stub with small batch size for testing."""
+
+        ingestion_batch_size = 5
+        sentence_splitter_chunk_size = 512
+        sentence_splitter_chunk_overlap = 64
+        supported_filetypes = [".wav", ".mp3", ".txt"]
+        hierarchical_chunking_enabled = False
+        coarse_chunk_size = 1024
+        fine_chunk_size = 256
+        fine_chunk_overlap = 32
+
+    monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
+    monkeypatch.setattr(
+        pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig()
+    )
+
+    pipeline = DocumentIngestionPipeline(
+        data_dir=tmp_path,
+        device="cpu",
+        ner_model=None,
+        progress_callback=None,
+    )
+
+    captured_batches: list[list[str]] = []
+
+    class FakeAudioReader:
+        """Fake AudioReader that captures batch file paths and returns dummy documents."""
+
+        max_workers = 2
+
+        def load_batch_data(
+            self,
+            files: list[Path],
+            *,
+            extra_info: list[dict[str, Any] | None] | None = None,
+        ) -> list[list[Document]]:
+            """Load a batch of audio files and return dummy documents.
+
+            Args:
+                files (list[Path]): List of audio file paths.
+                extra_info (list[dict[str, Any]  |  None] | None, optional): Additional information for each file. Defaults to None.
+
+            Returns:
+                list[list[Document]]: List of lists of dummy Document objects.
+            """
+            captured_batches.append([str(path) for path in files])
+            return [
+                [
+                    Document(
+                        text=f"audio:{Path(path).name}",
+                        metadata={"file_path": str(path), "file_hash": "audio-hash"},
+                    )
+                ]
+                for path in files
+            ]
+
+    fake_dir_reader = SimpleNamespace(
+        input_files=[first_audio, second_audio, text_file],
+        file_metadata=lambda file_path: {
+            "file_path": file_path,
+            "file_name": Path(file_path).name,
+            "filename": Path(file_path).name,
+            "file_hash": f"hash:{Path(file_path).name}",
+        },
+        file_extractor={},
+        filename_as_id=False,
+        encoding="utf-8",
+        errors="ignore",
+        raise_on_error=False,
+        fs=None,
+        _exclude_metadata=lambda docs: docs,
+    )
+
+    monkeypatch.setattr(
+        DocumentIngestionPipeline, "_load_doc_readers", lambda self: None
+    )
+    monkeypatch.setattr(
+        DocumentIngestionPipeline, "_load_node_parsers", lambda self: None
+    )
+    monkeypatch.setattr(
+        pipeline_module.SimpleDirectoryReader,
+        "load_file",
+        staticmethod(
+            lambda **kwargs: [
+                Document(
+                    text=f"text:{Path(kwargs['input_file']).name}",
+                    metadata={
+                        "file_path": str(kwargs["input_file"]),
+                        "file_hash": "text-hash",
+                    },
+                )
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        DocumentIngestionPipeline,
+        "_process_batch",
+        lambda self, docs, existing_hashes: (docs, []),
+    )
+
+    pipeline.audio_reader = cast(Any, FakeAudioReader())
+    pipeline.dir_reader = cast(Any, fake_dir_reader)
+
+    batches = list(pipeline.build())
+
+    assert captured_batches == [[str(first_audio), str(second_audio)]]
+    assert len(batches) == 1
+    docs, nodes = batches[0]
+    assert nodes == []
+    assert [doc.text for doc in docs] == [
+        "audio:first.wav",
+        "audio:second.mp3",
+        "text:notes.txt",
+    ]
+
+
+def test_pipeline_streams_large_audio_runs_in_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Large contiguous audio runs should be flushed in bounded windows.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+    """
+
+    audio_files: list[Path] = []
+    for idx in range(5):
+        file_path = tmp_path / f"clip-{idx}.wav"
+        file_path.write_bytes(f"{idx}".encode("utf-8"))
+        audio_files.append(file_path)
+
+    class FakeNERConfig:
+        """NER config stub with extraction disabled."""
+
+        enabled = False
+        max_chars = 256
+        max_workers = 1
+
+    class FakeIngestionConfig:
+        """Ingestion config stub with a bounded batch size for streaming tests."""
+
+        ingestion_batch_size = 3
+        sentence_splitter_chunk_size = 512
+        sentence_splitter_chunk_overlap = 64
+        supported_filetypes = [".wav"]
+        hierarchical_chunking_enabled = False
+        coarse_chunk_size = 1024
+        fine_chunk_size = 256
+        fine_chunk_overlap = 32
+
+    monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
+    monkeypatch.setattr(
+        pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig()
+    )
+
+    pipeline = DocumentIngestionPipeline(
+        data_dir=tmp_path,
+        device="cpu",
+        ner_model=None,
+        progress_callback=None,
+    )
+
+    captured_batches: list[list[str]] = []
+
+    class FakeAudioReader:
+        """Fake AudioReader that exposes a worker count and captures streamed windows."""
+
+        max_workers = 2
+
+        def load_batch_data(
+            self,
+            files: list[Path],
+            *,
+            extra_info: list[dict[str, Any] | None] | None = None,
+        ) -> list[list[Document]]:
+            """Return dummy documents for a streamed batch of audio files.
+
+            Args:
+                files: The audio files in the streamed window.
+                extra_info: Additional file metadata entries.
+
+            Returns:
+                list[list[Document]]: Dummy documents keyed by file name.
+            """
+
+            captured_batches.append([str(path) for path in files])
+            return [
+                [
+                    Document(
+                        text=f"audio:{path.name}",
+                        metadata={
+                            "file_path": str(path),
+                            "file_hash": f"hash:{path.name}",
+                        },
+                    )
+                ]
+                for path in files
+            ]
+
+    fake_dir_reader = SimpleNamespace(
+        input_files=audio_files,
+        file_metadata=lambda file_path: {
+            "file_path": file_path,
+            "file_name": Path(file_path).name,
+            "filename": Path(file_path).name,
+            "file_hash": f"hash:{Path(file_path).name}",
+        },
+        file_extractor={},
+        filename_as_id=False,
+        encoding="utf-8",
+        errors="ignore",
+        raise_on_error=False,
+        fs=None,
+        _exclude_metadata=lambda docs: docs,
+    )
+
+    monkeypatch.setattr(
+        DocumentIngestionPipeline, "_load_doc_readers", lambda self: None
+    )
+    monkeypatch.setattr(
+        DocumentIngestionPipeline, "_load_node_parsers", lambda self: None
+    )
+    monkeypatch.setattr(
+        DocumentIngestionPipeline,
+        "_process_batch",
+        lambda self, docs, existing_hashes: (docs, []),
+    )
+
+    pipeline.audio_reader = cast(Any, FakeAudioReader())
+    pipeline.dir_reader = cast(Any, fake_dir_reader)
+
+    list(pipeline.build())
+
+    assert captured_batches == [
+        [
+            str(audio_files[0]),
+            str(audio_files[1]),
+            str(audio_files[2]),
+            str(audio_files[3]),
+        ],
+        [str(audio_files[4])],
+    ]
