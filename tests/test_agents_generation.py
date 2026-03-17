@@ -106,11 +106,8 @@ def test_validation_agent_handles_invalid_schema() -> None:
     assert finalized.validation_reason == "Validation model returned invalid schema."
 
 
-def test_validation_agent_summary_coverage_threshold_overrides_relevance() -> None:
-    """Test that when summary coverage is below the target, it sets validation_mismatch
-    to True regardless of the grounding and relevance flags returned by the LLM. This
-    ensures that coverage issues are prioritized in the validation logic.
-    """
+def test_validation_agent_document_coverage_does_not_override_relevance() -> None:
+    """Document-level coverage should not suppress a relevance mismatch."""
     llm = _FakeLLM(
         '{"summary_grounded": true, "sources_relevant": false, "reason":"partial source fit"}'
     )
@@ -124,6 +121,32 @@ def test_validation_agent_summary_coverage_threshold_overrides_relevance() -> No
             "coverage_ratio": 0.8,
             "coverage_target": 0.7,
             "uncovered_documents": ["doc9.pdf", "doc10.pdf"],
+        },
+    )
+
+    finalized = agent.finalize(result, Turn(user_input="summarize collection"))
+
+    assert finalized.validation_checked is True
+    assert finalized.validation_mismatch is True
+    assert finalized.validation_reason == "partial source fit"
+
+
+def test_validation_agent_post_coverage_can_override_relevance() -> None:
+    """Post-level coverage may suppress overly strict relevance mismatches."""
+    llm = _FakeLLM(
+        '{"summary_grounded": true, "sources_relevant": false, "reason":"partial source fit"}'
+    )
+    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    result = RetrievalResult(
+        answer="answer",
+        sources=[{"text": "source"}],
+        summary_diagnostics={
+            "total_documents": 10,
+            "covered_documents": 8,
+            "coverage_ratio": 0.8,
+            "coverage_target": 0.7,
+            "coverage_unit": "posts",
+            "uncovered_documents": [],
         },
     )
 

@@ -21,6 +21,7 @@ from llama_index.core import Document
 from docint.core import rag as rag_module
 from docint.core.rag import RAG
 from docint.core.retrieval_filters import build_metadata_filters, build_qdrant_filter
+from docint.utils.env_cfg import OpenAIConfig
 from docint.utils.hashing import compute_file_hash
 
 
@@ -128,6 +129,56 @@ def test_normalize_response_data_extracts_sources(
     assert first_source.get("preview_text") == "Example text"
     assert first_source.get("preview_url")
     assert first_source.get("document_url") == first_source.get("preview_url")
+
+
+def test_create_text_model_passes_reasoning_effort_for_openai(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RAG text model creation should enable reasoning only for OpenAI provider.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    captured: dict[str, Any] = {}
+
+    class FakeLocalOpenAI:
+        """Capture constructor kwargs passed by ``RAG._create_text_model``."""
+
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(rag_module, "LocalOpenAI", FakeLocalOpenAI)
+
+    rag = RAG(qdrant_collection="test")
+    rag.text_model_id = "gpt-5-mini"
+    rag.openai_config = OpenAIConfig(
+        api_base="https://api.openai.com/v1",
+        api_key="sk-test",
+        ctx_window=200000,
+        dimensions=1024,
+        max_retries=2,
+        model_provider="openai",
+        reuse_client=False,
+        seed=42,
+        temperature=0.0,
+        thinking_effort="high",
+        thinking_enabled=True,
+        timeout=300.0,
+        top_p=0.0,
+    )
+    rag.openai_api_base = rag.openai_config.api_base
+    rag.openai_api_key = rag.openai_config.api_key
+    rag.openai_ctx_window = rag.openai_config.ctx_window
+    rag.openai_max_retries = rag.openai_config.max_retries
+    rag.openai_reuse_client = rag.openai_config.reuse_client
+    rag.openai_seed = rag.openai_config.seed
+    rag.openai_temperature = rag.openai_config.temperature
+    rag.openai_timeout = rag.openai_config.timeout
+    rag.openai_top_p = rag.openai_config.top_p
+
+    rag._create_text_model()
+
+    assert captured["reasoning_effort"] == "high"
 
 
 def test_normalize_response_data_appends_image_sources(
@@ -1098,6 +1149,93 @@ def _summary_node(
     return nws
 
 
+def _social_summary_node(
+    *,
+    text: str,
+    filename: str,
+    file_hash: str,
+    text_id: str,
+    author: str,
+    author_id: str,
+    timestamp: str,
+    row: int,
+    score: float = 0.9,
+) -> DummyNodeWithScore:
+    """Build a dummy row-level social source node for summary tests."""
+    node = DummyNode(
+        text,
+        {
+            "origin": {
+                "filename": filename,
+                "mimetype": "text/csv",
+                "file_hash": file_hash,
+            },
+            "source": "table",
+            "table": {"row_index": row, "n_rows": 10},
+            "reference_metadata": {
+                "network": "Telegram",
+                "type": "comment",
+                "timestamp": timestamp,
+                "author": author,
+                "author_id": author_id,
+                "text_id": text_id,
+            },
+        },
+    )
+    nws = DummyNodeWithScore(node)
+    nws.score = score
+    return nws
+
+
+def test_build_query_engine_uses_refine_prompts_for_social_table_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Social/table-heavy collections should use grounded refine synthesis."""
+    rag = RAG(qdrant_collection="test")
+    rag._text_model = cast(Any, object())
+    rag._reranker = cast(Any, object())
+    rag.index = types.SimpleNamespace(
+        as_retriever=lambda **kwargs: {"retriever_kwargs": kwargs}
+    )
+    monkeypatch.setattr(
+        RAG,
+        "list_documents",
+        lambda self: [{"filename": "social.csv", "max_rows": 500}],
+    )
+    monkeypatch.setattr(
+        RAG,
+        "_sample_collection_payloads",
+        lambda self, limit=128: [
+            {
+                "source": "table",
+                "reference_metadata": {"type": "comment", "text_id": "p1"},
+            }
+        ],
+    )
+
+    captured: dict[str, Any] = {}
+    sentinel = object()
+
+    def fake_from_args(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(
+        rag_module.RetrieverQueryEngine,
+        "from_args",
+        staticmethod(fake_from_args),
+    )
+
+    engine = rag.build_query_engine()
+
+    assert engine is sentinel
+    assert captured["response_mode"] == rag_module.ResponseMode.REFINE
+    postprocessors = captured["node_postprocessors"]
+    assert len(postprocessors) == 2
+    assert isinstance(postprocessors[1], rag_module.SocialSourceDiversityPostprocessor)
+    assert "keep each post distinct" in captured["text_qa_template"].template.lower()
+
+
 def test_summarize_collection_reports_coverage_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1145,6 +1283,78 @@ def test_summarize_collection_reports_coverage_diagnostics(
     assert diagnostics["coverage_ratio"] == 0.6667
     assert diagnostics["uncovered_documents"] == ["c.pdf"]
     assert len(summary["sources"]) == 2
+
+
+def test_summarize_collection_uses_post_coverage_for_social_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Social summaries should report post-level coverage and preserve source distinctions."""
+    rag = RAG(qdrant_collection="test")
+    rag._text_model = _FakeSummaryLLM("Social summary")  # type: ignore[assignment]
+    rag.social_summary_diversity_limit = 1
+
+    monkeypatch.setattr(
+        RAG,
+        "_summary_kv_store",
+        lambda self, collection=None, allow_create=True: None,
+    )
+    monkeypatch.setattr(
+        RAG,
+        "_infer_collection_profile",
+        lambda self: {"is_social_table": True, "coverage_unit": "posts"},
+    )
+    monkeypatch.setattr(
+        RAG,
+        "_retrieve_social_summary_nodes",
+        lambda self: [
+            _social_summary_node(
+                text="Alice says the launch moved to Friday.",
+                filename="social.csv",
+                file_hash="hash-social",
+                text_id="p1",
+                author="Alice",
+                author_id="a1",
+                timestamp="2026-01-02T10:00:00Z",
+                row=1,
+            ),
+            _social_summary_node(
+                text="Duplicate of Alice launch post.",
+                filename="social.csv",
+                file_hash="hash-social",
+                text_id="p1",
+                author="Alice",
+                author_id="a1",
+                timestamp="2026-01-02T10:00:00Z",
+                row=2,
+            ),
+            _social_summary_node(
+                text="Bob says the launch is still Thursday.",
+                filename="social.csv",
+                file_hash="hash-social",
+                text_id="p2",
+                author="Bob",
+                author_id="b1",
+                timestamp="2026-01-02T11:00:00Z",
+                row=3,
+            ),
+        ],
+    )
+    monkeypatch.setattr(RAG, "_count_social_coverage_units", lambda self, unit: 5)
+
+    summary = rag.summarize_collection()
+
+    diagnostics = summary["summary_diagnostics"]
+    assert summary["response"] == "Social summary"
+    assert diagnostics["coverage_unit"] == "posts"
+    assert diagnostics["total_documents"] == 5
+    assert diagnostics["covered_documents"] == 2
+    assert diagnostics["coverage_ratio"] == 0.4
+    assert diagnostics["candidate_count"] == 3
+    assert diagnostics["deduped_count"] == 2
+    assert diagnostics["sampled_count"] == 2
+    assert len(summary["sources"]) == 2
+    assert "author=Alice" in rag._text_model.prompts[0]
+    assert "author=Bob" in rag._text_model.prompts[0]
 
 
 def test_merge_summary_sources_deduplicates_and_preserves_doc_coverage() -> None:

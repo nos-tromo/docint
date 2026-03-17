@@ -217,6 +217,9 @@ class QueryOut(BaseModel):
     sources: list[dict] = []
     session_id: str
     graph_debug: dict[str, Any] | None = None
+    retrieval_query: str | None = None
+    coverage_unit: str | None = None
+    retrieval_mode: str | None = None
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
     validation_reason: str | None = None
@@ -228,6 +231,10 @@ class SummaryDiagnosticsOut(BaseModel):
     coverage_ratio: float
     uncovered_documents: list[str] = []
     coverage_target: float
+    coverage_unit: str | None = None
+    candidate_count: int | None = None
+    deduped_count: int | None = None
+    sampled_count: int | None = None
 
 
 class SummarizeOut(BaseModel):
@@ -431,6 +438,21 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
             if isinstance(data, dict) and isinstance(data.get("graph_debug"), dict)
             else None
         )
+        retrieval_query = (
+            str(data.get("retrieval_query") or "")
+            if isinstance(data, dict) and data.get("retrieval_query") is not None
+            else None
+        )
+        coverage_unit = (
+            str(data.get("coverage_unit") or "")
+            if isinstance(data, dict) and data.get("coverage_unit") is not None
+            else None
+        )
+        retrieval_mode = (
+            str(data.get("retrieval_mode") or "")
+            if isinstance(data, dict) and data.get("retrieval_mode") is not None
+            else None
+        )
 
         validation = _validation_payload(
             question=payload.question,
@@ -442,6 +464,9 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
             "sources": sources,
             "session_id": session_id,
             "graph_debug": graph_debug,
+            "retrieval_query": retrieval_query,
+            "coverage_unit": coverage_unit,
+            "retrieval_mode": retrieval_mode,
             **validation,
         }
     except HTTPException as e:

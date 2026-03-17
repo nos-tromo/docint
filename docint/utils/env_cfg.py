@@ -558,6 +558,8 @@ class OpenAIConfig:
     reuse_client: bool
     seed: int
     temperature: float
+    thinking_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+    thinking_enabled: bool
     timeout: float
     top_p: float
 
@@ -572,6 +574,10 @@ def load_openai_env(
     default_reuse_client: bool = False,
     default_seed: int = 42,
     default_temperature: float = 0.0,
+    default_thinking_effort: Literal[
+        "none", "minimal", "low", "medium", "high", "xhigh"
+    ] = "medium",
+    default_thinking_enabled: bool = False,
     default_timeout: float = 300.0,
     default_top_p: float = 0.0,
 ) -> OpenAIConfig:
@@ -587,6 +593,9 @@ def load_openai_env(
         default_reuse_client (bool): Whether to reuse the OpenAI client across calls. Default is False.
         default_seed (int): Default random seed for reproducibility.
         default_temperature (float): Default temperature for text generation.
+        default_thinking_effort: Default reasoning effort to request when
+            thinking is enabled.
+        default_thinking_enabled: Whether OpenAI reasoning/thinking is enabled.
         default_timeout (float): Default timeout in seconds.
         default_top_p (float): Default top_p for nucleus sampling.
 
@@ -601,6 +610,9 @@ def load_openai_env(
         - reuse_client (bool): Whether to reuse the OpenAI client across calls.
         - seed (int): Random seed for reproducibility.
         - temperature (float): Temperature for text generation.
+        - thinking_effort (Literal["none", "minimal", "low", "medium", "high", "xhigh"]):
+          Reasoning effort requested for OpenAI chat completions when thinking is enabled.
+        - thinking_enabled (bool): Whether OpenAI reasoning/thinking is enabled.
         - timeout (float): Timeout in seconds for API calls.
         - top_p (float): Top_p for nucleus sampling.
 
@@ -620,6 +632,20 @@ def load_openai_env(
             f"Supported options are: 'ollama', 'llama.cpp', 'openai'."
         )
 
+    thinking_effort = os.getenv(
+        "OPENAI_THINKING_EFFORT", default_thinking_effort
+    ).lower()
+    allowed_thinking_efforts = {
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    }
+    if thinking_effort not in allowed_thinking_efforts:
+        thinking_effort = default_thinking_effort
+
     return OpenAIConfig(
         api_base=os.getenv("OPENAI_API_BASE", default_api_base),
         api_key=os.getenv("OPENAI_API_KEY", default_api_key),
@@ -631,6 +657,14 @@ def load_openai_env(
         in {"true", "1", "yes"},
         seed=int(os.getenv("OPENAI_SEED", default_seed)),
         temperature=float(os.getenv("OPENAI_TEMPERATURE", default_temperature)),
+        thinking_effort=cast(
+            Literal["none", "minimal", "low", "medium", "high", "xhigh"],
+            thinking_effort,
+        ),
+        thinking_enabled=str(
+            os.getenv("OPENAI_ENABLE_THINKING", default_thinking_enabled)
+        ).lower()
+        in {"true", "1", "yes"},
         timeout=float(os.getenv("OPENAI_TIMEOUT", default_timeout)),
         top_p=float(os.getenv("OPENAI_TOP_P", default_top_p)),
     )
@@ -828,11 +862,13 @@ class RetrievalConfig:
 
     rerank_use_fp16: bool
     retrieve_top_k: int
+    chat_response_mode: Literal["auto", "compact", "refine"]
 
 
 def load_retrieval_env(
     default_rerank_use_fp16: bool = False,
     default_retrieve_top_k: int = 20,
+    default_chat_response_mode: Literal["auto", "compact", "refine"] = "auto",
 ) -> RetrievalConfig:
     """Loads retrieval configuration from environment variables or defaults.
 
@@ -844,13 +880,25 @@ def load_retrieval_env(
         RetrievalConfig: Dataclass containing retrieval configuration.
         - rerank_use_fp16 (bool): Whether to use FP16 for the reranker model.
         - retrieve_top_k (int): The number of top documents to retrieve for RAG
+        - chat_response_mode (Literal["auto", "compact", "refine"]): The
+          response synthesizer mode for chat/query answers.
     """
+    raw_mode = (
+        str(os.getenv("CHAT_RESPONSE_MODE", default_chat_response_mode)).strip().lower()
+    )
+    chat_response_mode: Literal["auto", "compact", "refine"] = "auto"
+    if raw_mode in {"compact", "refine"}:
+        chat_response_mode = cast(Literal["compact", "refine"], raw_mode)
+    elif raw_mode == "auto":
+        chat_response_mode = "auto"
+
     return RetrievalConfig(
         rerank_use_fp16=str(
             os.getenv("RERANK_USE_FP16", default_rerank_use_fp16)
         ).lower()
         in {"true", "1", "yes"},
         retrieve_top_k=int(os.getenv("RETRIEVE_TOP_K", default_retrieve_top_k)),
+        chat_response_mode=chat_response_mode,
     )
 
 
@@ -887,6 +935,9 @@ class SummaryConfig:
     max_docs: int
     per_doc_top_k: int
     final_source_cap: int
+    social_chunking_enabled: bool
+    social_candidate_pool: int
+    social_diversity_limit: int
 
 
 def load_summary_env(
@@ -894,6 +945,9 @@ def load_summary_env(
     default_max_docs: int = 30,
     default_per_doc_top_k: int = 4,
     default_final_source_cap: int = 24,
+    default_social_chunking_enabled: bool = True,
+    default_social_candidate_pool: int = 48,
+    default_social_diversity_limit: int = 2,
 ) -> SummaryConfig:
     """Load collection summary precision settings from environment variables.
 
@@ -909,6 +963,12 @@ def load_summary_env(
         - max_docs (int): Maximum number of documents to sample for summarization.
         - per_doc_top_k (int): Maximum number of evidence chunks to retrieve per document.
         - final_source_cap (int): Maximum number of merged sources to include in the final summary answer to keep it concise and focused.
+        - social_chunking_enabled (bool): Whether row-heavy social/table
+          collections should use chunk/post-level summarization.
+        - social_candidate_pool (int): Candidate retrieval depth for social/table
+          collection summaries.
+        - social_diversity_limit (int): Maximum number of sources retained per
+          diversity bucket during social/table collection summaries.
     """
     raw_target = float(os.getenv("SUMMARY_COVERAGE_TARGET", default_coverage_target))
     target = min(1.0, max(0.0, raw_target))
@@ -920,6 +980,31 @@ def load_summary_env(
         ),
         final_source_cap=max(
             1, int(os.getenv("SUMMARY_FINAL_SOURCE_CAP", default_final_source_cap))
+        ),
+        social_chunking_enabled=str(
+            os.getenv(
+                "SUMMARY_SOCIAL_CHUNKING_ENABLED",
+                default_social_chunking_enabled,
+            )
+        ).lower()
+        in {"true", "1", "yes"},
+        social_candidate_pool=max(
+            1,
+            int(
+                os.getenv(
+                    "SUMMARY_SOCIAL_CANDIDATE_POOL",
+                    default_social_candidate_pool,
+                )
+            ),
+        ),
+        social_diversity_limit=max(
+            1,
+            int(
+                os.getenv(
+                    "SUMMARY_SOCIAL_DIVERSITY_LIMIT",
+                    default_social_diversity_limit,
+                )
+            ),
         ),
     )
 

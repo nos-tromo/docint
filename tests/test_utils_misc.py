@@ -10,7 +10,9 @@ from docint.utils.clean_text import basic_clean
 from docint.utils.env_cfg import (
     load_hate_speech_env,
     load_model_env,
+    load_openai_env,
     load_path_env,
+    load_retrieval_env,
     load_summary_env,
 )
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
@@ -123,6 +125,9 @@ def test_load_summary_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SUMMARY_MAX_DOCS", raising=False)
     monkeypatch.delenv("SUMMARY_PER_DOC_TOP_K", raising=False)
     monkeypatch.delenv("SUMMARY_FINAL_SOURCE_CAP", raising=False)
+    monkeypatch.delenv("SUMMARY_SOCIAL_CHUNKING_ENABLED", raising=False)
+    monkeypatch.delenv("SUMMARY_SOCIAL_CANDIDATE_POOL", raising=False)
+    monkeypatch.delenv("SUMMARY_SOCIAL_DIVERSITY_LIMIT", raising=False)
 
     cfg = load_summary_env()
 
@@ -130,6 +135,9 @@ def test_load_summary_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.max_docs == 30
     assert cfg.per_doc_top_k == 4
     assert cfg.final_source_cap == 24
+    assert cfg.social_chunking_enabled is True
+    assert cfg.social_candidate_pool == 48
+    assert cfg.social_diversity_limit == 2
 
 
 def test_load_summary_env_clamps_and_parses(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -142,6 +150,9 @@ def test_load_summary_env_clamps_and_parses(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("SUMMARY_MAX_DOCS", "12")
     monkeypatch.setenv("SUMMARY_PER_DOC_TOP_K", "6")
     monkeypatch.setenv("SUMMARY_FINAL_SOURCE_CAP", "10")
+    monkeypatch.setenv("SUMMARY_SOCIAL_CHUNKING_ENABLED", "false")
+    monkeypatch.setenv("SUMMARY_SOCIAL_CANDIDATE_POOL", "64")
+    monkeypatch.setenv("SUMMARY_SOCIAL_DIVERSITY_LIMIT", "3")
 
     cfg = load_summary_env()
 
@@ -149,6 +160,79 @@ def test_load_summary_env_clamps_and_parses(monkeypatch: pytest.MonkeyPatch) -> 
     assert cfg.max_docs == 12
     assert cfg.per_doc_top_k == 6
     assert cfg.final_source_cap == 10
+    assert cfg.social_chunking_enabled is False
+    assert cfg.social_candidate_pool == 64
+    assert cfg.social_diversity_limit == 3
+
+
+def test_load_retrieval_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retrieval env loader should use documented defaults.
+
+    Args:
+        monkeypatch: Fixture to clear environment variables.
+    """
+    monkeypatch.delenv("RERANK_USE_FP16", raising=False)
+    monkeypatch.delenv("RETRIEVE_TOP_K", raising=False)
+    monkeypatch.delenv("CHAT_RESPONSE_MODE", raising=False)
+
+    cfg = load_retrieval_env()
+
+    assert cfg.rerank_use_fp16 is False
+    assert cfg.retrieve_top_k == 20
+    assert cfg.chat_response_mode == "auto"
+
+
+def test_load_retrieval_env_parses_chat_response_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retrieval env loader should clamp unknown chat modes to ``auto``.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.setenv("RERANK_USE_FP16", "true")
+    monkeypatch.setenv("RETRIEVE_TOP_K", "11")
+    monkeypatch.setenv("CHAT_RESPONSE_MODE", "refine")
+
+    cfg = load_retrieval_env()
+
+    assert cfg.rerank_use_fp16 is True
+    assert cfg.retrieve_top_k == 11
+    assert cfg.chat_response_mode == "refine"
+
+
+def test_load_openai_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OpenAI env loader should default thinking to disabled.
+
+    Args:
+        monkeypatch: Fixture to clear environment variables.
+    """
+    monkeypatch.delenv("MODEL_PROVIDER", raising=False)
+    monkeypatch.delenv("OPENAI_ENABLE_THINKING", raising=False)
+    monkeypatch.delenv("OPENAI_THINKING_EFFORT", raising=False)
+
+    cfg = load_openai_env()
+
+    assert cfg.thinking_enabled is False
+    assert cfg.thinking_effort == "medium"
+
+
+def test_load_openai_env_clamps_invalid_thinking_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenAI env loader should clamp unknown thinking efforts to ``medium``.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.setenv("MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_ENABLE_THINKING", "true")
+    monkeypatch.setenv("OPENAI_THINKING_EFFORT", "unsupported")
+
+    cfg = load_openai_env()
+
+    assert cfg.thinking_enabled is True
+    assert cfg.thinking_effort == "medium"
 
 
 def test_load_model_env_parses_vision_mmproj_repo_and_file(

@@ -1,0 +1,11 @@
+Rewrite the user's latest message into a standalone retrieval query.
+Use prior conversation only to resolve references or omitted details.
+Do not answer the question. Do not include prior assistant claims unless the user explicitly refers to them. Return only the rewritten query.
+
+Conversation context:
+{conversation_context}
+
+Latest user message:
+{user_msg}
+
+Standalone retrieval query:

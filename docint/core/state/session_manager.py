@@ -213,22 +213,29 @@ class SessionManager:
         if self.chat_engine is None or session_id is None:
             session_id = self.start_session(session_id)
 
-        # Include both summary and recent unsummarized turns in context
         session_context = self._get_session_context(session_id)
-        retrieval_query = (
-            f"{session_context}\n\nUser question: {user_msg}"
-            if session_context
-            else user_msg
+        retrieval_query = self.rag.rewrite_retrieval_query(
+            user_msg=user_msg,
+            conversation_context=session_context,
         )
-        retrieval_query, graph_debug = self.rag.expand_query_with_graph_with_debug(
+        expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(
             retrieval_query
         )
+        coverage_unit = str(
+            self.rag._infer_collection_profile().get("coverage_unit") or "documents"
+        )
+        retrieval_mode = f"rewrite_{self.rag._resolve_chat_response_mode().value}"
+        if bool(graph_debug.get("applied")):
+            retrieval_mode += "_graph"
 
-        resp = engine.query(retrieval_query)
+        resp = engine.query(expanded_query)
         response = self.rag._normalize_response_data(
             user_msg,
             resp,
             metadata_filters_active=metadata_filters_active,
+            retrieval_query=retrieval_query,
+            coverage_unit=coverage_unit,
+            retrieval_mode=retrieval_mode,
         )
         response["graph_debug"] = graph_debug
         self._persist_turn(session_id, user_msg, resp, response)
@@ -282,15 +289,22 @@ class SessionManager:
         if self.chat_engine is None or session_id is None:
             session_id = self.start_session(session_id)
 
-        summary = self._get_rolling_summary(session_id)
-        retrieval_query = (
-            f"{summary}\n\nUser question: {user_msg}" if summary else user_msg
+        session_context = self._get_session_context(session_id)
+        retrieval_query = self.rag.rewrite_retrieval_query(
+            user_msg=user_msg,
+            conversation_context=session_context,
         )
-        retrieval_query, graph_debug = self.rag.expand_query_with_graph_with_debug(
+        expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(
             retrieval_query
         )
+        coverage_unit = str(
+            self.rag._infer_collection_profile().get("coverage_unit") or "documents"
+        )
+        retrieval_mode = f"rewrite_{self.rag._resolve_chat_response_mode().value}"
+        if bool(graph_debug.get("applied")):
+            retrieval_mode += "_graph"
 
-        response = streaming_engine.query(retrieval_query)
+        response = streaming_engine.query(expanded_query)
         response_gen = getattr(response, "response_gen", None)
         if response_gen is None:
             logger.error("RuntimeError: Streaming response generator is unavailable.")
@@ -320,6 +334,9 @@ class SessionManager:
             user_msg,
             final_response,
             metadata_filters_active=metadata_filters_active,
+            retrieval_query=retrieval_query,
+            coverage_unit=coverage_unit,
+            retrieval_mode=retrieval_mode,
         )
         normalized["graph_debug"] = graph_debug
         self._persist_turn(session_id, user_msg, final_response, normalized)
@@ -331,6 +348,9 @@ class SessionManager:
             "session_id": session_id,
             "reasoning": normalized.get("reasoning"),
             "graph_debug": normalized.get("graph_debug"),
+            "retrieval_query": normalized.get("retrieval_query"),
+            "coverage_unit": normalized.get("coverage_unit"),
+            "retrieval_mode": normalized.get("retrieval_mode"),
         }
 
     def export_session(
@@ -485,7 +505,16 @@ class SessionManager:
             conv = self._load_or_create_convo(s, session_id)
 
             meta = getattr(resp, "metadata", {}) or {}
-            rewritten = meta.get("query_str") or meta.get("compressed_query_str")
+            rewritten_candidate = (
+                data.get("retrieval_query")
+                or meta.get("query_str")
+                or meta.get("compressed_query_str")
+            )
+            rewritten = (
+                str(rewritten_candidate).strip()
+                if isinstance(rewritten_candidate, str)
+                else None
+            )
 
             reasoning = data.get("reasoning")
             next_idx = len(conv.turns)
@@ -571,7 +600,7 @@ class SessionManager:
                 slice_text.append(
                     f"User: {turn.user_text}\nAssistant: {turn.model_response}"
                 )
-            prompt = self.rag.summarize_prompt + "\n\n".join(slice_text)
+            prompt = self.rag.conversation_summary_prompt + "\n\n".join(slice_text)
 
             summary_resp = self.rag.text_model.complete(prompt)
             existing_summary = cast(str | None, conv.rolling_summary) or ""

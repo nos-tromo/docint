@@ -101,16 +101,17 @@ class ResultValidationResponseAgent(ResponseAgent):
                 return result
 
             mismatch = not (summary_grounded and sources_relevant)
-            coverage_ratio, coverage_target = self._extract_coverage_metrics(
-                result.summary_diagnostics
+            coverage_ratio, coverage_target, coverage_unit = (
+                self._extract_coverage_metrics(result.summary_diagnostics)
             )
             if (
                 coverage_ratio is not None
                 and coverage_target is not None
+                and coverage_unit in {"chunks", "posts"}
                 and summary_grounded
                 and coverage_ratio >= coverage_target
             ):
-                # For summary mode, coverage-aware diagnostics may make
+                # Chunk/post coverage in row-heavy collections can make
                 # per-source relevance checks overly strict.
                 mismatch = False
 
@@ -204,6 +205,7 @@ class ResultValidationResponseAgent(ResponseAgent):
         covered_documents = summary_diagnostics.get("covered_documents")
         coverage_ratio = summary_diagnostics.get("coverage_ratio")
         coverage_target = summary_diagnostics.get("coverage_target")
+        coverage_unit = summary_diagnostics.get("coverage_unit")
         uncovered = summary_diagnostics.get("uncovered_documents")
         if isinstance(uncovered, list):
             uncovered_text = ", ".join(str(item) for item in uncovered if item)
@@ -215,34 +217,42 @@ class ResultValidationResponseAgent(ResponseAgent):
             f"- covered_documents: {covered_documents}\n"
             f"- coverage_ratio: {coverage_ratio}\n"
             f"- coverage_target: {coverage_target}\n"
+            f"- coverage_unit: {coverage_unit}\n"
             f"- uncovered_documents: {uncovered_text or '(none)'}\n\n"
         )
 
     def _extract_coverage_metrics(
         self, summary_diagnostics: dict[str, Any] | None
-    ) -> tuple[float | None, float | None]:
+    ) -> tuple[float | None, float | None, str | None]:
         """Parse optional coverage metrics from summary diagnostics.
 
         Args:
             summary_diagnostics (dict[str, Any] | None): Optional diagnostics payload.
 
         Returns:
-            tuple[float | None, float | None]: Parsed coverage ratio and target.
+            tuple[float | None, float | None, str | None]: Parsed coverage ratio,
+            target, and coverage unit.
         """
         if not isinstance(summary_diagnostics, dict):
-            return (None, None)
+            return (None, None, None)
         coverage_ratio_raw = summary_diagnostics.get("coverage_ratio")
         coverage_target_raw = summary_diagnostics.get("coverage_target")
+        coverage_unit_raw = summary_diagnostics.get("coverage_unit")
         if not isinstance(coverage_ratio_raw, (int, float, str)):
-            return (None, None)
+            return (None, None, None)
         if not isinstance(coverage_target_raw, (int, float, str)):
-            return (None, None)
+            return (None, None, None)
         try:
             coverage_ratio = float(coverage_ratio_raw)
             coverage_target = float(coverage_target_raw)
         except (TypeError, ValueError):
-            return (None, None)
-        return (coverage_ratio, coverage_target)
+            return (None, None, None)
+        coverage_unit = (
+            str(coverage_unit_raw).strip().lower()
+            if isinstance(coverage_unit_raw, (str, int, float))
+            else None
+        )
+        return (coverage_ratio, coverage_target, coverage_unit)
 
     def _sources_to_text(self, sources: list[dict[str, Any]]) -> str:
         """Convert source dictionaries to compact text snippets for validation.
