@@ -9,6 +9,7 @@ import pytest
 from docint.utils.clean_text import basic_clean
 from docint.utils.env_cfg import (
     load_hate_speech_env,
+    load_ingestion_env,
     load_model_env,
     load_path_env,
     load_summary_env,
@@ -220,3 +221,43 @@ def test_load_hate_speech_env_clamps_max_workers_minimum(
     cfg = load_hate_speech_env()
 
     assert cfg.max_workers == 1
+
+
+def test_load_ingestion_env_parses_docstore_retry_knobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ingestion env loader should parse and clamp docstore retry settings.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.setenv("DOCSTORE_MAX_RETRIES", "7")
+    monkeypatch.setenv("DOCSTORE_RETRY_BACKOFF_SECONDS", "0.75")
+    monkeypatch.setenv("DOCSTORE_RETRY_BACKOFF_MAX_SECONDS", "5.0")
+    monkeypatch.setenv("INGEST_BENCHMARK_ENABLED", "true")
+
+    cfg = load_ingestion_env()
+
+    assert cfg.docstore_max_retries == 7
+    assert cfg.docstore_retry_backoff_seconds == 0.75
+    assert cfg.docstore_retry_backoff_max_seconds == 5.0
+    assert cfg.ingest_benchmark_enabled is True
+
+
+def test_load_ingestion_env_clamps_negative_docstore_retry_knobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Negative docstore retry knobs should be clamped to zero.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.setenv("DOCSTORE_MAX_RETRIES", "-2")
+    monkeypatch.setenv("DOCSTORE_RETRY_BACKOFF_SECONDS", "-1")
+    monkeypatch.setenv("DOCSTORE_RETRY_BACKOFF_MAX_SECONDS", "-3")
+
+    cfg = load_ingestion_env()
+
+    assert cfg.docstore_max_retries == 0
+    assert cfg.docstore_retry_backoff_seconds == 0.0
+    assert cfg.docstore_retry_backoff_max_seconds == 0.0

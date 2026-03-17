@@ -91,9 +91,9 @@ class GraphRAGConfig:
 
 def load_graphrag_env(
     default_enabled: bool = True,
-    default_neighbor_hops: int = 1,
-    default_top_k_nodes: int = 100,
-    default_min_edge_weight: int = 1,
+    default_neighbor_hops: int = 2,
+    default_top_k_nodes: int = 50,
+    default_min_edge_weight: int = 3,
     default_max_neighbors: int = 6,
 ) -> GraphRAGConfig:
     """Load GraphRAG configuration from environment variables.
@@ -300,6 +300,10 @@ class IngestionConfig:
     coarse_chunk_size: int
     docling_accelerator_num_threads: int
     docstore_batch_size: int
+    ingest_benchmark_enabled: bool
+    docstore_max_retries: int
+    docstore_retry_backoff_max_seconds: float
+    docstore_retry_backoff_seconds: float
     fine_chunk_overlap: int
     fine_chunk_size: int
     hierarchical_chunking_enabled: bool
@@ -313,6 +317,10 @@ def load_ingestion_env(
     default_coarse_chunk_size: int = 8192,
     default_docling_accelerator_num_threads: int = 4,
     default_docstore_batch_size: int = 100,
+    default_ingest_benchmark_enabled: bool = False,
+    default_docstore_max_retries: int = 3,
+    default_docstore_retry_backoff_seconds: float = 0.25,
+    default_docstore_retry_backoff_max_seconds: float = 2.0,
     default_fine_chunk_overlap: int = 0,
     default_fine_chunk_size: int = 8192,
     default_hierarchical_chunking_enabled: bool = True,
@@ -357,6 +365,14 @@ def load_ingestion_env(
         - coarse_chunk_size (int): The coarse chunk size for hierarchical chunking.
         - docling_accelerator_num_threads (int): The default number of threads for Docling accelerator.
         - docstore_batch_size (int): The batch size for document store operations.
+        - ingest_benchmark_enabled (bool): Emit ingestion benchmark summary logs
+            for throughput and batch diagnostics.
+        - docstore_max_retries (int): Maximum retries for transient docstore/Qdrant
+            transport failures.
+        - docstore_retry_backoff_seconds (float): Initial retry backoff in seconds
+            for docstore/Qdrant operations.
+        - docstore_retry_backoff_max_seconds (float): Maximum retry backoff in
+            seconds for docstore/Qdrant operations.
         - fine_chunk_overlap (int): The fine chunk overlap size for hierarchical chunking.
         - fine_chunk_size (int): The fine chunk size for hierarchical chunking.
         - hierarchical_chunking_enabled (bool): Whether hierarchical chunking is enabled.
@@ -377,6 +393,32 @@ def load_ingestion_env(
         ),
         docstore_batch_size=int(
             os.getenv("DOCSTORE_BATCH_SIZE", default_docstore_batch_size)
+        ),
+        ingest_benchmark_enabled=str(
+            os.getenv("INGEST_BENCHMARK_ENABLED", default_ingest_benchmark_enabled)
+        ).lower()
+        in {"true", "1", "yes"},
+        docstore_max_retries=max(
+            0,
+            int(os.getenv("DOCSTORE_MAX_RETRIES", default_docstore_max_retries)),
+        ),
+        docstore_retry_backoff_seconds=max(
+            0.0,
+            float(
+                os.getenv(
+                    "DOCSTORE_RETRY_BACKOFF_SECONDS",
+                    default_docstore_retry_backoff_seconds,
+                )
+            ),
+        ),
+        docstore_retry_backoff_max_seconds=max(
+            0.0,
+            float(
+                os.getenv(
+                    "DOCSTORE_RETRY_BACKOFF_MAX_SECONDS",
+                    default_docstore_retry_backoff_max_seconds,
+                )
+            ),
         ),
         fine_chunk_overlap=int(
             os.getenv("FINE_CHUNK_OVERLAP", default_fine_chunk_overlap)
