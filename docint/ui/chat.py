@@ -236,11 +236,31 @@ def _render_graph_debug_panel(graph_debug: Mapping[str, Any]) -> None:
             st.json(dict(graph_debug))
 
 
+def _render_retrieval_debug_panel(
+    *,
+    retrieval_query: str | None,
+    retrieval_mode: str | None,
+    coverage_unit: str | None,
+) -> None:
+    """Render retrieval diagnostics in a popover."""
+    payload = {
+        "retrieval_query": retrieval_query,
+        "retrieval_mode": retrieval_mode,
+        "coverage_unit": coverage_unit,
+    }
+    with st.popover("Retrieval Debug"):
+        with st.container(height=CHAT_DEBUG_CONTAINER_HEIGHT):
+            st.json(payload)
+
+
 def _render_answer_tool_panels(
     *,
     graph_debug: Mapping[str, Any] | None,
     sources: Sequence[Mapping[str, Any]] | None,
     collection: str,
+    retrieval_query: str | None = None,
+    retrieval_mode: str | None = None,
+    coverage_unit: str | None = None,
 ) -> None:
     """Render optional chat detail controls in one horizontal row.
 
@@ -249,7 +269,11 @@ def _render_answer_tool_panels(
         sources: Optional source rows associated with a chat answer.
         collection: Active collection name for source downloads.
     """
-    tool_count = int(bool(sources)) + int(isinstance(graph_debug, Mapping))
+    tool_count = (
+        int(bool(sources))
+        + int(isinstance(graph_debug, Mapping))
+        + int(bool(retrieval_query or retrieval_mode or coverage_unit))
+    )
     if tool_count == 0:
         return
 
@@ -264,6 +288,15 @@ def _render_answer_tool_panels(
     if isinstance(graph_debug, Mapping):
         with columns[column_index]:
             _render_graph_debug_panel(graph_debug)
+        column_index += 1
+
+    if retrieval_query or retrieval_mode or coverage_unit:
+        with columns[column_index]:
+            _render_retrieval_debug_panel(
+                retrieval_query=retrieval_query,
+                retrieval_mode=retrieval_mode,
+                coverage_unit=coverage_unit,
+            )
 
 
 def render_chat() -> None:
@@ -302,6 +335,17 @@ def render_chat() -> None:
             graph_line = _format_graph_debug_summary(msg.get("graph_debug"))
             if graph_line:
                 chat_text += f"GRAPHRAG: {graph_line}\n\n"
+            if (
+                msg.get("retrieval_query")
+                or msg.get("retrieval_mode")
+                or msg.get("coverage_unit")
+            ):
+                chat_text += (
+                    "RETRIEVAL: "
+                    f"query={msg.get('retrieval_query')}, "
+                    f"mode={msg.get('retrieval_mode')}, "
+                    f"coverage_unit={msg.get('coverage_unit')}\n\n"
+                )
             if msg.get("sources"):
                 chat_text += "SOURCES:\n"
                 for idx, src in enumerate(msg["sources"], start=1):
@@ -345,6 +389,9 @@ def render_chat() -> None:
                 graph_debug=msg.get("graph_debug"),
                 sources=msg.get("sources"),
                 collection=collection,
+                retrieval_query=msg.get("retrieval_query"),
+                retrieval_mode=msg.get("retrieval_mode"),
+                coverage_unit=msg.get("coverage_unit"),
             )
 
     with st.expander("Retrieval filters", expanded=False):
@@ -473,6 +520,9 @@ def render_chat() -> None:
             validation_mismatch: bool | None = None
             validation_reason: str | None = None
             graph_debug: dict[str, Any] | None = None
+            retrieval_query: str | None = None
+            coverage_unit: str | None = None
+            retrieval_mode: str | None = None
             metadata_filters = build_chat_metadata_filters(
                 {
                     "enabled": st.session_state.chat_filter_enabled,
@@ -524,6 +574,9 @@ def render_chat() -> None:
                             nonlocal validation_mismatch
                             nonlocal validation_reason
                             nonlocal graph_debug
+                            nonlocal retrieval_query
+                            nonlocal coverage_unit
+                            nonlocal retrieval_mode
                             if not line:
                                 return
                             decoded = line.decode("utf-8")
@@ -541,6 +594,16 @@ def render_chat() -> None:
                                     validation_reason = data.get("validation_reason")
                                 if isinstance(data.get("graph_debug"), dict):
                                     graph_debug = data.get("graph_debug")
+                                if data.get("retrieval_query") is not None:
+                                    retrieval_query = str(
+                                        data.get("retrieval_query") or ""
+                                    )
+                                if data.get("coverage_unit") is not None:
+                                    coverage_unit = str(data.get("coverage_unit") or "")
+                                if data.get("retrieval_mode") is not None:
+                                    retrieval_mode = str(
+                                        data.get("retrieval_mode") or ""
+                                    )
                                 if data.get("session_id"):
                                     st.session_state.session_id = data.get("session_id")
                                 if "token" in data:
@@ -583,6 +646,9 @@ def render_chat() -> None:
                             graph_debug=graph_debug,
                             sources=sources,
                             collection=collection,
+                            retrieval_query=retrieval_query,
+                            retrieval_mode=retrieval_mode,
+                            coverage_unit=coverage_unit,
                         )
 
                         # Persist message
@@ -601,6 +667,12 @@ def render_chat() -> None:
                             msg_entry["validation_reason"] = validation_reason
                         if graph_debug is not None:
                             msg_entry["graph_debug"] = graph_debug
+                        if retrieval_query is not None:
+                            msg_entry["retrieval_query"] = retrieval_query
+                        if retrieval_mode is not None:
+                            msg_entry["retrieval_mode"] = retrieval_mode
+                        if coverage_unit is not None:
+                            msg_entry["coverage_unit"] = coverage_unit
                         st.session_state.messages.append(msg_entry)
                         st.session_state.chat_running = False
                         st.rerun()

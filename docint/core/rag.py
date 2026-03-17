@@ -55,8 +55,11 @@ from llama_index.core import (
 )
 from llama_index.core.embeddings import BaseEmbedding
 from llama_index.core.postprocessor import LLMRerank
+from llama_index.core.postprocessor.types import BaseNodePostprocessor
+from llama_index.core.prompts import PromptTemplate
 from llama_index.core.query_engine import RetrieverQueryEngine
-from llama_index.core.schema import BaseNode, Document
+from llama_index.core.response_synthesizers.type import ResponseMode
+from llama_index.core.schema import BaseNode, Document, NodeWithScore, QueryBundle
 from llama_index.core.storage.docstore.keyval_docstore import KVDocumentStore
 from llama_index.core.vector_stores.types import (
     FilterCondition,
@@ -86,7 +89,7 @@ from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.state.session_manager import SessionManager
 from docint.core.storage.docstore import QdrantKVStore
 from docint.core.storage.sources import stage_sources_to_qdrant
-from docint.utils.openai_cfg import LocalOpenAI
+from docint.utils.openai_cfg import LocalOpenAI, get_openai_reasoning_effort
 from docint.utils.reference_metadata import REFERENCE_METADATA_FIELDS
 
 
@@ -97,6 +100,153 @@ EMPTY_RESPONSE_FALLBACK = (
     "I couldn't generate a grounded answer from the retrieved context. "
     "Please try rephrasing the question or ingesting more relevant documents."
 )
+DEFAULT_SUMMARIZE_PROMPT = (
+    "Provide a concise overview of the active collection. Highlight the main "
+    "topics, document types, and notable findings. Focus on text bodies, not "
+    "metadata. Limit the response to 15 sentences."
+)
+DEFAULT_SOCIAL_SUMMARIZE_PROMPT = (
+    "Summarize the social or row-based collection using only the cited posts or "
+    "rows. Keep posts distinct, use metadata such as network, author, and "
+    "timestamp when it helps prevent blending separate claims, and call out "
+    "conflicts or uncertainty explicitly."
+)
+DEFAULT_RETRIEVAL_REWRITE_PROMPT = (
+    "Rewrite the user's latest message into a standalone retrieval query.\n"
+    "Use prior conversation only to resolve references or omitted details.\n"
+    "Do not answer the question. Do not include prior assistant claims unless "
+    "the user explicitly refers to them. Return only the rewritten query.\n\n"
+    "Conversation context:\n{conversation_context}\n\n"
+    "Latest user message:\n{user_msg}\n\n"
+    "Standalone retrieval query:"
+)
+DEFAULT_CONVERSATION_SUMMARY_PROMPT = (
+    "Summarize the recent conversation turns for future follow-up question "
+    "rewriting.\n"
+    "Capture only user goals, resolved references, and grounded assistant "
+    "conclusions. Do not add new claims.\n\n"
+)
+DEFAULT_GROUNDED_TEXT_QA_PROMPT = (
+    "You are answering a question from retrieved evidence.\n"
+    "Use only the context snippets below.\n"
+    "Treat each snippet as a distinct source chunk; do not blend claims across "
+    "different chunks unless the overlap is explicit.\n"
+    "If snippets conflict, say so. If evidence is insufficient, say that "
+    "explicitly.\n"
+    "Preserve source-specific metadata such as author, network, timestamp, page, "
+    "or row when it matters.\n\n"
+    "Context snippets:\n"
+    "---------------------\n"
+    "{context_str}\n"
+    "---------------------\n"
+    "Question: {query_str}\n"
+    "Grounded answer:"
+)
+DEFAULT_GROUNDED_REFINE_PROMPT = (
+    "You are refining an answer from retrieved evidence.\n"
+    "Original question: {query_str}\n"
+    "Current answer: {existing_answer}\n"
+    "New context snippet(s):\n"
+    "---------------------\n"
+    "{context_msg}\n"
+    "---------------------\n"
+    "Update the answer only when the new evidence materially improves or corrects "
+    "it. Keep source-specific claims distinct. If the new context is not useful, "
+    "return the current answer unchanged.\n"
+    "Refined grounded answer:"
+)
+
+
+class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
+    """Deduplicate and diversify row-level social/table retrieval results."""
+
+    diversity_limit: int = 2
+
+    @classmethod
+    def class_name(cls) -> str:
+        """Return a stable class identifier."""
+        return "SocialSourceDiversityPostprocessor"
+
+    @staticmethod
+    def _reference_metadata(node: NodeWithScore) -> dict[str, Any]:
+        metadata = getattr(node, "metadata", {}) or {}
+        reference_metadata = metadata.get("reference_metadata")
+        if isinstance(reference_metadata, dict):
+            return reference_metadata
+        return {}
+
+    @staticmethod
+    def _identity_key(node: NodeWithScore) -> str:
+        metadata = getattr(node, "metadata", {}) or {}
+        reference_metadata = SocialSourceDiversityPostprocessor._reference_metadata(
+            node
+        )
+        text_id = str(reference_metadata.get("text_id") or "").strip()
+        if text_id:
+            return f"text_id:{text_id}"
+
+        file_hash = str(metadata.get("file_hash") or "").strip()
+        table_meta = metadata.get("table") or {}
+        row_index = (
+            table_meta.get("row_index") if isinstance(table_meta, dict) else None
+        )
+        if file_hash and row_index is not None:
+            return f"row:{file_hash}:{row_index}"
+
+        text_value = str(getattr(node, "text", "") or "").strip()
+        if text_value:
+            normalized = re.sub(r"\s+", " ", text_value).lower()
+            return f"text:{normalized[:240]}"
+
+        return ""
+
+    @staticmethod
+    def _diversity_bucket(node: NodeWithScore) -> str:
+        metadata = getattr(node, "metadata", {}) or {}
+        reference_metadata = SocialSourceDiversityPostprocessor._reference_metadata(
+            node
+        )
+        author = str(
+            reference_metadata.get("author_id")
+            or reference_metadata.get("author")
+            or metadata.get("author_id")
+            or metadata.get("author")
+            or "unknown"
+        ).strip()
+        timestamp_raw = str(reference_metadata.get("timestamp") or "").strip()
+        time_bucket = "unknown"
+        if timestamp_raw:
+            try:
+                parsed = datetime.fromisoformat(timestamp_raw.replace("Z", "+00:00"))
+                time_bucket = parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H")
+            except ValueError:
+                time_bucket = timestamp_raw[:13]
+        return f"{author.lower()}::{time_bucket}"
+
+    def _postprocess_nodes(
+        self,
+        nodes: list[NodeWithScore],
+        query_bundle: QueryBundle | None = None,
+    ) -> list[NodeWithScore]:
+        """Deduplicate by post identity and cap near-duplicate author/time buckets."""
+        _ = query_bundle
+        seen: set[str] = set()
+        bucket_counts: dict[str, int] = defaultdict(int)
+        filtered: list[NodeWithScore] = []
+
+        for node in nodes:
+            identity = self._identity_key(node)
+            if identity and identity in seen:
+                continue
+            bucket = self._diversity_bucket(node)
+            if bucket_counts[bucket] >= max(1, int(self.diversity_limit)):
+                continue
+            if identity:
+                seen.add(identity)
+            bucket_counts[bucket] += 1
+            filtered.append(node)
+
+        return filtered
 
 
 @dataclass(slots=True)
@@ -167,6 +317,8 @@ class RAG:
     openai_reuse_client: bool = field(default=True, init=False)
     openai_seed: int = field(default=42, init=False)
     openai_temperature: float = field(default=0.1, init=False)
+    openai_thinking_effort: str = field(default="medium", init=False)
+    openai_thinking_enabled: bool = field(default=False, init=False)
     openai_timeout: float = field(default=300.0, init=False)
     openai_top_p: float = field(default=0.0, init=False)
 
@@ -178,6 +330,7 @@ class RAG:
     retrieve_similarity_top_k: int = field(default=20, init=False)
     rerank_top_n: int = field(default=5, init=False)
     rerank_use_fp16: bool = field(default=False, init=False)
+    chat_response_mode: str = field(default="auto", init=False)
     graphrag_enabled: bool = field(default=False, init=False)
     graphrag_neighbor_hops: int = field(default=1, init=False)
     graphrag_top_k_nodes: int = field(default=100, init=False)
@@ -187,6 +340,9 @@ class RAG:
     summary_max_docs: int = field(default=30, init=False)
     summary_per_doc_top_k: int = field(default=4, init=False)
     summary_final_source_cap: int = field(default=24, init=False)
+    social_summary_enabled: bool = field(default=True, init=False)
+    social_summary_candidate_pool: int = field(default=48, init=False)
+    social_summary_diversity_limit: int = field(default=2, init=False)
 
     # --- Session config ---
     session_store: str = field(default="", init=False)
@@ -203,7 +359,17 @@ class RAG:
     # --- Prompt config ---
     prompt_dir: Path | None = field(default=None, init=False)
     summarize_prompt_path: Path | None = field(default=None, init=False)
+    summarize_social_prompt_path: Path | None = field(default=None, init=False)
+    conversation_summary_prompt_path: Path | None = field(default=None, init=False)
+    rewrite_retrieval_prompt_path: Path | None = field(default=None, init=False)
+    grounded_text_qa_prompt_path: Path | None = field(default=None, init=False)
+    grounded_refine_prompt_path: Path | None = field(default=None, init=False)
     summarize_prompt: str = field(default="", init=False)
+    summarize_social_prompt: str = field(default="", init=False)
+    conversation_summary_prompt: str = field(default="", init=False)
+    rewrite_retrieval_prompt: str = field(default="", init=False)
+    grounded_text_qa_prompt: str = field(default="", init=False)
+    grounded_refine_prompt: str = field(default="", init=False)
 
     # --- Runtime (lazy caches / not in repr) ---
     _device: str | None = field(default=None, init=False, repr=False)
@@ -267,6 +433,8 @@ class RAG:
         self.openai_reuse_client = self.openai_config.reuse_client
         self.openai_seed = self.openai_config.seed
         self.openai_temperature = self.openai_config.temperature
+        self.openai_thinking_effort = self.openai_config.thinking_effort
+        self.openai_thinking_enabled = self.openai_config.thinking_enabled
         self.openai_timeout = self.openai_config.timeout
         self.openai_top_p = self.openai_config.top_p
 
@@ -283,6 +451,15 @@ class RAG:
         ## --- Load prompts ---
         if self.prompt_dir:
             self.summarize_prompt_path = self.prompt_dir / "summarize.txt"
+            self.summarize_social_prompt_path = self.prompt_dir / "summarize_social.txt"
+            self.conversation_summary_prompt_path = (
+                self.prompt_dir / "conversation_summary.txt"
+            )
+            self.rewrite_retrieval_prompt_path = (
+                self.prompt_dir / "rewrite_retrieval.txt"
+            )
+            self.grounded_text_qa_prompt_path = self.prompt_dir / "grounded_qa.txt"
+            self.grounded_refine_prompt_path = self.prompt_dir / "grounded_refine.txt"
         if self.summarize_prompt_path is None:
             logger.error(
                 "ValueError: summarize_prompt_path is not set. Cannot load summarize prompt."
@@ -290,13 +467,36 @@ class RAG:
             raise ValueError(
                 "summarize_prompt_path is not set. Cannot load summarize prompt."
             )
-
-        with open(self.summarize_prompt_path, "r", encoding="utf-8") as f:
-            self.summarize_prompt = f.read()
+        self.summarize_prompt = self._load_prompt_text(
+            self.summarize_prompt_path,
+            default=DEFAULT_SUMMARIZE_PROMPT,
+            required=True,
+        )
+        self.summarize_social_prompt = self._load_prompt_text(
+            self.summarize_social_prompt_path,
+            default=DEFAULT_SOCIAL_SUMMARIZE_PROMPT,
+        )
+        self.conversation_summary_prompt = self._load_prompt_text(
+            self.conversation_summary_prompt_path,
+            default=DEFAULT_CONVERSATION_SUMMARY_PROMPT,
+        )
+        self.rewrite_retrieval_prompt = self._load_prompt_text(
+            self.rewrite_retrieval_prompt_path,
+            default=DEFAULT_RETRIEVAL_REWRITE_PROMPT,
+        )
+        self.grounded_text_qa_prompt = self._load_prompt_text(
+            self.grounded_text_qa_prompt_path,
+            default=DEFAULT_GROUNDED_TEXT_QA_PROMPT,
+        )
+        self.grounded_refine_prompt = self._load_prompt_text(
+            self.grounded_refine_prompt_path,
+            default=DEFAULT_GROUNDED_REFINE_PROMPT,
+        )
 
         # --- Retrieval config ---
         self.rerank_use_fp16 = self.retrieval_config.rerank_use_fp16
         self.retrieve_similarity_top_k = self.retrieval_config.retrieve_top_k
+        self.chat_response_mode = self.retrieval_config.chat_response_mode
         self.rerank_top_n = int(self.retrieve_similarity_top_k // 4)
         self.graphrag_enabled = self.graphrag_config.enabled
         self.graphrag_neighbor_hops = self.graphrag_config.neighbor_hops
@@ -313,6 +513,40 @@ class RAG:
         self.summary_max_docs = self.summary_config.max_docs
         self.summary_per_doc_top_k = self.summary_config.per_doc_top_k
         self.summary_final_source_cap = self.summary_config.final_source_cap
+        self.social_summary_enabled = self.summary_config.social_chunking_enabled
+        self.social_summary_candidate_pool = self.summary_config.social_candidate_pool
+        self.social_summary_diversity_limit = self.summary_config.social_diversity_limit
+
+    @staticmethod
+    def _load_prompt_text(
+        path: Path | None,
+        *,
+        default: str,
+        required: bool = False,
+    ) -> str:
+        """Load prompt text from disk, falling back to a bundled default.
+
+        Args:
+            path: Optional filesystem path to the prompt template.
+            default: Fallback prompt text when the file is absent.
+            required: Whether a missing prompt should raise an error.
+
+        Returns:
+            Prompt text for downstream model calls.
+
+        Raises:
+            ValueError: If ``required`` is true and no prompt path is available.
+        """
+        if path is None:
+            if required:
+                raise ValueError("Prompt path is required but missing.")
+            return default
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            if required:
+                raise
+            return default
 
     @property
     def session_id(self) -> str | None:
@@ -583,6 +817,7 @@ class RAG:
             raise ValueError("text_model_id cannot be None")
 
         additional_kwargs: dict[str, Any] = {}
+        reasoning_effort = get_openai_reasoning_effort(self.openai_config)
 
         # LlamaIndex OpenAI class supports api_key, api_base, timeout, max_retries, seed, top_p
         # Use LocalOpenAI which tolerates unknown model names (e.g. paths) by falling back to default metadata
@@ -594,6 +829,7 @@ class RAG:
             max_retries=self.openai_max_retries,
             model=self.text_model_id,
             reuse_client=self.openai_reuse_client,
+            reasoning_effort=reasoning_effort,
             seed=self.openai_seed,
             temperature=self.openai_temperature,
             timeout=self.openai_timeout,
@@ -1432,6 +1668,201 @@ class RAG:
         """
         self.query_engine = self.build_query_engine()
 
+    def rewrite_retrieval_query(
+        self,
+        *,
+        user_msg: str,
+        conversation_context: str = "",
+    ) -> str:
+        """Rewrite the latest user message into a standalone retrieval query.
+
+        Args:
+            user_msg: The latest user question.
+            conversation_context: Compact prior-turn context used only for rewrite.
+
+        Returns:
+            Standalone retrieval query text.
+        """
+        if not conversation_context.strip():
+            return user_msg.strip()
+
+        prompt = self.rewrite_retrieval_prompt.format(
+            conversation_context=conversation_context.strip(),
+            user_msg=user_msg.strip(),
+        )
+        try:
+            completion = self.text_model.complete(prompt)
+            rewritten = str(getattr(completion, "text", "") or "").strip()
+        except Exception as exc:
+            logger.warning("Retrieval rewrite failed; using raw user message: {}", exc)
+            return user_msg.strip()
+        return rewritten or user_msg.strip()
+
+    def _sample_collection_payloads(self, limit: int = 128) -> list[dict[str, Any]]:
+        """Fetch a small payload sample from the active collection."""
+        if not self.qdrant_collection:
+            return []
+
+        offset = None
+        payloads: list[dict[str, Any]] = []
+        remaining = max(1, int(limit))
+        while remaining > 0:
+            batch_size = min(remaining, 128)
+            try:
+                points, offset = self.qdrant_client.scroll(
+                    collection_name=self.qdrant_collection,
+                    limit=batch_size,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to sample collection payloads for '{}': {}",
+                    self.qdrant_collection,
+                    exc,
+                )
+                break
+            if not points:
+                break
+            for point in points:
+                payload = getattr(point, "payload", None)
+                if isinstance(payload, dict):
+                    payloads.append(payload)
+                    remaining -= 1
+                    if remaining <= 0:
+                        break
+            if offset is None:
+                break
+        return payloads
+
+    @staticmethod
+    def _is_social_payload(payload: dict[str, Any]) -> bool:
+        """Return whether a payload looks like a row-level social post."""
+        if not isinstance(payload, dict):
+            return False
+        source_kind = str(payload.get("source") or payload.get("source_type") or "")
+        if source_kind != "table":
+            return False
+        reference_metadata = RAG._extract_reference_metadata(payload) or {}
+        if not isinstance(reference_metadata, dict):
+            return False
+        return any(
+            str(reference_metadata.get(key) or "").strip()
+            for key in ("type", "network", "author", "author_id", "text_id")
+        )
+
+    @staticmethod
+    def _source_post_key(source: dict[str, Any]) -> str:
+        """Build a stable social/post identity key for normalized sources."""
+        reference_metadata = source.get("reference_metadata")
+        if isinstance(reference_metadata, dict):
+            text_id = str(reference_metadata.get("text_id") or "").strip()
+            if text_id:
+                return f"text_id:{text_id}"
+
+        file_hash = str(source.get("file_hash") or "").strip()
+        row_value = source.get("row")
+        if file_hash and row_value is not None:
+            return f"row:{file_hash}:{row_value}"
+
+        text_value = str(source.get("text") or source.get("preview_text") or "").strip()
+        if text_value:
+            normalized = re.sub(r"\s+", " ", text_value).lower()
+            return f"text:{normalized[:240]}"
+        return ""
+
+    @staticmethod
+    def _source_diversity_bucket(source: dict[str, Any]) -> str:
+        """Return a coarse author/time bucket for social summary diversity."""
+        reference_metadata = source.get("reference_metadata")
+        ref = reference_metadata if isinstance(reference_metadata, dict) else {}
+        author = str(ref.get("author_id") or ref.get("author") or "unknown").strip()
+        timestamp_raw = str(ref.get("timestamp") or "").strip()
+        time_bucket = "unknown"
+        if timestamp_raw:
+            try:
+                parsed = datetime.fromisoformat(timestamp_raw.replace("Z", "+00:00"))
+                time_bucket = parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H")
+            except ValueError:
+                time_bucket = timestamp_raw[:13]
+        return f"{author.lower()}::{time_bucket}"
+
+    @staticmethod
+    def _coverage_unit_for_sources(sources: list[dict[str, Any]]) -> str:
+        """Infer coverage unit from normalized source metadata."""
+        for source in sources:
+            reference_metadata = source.get("reference_metadata")
+            if (
+                isinstance(reference_metadata, dict)
+                and str(reference_metadata.get("text_id") or "").strip()
+            ):
+                return "posts"
+        return "chunks"
+
+    def _infer_collection_profile(self) -> dict[str, Any]:
+        """Infer whether the active collection is social/table heavy."""
+        docs = self.list_documents()
+        payloads = self._sample_collection_payloads(limit=96)
+        social_payloads = [
+            payload for payload in payloads if self._is_social_payload(payload)
+        ]
+        table_docs = [doc for doc in docs if "max_rows" in doc]
+        is_social_table = bool(social_payloads) and (
+            len(docs) <= 3
+            or len(table_docs) == len(docs)
+            or len(social_payloads) >= max(3, len(payloads) // 3)
+        )
+        coverage_unit = "documents"
+        if is_social_table:
+            coverage_unit = "posts"
+            for payload in social_payloads:
+                reference_metadata = self._extract_reference_metadata(payload) or {}
+                if (
+                    not isinstance(reference_metadata, dict)
+                    or not str(reference_metadata.get("text_id") or "").strip()
+                ):
+                    coverage_unit = "chunks"
+                    break
+        return {
+            "is_social_table": is_social_table,
+            "coverage_unit": coverage_unit,
+        }
+
+    def _resolve_chat_response_mode(self) -> ResponseMode:
+        """Resolve the response synthesizer mode for query/chat answers."""
+        configured = str(self.chat_response_mode or "auto").strip().lower()
+        if configured == "refine":
+            return ResponseMode.REFINE
+        if configured == "compact":
+            return ResponseMode.COMPACT
+        profile = self._infer_collection_profile()
+        if bool(profile.get("is_social_table")):
+            return ResponseMode.REFINE
+        return ResponseMode.COMPACT
+
+    def _build_grounded_text_qa_template(self, *, social_table: bool) -> PromptTemplate:
+        """Return the grounded QA prompt template for answer synthesis."""
+        prompt = self.grounded_text_qa_prompt
+        if social_table:
+            prompt = (
+                f"{prompt.strip()}\n\n"
+                "When the context comes from social posts or table rows, keep each "
+                "post distinct and avoid merging separate authors or timestamps.\n"
+            )
+        return PromptTemplate(prompt)
+
+    def _build_grounded_refine_template(self, *, social_table: bool) -> PromptTemplate:
+        """Return the grounded refine prompt template for answer synthesis."""
+        prompt = self.grounded_refine_prompt
+        if social_table:
+            prompt = (
+                f"{prompt.strip()}\n\n"
+                "For row-level social evidence, preserve distinctions between "
+                "different posts even when they discuss the same topic.\n"
+            )
+        return PromptTemplate(prompt)
+
     def _build_retriever(
         self,
         *,
@@ -1481,14 +1912,35 @@ class RAG:
             logger.error("RuntimeError: Index is not initialized.")
             raise RuntimeError("Index is not initialized. Cannot create query engine.")
 
+        profile = self._infer_collection_profile()
+        response_mode = self._resolve_chat_response_mode()
+        node_postprocessors: list[
+            BaseNodePostprocessor | LLMRerank | FlagEmbeddingReranker
+        ] = [  # type: ignore[assignment]
+            self.reranker
+        ]
+        if bool(profile.get("is_social_table")):
+            node_postprocessors.append(
+                SocialSourceDiversityPostprocessor(
+                    diversity_limit=max(1, int(self.social_summary_diversity_limit))
+                )
+            )
+
         return RetrieverQueryEngine.from_args(
             retriever=self._build_retriever(
                 metadata_filters=metadata_filters,
                 vector_store_kwargs=vector_store_kwargs,
             ),
             llm=self.text_model,
-            node_postprocessors=[self.reranker],
+            node_postprocessors=node_postprocessors,
             streaming=streaming,
+            response_mode=response_mode,
+            text_qa_template=self._build_grounded_text_qa_template(
+                social_table=bool(profile.get("is_social_table"))
+            ),
+            refine_template=self._build_grounded_refine_template(
+                social_table=bool(profile.get("is_social_table"))
+            ),
         )
 
     def _source_from_node_with_score(self, nws: Any) -> dict[str, Any] | None:
@@ -1520,6 +1972,9 @@ class RAG:
         reason: str | None = None,
         *,
         metadata_filters_active: bool = False,
+        retrieval_query: str | None = None,
+        coverage_unit: str | None = None,
+        retrieval_mode: str | None = None,
     ) -> dict[str, Any]:
         """Normalize both llama_index.core.Response and AgentChatResponse into a single payload.
         Handles:
@@ -1604,6 +2059,9 @@ class RAG:
             "reasoning": reason,
             "response": resp_text,
             "sources": sources,
+            "retrieval_query": retrieval_query,
+            "coverage_unit": coverage_unit,
+            "retrieval_mode": retrieval_mode,
         }
 
     # --- Collection discovery / selection ---
@@ -2485,6 +2943,12 @@ class RAG:
         Returns:
             A string key that uniquely identifies the source for deduplication purposes.
         """
+        reference_metadata = source.get("reference_metadata")
+        text_id = ""
+        if isinstance(reference_metadata, dict):
+            text_id = str(reference_metadata.get("text_id") or "").strip()
+        if text_id:
+            return f"text_id||{text_id}"
         return "||".join(
             [
                 str(source.get("file_hash") or ""),
@@ -2572,6 +3036,7 @@ class RAG:
         *,
         briefs: list[str],
         diagnostics: dict[str, Any],
+        style_prompt: str,
     ) -> str:
         """Build the final synthesis prompt from per-document evidence briefs.
 
@@ -2584,6 +3049,7 @@ class RAG:
         """
         coverage_ratio = float(diagnostics.get("coverage_ratio", 0.0) or 0.0)
         coverage_target = float(diagnostics.get("coverage_target", 0.0) or 0.0)
+        coverage_unit = str(diagnostics.get("coverage_unit") or "documents")
         uncovered = diagnostics.get("uncovered_documents") or []
         uncovered_text = ", ".join(str(item) for item in uncovered) or "(none)"
         evidence_block = "\n\n".join(briefs) if briefs else "(no evidence extracted)"
@@ -2592,25 +3058,24 @@ class RAG:
             "Use only the evidence briefs below. If evidence is insufficient, state that explicitly.\n"
             "Include cross-document themes, notable differences or outliers, and concrete findings.\n"
             "Do not introduce claims unsupported by the evidence briefs.\n\n"
+            f"Coverage unit: {coverage_unit}\n"
             f"Coverage ratio: {coverage_ratio:.2f}\n"
             f"Coverage target: {coverage_target:.2f}\n"
             f"Uncovered documents: {uncovered_text}\n\n"
-            f"Style instructions:\n{self.summarize_prompt.strip()}\n\n"
+            f"Style instructions:\n{style_prompt.strip()}\n\n"
             f"Evidence briefs:\n{evidence_block}\n"
         )
 
-    def _prepare_collection_summary_context(self) -> dict[str, Any]:
-        """Prepare document briefs, merged evidence, and diagnostics for summary.
-
-        Returns:
-            A dictionary containing the synthesis prompt, merged sources, and summary diagnostics.
-        """
+    def _prepare_document_summary_context(self) -> dict[str, Any]:
+        """Prepare document-level summary context for standard collections."""
         targets = self._summary_document_targets()
         target_filenames = [
             str(doc.get("filename") or "") for doc in targets if doc.get("filename")
         ]
         per_doc_sources: dict[str, list[dict[str, Any]]] = {}
         briefs: list[str] = []
+        candidate_count = 0
+        deduped_count = 0
 
         for doc in targets:
             filename = str(doc.get("filename") or "").strip()
@@ -2622,6 +3087,7 @@ class RAG:
                 filename=filename,
                 file_hash=file_hash,
             )
+            candidate_count += len(nodes)
             normalized_sources: list[dict[str, Any]] = []
             seen_doc_keys: set[str] = set()
             for nws in nodes:
@@ -2641,6 +3107,7 @@ class RAG:
                     break
 
             if normalized_sources:
+                deduped_count += len(normalized_sources)
                 per_doc_sources[filename] = normalized_sources
                 briefs.append(
                     self._summary_document_brief(
@@ -2664,16 +3131,215 @@ class RAG:
             "coverage_ratio": round(coverage_ratio, 4),
             "uncovered_documents": uncovered,
             "coverage_target": self.summary_coverage_target,
+            "coverage_unit": "documents",
+            "candidate_count": candidate_count,
+            "deduped_count": deduped_count,
+            "sampled_count": len(self._merge_summary_sources(per_doc_sources)),
         }
+        merged_sources = self._merge_summary_sources(per_doc_sources)
 
         return {
             "synthesis_prompt": self._build_summary_synthesis_prompt(
                 briefs=briefs,
                 diagnostics=diagnostics,
+                style_prompt=self.summarize_prompt,
             ),
-            "sources": self._merge_summary_sources(per_doc_sources),
+            "sources": merged_sources,
             "summary_diagnostics": diagnostics,
         }
+
+    def _retrieve_social_summary_nodes(self) -> list[Any]:
+        """Retrieve a larger candidate pool for social/table-heavy summaries."""
+        if self.index is None:
+            self.create_index()
+        if self.index is None:
+            return []
+
+        query = (
+            "Identify representative posts or rows, recurring themes, concrete "
+            "claims, disagreements, and notable outliers across this collection."
+        )
+        top_k = max(
+            1,
+            int(
+                max(
+                    self.social_summary_candidate_pool,
+                    self.summary_final_source_cap,
+                )
+            ),
+        )
+        try:
+            retriever = self.index.as_retriever(similarity_top_k=top_k)
+            nodes = retriever.retrieve(query)
+            if isinstance(nodes, list):
+                return nodes[:top_k]
+        except Exception as exc:
+            logger.warning("Social summary retrieval failed: {}", exc)
+        return []
+
+    def _select_social_summary_sources(
+        self,
+        candidates: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Deduplicate and diversify candidate social/table sources."""
+        deduped: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for source in candidates:
+            identity = self._source_post_key(source)
+            if identity and identity in seen:
+                continue
+            if identity:
+                seen.add(identity)
+            deduped.append(source)
+
+        bucket_counts: dict[str, int] = defaultdict(int)
+        sampled: list[dict[str, Any]] = []
+        limit = max(1, int(self.social_summary_diversity_limit))
+        for source in deduped:
+            bucket = self._source_diversity_bucket(source)
+            if bucket_counts[bucket] >= limit:
+                continue
+            bucket_counts[bucket] += 1
+            sampled.append(source)
+            if len(sampled) >= self.summary_final_source_cap:
+                break
+        return deduped, sampled
+
+    def _count_social_coverage_units(self, coverage_unit: str) -> int:
+        """Count total social coverage units across the active collection."""
+        if not self.qdrant_collection:
+            return 0
+        seen: set[str] = set()
+        offset = None
+        while True:
+            try:
+                points, offset = self.qdrant_client.scroll(
+                    collection_name=self.qdrant_collection,
+                    limit=256,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to count social coverage units for '{}': {}",
+                    self.qdrant_collection,
+                    exc,
+                )
+                break
+            if not points:
+                break
+            for point in points:
+                payload = getattr(point, "payload", None)
+                if not isinstance(payload, dict) or not self._is_social_payload(
+                    payload
+                ):
+                    continue
+                source = self._source_from_payload(
+                    collection=self.qdrant_collection,
+                    payload=payload,
+                )
+                if coverage_unit == "posts":
+                    key = self._source_post_key(source)
+                else:
+                    key = self._summary_source_key(source)
+                if key:
+                    seen.add(key)
+            if offset is None:
+                break
+        return len(seen)
+
+    def _build_social_summary_briefs(
+        self,
+        sources: list[dict[str, Any]],
+    ) -> list[str]:
+        """Build source-preserving evidence briefs for row-level social summaries."""
+        briefs: list[str] = []
+        for index, source in enumerate(sources, start=1):
+            reference_metadata = source.get("reference_metadata")
+            ref = reference_metadata if isinstance(reference_metadata, dict) else {}
+            metadata_bits = [
+                f"network={ref.get('network')}" if ref.get("network") else "",
+                f"type={ref.get('type')}" if ref.get("type") else "",
+                f"author={ref.get('author') or ref.get('author_id')}"
+                if (ref.get("author") or ref.get("author_id"))
+                else "",
+                f"timestamp={ref.get('timestamp')}" if ref.get("timestamp") else "",
+                f"row={source.get('row')}" if source.get("row") is not None else "",
+            ]
+            metadata_line = (
+                ", ".join(bit for bit in metadata_bits if bit) or "metadata=n/a"
+            )
+            raw_text = str(
+                source.get("text") or source.get("preview_text") or ""
+            ).strip()
+            compact = re.sub(r"\s+", " ", raw_text)[:280] if raw_text else "(no text)"
+            briefs.append(f"- Source {index}: {metadata_line}\n  - Evidence: {compact}")
+        return briefs
+
+    def _prepare_social_summary_context(self) -> dict[str, Any]:
+        """Prepare chunk/post-level summary context for social/table collections."""
+        candidate_nodes = self._retrieve_social_summary_nodes()
+        candidate_sources: list[dict[str, Any]] = []
+        for nws in candidate_nodes:
+            source = self._source_from_node_with_score(nws)
+            if source is None:
+                continue
+            if str(source.get("source") or "") != "table":
+                continue
+            candidate_sources.append(source)
+
+        if not candidate_sources:
+            for payload in self._sample_collection_payloads(
+                limit=self.social_summary_candidate_pool
+            ):
+                if not self._is_social_payload(payload):
+                    continue
+                candidate_sources.append(
+                    self._source_from_payload(
+                        collection=self.qdrant_collection,
+                        payload=payload,
+                    )
+                )
+
+        deduped_sources, sampled_sources = self._select_social_summary_sources(
+            candidate_sources
+        )
+        coverage_unit = self._coverage_unit_for_sources(
+            sampled_sources or deduped_sources or candidate_sources
+        )
+        total_units = self._count_social_coverage_units(coverage_unit)
+        covered_units = len(sampled_sources)
+        coverage_ratio = covered_units / total_units if total_units > 0 else 0.0
+        diagnostics = {
+            "total_documents": total_units,
+            "covered_documents": covered_units,
+            "coverage_ratio": round(coverage_ratio, 4),
+            "uncovered_documents": [],
+            "coverage_target": self.summary_coverage_target,
+            "coverage_unit": coverage_unit,
+            "candidate_count": len(candidate_sources),
+            "deduped_count": len(deduped_sources),
+            "sampled_count": len(sampled_sources),
+        }
+
+        briefs = self._build_social_summary_briefs(sampled_sources)
+        return {
+            "synthesis_prompt": self._build_summary_synthesis_prompt(
+                briefs=briefs,
+                diagnostics=diagnostics,
+                style_prompt=self.summarize_social_prompt,
+            ),
+            "sources": sampled_sources,
+            "summary_diagnostics": diagnostics,
+        }
+
+    def _prepare_collection_summary_context(self) -> dict[str, Any]:
+        """Prepare summary context for the active collection."""
+        profile = self._infer_collection_profile()
+        if self.social_summary_enabled and bool(profile.get("is_social_table")):
+            return self._prepare_social_summary_context()
+        return self._prepare_document_summary_context()
 
     def _summary_kv_store(
         self,
@@ -2731,10 +3397,14 @@ class RAG:
         """
         payload = {
             "summarize_prompt": self.summarize_prompt,
+            "summarize_social_prompt": self.summarize_social_prompt,
             "summary_coverage_target": self.summary_coverage_target,
             "summary_max_docs": self.summary_max_docs,
             "summary_per_doc_top_k": self.summary_per_doc_top_k,
             "summary_final_source_cap": self.summary_final_source_cap,
+            "social_summary_enabled": self.social_summary_enabled,
+            "social_summary_candidate_pool": self.social_summary_candidate_pool,
+            "social_summary_diversity_limit": self.social_summary_diversity_limit,
         }
         encoded = json.dumps(
             payload,

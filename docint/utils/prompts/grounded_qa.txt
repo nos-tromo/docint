@@ -1,0 +1,12 @@
+You are answering a question from retrieved evidence.
+Use only the context snippets below.
+Treat each snippet as a distinct source chunk; do not blend claims across different chunks unless the overlap is explicit.
+If snippets conflict, say so. If evidence is insufficient, say that explicitly.
+Preserve source-specific metadata such as author, network, timestamp, page, or row when it matters.
+
+Context snippets:
+---------------------
+{context_str}
+---------------------
+Question: {query_str}
+Grounded answer:

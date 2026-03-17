@@ -8,7 +8,12 @@ from loguru import logger
 from openai import OpenAI
 from openai.types.chat import ChatCompletionContentPartParam, ChatCompletionMessageParam
 
-from docint.utils.env_cfg import load_model_env, load_openai_env, load_path_env
+from docint.utils.env_cfg import (
+    OpenAIConfig,
+    load_model_env,
+    load_openai_env,
+    load_path_env,
+)
 
 
 class LocalOpenAI(LlamaIndexOpenAI):
@@ -43,6 +48,27 @@ class LocalOpenAI(LlamaIndexOpenAI):
             )
 
 
+def get_openai_reasoning_effort(openai_config: OpenAIConfig) -> str | None:
+    """Return the OpenAI reasoning effort to request for chat completions.
+
+    Reasoning is only enabled for the native OpenAI provider to avoid sending
+    unsupported parameters to other OpenAI-compatible backends such as Ollama
+    or llama.cpp.
+
+    Args:
+        openai_config: Parsed OpenAI environment configuration.
+
+    Returns:
+        The configured reasoning effort string when enabled for the OpenAI
+        provider, otherwise ``None``.
+    """
+    if not openai_config.thinking_enabled:
+        return None
+    if openai_config.model_provider != "openai":
+        return None
+    return openai_config.thinking_effort
+
+
 @dataclass
 class OpenAIPipeline:
     """Pipeline for text generation and image processing using OpenAI-compatible APIs."""
@@ -52,6 +78,7 @@ class OpenAIPipeline:
     text_model_id: str = field(init=False)
     vision_model_id: str = field(init=False)
     prompt_dir: Path | None = field(init=False)
+    reasoning_effort: str | None = field(init=False)
 
     def __post_init__(self) -> None:
         """Post-initialization to load configurations."""
@@ -67,6 +94,7 @@ class OpenAIPipeline:
         timeout = _openai_config.timeout
         self.temperature = _openai_config.temperature
         self.top_p = _openai_config.top_p
+        self.reasoning_effort = get_openai_reasoning_effort(_openai_config)
 
         self.client = OpenAI(
             api_key=api_key,
@@ -129,9 +157,17 @@ class OpenAIPipeline:
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
 
+            request_kwargs: dict[str, Any] = {}
+            if self.reasoning_effort is not None:
+                request_kwargs["reasoning_effort"] = self.reasoning_effort
+
             response = self.client.chat.completions.create(
                 model=self.text_model_id,
                 messages=messages,
+                seed=self.seed,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                **request_kwargs,
             )
             return response.choices[0].message.content or ""
         except Exception as e:

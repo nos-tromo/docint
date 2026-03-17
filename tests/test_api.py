@@ -94,6 +94,10 @@ class DummyRAG:
                 "coverage_ratio": 1.0,
                 "uncovered_documents": [],
                 "coverage_target": 0.7,
+                "coverage_unit": "documents",
+                "candidate_count": 2,
+                "deduped_count": 2,
+                "sampled_count": 2,
             },
         }
 
@@ -167,6 +171,9 @@ class DummyRAG:
         return {
             "response": "answer",
             "sources": [{"id": 1}],
+            "retrieval_query": f"rewritten::{question}",
+            "coverage_unit": "documents",
+            "retrieval_mode": "rewrite_compact_graph",
             "graph_debug": {
                 "enabled": True,
                 "applied": True,
@@ -208,6 +215,9 @@ class DummyRAG:
         yield {
             "sources": [{"id": 1}],
             "session_id": "generated-session",
+            "retrieval_query": f"rewritten::{question}",
+            "coverage_unit": "documents",
+            "retrieval_mode": "rewrite_compact_graph",
             "graph_debug": {
                 "enabled": True,
                 "applied": True,
@@ -678,6 +688,8 @@ def test_stream_query_includes_validation_metadata(client: TestClient) -> None:
     assert '"validation_checked"' in text
     assert '"validation_mismatch"' in text
     assert '"graph_debug"' in text
+    assert '"retrieval_query"' in text
+    assert '"retrieval_mode"' in text
 
 
 def test_summarize_includes_summary_diagnostics(client: TestClient) -> None:
@@ -693,6 +705,7 @@ def test_summarize_includes_summary_diagnostics(client: TestClient) -> None:
     assert payload["sources"] == [{"id": "s1"}]
     assert payload["summary_diagnostics"]["total_documents"] == 2
     assert payload["summary_diagnostics"]["covered_documents"] == 2
+    assert payload["summary_diagnostics"]["coverage_unit"] == "documents"
     assert "validation_checked" in payload
     assert "validation_mismatch" in payload
     assert "validation_reason" in payload
@@ -721,6 +734,7 @@ def test_summarize_stream_includes_summary_diagnostics(client: TestClient) -> No
         text = "".join([chunk.decode() for chunk in resp.iter_raw()])
     assert '"summary_diagnostics"' in text
     assert '"coverage_ratio"' in text
+    assert '"coverage_unit"' in text
 
 
 def test_summarize_stream_refresh_flag_passthrough(client: TestClient) -> None:

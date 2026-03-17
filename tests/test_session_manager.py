@@ -33,6 +33,12 @@ def session_manager() -> Generator[SessionManager, None, None]:
     rag_mock.text_model_id = "text-model"
     rag_mock.retrieve_similarity_top_k = 20
     rag_mock.rerank_top_n = 5
+    rag_mock.conversation_summary_prompt = "Summarize turns:\n"
+    rag_mock.rewrite_retrieval_query.return_value = "rewritten question"
+    rag_mock._infer_collection_profile.return_value = {"coverage_unit": "documents"}
+    mode = MagicMock()
+    mode.value = "compact"
+    rag_mock._resolve_chat_response_mode.return_value = mode
     cast(Any, rag_mock.get_source_by_node_id).return_value = None
 
     sm = SessionManager(rag=rag_mock)
@@ -198,7 +204,11 @@ def test_chat_uses_request_scoped_filtered_engine(
 
     session_manager.rag.query_engine = MagicMock()
     session_manager.rag.build_query_engine.return_value = filtered_engine
-    session_manager.rag.expand_query_with_graph_with_debug.return_value = ("hello", {})
+    session_manager.rag.rewrite_retrieval_query.return_value = "rewritten hello"
+    session_manager.rag.expand_query_with_graph_with_debug.return_value = (
+        "expanded hello",
+        {},
+    )
     session_manager.rag._normalize_response_data.return_value = {
         "response": "Hi",
         "sources": [],
@@ -216,10 +226,62 @@ def test_chat_uses_request_scoped_filtered_engine(
     )
 
     session_manager.rag.build_query_engine.assert_called_once()
-    filtered_engine.query.assert_called_once_with("hello")
+    filtered_engine.query.assert_called_once_with("expanded hello")
     session_manager.rag._normalize_response_data.assert_called_once_with(
         "hello",
         filtered_response,
         metadata_filters_active=True,
+        retrieval_query="rewritten hello",
+        coverage_unit="documents",
+        retrieval_mode="rewrite_compact",
     )
     assert response["response"] == "Hi"
+
+
+def test_chat_rewrites_retrieval_query_without_prefixing_session_context(
+    session_manager: SessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chat should retrieve with the rewritten standalone query only.
+
+    Args:
+        session_manager: The session manager fixture.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    resp_mock = MagicMock()
+    resp_mock.metadata = {}
+    resp_mock.source_nodes = []
+
+    session_manager._persist_turn(
+        "rewrite-session",
+        "Tell me about Alice",
+        resp_mock,
+        {"response": "Alice posted about launch", "reasoning": None},
+    )
+
+    engine = MagicMock()
+    filtered_response = MagicMock()
+    engine.query.return_value = filtered_response
+    session_manager.rag.query_engine = engine
+    session_manager.rag.rewrite_retrieval_query.return_value = "What did Alice post?"
+    session_manager.rag.expand_query_with_graph_with_debug.return_value = (
+        "What did Alice post?",
+        {"applied": False},
+    )
+    session_manager.rag._normalize_response_data.return_value = {
+        "response": "Grounded answer",
+        "sources": [],
+    }
+    session_manager.session_id = "rewrite-session"
+    session_manager.chat_engine = object()
+
+    monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
+
+    session_manager.chat("What did she post?")
+
+    rewrite_context = session_manager.rag.rewrite_retrieval_query.call_args.kwargs[
+        "conversation_context"
+    ]
+    assert "Tell me about Alice" in rewrite_context
+    assert "Alice posted about launch" in rewrite_context
+    engine.query.assert_called_once_with("What did Alice post?")

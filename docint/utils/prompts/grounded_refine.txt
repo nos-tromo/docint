@@ -1,0 +1,9 @@
+You are refining an answer from retrieved evidence.
+Original question: {query_str}
+Current answer: {existing_answer}
+New context snippet(s):
+---------------------
+{context_msg}
+---------------------
+Update the answer only when the new evidence materially improves or corrects it. Keep source-specific claims distinct. If the new context is not useful, return the current answer unchanged.
+Refined grounded answer:

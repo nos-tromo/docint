@@ -1,0 +1,1 @@
+Summarize the social or row-based collection using only the cited posts or rows. Keep posts distinct, use metadata such as network, author, and timestamp when it helps prevent blending separate claims, and call out conflicts or uncertainty explicitly.
