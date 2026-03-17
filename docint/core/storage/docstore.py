@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import time
 import uuid
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from llama_index.core.storage.kvstore.types import DEFAULT_COLLECTION, BaseKVStore
 from loguru import logger
 from qdrant_client import QdrantClient
+from qdrant_client.http.exceptions import ResponseHandlingException
 from qdrant_client.http import models as rest
+
+
+T = TypeVar("T")
 
 
 def _generate_id(key: str, collection: str) -> str:
@@ -33,6 +38,9 @@ class QdrantKVStore(BaseKVStore):
         client: QdrantClient,
         collection_name: str,
         batch_size: int = 100,
+        max_retries: int = 3,
+        retry_backoff_seconds: float = 0.25,
+        retry_backoff_max_seconds: float = 2.0,
     ) -> None:
         """Initialize the QdrantKVStore.
 
@@ -40,10 +48,19 @@ class QdrantKVStore(BaseKVStore):
             client (QdrantClient): The Qdrant client instance.
             collection_name (str): The name of the Qdrant collection to use.
             batch_size (int, optional): The batch size for upsert operations. Defaults to 100.
+            max_retries (int, optional): Number of retries for transient transport
+                failures. Defaults to 3.
+            retry_backoff_seconds (float, optional): Initial backoff in seconds between
+                retries. Defaults to 0.25.
+            retry_backoff_max_seconds (float, optional): Maximum backoff in seconds.
+                Defaults to 2.0.
         """
         self.client = client
         self.collection_name = collection_name
         self.batch_size = batch_size
+        self.max_retries = max(0, max_retries)
+        self.retry_backoff_seconds = max(0.0, retry_backoff_seconds)
+        self.retry_backoff_max_seconds = max(0.0, retry_backoff_max_seconds)
 
         # Create collection if it doesn't exist
         if not self.client.collection_exists(self.collection_name):
@@ -58,6 +75,78 @@ class QdrantKVStore(BaseKVStore):
                     distance=rest.Distance.DOT,
                 ),
             )
+
+    @staticmethod
+    def _is_retryable_exception(exc: Exception) -> bool:
+        """Return True when *exc* looks like a transient transport failure.
+
+        Args:
+            exc: Exception raised by Qdrant/http transports.
+
+        Returns:
+            bool: Whether this exception should be retried.
+        """
+        if isinstance(exc, (ConnectionError, ConnectionResetError, TimeoutError)):
+            return True
+        if isinstance(exc, ResponseHandlingException) and exc.__cause__ is not None:
+            return QdrantKVStore._is_retryable_exception(exc.__cause__)
+
+        message = str(exc).lower()
+        retryable_markers = (
+            "connection reset",
+            "connection aborted",
+            "connection refused",
+            "broken pipe",
+            "timed out",
+            "readerror",
+            "responsehandlingexception",
+        )
+        return any(marker in message for marker in retryable_markers)
+
+    def _execute_with_retry(self, operation: str, fn: Callable[[], T]) -> T:
+        """Execute *fn* with bounded retries for transient Qdrant errors.
+
+        Args:
+            operation: Human-readable operation name for logs.
+            fn: Callable that performs the underlying operation.
+
+        Returns:
+            T: Result from *fn*.
+
+        Raises:
+            Exception: Re-raises the last exception on exhaustion or non-retryable
+                failures.
+        """
+        attempts = max(1, self.max_retries + 1)
+        attempt = 1
+        last_exc: Exception | None = None
+        while attempt <= attempts:
+            try:
+                return fn()
+            except Exception as exc:
+                last_exc = exc
+                if not self._is_retryable_exception(exc) or attempt >= attempts:
+                    raise
+                delay = min(
+                    self.retry_backoff_seconds * (2 ** (attempt - 1)),
+                    self.retry_backoff_max_seconds,
+                )
+                logger.warning(
+                    "Qdrant KV operation '{}' failed on attempt {}/{} with retryable "
+                    "error: {}. Retrying in {:.2f}s",
+                    operation,
+                    attempt,
+                    attempts,
+                    exc,
+                    delay,
+                )
+                if delay > 0:
+                    time.sleep(delay)
+                attempt += 1
+
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("Retry loop exited unexpectedly")
 
     def put(
         self,
@@ -79,16 +168,19 @@ class QdrantKVStore(BaseKVStore):
             "collection": collection,
             "val": val,
         }
-        self.client.upsert(
-            collection_name=self.collection_name,
-            points=[
-                rest.PointStruct(
-                    id=point_id,
-                    vector=[0.0],
-                    payload=payload,
-                )
-            ],
-            wait=True,
+        self._execute_with_retry(
+            "put",
+            lambda: self.client.upsert(
+                collection_name=self.collection_name,
+                points=[
+                    rest.PointStruct(
+                        id=point_id,
+                        vector=[0.0],
+                        payload=payload,
+                    )
+                ],
+                wait=True,
+            ),
         )
 
     def put_all(
@@ -127,10 +219,17 @@ class QdrantKVStore(BaseKVStore):
             logger.debug(
                 "Upserting batch {} of size {}", i // batch_size + 1, len(batch)
             )
-            self.client.upsert(
-                collection_name=self.collection_name,
-                points=batch,
-                wait=True,
+
+            def _upsert_batch() -> Any:
+                return self.client.upsert(
+                    collection_name=self.collection_name,
+                    points=batch,
+                    wait=True,
+                )
+
+            self._execute_with_retry(
+                "put_all.batch_upsert",
+                _upsert_batch,
             )
 
     def get(
@@ -148,10 +247,13 @@ class QdrantKVStore(BaseKVStore):
             dict | None: The retrieved value or None if not found.
         """
         point_id = _generate_id(key, collection)
-        res = self.client.retrieve(
-            collection_name=self.collection_name,
-            ids=[point_id],
-            with_payload=True,
+        res = self._execute_with_retry(
+            "get",
+            lambda: self.client.retrieve(
+                collection_name=self.collection_name,
+                ids=[point_id],
+                with_payload=True,
+            ),
         )
         if res and res[0].payload:
             val = res[0].payload.get("val")
@@ -180,12 +282,19 @@ class QdrantKVStore(BaseKVStore):
         )
 
         while True:
-            points, offset = self.client.scroll(
-                collection_name=self.collection_name,
-                scroll_filter=filter_,
-                limit=self.batch_size,
-                offset=offset,
-                with_payload=True,
+
+            def _scroll_once() -> Any:
+                return self.client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=filter_,
+                    limit=self.batch_size,
+                    offset=offset,
+                    with_payload=True,
+                )
+
+            points, offset = self._execute_with_retry(
+                "get_all.scroll",
+                _scroll_once,
             )
             for point in points:
                 if point.payload:
@@ -209,9 +318,12 @@ class QdrantKVStore(BaseKVStore):
             bool: True if the key-value pair was deleted successfully.
         """
         point_id = _generate_id(key, collection)
-        self.client.delete(
-            collection_name=self.collection_name,
-            points_selector=[point_id],
+        self._execute_with_retry(
+            "delete",
+            lambda: self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=[point_id],
+            ),
         )
         return True
 

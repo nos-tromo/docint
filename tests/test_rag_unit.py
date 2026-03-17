@@ -1406,6 +1406,38 @@ def test_summarize_collection_revision_bump_invalidates_cache(
     assert len(llm.prompts) == 2
 
 
+def test_summary_kv_store_passes_docstore_retry_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Summary KV store construction should include docstore retry settings.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    captured: dict[str, Any] = {}
+
+    class FakeQdrantKVStore:
+        """Capture kwargs passed to KV store constructor."""
+
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = MagicMock()
+    rag.docstore_max_retries = 8
+    rag.docstore_retry_backoff_seconds = 0.6
+    rag.docstore_retry_backoff_max_seconds = 4.0
+
+    monkeypatch.setattr(rag_module, "QdrantKVStore", FakeQdrantKVStore)
+
+    kv_store = rag._summary_kv_store()
+
+    assert kv_store is not None
+    assert captured["max_retries"] == 8
+    assert captured["retry_backoff_seconds"] == 0.6
+    assert captured["retry_backoff_max_seconds"] == 4.0
+
+
 class _FakeDocStore:
     """Minimal docstore stub for ingest invalidation tests."""
 
@@ -1537,6 +1569,113 @@ def _patch_ingest_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rag_module, "CorePDFPipelineReader", _FakeCorePDFReader)
     monkeypatch.setattr(RAG, "reset_session_state", lambda self: None)
     monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+
+
+def test_persist_node_batches_streams_micro_batches() -> None:
+    """Node persistence should split ingest writes into micro-batches.
+
+    Args:
+        None.
+    """
+
+    class FakeDocStore:
+        """Capture docstore write batch sizes."""
+
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        def add_documents(self, nodes: list[Any], allow_update: bool = True) -> None:
+            _ = allow_update
+            self.batch_sizes.append(len(nodes))
+
+    class FakeIndex:
+        """Capture vector insert batch sizes."""
+
+        def __init__(self) -> None:
+            self.docstore = FakeDocStore()
+            self.vector_batch_sizes: list[int] = []
+
+        def insert_nodes(self, nodes: list[Any]) -> None:
+            self.vector_batch_sizes.append(len(nodes))
+
+    rag = RAG(qdrant_collection="test")
+    rag.docstore_batch_size = 2
+    rag.index = cast(Any, FakeIndex())
+
+    nodes = [types.SimpleNamespace(metadata={}) for _ in range(5)]
+    rag._persist_node_batches(cast(list[Any], nodes))
+
+    assert rag.index.docstore.batch_sizes == [2, 2, 1]
+    assert rag.index.vector_batch_sizes == [2, 2, 1]
+
+
+def test_apersist_node_batches_streams_micro_batches() -> None:
+    """Async node persistence should split ingest writes into micro-batches."""
+
+    class FakeDocStore:
+        """Capture docstore write batch sizes."""
+
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        def add_documents(self, nodes: list[Any], allow_update: bool = True) -> None:
+            _ = allow_update
+            self.batch_sizes.append(len(nodes))
+
+    class FakeIndex:
+        """Capture async vector insert batch sizes."""
+
+        def __init__(self) -> None:
+            self.docstore = FakeDocStore()
+            self.vector_batch_sizes: list[int] = []
+
+        async def ainsert_nodes(self, nodes: list[Any]) -> None:
+            self.vector_batch_sizes.append(len(nodes))
+
+    rag = RAG(qdrant_collection="test")
+    rag.docstore_batch_size = 3
+    rag.index = cast(Any, FakeIndex())
+
+    nodes = [types.SimpleNamespace(metadata={}) for _ in range(7)]
+    asyncio.run(rag._apersist_node_batches(cast(list[Any], nodes)))
+
+    assert rag.index.docstore.batch_sizes == [3, 3, 1]
+    assert rag.index.vector_batch_sizes == [3, 3, 1]
+
+
+def test_log_ingest_benchmark_summary_emits_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Benchmark helper should emit a structured ingest summary log.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="test")
+    captured: list[str] = []
+
+    monkeypatch.setattr(
+        rag_module.logger,
+        "info",
+        lambda message, *args: captured.append(message.format(*args)),
+    )
+
+    rag._log_ingest_benchmark_summary(
+        mode="sync",
+        started_at=0.0,
+        core_docs=2,
+        core_nodes=10,
+        streaming_docs=3,
+        streaming_nodes=20,
+        enrich_batches=4,
+        persist_batches=5,
+    )
+
+    assert len(captured) == 1
+    assert "Ingest benchmark (sync)" in captured[0]
+    assert "nodes_per_s=" in captured[0]
+    assert "ingestion_batch_size=" in captured[0]
+    assert "docstore_batch_size=" in captured[0]
 
 
 def test_ingest_docs_bumps_summary_revision(

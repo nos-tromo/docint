@@ -255,6 +255,117 @@ class DocumentIngestionPipeline:
         if current_docs:
             yield self._process_batch(current_docs, existing_hashes)
 
+    def build_streaming(
+        self, existing_hashes: set[str] | None = None
+    ) -> Iterable[tuple[list[Document], list[BaseNode], set[str]]]:
+        """Execute ingestion and yield node batches as enrichment progresses.
+
+        Args:
+            existing_hashes: Optional set of already ingested file hashes.
+
+        Yields:
+            tuple[list[Document], list[BaseNode], set[str]]:
+                - docs: Processed documents for the current source batch. Only
+                  present on the first yielded node batch for that source batch.
+                - nodes: Incrementally enriched nodes ready for persistence.
+                - completed_hashes: File hashes that are complete for this source
+                  batch and safe to mark as processed.
+        """
+        self._load_doc_readers()
+        self._load_node_parsers()
+
+        if self.dir_reader is None:
+            raise RuntimeError("Directory reader failed to initialize.")
+
+        if existing_hashes:
+            self._filter_input_files(existing_hashes)
+
+        current_docs: list[Document] = []
+        files_processed = 0
+
+        for file_docs in self._iter_loaded_documents():
+            current_docs.extend(file_docs)
+            files_processed += 1
+
+            if files_processed >= self.ingestion_batch_size:
+                yield from self._stream_processed_batch(current_docs, existing_hashes)
+                current_docs = []
+                files_processed = 0
+
+        if current_docs:
+            yield from self._stream_processed_batch(current_docs, existing_hashes)
+
+    @staticmethod
+    def _chunk_nodes(nodes: list[BaseNode], batch_size: int) -> list[list[BaseNode]]:
+        """Split nodes into non-empty batches.
+
+        Args:
+            nodes: Nodes to split.
+            batch_size: Maximum number of nodes per batch.
+
+        Returns:
+            list[list[BaseNode]]: Batched nodes preserving input order.
+        """
+        if not nodes:
+            return []
+        effective_batch_size = max(1, int(batch_size))
+        return [
+            nodes[i : i + effective_batch_size]
+            for i in range(0, len(nodes), effective_batch_size)
+        ]
+
+    @staticmethod
+    def _extract_doc_file_hashes(docs: list[Document]) -> set[str]:
+        """Collect unique file hashes from processed documents.
+
+        Args:
+            docs: Processed document batch.
+
+        Returns:
+            set[str]: Extracted file hashes.
+        """
+        hashes: set[str] = set()
+        for doc in docs:
+            metadata = getattr(doc, "metadata", {}) or {}
+            value = metadata.get("file_hash")
+            if isinstance(value, str) and value.strip():
+                hashes.add(value.strip())
+        return hashes
+
+    def _stream_processed_batch(
+        self,
+        docs: list[Document],
+        existing_hashes: set[str] | None,
+    ) -> Iterable[tuple[list[Document], list[BaseNode], set[str]]]:
+        """Yield incrementally enriched node batches for one source-doc batch."""
+        docs = self._attach_clean_text(docs)
+        docs = self._ensure_file_hashes(docs)
+        docs = self._filter_docs_by_existing_hashes(docs, existing_hashes)
+        file_hashes = self._extract_doc_file_hashes(docs)
+        nodes = self._create_nodes_without_enrichment(docs)
+
+        self.docs = docs
+        self.nodes = nodes
+
+        if not nodes:
+            yield docs, [], file_hashes
+            return
+
+        total_nodes = len(nodes)
+        processed_nodes = 0
+        node_batches = self._chunk_nodes(nodes, self.ingestion_batch_size)
+        for batch_idx, node_batch in enumerate(node_batches):
+            self._enrich_nodes_in_place(
+                node_batch,
+                progress_offset=processed_nodes,
+                progress_total=total_nodes,
+            )
+            processed_nodes += len(node_batch)
+            completed_hashes = (
+                file_hashes if batch_idx == len(node_batches) - 1 else set()
+            )
+            yield docs if batch_idx == 0 else [], node_batch, completed_hashes
+
     @staticmethod
     def _is_audio_input_file(file_path: Path | PurePosixPath) -> bool:
         """Return True when the input path should use the audio reader.
@@ -393,6 +504,278 @@ class DocumentIngestionPipeline:
         self.nodes = nodes
 
         return docs, nodes
+
+    def _enrich_nodes_in_place(
+        self,
+        nodes: list[BaseNode],
+        *,
+        progress_offset: int = 0,
+        progress_total: int | None = None,
+    ) -> None:
+        """Apply NER and hate-speech enrichment to *nodes* in-place.
+
+        Args:
+            nodes: Nodes to enrich.
+            progress_offset: Processed node count offset for cumulative progress.
+            progress_total: Total node count for progress display.
+        """
+        if not nodes:
+            return
+
+        total_nodes = progress_total or (progress_offset + len(nodes))
+
+        if self.entity_extractor:
+
+            def _process_node(idx: int, node: BaseNode) -> None:
+                text_value = getattr(node, "text", "") or ""
+                if not text_value.strip():
+                    return
+                try:
+                    if self.entity_extractor:
+                        ents, rels = self.entity_extractor(text_value)
+                        if ents or rels:
+                            meta = dict(getattr(node, "metadata", {}) or {})
+                            if ents:
+                                meta["entities"] = ents
+                            if rels:
+                                meta["relations"] = rels
+                            node.metadata = meta
+                except Exception as exc:
+                    logger.warning("Entity extractor failed on chunk {}: {}", idx, exc)
+
+            if self.ner_max_workers > 1:
+                with ThreadPoolExecutor(max_workers=self.ner_max_workers) as executor:
+                    futures = [
+                        executor.submit(_process_node, i + progress_offset, node)
+                        for i, node in enumerate(nodes)
+                    ]
+                    for i, _ in enumerate(as_completed(futures)):
+                        if self.progress_callback:
+                            self.progress_callback(
+                                "Extracting entities: "
+                                f"{progress_offset + i + 1}/{total_nodes} chunks processed"
+                            )
+            else:
+                for i, node in enumerate(nodes):
+                    _process_node(i + progress_offset, node)
+                    if self.progress_callback:
+                        self.progress_callback(
+                            "Extracting entities: "
+                            f"{progress_offset + i + 1}/{total_nodes} chunks processed"
+                        )
+
+        if (
+            self.hate_speech_enabled
+            and self.hate_speech_prompt
+            and self.hate_speech_model is not None
+        ):
+
+            def _process_hate_speech(idx: int, node: BaseNode) -> None:
+                text_value = getattr(node, "text", "") or ""
+                if not text_value.strip():
+                    return
+                try:
+                    prompt = self.hate_speech_prompt.replace(  # type: ignore[union-attr]
+                        "{text}", text_value[: self.hate_speech_max_chars]
+                    )
+                    response = self.hate_speech_model.complete(prompt)  # type: ignore[union-attr]
+                    raw = response.text if hasattr(response, "text") else str(response)
+                    parsed = _parse_hate_speech_payload(str(raw))
+                    if bool(parsed.get("hate_speech")):
+                        meta = dict(getattr(node, "metadata", {}) or {})
+                        chunk_id = str(
+                            getattr(node, "node_id", "")
+                            or getattr(node, "id_", "")
+                            or ""
+                        )
+                        source_ref = str(
+                            meta.get("file_path")
+                            or meta.get("filename")
+                            or meta.get("file_name")
+                            or meta.get("source")
+                            or ""
+                        )
+                        parsed["chunk_id"] = chunk_id
+                        parsed["chunk_text"] = text_value
+                        parsed["source_ref"] = source_ref
+                        node.metadata = {**meta, "hate_speech": parsed}
+                except Exception as exc:
+                    logger.warning(
+                        "Hate-speech detection failed on chunk {}: {}", idx, exc
+                    )
+
+            if self.hate_speech_max_workers > 1:
+                with ThreadPoolExecutor(
+                    max_workers=self.hate_speech_max_workers
+                ) as executor:
+                    futures = [
+                        executor.submit(_process_hate_speech, i + progress_offset, node)
+                        for i, node in enumerate(nodes)
+                    ]
+                    for i, _ in enumerate(as_completed(futures)):
+                        if self.progress_callback:
+                            self.progress_callback(
+                                "Detecting hate speech: "
+                                f"{progress_offset + i + 1}/{total_nodes} chunks processed"
+                            )
+            else:
+                for i, node in enumerate(nodes):
+                    _process_hate_speech(i + progress_offset, node)
+                    if self.progress_callback:
+                        self.progress_callback(
+                            "Detecting hate speech: "
+                            f"{progress_offset + i + 1}/{total_nodes} chunks processed"
+                        )
+
+    def _create_nodes_without_enrichment(self, docs: list[Document]) -> list[BaseNode]:
+        """Create nodes from documents without applying enrichment stages.
+
+        Args:
+            docs: Documents to parse.
+
+        Returns:
+            list[BaseNode]: Parsed nodes before NER/hate-speech enrichment.
+
+        Raises:
+            RuntimeError: If node parsers are not initialized.
+        """
+        if self.md_node_parser is None or self.docling_node_parser is None:
+            raise RuntimeError("Node parsers are not initialized.")
+
+        audio_docs, document_docs, img_docs, json_docs, table_docs, text_docs = [
+            [] for _ in range(6)
+        ]
+        for d in docs:
+            meta = getattr(d, "metadata", {}) or {}
+            file_type = (meta.get("file_type") or "").lower()
+            source_kind = meta.get("source", "") or ""
+            file_path = str(meta.get("file_path") or meta.get("file_name") or "")
+            ext = file_path.lower().rsplit(".", 1)[-1] if "." in file_path else ""
+
+            if source_kind in {"audio", "video"} or ext in {
+                "avi",
+                "flv",
+                "mkv",
+                "mov",
+                "mpeg",
+                "mpg",
+                "mp3",
+                "mp4",
+                "m4v",
+                "ogg",
+                "wav",
+                "webm",
+                "wmv",
+            }:
+                audio_docs.append(d)
+            elif source_kind == "image" or ext in {"gif", "jpeg", "jpg", "png"}:
+                img_docs.append(d)
+            elif source_kind == "table" or ext in {"csv", "tsv"}:
+                table_docs.append(d)
+            elif file_type.endswith(("json", "jsonl")) or ext in {"json", "jsonl"}:
+                json_docs.append(d)
+            elif file_type.endswith(("docx", "pdf")) or ext in {"docx", "pdf"}:
+                document_docs.append(d)
+            elif file_type.startswith("text/") or ext in {"txt", "md", "rst"}:
+                text_docs.append(d)
+            else:
+                if file_type.startswith("text/") or ext in {"txt", "md", "rst"}:
+                    text_docs.append(d)
+                else:
+                    logger.warning(
+                        "Unrecognized document type for file '{}'; treating as plain text.",
+                        file_path,
+                    )
+                    text_docs.append(d)
+
+        nodes: list[BaseNode] = []
+        if audio_docs:
+            logger.info(
+                "Parsing {} audio documents with SentenceSplitter",
+                len(audio_docs),
+            )
+            nodes.extend(self._process_docs_hierarchical(audio_docs))
+
+        if img_docs:
+            logger.info(
+                "Parsing {} image documents with SentenceSplitter",
+                len(img_docs),
+            )
+            nodes.extend(self._process_docs_hierarchical(img_docs))
+
+        if json_docs:
+            logger.info(
+                "Parsing {} JSON documents with SentenceSplitter",
+                len(json_docs),
+            )
+            nodes.extend(self._process_docs_hierarchical(json_docs))
+
+        if document_docs:
+
+            def _is_docling_json(doc: Document) -> bool:
+                try:
+                    json.loads(getattr(doc, "text", "") or "")
+                    return True
+                except Exception:
+                    return False
+
+            pdf_docs_docling = [d for d in document_docs if _is_docling_json(d)]
+            pdf_docs_md = [d for d in document_docs if not _is_docling_json(d)]
+
+            if pdf_docs_docling:
+                logger.info(
+                    "Parsing {} Docling JSON PDFs with DoclingNodeParser",
+                    len(pdf_docs_docling),
+                )
+                nodes.extend(
+                    self._process_docs_hierarchical(
+                        pdf_docs_docling, self.docling_node_parser
+                    )
+                )
+            if pdf_docs_md:
+                logger.info(
+                    "Parsing {} Markdown PDFs with MarkdownNodeParser",
+                    len(pdf_docs_md),
+                )
+                nodes.extend(
+                    self._process_docs_hierarchical(pdf_docs_md, self.md_node_parser)
+                )
+
+        if table_docs:
+            logger.info(
+                "Parsing {} table documents with SentenceSplitter (one node per document)",
+                len(table_docs),
+            )
+            table_splitter = SentenceSplitter(chunk_size=10_000_000, chunk_overlap=0)
+            nodes.extend(table_splitter.get_nodes_from_documents(table_docs))
+
+        if text_docs:
+            markdown_docs = [
+                d
+                for d in text_docs
+                if str(d.metadata.get("file_path", "")).endswith(
+                    (".md", ".markdown", ".rst")
+                )
+                or (d.text.strip().startswith("#"))
+            ]
+            plain_docs = [d for d in text_docs if d not in markdown_docs]
+
+            if markdown_docs:
+                logger.info(
+                    "Parsing {} markdown documents with MarkdownNodeParser",
+                    len(markdown_docs),
+                )
+                nodes.extend(
+                    self._process_docs_hierarchical(markdown_docs, self.md_node_parser)
+                )
+            if plain_docs:
+                logger.info(
+                    "Parsing {} plain text documents with SentenceSplitter",
+                    len(plain_docs),
+                )
+                nodes.extend(self._process_docs_hierarchical(plain_docs))
+
+        return nodes
 
     def _filter_input_files(self, existing_hashes: set[str]) -> None:
         """Filter self.dir_reader.input_files based on existing hashes. Populates self.file_hash_cache.
@@ -738,249 +1121,6 @@ class DocumentIngestionPipeline:
         Raises:
             RuntimeError: If node parsers are not initialized.
         """
-        if self.md_node_parser is None or self.docling_node_parser is None:
-            raise RuntimeError("Node parsers are not initialized.")
-
-        audio_docs, document_docs, img_docs, json_docs, table_docs, text_docs = [
-            [] for _ in range(6)
-        ]
-        for d in docs:
-            meta = getattr(d, "metadata", {}) or {}
-            file_type = (meta.get("file_type") or "").lower()
-            source_kind = meta.get("source", "") or ""
-            file_path = str(meta.get("file_path") or meta.get("file_name") or "")
-            ext = file_path.lower().rsplit(".", 1)[-1] if "." in file_path else ""
-
-            if source_kind in {"audio", "video"} or ext in {
-                "avi",
-                "flv",
-                "mkv",
-                "mov",
-                "mpeg",
-                "mpg",
-                "mp3",
-                "mp4",
-                "m4v",
-                "ogg",
-                "wav",
-                "webm",
-                "wmv",
-            }:
-                audio_docs.append(d)
-            elif source_kind == "image" or ext in {"gif", "jpeg", "jpg", "png"}:
-                img_docs.append(d)
-            elif source_kind == "table" or ext in {"csv", "tsv"}:
-                table_docs.append(d)
-            elif file_type.endswith(("json", "jsonl")) or ext in {"json", "jsonl"}:
-                json_docs.append(d)
-            elif file_type.endswith(("docx", "pdf")) or ext in {"docx", "pdf"}:
-                document_docs.append(d)
-            elif file_type.startswith("text/") or ext in {"txt", "md", "rst"}:
-                text_docs.append(d)
-            else:
-                if file_type.startswith("text/") or ext in {"txt", "md", "rst"}:
-                    text_docs.append(d)
-                else:
-                    logger.warning(
-                        "Unrecognized document type for file '{}'; treating as plain text.",
-                        file_path,
-                    )
-                    text_docs.append(d)
-
-        nodes: list[BaseNode] = []
-        if audio_docs:
-            logger.info(
-                "Parsing {} audio documents with SentenceSplitter",
-                len(audio_docs),
-            )
-            nodes.extend(self._process_docs_hierarchical(audio_docs))
-
-        if img_docs:
-            logger.info(
-                "Parsing {} image documents with SentenceSplitter",
-                len(img_docs),
-            )
-            nodes.extend(self._process_docs_hierarchical(img_docs))
-
-        if json_docs:
-            logger.info(
-                "Parsing {} JSON documents with SentenceSplitter",
-                len(json_docs),
-            )
-            nodes.extend(self._process_docs_hierarchical(json_docs))
-
-        if document_docs:
-
-            def _is_docling_json(doc: Document) -> bool:
-                """Check if the document text is valid Docling JSON.
-
-                Args:
-                    doc (Document): The document to check.
-
-                Returns:
-                    bool: True if the document text is valid Docling JSON, False otherwise.
-                """
-                try:
-                    json.loads(getattr(doc, "text", "") or "")
-                    return True
-                except Exception:
-                    return False
-
-            pdf_docs_docling = [d for d in document_docs if _is_docling_json(d)]
-            pdf_docs_md = [d for d in document_docs if not _is_docling_json(d)]
-
-            if pdf_docs_docling:
-                logger.info(
-                    "Parsing {} Docling JSON PDFs with DoclingNodeParser",
-                    len(pdf_docs_docling),
-                )
-                nodes.extend(
-                    self._process_docs_hierarchical(
-                        pdf_docs_docling, self.docling_node_parser
-                    )
-                )
-            if pdf_docs_md:
-                logger.info(
-                    "Parsing {} Markdown PDFs with MarkdownNodeParser",
-                    len(pdf_docs_md),
-                )
-                nodes.extend(
-                    self._process_docs_hierarchical(pdf_docs_md, self.md_node_parser)
-                )
-
-        if table_docs:
-            logger.info(
-                "Parsing {} table documents with SentenceSplitter (one node per document)",
-                len(table_docs),
-            )
-            table_splitter = SentenceSplitter(chunk_size=10_000_000, chunk_overlap=0)
-            nodes.extend(table_splitter.get_nodes_from_documents(table_docs))
-
-        if text_docs:
-            markdown_docs = [
-                d
-                for d in text_docs
-                if str(d.metadata.get("file_path", "")).endswith(
-                    (".md", ".markdown", ".rst")
-                )
-                or (d.text.strip().startswith("#"))
-            ]
-            plain_docs = [d for d in text_docs if d not in markdown_docs]
-
-            if markdown_docs:
-                logger.info(
-                    "Parsing {} markdown documents with MarkdownNodeParser",
-                    len(markdown_docs),
-                )
-                nodes.extend(
-                    self._process_docs_hierarchical(markdown_docs, self.md_node_parser)
-                )
-            if plain_docs:
-                logger.info(
-                    "Parsing {} plain text documents with SentenceSplitter",
-                    len(plain_docs),
-                )
-                nodes.extend(self._process_docs_hierarchical(plain_docs))
-
-        if self.entity_extractor:
-            total_nodes = len(nodes)
-
-            def _process_node(idx: int, node: BaseNode) -> None:
-                text_value = getattr(node, "text", "") or ""
-                if not text_value.strip():
-                    return
-                try:
-                    if self.entity_extractor:
-                        ents, rels = self.entity_extractor(text_value)
-                        if ents or rels:
-                            meta = dict(getattr(node, "metadata", {}) or {})
-                            if ents:
-                                meta["entities"] = ents
-                            if rels:
-                                meta["relations"] = rels
-                            node.metadata = meta
-                except Exception as exc:
-                    logger.warning("Entity extractor failed on chunk {}: {}", idx, exc)
-
-            if self.ner_max_workers > 1:
-                with ThreadPoolExecutor(max_workers=self.ner_max_workers) as executor:
-                    futures = [
-                        executor.submit(_process_node, i, node)
-                        for i, node in enumerate(nodes)
-                    ]
-                    for i, _ in enumerate(as_completed(futures)):
-                        if self.progress_callback:
-                            self.progress_callback(
-                                f"Extracting entities: {i + 1}/{total_nodes} chunks processed"
-                            )
-            else:
-                for i, node in enumerate(nodes):
-                    _process_node(i, node)
-                    if self.progress_callback:
-                        self.progress_callback(
-                            f"Extracting entities: {i + 1}/{total_nodes} chunks processed"
-                        )
-
-        if (
-            self.hate_speech_enabled
-            and self.hate_speech_prompt
-            and self.hate_speech_model is not None
-        ):
-            total_nodes = len(nodes)
-
-            def _process_hate_speech(idx: int, node: BaseNode) -> None:
-                text_value = getattr(node, "text", "") or ""
-                if not text_value.strip():
-                    return
-                try:
-                    prompt = self.hate_speech_prompt.replace(  # type: ignore[union-attr]
-                        "{text}", text_value[: self.hate_speech_max_chars]
-                    )
-                    response = self.hate_speech_model.complete(prompt)  # type: ignore[union-attr]
-                    raw = response.text if hasattr(response, "text") else str(response)
-                    parsed = _parse_hate_speech_payload(str(raw))
-                    if bool(parsed.get("hate_speech")):
-                        meta = dict(getattr(node, "metadata", {}) or {})
-                        chunk_id = str(
-                            getattr(node, "node_id", "")
-                            or getattr(node, "id_", "")
-                            or ""
-                        )
-                        source_ref = str(
-                            meta.get("file_path")
-                            or meta.get("filename")
-                            or meta.get("file_name")
-                            or meta.get("source")
-                            or ""
-                        )
-                        parsed["chunk_id"] = chunk_id
-                        parsed["chunk_text"] = text_value
-                        parsed["source_ref"] = source_ref
-                        node.metadata = {**meta, "hate_speech": parsed}
-                except Exception as exc:
-                    logger.warning(
-                        "Hate-speech detection failed on chunk {}: {}", idx, exc
-                    )
-
-            if self.hate_speech_max_workers > 1:
-                with ThreadPoolExecutor(
-                    max_workers=self.hate_speech_max_workers
-                ) as executor:
-                    futures = [
-                        executor.submit(_process_hate_speech, i, node)
-                        for i, node in enumerate(nodes)
-                    ]
-                    for i, _ in enumerate(as_completed(futures)):
-                        if self.progress_callback:
-                            self.progress_callback(
-                                f"Detecting hate speech: {i + 1}/{total_nodes} chunks processed"
-                            )
-            else:
-                for i, node in enumerate(nodes):
-                    _process_hate_speech(i, node)
-                    if self.progress_callback:
-                        self.progress_callback(
-                            f"Detecting hate speech: {i + 1}/{total_nodes} chunks processed"
-                        )
-
+        nodes = self._create_nodes_without_enrichment(docs)
+        self._enrich_nodes_in_place(nodes)
         return nodes
