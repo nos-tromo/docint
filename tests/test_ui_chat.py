@@ -5,7 +5,11 @@ from contextlib import nullcontext
 import pytest
 
 from docint.ui import chat as chat_module
-from docint.ui.chat import _format_graph_debug_summary, build_chat_metadata_filters
+from docint.ui.chat import (
+    _format_graph_debug_summary,
+    _retrieval_mode_badge_label,
+    build_chat_metadata_filters,
+)
 
 
 def test_format_graph_debug_summary_includes_core_fields() -> None:
@@ -28,6 +32,17 @@ def test_format_graph_debug_summary_includes_core_fields() -> None:
 def test_format_graph_debug_summary_none_returns_none() -> None:
     """Formatter should gracefully return None when no payload is provided."""
     assert _format_graph_debug_summary(None) is None
+
+
+def test_retrieval_mode_badge_label_defaults_to_stateless() -> None:
+    """Badge label helper should default unknown values to stateless label."""
+    assert _retrieval_mode_badge_label(None) == "Stateless Retrieval"
+    assert _retrieval_mode_badge_label("unexpected") == "Stateless Retrieval"
+
+
+def test_retrieval_mode_badge_label_session() -> None:
+    """Badge label helper should render session mode label."""
+    assert _retrieval_mode_badge_label("session") == "Session Retrieval"
 
 
 def test_build_chat_metadata_filters_combines_scope_date_and_custom_rules() -> None:

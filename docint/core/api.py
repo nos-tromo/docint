@@ -173,6 +173,20 @@ def _validation_payload(
     }
 
 
+def _iter_text_tokens(text: str) -> list[str]:
+    """Split text into whitespace-preserving token chunks for SSE streaming.
+
+    Args:
+        text: The text to chunk.
+
+    Returns:
+        list[str]: Token chunks suitable for incremental UI rendering.
+    """
+    if not text:
+        return []
+    return [chunk for chunk in text.split(" ") if chunk] if " " in text else [text]
+
+
 # --- Pydantic models for request and response payloads ---
 
 
@@ -210,6 +224,7 @@ class QueryIn(BaseModel):
     question: str
     session_id: str | None = None
     metadata_filters: list[MetadataFilterIn] = Field(default_factory=list)
+    retrieval_mode: Literal["session", "stateless"] = "session"
 
 
 class QueryOut(BaseModel):
@@ -405,20 +420,45 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
                 rag.create_index()
             rag.create_query_engine()
 
-        session_id = rag.start_session(payload.session_id)
         metadata_filters = build_metadata_filters(payload.metadata_filters)
         vector_store_kwargs = {}
         qdrant_filter = build_qdrant_filter(payload.metadata_filters)
         if qdrant_filter is not None:
             vector_store_kwargs["qdrant_filters"] = qdrant_filter
-        data = rag.chat(
-            payload.question,
-            metadata_filters=metadata_filters,
-            metadata_filters_active=(
-                metadata_filters is not None or bool(vector_store_kwargs)
-            ),
-            vector_store_kwargs=vector_store_kwargs or None,
-        )
+
+        if payload.retrieval_mode == "stateless":
+            retrieval_query = payload.question
+            graph_debug: dict[str, Any] | None = None
+            expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
+            if callable(expand_with_debug):
+                try:
+                    expanded, debug_payload = expand_with_debug(retrieval_query)
+                    retrieval_query = str(expanded)
+                    if isinstance(debug_payload, dict):
+                        graph_debug = debug_payload
+                except Exception as exc:
+                    logger.warning(
+                        "Graph debug expansion failed for stateless query: {}", exc
+                    )
+
+            data = rag.run_query(
+                retrieval_query,
+                metadata_filters=metadata_filters,
+                vector_store_kwargs=vector_store_kwargs or None,
+            )
+            if graph_debug is not None:
+                data["graph_debug"] = graph_debug
+            session_id = payload.session_id or "stateless"
+        else:
+            session_id = rag.start_session(payload.session_id)
+            data = rag.chat(
+                payload.question,
+                metadata_filters=metadata_filters,
+                metadata_filters_active=(
+                    metadata_filters is not None or bool(vector_store_kwargs)
+                ),
+                vector_store_kwargs=vector_store_kwargs or None,
+            )
 
         answer = (
             str(data.get("response") or data.get("answer") or "")
@@ -469,7 +509,6 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
     if getattr(rag, "index", None) is None:
         rag.create_index()
 
-    rag.start_session(payload.session_id)
     metadata_filters = build_metadata_filters(payload.metadata_filters)
     vector_store_kwargs = {}
     qdrant_filter = build_qdrant_filter(payload.metadata_filters)
@@ -488,20 +527,61 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
         try:
             full_answer = ""
             final_payload: dict[str, Any] | None = None
-            # Iterate over the sync generator
-            for chunk in rag.stream_chat(
-                payload.question,
-                metadata_filters=metadata_filters,
-                metadata_filters_active=(
-                    metadata_filters is not None or bool(vector_store_kwargs)
-                ),
-                vector_store_kwargs=vector_store_kwargs or None,
-            ):
-                if isinstance(chunk, str):
-                    full_answer += chunk
-                    yield f"data: {json.dumps({'token': chunk})}\n\n"
-                elif isinstance(chunk, dict):
-                    final_payload = chunk
+            if payload.retrieval_mode == "stateless":
+                retrieval_query = payload.question
+                graph_debug: dict[str, Any] | None = None
+                expand_with_debug = getattr(
+                    rag, "expand_query_with_graph_with_debug", None
+                )
+                if callable(expand_with_debug):
+                    try:
+                        expanded, debug_payload = expand_with_debug(retrieval_query)
+                        retrieval_query = str(expanded)
+                        if isinstance(debug_payload, dict):
+                            graph_debug = debug_payload
+                    except Exception as exc:
+                        logger.warning(
+                            "Graph debug expansion failed for stateless stream query: {}",
+                            exc,
+                        )
+
+                stateless_data = rag.run_query(
+                    retrieval_query,
+                    metadata_filters=metadata_filters,
+                    vector_store_kwargs=vector_store_kwargs or None,
+                )
+                if graph_debug is not None:
+                    stateless_data["graph_debug"] = graph_debug
+
+                answer_text = str(
+                    stateless_data.get("response") or stateless_data.get("answer") or ""
+                )
+                for token in _iter_text_tokens(answer_text):
+                    full_answer += (" " if full_answer else "") + token
+                    yield f"data: {json.dumps({'token': token + ' '})}\n\n"
+
+                final_payload = {
+                    "sources": stateless_data.get("sources") or [],
+                    "session_id": payload.session_id or "stateless",
+                    "reasoning": stateless_data.get("reasoning"),
+                    "graph_debug": stateless_data.get("graph_debug"),
+                }
+            else:
+                rag.start_session(payload.session_id)
+                # Iterate over the sync generator
+                for chunk in rag.stream_chat(
+                    payload.question,
+                    metadata_filters=metadata_filters,
+                    metadata_filters_active=(
+                        metadata_filters is not None or bool(vector_store_kwargs)
+                    ),
+                    vector_store_kwargs=vector_store_kwargs or None,
+                ):
+                    if isinstance(chunk, str):
+                        full_answer += chunk
+                        yield f"data: {json.dumps({'token': chunk})}\n\n"
+                    elif isinstance(chunk, dict):
+                        final_payload = chunk
 
             payload_out = dict(final_payload or {})
             answer = str(payload_out.get("response") or payload_out.get("answer") or "")

@@ -42,6 +42,7 @@ def init_session_state() -> None:
         "selected_collection": "",
         "preview_url": None,
         "chat_running": False,
+        "chat_retrieval_mode": "stateless",
         "chat_filter_enabled": False,
         "chat_filter_scope": "All content",
         "chat_filter_mime_pattern": "",

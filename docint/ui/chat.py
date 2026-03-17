@@ -53,6 +53,22 @@ CUSTOM_OPERATOR_OPTIONS: dict[str, str] = {
     "Date on or after": "date_on_or_after",
     "Date on or before": "date_on_or_before",
 }
+CHAT_RETRIEVAL_MODE_OPTIONS: tuple[str, ...] = ("stateless", "session")
+
+
+def _retrieval_mode_badge_label(mode: str | None) -> str:
+    """Return a compact badge label for the selected retrieval mode.
+
+    Args:
+        mode: Raw retrieval mode value from session state.
+
+    Returns:
+        str: Human-readable badge label.
+    """
+    normalized = str(mode or "stateless").strip().lower()
+    if normalized == "session":
+        return "Session Retrieval"
+    return "Stateless Retrieval"
 
 
 def _format_graph_debug_summary(graph_debug: dict[str, Any] | None) -> str | None:
@@ -278,6 +294,9 @@ def render_chat() -> None:
         return
 
     st.caption(f"📁 {collection}")
+    st.markdown(
+        f"`{_retrieval_mode_badge_label(st.session_state.get('chat_retrieval_mode'))}`"
+    )
 
     # ── Download current chat ────────────────────────────────
     if st.session_state.messages:
@@ -348,6 +367,15 @@ def render_chat() -> None:
             )
 
     with st.expander("Retrieval filters", expanded=False):
+        st.selectbox(
+            "Retrieval mode",
+            options=CHAT_RETRIEVAL_MODE_OPTIONS,
+            key="chat_retrieval_mode",
+            help=(
+                "stateless: no conversation rewrite/memory carry-over; "
+                "session: multi-turn chat with conversation context."
+            ),
+        )
         st.checkbox(
             "Enable metadata filtering",
             key="chat_filter_enabled",
@@ -492,6 +520,9 @@ def render_chat() -> None:
                 "question": prompt,
                 "session_id": st.session_state.session_id,
                 "metadata_filters": metadata_filters,
+                "retrieval_mode": st.session_state.get(
+                    "chat_retrieval_mode", "stateless"
+                ),
             }
             try:
                 with requests.post(
