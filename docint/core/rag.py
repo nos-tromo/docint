@@ -10,10 +10,11 @@ import shutil
 import stat
 import sys
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 # isort: off
 # Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
@@ -85,6 +86,7 @@ from docint.core.ner import (
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.readers.documents import CorePDFPipelineReader
+from docint.core.retrieval_filters import matches_metadata_filters
 from docint.core.state.session_manager import SessionManager
 from docint.core.storage.docstore import QdrantKVStore
 from docint.core.storage.sources import stage_sources_to_qdrant
@@ -981,12 +983,15 @@ class RAG:
         query: str,
         *,
         top_k: int = 3,
+        metadata_filter_rules: Sequence[Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Retrieve image matches for a text query and normalize them as sources.
 
         Args:
             query (str): The text query to find similar images for.
             top_k (int): The number of top matches to retrieve.
+            metadata_filter_rules (Sequence[Any] | None): Optional raw request
+                filters used to post-filter auxiliary image matches in memory.
 
         Returns:
             list[dict[str, Any]]: A list of source dictionaries representing the matched images.
@@ -1018,6 +1023,12 @@ class RAG:
         results: list[dict[str, Any]] = []
         seen: set[str] = set()
         for payload in matches:
+            if metadata_filter_rules and not matches_metadata_filters(
+                payload,
+                metadata_filter_rules,
+            ):
+                continue
+
             image_id = str(payload.get("image_id") or "").strip()
             if image_id:
                 if image_id in seen:
@@ -1971,6 +1982,7 @@ class RAG:
         reason: str | None = None,
         *,
         metadata_filters_active: bool = False,
+        metadata_filter_rules: Sequence[Any] | None = None,
         retrieval_query: str | None = None,
         coverage_unit: str | None = None,
         retrieval_mode: str | None = None,
@@ -1987,6 +1999,8 @@ class RAG:
             reason (str | None): Optional reasoning string.
             metadata_filters_active (bool): Whether request-scoped metadata
                 filters were active for the retrieval.
+            metadata_filter_rules (Sequence[Any] | None): Optional raw request
+                filter payloads for post-filtering auxiliary image sources.
 
         Returns:
             dict[str, Any]: A dictionary containing:
@@ -2038,19 +2052,34 @@ class RAG:
             if normalized is not None:
                 sources.append(normalized)
 
+        image_filter_rules = metadata_filter_rules if metadata_filters_active else None
         if (
-            not metadata_filters_active
-            and query.strip()
+            query.strip()
             and query != self.summarize_prompt
+            and (not metadata_filters_active or bool(image_filter_rules))
         ):
             sources.extend(
                 self._retrieve_image_sources(
                     query,
                     top_k=max(1, self.rerank_top_n // 2),
+                    metadata_filter_rules=image_filter_rules,
                 )
             )
 
-        if not str(resp_text or "").strip():
+        normalized_resp_text = str(resp_text or "").strip()
+        if normalized_resp_text.lower() in {"empty response", "no response"}:
+            resp_text = ""
+            normalized_resp_text = ""
+
+        if normalized_resp_text == EMPTY_RESPONSE_FALLBACK and sources:
+            resp_text = self._source_backed_fallback_response(sources)
+            normalized_resp_text = str(resp_text).strip()
+
+        if not normalized_resp_text and sources:
+            resp_text = self._source_backed_fallback_response(sources)
+            normalized_resp_text = str(resp_text).strip()
+
+        if not normalized_resp_text:
             resp_text = EMPTY_RESPONSE_FALLBACK
 
         return {
@@ -2062,6 +2091,36 @@ class RAG:
             "coverage_unit": coverage_unit,
             "retrieval_mode": retrieval_mode,
         }
+
+    @staticmethod
+    def _source_backed_fallback_response(sources: Sequence[dict[str, Any]]) -> str:
+        """Build a concise answer when sources exist but model text is empty."""
+        if not sources:
+            return EMPTY_RESPONSE_FALLBACK
+
+        labels: list[str] = []
+        for source in sources[:3]:
+            filename = str(
+                source.get("filename") or source.get("file_path") or "Unknown"
+            )
+            page = source.get("page")
+            row = source.get("row")
+            if page is not None:
+                labels.append(f"{filename} (page {page})")
+            elif row is not None:
+                labels.append(f"{filename} (row {row})")
+            else:
+                labels.append(filename)
+
+        if len(sources) == 1:
+            return f"I found 1 matching source: {labels[0]}."
+        if len(sources) <= 3:
+            return f"I found {len(sources)} matching sources: {', '.join(labels)}."
+        remaining = len(sources) - len(labels)
+        return (
+            f"I found {len(sources)} matching sources, including "
+            f"{', '.join(labels)}, and {remaining} more."
+        )
 
     # --- Collection discovery / selection ---
     def list_collections(self) -> list[str]:
@@ -2492,6 +2551,7 @@ class RAG:
         prompt: str,
         *,
         metadata_filters: MetadataFilters | None = None,
+        metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run a query against the Qdrant collection.
@@ -2500,6 +2560,8 @@ class RAG:
             prompt (str): The query prompt.
             metadata_filters (MetadataFilters | None): Optional request-scoped
                 metadata filters.
+            metadata_filter_rules (Sequence[Any] | None): Optional raw request
+                filter payloads for post-filtering auxiliary image sources.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
 
@@ -2537,6 +2599,7 @@ class RAG:
             metadata_filters_active=(
                 metadata_filters is not None or bool(vector_store_kwargs)
             ),
+            metadata_filter_rules=metadata_filter_rules,
         )
 
     async def run_query_async(
@@ -2544,6 +2607,7 @@ class RAG:
         prompt: str,
         *,
         metadata_filters: MetadataFilters | None = None,
+        metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run a query against the Qdrant collection asynchronously.
@@ -2552,6 +2616,8 @@ class RAG:
             prompt (str): The query prompt.
             metadata_filters (MetadataFilters | None): Optional request-scoped
                 metadata filters.
+            metadata_filter_rules (Sequence[Any] | None): Optional raw request
+                filter payloads for post-filtering auxiliary image sources.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
 
@@ -2589,6 +2655,7 @@ class RAG:
             metadata_filters_active=(
                 metadata_filters is not None or bool(vector_store_kwargs)
             ),
+            metadata_filter_rules=metadata_filter_rules,
         )
 
     # --- Session integration ---
@@ -2661,6 +2728,7 @@ class RAG:
         *,
         metadata_filters: MetadataFilters | None = None,
         metadata_filters_active: bool = False,
+        metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Proxy chat turns to SessionManager.
@@ -2671,6 +2739,8 @@ class RAG:
                 metadata filters.
             metadata_filters_active (bool): Whether request-scoped metadata
                 filters were active for the retrieval.
+            metadata_filter_rules (Sequence[Any] | None): Optional raw request
+                filter payloads for post-filtering auxiliary image sources.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
 
@@ -2683,6 +2753,7 @@ class RAG:
             user_msg,
             metadata_filters=metadata_filters,
             metadata_filters_active=metadata_filters_active,
+            metadata_filter_rules=metadata_filter_rules,
             vector_store_kwargs=vector_store_kwargs,
         )
 
@@ -2692,6 +2763,7 @@ class RAG:
         *,
         metadata_filters: MetadataFilters | None = None,
         metadata_filters_active: bool = False,
+        metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
     ) -> Any:
         """Proxy stream chat turns to SessionManager.
@@ -2702,6 +2774,8 @@ class RAG:
                 metadata filters.
             metadata_filters_active (bool): Whether request-scoped metadata
                 filters were active for the retrieval.
+            metadata_filter_rules (Sequence[Any] | None): Optional raw request
+                filter payloads for post-filtering auxiliary image sources.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
 
@@ -2714,6 +2788,7 @@ class RAG:
             user_msg,
             metadata_filters=metadata_filters,
             metadata_filters_active=metadata_filters_active,
+            metadata_filter_rules=metadata_filter_rules,
             vector_store_kwargs=vector_store_kwargs,
         )
 
