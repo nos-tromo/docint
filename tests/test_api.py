@@ -76,6 +76,7 @@ class DummyRAG:
         self.selected: list[str] = []
         self.sessions = DummySessionManager()
         self.chats: list[str] = []
+        self.stateless_queries: list[str] = []
         self.chat_filters: list[Any] = []
         self.stream_filters: list[Any] = []
         self.created_index = 0  # Tracks the number of times an index is created
@@ -227,6 +228,54 @@ class DummyRAG:
                 "neighbor_entities": ["Widget"],
             },
         }
+
+    def run_query(
+        self,
+        prompt: str,
+        *,
+        metadata_filters: Any = None,
+        vector_store_kwargs: Any = None,
+    ) -> dict[str, Any]:
+        """Run a stateless retrieval query.
+
+        Args:
+            prompt: Query prompt.
+            metadata_filters: Optional compiled metadata filters.
+            vector_store_kwargs: Optional native vector-store query kwargs.
+
+        Returns:
+            dict[str, Any]: Response payload.
+        """
+        _ = metadata_filters
+        _ = vector_store_kwargs
+        self.stateless_queries.append(prompt)
+        return {
+            "response": "answer",
+            "sources": [{"id": 1}],
+        }
+
+    def expand_query_with_graph_with_debug(
+        self, query: str
+    ) -> tuple[str, dict[str, Any]]:
+        """Return deterministic GraphRAG expansion metadata for tests.
+
+        Args:
+            query: Input query.
+
+        Returns:
+            tuple[str, dict[str, Any]]: Expanded query and debug metadata.
+        """
+        return (
+            f"{query}\n\nRelated entities for retrieval: Acme",
+            {
+                "enabled": True,
+                "applied": True,
+                "original_query": query,
+                "expanded_query": f"{query}\n\nRelated entities for retrieval: Acme",
+                "anchor_entities": ["Acme"],
+                "neighbor_entities": ["Widget"],
+            },
+        )
 
     def summarize_collection(self, refresh: bool = False) -> dict[str, Any]:
         """Return canned summarize payload.
@@ -690,6 +739,48 @@ def test_stream_query_includes_validation_metadata(client: TestClient) -> None:
     assert '"graph_debug"' in text
     assert '"retrieval_query"' in text
     assert '"retrieval_mode"' in text
+
+
+def test_query_stateless_mode_skips_session_chat(client: TestClient) -> None:
+    """Stateless query mode should use direct retrieval without chat session state.
+
+    Args:
+        client: The TestClient instance.
+    """
+    rag = cast(DummyRAG, api_module.rag)
+    before_chats = len(rag.chats)
+
+    response = client.post(
+        "/query",
+        json={"question": "What?", "retrieval_mode": "stateless"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["answer"] == "answer"
+    assert body["session_id"] == "stateless"
+    assert len(rag.chats) == before_chats
+    assert rag.stateless_queries[-1].startswith("What?")
+    assert body["graph_debug"]["applied"] is True
+
+
+def test_stream_query_stateless_mode_emits_tokens(client: TestClient) -> None:
+    """Stateless stream mode should emit token events and final metadata payload.
+
+    Args:
+        client: The TestClient instance.
+    """
+    with client.stream(
+        "POST",
+        "/stream_query",
+        json={"question": "hello", "retrieval_mode": "stateless"},
+    ) as resp:
+        assert resp.status_code == 200
+        text = "".join([chunk.decode() for chunk in resp.iter_raw()])
+
+    assert '"token"' in text
+    assert '"session_id": "stateless"' in text
+    assert '"graph_debug"' in text
 
 
 def test_summarize_includes_summary_diagnostics(client: TestClient) -> None:
