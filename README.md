@@ -193,7 +193,23 @@ The application is configured via environment variables. Key variables include:
 - `SUMMARY_SOCIAL_CHUNKING_ENABLED`: Enable chunk/post-level summary mode for row-heavy social/table collections (default: `true`).
 - `SUMMARY_SOCIAL_CANDIDATE_POOL`: Candidate retrieval depth used by chunk/post-level social summaries (default: `48`).
 - `SUMMARY_SOCIAL_DIVERSITY_LIMIT`: Maximum number of retained social summary sources per author/time bucket (default: `2`).
+<<<<<<< codex/reduce-drift-openai-thinking
+=======
+- `INGESTION_BATCH_SIZE`: Size of the in-memory enrichment streaming window (NER/hate-speech). Smaller values reduce crash-loss window during enrichment; larger values can improve throughput (default: `5`).
+- `DOCSTORE_BATCH_SIZE`: Size of micro-batches written to docstore/vectorstore after enrichment. Smaller values flush to Qdrant more often; larger values reduce write overhead (default: `100`).
+- `INGEST_BENCHMARK_ENABLED`: Emit ingest benchmark logs (elapsed time, docs/nodes throughput, enrichment and persistence batch counters) to help tune batch sizes (default: `false`).
+- `DOCSTORE_MAX_RETRIES`: Retry count for transient Qdrant docstore transport errors during ingest/read operations (default: `3`).
+- `DOCSTORE_RETRY_BACKOFF_SECONDS`: Initial backoff delay between docstore retries in seconds (default: `0.25`).
+- `DOCSTORE_RETRY_BACKOFF_MAX_SECONDS`: Maximum backoff delay between docstore retries in seconds (default: `2.0`).
+>>>>>>> main
 - `PRELOAD_MODELS`: Set to `true` to download all ML models at container startup (default: unset/disabled). Used by `docker-compose.yml` to populate the `model-cache` volume on first run.
+
+Batch-size tuning guidance:
+
+- `INGESTION_BATCH_SIZE` controls how many parsed nodes are enriched before they are yielded to persistence in streaming mode.
+- `DOCSTORE_BATCH_SIZE` controls how many already-enriched nodes are flushed per write call to the persistent stores.
+- Increasing only `INGESTION_BATCH_SIZE` raises enrichment throughput but increases in-flight work that can be lost before first persist.
+- Increasing only `DOCSTORE_BATCH_SIZE` reduces write-call overhead but increases the amount of post-enrichment work that can be in-flight during a transport interruption.
 
 **Hosts / Service Endpoints:**
 

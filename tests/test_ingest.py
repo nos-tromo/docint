@@ -848,3 +848,110 @@ def test_pipeline_streams_large_audio_runs_in_windows(
         ],
         [str(audio_files[4])],
     ]
+
+
+def test_build_streaming_yields_enrichment_batches_and_completion_hashes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Streaming build should emit enriched node chunks and completion hashes.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+    """
+
+    class FakeNERConfig:
+        """NER config stub with extraction disabled for deterministic tests."""
+
+        enabled = False
+        max_chars = 256
+        max_workers = 1
+
+    class FakeIngestionConfig:
+        """Ingestion config stub with small batch size for chunked streaming."""
+
+        ingestion_batch_size = 2
+        sentence_splitter_chunk_size = 512
+        sentence_splitter_chunk_overlap = 64
+        supported_filetypes = [".txt"]
+        hierarchical_chunking_enabled = False
+        coarse_chunk_size = 1024
+        fine_chunk_size = 256
+        fine_chunk_overlap = 32
+
+    monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
+    monkeypatch.setattr(
+        pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig()
+    )
+
+    pipeline = DocumentIngestionPipeline(
+        data_dir=tmp_path,
+        device="cpu",
+        ner_model=None,
+        progress_callback=None,
+    )
+
+    docs_input = [
+        Document(text="a", metadata={"file_hash": "hash-a"}),
+        Document(text="b", metadata={"file_hash": "hash-b"}),
+    ]
+    nodes_input = [
+        cast(Any, SimpleNamespace(text=f"n{i}", metadata={"file_hash": "hash-a"}))
+        for i in range(5)
+    ]
+
+    enrich_calls: list[tuple[int, int, int]] = []
+
+    monkeypatch.setattr(
+        DocumentIngestionPipeline, "_load_doc_readers", lambda self: None
+    )
+    monkeypatch.setattr(
+        DocumentIngestionPipeline, "_load_node_parsers", lambda self: None
+    )
+    monkeypatch.setattr(
+        DocumentIngestionPipeline,
+        "_iter_loaded_documents",
+        lambda self: iter([docs_input]),
+    )
+    monkeypatch.setattr(
+        DocumentIngestionPipeline,
+        "_attach_clean_text",
+        lambda self, docs: list(docs),
+    )
+    monkeypatch.setattr(
+        DocumentIngestionPipeline,
+        "_ensure_file_hashes",
+        lambda self, docs: docs,
+    )
+    monkeypatch.setattr(
+        DocumentIngestionPipeline,
+        "_filter_docs_by_existing_hashes",
+        lambda self, docs, existing_hashes: list(docs),
+    )
+    monkeypatch.setattr(
+        DocumentIngestionPipeline,
+        "_create_nodes_without_enrichment",
+        lambda self, docs: list(nodes_input),
+    )
+    monkeypatch.setattr(
+        DocumentIngestionPipeline,
+        "_enrich_nodes_in_place",
+        lambda self, nodes, progress_offset=0, progress_total=None: enrich_calls.append(
+            (len(nodes), progress_offset, int(progress_total or 0))
+        ),
+    )
+
+    pipeline.dir_reader = cast(Any, SimpleNamespace())
+
+    batches = list(pipeline.build_streaming(existing_hashes=set()))
+
+    assert [len(nodes) for _, nodes, _ in batches] == [2, 2, 1]
+    assert [len(docs) for docs, _, _ in batches] == [2, 0, 0]
+    assert batches[0][2] == set()
+    assert batches[1][2] == set()
+    assert batches[2][2] == {"hash-a", "hash-b"}
+    assert enrich_calls == [
+        (2, 0, 5),
+        (2, 2, 5),
+        (1, 4, 5),
+    ]

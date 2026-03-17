@@ -9,6 +9,7 @@ import re
 import shutil
 import stat
 import sys
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -348,6 +349,10 @@ class RAG:
 
     # --- Qdrant controls ---
     docstore_batch_size: int = field(default=100, init=False)
+    ingest_benchmark_enabled: bool = field(default=False, init=False)
+    docstore_max_retries: int = field(default=3, init=False)
+    docstore_retry_backoff_seconds: float = field(default=0.25, init=False)
+    docstore_retry_backoff_max_seconds: float = field(default=2.0, init=False)
     qdrant_host: str | None = field(default=None, init=False)
     _qdrant_src_dir: Path | None = field(default=None, init=False, repr=False)
 
@@ -402,6 +407,14 @@ class RAG:
 
         # --- Ingestion config ---
         self.docstore_batch_size = self.ingestion_config.docstore_batch_size
+        self.ingest_benchmark_enabled = self.ingestion_config.ingest_benchmark_enabled
+        self.docstore_max_retries = self.ingestion_config.docstore_max_retries
+        self.docstore_retry_backoff_seconds = (
+            self.ingestion_config.docstore_retry_backoff_seconds
+        )
+        self.docstore_retry_backoff_max_seconds = (
+            self.ingestion_config.docstore_retry_backoff_max_seconds
+        )
 
         # --- Model config ---
         suffix = ".gguf"
@@ -905,6 +918,9 @@ class RAG:
         kv_store = QdrantKVStore(
             client=self.qdrant_client,
             collection_name=kv_collection,
+            max_retries=self.docstore_max_retries,
+            retry_backoff_seconds=self.docstore_retry_backoff_seconds,
+            retry_backoff_max_seconds=self.docstore_retry_backoff_max_seconds,
         )
         # Use a reasonable batch size to encourage batch operations
         doc_store = KVDocumentStore(
@@ -1125,6 +1141,123 @@ class RAG:
         if is_hierarchical:
             return [n for n in nodes if n.metadata.get("docint_hier_type") != "coarse"]
         return nodes
+
+    @staticmethod
+    def _chunk_nodes(nodes: list[BaseNode], batch_size: int) -> list[list[BaseNode]]:
+        """Split nodes into non-empty batches.
+
+        Args:
+            nodes: Nodes to split.
+            batch_size: Preferred maximum batch size.
+
+        Returns:
+            list[list[BaseNode]]: Node batches in input order.
+        """
+        if not nodes:
+            return []
+        effective_batch_size = max(1, int(batch_size))
+        return [
+            nodes[i : i + effective_batch_size]
+            for i in range(0, len(nodes), effective_batch_size)
+        ]
+
+    def _persist_node_batches(self, nodes: list[BaseNode]) -> None:
+        """Persist nodes in micro-batches to reduce crash-loss windows.
+
+        Args:
+            nodes: Ingestion nodes to persist.
+
+        Raises:
+            RuntimeError: If the index is not initialized.
+        """
+        if self.index is None:
+            raise RuntimeError("Index is not initialized.")
+
+        batches = self._chunk_nodes(nodes, self.docstore_batch_size)
+        for batch_no, batch in enumerate(batches, start=1):
+            logger.debug(
+                "Persisting node batch {}/{} ({} node(s)) to DocStore...",
+                batch_no,
+                len(batches),
+                len(batch),
+            )
+            self.index.docstore.add_documents(batch, allow_update=True)
+            vector_nodes = self._select_vector_nodes(batch)
+            if vector_nodes:
+                self.index.insert_nodes(vector_nodes)
+
+    def _log_ingest_benchmark_summary(
+        self,
+        *,
+        mode: str,
+        started_at: float,
+        core_docs: int,
+        core_nodes: int,
+        streaming_docs: int,
+        streaming_nodes: int,
+        enrich_batches: int,
+        persist_batches: int,
+    ) -> None:
+        """Log ingest benchmark counters for runtime tuning.
+
+        Args:
+            mode: Ingest mode label (``sync`` or ``async``).
+            started_at: Monotonic timestamp when ingestion started.
+            core_docs: Number of document records emitted by core PDF pipeline.
+            core_nodes: Number of nodes persisted from core PDF pipeline.
+            streaming_docs: Number of docs emitted by legacy streaming pipeline.
+            streaming_nodes: Number of nodes persisted from legacy streaming pipeline.
+            enrich_batches: Number of streaming enrichment batches processed.
+            persist_batches: Number of docstore/vector persistence micro-batches.
+        """
+        elapsed_s = max(0.001, time.monotonic() - started_at)
+        total_nodes = core_nodes + streaming_nodes
+        total_docs = core_docs + streaming_docs
+        nodes_per_second = total_nodes / elapsed_s
+        logger.info(
+            "Ingest benchmark ({}) | elapsed_s={:.3f} docs={} nodes={} "
+            "nodes_per_s={:.2f} core_docs={} core_nodes={} streaming_docs={} "
+            "streaming_nodes={} enrich_batches={} persist_batches={} "
+            "ingestion_batch_size={} docstore_batch_size={}",
+            mode,
+            elapsed_s,
+            total_docs,
+            total_nodes,
+            nodes_per_second,
+            core_docs,
+            core_nodes,
+            streaming_docs,
+            streaming_nodes,
+            enrich_batches,
+            persist_batches,
+            self.ingestion_config.ingestion_batch_size,
+            self.docstore_batch_size,
+        )
+
+    async def _apersist_node_batches(self, nodes: list[BaseNode]) -> None:
+        """Asynchronously persist nodes in micro-batches.
+
+        Args:
+            nodes: Ingestion nodes to persist.
+
+        Raises:
+            RuntimeError: If the index is not initialized.
+        """
+        if self.index is None:
+            raise RuntimeError("Index is not initialized.")
+
+        batches = self._chunk_nodes(nodes, self.docstore_batch_size)
+        for batch_no, batch in enumerate(batches, start=1):
+            logger.debug(
+                "Persisting async node batch {}/{} ({} node(s)) to DocStore...",
+                batch_no,
+                len(batches),
+                len(batch),
+            )
+            self.index.docstore.add_documents(batch, allow_update=True)
+            vector_nodes = self._select_vector_nodes(batch)
+            if vector_nodes:
+                await self.index.ainsert_nodes(vector_nodes)
 
     @staticmethod
     def _extract_file_hash(data: Any) -> str | None:
@@ -2098,6 +2231,13 @@ class RAG:
             Path(data_dir) if isinstance(data_dir, str) else data_dir
         )
         self.data_dir = prepared_dir
+        ingest_started_at = time.monotonic()
+        core_docs = 0
+        core_nodes = 0
+        streaming_docs = 0
+        streaming_nodes = 0
+        enrich_batches = 0
+        persist_batches = 0
 
         # Initialize index (load existing or create new wrapper)
         vector_store = self._vector_store()
@@ -2125,32 +2265,48 @@ class RAG:
         for docs, nodes, file_hash in core_pdf_reader.build(
             existing_hashes=processed_hashes, progress_callback=progress_callback
         ):
+            core_docs += len(docs)
             if nodes:
-                vector_nodes = self._select_vector_nodes(nodes)
-
-                logger.debug(
-                    "Persisting {} core-pipeline nodes to DocStore...",
-                    len(nodes),
+                self._persist_node_batches(nodes)
+                core_nodes += len(nodes)
+                persist_batches += len(
+                    self._chunk_nodes(nodes, self.docstore_batch_size)
                 )
-                self.index.docstore.add_documents(nodes, allow_update=True)
-                if vector_nodes:
-                    self.index.insert_nodes(vector_nodes)
                 processed_hashes.add(file_hash)
 
         # PDFs are owned by the core pipeline reader and should not be
         # re-processed by the legacy ingestion path.
         processed_hashes.update(core_pdf_reader.discovered_hashes)
 
-        # Process batches from the pipeline generator
-        for docs, nodes in pipeline.build(processed_hashes):
-            if nodes:
-                vector_nodes = self._select_vector_nodes(nodes)
-
-                # Explicitly persist to docstore first to ensure data safety
-                logger.debug("Persisting {} nodes to DocStore...", len(nodes))
-                self.index.docstore.add_documents(nodes, allow_update=True)
-                if vector_nodes:
-                    self.index.insert_nodes(vector_nodes)
+        # Process batches from the pipeline generator, persisting nodes as soon
+        # as each enrichment micro-batch completes when supported.
+        if hasattr(pipeline, "build_streaming") and callable(
+            getattr(pipeline, "build_streaming")
+        ):
+            for docs, nodes, completed_hashes in pipeline.build_streaming(
+                processed_hashes
+            ):
+                if docs:
+                    streaming_docs += len(docs)
+                if nodes:
+                    self._persist_node_batches(nodes)
+                    streaming_nodes += len(nodes)
+                    persist_batches += len(
+                        self._chunk_nodes(nodes, self.docstore_batch_size)
+                    )
+                    enrich_batches += 1
+                if completed_hashes:
+                    processed_hashes.update(completed_hashes)
+        else:
+            for docs, nodes in pipeline.build(processed_hashes):
+                if docs:
+                    streaming_docs += len(docs)
+                if nodes:
+                    self._persist_node_batches(nodes)
+                    streaming_nodes += len(nodes)
+                    persist_batches += len(
+                        self._chunk_nodes(nodes, self.docstore_batch_size)
+                    )
 
         self.dir_reader = pipeline.dir_reader
         # Clear memory-heavy lists as we've persisted them to the vector store
@@ -2181,6 +2337,17 @@ class RAG:
                 self.device,
                 self.device,
             )
+        if self.ingest_benchmark_enabled:
+            self._log_ingest_benchmark_summary(
+                mode="sync",
+                started_at=ingest_started_at,
+                core_docs=core_docs,
+                core_nodes=core_nodes,
+                streaming_docs=streaming_docs,
+                streaming_nodes=streaming_nodes,
+                enrich_batches=enrich_batches,
+                persist_batches=persist_batches,
+            )
         self._bump_summary_revision(self.qdrant_collection)
         logger.info("Documents ingested successfully.")
 
@@ -2207,6 +2374,13 @@ class RAG:
             Path(data_dir) if isinstance(data_dir, str) else data_dir
         )
         self.data_dir = prepared_dir
+        ingest_started_at = time.monotonic()
+        core_docs = 0
+        core_nodes = 0
+        streaming_docs = 0
+        streaming_nodes = 0
+        enrich_batches = 0
+        persist_batches = 0
         # Initialize index
         vector_store = self._vector_store()
         storage_ctx = self._storage_context(vector_store)
@@ -2231,22 +2405,46 @@ class RAG:
         for docs, nodes, file_hash in core_pdf_reader.build(
             existing_hashes=processed_hashes, progress_callback=progress_callback
         ):
+            core_docs += len(docs)
             if nodes:
-                vector_nodes = self._select_vector_nodes(nodes)
-                self.index.docstore.add_documents(nodes, allow_update=True)
-                if vector_nodes:
-                    await self.index.ainsert_nodes(vector_nodes)
+                await self._apersist_node_batches(nodes)
+                core_nodes += len(nodes)
+                persist_batches += len(
+                    self._chunk_nodes(nodes, self.docstore_batch_size)
+                )
                 processed_hashes.add(file_hash)
 
         processed_hashes.update(core_pdf_reader.discovered_hashes)
 
-        # Process batches
-        for docs, nodes in pipeline.build(processed_hashes):
-            if nodes:
-                vector_nodes = self._select_vector_nodes(nodes)
-                self.index.docstore.add_documents(nodes, allow_update=True)
-                if vector_nodes:
-                    await self.index.ainsert_nodes(vector_nodes)
+        # Process batches, persisting nodes as soon as each enrichment
+        # micro-batch completes when supported.
+        if hasattr(pipeline, "build_streaming") and callable(
+            getattr(pipeline, "build_streaming")
+        ):
+            for docs, nodes, completed_hashes in pipeline.build_streaming(
+                processed_hashes
+            ):
+                if docs:
+                    streaming_docs += len(docs)
+                if nodes:
+                    await self._apersist_node_batches(nodes)
+                    streaming_nodes += len(nodes)
+                    persist_batches += len(
+                        self._chunk_nodes(nodes, self.docstore_batch_size)
+                    )
+                    enrich_batches += 1
+                if completed_hashes:
+                    processed_hashes.update(completed_hashes)
+        else:
+            for docs, nodes in pipeline.build(processed_hashes):
+                if docs:
+                    streaming_docs += len(docs)
+                if nodes:
+                    await self._apersist_node_batches(nodes)
+                    streaming_nodes += len(nodes)
+                    persist_batches += len(
+                        self._chunk_nodes(nodes, self.docstore_batch_size)
+                    )
 
         self.dir_reader = pipeline.dir_reader
         self.docs = []
@@ -2275,6 +2473,17 @@ class RAG:
                 self.rerank_top_n,
                 self.device,
                 self.device,
+            )
+        if self.ingest_benchmark_enabled:
+            self._log_ingest_benchmark_summary(
+                mode="async",
+                started_at=ingest_started_at,
+                core_docs=core_docs,
+                core_nodes=core_nodes,
+                streaming_docs=streaming_docs,
+                streaming_nodes=streaming_nodes,
+                enrich_batches=enrich_batches,
+                persist_batches=persist_batches,
             )
         self._bump_summary_revision(self.qdrant_collection)
         logger.info("Documents ingested successfully (async path).")
@@ -3168,6 +3377,9 @@ class RAG:
             return QdrantKVStore(
                 client=self.qdrant_client,
                 collection_name=kv_collection,
+                max_retries=self.docstore_max_retries,
+                retry_backoff_seconds=self.docstore_retry_backoff_seconds,
+                retry_backoff_max_seconds=self.docstore_retry_backoff_max_seconds,
             )
         except Exception as exc:
             logger.warning(
