@@ -14,7 +14,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable, Sequence, cast
 
 # isort: off
 # Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
@@ -2294,6 +2294,61 @@ class RAG:
             score=getattr(nws, "score", None),
             text_value=text_value,
         )
+
+    @staticmethod
+    def _source_backed_fallback_response(sources: Sequence[dict[str, Any]]) -> str:
+        """Build a concise grounded fallback response from normalized sources.
+
+        Args:
+            sources (Sequence[dict[str, Any]]): Retrieved source payloads.
+
+        Returns:
+            str: A concise description of the matched sources.
+        """
+        if not sources:
+            return EMPTY_RESPONSE_FALLBACK
+
+        formatted_sources: list[str] = []
+        seen: set[tuple[Any, ...]] = set()
+        for source in sources:
+            dedupe_key = (
+                source.get("filename"),
+                source.get("page"),
+                source.get("row"),
+                source.get("file_hash"),
+                source.get("preview_text"),
+                source.get("text"),
+            )
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+
+            label = (
+                source.get("filename")
+                or source.get("file_hash")
+                or source.get("source")
+                or "source"
+            )
+            location_parts: list[str] = []
+            page = source.get("page")
+            row = source.get("row")
+            if page is not None:
+                location_parts.append(f"page {page}")
+            if row is not None:
+                location_parts.append(f"row {row}")
+            if location_parts:
+                label = f"{label} ({', '.join(location_parts)})"
+            formatted_sources.append(str(label))
+
+        total_sources = len(formatted_sources)
+        if total_sources == 0:
+            return EMPTY_RESPONSE_FALLBACK
+
+        preview = formatted_sources[:3]
+        summary = ", ".join(preview)
+        if total_sources > len(preview):
+            summary = f"{summary}, and {total_sources - len(preview)} more"
+        return f"I found {total_sources} matching sources: {summary}."
 
     def _normalize_response_data(
         self,

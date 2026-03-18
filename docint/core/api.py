@@ -49,6 +49,7 @@ app.add_middleware(
 )
 
 rag = RAG(qdrant_collection="")
+SIMULATED_STREAM_TOKEN_DELAY_SECONDS = 0.03
 
 # Agent components (kept lightweight; swap with richer agents as needed)
 _understanding_agent = SimpleUnderstandingAgent()
@@ -185,6 +186,20 @@ def _iter_text_tokens(text: str) -> list[str]:
     if not text:
         return []
     return [chunk for chunk in text.split(" ") if chunk] if " " in text else [text]
+
+
+async def _stream_simulated_text(answer_text: str) -> AsyncIterator[str]:
+    """Yield SSE token events for already-generated answers with visible pacing.
+
+    Args:
+        answer_text: Full answer text that must be replayed as a token stream.
+
+    Yields:
+        SSE ``data:`` lines for each token-sized chunk.
+    """
+    for token in _iter_text_tokens(answer_text):
+        yield f"data: {json.dumps({'token': token + ' '})}\n\n"
+        await asyncio.sleep(SIMULATED_STREAM_TOKEN_DELAY_SECONDS)
 
 
 # --- Pydantic models for request and response payloads ---
@@ -472,6 +487,7 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
                 data = rag.run_query(
                     retrieval_query,
                     metadata_filters=metadata_filters,
+                    metadata_filter_rules=payload.metadata_filters,
                     vector_store_kwargs=vector_store_kwargs or None,
                 )
                 if graph_debug is not None:
@@ -485,6 +501,7 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
                     metadata_filters_active=(
                         metadata_filters is not None or bool(vector_store_kwargs)
                     ),
+                    metadata_filter_rules=payload.metadata_filters,
                     vector_store_kwargs=vector_store_kwargs or None,
                 )
 
@@ -605,10 +622,11 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                     or occurrence_data.get("answer")
                     or ""
                 )
-                for token in _iter_text_tokens(answer_text):
-                    full_answer += (" " if full_answer else "") + token
-                    yield f"data: {json.dumps({'token': token + ' '})}\n\n"
-                    await asyncio.sleep(0)
+                async for event in _stream_simulated_text(answer_text):
+                    event_payload = json.loads(event[6:].strip())
+                    token = str(event_payload.get("token") or "")
+                    full_answer += token
+                    yield event
 
                 final_payload = {
                     "answer": occurrence_data.get("response"),
@@ -655,10 +673,11 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                 answer_text = str(
                     stateless_data.get("response") or stateless_data.get("answer") or ""
                 )
-                for token in _iter_text_tokens(answer_text):
-                    full_answer += (" " if full_answer else "") + token
-                    yield f"data: {json.dumps({'token': token + ' '})}\n\n"
-                    await asyncio.sleep(0)
+                async for event in _stream_simulated_text(answer_text):
+                    event_payload = json.loads(event[6:].strip())
+                    token = str(event_payload.get("token") or "")
+                    full_answer += token
+                    yield event
 
                 final_payload = {
                     "response": answer_text,

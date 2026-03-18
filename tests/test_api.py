@@ -891,6 +891,34 @@ def test_stream_query_stateless_mode_emits_tokens(client: TestClient) -> None:
     assert '"graph_debug"' in text
 
 
+@pytest.mark.anyio
+async def test_stream_simulated_text_applies_visible_pacing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Synthetic token replay should keep a small delay between chunks.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+    """
+    delays: list[float] = []
+
+    async def _fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(api_module.asyncio, "sleep", _fake_sleep)
+
+    events: list[str] = []
+    async for event in api_module._stream_simulated_text("hello world"):
+        events.append(event)
+
+    assert len(events) == 2
+    assert all('"token"' in event for event in events)
+    assert delays == [
+        api_module.SIMULATED_STREAM_TOKEN_DELAY_SECONDS,
+        api_module.SIMULATED_STREAM_TOKEN_DELAY_SECONDS,
+    ]
+
+
 def test_query_entity_occurrence_mode_skips_chat_and_uses_ner_lookup(
     client: TestClient,
 ) -> None:
