@@ -1,7 +1,10 @@
 """Chat page: streaming Q&A with source rendering and NER."""
 
 import json
-from typing import Any, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
+from itertools import chain
+from typing import Any
 
 import requests
 import streamlit as st
@@ -18,6 +21,11 @@ from docint.utils.env_cfg import load_host_env
 BACKEND_HOST = load_host_env().backend_host
 CHAT_SOURCES_CONTAINER_HEIGHT = 420
 CHAT_DEBUG_CONTAINER_HEIGHT = 280
+CHAT_QUERY_MODE_OPTIONS: tuple[str, ...] = (
+    "answer",
+    "entity_occurrence",
+    "entity_occurrence_multi",
+)
 CHAT_SCOPE_OPTIONS: tuple[str, ...] = (
     "All content",
     "Images only",
@@ -56,6 +64,171 @@ CUSTOM_OPERATOR_OPTIONS: dict[str, str] = {
 CHAT_RETRIEVAL_MODE_OPTIONS: tuple[str, ...] = ("stateless", "session")
 
 
+@dataclass
+class ChatStreamState:
+    """Accumulate streamed assistant response state from SSE payloads."""
+
+    full_answer: str = ""
+    sources: list[dict[str, Any]] = field(default_factory=list)
+    reasoning: str | None = None
+    validation_checked: bool | None = None
+    validation_mismatch: bool | None = None
+    validation_reason: str | None = None
+    graph_debug: dict[str, Any] | None = None
+    retrieval_query: str | None = None
+    coverage_unit: str | None = None
+    retrieval_mode: str | None = None
+    entity_match_candidates: list[dict[str, Any]] = field(default_factory=list)
+    entity_match_groups: list[dict[str, Any]] = field(default_factory=list)
+    session_id: str | None = None
+    error: str | None = None
+
+    def apply_payload(self, payload: Mapping[str, Any]) -> str | None:
+        """Apply one streamed payload and return any newly emitted text chunk.
+
+        Args:
+            payload: Parsed SSE payload from the backend.
+
+        Returns:
+            New text to render immediately, if present.
+        """
+        if "validation_checked" in payload:
+            self.validation_checked = payload.get("validation_checked")
+        if "validation_mismatch" in payload:
+            self.validation_mismatch = payload.get("validation_mismatch")
+        if "validation_reason" in payload:
+            self.validation_reason = payload.get("validation_reason")
+        if isinstance(payload.get("graph_debug"), dict):
+            self.graph_debug = dict(payload["graph_debug"])
+        if payload.get("retrieval_query") is not None:
+            self.retrieval_query = str(payload.get("retrieval_query") or "")
+        if payload.get("coverage_unit") is not None:
+            self.coverage_unit = str(payload.get("coverage_unit") or "")
+        if payload.get("retrieval_mode") is not None:
+            self.retrieval_mode = str(payload.get("retrieval_mode") or "")
+        if isinstance(payload.get("entity_match_candidates"), list):
+            self.entity_match_candidates = [
+                dict(item)
+                for item in payload.get("entity_match_candidates", [])
+                if isinstance(item, Mapping)
+            ]
+        if isinstance(payload.get("entity_match_groups"), list):
+            self.entity_match_groups = [
+                dict(item)
+                for item in payload.get("entity_match_groups", [])
+                if isinstance(item, Mapping)
+            ]
+        if payload.get("session_id"):
+            self.session_id = str(payload["session_id"])
+        if isinstance(payload.get("sources"), list):
+            self.sources = [
+                dict(item)
+                for item in payload.get("sources", [])
+                if isinstance(item, Mapping)
+            ]
+            self.reasoning = (
+                str(payload["reasoning"])
+                if payload.get("reasoning") is not None
+                else None
+            )
+        if payload.get("error") is not None:
+            self.error = str(payload["error"])
+
+        token: str | None = None
+        if "token" in payload:
+            token = str(payload["token"])
+        elif not self.full_answer and (
+            payload.get("response") is not None or payload.get("answer") is not None
+        ):
+            token = str(payload.get("response") or payload.get("answer") or "")
+
+        if token:
+            self.full_answer += token
+        return token
+
+
+def _parse_sse_payload(line: bytes | str) -> dict[str, Any] | None:
+    """Parse one SSE data line into a JSON payload.
+
+    Args:
+        line: Raw line yielded from ``requests.Response.iter_lines``.
+
+    Returns:
+        Parsed payload dictionary or ``None`` when the line is not usable.
+    """
+    if not line:
+        return None
+    decoded = line.decode("utf-8") if isinstance(line, bytes) else line
+    if not decoded.startswith("data: "):
+        return None
+    try:
+        payload = json.loads(decoded[6:])
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _iter_chat_stream_text(
+    lines: Iterable[bytes | str],
+    stream_state: ChatStreamState,
+    *,
+    on_update: Callable[[ChatStreamState], None] | None = None,
+) -> Iterator[str]:
+    """Yield streamed text chunks while accumulating chat metadata.
+
+    Args:
+        lines: Streaming response lines from the backend.
+        stream_state: Accumulator for streamed response metadata.
+        on_update: Optional callback invoked after each processed payload.
+
+    Yields:
+        Text chunks to render incrementally in the Streamlit chat body.
+    """
+    for line in lines:
+        if not st.session_state.get("chat_running"):
+            break
+        payload = _parse_sse_payload(line)
+        if payload is None:
+            continue
+        token = stream_state.apply_payload(payload)
+        if on_update is not None:
+            on_update(stream_state)
+        if token:
+            yield token
+
+
+def _prime_chat_stream(
+    lines: Iterable[bytes | str],
+    stream_state: ChatStreamState,
+    *,
+    on_update: Callable[[ChatStreamState], None] | None = None,
+) -> tuple[str | None, Iterator[bytes | str]]:
+    """Consume stream lines until the first renderable text chunk is available.
+
+    Args:
+        lines: Streaming response lines from the backend.
+        stream_state: Accumulator for streamed response metadata.
+        on_update: Optional callback invoked after each processed payload.
+
+    Returns:
+        A tuple of the first renderable text chunk, if any, and the remaining
+        stream iterator.
+    """
+    iterator = iter(lines)
+    for line in iterator:
+        if not st.session_state.get("chat_running"):
+            break
+        payload = _parse_sse_payload(line)
+        if payload is None:
+            continue
+        token = stream_state.apply_payload(payload)
+        if on_update is not None:
+            on_update(stream_state)
+        if token:
+            return token, iterator
+    return None, iterator
+
+
 def _retrieval_mode_badge_label(mode: str | None) -> str:
     """Return a compact badge label for the selected retrieval mode.
 
@@ -69,6 +242,79 @@ def _retrieval_mode_badge_label(mode: str | None) -> str:
     if normalized == "session":
         return "Session Retrieval"
     return "Stateless Retrieval"
+
+
+def _query_mode_badge_label(mode: str | None) -> str:
+    """Return a compact badge label for the active chat query mode."""
+    normalized = str(mode or "answer").strip().lower()
+    if normalized == "entity_occurrence_multi":
+        return "Multi-Entity Occurrence Mode"
+    if normalized == "entity_occurrence":
+        return "Entity Occurrence Mode"
+    return "Answer Mode"
+
+
+def _entity_candidate_label(candidate: Mapping[str, Any]) -> str:
+    """Build a compact button label for one ambiguous entity candidate."""
+    text = str(candidate.get("text") or "").strip() or "Unknown"
+    entity_type = str(candidate.get("type") or "Unlabeled").strip()
+    mentions = int(candidate.get("mentions", 0) or 0)
+    return f"{text} [{entity_type}] · {mentions} mention(s)"
+
+
+def _queue_entity_occurrence_prompt(candidate: Mapping[str, Any]) -> None:
+    """Queue a follow-up occurrence lookup for one chosen entity."""
+    st.session_state.chat_pending_prompt = str(candidate.get("text") or "").strip()
+    st.session_state.chat_query_mode = "entity_occurrence"
+    st.rerun()
+
+
+def _render_entity_match_candidates(
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    message_key: str,
+) -> None:
+    """Render disambiguation controls for equally strong entity matches."""
+    if not candidates:
+        return
+    st.info(
+        "Multiple entities matched equally well. Choose one to rerun the lookup "
+        "exactly, or switch Query mode to multi-entity occurrence."
+    )
+    for index, candidate in enumerate(candidates):
+        if st.button(
+            _entity_candidate_label(candidate),
+            key=f"entity-candidate-{message_key}-{index}",
+            use_container_width=True,
+        ):
+            _queue_entity_occurrence_prompt(candidate)
+
+
+def _render_entity_match_groups(
+    groups: Sequence[Mapping[str, Any]],
+    *,
+    collection: str,
+    message_key: str,
+) -> None:
+    """Render grouped multi-entity occurrence results in the chat UI."""
+    if not groups:
+        return
+    st.markdown("**Matched Entities**")
+    for index, group in enumerate(groups):
+        entity = group.get("entity") if isinstance(group, Mapping) else {}
+        entity = entity if isinstance(entity, Mapping) else {}
+        label = (
+            f"{str(entity.get('text') or 'Unknown')} "
+            f"[{str(entity.get('type') or 'Unlabeled')}]"
+            f" · {int(group.get('chunk_count', 0) or 0)} chunk(s)"
+            f" · {int(group.get('document_count', 0) or 0)} document(s)"
+        )
+        with st.expander(label):
+            if bool(group.get("truncated")):
+                st.caption("Showing a truncated per-entity source list.")
+            for source in list(group.get("sources") or []):
+                if isinstance(source, Mapping):
+                    render_source_item(dict(source), collection)
 
 
 def _format_graph_debug_summary(graph_debug: dict[str, Any] | None) -> str | None:
@@ -328,7 +574,12 @@ def render_chat() -> None:
 
     st.caption(f"📁 {collection}")
     st.markdown(
-        f"`{_retrieval_mode_badge_label(st.session_state.get('chat_retrieval_mode'))}`"
+        " ".join(
+            [
+                f"`{_query_mode_badge_label(st.session_state.get('chat_query_mode'))}`",
+                f"`{_retrieval_mode_badge_label(st.session_state.get('chat_retrieval_mode'))}`",
+            ]
+        )
     )
 
     # ── Download current chat ────────────────────────────────
@@ -391,9 +642,22 @@ def render_chat() -> None:
         )
 
     # ── Message history ──────────────────────────────────────
-    for msg in st.session_state.messages:
+    for message_index, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
+
+            if msg.get("entity_match_candidates"):
+                _render_entity_match_candidates(
+                    list(msg.get("entity_match_candidates") or []),
+                    message_key=f"history-{message_index}",
+                )
+
+            if msg.get("entity_match_groups") and not msg.get("sources"):
+                _render_entity_match_groups(
+                    list(msg.get("entity_match_groups") or []),
+                    collection=collection,
+                    message_key=f"history-{message_index}",
+                )
 
             if msg.get("reasoning"):
                 with st.expander("Reasoning"):
@@ -415,12 +679,24 @@ def render_chat() -> None:
 
     with st.expander("Retrieval filters", expanded=False):
         st.selectbox(
+            "Query mode",
+            options=CHAT_QUERY_MODE_OPTIONS,
+            key="chat_query_mode",
+            help=(
+                "answer: grounded answer generation from retrieved chunks; "
+                "entity_occurrence: exact mention lookup for one entity, with disambiguation when ambiguous; "
+                "entity_occurrence_multi: grouped results for all equally strong entity matches."
+            ),
+        )
+        st.selectbox(
             "Retrieval mode",
             options=CHAT_RETRIEVAL_MODE_OPTIONS,
             key="chat_retrieval_mode",
+            disabled=(st.session_state.get("chat_query_mode") == "entity_occurrence"),
             help=(
                 "stateless: no conversation rewrite/memory carry-over; "
-                "session: multi-turn chat with conversation context."
+                "session: multi-turn chat with conversation context. "
+                "Ignored when Query mode is entity_occurrence."
             ),
         )
         st.checkbox(
@@ -519,9 +795,14 @@ def render_chat() -> None:
         st.session_state.current_answer = ""
 
     # ── Chat input ───────────────────────────────────────────
-    if prompt := st.chat_input(
+    pending_prompt = st.session_state.pop("chat_pending_prompt", None)
+    if isinstance(pending_prompt, str) and pending_prompt.strip():
+        _start_chat()
+
+    prompt = pending_prompt or st.chat_input(
         "Ask a question about your documents…", on_submit=_start_chat
-    ):
+    )
+    if prompt:
         st.session_state.messages.append({"role": "user", "content": prompt})
 
         with st.chat_message("user"):
@@ -537,20 +818,7 @@ def render_chat() -> None:
                         on_click=_stop_generation,
                         help="Stop generation",
                     )
-
-            with c1:
-                answer_placeholder = st.empty()
-
-            full_answer = ""
-            sources: list[dict[str, Any]] = []
-            reasoning: str | None = None
-            validation_checked: bool | None = None
-            validation_mismatch: bool | None = None
-            validation_reason: str | None = None
-            graph_debug: dict[str, Any] | None = None
-            retrieval_query: str | None = None
-            coverage_unit: str | None = None
-            retrieval_mode: str | None = None
+            stream_state = ChatStreamState()
             metadata_filters = build_chat_metadata_filters(
                 {
                     "enabled": st.session_state.chat_filter_enabled,
@@ -573,6 +841,7 @@ def render_chat() -> None:
                 "retrieval_mode": st.session_state.get(
                     "chat_retrieval_mode", "stateless"
                 ),
+                "query_mode": st.session_state.get("chat_query_mode", "answer"),
             }
             try:
                 with requests.post(
@@ -582,137 +851,120 @@ def render_chat() -> None:
                     timeout=600,
                 ) as resp:
                     if resp.status_code == 200:
-                        lines = resp.iter_lines()
-                        first_line = None
+                        stream_lines = resp.iter_lines(chunk_size=1)
+
+                        def _sync_stream_state(state: ChatStreamState) -> None:
+                            """Mirror streamed answer progress into session state."""
+                            st.session_state.current_answer = state.full_answer
+                            if state.session_id:
+                                st.session_state.session_id = state.session_id
 
                         with c1:
                             with st.spinner("Thinking…"):
-                                try:
-                                    first_line = next(lines)
-                                except StopIteration:
-                                    pass
-
-                        def _process_line(line: bytes) -> None:
-                            """Process a single SSE line.
-
-                            Args:
-                                line: Raw bytes from the streaming response.
-                            """
-                            nonlocal full_answer
-                            nonlocal sources
-                            nonlocal reasoning
-                            nonlocal validation_checked
-                            nonlocal validation_mismatch
-                            nonlocal validation_reason
-                            nonlocal graph_debug
-                            nonlocal retrieval_query
-                            nonlocal coverage_unit
-                            nonlocal retrieval_mode
-                            if not line:
-                                return
-                            decoded = line.decode("utf-8")
-                            if not decoded.startswith("data: "):
-                                return
-                            try:
-                                data = json.loads(decoded[6:])
-                                if "validation_checked" in data:
-                                    validation_checked = data.get("validation_checked")
-                                if "validation_mismatch" in data:
-                                    validation_mismatch = data.get(
-                                        "validation_mismatch"
+                                first_chunk, remaining_lines = _prime_chat_stream(
+                                    stream_lines,
+                                    stream_state,
+                                    on_update=_sync_stream_state,
+                                )
+                            if first_chunk is not None:
+                                full_answer = st.write_stream(
+                                    chain(
+                                        [first_chunk],
+                                        _iter_chat_stream_text(
+                                            remaining_lines,
+                                            stream_state,
+                                            on_update=_sync_stream_state,
+                                        ),
                                     )
-                                if "validation_reason" in data:
-                                    validation_reason = data.get("validation_reason")
-                                if isinstance(data.get("graph_debug"), dict):
-                                    graph_debug = data.get("graph_debug")
-                                if data.get("retrieval_query") is not None:
-                                    retrieval_query = str(
-                                        data.get("retrieval_query") or ""
-                                    )
-                                if data.get("coverage_unit") is not None:
-                                    coverage_unit = str(data.get("coverage_unit") or "")
-                                if data.get("retrieval_mode") is not None:
-                                    retrieval_mode = str(
-                                        data.get("retrieval_mode") or ""
-                                    )
-                                if data.get("session_id"):
-                                    st.session_state.session_id = data.get("session_id")
-                                if "token" in data:
-                                    full_answer += data["token"]
-                                    st.session_state.current_answer = full_answer
-                                    answer_placeholder.markdown(full_answer + "▌")
-                                if not full_answer and (
-                                    data.get("response") is not None
-                                    or data.get("answer") is not None
-                                ):
-                                    full_answer = str(
-                                        data.get("response") or data.get("answer") or ""
-                                    )
-                                    st.session_state.current_answer = full_answer
-                                    answer_placeholder.markdown(full_answer)
-                                if "sources" in data:
-                                    sources = data.get("sources", [])
-                                    reasoning = data.get("reasoning")
-                                if "error" in data:
-                                    st.error(f"Stream error: {data['error']}")
-                            except json.JSONDecodeError:
-                                pass
+                                )
+                            else:
+                                full_answer = stream_state.full_answer
 
-                        if first_line:
-                            _process_line(first_line)
+                        if not isinstance(full_answer, str):
+                            full_answer = stream_state.full_answer
+                        if full_answer:
+                            stream_state.full_answer = full_answer
+                            st.session_state.current_answer = full_answer
+                        if stream_state.session_id:
+                            st.session_state.session_id = stream_state.session_id
+                        if stream_state.error:
+                            st.error(f"Stream error: {stream_state.error}")
 
-                        for line in lines:
-                            if not st.session_state.get("chat_running"):
-                                break
-                            _process_line(line)
-
-                        answer_placeholder.markdown(full_answer)
-
-                        if not full_answer and not reasoning:
+                        if not stream_state.full_answer and not stream_state.reasoning:
                             st.warning("Received empty response from the backend.")
-                        elif not full_answer and reasoning:
+                        elif not stream_state.full_answer and stream_state.reasoning:
                             st.info("No text response generated (reasoning only).")
 
-                        if reasoning:
+                        if stream_state.reasoning:
                             with st.expander("Reasoning"):
-                                st.markdown(reasoning)
+                                st.markdown(stream_state.reasoning)
+
+                        if stream_state.entity_match_candidates:
+                            _render_entity_match_candidates(
+                                stream_state.entity_match_candidates,
+                                message_key="active",
+                            )
+
+                        if (
+                            stream_state.entity_match_groups
+                            and not stream_state.sources
+                        ):
+                            _render_entity_match_groups(
+                                stream_state.entity_match_groups,
+                                collection=collection,
+                                message_key="active",
+                            )
 
                         render_response_validation(
-                            validation_checked=validation_checked,
-                            validation_mismatch=validation_mismatch,
-                            validation_reason=validation_reason,
+                            validation_checked=stream_state.validation_checked,
+                            validation_mismatch=stream_state.validation_mismatch,
+                            validation_reason=stream_state.validation_reason,
                         )
                         _render_answer_tool_panels(
-                            graph_debug=graph_debug,
-                            sources=sources,
+                            graph_debug=stream_state.graph_debug,
+                            sources=stream_state.sources,
                             collection=collection,
-                            retrieval_query=retrieval_query,
-                            retrieval_mode=retrieval_mode,
-                            coverage_unit=coverage_unit,
+                            retrieval_query=stream_state.retrieval_query,
+                            retrieval_mode=stream_state.retrieval_mode,
+                            coverage_unit=stream_state.coverage_unit,
                         )
 
                         # Persist message
                         msg_entry: dict[str, Any] = {
                             "role": "assistant",
-                            "content": full_answer,
-                            "sources": sources,
+                            "content": stream_state.full_answer,
+                            "sources": stream_state.sources,
                         }
-                        if reasoning:
-                            msg_entry["reasoning"] = reasoning
-                        if validation_checked is not None:
-                            msg_entry["validation_checked"] = validation_checked
-                        if validation_mismatch is not None:
-                            msg_entry["validation_mismatch"] = validation_mismatch
-                        if validation_reason:
-                            msg_entry["validation_reason"] = validation_reason
-                        if graph_debug is not None:
-                            msg_entry["graph_debug"] = graph_debug
-                        if retrieval_query is not None:
-                            msg_entry["retrieval_query"] = retrieval_query
-                        if retrieval_mode is not None:
-                            msg_entry["retrieval_mode"] = retrieval_mode
-                        if coverage_unit is not None:
-                            msg_entry["coverage_unit"] = coverage_unit
+                        if stream_state.reasoning:
+                            msg_entry["reasoning"] = stream_state.reasoning
+                        if stream_state.validation_checked is not None:
+                            msg_entry["validation_checked"] = (
+                                stream_state.validation_checked
+                            )
+                        if stream_state.validation_mismatch is not None:
+                            msg_entry["validation_mismatch"] = (
+                                stream_state.validation_mismatch
+                            )
+                        if stream_state.validation_reason:
+                            msg_entry["validation_reason"] = (
+                                stream_state.validation_reason
+                            )
+                        if stream_state.graph_debug is not None:
+                            msg_entry["graph_debug"] = stream_state.graph_debug
+                        if stream_state.retrieval_query is not None:
+                            msg_entry["retrieval_query"] = stream_state.retrieval_query
+                        if stream_state.retrieval_mode is not None:
+                            msg_entry["retrieval_mode"] = stream_state.retrieval_mode
+                        if stream_state.coverage_unit is not None:
+                            msg_entry["coverage_unit"] = stream_state.coverage_unit
+                        if stream_state.entity_match_candidates:
+                            msg_entry["entity_match_candidates"] = (
+                                stream_state.entity_match_candidates
+                            )
+                        if stream_state.entity_match_groups:
+                            msg_entry["entity_match_groups"] = (
+                                stream_state.entity_match_groups
+                            )
                         st.session_state.messages.append(msg_entry)
                         st.session_state.chat_running = False
                         st.rerun()

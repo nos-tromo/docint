@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from llama_index.core import Document
+from llama_index.core.schema import NodeWithScore, TextNode
 
 from docint.core import rag as rag_module
 from docint.core.rag import RAG
@@ -763,6 +764,131 @@ def test_collection_ner_search_matches_entity_acronyms() -> None:
     assert results[0]["mentions"] == 2
 
 
+def test_run_entity_occurrence_query_returns_matching_sources() -> None:
+    """Entity occurrence mode should return mention-level source rows."""
+    rag = RAG(qdrant_collection="test")
+    rag.ner_sources = [
+        {
+            "filename": "a.pdf",
+            "file_hash": "hash-a",
+            "chunk_id": "chunk-1",
+            "chunk_text": "Remigration appears here.",
+            "text": "Remigration appears here.",
+            "page": 1,
+            "entities": [{"text": "Remigration", "type": "IDEOLOGY"}],
+        },
+        {
+            "filename": "b.pdf",
+            "file_hash": "hash-b",
+            "chunk_id": "chunk-2",
+            "chunk_text": "Another Remigration mention.",
+            "text": "Another Remigration mention.",
+            "page": 2,
+            "entities": [{"text": "Remigration", "type": "IDEOLOGY"}],
+        },
+        {
+            "filename": "c.pdf",
+            "file_hash": "hash-c",
+            "chunk_id": "chunk-3",
+            "chunk_text": "Something else.",
+            "text": "Something else.",
+            "page": 3,
+            "entities": [{"text": "Migration", "type": "IDEOLOGY"}],
+        },
+    ]
+
+    result = rag.run_entity_occurrence_query("Where is Remigration mentioned?")
+
+    assert result["retrieval_mode"] == "entity_occurrence"
+    assert result["coverage_unit"] == "entity_mentions"
+    assert len(result["sources"]) == 2
+    assert result["sources"][0]["matched_entity"]["text"] == "Remigration"
+    assert result["sources"][0]["occurrence_count"] == 1
+    assert "Found 2 occurrence(s) of 'Remigration'" in result["response"]
+
+
+def test_run_entity_occurrence_query_reports_no_match() -> None:
+    """Entity occurrence mode should return a clear no-match response."""
+    rag = RAG(qdrant_collection="test")
+    rag.ner_sources = [
+        {
+            "filename": "a.pdf",
+            "chunk_id": "chunk-1",
+            "chunk_text": "Acme is here.",
+            "text": "Acme is here.",
+            "entities": [{"text": "Acme", "type": "ORG"}],
+        }
+    ]
+
+    result = rag.run_entity_occurrence_query("Remigration")
+
+    assert result["sources"] == []
+    assert "couldn't find a named-entity match" in result["response"]
+
+
+def test_run_entity_occurrence_query_reports_ambiguity() -> None:
+    """Single-entity occurrence mode should stop when top-rank matches tie."""
+    rag = RAG(qdrant_collection="test")
+    rag.ner_sources = [
+        {
+            "filename": "a.pdf",
+            "chunk_id": "chunk-1",
+            "chunk_text": "Acme the organization is here.",
+            "text": "Acme the organization is here.",
+            "entities": [{"text": "Acme", "type": "ORG"}],
+        },
+        {
+            "filename": "b.pdf",
+            "chunk_id": "chunk-2",
+            "chunk_text": "Acme the product is here.",
+            "text": "Acme the product is here.",
+            "entities": [{"text": "Acme", "type": "PRODUCT"}],
+        },
+    ]
+
+    result = rag.run_entity_occurrence_query("Acme")
+
+    assert result["retrieval_mode"] == "entity_occurrence_ambiguous"
+    assert result["sources"] == []
+    assert len(result["entity_match_candidates"]) == 2
+    assert "matches multiple entities equally well" in result["response"]
+
+
+def test_run_multi_entity_occurrence_query_groups_strong_matches() -> None:
+    """Multi-entity occurrence mode should group all equally strong matches."""
+    rag = RAG(qdrant_collection="test")
+    rag.ner_sources = [
+        {
+            "filename": "a.pdf",
+            "file_hash": "hash-a",
+            "chunk_id": "chunk-1",
+            "chunk_text": "Acme the organization is here.",
+            "text": "Acme the organization is here.",
+            "page": 1,
+            "entities": [{"text": "Acme", "type": "ORG"}],
+        },
+        {
+            "filename": "b.pdf",
+            "file_hash": "hash-b",
+            "chunk_id": "chunk-2",
+            "chunk_text": "Acme the product is here.",
+            "text": "Acme the product is here.",
+            "page": 2,
+            "entities": [{"text": "Acme", "type": "PRODUCT"}],
+        },
+    ]
+
+    result = rag.run_multi_entity_occurrence_query("Acme")
+
+    assert result["retrieval_mode"] == "entity_occurrence_multi"
+    assert len(result["entity_match_groups"]) == 2
+    assert {group["entity"]["type"] for group in result["entity_match_groups"]} == {
+        "ORG",
+        "PRODUCT",
+    }
+    assert len(result["sources"]) == 2
+
+
 def test_collection_ner_graph_and_neighbors() -> None:
     """Graph endpoints should expose relation and co-occurrence edges."""
     rag = RAG(qdrant_collection="test")
@@ -1360,6 +1486,100 @@ def test_build_query_engine_uses_refine_prompts_for_social_table_collection(
     assert "keep each post distinct" in captured["text_qa_template"].template.lower()
 
 
+def test_build_query_engine_uses_hybrid_retrieval_by_default_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid-capable collections should default to actual hybrid retrieval."""
+    rag = RAG(qdrant_collection="test", enable_hybrid=True)
+    rag._text_model = cast(Any, object())
+    rag._reranker = cast(Any, object())
+
+    captured_retriever_kwargs: dict[str, Any] = {}
+    rag.index = types.SimpleNamespace(
+        docstore=object(),
+        as_retriever=lambda **kwargs: captured_retriever_kwargs.update(kwargs)
+        or {"retriever_kwargs": kwargs},
+    )
+    monkeypatch.setattr(RAG, "list_documents", lambda self: [])
+    monkeypatch.setattr(RAG, "_sample_collection_payloads", lambda self, limit=128: [])
+    monkeypatch.setattr(
+        rag_module.RetrieverQueryEngine,
+        "from_args",
+        staticmethod(lambda **kwargs: kwargs),
+    )
+
+    rag.build_query_engine()
+
+    assert (
+        captured_retriever_kwargs["vector_store_query_mode"]
+        == rag_module.VectorStoreQueryMode.HYBRID
+    )
+    assert captured_retriever_kwargs["alpha"] == pytest.approx(rag.hybrid_alpha)
+    assert captured_retriever_kwargs["sparse_top_k"] == rag.sparse_top_k
+    assert captured_retriever_kwargs["hybrid_top_k"] == rag.hybrid_top_k
+
+
+def test_build_query_engine_adds_parent_context_postprocessor_when_supported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hierarchical collections should expand fine hits to parent context."""
+    rag = RAG(qdrant_collection="test")
+    rag._text_model = cast(Any, object())
+    rag._reranker = cast(Any, object())
+    rag.index = types.SimpleNamespace(
+        docstore=object(),
+        as_retriever=lambda **kwargs: {"retriever_kwargs": kwargs},
+    )
+    monkeypatch.setattr(RAG, "list_documents", lambda self: [])
+    monkeypatch.setattr(
+        RAG,
+        "_sample_collection_payloads",
+        lambda self, limit=128: [{"docint_hier_type": "fine", "hier.parent_id": "p1"}],
+    )
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        rag_module.RetrieverQueryEngine,
+        "from_args",
+        staticmethod(lambda **kwargs: captured.update(kwargs) or kwargs),
+    )
+
+    rag.build_query_engine()
+
+    postprocessors = captured["node_postprocessors"]
+    assert any(
+        isinstance(postprocessor, rag_module.ParentContextPostprocessor)
+        for postprocessor in postprocessors
+    )
+
+
+def test_parent_context_postprocessor_promotes_parent_nodes() -> None:
+    """Parent-context postprocessor should replace child hits with their parent node."""
+    parent = TextNode(
+        text="Parent context", id_="parent-1", metadata={"filename": "a.txt"}
+    )
+    child = TextNode(
+        text="Child match",
+        id_="child-1",
+        metadata={"hier.parent_id": "parent-1", "docint_hier_type": "fine"},
+    )
+    child_hit = NodeWithScore(node=child, score=0.77)
+
+    postprocessor = rag_module.ParentContextPostprocessor(
+        docstore=types.SimpleNamespace(
+            get_node=lambda node_id, raise_error=False: parent
+            if node_id == "parent-1"
+            else None
+        )
+    )
+
+    processed = postprocessor._postprocess_nodes([child_hit])
+
+    assert len(processed) == 1
+    assert processed[0].node.get_content() == "Parent context"
+    assert processed[0].score == pytest.approx(0.77)
+
+
 def test_summarize_collection_reports_coverage_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1550,6 +1770,48 @@ def test_summarize_collection_requires_collection() -> None:
     rag = RAG(qdrant_collection="")
     with pytest.raises(ValueError, match="No collection selected"):
         rag.summarize_collection()
+
+
+def test_retrieve_summary_nodes_for_document_falls_back_to_payload_scroll() -> None:
+    """Summary retrieval should still return evidence when embedding calls fail."""
+    rag = RAG(qdrant_collection="test")
+    rag.summary_per_doc_top_k = 2
+    rag.index = cast(
+        Any,
+        types.SimpleNamespace(
+            as_retriever=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("nan"))
+        ),
+    )
+
+    point = types.SimpleNamespace(
+        id="pt-1",
+        payload={
+            "origin": {
+                "filename": "39816-pdf.pdf",
+                "mimetype": "application/pdf",
+                "file_hash": "hash-39816",
+            },
+            "file_hash": "hash-39816",
+            "page_number": 1,
+            "source": "document",
+            "text": "A grounded finding from the PDF.",
+        },
+    )
+    rag._qdrant_client = cast(
+        Any,
+        types.SimpleNamespace(scroll=lambda **kwargs: ([point], None)),
+    )
+
+    nodes = rag._retrieve_summary_nodes_for_document(
+        filename="39816-pdf.pdf",
+        file_hash="hash-39816",
+    )
+
+    assert len(nodes) == 1
+    source = rag._source_from_node_with_score(nodes[0])
+    assert source is not None
+    assert source["filename"] == "39816-pdf.pdf"
+    assert source["text"] == "A grounded finding from the PDF."
 
 
 class _InMemorySummaryKVStore:

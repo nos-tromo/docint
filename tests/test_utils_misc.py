@@ -175,12 +175,22 @@ def test_load_retrieval_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RERANK_USE_FP16", raising=False)
     monkeypatch.delenv("RETRIEVE_TOP_K", raising=False)
     monkeypatch.delenv("CHAT_RESPONSE_MODE", raising=False)
+    monkeypatch.delenv("RETRIEVAL_VECTOR_QUERY_MODE", raising=False)
+    monkeypatch.delenv("RETRIEVAL_HYBRID_ALPHA", raising=False)
+    monkeypatch.delenv("RETRIEVAL_SPARSE_TOP_K", raising=False)
+    monkeypatch.delenv("RETRIEVAL_HYBRID_TOP_K", raising=False)
+    monkeypatch.delenv("PARENT_CONTEXT_RETRIEVAL_ENABLED", raising=False)
 
     cfg = load_retrieval_env()
 
     assert cfg.rerank_use_fp16 is False
     assert cfg.retrieve_top_k == 20
     assert cfg.chat_response_mode == "auto"
+    assert cfg.vector_store_query_mode == "auto"
+    assert cfg.hybrid_alpha == 0.5
+    assert cfg.sparse_top_k == 20
+    assert cfg.hybrid_top_k == 20
+    assert cfg.parent_context_enabled is True
 
 
 def test_load_retrieval_env_parses_chat_response_mode(
@@ -194,12 +204,22 @@ def test_load_retrieval_env_parses_chat_response_mode(
     monkeypatch.setenv("RERANK_USE_FP16", "true")
     monkeypatch.setenv("RETRIEVE_TOP_K", "11")
     monkeypatch.setenv("CHAT_RESPONSE_MODE", "refine")
+    monkeypatch.setenv("RETRIEVAL_VECTOR_QUERY_MODE", "hybrid")
+    monkeypatch.setenv("RETRIEVAL_HYBRID_ALPHA", "0.25")
+    monkeypatch.setenv("RETRIEVAL_SPARSE_TOP_K", "17")
+    monkeypatch.setenv("RETRIEVAL_HYBRID_TOP_K", "9")
+    monkeypatch.setenv("PARENT_CONTEXT_RETRIEVAL_ENABLED", "false")
 
     cfg = load_retrieval_env()
 
     assert cfg.rerank_use_fp16 is True
     assert cfg.retrieve_top_k == 11
     assert cfg.chat_response_mode == "refine"
+    assert cfg.vector_store_query_mode == "hybrid"
+    assert cfg.hybrid_alpha == 0.25
+    assert cfg.sparse_top_k == 17
+    assert cfg.hybrid_top_k == 9
+    assert cfg.parent_context_enabled is False
 
 
 def test_load_openai_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

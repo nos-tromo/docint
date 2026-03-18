@@ -905,18 +905,36 @@ class RetrievalConfig:
     rerank_use_fp16: bool
     retrieve_top_k: int
     chat_response_mode: Literal["auto", "compact", "refine"]
+    vector_store_query_mode: Literal["auto", "default", "sparse", "hybrid", "mmr"]
+    hybrid_alpha: float
+    sparse_top_k: int
+    hybrid_top_k: int
+    parent_context_enabled: bool
 
 
 def load_retrieval_env(
     default_rerank_use_fp16: bool = False,
     default_retrieve_top_k: int = 20,
     default_chat_response_mode: Literal["auto", "compact", "refine"] = "auto",
+    default_vector_store_query_mode: Literal[
+        "auto", "default", "sparse", "hybrid", "mmr"
+    ] = "auto",
+    default_hybrid_alpha: float = 0.5,
+    default_sparse_top_k: int = 20,
+    default_hybrid_top_k: int = 20,
+    default_parent_context_enabled: bool = True,
 ) -> RetrievalConfig:
     """Loads retrieval configuration from environment variables or defaults.
 
     Args:
         default_rerank_use_fp16 (bool): Default flag to use FP16 for reranker model. Default is False.
         default_retrieve_top_k (int): Default number of top documents to retrieve.
+        default_chat_response_mode (Literal["auto", "compact", "refine"]): Default response synthesizer mode for chat/query answers. Default is "auto".
+        default_vector_store_query_mode (Literal["auto", "default", "sparse", "hybrid", "mmr"]): Default retrieval mode to use for vector store queries. Default is "auto".
+        default_hybrid_alpha (float): Default dense-vs-sparse fusion weight for hybrid search. Value should be in [0.0, 1.0]. Default is 0.5.
+        default_sparse_top_k (int): Default candidate depth for sparse retrieval in hybrid/sparse modes. Default is 20.
+        default_hybrid_top_k (int): Default final candidate depth after dense/sparse fusion. Default is 20.
+        default_parent_context_enabled (bool): Default flag to enable hierarchical parent context retrieval. Default is True.
 
     Returns:
         RetrievalConfig: Dataclass containing retrieval configuration.
@@ -924,6 +942,13 @@ def load_retrieval_env(
         - retrieve_top_k (int): The number of top documents to retrieve for RAG
         - chat_response_mode (Literal["auto", "compact", "refine"]): The
           response synthesizer mode for chat/query answers.
+                - vector_store_query_mode (Literal["auto", "default", "sparse", "hybrid", "mmr"]):
+                    Retrieval mode to use for vector store queries.
+                - hybrid_alpha (float): Dense-vs-sparse fusion weight for hybrid search.
+                - sparse_top_k (int): Candidate depth for sparse retrieval in hybrid/sparse modes.
+                - hybrid_top_k (int): Final candidate depth after dense/sparse fusion.
+                - parent_context_enabled (bool): Whether fine-grained matches should expand
+                    to their hierarchical parent context when available.
     """
     raw_mode = (
         str(os.getenv("CHAT_RESPONSE_MODE", default_chat_response_mode)).strip().lower()
@@ -934,6 +959,22 @@ def load_retrieval_env(
     elif raw_mode == "auto":
         chat_response_mode = "auto"
 
+    raw_query_mode = (
+        str(os.getenv("RETRIEVAL_VECTOR_QUERY_MODE", default_vector_store_query_mode))
+        .strip()
+        .lower()
+    )
+    vector_store_query_mode: Literal["auto", "default", "sparse", "hybrid", "mmr"] = (
+        "auto"
+    )
+    if raw_query_mode in {"default", "sparse", "hybrid", "mmr"}:
+        vector_store_query_mode = cast(
+            Literal["default", "sparse", "hybrid", "mmr"],
+            raw_query_mode,
+        )
+    elif raw_query_mode == "auto":
+        vector_store_query_mode = "auto"
+
     return RetrievalConfig(
         rerank_use_fp16=str(
             os.getenv("RERANK_USE_FP16", default_rerank_use_fp16)
@@ -941,6 +982,29 @@ def load_retrieval_env(
         in {"true", "1", "yes"},
         retrieve_top_k=int(os.getenv("RETRIEVE_TOP_K", default_retrieve_top_k)),
         chat_response_mode=chat_response_mode,
+        vector_store_query_mode=vector_store_query_mode,
+        hybrid_alpha=min(
+            1.0,
+            max(
+                0.0,
+                float(os.getenv("RETRIEVAL_HYBRID_ALPHA", default_hybrid_alpha)),
+            ),
+        ),
+        sparse_top_k=max(
+            1,
+            int(os.getenv("RETRIEVAL_SPARSE_TOP_K", default_sparse_top_k)),
+        ),
+        hybrid_top_k=max(
+            1,
+            int(os.getenv("RETRIEVAL_HYBRID_TOP_K", default_hybrid_top_k)),
+        ),
+        parent_context_enabled=str(
+            os.getenv(
+                "PARENT_CONTEXT_RETRIEVAL_ENABLED",
+                default_parent_context_enabled,
+            )
+        ).lower()
+        in {"true", "1", "yes"},
     )
 
 

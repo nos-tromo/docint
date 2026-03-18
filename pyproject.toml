@@ -54,6 +54,7 @@ dependencies = [
 docint = "docint.app:run"
 ingest = "docint.cli.ingest:main"
 query = "docint.cli.query:main"
+query-eval = "docint.cli.eval:main"
 load-models = "docint.utils.model_cfg:main"
 
 [dependency-groups]

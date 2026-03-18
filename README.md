@@ -133,7 +133,7 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    cp .env.example .env
    ```
 
-   At minimum, confirm `MODEL_PROVIDER`, `OPENAI_API_BASE`, `EMBED_MODEL_PROVIDER`, and model IDs (`EMBED_MODEL`, `LLM`, `VLM`) match your stack.
+   At minimum, confirm `MODEL_PROVIDER`, `OPENAI_API_BASE`, and model IDs (`EMBED_MODEL`, `LLM`, `VLM`) match your stack.
 
 3. **Install Dependencies**
 
@@ -186,6 +186,11 @@ The application is configured via environment variables. Key variables include:
 - `GRAPHRAG_MAX_NEIGHBORS`: Maximum neighbor entities appended to a retrieval query (default: `6`).
 - `RESPONSE_VALIDATION_ENABLED`: Enable a second-pass LLM check that verifies answer grounding and source/query fit, and flags mismatches (default: `false`).
 - `CHAT_RESPONSE_MODE`: Chat/query response synthesizer mode. Use `auto` to switch social/table-heavy collections to `refine` while keeping other collections on `compact` (default: `auto`).
+- `RETRIEVAL_VECTOR_QUERY_MODE`: First-stage retrieval mode. `auto` resolves to `hybrid` when hybrid search is enabled for the collection, otherwise `default`. Supported values: `auto`, `default`, `sparse`, `hybrid`, `mmr` (default: `auto`).
+- `RETRIEVAL_HYBRID_ALPHA`: Dense-vs-sparse fusion weight for hybrid retrieval. `1.0` biases dense results, `0.0` biases sparse results (default: `0.5`).
+- `RETRIEVAL_SPARSE_TOP_K`: Sparse candidate depth used by sparse and hybrid retrieval (default: `20`).
+- `RETRIEVAL_HYBRID_TOP_K`: Final candidate depth retained after dense/sparse fusion in hybrid mode (default: `20`).
+- `PARENT_CONTEXT_RETRIEVAL_ENABLED`: When hierarchical chunks are available, retrieve fine chunks first and expand them to their parent context for synthesis (default: `true`).
 - `SUMMARY_COVERAGE_TARGET`: Minimum document coverage ratio considered sufficient for collection summaries (default: `0.70`).
 - `SUMMARY_MAX_DOCS`: Maximum number of documents sampled when building collection summaries (default: `30`).
 - `SUMMARY_PER_DOC_TOP_K`: Maximum evidence chunks retrieved per document during summary preparation (default: `4`).
@@ -193,15 +198,12 @@ The application is configured via environment variables. Key variables include:
 - `SUMMARY_SOCIAL_CHUNKING_ENABLED`: Enable chunk/post-level summary mode for row-heavy social/table collections (default: `true`).
 - `SUMMARY_SOCIAL_CANDIDATE_POOL`: Candidate retrieval depth used by chunk/post-level social summaries (default: `48`).
 - `SUMMARY_SOCIAL_DIVERSITY_LIMIT`: Maximum number of retained social summary sources per author/time bucket (default: `2`).
-<<<<<<< codex/reduce-drift-openai-thinking
-=======
 - `INGESTION_BATCH_SIZE`: Size of the in-memory enrichment streaming window (NER/hate-speech). Smaller values reduce crash-loss window during enrichment; larger values can improve throughput (default: `5`).
 - `DOCSTORE_BATCH_SIZE`: Size of micro-batches written to docstore/vectorstore after enrichment. Smaller values flush to Qdrant more often; larger values reduce write overhead (default: `100`).
 - `INGEST_BENCHMARK_ENABLED`: Emit ingest benchmark logs (elapsed time, docs/nodes throughput, enrichment and persistence batch counters) to help tune batch sizes (default: `false`).
 - `DOCSTORE_MAX_RETRIES`: Retry count for transient Qdrant docstore transport errors during ingest/read operations (default: `3`).
 - `DOCSTORE_RETRY_BACKOFF_SECONDS`: Initial backoff delay between docstore retries in seconds (default: `0.25`).
 - `DOCSTORE_RETRY_BACKOFF_MAX_SECONDS`: Maximum backoff delay between docstore retries in seconds (default: `2.0`).
->>>>>>> main
 - `PRELOAD_MODELS`: Set to `true` to download all ML models at container startup (default: unset/disabled). Used by `docker-compose.yml` to populate the `model-cache` volume on first run.
 
 Batch-size tuning guidance:
@@ -225,9 +227,8 @@ Batch-size tuning guidance:
 - `OPENAI_ENABLE_THINKING`: Enable OpenAI reasoning/thinking for text models routed through the native OpenAI provider (default: `false`).
 - `OPENAI_THINKING_EFFORT`: Reasoning effort used when `OPENAI_ENABLE_THINKING=true`. Supported values: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` (default: `medium`).
 - `MODEL_PROVIDER`: Inference provider type (`llama.cpp`, `ollama`, `openai`).
-- `EMBED_MODEL_PROVIDER`: Embedding backend selector (`huggingface`, `ollama`, `openai`, or `llama.cpp`). When omitted, Docint defaults to the native embedding backend for `MODEL_PROVIDER`; if no provider-native backend is inferred, it falls back to `huggingface`.
 - `LLM`: Repo ID (e.g., `bartowski/Meta-Llama-3-8B-Instruct-GGUF`) for automatic download.
-- `EMBED_MODEL`: Embedding model ID for the selected embedding backend. Use an Ollama tag (for example `bge-m3`) with `EMBED_MODEL_PROVIDER=ollama`, an OpenAI embedding model name (for example `text-embedding-3-small`) with `EMBED_MODEL_PROVIDER=openai`, a GGUF spec (for example `ggml-org/bge-m3-Q8_0-GGUF;bge-m3-q8_0.gguf`) with `EMBED_MODEL_PROVIDER=llama.cpp`, or a Hugging Face repo ID (for example `BAAI/bge-m3`) with `EMBED_MODEL_PROVIDER=huggingface`.
+- `EMBED_MODEL`: Embedding model ID served by the configured `MODEL_PROVIDER`. Use an Ollama tag (for example `bge-m3`) with `MODEL_PROVIDER=ollama`, an OpenAI embedding model name (for example `text-embedding-3-small`) with `MODEL_PROVIDER=openai`, or a GGUF spec (for example `ggml-org/bge-m3-Q8_0-GGUF;bge-m3-q8_0.gguf`) with `MODEL_PROVIDER=llama.cpp`.
 - `VLM`: Vision-language model ID (GGUF `repo;filename` for `llama.cpp` or model tag for Ollama/OpenAI).
 
 **Note on Provider Agnosticism:**
@@ -374,6 +375,16 @@ matches = service.query_similar_images(Path("query.png"), top_k=5)
    When GraphRAG is enabled, each result JSON also includes a `graph_debug`
    object with query-expansion details (anchors, neighbors, and applied/no-op reason).
 
+4. **Compare Retrieval Modes**
+
+   To compare dense/default, sparse, and hybrid retrieval over the same query set, run:
+
+   ```bash
+   uv run query-eval
+   ```
+
+   The command reads the same `queries.txt` file used by `uv run query`. You can also use `.json` or `.jsonl` files with optional expectation fields such as `expected_filenames`, `expected_file_hashes`, and `expected_text_ids`. A structured evaluation report is written to `~/docint/results`.
+
 ---
 
 ### [Development] Launching UI and Backend separately
@@ -408,6 +419,12 @@ matches = service.query_similar_images(Path("query.png"), top_k=5)
    metadata before querying the vector store. Supported filters include MIME
    patterns (for example `image/*` or `application/pdf`), date boundaries on
    timestamp fields, and additional custom metadata rules.
+
+   The same panel now also exposes a `Query mode` selector:
+   `answer` keeps the normal grounded-answer path, while
+   `entity_occurrence` bypasses reranked answer synthesis and returns
+   mention-level NER-backed source rows for the best matching entity in the
+   active collection.
 
 ---
 
@@ -542,4 +559,4 @@ Failures on individual pages do not crash the entire document. Failed pages are 
 
 ### Offline Compliance
 
-Core PDF processing runs locally. Vision OCR fallback uses the configured OpenAI-compatible inference endpoint (local or remote), and can be disabled with `PIPELINE_ENABLE_VISION_OCR=false`. Set `DOCINT_OFFLINE=true` to enforce offline mode for Hugging Face model loading. When `EMBED_MODEL_PROVIDER=huggingface`, `uv run load-models` must be run before startup so the embedding snapshot is present in the local cache.
+Core PDF processing runs locally. Vision OCR fallback uses the configured OpenAI-compatible inference endpoint (local or remote), and can be disabled with `PIPELINE_ENABLE_VISION_OCR=false`. Set `DOCINT_OFFLINE=true` to enforce offline mode for Hugging Face model loading. When using local model assets, `uv run load-models` must be run before startup so embedding, sparse, rerank, and related model files are present in the local cache.
