@@ -6,7 +6,9 @@ import pytest
 
 from docint.ui import chat as chat_module
 from docint.ui.chat import (
+    _entity_candidate_label,
     _format_graph_debug_summary,
+    _query_mode_badge_label,
     _retrieval_mode_badge_label,
     build_chat_metadata_filters,
 )
@@ -43,6 +45,31 @@ def test_retrieval_mode_badge_label_defaults_to_stateless() -> None:
 def test_retrieval_mode_badge_label_session() -> None:
     """Badge label helper should render session mode label."""
     assert _retrieval_mode_badge_label("session") == "Session Retrieval"
+
+
+def test_query_mode_badge_label_defaults_to_answer() -> None:
+    """Query mode badge should default unknown values to answer mode."""
+    assert _query_mode_badge_label(None) == "Answer Mode"
+    assert _query_mode_badge_label("unexpected") == "Answer Mode"
+
+
+def test_query_mode_badge_label_occurrence() -> None:
+    """Query mode badge should render entity occurrence mode clearly."""
+    assert _query_mode_badge_label("entity_occurrence") == "Entity Occurrence Mode"
+
+
+def test_query_mode_badge_label_multi_occurrence() -> None:
+    """Query mode badge should render the multi-entity occurrence label."""
+    assert (
+        _query_mode_badge_label("entity_occurrence_multi")
+        == "Multi-Entity Occurrence Mode"
+    )
+
+
+def test_entity_candidate_label_includes_type_and_mentions() -> None:
+    """Candidate labels should help users disambiguate tied entities quickly."""
+    label = _entity_candidate_label({"text": "Acme", "type": "ORG", "mentions": 3})
+    assert label == "Acme [ORG] · 3 mention(s)"
 
 
 def test_build_chat_metadata_filters_combines_scope_date_and_custom_rules() -> None:

@@ -18,6 +18,11 @@ from docint.utils.env_cfg import load_host_env
 BACKEND_HOST = load_host_env().backend_host
 CHAT_SOURCES_CONTAINER_HEIGHT = 420
 CHAT_DEBUG_CONTAINER_HEIGHT = 280
+CHAT_QUERY_MODE_OPTIONS: tuple[str, ...] = (
+    "answer",
+    "entity_occurrence",
+    "entity_occurrence_multi",
+)
 CHAT_SCOPE_OPTIONS: tuple[str, ...] = (
     "All content",
     "Images only",
@@ -69,6 +74,79 @@ def _retrieval_mode_badge_label(mode: str | None) -> str:
     if normalized == "session":
         return "Session Retrieval"
     return "Stateless Retrieval"
+
+
+def _query_mode_badge_label(mode: str | None) -> str:
+    """Return a compact badge label for the active chat query mode."""
+    normalized = str(mode or "answer").strip().lower()
+    if normalized == "entity_occurrence_multi":
+        return "Multi-Entity Occurrence Mode"
+    if normalized == "entity_occurrence":
+        return "Entity Occurrence Mode"
+    return "Answer Mode"
+
+
+def _entity_candidate_label(candidate: Mapping[str, Any]) -> str:
+    """Build a compact button label for one ambiguous entity candidate."""
+    text = str(candidate.get("text") or "").strip() or "Unknown"
+    entity_type = str(candidate.get("type") or "Unlabeled").strip()
+    mentions = int(candidate.get("mentions", 0) or 0)
+    return f"{text} [{entity_type}] · {mentions} mention(s)"
+
+
+def _queue_entity_occurrence_prompt(candidate: Mapping[str, Any]) -> None:
+    """Queue a follow-up occurrence lookup for one chosen entity."""
+    st.session_state.chat_pending_prompt = str(candidate.get("text") or "").strip()
+    st.session_state.chat_query_mode = "entity_occurrence"
+    st.rerun()
+
+
+def _render_entity_match_candidates(
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    message_key: str,
+) -> None:
+    """Render disambiguation controls for equally strong entity matches."""
+    if not candidates:
+        return
+    st.info(
+        "Multiple entities matched equally well. Choose one to rerun the lookup "
+        "exactly, or switch Query mode to multi-entity occurrence."
+    )
+    for index, candidate in enumerate(candidates):
+        if st.button(
+            _entity_candidate_label(candidate),
+            key=f"entity-candidate-{message_key}-{index}",
+            use_container_width=True,
+        ):
+            _queue_entity_occurrence_prompt(candidate)
+
+
+def _render_entity_match_groups(
+    groups: Sequence[Mapping[str, Any]],
+    *,
+    collection: str,
+    message_key: str,
+) -> None:
+    """Render grouped multi-entity occurrence results in the chat UI."""
+    if not groups:
+        return
+    st.markdown("**Matched Entities**")
+    for index, group in enumerate(groups):
+        entity = group.get("entity") if isinstance(group, Mapping) else {}
+        entity = entity if isinstance(entity, Mapping) else {}
+        label = (
+            f"{str(entity.get('text') or 'Unknown')} "
+            f"[{str(entity.get('type') or 'Unlabeled')}]"
+            f" · {int(group.get('chunk_count', 0) or 0)} chunk(s)"
+            f" · {int(group.get('document_count', 0) or 0)} document(s)"
+        )
+        with st.expander(label):
+            if bool(group.get("truncated")):
+                st.caption("Showing a truncated per-entity source list.")
+            for source in list(group.get("sources") or []):
+                if isinstance(source, Mapping):
+                    render_source_item(dict(source), collection)
 
 
 def _format_graph_debug_summary(graph_debug: dict[str, Any] | None) -> str | None:
@@ -328,7 +406,12 @@ def render_chat() -> None:
 
     st.caption(f"📁 {collection}")
     st.markdown(
-        f"`{_retrieval_mode_badge_label(st.session_state.get('chat_retrieval_mode'))}`"
+        " ".join(
+            [
+                f"`{_query_mode_badge_label(st.session_state.get('chat_query_mode'))}`",
+                f"`{_retrieval_mode_badge_label(st.session_state.get('chat_retrieval_mode'))}`",
+            ]
+        )
     )
 
     # ── Download current chat ────────────────────────────────
@@ -391,9 +474,22 @@ def render_chat() -> None:
         )
 
     # ── Message history ──────────────────────────────────────
-    for msg in st.session_state.messages:
+    for message_index, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
+
+            if msg.get("entity_match_candidates"):
+                _render_entity_match_candidates(
+                    list(msg.get("entity_match_candidates") or []),
+                    message_key=f"history-{message_index}",
+                )
+
+            if msg.get("entity_match_groups") and not msg.get("sources"):
+                _render_entity_match_groups(
+                    list(msg.get("entity_match_groups") or []),
+                    collection=collection,
+                    message_key=f"history-{message_index}",
+                )
 
             if msg.get("reasoning"):
                 with st.expander("Reasoning"):
@@ -415,12 +511,24 @@ def render_chat() -> None:
 
     with st.expander("Retrieval filters", expanded=False):
         st.selectbox(
+            "Query mode",
+            options=CHAT_QUERY_MODE_OPTIONS,
+            key="chat_query_mode",
+            help=(
+                "answer: grounded answer generation from retrieved chunks; "
+                "entity_occurrence: exact mention lookup for one entity, with disambiguation when ambiguous; "
+                "entity_occurrence_multi: grouped results for all equally strong entity matches."
+            ),
+        )
+        st.selectbox(
             "Retrieval mode",
             options=CHAT_RETRIEVAL_MODE_OPTIONS,
             key="chat_retrieval_mode",
+            disabled=(st.session_state.get("chat_query_mode") == "entity_occurrence"),
             help=(
                 "stateless: no conversation rewrite/memory carry-over; "
-                "session: multi-turn chat with conversation context."
+                "session: multi-turn chat with conversation context. "
+                "Ignored when Query mode is entity_occurrence."
             ),
         )
         st.checkbox(
@@ -519,9 +627,14 @@ def render_chat() -> None:
         st.session_state.current_answer = ""
 
     # ── Chat input ───────────────────────────────────────────
-    if prompt := st.chat_input(
+    pending_prompt = st.session_state.pop("chat_pending_prompt", None)
+    if isinstance(pending_prompt, str) and pending_prompt.strip():
+        _start_chat()
+
+    prompt = pending_prompt or st.chat_input(
         "Ask a question about your documents…", on_submit=_start_chat
-    ):
+    )
+    if prompt:
         st.session_state.messages.append({"role": "user", "content": prompt})
 
         with st.chat_message("user"):
@@ -551,6 +664,8 @@ def render_chat() -> None:
             retrieval_query: str | None = None
             coverage_unit: str | None = None
             retrieval_mode: str | None = None
+            entity_match_candidates: list[dict[str, Any]] = []
+            entity_match_groups: list[dict[str, Any]] = []
             metadata_filters = build_chat_metadata_filters(
                 {
                     "enabled": st.session_state.chat_filter_enabled,
@@ -573,6 +688,7 @@ def render_chat() -> None:
                 "retrieval_mode": st.session_state.get(
                     "chat_retrieval_mode", "stateless"
                 ),
+                "query_mode": st.session_state.get("chat_query_mode", "answer"),
             }
             try:
                 with requests.post(
@@ -582,7 +698,7 @@ def render_chat() -> None:
                     timeout=600,
                 ) as resp:
                     if resp.status_code == 200:
-                        lines = resp.iter_lines()
+                        lines = resp.iter_lines(chunk_size=1)
                         first_line = None
 
                         with c1:
@@ -608,6 +724,8 @@ def render_chat() -> None:
                             nonlocal retrieval_query
                             nonlocal coverage_unit
                             nonlocal retrieval_mode
+                            nonlocal entity_match_candidates
+                            nonlocal entity_match_groups
                             if not line:
                                 return
                             decoded = line.decode("utf-8")
@@ -635,6 +753,20 @@ def render_chat() -> None:
                                     retrieval_mode = str(
                                         data.get("retrieval_mode") or ""
                                     )
+                                if isinstance(
+                                    data.get("entity_match_candidates"), list
+                                ):
+                                    entity_match_candidates = [
+                                        dict(item)
+                                        for item in data.get("entity_match_candidates")
+                                        if isinstance(item, dict)
+                                    ]
+                                if isinstance(data.get("entity_match_groups"), list):
+                                    entity_match_groups = [
+                                        dict(item)
+                                        for item in data.get("entity_match_groups")
+                                        if isinstance(item, dict)
+                                    ]
                                 if data.get("session_id"):
                                     st.session_state.session_id = data.get("session_id")
                                 if "token" in data:
@@ -667,6 +799,19 @@ def render_chat() -> None:
                         if reasoning:
                             with st.expander("Reasoning"):
                                 st.markdown(reasoning)
+
+                        if entity_match_candidates:
+                            _render_entity_match_candidates(
+                                entity_match_candidates,
+                                message_key="active",
+                            )
+
+                        if entity_match_groups and not sources:
+                            _render_entity_match_groups(
+                                entity_match_groups,
+                                collection=collection,
+                                message_key="active",
+                            )
 
                         render_response_validation(
                             validation_checked=validation_checked,
@@ -704,6 +849,12 @@ def render_chat() -> None:
                             msg_entry["retrieval_mode"] = retrieval_mode
                         if coverage_unit is not None:
                             msg_entry["coverage_unit"] = coverage_unit
+                        if entity_match_candidates:
+                            msg_entry["entity_match_candidates"] = (
+                                entity_match_candidates
+                            )
+                        if entity_match_groups:
+                            msg_entry["entity_match_groups"] = entity_match_groups
                         st.session_state.messages.append(msg_entry)
                         st.session_state.chat_running = False
                         st.rerun()

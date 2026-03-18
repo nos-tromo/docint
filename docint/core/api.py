@@ -225,6 +225,9 @@ class QueryIn(BaseModel):
     session_id: str | None = None
     metadata_filters: list[MetadataFilterIn] = Field(default_factory=list)
     retrieval_mode: Literal["session", "stateless"] = "session"
+    query_mode: Literal["answer", "entity_occurrence", "entity_occurrence_multi"] = (
+        "answer"
+    )
 
 
 class QueryOut(BaseModel):
@@ -235,6 +238,8 @@ class QueryOut(BaseModel):
     retrieval_query: str | None = None
     coverage_unit: str | None = None
     retrieval_mode: str | None = None
+    entity_match_candidates: list[dict] = []
+    entity_match_groups: list[dict] = []
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
     validation_reason: str | None = None
@@ -422,50 +427,66 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
             logger.error("HTTPException: No collection selected")
             raise HTTPException(status_code=400, detail="No collection selected")
 
-        if getattr(rag, "query_engine", None) is None:
-            if getattr(rag, "index", None) is None:
-                rag.create_index()
-            rag.create_query_engine()
-
         metadata_filters = build_metadata_filters(payload.metadata_filters)
         vector_store_kwargs = {}
         qdrant_filter = build_qdrant_filter(payload.metadata_filters)
         if qdrant_filter is not None:
             vector_store_kwargs["qdrant_filters"] = qdrant_filter
 
-        if payload.retrieval_mode == "stateless":
-            retrieval_query = payload.question
-            graph_debug: dict[str, Any] | None = None
-            expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
-            if callable(expand_with_debug):
-                try:
-                    expanded, debug_payload = expand_with_debug(retrieval_query)
-                    retrieval_query = str(expanded)
-                    if isinstance(debug_payload, dict):
-                        graph_debug = debug_payload
-                except Exception as exc:
-                    logger.warning(
-                        "Graph debug expansion failed for stateless query: {}", exc
-                    )
-
-            data = rag.run_query(
-                retrieval_query,
-                metadata_filters=metadata_filters,
-                vector_store_kwargs=vector_store_kwargs or None,
-            )
-            if graph_debug is not None:
-                data["graph_debug"] = graph_debug
+        if payload.query_mode in {"entity_occurrence", "entity_occurrence_multi"}:
+            if payload.query_mode == "entity_occurrence_multi":
+                data = rag.run_multi_entity_occurrence_query(
+                    payload.question,
+                    qdrant_filter=qdrant_filter,
+                )
+            else:
+                data = rag.run_entity_occurrence_query(
+                    payload.question,
+                    qdrant_filter=qdrant_filter,
+                )
             session_id = payload.session_id or "stateless"
         else:
-            session_id = rag.start_session(payload.session_id)
-            data = rag.chat(
-                payload.question,
-                metadata_filters=metadata_filters,
-                metadata_filters_active=(
-                    metadata_filters is not None or bool(vector_store_kwargs)
-                ),
-                vector_store_kwargs=vector_store_kwargs or None,
-            )
+            if getattr(rag, "query_engine", None) is None:
+                if getattr(rag, "index", None) is None:
+                    rag.create_index()
+                rag.create_query_engine()
+
+            if payload.retrieval_mode == "stateless":
+                retrieval_query = payload.question
+                graph_debug: dict[str, Any] | None = None
+                expand_with_debug = getattr(
+                    rag, "expand_query_with_graph_with_debug", None
+                )
+                if callable(expand_with_debug):
+                    try:
+                        expanded, debug_payload = expand_with_debug(retrieval_query)
+                        retrieval_query = str(expanded)
+                        if isinstance(debug_payload, dict):
+                            graph_debug = debug_payload
+                    except Exception as exc:
+                        logger.warning(
+                            "Graph debug expansion failed for stateless query: {}",
+                            exc,
+                        )
+
+                data = rag.run_query(
+                    retrieval_query,
+                    metadata_filters=metadata_filters,
+                    vector_store_kwargs=vector_store_kwargs or None,
+                )
+                if graph_debug is not None:
+                    data["graph_debug"] = graph_debug
+                session_id = payload.session_id or "stateless"
+            else:
+                session_id = rag.start_session(payload.session_id)
+                data = rag.chat(
+                    payload.question,
+                    metadata_filters=metadata_filters,
+                    metadata_filters_active=(
+                        metadata_filters is not None or bool(vector_store_kwargs)
+                    ),
+                    vector_store_kwargs=vector_store_kwargs or None,
+                )
 
         answer = (
             str(data.get("response") or data.get("answer") or "")
@@ -478,7 +499,7 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
             if isinstance(data, dict) and isinstance(data.get("graph_debug"), dict)
             else None
         )
-        retrieval_query = (
+        retrieval_query_value: str | None = (
             str(data.get("retrieval_query") or "")
             if isinstance(data, dict) and data.get("retrieval_query") is not None
             else None
@@ -493,6 +514,18 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
             if isinstance(data, dict) and data.get("retrieval_mode") is not None
             else None
         )
+        entity_match_candidates = (
+            data.get("entity_match_candidates", [])
+            if isinstance(data, dict)
+            and isinstance(data.get("entity_match_candidates"), list)
+            else []
+        )
+        entity_match_groups = (
+            data.get("entity_match_groups", [])
+            if isinstance(data, dict)
+            and isinstance(data.get("entity_match_groups"), list)
+            else []
+        )
 
         validation = _validation_payload(
             question=payload.question,
@@ -504,9 +537,11 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
             "sources": sources,
             "session_id": session_id,
             "graph_debug": graph_debug,
-            "retrieval_query": retrieval_query,
+            "retrieval_query": retrieval_query_value,
             "coverage_unit": coverage_unit,
             "retrieval_mode": retrieval_mode,
+            "entity_match_candidates": entity_match_candidates,
+            "entity_match_groups": entity_match_groups,
             **validation,
         }
     except HTTPException as e:
@@ -530,15 +565,17 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
     if not rag.qdrant_collection:
         raise HTTPException(status_code=400, detail="No collection selected")
 
-    # Ensure index exists
-    if getattr(rag, "index", None) is None:
-        rag.create_index()
-
     metadata_filters = build_metadata_filters(payload.metadata_filters)
     vector_store_kwargs = {}
     qdrant_filter = build_qdrant_filter(payload.metadata_filters)
     if qdrant_filter is not None:
         vector_store_kwargs["qdrant_filters"] = qdrant_filter
+
+    if (
+        payload.query_mode not in {"entity_occurrence", "entity_occurrence_multi"}
+        and getattr(rag, "index", None) is None
+    ):
+        rag.create_index()
 
     async def event_generator() -> AsyncIterator[str]:
         """Generate SSE events for the streaming query.
@@ -552,7 +589,43 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
         try:
             full_answer = ""
             final_payload: dict[str, Any] | None = None
-            if payload.retrieval_mode == "stateless":
+            if payload.query_mode in {"entity_occurrence", "entity_occurrence_multi"}:
+                if payload.query_mode == "entity_occurrence_multi":
+                    occurrence_data = rag.run_multi_entity_occurrence_query(
+                        payload.question,
+                        qdrant_filter=qdrant_filter,
+                    )
+                else:
+                    occurrence_data = rag.run_entity_occurrence_query(
+                        payload.question,
+                        qdrant_filter=qdrant_filter,
+                    )
+                answer_text = str(
+                    occurrence_data.get("response")
+                    or occurrence_data.get("answer")
+                    or ""
+                )
+                for token in _iter_text_tokens(answer_text):
+                    full_answer += (" " if full_answer else "") + token
+                    yield f"data: {json.dumps({'token': token + ' '})}\n\n"
+                    await asyncio.sleep(0)
+
+                final_payload = {
+                    "answer": occurrence_data.get("response"),
+                    "sources": occurrence_data.get("sources") or [],
+                    "session_id": payload.session_id or "stateless",
+                    "reasoning": occurrence_data.get("reasoning"),
+                    "retrieval_query": occurrence_data.get("retrieval_query"),
+                    "coverage_unit": occurrence_data.get("coverage_unit"),
+                    "retrieval_mode": occurrence_data.get("retrieval_mode"),
+                    "entity_match_candidates": occurrence_data.get(
+                        "entity_match_candidates"
+                    )
+                    or [],
+                    "entity_match_groups": occurrence_data.get("entity_match_groups")
+                    or [],
+                }
+            elif payload.retrieval_mode == "stateless":
                 retrieval_query = payload.question
                 graph_debug: dict[str, Any] | None = None
                 expand_with_debug = getattr(
@@ -584,6 +657,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                 for token in _iter_text_tokens(answer_text):
                     full_answer += (" " if full_answer else "") + token
                     yield f"data: {json.dumps({'token': token + ' '})}\n\n"
+                    await asyncio.sleep(0)
 
                 final_payload = {
                     "sources": stateless_data.get("sources") or [],
@@ -605,6 +679,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                     if isinstance(chunk, str):
                         full_answer += chunk
                         yield f"data: {json.dumps({'token': chunk})}\n\n"
+                        await asyncio.sleep(0)
                     elif isinstance(chunk, dict):
                         final_payload = chunk
 
@@ -627,7 +702,15 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
             logger.exception("Stream error during SSE generation")
             yield f"data: {json.dumps({'error': 'Internal server error'})}\n\n"
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/summarize", response_model=SummarizeOut, tags=["Query"])

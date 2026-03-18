@@ -10,10 +10,11 @@ import shutil
 import stat
 import sys
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 # isort: off
 # Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
@@ -58,13 +59,20 @@ from llama_index.core.postprocessor.types import BaseNodePostprocessor
 from llama_index.core.prompts import PromptTemplate
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.response_synthesizers.type import ResponseMode
-from llama_index.core.schema import BaseNode, Document, NodeWithScore, QueryBundle
+from llama_index.core.schema import (
+    BaseNode,
+    Document,
+    NodeWithScore,
+    QueryBundle,
+    TextNode,
+)
 from llama_index.core.storage.docstore.keyval_docstore import KVDocumentStore
 from llama_index.core.vector_stores.types import (
     FilterCondition,
     FilterOperator,
     MetadataFilter,
     MetadataFilters,
+    VectorStoreQueryMode,
 )
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai import OpenAI
@@ -72,6 +80,7 @@ from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReran
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from loguru import logger
 from qdrant_client import QdrantClient
+from qdrant_client import models as qdrant_models
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 
 from docint.core.ner import (
@@ -80,6 +89,7 @@ from docint.core.ner import (
     build_ner_stats,
     graph_neighbors,
     match_entity_text,
+    normalize_entities,
     search_entities,
 )
 from docint.core.ingest.images_service import ImageIngestionService
@@ -248,6 +258,101 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
         return filtered
 
 
+class ParentContextPostprocessor(BaseNodePostprocessor):
+    """Promote fine-grained retrieval hits to their hierarchical parent context."""
+
+    docstore: Any
+
+    @classmethod
+    def class_name(cls) -> str:
+        """Return a stable class identifier.
+
+        This is used to determine whether a cached postprocessor can be reused for a given pipeline configuration.
+
+        Returns:
+            A string identifier for this postprocessor class.
+        """
+        return "ParentContextPostprocessor"
+
+    @staticmethod
+    def _parent_id(node: NodeWithScore) -> str:
+        """Extract the parent ID for a retrieved node, if available.
+
+        Args:
+            node (NodeWithScore): The retrieved node for which to find the parent ID.
+
+        Returns:
+            str: The parent ID if found, otherwise an empty string.
+        """
+        metadata = getattr(node, "metadata", {}) or {}
+        parent_id = str(metadata.get("hier.parent_id") or "").strip()
+        if parent_id:
+            return parent_id
+
+        raw_node = getattr(node, "node", None)
+        parent = getattr(raw_node, "parent_node", None)
+        if parent is not None:
+            return str(getattr(parent, "node_id", "") or "").strip()
+        return ""
+
+    def _load_parent_node(self, parent_id: str) -> BaseNode | None:
+        """Load the parent node from the docstore using the given parent ID.
+
+        Args:
+            parent_id (str): The ID of the parent node to load.
+
+        Returns:
+            BaseNode | None: The loaded parent node if successful, otherwise None if the parent node cannot be loaded.
+        """
+        if not parent_id:
+            return None
+        try:
+            return self.docstore.get_node(parent_id, raise_error=False)
+        except AttributeError:
+            return self.docstore.get_document(parent_id, raise_error=False)
+        except Exception as exc:
+            logger.warning(
+                "Failed to load parent node '{}' from docstore: {}", parent_id, exc
+            )
+            return None
+
+    def _postprocess_nodes(
+        self,
+        nodes: list[NodeWithScore],
+        query_bundle: QueryBundle | None = None,
+    ) -> list[NodeWithScore]:
+        """Replace fine child hits with their deduplicated parent nodes when available.
+
+        Args:
+            nodes (list[NodeWithScore]): The list of retrieved nodes to postprocess.
+            query_bundle (QueryBundle | None): The original query bundle that led to these retrieval results, which may be used for context but is not modified by this postprocessor.
+
+        Returns:
+            list[NodeWithScore]: The postprocessed list of nodes, where child nodes have been replaced by their parent nodes when a parent context is available.
+        """
+        _ = query_bundle
+        expanded: list[NodeWithScore] = []
+        seen_parent_ids: set[str] = set()
+
+        for node in nodes:
+            parent_id = self._parent_id(node)
+            if not parent_id:
+                expanded.append(node)
+                continue
+            if parent_id in seen_parent_ids:
+                continue
+
+            parent_node = self._load_parent_node(parent_id)
+            if parent_node is None:
+                expanded.append(node)
+                continue
+
+            seen_parent_ids.add(parent_id)
+            expanded.append(NodeWithScore(node=parent_node, score=node.score))
+
+        return expanded
+
+
 @dataclass(slots=True)
 class RAG:
     """Represents a Retrieval-Augmented Generation (RAG) model. Handles configuration,
@@ -330,6 +435,11 @@ class RAG:
     rerank_top_n: int = field(default=5, init=False)
     rerank_use_fp16: bool = field(default=False, init=False)
     chat_response_mode: str = field(default="auto", init=False)
+    vector_store_query_mode: str = field(default="auto", init=False)
+    hybrid_alpha: float = field(default=0.5, init=False)
+    sparse_top_k: int = field(default=20, init=False)
+    hybrid_top_k: int = field(default=20, init=False)
+    parent_context_enabled: bool = field(default=True, init=False)
     graphrag_enabled: bool = field(default=False, init=False)
     graphrag_neighbor_hops: int = field(default=1, init=False)
     graphrag_top_k_nodes: int = field(default=100, init=False)
@@ -380,6 +490,9 @@ class RAG:
     _qdrant_client: QdrantClient | None = field(default=None, init=False, repr=False)
     _qdrant_aclient: AsyncQdrantClient | None = field(
         default=None, init=False, repr=False
+    )
+    _parent_context_support_cache: dict[str, bool] = field(
+        default_factory=dict, init=False, repr=False
     )
     _image_ingestion_service: ImageIngestionService | None = field(
         default=None, init=False, repr=False
@@ -496,6 +609,11 @@ class RAG:
         self.rerank_use_fp16 = self.retrieval_config.rerank_use_fp16
         self.retrieve_similarity_top_k = self.retrieval_config.retrieve_top_k
         self.chat_response_mode = self.retrieval_config.chat_response_mode
+        self.vector_store_query_mode = self.retrieval_config.vector_store_query_mode
+        self.hybrid_alpha = self.retrieval_config.hybrid_alpha
+        self.sparse_top_k = self.retrieval_config.sparse_top_k
+        self.hybrid_top_k = self.retrieval_config.hybrid_top_k
+        self.parent_context_enabled = self.retrieval_config.parent_context_enabled
         self.rerank_top_n = int(self.retrieve_similarity_top_k // 4)
         self.graphrag_enabled = self.graphrag_config.enabled
         self.graphrag_neighbor_hops = self.graphrag_config.neighbor_hops
@@ -1840,8 +1958,166 @@ class RAG:
             return ResponseMode.REFINE
         return ResponseMode.COMPACT
 
+    def _collection_supports_parent_context(self) -> bool:
+        """Return whether the active collection contains hierarchical parent/child nodes.
+
+        Returns:
+            bool: True if the collection appears to support parent/child context, else False.
+        """
+        collection = str(self.qdrant_collection or "").strip()
+        if not collection:
+            return False
+        cached = self._parent_context_support_cache.get(collection)
+        if cached is not None:
+            return cached
+
+        supported = False
+        for payload in self._sample_collection_payloads(limit=96):
+            hier_type = str(payload.get("docint_hier_type") or "").strip().lower()
+            if hier_type in {"coarse", "fine"}:
+                supported = True
+                break
+            if payload.get("hier.parent_id") or payload.get("hier.level"):
+                supported = True
+                break
+
+        self._parent_context_support_cache[collection] = supported
+        return supported
+
+    @staticmethod
+    def _merge_metadata_filters(
+        base_filters: MetadataFilters | None,
+        extra_filters: list[MetadataFilter],
+    ) -> MetadataFilters | None:
+        """Merge request-scoped filters with internal retrieval filters.
+
+        Args:
+            base_filters: The original filters provided at the query engine level, or None if no filters were provided.
+            extra_filters: Additional filters that must be applied for retrieval, such as parent-context scoping.
+
+        Returns:
+            A new MetadataFilters object that combines the base filters and extra filters with an AND condition, or None if there are no filters to apply.
+        """
+        if not extra_filters:
+            return base_filters
+        if base_filters is None:
+            return MetadataFilters(
+                filters=cast(list[MetadataFilter | MetadataFilters], extra_filters),
+                condition=FilterCondition.AND,
+            )
+        return MetadataFilters(
+            filters=[*base_filters.filters, *extra_filters],
+            condition=FilterCondition.AND,
+        )
+
+    def _resolve_vector_store_query_mode(
+        self,
+        raw_mode: str | None = None,
+    ) -> VectorStoreQueryMode:
+        """Resolve runtime retrieval mode for the vector index retriever.
+
+        Args:
+            raw_mode: An optional retrieval mode string provided at call time, which takes precedence over config settings. Expected values
+                are "auto", "default", "sparse", "hybrid", or "mmr".
+
+        Returns:
+            VectorStoreQueryMode: The resolved retrieval mode to use for the current retrieval operation.
+        """
+        mode_value = (
+            str(raw_mode or self.vector_store_query_mode or "auto").strip().lower()
+        )
+        if mode_value == "auto":
+            mode_value = "hybrid" if self.enable_hybrid else "default"
+
+        mode_map = {
+            "default": VectorStoreQueryMode.DEFAULT,
+            "sparse": VectorStoreQueryMode.SPARSE,
+            "hybrid": VectorStoreQueryMode.HYBRID,
+            "mmr": VectorStoreQueryMode.MMR,
+        }
+        resolved = mode_map.get(mode_value, VectorStoreQueryMode.DEFAULT)
+        if (
+            resolved in {VectorStoreQueryMode.HYBRID, VectorStoreQueryMode.SPARSE}
+            and not self.enable_hybrid
+        ):
+            logger.warning(
+                "Retrieval mode '{}' requested without hybrid support; falling back to dense retrieval.",
+                mode_value,
+            )
+            return VectorStoreQueryMode.DEFAULT
+        return resolved
+
+    def _resolve_runtime_retrieval_settings(
+        self,
+        *,
+        similarity_top_k: int | None = None,
+        retrieval_options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Resolve retrieval settings from config plus optional call-site overrides.
+
+        Args:
+            similarity_top_k: An optional override for the number of top similar results to retrieve, which takes precedence over config settings.
+            retrieval_options: An optional dictionary of runtime retrieval overrides, which may include "vector_store_query_mode", "alpha",
+                "sparse_top_k", "hybrid_top_k", and "parent_context_enabled". These options take precedence over config settings and are used to
+                dynamically adjust retrieval behavior on a per-query basis.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the resolved retrieval settings to apply for the current retrieval operation, including:
+                - "similarity_top_k": The effective number of top similar results to retrieve.
+                - "vector_store_query_mode": The resolved retrieval mode to use.
+                - "alpha": The hybrid fusion alpha value (if applicable).
+                - "sparse_top_k": The number of top sparse results to retrieve (if applicable).
+                - "hybrid_top_k": The number of top hybrid results to retrieve (if applicable).
+                - "parent_context_enabled": Whether parent-context expansion is enabled for this retrieval.
+                - "label": A string label summarizing the retrieval mode and parent context status, useful for logging and analytics.
+        """
+        overrides = retrieval_options or {}
+        resolved_mode = self._resolve_vector_store_query_mode(
+            cast(str | None, overrides.get("vector_store_query_mode"))
+        )
+        effective_top_k = similarity_top_k or min(
+            max(self.retrieve_similarity_top_k, self.rerank_top_n * 8),
+            64,
+        )
+        alpha = float(overrides.get("alpha", self.hybrid_alpha))
+        alpha = min(1.0, max(0.0, alpha))
+        sparse_top_k = max(
+            1,
+            int(overrides.get("sparse_top_k", self.sparse_top_k)),
+        )
+        hybrid_top_k = max(
+            1,
+            int(overrides.get("hybrid_top_k", self.hybrid_top_k)),
+        )
+        parent_context_enabled = (
+            bool(overrides.get("parent_context_enabled", self.parent_context_enabled))
+            and self._collection_supports_parent_context()
+        )
+
+        label = resolved_mode.value
+        if parent_context_enabled:
+            label = f"{label}_parent"
+
+        return {
+            "similarity_top_k": effective_top_k,
+            "vector_store_query_mode": resolved_mode,
+            "alpha": alpha,
+            "sparse_top_k": sparse_top_k,
+            "hybrid_top_k": hybrid_top_k,
+            "parent_context_enabled": parent_context_enabled,
+            "label": label,
+        }
+
     def _build_grounded_text_qa_template(self, *, social_table: bool) -> PromptTemplate:
-        """Return the grounded QA prompt template for answer synthesis."""
+        """Return the grounded QA prompt template for answer synthesis.
+
+        Args:
+            social_table: Whether the active collection appears to be social/table heavy, which may require special
+                instructions to preserve post-level distinctions during synthesis.
+
+        Returns:
+            PromptTemplate: The constructed prompt template to use for grounded question-answering during response synthesis.
+        """
         prompt = self.grounded_text_qa_prompt
         if social_table:
             prompt = (
@@ -1852,7 +2128,15 @@ class RAG:
         return PromptTemplate(prompt)
 
     def _build_grounded_refine_template(self, *, social_table: bool) -> PromptTemplate:
-        """Return the grounded refine prompt template for answer synthesis."""
+        """Return the grounded refine prompt template for answer synthesis.
+
+        Args:
+            social_table: Whether the active collection appears to be social/table heavy, which may require special
+                instructions to preserve post-level distinctions during synthesis.
+
+        Returns:
+            PromptTemplate: The constructed prompt template to use for grounded question-answering during response synthesis.
+        """
         prompt = self.grounded_refine_prompt
         if social_table:
             prompt = (
@@ -1868,6 +2152,7 @@ class RAG:
         metadata_filters: MetadataFilters | None = None,
         similarity_top_k: int | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
+        retrieval_options: dict[str, Any] | None = None,
     ) -> Any:
         """Build a retriever, optionally scoped by metadata filters.
 
@@ -1875,18 +2160,45 @@ class RAG:
             metadata_filters: Optional request-scoped metadata filters.
             similarity_top_k: Optional override for retrieval depth.
             vector_store_kwargs: Optional native vector-store query kwargs.
+            retrieval_options: Optional runtime overrides for retrieval mode,
+                hybrid fusion, and parent-context expansion.
         """
         if self.index is None:
             logger.error("RuntimeError: Index is not initialized.")
             raise RuntimeError("Index is not initialized. Cannot create retriever.")
 
-        k = similarity_top_k or min(
-            max(self.retrieve_similarity_top_k, self.rerank_top_n * 8),
-            64,
+        retrieval_settings = self._resolve_runtime_retrieval_settings(
+            similarity_top_k=similarity_top_k,
+            retrieval_options=retrieval_options,
         )
-        retriever_kwargs: dict[str, Any] = {"similarity_top_k": k}
-        if metadata_filters is not None:
-            retriever_kwargs["filters"] = metadata_filters
+        internal_filters: list[MetadataFilter] = []
+        if retrieval_settings["parent_context_enabled"]:
+            internal_filters.append(
+                MetadataFilter(
+                    key="docint_hier_type",
+                    value="fine",
+                    operator=FilterOperator.EQ,
+                )
+            )
+
+        merged_filters = self._merge_metadata_filters(
+            metadata_filters, internal_filters
+        )
+
+        retriever_kwargs: dict[str, Any] = {
+            "similarity_top_k": retrieval_settings["similarity_top_k"],
+            "vector_store_query_mode": retrieval_settings["vector_store_query_mode"],
+        }
+        if merged_filters is not None:
+            retriever_kwargs["filters"] = merged_filters
+        if retrieval_settings["vector_store_query_mode"] == VectorStoreQueryMode.HYBRID:
+            retriever_kwargs["alpha"] = retrieval_settings["alpha"]
+            retriever_kwargs["sparse_top_k"] = retrieval_settings["sparse_top_k"]
+            retriever_kwargs["hybrid_top_k"] = retrieval_settings["hybrid_top_k"]
+        elif (
+            retrieval_settings["vector_store_query_mode"] == VectorStoreQueryMode.SPARSE
+        ):
+            retriever_kwargs["sparse_top_k"] = retrieval_settings["sparse_top_k"]
         if vector_store_kwargs:
             retriever_kwargs["vector_store_kwargs"] = vector_store_kwargs
         return self.index.as_retriever(**retriever_kwargs)
@@ -1897,6 +2209,7 @@ class RAG:
         metadata_filters: MetadataFilters | None = None,
         streaming: bool = False,
         vector_store_kwargs: dict[str, Any] | None = None,
+        retrieval_options: dict[str, Any] | None = None,
     ) -> RetrieverQueryEngine:
         """Construct a query engine for the current index.
 
@@ -1904,6 +2217,8 @@ class RAG:
             metadata_filters: Optional request-scoped metadata filters.
             streaming: Whether the query engine should stream token output.
             vector_store_kwargs: Optional native vector-store query kwargs.
+            retrieval_options: Optional runtime overrides for retrieval mode,
+                hybrid fusion, and parent-context expansion.
         """
         if self.index is None:
             self.create_index()
@@ -1912,12 +2227,17 @@ class RAG:
             raise RuntimeError("Index is not initialized. Cannot create query engine.")
 
         profile = self._infer_collection_profile()
+        retrieval_settings = self._resolve_runtime_retrieval_settings(
+            retrieval_options=retrieval_options,
+        )
         response_mode = self._resolve_chat_response_mode()
         node_postprocessors: list[
             BaseNodePostprocessor | LLMRerank | FlagEmbeddingReranker
-        ] = [  # type: ignore[assignment]
-            self.reranker
-        ]
+        ] = [self.reranker]
+        if retrieval_settings["parent_context_enabled"] and self.index is not None:
+            node_postprocessors.append(
+                ParentContextPostprocessor(docstore=self.index.docstore)
+            )
         if bool(profile.get("is_social_table")):
             node_postprocessors.append(
                 SocialSourceDiversityPostprocessor(
@@ -1929,6 +2249,7 @@ class RAG:
             retriever=self._build_retriever(
                 metadata_filters=metadata_filters,
                 vector_store_kwargs=vector_store_kwargs,
+                retrieval_options=retrieval_options,
             ),
             llm=self.text_model,
             node_postprocessors=node_postprocessors,
@@ -2063,6 +2384,486 @@ class RAG:
             "retrieval_mode": retrieval_mode,
         }
 
+    def _load_collection_ner_sources(
+        self,
+        *,
+        qdrant_filter: qdrant_models.Filter | None = None,
+    ) -> list[dict[str, Any]]:
+        """Load NER-bearing source rows from Qdrant.
+
+        Args:
+            qdrant_filter: Optional native Qdrant filter applied during scroll.
+
+        Returns:
+            list[dict[str, Any]]: Normalized NER source rows.
+        """
+        if not self.qdrant_collection:
+            return []
+
+        sources: list[dict[str, Any]] = []
+        offset = None
+        while True:
+            try:
+                points, offset = self.qdrant_client.scroll(
+                    collection_name=self.qdrant_collection,
+                    limit=100,
+                    offset=offset,
+                    scroll_filter=qdrant_filter,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to scroll collection '{}' for NER sources: {}",
+                    self.qdrant_collection,
+                    exc,
+                )
+                break
+
+            if not points:
+                break
+
+            for point in points:
+                payload = getattr(point, "payload", None)
+                if not isinstance(payload, dict):
+                    continue
+                if "entities" not in payload and "relations" not in payload:
+                    continue
+
+                source = self._source_from_payload(
+                    collection=self.qdrant_collection,
+                    payload=payload,
+                )
+                source["chunk_id"] = str(
+                    payload.get("node_id")
+                    or payload.get("id_")
+                    or str(getattr(point, "id", "") or "")
+                )
+                source["chunk_text"] = str(source.get("text") or "")
+                sources.append(source)
+
+            if offset is None:
+                break
+
+        return sources
+
+    @staticmethod
+    def _dedupe_source_key(source: dict[str, Any]) -> str:
+        """Build a stable key for source-level deduplication.
+
+        Args:
+            source: A normalized source dictionary.
+
+        Returns:
+            str: A string key that can be used to identify duplicate sources.
+        """
+        reference_metadata = source.get("reference_metadata") or {}
+        if isinstance(reference_metadata, dict):
+            text_id = str(reference_metadata.get("text_id") or "").strip()
+            if text_id:
+                return f"text_id:{text_id}"
+
+        chunk_id = str(source.get("chunk_id") or "").strip()
+        if chunk_id:
+            return f"chunk:{chunk_id}"
+
+        file_hash = str(source.get("file_hash") or "").strip()
+        page = source.get("page")
+        row = source.get("row")
+        if file_hash and (page is not None or row is not None):
+            return f"file:{file_hash}:page={page}:row={row}"
+
+        filename = str(source.get("filename") or "").strip().lower()
+        preview = str(source.get("chunk_text") or source.get("text") or "").strip()
+        return f"fallback:{filename}:{preview[:160].lower()}"
+
+    @staticmethod
+    def _collect_entity_matches(
+        aggregate: dict[str, Any],
+        *,
+        query: str,
+    ) -> list[dict[str, Any]]:
+        """Collect sorted entity matches for an occurrence lookup query.
+
+        Args:
+            aggregate: Collection-wide NER aggregate payload.
+            query: Raw user query string.
+
+        Returns:
+            list[dict[str, Any]]: Candidate entity matches sorted by rank and mentions.
+        """
+        entity_matches: list[dict[str, Any]] = []
+        for entity in list(aggregate.get("entities") or []):
+            entity_text = str(entity.get("text") or "").strip()
+            if not entity_text:
+                continue
+            match = match_entity_text(entity_text, query)
+            if match is None:
+                continue
+            entity_matches.append(
+                {
+                    "text": entity_text,
+                    "type": str(entity.get("type") or "Unlabeled"),
+                    "mentions": int(entity.get("mentions", 0) or 0),
+                    "source_count": int(entity.get("source_count", 0) or 0),
+                    "best_score": entity.get("best_score"),
+                    "match_rank": int(match[0]),
+                    "match_alias": str(match[1]),
+                }
+            )
+
+        entity_matches.sort(
+            key=lambda row: (
+                int(row["match_rank"]),
+                -int(row["mentions"]),
+                str(row["text"]).lower(),
+                str(row["type"]).lower(),
+            )
+        )
+        return entity_matches
+
+    @staticmethod
+    def _strong_entity_matches(
+        entity_matches: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Return all strong top-rank entity matches for a query.
+
+        The strongest ambiguity cases are same-surface-form collisions such as the
+        same label appearing under different entity types. Narrowing to the top
+        alias avoids treating substring matches like ``Migration`` vs
+        ``Remigration`` as equally strong.
+        """
+        if not entity_matches:
+            return []
+        best_rank = int(entity_matches[0]["match_rank"])
+        top_alias = str(entity_matches[0].get("match_alias") or "").strip().lower()
+        strong_matches = [
+            row
+            for row in entity_matches
+            if int(row["match_rank"]) == best_rank
+            and str(row.get("match_alias") or "").strip().lower() == top_alias
+        ]
+        return strong_matches or [
+            row for row in entity_matches if int(row["match_rank"]) == best_rank
+        ]
+
+    @staticmethod
+    def _entity_candidate_payload(entity_match: dict[str, Any]) -> dict[str, Any]:
+        """Normalize an entity match row for API/UI disambiguation payloads."""
+        return {
+            "text": str(entity_match.get("text") or ""),
+            "type": str(entity_match.get("type") or "Unlabeled"),
+            "mentions": int(entity_match.get("mentions", 0) or 0),
+            "source_count": int(entity_match.get("source_count", 0) or 0),
+            "best_score": entity_match.get("best_score"),
+            "match_rank": int(entity_match.get("match_rank", 99) or 99),
+            "match_alias": str(entity_match.get("match_alias") or ""),
+        }
+
+    def _build_entity_occurrence_group(
+        self,
+        *,
+        sources: list[dict[str, Any]],
+        matched_entity: dict[str, Any],
+        limit: int,
+    ) -> dict[str, Any]:
+        """Build grouped occurrence results for one matched entity.
+
+        Args:
+            sources: Candidate NER-bearing source rows.
+            matched_entity: Selected entity match metadata.
+            limit: Maximum number of source rows retained for the entity.
+
+        Returns:
+            dict[str, Any]: Group payload containing entity metadata and sources.
+        """
+        matched_text = str(matched_entity["text"])
+        matched_type = str(matched_entity["type"])
+        occurrence_sources: list[dict[str, Any]] = []
+        seen_keys: set[str] = set()
+
+        for source in sources:
+            mention_rows: list[dict[str, Any]] = []
+            for entity in normalize_entities(source.get("entities")):
+                entity_text = str(entity.get("text") or "").strip()
+                entity_type = str(entity.get("type") or "Unlabeled")
+                if entity_text.lower() != matched_text.lower():
+                    continue
+                if entity_type.lower() != matched_type.lower():
+                    continue
+                mention_rows.append(
+                    {
+                        "text": entity_text,
+                        "type": entity_type,
+                        "score": entity.get("score"),
+                    }
+                )
+
+            if not mention_rows:
+                continue
+
+            source_row = dict(source)
+            source_row["matched_entity"] = {
+                "text": matched_text,
+                "type": matched_type,
+                "match_alias": str(matched_entity.get("match_alias") or ""),
+            }
+            source_row["matched_mentions"] = mention_rows
+            source_row["occurrence_count"] = len(mention_rows)
+
+            dedupe_key = self._dedupe_source_key(source_row)
+            if dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
+            occurrence_sources.append(source_row)
+
+        occurrence_sources.sort(
+            key=lambda source: (
+                str(source.get("filename") or "").lower(),
+                int(source.get("page") or 0),
+                int(source.get("row") or 0),
+                str(source.get("chunk_id") or "").lower(),
+            )
+        )
+
+        limited_sources = occurrence_sources[: max(1, int(limit))]
+        return {
+            "entity": self._entity_candidate_payload(matched_entity),
+            "sources": limited_sources,
+            "chunk_count": len(occurrence_sources),
+            "document_count": len(
+                {
+                    str(source.get("file_hash") or source.get("filename") or "")
+                    for source in occurrence_sources
+                    if str(source.get("file_hash") or source.get("filename") or "")
+                }
+            ),
+            "truncated": len(occurrence_sources) > len(limited_sources),
+        }
+
+    @staticmethod
+    def _flatten_occurrence_groups(
+        groups: list[dict[str, Any]],
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Flatten grouped occurrence results into one deduplicated source list."""
+        flattened: list[dict[str, Any]] = []
+        seen_keys: set[str] = set()
+        for group in groups:
+            for source in list(group.get("sources") or []):
+                if not isinstance(source, dict):
+                    continue
+                dedupe_key = RAG._dedupe_source_key(source)
+                if dedupe_key in seen_keys:
+                    continue
+                seen_keys.add(dedupe_key)
+                flattened.append(source)
+                if len(flattened) >= max(1, int(limit)):
+                    return flattened
+        return flattened
+
+    def run_entity_occurrence_query(
+        self,
+        prompt: str,
+        *,
+        qdrant_filter: qdrant_models.Filter | None = None,
+        limit: int = 100,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        """Return mention-level source rows for the best matching entity.
+
+        Args:
+            prompt: Raw user query used to identify the target entity.
+            qdrant_filter: Optional native Qdrant filter to constrain candidate rows.
+            limit: Maximum number of occurrence rows to return.
+            refresh: Whether to bypass cached NER rows when no native filter is used.
+
+        Returns:
+            dict[str, Any]: A response payload aligned with the normal query path.
+        """
+        query = str(prompt or "").strip()
+        if not query:
+            logger.error("ValueError: Query prompt cannot be empty.")
+            raise ValueError("Query prompt cannot be empty.")
+
+        sources = (
+            self._load_collection_ner_sources(qdrant_filter=qdrant_filter)
+            if qdrant_filter is not None
+            else self.get_collection_ner(refresh=refresh)
+        )
+        aggregate = aggregate_ner_sources(sources)
+        entity_matches = self._collect_entity_matches(aggregate, query=query)
+
+        if not entity_matches:
+            return {
+                "query": query,
+                "reasoning": None,
+                "response": (
+                    f"I couldn't find a named-entity match for '{query}' in the "
+                    "active collection."
+                ),
+                "sources": [],
+                "retrieval_query": query,
+                "coverage_unit": "entity_mentions",
+                "retrieval_mode": "entity_occurrence",
+                "vector_query_mode": "entity_occurrence",
+                "retrieval_profile": "entity_occurrence",
+                "parent_context_enabled": False,
+            }
+
+        strong_matches = self._strong_entity_matches(entity_matches)
+        if len(strong_matches) > 1:
+            return {
+                "query": query,
+                "reasoning": None,
+                "response": (
+                    f"Your query matches multiple entities equally well. Choose one "
+                    f"candidate below or switch to multi-entity occurrence mode to see "
+                    f"all strong matches for '{query}'."
+                ),
+                "sources": [],
+                "retrieval_query": query,
+                "coverage_unit": "entity_mentions",
+                "retrieval_mode": "entity_occurrence_ambiguous",
+                "vector_query_mode": "entity_occurrence",
+                "retrieval_profile": "entity_occurrence_ambiguous",
+                "parent_context_enabled": False,
+                "entity_match_candidates": [
+                    self._entity_candidate_payload(match) for match in strong_matches
+                ],
+                "entity_match_groups": [],
+            }
+
+        matched_entity = strong_matches[0]
+        group = self._build_entity_occurrence_group(
+            sources=sources,
+            matched_entity=matched_entity,
+            limit=limit,
+        )
+
+        response_text = (
+            f"Found {matched_entity['mentions']} occurrence(s) of '{matched_entity['text']}' "
+            f"across {int(group['chunk_count'])} chunk(s) in {int(group['document_count'])} "
+            "document(s)."
+        )
+        if bool(group.get("truncated")):
+            response_text += (
+                f" Showing the first {len(list(group.get('sources') or []))} chunk(s); refine with "
+                "metadata filters to narrow the result set."
+            )
+
+        return {
+            "query": query,
+            "reasoning": None,
+            "response": response_text,
+            "sources": list(group.get("sources") or []),
+            "retrieval_query": query,
+            "coverage_unit": "entity_mentions",
+            "retrieval_mode": "entity_occurrence",
+            "vector_query_mode": "entity_occurrence",
+            "retrieval_profile": "entity_occurrence",
+            "parent_context_enabled": False,
+            "entity_match_candidates": [self._entity_candidate_payload(matched_entity)],
+            "entity_match_groups": [group],
+        }
+
+    def run_multi_entity_occurrence_query(
+        self,
+        prompt: str,
+        *,
+        qdrant_filter: qdrant_models.Filter | None = None,
+        limit: int = 100,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        """Return grouped occurrence results for all strong entity matches.
+
+        Args:
+            prompt: Raw user query used to identify the target entities.
+            qdrant_filter: Optional native Qdrant filter to constrain candidate rows.
+            limit: Maximum number of source rows retained across all groups.
+            refresh: Whether to bypass cached NER rows when no native filter is used.
+
+        Returns:
+            dict[str, Any]: Grouped occurrence payload.
+        """
+        query = str(prompt or "").strip()
+        if not query:
+            logger.error("ValueError: Query prompt cannot be empty.")
+            raise ValueError("Query prompt cannot be empty.")
+
+        sources = (
+            self._load_collection_ner_sources(qdrant_filter=qdrant_filter)
+            if qdrant_filter is not None
+            else self.get_collection_ner(refresh=refresh)
+        )
+        aggregate = aggregate_ner_sources(sources)
+        entity_matches = self._collect_entity_matches(aggregate, query=query)
+
+        if not entity_matches:
+            return {
+                "query": query,
+                "reasoning": None,
+                "response": (
+                    f"I couldn't find a named-entity match for '{query}' in the "
+                    "active collection."
+                ),
+                "sources": [],
+                "retrieval_query": query,
+                "coverage_unit": "entity_mentions",
+                "retrieval_mode": "entity_occurrence_multi",
+                "vector_query_mode": "entity_occurrence_multi",
+                "retrieval_profile": "entity_occurrence_multi",
+                "parent_context_enabled": False,
+                "entity_match_candidates": [],
+                "entity_match_groups": [],
+            }
+
+        strong_matches = self._strong_entity_matches(entity_matches)
+        per_group_limit = max(1, int(limit))
+        groups = [
+            self._build_entity_occurrence_group(
+                sources=sources,
+                matched_entity=match,
+                limit=per_group_limit,
+            )
+            for match in strong_matches
+        ]
+        groups = [group for group in groups if list(group.get("sources") or [])]
+
+        flattened_sources = self._flatten_occurrence_groups(
+            groups, limit=per_group_limit
+        )
+        total_chunks = sum(int(group.get("chunk_count", 0) or 0) for group in groups)
+        total_documents = len(
+            {
+                str(source.get("file_hash") or source.get("filename") or "")
+                for source in flattened_sources
+                if str(source.get("file_hash") or source.get("filename") or "")
+            }
+        )
+        response_text = (
+            f"Found {len(groups)} equally strong entity match(es) for '{query}', "
+            f"covering {total_chunks} chunk(s) across {total_documents} document(s)."
+        )
+
+        return {
+            "query": query,
+            "reasoning": None,
+            "response": response_text,
+            "sources": flattened_sources,
+            "retrieval_query": query,
+            "coverage_unit": "entity_mentions",
+            "retrieval_mode": "entity_occurrence_multi",
+            "vector_query_mode": "entity_occurrence_multi",
+            "retrieval_profile": "entity_occurrence_multi",
+            "parent_context_enabled": False,
+            "entity_match_candidates": [
+                self._entity_candidate_payload(match) for match in strong_matches
+            ],
+            "entity_match_groups": groups,
+        }
+
     # --- Collection discovery / selection ---
     def list_collections(self) -> list[str]:
         """Return a list of collection names via the Qdrant API.
@@ -2178,6 +2979,8 @@ class RAG:
 
         previous_collection = self.qdrant_collection
         self.qdrant_collection = name
+        self._parent_context_support_cache.pop(previous_collection, None)
+        self._parent_context_support_cache.pop(name, None)
 
         # Reset any state tied to the previously selected collection so that
         # future queries do not use stale indexes or conversations.
@@ -2493,6 +3296,7 @@ class RAG:
         *,
         metadata_filters: MetadataFilters | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
+        retrieval_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run a query against the Qdrant collection.
 
@@ -2502,6 +3306,8 @@ class RAG:
                 metadata filters.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
+            retrieval_options (dict[str, Any] | None): Optional runtime
+                retrieval overrides.
 
         Returns:
             dict[str, Any]: The query results.
@@ -2518,8 +3324,9 @@ class RAG:
             self.build_query_engine(
                 metadata_filters=metadata_filters,
                 vector_store_kwargs=vector_store_kwargs,
+                retrieval_options=retrieval_options,
             )
-            if metadata_filters is not None or vector_store_kwargs
+            if metadata_filters is not None or vector_store_kwargs or retrieval_options
             else self.query_engine
         )
         if engine is None:
@@ -2531,13 +3338,24 @@ class RAG:
         if not isinstance(result, Response):
             logger.error("TypeError: Expected Response, got {}.", type(result).__name__)
             raise TypeError(f"Expected Response, got {type(result).__name__}")
-        return self._normalize_response_data(
+        normalized = self._normalize_response_data(
             prompt,
             result,
             metadata_filters_active=(
                 metadata_filters is not None or bool(vector_store_kwargs)
             ),
         )
+        retrieval_settings = self._resolve_runtime_retrieval_settings(
+            retrieval_options=retrieval_options,
+        )
+        normalized["vector_query_mode"] = retrieval_settings[
+            "vector_store_query_mode"
+        ].value
+        normalized["retrieval_profile"] = retrieval_settings["label"]
+        normalized["parent_context_enabled"] = retrieval_settings[
+            "parent_context_enabled"
+        ]
+        return normalized
 
     async def run_query_async(
         self,
@@ -2545,6 +3363,7 @@ class RAG:
         *,
         metadata_filters: MetadataFilters | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
+        retrieval_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run a query against the Qdrant collection asynchronously.
 
@@ -2554,6 +3373,8 @@ class RAG:
                 metadata filters.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
+            retrieval_options (dict[str, Any] | None): Optional runtime
+                retrieval overrides.
 
         Returns:
             dict[str, Any]: The query results.
@@ -2570,8 +3391,9 @@ class RAG:
             self.build_query_engine(
                 metadata_filters=metadata_filters,
                 vector_store_kwargs=vector_store_kwargs,
+                retrieval_options=retrieval_options,
             )
-            if metadata_filters is not None or vector_store_kwargs
+            if metadata_filters is not None or vector_store_kwargs or retrieval_options
             else self.query_engine
         )
         if engine is None:
@@ -2583,13 +3405,24 @@ class RAG:
         if not isinstance(result, Response):
             logger.error("TypeError: Expected Response, got {}.", type(result).__name__)
             raise TypeError(f"Expected Response, got {type(result).__name__}")
-        return self._normalize_response_data(
+        normalized = self._normalize_response_data(
             prompt,
             result,
             metadata_filters_active=(
                 metadata_filters is not None or bool(vector_store_kwargs)
             ),
         )
+        retrieval_settings = self._resolve_runtime_retrieval_settings(
+            retrieval_options=retrieval_options,
+        )
+        normalized["vector_query_mode"] = retrieval_settings[
+            "vector_store_query_mode"
+        ].value
+        normalized["retrieval_profile"] = retrieval_settings["label"]
+        normalized["parent_context_enabled"] = retrieval_settings[
+            "parent_context_enabled"
+        ]
+        return normalized
 
     # --- Session integration ---
     def init_session_store(self, db_url: str) -> None:
@@ -2617,6 +3450,7 @@ class RAG:
             self.ner_sources = []
             self.ner_aggregate_cache.clear()
             self.ner_graph_cache.clear()
+            self._parent_context_support_cache.clear()
             return
 
         self.ner_aggregate_cache.pop(collection, None)
@@ -2626,6 +3460,7 @@ class RAG:
 
         if collection == self.qdrant_collection:
             self.ner_sources = []
+        self._parent_context_support_cache.pop(collection, None)
 
     def export_session(
         self, session_id: str | None = None, out_dir: str | Path = "session"
@@ -2879,6 +3714,95 @@ class RAG:
             )
         return MetadataFilters(filters=filters, condition=FilterCondition.OR)
 
+    def _summary_payload_fallback_nodes(
+        self, *, filename: str, file_hash: str | None
+    ) -> list[NodeWithScore]:
+        """Build synthetic summary nodes by scrolling stored payloads.
+
+        This fallback bypasses query embeddings entirely, so summary generation
+        can still proceed when the embedding backend returns invalid values.
+
+        Args:
+            filename: Target document filename.
+            file_hash: Optional file hash for precise scoping.
+
+        Returns:
+            list[NodeWithScore]: Synthetic node hits derived from stored payloads.
+        """
+        if not self.qdrant_collection:
+            return []
+
+        top_k = max(1, self.summary_per_doc_top_k)
+        matched_nodes: list[NodeWithScore] = []
+        offset = None
+        scroll_filter = None
+        if file_hash:
+            scroll_filter = qdrant_models.Filter(
+                must=[
+                    qdrant_models.FieldCondition(
+                        key="file_hash",
+                        match=qdrant_models.MatchValue(value=file_hash),
+                    )
+                ]
+            )
+
+        while len(matched_nodes) < top_k:
+            try:
+                points, offset = self.qdrant_client.scroll(
+                    collection_name=self.qdrant_collection,
+                    limit=128,
+                    offset=offset,
+                    scroll_filter=scroll_filter,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Payload fallback summary retrieval failed for '{}': {}",
+                    filename,
+                    exc,
+                )
+                break
+
+            if not points:
+                break
+
+            for index, point in enumerate(points, start=len(matched_nodes) + 1):
+                payload = getattr(point, "payload", None)
+                if not isinstance(payload, dict):
+                    continue
+                source = self._source_from_payload(
+                    collection=self.qdrant_collection,
+                    payload=payload,
+                )
+                if not self._summary_source_matches_document(
+                    source,
+                    filename=filename,
+                    file_hash=file_hash,
+                ):
+                    continue
+
+                node_id = str(
+                    payload.get("node_id")
+                    or payload.get("id_")
+                    or getattr(point, "id", "")
+                    or f"summary-fallback-{index}"
+                )
+                text_value = str(source.get("text") or source.get("preview_text") or "")
+                synthetic_node = TextNode(
+                    text=text_value,
+                    id_=node_id,
+                    metadata=dict(payload),
+                )
+                matched_nodes.append(NodeWithScore(node=synthetic_node, score=0.0))
+                if len(matched_nodes) >= top_k:
+                    break
+
+            if offset is None:
+                break
+
+        return matched_nodes
+
     def _retrieve_summary_nodes_for_document(
         self, *, filename: str, file_hash: str | None
     ) -> list[Any]:
@@ -2931,7 +3855,10 @@ class RAG:
             logger.warning(
                 "Fallback summary retrieval failed for '{}': {}", filename, exc
             )
-            return []
+            return self._summary_payload_fallback_nodes(
+                filename=filename,
+                file_hash=file_hash,
+            )
 
     def _summary_source_key(self, source: dict[str, Any]) -> str:
         """Build a deterministic deduplication key for summary sources.
@@ -3870,48 +4797,8 @@ class RAG:
         if self.ner_sources and not refresh:
             return self.ner_sources
 
-        sources: list[dict[str, Any]] = []
-        offset = None
-        while True:
-            try:
-                points, offset = self.qdrant_client.scroll(
-                    collection_name=self.qdrant_collection,
-                    limit=100,
-                    offset=offset,
-                    with_payload=True,
-                    with_vectors=False,
-                )
-            except Exception as exc:
-                logger.error(
-                    "Failed to scroll collection '{}': {}", self.qdrant_collection, exc
-                )
-                break
-
-            if not points:
-                break
-
-            for point in points:
-                payload = getattr(point, "payload", None)
-                if isinstance(payload, dict):
-                    # We only care about nodes that have NER data
-                    if "entities" in payload or "relations" in payload:
-                        source = self._source_from_payload(
-                            collection=self.qdrant_collection,
-                            payload=payload,
-                        )
-                        source["chunk_id"] = (
-                            payload.get("node_id")
-                            or payload.get("id_")
-                            or str(getattr(point, "id", "") or "")
-                        )
-                        source["chunk_text"] = str(source.get("text") or "")
-                        sources.append(source)
-
-            if offset is None:
-                break
-
-        self.ner_sources = sources
-        return sources
+        self.ner_sources = self._load_collection_ner_sources()
+        return self.ner_sources
 
     def get_collection_hate_speech(self) -> list[dict[str, Any]]:
         """Return flagged hate-speech chunks from the selected collection.
