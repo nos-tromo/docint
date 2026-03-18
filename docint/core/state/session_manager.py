@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import timezone
 from pathlib import Path
-from typing import Any, Iterator, TYPE_CHECKING, cast
+from typing import Any, Iterator, Sequence, TYPE_CHECKING, cast
 
 import pandas as pd
 from llama_index.core import Response
@@ -171,6 +171,7 @@ class SessionManager:
         *,
         metadata_filters: MetadataFilters | None = None,
         metadata_filters_active: bool = False,
+        metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Handle a chat message from the user.
@@ -181,6 +182,8 @@ class SessionManager:
                 metadata filters for this turn only.
             metadata_filters_active (bool): Whether a request-scoped metadata
                 filter was supplied.
+            metadata_filter_rules (Sequence[Any] | None): Optional raw request
+                filter payloads for post-filtering auxiliary image sources.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
 
@@ -233,6 +236,7 @@ class SessionManager:
             user_msg,
             resp,
             metadata_filters_active=metadata_filters_active,
+            metadata_filter_rules=metadata_filter_rules,
             retrieval_query=retrieval_query,
             coverage_unit=coverage_unit,
             retrieval_mode=retrieval_mode,
@@ -248,6 +252,7 @@ class SessionManager:
         *,
         metadata_filters: MetadataFilters | None = None,
         metadata_filters_active: bool = False,
+        metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
     ) -> Iterator[str | dict]:
         """Handle a streaming chat message from the user.
@@ -258,6 +263,8 @@ class SessionManager:
                 metadata filters for this turn only.
             metadata_filters_active (bool): Whether a request-scoped metadata
                 filter was supplied.
+            metadata_filter_rules (Sequence[Any] | None): Optional raw request
+                filter payloads for post-filtering auxiliary image sources.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
 
@@ -334,6 +341,7 @@ class SessionManager:
             user_msg,
             final_response,
             metadata_filters_active=metadata_filters_active,
+            metadata_filter_rules=metadata_filter_rules,
             retrieval_query=retrieval_query,
             coverage_unit=coverage_unit,
             retrieval_mode=retrieval_mode,
@@ -344,6 +352,7 @@ class SessionManager:
 
         # Yield metadata
         yield {
+            "response": normalized.get("response"),
             "sources": normalized.get("sources", []),
             "session_id": session_id,
             "reasoning": normalized.get("reasoning"),

@@ -646,6 +646,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                 stateless_data = rag.run_query(
                     retrieval_query,
                     metadata_filters=metadata_filters,
+                    metadata_filter_rules=payload.metadata_filters,
                     vector_store_kwargs=vector_store_kwargs or None,
                 )
                 if graph_debug is not None:
@@ -660,6 +661,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                     await asyncio.sleep(0)
 
                 final_payload = {
+                    "response": answer_text,
                     "sources": stateless_data.get("sources") or [],
                     "session_id": payload.session_id or "stateless",
                     "reasoning": stateless_data.get("reasoning"),
@@ -674,6 +676,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                     metadata_filters_active=(
                         metadata_filters is not None or bool(vector_store_kwargs)
                     ),
+                    metadata_filter_rules=payload.metadata_filters,
                     vector_store_kwargs=vector_store_kwargs or None,
                 ):
                     if isinstance(chunk, str):

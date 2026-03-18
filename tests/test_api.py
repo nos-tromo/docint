@@ -152,6 +152,7 @@ class DummyRAG:
         *,
         metadata_filters: Any = None,
         metadata_filters_active: bool = False,
+        metadata_filter_rules: Any = None,
         vector_store_kwargs: Any = None,
     ) -> dict[str, Any]:
         """Chat with the RAG system.
@@ -160,6 +161,7 @@ class DummyRAG:
             question (str): The question to ask the RAG system.
             metadata_filters (Any): Optional compiled metadata filters.
             metadata_filters_active (bool): Whether request filters were active.
+            metadata_filter_rules (Any): Optional raw request filter rules.
             vector_store_kwargs (Any): Optional native vector-store query kwargs.
 
         Returns:
@@ -170,6 +172,7 @@ class DummyRAG:
             {
                 "filters": metadata_filters,
                 "active": metadata_filters_active,
+                "rules": metadata_filter_rules,
                 "vector_store_kwargs": vector_store_kwargs,
             }
         )
@@ -195,6 +198,7 @@ class DummyRAG:
         *,
         metadata_filters: Any = None,
         metadata_filters_active: bool = False,
+        metadata_filter_rules: Any = None,
         vector_store_kwargs: Any = None,
     ) -> Generator[str | dict[str, Any], None, None]:
         """
@@ -204,6 +208,7 @@ class DummyRAG:
             question (str): The question to ask the RAG system.
             metadata_filters (Any): Optional compiled metadata filters.
             metadata_filters_active (bool): Whether request filters were active.
+            metadata_filter_rules (Any): Optional raw request filter rules.
             vector_store_kwargs (Any): Optional native vector-store query kwargs.
 
         Yields:
@@ -213,11 +218,13 @@ class DummyRAG:
             {
                 "filters": metadata_filters,
                 "active": metadata_filters_active,
+                "rules": metadata_filter_rules,
                 "vector_store_kwargs": vector_store_kwargs,
             }
         )
         yield "chunk"
         yield {
+            "response": "answer",
             "sources": [{"id": 1}],
             "session_id": "generated-session",
             "retrieval_query": f"rewritten::{question}",
@@ -238,6 +245,7 @@ class DummyRAG:
         prompt: str,
         *,
         metadata_filters: Any = None,
+        metadata_filter_rules: Any = None,
         vector_store_kwargs: Any = None,
     ) -> dict[str, Any]:
         """Run a stateless retrieval query.
@@ -245,12 +253,14 @@ class DummyRAG:
         Args:
             prompt: Query prompt.
             metadata_filters: Optional compiled metadata filters.
+            metadata_filter_rules: Optional raw request filter rules.
             vector_store_kwargs: Optional native vector-store query kwargs.
 
         Returns:
             dict[str, Any]: Response payload.
         """
         _ = metadata_filters
+        _ = metadata_filter_rules
         _ = vector_store_kwargs
         self.stateless_queries.append(prompt)
         return {
@@ -836,6 +846,7 @@ def test_stream_query_includes_validation_metadata(client: TestClient) -> None:
     assert '"graph_debug"' in text
     assert '"retrieval_query"' in text
     assert '"retrieval_mode"' in text
+    assert '"response": "answer"' in text
 
 
 def test_query_stateless_mode_skips_session_chat(client: TestClient) -> None:
@@ -1289,6 +1300,20 @@ def test_query_builds_and_passes_metadata_filters(client: TestClient) -> None:
     rag = cast(DummyRAG, api_module.rag)
     last_filters = rag.chat_filters[-1]
     assert last_filters["active"] is True
+    assert [rule.model_dump() for rule in last_filters["rules"]] == [
+        {
+            "field": "mimetype",
+            "operator": "mime_match",
+            "value": "image/*",
+            "values": [],
+        },
+        {
+            "field": "reference_metadata.timestamp",
+            "operator": "date_on_or_after",
+            "value": "2026-01-01",
+            "values": [],
+        },
+    ]
     compiled = last_filters["filters"]
     assert compiled is not None
     assert len(compiled.filters) == 2
@@ -1321,6 +1346,14 @@ def test_stream_query_passes_metadata_filters(client: TestClient) -> None:
     rag = cast(DummyRAG, api_module.rag)
     last_filters = rag.stream_filters[-1]
     assert last_filters["active"] is True
+    assert [rule.model_dump() for rule in last_filters["rules"]] == [
+        {
+            "field": "hate_speech.hate_speech",
+            "operator": "eq",
+            "value": True,
+            "values": [],
+        }
+    ]
     assert last_filters["vector_store_kwargs"]["qdrant_filters"] is not None
 
 

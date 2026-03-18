@@ -773,10 +773,19 @@ def render_chat() -> None:
                                     full_answer += data["token"]
                                     st.session_state.current_answer = full_answer
                                     answer_placeholder.markdown(full_answer + "▌")
-                                elif "sources" in data:
+                                if not full_answer and (
+                                    data.get("response") is not None
+                                    or data.get("answer") is not None
+                                ):
+                                    full_answer = str(
+                                        data.get("response") or data.get("answer") or ""
+                                    )
+                                    st.session_state.current_answer = full_answer
+                                    answer_placeholder.markdown(full_answer)
+                                if "sources" in data:
                                     sources = data.get("sources", [])
                                     reasoning = data.get("reasoning")
-                                elif "error" in data:
+                                if "error" in data:
                                     st.error(f"Stream error: {data['error']}")
                             except json.JSONDecodeError:
                                 pass
