@@ -92,6 +92,34 @@ def build_qdrant_filter(raw_rules: Sequence[Any] | None) -> models.Filter | None
     return models.Filter(must=must or None, must_not=must_not or None)
 
 
+def matches_metadata_filters(
+    metadata: Mapping[str, Any],
+    raw_rules: Sequence[Any] | None,
+) -> bool:
+    """Return whether ``metadata`` satisfies all supplied request filter rules.
+
+    This helper is used for best-effort in-memory filtering of sources that are
+    retrieved outside the main vector-store query path, such as auxiliary image
+    matches from the dedicated image collection.
+
+    Args:
+        metadata: Metadata payload to test.
+        raw_rules: Sequence of filter-like mappings or objects exposing
+            ``field``, ``operator``, ``value``, and optional ``values``.
+
+    Returns:
+        ``True`` when every valid rule matches the metadata payload, otherwise
+        ``False``.
+    """
+    for raw_rule in raw_rules or []:
+        rule = _coerce_rule(raw_rule)
+        if rule is None:
+            continue
+        if not _matches_rule(metadata, rule):
+            return False
+    return True
+
+
 def _coerce_rule(raw_rule: Any) -> dict[str, Any] | None:
     """Normalize a raw filter payload into a plain dictionary.
 
@@ -128,6 +156,172 @@ def _coerce_rule(raw_rule: Any) -> dict[str, Any] | None:
         "value": data.get("value"),
         "values": values,
     }
+
+
+def _matches_rule(metadata: Mapping[str, Any], rule: dict[str, Any]) -> bool:
+    """Return whether a normalized rule matches an in-memory metadata payload.
+
+    Args:
+        metadata: The metadata payload to test.
+        rule: A normalized rule dictionary.
+
+    Returns:
+        True if the rule matches the metadata, False otherwise.
+    """
+    operator = rule["operator"]
+    values = _extract_field_values(metadata, rule["field"])
+    if not values:
+        return False
+
+    if operator in {"eq", "neq"}:
+        expected = _normalize_scalar(rule.get("value"))
+        if expected is None:
+            return False
+        matched = any(_coerce_comparable(value) == expected for value in values)
+        return not matched if operator == "neq" else matched
+
+    if operator in {"gt", "gte", "lt", "lte"}:
+        expected = _normalize_scalar(rule.get("value"))
+        if not isinstance(expected, (int, float)):
+            return False
+        numeric_values = [
+            value
+            for value in (_coerce_numeric(value) for value in values)
+            if value is not None
+        ]
+        if not numeric_values:
+            return False
+        op_map = {
+            "gt": lambda value: value > expected,
+            "gte": lambda value: value >= expected,
+            "lt": lambda value: value < expected,
+            "lte": lambda value: value <= expected,
+        }
+        return any(op_map[operator](value) for value in numeric_values)
+
+    if operator == "in":
+        expected_values = _normalize_values(rule.get("values"))
+        if not expected_values:
+            scalar = _normalize_scalar(rule.get("value"))
+            expected_values = [scalar] if scalar is not None else []
+        if not expected_values:
+            return False
+        normalized_actual = {_coerce_comparable(value) for value in values}
+        return any(value in normalized_actual for value in expected_values)
+
+    if operator == "contains":
+        expected = _normalize_scalar(rule.get("value"))
+        if not isinstance(expected, str):
+            return False
+        needle = expected.lower()
+        return any(needle in str(value).lower() for value in values)
+
+    if operator == "mime_match":
+        pattern = str(rule.get("value") or "").strip().lower()
+        if not pattern:
+            return False
+        if pattern.endswith("/*"):
+            prefix = pattern[:-1]
+            return any(str(value).lower().startswith(prefix) for value in values)
+        return any(str(value).lower() == pattern for value in values)
+
+    if operator in {
+        "date_after",
+        "date_on_or_after",
+        "date_before",
+        "date_on_or_before",
+    }:
+        boundary = _parse_date_value(
+            rule.get("value"),
+            upper_bound=operator.endswith("before"),
+        )
+        if boundary is None:
+            return False
+        parsed_values = [
+            value
+            for value in (
+                _parse_date_value(value, upper_bound=False) for value in values
+            )
+            if value is not None
+        ]
+        if not parsed_values:
+            return False
+        op_map = {
+            "date_after": lambda value: value > boundary,
+            "date_on_or_after": lambda value: value >= boundary,
+            "date_before": lambda value: value < boundary,
+            "date_on_or_before": lambda value: value <= boundary,
+        }
+        return any(op_map[operator](value) for value in parsed_values)
+
+    logger.warning("Ignoring unsupported in-memory metadata operator '{}'.", operator)
+    return False
+
+
+def _extract_field_values(metadata: Mapping[str, Any], field: str) -> list[Any]:
+    """Return one or more values for a dotted metadata field path.
+
+    Args:
+        metadata: The metadata payload to extract values from.
+        field: The dotted path to the desired field, e.g. ``author.name``.
+
+    Returns:
+        A list of values found at the specified field path. If the path does not exist,
+        an empty list is returned.
+    """
+    parts = [part for part in field.split(".") if part]
+    if not parts:
+        return []
+
+    current_values: list[Any] = [metadata]
+    for part in parts:
+        next_values: list[Any] = []
+        for current in current_values:
+            if isinstance(current, Mapping):
+                candidate = current.get(part)
+                if candidate is not None:
+                    next_values.append(candidate)
+            elif isinstance(current, list):
+                for item in current:
+                    if isinstance(item, Mapping):
+                        candidate = item.get(part)
+                        if candidate is not None:
+                            next_values.append(candidate)
+        if not next_values:
+            return []
+        current_values = next_values
+
+    flattened: list[Any] = []
+    for value in current_values:
+        if isinstance(value, list):
+            flattened.extend(value)
+        else:
+            flattened.append(value)
+    return flattened
+
+
+def _coerce_comparable(value: Any) -> str | int | float | bool | None:
+    """Normalize an in-memory value for scalar comparisons."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    if value is None:
+        return None
+    return str(value).strip()
+
+
+def _coerce_numeric(value: Any) -> int | float | None:
+    """Return a numeric representation for scalar comparisons when possible."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return int(parsed) if parsed.is_integer() else parsed
 
 
 def _compile_rule(rule: dict[str, Any]) -> MetadataFilter | MetadataFilters | None:

@@ -20,7 +20,11 @@ from llama_index.core import Document
 
 from docint.core import rag as rag_module
 from docint.core.rag import RAG
-from docint.core.retrieval_filters import build_metadata_filters, build_qdrant_filter
+from docint.core.retrieval_filters import (
+    build_metadata_filters,
+    build_qdrant_filter,
+    matches_metadata_filters,
+)
 from docint.utils.env_cfg import OpenAIConfig
 from docint.utils.hashing import compute_file_hash
 
@@ -79,7 +83,7 @@ def test_normalize_response_data_extracts_sources(
     monkeypatch.setattr(
         RAG,
         "_retrieve_image_sources",
-        lambda self, query, top_k=3: [],
+        lambda self, query, top_k=3, metadata_filter_rules=None: [],
     )
     node = DummyNode(
         "Example text",
@@ -193,7 +197,7 @@ def test_normalize_response_data_appends_image_sources(
     monkeypatch.setattr(
         RAG,
         "_retrieve_image_sources",
-        lambda self, query, top_k=3: [
+        lambda self, query, top_k=3, metadata_filter_rules=None: [
             {
                 "text": "Image shows transformer blocks.",
                 "filename": "attention_is_all_you_need.pdf",
@@ -216,22 +220,36 @@ def test_normalize_response_data_appends_image_sources(
 def test_normalize_response_data_skips_aux_image_sources_when_filters_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Request-scoped metadata filtering should not append unfiltered image extras.
+    """Request-scoped metadata filters should be forwarded to image retrieval.
 
     Args:
         monkeypatch: The monkeypatch fixture.
     """
     rag = RAG(qdrant_collection="test")
-    monkeypatch.setattr(
-        RAG,
-        "_retrieve_image_sources",
-        lambda self, query, top_k=3: [
+    captured_rules: list[Any] = []
+
+    def _fake_retrieve_image_sources(
+        self: RAG,
+        query: str,
+        top_k: int = 3,
+        metadata_filter_rules: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        _ = self
+        _ = query
+        _ = top_k
+        captured_rules.extend(metadata_filter_rules or [])
+        return [
             {
                 "text": "Image-only source.",
                 "filename": "img.png",
                 "source": "image",
             }
-        ],
+        ]
+
+    monkeypatch.setattr(
+        RAG,
+        "_retrieve_image_sources",
+        _fake_retrieve_image_sources,
     )
     result = DummyResponse("Answer", [])
 
@@ -239,9 +257,29 @@ def test_normalize_response_data_skips_aux_image_sources_when_filters_active(
         "transformer diagram",
         result,
         metadata_filters_active=True,
+        metadata_filter_rules=[
+            {
+                "field": "mimetype",
+                "operator": "mime_match",
+                "value": "image/*",
+            }
+        ],
     )
 
-    assert normalized["sources"] == []
+    assert normalized["sources"] == [
+        {
+            "text": "Image-only source.",
+            "filename": "img.png",
+            "source": "image",
+        }
+    ]
+    assert captured_rules == [
+        {
+            "field": "mimetype",
+            "operator": "mime_match",
+            "value": "image/*",
+        }
+    ]
 
 
 def test_normalize_response_data_falls_back_for_empty_model_output(
@@ -256,7 +294,7 @@ def test_normalize_response_data_falls_back_for_empty_model_output(
     monkeypatch.setattr(
         RAG,
         "_retrieve_image_sources",
-        lambda self, query, top_k=3: [],
+        lambda self, query, top_k=3, metadata_filter_rules=None: [],
     )
 
     # Simulates models that emit only hidden reasoning.
@@ -265,6 +303,56 @@ def test_normalize_response_data_falls_back_for_empty_model_output(
 
     assert normalized["response"] == rag_module.EMPTY_RESPONSE_FALLBACK
     assert normalized["reasoning"] == "internal reasoning"
+
+
+def test_normalize_response_data_falls_back_for_empty_response_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normalization should hide upstream empty-response sentinels."""
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(
+        RAG,
+        "_retrieve_image_sources",
+        lambda self, query, top_k=3, metadata_filter_rules=None: [],
+    )
+
+    normalized = rag._normalize_response_data(
+        "frage", DummyResponse("Empty Response", [])
+    )
+
+    assert normalized["response"] == rag_module.EMPTY_RESPONSE_FALLBACK
+
+
+def test_normalize_response_data_builds_source_backed_answer_when_sources_exist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normalization should summarize matching sources instead of claiming no context."""
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(
+        RAG,
+        "_retrieve_image_sources",
+        lambda self, query, top_k=3, metadata_filter_rules=None: [
+            {
+                "text": "Transformer attention diagram.",
+                "filename": "image-3-b65a08ee-0.png",
+                "page": 4,
+                "source": "image",
+            },
+            {
+                "text": "Transformer architecture diagram.",
+                "filename": "image-2-4fd97d25-0.png",
+                "page": 3,
+                "source": "image",
+            },
+        ],
+    )
+
+    normalized = rag._normalize_response_data("frage", DummyResponse("", []))
+
+    assert normalized["response"] == (
+        "I found 2 matching sources: image-3-b65a08ee-0.png (page 4), "
+        "image-2-4fd97d25-0.png (page 3)."
+    )
 
 
 def test_build_metadata_filters_supports_mime_and_date_rules() -> None:
@@ -330,6 +418,42 @@ def test_build_metadata_filters_skips_invalid_date_values() -> None:
     )
 
     assert compiled is None
+
+
+def test_matches_metadata_filters_supports_mime_and_dates() -> None:
+    """In-memory metadata matching should support MIME wildcards and dates."""
+    payload = {
+        "mimetype": "image/png",
+        "created_at": "2026-03-17T12:00:00Z",
+        "reference_metadata": {"timestamp": "2026-03-10T09:00:00Z"},
+    }
+
+    assert matches_metadata_filters(
+        payload,
+        [
+            {"field": "mimetype", "operator": "mime_match", "value": "image/*"},
+            {
+                "field": "created_at",
+                "operator": "date_on_or_after",
+                "value": "2026-03-01",
+            },
+            {
+                "field": "reference_metadata.timestamp",
+                "operator": "date_on_or_before",
+                "value": "2026-03-10",
+            },
+        ],
+    )
+    assert not matches_metadata_filters(
+        payload,
+        [
+            {
+                "field": "reference_metadata.timestamp",
+                "operator": "date_on_or_after",
+                "value": "2026-03-11",
+            }
+        ],
+    )
 
 
 def test_retrieve_image_sources_skips_when_image_collection_missing() -> None:

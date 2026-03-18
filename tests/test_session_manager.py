@@ -223,6 +223,7 @@ def test_chat_uses_request_scoped_filtered_engine(
         "hello",
         metadata_filters=cast(Any, object()),
         metadata_filters_active=True,
+        metadata_filter_rules=[{"field": "mimetype", "operator": "mime_match"}],
     )
 
     session_manager.rag.build_query_engine.assert_called_once()
@@ -231,11 +232,71 @@ def test_chat_uses_request_scoped_filtered_engine(
         "hello",
         filtered_response,
         metadata_filters_active=True,
+        metadata_filter_rules=[{"field": "mimetype", "operator": "mime_match"}],
         retrieval_query="rewritten hello",
         coverage_unit="documents",
         retrieval_mode="rewrite_compact",
     )
     assert response["response"] == "Hi"
+
+
+def test_stream_chat_includes_final_response_when_no_tokens(
+    session_manager: SessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streaming chat should yield the normalized response in its final payload.
+
+    Args:
+        session_manager: The session manager fixture.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    streaming_engine = MagicMock()
+    streaming_response = MagicMock()
+    streaming_response.response_gen = iter(())
+    streaming_response.source_nodes = []
+    streaming_engine.query.return_value = streaming_response
+
+    session_manager.rag.build_query_engine.return_value = streaming_engine
+    session_manager.rag.rewrite_retrieval_query.return_value = "rewritten hello"
+    session_manager.rag.expand_query_with_graph_with_debug.return_value = (
+        "expanded hello",
+        {},
+    )
+    session_manager.rag._normalize_response_data.return_value = {
+        "response": "Fallback answer",
+        "sources": [],
+        "reasoning": None,
+        "retrieval_query": "rewritten hello",
+        "coverage_unit": "documents",
+        "retrieval_mode": "rewrite_compact",
+    }
+    session_manager.rag.index = object()
+    session_manager.session_id = "session-1"
+    session_manager.chat_engine = object()
+
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args: None)
+    monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
+
+    chunks = list(
+        session_manager.stream_chat(
+            "hello",
+            metadata_filters_active=True,
+            metadata_filter_rules=[{"field": "mimetype", "operator": "mime_match"}],
+        )
+    )
+
+    assert chunks == [
+        {
+            "response": "Fallback answer",
+            "sources": [],
+            "session_id": "session-1",
+            "reasoning": None,
+            "graph_debug": {},
+            "retrieval_query": "rewritten hello",
+            "coverage_unit": "documents",
+            "retrieval_mode": "rewrite_compact",
+        }
+    ]
 
 
 def test_chat_rewrites_retrieval_query_without_prefixing_session_context(
