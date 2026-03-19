@@ -324,7 +324,7 @@ def load_ingestion_env(
     default_fine_chunk_overlap: int = 0,
     default_fine_chunk_size: int = 8192,
     default_hierarchical_chunking_enabled: bool = True,
-    default_ingestion_batch_size: int = 5,
+    default_ingestion_batch_size: int = 50,
     default_sentence_splitter_chunk_overlap: int = 64,
     default_sentence_splitter_chunk_size: int = 1024,
     default_supported_filetypes: list[str] = [
@@ -450,17 +450,13 @@ def load_ingestion_env(
 class ModelConfig:
     """Dataclass for model configuration."""
 
-    embed_model_file: str
-    embed_model_repo: str
+    embed_model: str
     image_embed_model: str
     ner_model: str
     rerank_model: str
     sparse_model: str
-    text_model_file: str
-    text_model_repo: str
-    vision_model_file: str
-    vision_model_mmproj_file: str
-    vision_model_repo: str
+    text_model: str
+    vision_model: str
     whisper_model: str
 
 
@@ -470,8 +466,8 @@ def load_model_env(
     default_ner_model: str = "gliner-community/gliner_large-v2.5",
     default_rerank_model: str = "BAAI/bge-reranker-v2-m3",
     default_sparse_model: str = "Qdrant/all_miniLM_L6_v2_with_attentions",
-    default_text_model_str: str = "gpt-oss:20b",
-    default_vision_model_str: str = "qwen3.5:9b",
+    default_text_model: str = "gpt-oss:20b",
+    default_vision_model: str = "qwen3.5:9b",
     default_whisper_model: str = "turbo",
 ) -> ModelConfig:
     """Loads model configuration from environment variables or defaults.
@@ -488,63 +484,23 @@ def load_model_env(
 
     Returns:
         ModelConfig: Dataclass containing model configuration.
-        - embed_model_file (str): The embedding model file name.
-        - embed_model_repo (str): The embedding model HuggingFace repo ID for cache resolution
+        - embed_model (str): The embedding model identifier for Ollama-compatible embeddings.
         - image_embed_model (str): The image embedding model identifier.
         - ner_model (str): The NER model identifier.
         - rerank_model (str): The reranker model identifier.
         - sparse_model (str): The sparse model identifier.
-        - text_model_file (str): The text model file name.
-        - text_model_repo (str): The text model HuggingFace repo ID for cache resolution
-        - vision_model_file (str): The vision model file name.
-        - vision_model_mmproj_file (str): The vision model MMProj file name.
-        - vision_model_repo (str): The vision model HuggingFace repo ID for cache resolution
+        - text_model (str): The text model identifier.
+        - vision_model (str): The vision model identifier.
         - whisper_model (str): The Whisper model identifier.
     """
-
-    def resolve_model_name(model_str: str) -> tuple[str, str, str]:
-        """Resolves a model string into its components: repo, model, and mmproj.
-
-        Args:
-            model_str (str): The model string in the format "repo;model;mmproj".
-
-        Raises:
-            ValueError: If the model string is not in the expected format.
-
-        Returns:
-            tuple[str, str, str]: A tuple containing the repo, model, and mmproj identifiers.
-        """
-        parts = [p.strip() for p in model_str.split(";")]
-        if not 1 <= len(parts) <= 3:
-            raise ValueError(f"Invalid vision model string: {model_str}")
-
-        repo = parts[0]
-        model = parts[1] if len(parts) >= 2 else repo
-        mmproj = parts[2] if len(parts) == 3 else model
-        return repo, model, mmproj
-
-    embed_model_repo, embed_model_file, _ = resolve_model_name(
-        os.getenv("EMBED_MODEL", default_embed_model)
-    )
-    text_model_repo, text_model_file, _ = resolve_model_name(
-        os.getenv("LLM", default_text_model_str)
-    )
-    vision_model_repo, vision_model_file, vision_model_mmproj_file = resolve_model_name(
-        os.getenv("VLM", default_vision_model_str)
-    )
-
     return ModelConfig(
-        embed_model_file=embed_model_file,
-        embed_model_repo=embed_model_repo,
+        embed_model=os.getenv("EMBED_MODEL", default_embed_model),
         image_embed_model=os.getenv("IMAGE_EMBED_MODEL", default_image_embed_model),
         ner_model=os.getenv("NER_MODEL", default_ner_model),
         rerank_model=os.getenv("RERANK_MODEL", default_rerank_model),
         sparse_model=os.getenv("SPARSE_MODEL", default_sparse_model),
-        text_model_file=text_model_file,
-        text_model_repo=text_model_repo,
-        vision_model_file=vision_model_file,
-        vision_model_mmproj_file=vision_model_mmproj_file,
-        vision_model_repo=vision_model_repo,
+        text_model=os.getenv("TEXT_MODEL", default_text_model),
+        vision_model=os.getenv("VISION_MODEL", default_vision_model),
         whisper_model=os.getenv("WHISPER_MODEL", default_whisper_model),
     )
 
@@ -612,7 +568,7 @@ def load_openai_env(
     default_ctx_window: int = 4096,
     default_dimensions: int | None = None,
     default_max_retries: int = 2,
-    default_model_provider: str = "ollama",
+    default_model_provider: Literal["ollama", "openai", "vllm"] = "ollama",
     default_reuse_client: bool = False,
     default_seed: int = 42,
     default_temperature: float = 0.0,
@@ -632,7 +588,7 @@ def load_openai_env(
         default_dimensions (int | None): Optional embedding dimensions override for
             models that support reduced-dimension output.
         default_max_retries (int): Default number of retries.
-        default_model_provider (str): Default inference server type (e.g. "llama.cpp", "ollama", "openai", "vllm"). Default is "ollama".
+        default_model_provider: Default inference server type (e.g. "ollama", "openai", "vllm"). Default is "ollama".
         default_reuse_client (bool): Whether to reuse the OpenAI client across calls. Default is False.
         default_seed (int): Default random seed for reproducibility.
         default_temperature (float): Default temperature for text generation.
@@ -647,10 +603,10 @@ def load_openai_env(
         - api_base (str): The OpenAI API base URL.
         - api_key (str): The OpenAI API key.
         - ctx_window (int): The context window size for models that support it.
-                - dimensions (int | None): Optional embedding dimensions override for
-                    embedding models.
+        - dimensions (int | None): Optional embedding dimensions override for
+            embedding models.
         - max_retries (int): The number of retries for API calls.
-                - model_provider (str): The inference server type (e.g. "llama.cpp", "ollama", "openai", "vllm").
+        - model_provider (Literal["ollama", "openai", "vllm"]): The inference server type.
         - reuse_client (bool): Whether to reuse the OpenAI client across calls.
         - seed (int): Random seed for reproducibility.
         - temperature (float): Temperature for text generation.
@@ -665,16 +621,13 @@ def load_openai_env(
     """
     model_provider = os.getenv("MODEL_PROVIDER", default_model_provider).lower()
     if model_provider not in {
-        "llama.cpp",
-        "llama_cpp",
-        "llamacpp",
         "ollama",
         "openai",
         "vllm",
     }:
         raise ValueError(
             f"Unsupported inference server: {model_provider}. "
-            f"Supported options are: 'ollama', 'llama.cpp', 'openai', 'vllm'."
+            f"Supported options are: 'ollama', 'openai', 'vllm'."
         )
 
     raw_dimensions = os.getenv("OPENAI_DIMENSIONS")
@@ -734,7 +687,6 @@ class PathConfig:
     prompts: Path
     qdrant_sources: Path
     hf_hub_cache: Path
-    llama_cpp_cache: Path
 
 
 def load_path_env() -> PathConfig:
@@ -750,7 +702,6 @@ def load_path_env() -> PathConfig:
         - prompts (Path): Path to the prompts directory.
         - qdrant_sources (Path): Path to the Qdrant sources directory.
         - hf_hub_cache (Path): Path to the Hugging Face Hub cache directory.
-        - llama_cpp_cache (Path): Path to the llama.cpp cache directory.
     """
     home_dir: Path = Path.home()
     docint_home_dir: Path = home_dir / "docint"
@@ -759,7 +710,6 @@ def load_path_env() -> PathConfig:
     default_results_dir: Path = docint_home_dir / "results"
     default_model_cache: Path = home_dir / ".cache"
     default_hf_hub_cache: Path = default_model_cache / "huggingface" / "hub"
-    default_llama_cpp_cache: Path = default_model_cache / "llama.cpp"
 
     utils_dir: Path = Path(__file__).parent.resolve()
     default_prompts_dir: Path = utils_dir / "prompts"
@@ -782,9 +732,6 @@ def load_path_env() -> PathConfig:
             os.getenv("QDRANT_SRC_DIR", default_qdrant_sources)
         ).expanduser(),
         hf_hub_cache=Path(os.getenv("HF_HUB_CACHE", default_hf_hub_cache)).expanduser(),
-        llama_cpp_cache=Path(
-            os.getenv("LLAMA_CPP_CACHE", default_llama_cpp_cache)
-        ).expanduser(),
     )
 
 

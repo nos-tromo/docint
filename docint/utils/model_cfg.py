@@ -36,7 +36,7 @@ from docling.models.stages.table_structure.table_structure_model import (
 )
 from dotenv import load_dotenv
 from gliner import GLiNER
-from huggingface_hub import hf_hub_download, snapshot_download
+from huggingface_hub import snapshot_download
 from loguru import logger
 from transformers import AutoProcessor, CLIPModel
 
@@ -180,101 +180,6 @@ def _link_or_copy_model_file(source: Path, destination: Path) -> None:
         shutil.copy2(source, destination)
 
 
-def load_llama_cpp_model(
-    cache_dir: Path,
-    model_id: str,
-    repo_id: str | None,
-    kw: str,
-    destination_dir: Path | None = None,
-) -> None:
-    """Loads the llama.cpp model.
-
-    Args:
-        cache_dir (Path): The path to the cache directory.
-        model_id (str): The name of the model to load.
-        repo_id (str): The repository ID for the model.
-        kw (str): The keyword for the model type (e.g., "text" or "vision").
-        destination_dir (Path | None): Optional explicit directory where the model
-            file should be placed. Defaults to ``cache_dir``.
-    """
-
-    # Create cache directories if they don't exist.
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    target_dir = destination_dir or cache_dir
-
-    target_dir.mkdir(parents=True, exist_ok=True)
-    model_path = target_dir / model_id
-
-    # Check if model already exists at target path.
-    if model_path.exists():
-        logger.info(
-            "{} model '{}' is already available at {}",
-            kw.capitalize(),
-            model_id,
-            model_path,
-        )
-        return
-
-    # Check HF cache structure
-    if repo_id:
-        resolved = resolve_hf_cache_path(
-            cache_dir=cache_dir, repo_id=repo_id, filename=model_id
-        )
-        if resolved:
-            if destination_dir is not None and resolved != model_path:
-                _link_or_copy_model_file(resolved, model_path)
-                resolved = model_path
-            logger.info(
-                "{} model '{}' is already available at {}",
-                kw.capitalize(),
-                model_id,
-                resolved,
-            )
-            return
-
-    if not repo_id:
-        logger.warning(
-            "{} model '{}' not found locally and no repo_id provided for download",
-            kw.capitalize(),
-            model_id,
-        )
-        return
-
-    logger.info(
-        "{} model '{}' not found. Downloading from {}...",
-        kw.capitalize(),
-        model_id,
-        repo_id,
-    )
-
-    # Download from Hugging Face
-    # We use hf_hub_download to fetch the GGUF file directly.
-    # We catch EntryNotFoundError to handle cases where the filename config might be slightly off
-    # or if the user provided a full path instead of just the filename.
-    try:
-        downloaded_path = hf_hub_download(
-            repo_id=repo_id,
-            filename=model_id,
-            cache_dir=cache_dir,
-            local_dir=target_dir,  # Download directly to the configured destination folder.
-            local_dir_use_symlinks=False,
-        )
-        downloaded_file = Path(downloaded_path)
-        if downloaded_file != model_path and downloaded_file.exists():
-            _link_or_copy_model_file(downloaded_file, model_path)
-            downloaded_file = model_path
-        logger.info("Loaded {} model '{}' to {}", kw, model_id, downloaded_file)
-    except Exception as e:
-        logger.error("Failed to download {} model '{}': {}", kw, model_id, e)
-        # Verify if the file might actually be there under a different name or if the config is wrong
-        # But we continue to let the caller handle the missing model later.
-        pass
-
-    # Fallback/Check: We don't verify file presence here because it's remote (in shared volume).
-    # But since we share the volume, we technically COULD check.
-    # For now, we assume the server handles it.
-
-
 def load_ollama_model(
     model_id: str, kw: str, host: str = "http://localhost:11434"
 ) -> None:
@@ -357,62 +262,30 @@ def main() -> None:
             kw=kw,
         )
 
-    # LLaMA.cpp
-    if openai_config.model_provider in {"llama.cpp", "llama_cpp", "llamacpp"}:
-        vision_model_dir = (
-            path_config.llama_cpp_cache / Path(model_config.vision_model_file).stem
-        )
-
-        for model_id, repo_id, kw, destination_dir in [
-            # model_id refers to the GGUF filename, repo_id is the HuggingFace repo where it lives.
-            # We need both to resolve cache correctly.
-            (
-                model_config.embed_model_file,
-                model_config.embed_model_repo,
-                "embedding",
-                None,
-            ),
-            (model_config.text_model_file, model_config.text_model_repo, "text", None),
-            (
-                model_config.vision_model_file,
-                model_config.vision_model_repo,
-                "vision",
-                vision_model_dir,
-            ),
-            (
-                model_config.vision_model_mmproj_file,
-                model_config.vision_model_repo,
-                "vision_mmproj",
-                vision_model_dir,
-            ),
-        ]:
-            load_llama_cpp_model(
-                cache_dir=path_config.llama_cpp_cache,
-                model_id=model_id,
-                repo_id=repo_id,
-                kw=kw,
-                destination_dir=destination_dir,
-            )
-
-    # Ollama
-    if openai_config.model_provider in {"ollama"}:
-        for model_id, kw in [
-            (model_config.embed_model_file, "embedding"),
-            (model_config.text_model_file, "text"),
-            (model_config.vision_model_file, "vision"),
-        ]:
+    # Ollama / vLLM
+    for model_id, kw in [
+        # (model_config.embed_model, "embedding"),
+        (model_config.text_model, "text"),
+        # (model_config.vision_model, "vision"),
+    ]:
+        if openai_config.model_provider == "ollama":
             load_ollama_model(model_id=model_id, kw=kw, host=openai_config.api_base)
 
-    # vLLM
-    if openai_config.model_provider in {"vllm"}:
-        # TODO: Add vLLM loading logic here when we support vLLM as an inference server option.
-        logger.warning("vLLM inference server support is not yet implemented.")
+        elif openai_config.model_provider == "vllm":
+            load_hf_model(
+                model_id=model_id,
+                cache_folder=path_config.hf_hub_cache,
+                kw=kw,
+            )
 
-    # OpenAI API
+    # Remote OpenAI-compatible APIs
     if openai_config.model_provider in {"openai"}:
-        # For OpenAI API, we don't have local model loading.
+        # For remote OpenAI-compatible APIs, the serving stack provisions the
+        # text, embedding, and vision endpoints. Only the app-local auxiliary
+        # models above are prepared here.
         logger.info(
-            "Using OpenAI API as inference server. No local model loading required."
+            "Using {} as inference server. No local text/embedding/vision model loading required.",
+            openai_config.model_provider,
         )
 
     # Whisper
