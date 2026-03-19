@@ -229,13 +229,32 @@ def test_load_openai_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch: Fixture to clear environment variables.
     """
     monkeypatch.delenv("MODEL_PROVIDER", raising=False)
+    monkeypatch.delenv("OPENAI_DIMENSIONS", raising=False)
     monkeypatch.delenv("OPENAI_ENABLE_THINKING", raising=False)
     monkeypatch.delenv("OPENAI_THINKING_EFFORT", raising=False)
 
     cfg = load_openai_env()
 
+    assert cfg.dimensions is None
     assert cfg.thinking_enabled is False
     assert cfg.thinking_effort == "medium"
+
+
+def test_load_openai_env_accepts_vllm_and_dimensions_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenAI env loader should accept vLLM and parse embedding dimensions.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.setenv("MODEL_PROVIDER", "vllm")
+    monkeypatch.setenv("OPENAI_DIMENSIONS", "1024")
+
+    cfg = load_openai_env()
+
+    assert cfg.model_provider == "vllm"
+    assert cfg.dimensions == 1024
 
 
 def test_load_openai_env_clamps_invalid_thinking_effort(

@@ -226,7 +226,8 @@ Batch-size tuning guidance:
 - `OPENAI_API_BASE`: Base API URL. In Docker, this is set automatically per profile (e.g. `http://ollama-server:11434/v1` for `*-ollama`). For local development, point this to your provider (e.g., `http://localhost:11434/v1`).
 - `OPENAI_ENABLE_THINKING`: Enable OpenAI reasoning/thinking for text models routed through the native OpenAI provider (default: `false`).
 - `OPENAI_THINKING_EFFORT`: Reasoning effort used when `OPENAI_ENABLE_THINKING=true`. Supported values: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` (default: `medium`).
-- `MODEL_PROVIDER`: Inference provider type (`llama.cpp`, `ollama`, `openai`).
+- `OPENAI_DIMENSIONS`: Optional embedding dimension override. Only set this for providers and models that support reduced-dimension embeddings; leave it unset for most local OpenAI-compatible backends such as vLLM-served BGE models.
+- `MODEL_PROVIDER`: Inference provider type (`llama.cpp`, `ollama`, `openai`, `vllm`).
 - `LLM`: Repo ID (e.g., `bartowski/Meta-Llama-3-8B-Instruct-GGUF`) for automatic download.
 - `EMBED_MODEL`: Embedding model ID served by the configured `MODEL_PROVIDER`. Use an Ollama tag (for example `bge-m3`) with `MODEL_PROVIDER=ollama`, an OpenAI embedding model name (for example `text-embedding-3-small`) with `MODEL_PROVIDER=openai`, or a GGUF spec (for example `ggml-org/bge-m3-Q8_0-GGUF;bge-m3-q8_0.gguf`) with `MODEL_PROVIDER=llama.cpp`.
 - `VLM`: Vision-language model ID (GGUF `repo;filename` for `llama.cpp` or model tag for Ollama/OpenAI).

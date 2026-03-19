@@ -1275,6 +1275,7 @@ def test_embed_model_uses_ollama_embedding_backend(
             captured.update(kwargs)
 
     monkeypatch.setattr(rag_module, "OpenAIEmbedding", FakeOpenAIEmbedding)
+    monkeypatch.delenv("OPENAI_DIMENSIONS", raising=False)
 
     rag = RAG(qdrant_collection="test")
     rag.embed_model_id = "bge-m3"
@@ -1283,7 +1284,32 @@ def test_embed_model_uses_ollama_embedding_backend(
 
     assert captured["model_name"] == "bge-m3"
     assert captured["api_base"] == rag.openai_api_base
-    assert captured["dimensions"] == rag.openai_dimensions
+    assert "dimensions" not in captured
+
+
+def test_embed_model_forwards_explicit_dimensions_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit embedding dimensions should only be sent when configured.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    captured: dict[str, object] = {}
+
+    class FakeOpenAIEmbedding:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(rag_module, "OpenAIEmbedding", FakeOpenAIEmbedding)
+
+    rag = RAG(qdrant_collection="test")
+    rag.embed_model_id = "text-embedding-3-small"
+    rag.openai_dimensions = 1024
+
+    _ = rag.embed_model
+
+    assert captured["dimensions"] == 1024
 
 
 def test_reranker_falls_back_to_llm_on_meta_tensor_error(

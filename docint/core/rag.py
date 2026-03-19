@@ -416,7 +416,7 @@ class RAG:
     openai_api_base: str | None = field(default=None, init=False)
     openai_api_key: str | None = field(default=None, init=False)
     openai_ctx_window: int = field(default=4096, init=False)
-    openai_dimensions: int = field(default=1024, init=False)
+    openai_dimensions: int | None = field(default=None, init=False)
     openai_max_retries: int = field(default=2, init=False)
     openai_model_provider: str = field(default="llama.cpp", init=False)
     openai_reuse_client: bool = field(default=True, init=False)
@@ -795,14 +795,19 @@ class RAG:
 
             logger.info("Initializing embedding model: {}", self.embed_model_id)
 
+            embedding_kwargs: dict[str, Any] = {
+                "api_base": self.openai_api_base,
+                "api_key": self.openai_api_key,
+                "max_retries": self.openai_max_retries,
+                "model_name": self.embed_model_id,
+                "reuse_client": False,
+                "timeout": self.openai_timeout,
+            }
+            if self.openai_dimensions is not None:
+                embedding_kwargs["dimensions"] = self.openai_dimensions
+
             self._embed_model = OpenAIEmbedding(
-                api_base=self.openai_api_base,
-                api_key=self.openai_api_key,
-                dimensions=self.openai_dimensions,
-                max_retries=self.openai_max_retries,
-                model_name=self.embed_model_id,
-                reuse_client=False,
-                timeout=self.openai_timeout,
+                **embedding_kwargs,
             )
 
         return self._embed_model

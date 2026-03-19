@@ -594,7 +594,7 @@ class OpenAIConfig:
     api_base: str
     api_key: str
     ctx_window: int
-    dimensions: int
+    dimensions: int | None
     max_retries: int
     model_provider: str
     reuse_client: bool
@@ -610,7 +610,7 @@ def load_openai_env(
     default_api_base: str = "http://localhost:11434/v1",
     default_api_key: str = "sk-no-key-required",
     default_ctx_window: int = 4096,
-    default_dimensions: int = 1024,
+    default_dimensions: int | None = None,
     default_max_retries: int = 2,
     default_model_provider: str = "ollama",
     default_reuse_client: bool = False,
@@ -629,7 +629,8 @@ def load_openai_env(
         default_api_base (str): Default OpenAI API base URL.
         default_api_key (str): Default OpenAI API key.
         default_ctx_window (int): Default context window size for models that support it.
-        default_dimensions (int): Default embedding dimensions for embedding models.
+        default_dimensions (int | None): Optional embedding dimensions override for
+            models that support reduced-dimension output.
         default_max_retries (int): Default number of retries.
         default_model_provider (str): Default inference server type (e.g. "llama.cpp", "ollama", "openai", "vllm"). Default is "ollama".
         default_reuse_client (bool): Whether to reuse the OpenAI client across calls. Default is False.
@@ -646,9 +647,10 @@ def load_openai_env(
         - api_base (str): The OpenAI API base URL.
         - api_key (str): The OpenAI API key.
         - ctx_window (int): The context window size for models that support it.
-        - dimensions (int): The embedding dimensions for embedding models.
+                - dimensions (int | None): Optional embedding dimensions override for
+                    embedding models.
         - max_retries (int): The number of retries for API calls.
-        - model_provider (str): The inference server type (e.g. "llama.cpp", "ollama", "openai").
+                - model_provider (str): The inference server type (e.g. "llama.cpp", "ollama", "openai", "vllm").
         - reuse_client (bool): Whether to reuse the OpenAI client across calls.
         - seed (int): Random seed for reproducibility.
         - temperature (float): Temperature for text generation.
@@ -668,11 +670,19 @@ def load_openai_env(
         "llamacpp",
         "ollama",
         "openai",
+        "vllm",
     }:
         raise ValueError(
             f"Unsupported inference server: {model_provider}. "
-            f"Supported options are: 'ollama', 'llama.cpp', 'openai'."
+            f"Supported options are: 'ollama', 'llama.cpp', 'openai', 'vllm'."
         )
+
+    raw_dimensions = os.getenv("OPENAI_DIMENSIONS")
+    dimensions = (
+        default_dimensions
+        if raw_dimensions is None or not raw_dimensions.strip()
+        else int(raw_dimensions)
+    )
 
     thinking_effort = os.getenv(
         "OPENAI_THINKING_EFFORT", default_thinking_effort
@@ -692,7 +702,7 @@ def load_openai_env(
         api_base=os.getenv("OPENAI_API_BASE", default_api_base),
         api_key=os.getenv("OPENAI_API_KEY", default_api_key),
         ctx_window=int(os.getenv("OPENAI_CTX_WINDOW", default_ctx_window)),
-        dimensions=int(os.getenv("OPENAI_DIMENSIONS", default_dimensions)),
+        dimensions=dimensions,
         max_retries=int(os.getenv("OPENAI_MAX_RETRIES", default_max_retries)),
         model_provider=model_provider,
         reuse_client=str(os.getenv("OPENAI_REUSE_CLIENT", default_reuse_client)).lower()
