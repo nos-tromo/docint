@@ -205,7 +205,7 @@ services:
   ##########################################################
   # Ollama (CUDA)
   ##########################################################
-  ollama-gpu:
+  ollama-cuda:
     profiles: ["cuda-ollama"]
     image: ollama/ollama:latest
     environment:
