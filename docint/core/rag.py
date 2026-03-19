@@ -418,7 +418,7 @@ class RAG:
     openai_ctx_window: int = field(default=4096, init=False)
     openai_dimensions: int | None = field(default=None, init=False)
     openai_max_retries: int = field(default=2, init=False)
-    openai_model_provider: str = field(default="llama.cpp", init=False)
+    openai_model_provider: str = field(default="ollama", init=False)
     openai_reuse_client: bool = field(default=True, init=False)
     openai_seed: int = field(default=42, init=False)
     openai_temperature: float = field(default=0.1, init=False)
@@ -530,11 +530,10 @@ class RAG:
         )
 
         # --- Model config ---
-        suffix = ".gguf"
-        self.embed_model_id = self.model_config.embed_model_file.removesuffix(suffix)
+        self.embed_model_id = self.model_config.embed_model
         self.rerank_model_id = self.model_config.rerank_model
         self.sparse_model_id = self.model_config.sparse_model
-        self.text_model_id = self.model_config.text_model_file.removesuffix(suffix)
+        self.text_model_id = self.model_config.text_model
 
         # --- OpenAI config ---
         self.openai_api_key = self.openai_config.api_key

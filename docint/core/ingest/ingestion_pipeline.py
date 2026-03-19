@@ -122,7 +122,7 @@ class DocumentIngestionPipeline:
     ingestion_batch_size: int = field(default=5, init=False)
 
     # --- OpenAI config (for LLM-based NER) ---
-    openai_model_provider: str = field(default="llama.cpp")
+    openai_model_provider: str = field(default="ollama")
 
     # --- Table reader config ---
     table_text_cols: list[str] | None = None

@@ -83,8 +83,8 @@ class OpenAIPipeline:
     def __post_init__(self) -> None:
         """Post-initialization to load configurations."""
         _model_config = load_model_env()
-        self.text_model_id = _model_config.text_model_file.removesuffix(".gguf")
-        self.vision_model_id = _model_config.vision_model_file.removesuffix(".gguf")
+        self.text_model_id = _model_config.text_model.removesuffix(".gguf")
+        self.vision_model_id = _model_config.vision_model.removesuffix(".gguf")
 
         _openai_config = load_openai_env()
         api_key = _openai_config.api_key
