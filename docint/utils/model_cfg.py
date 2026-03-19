@@ -264,9 +264,9 @@ def main() -> None:
 
     # Ollama / vLLM
     for model_id, kw in [
-        # (model_config.embed_model, "embedding"),
+        (model_config.embed_model, "embedding"),
         (model_config.text_model, "text"),
-        # (model_config.vision_model, "vision"),
+        (model_config.vision_model, "vision"),
     ]:
         if openai_config.model_provider == "ollama":
             load_ollama_model(model_id=model_id, kw=kw, host=openai_config.api_base)
