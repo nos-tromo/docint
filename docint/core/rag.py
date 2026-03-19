@@ -542,7 +542,7 @@ class RAG:
         self.openai_ctx_window = self.openai_config.ctx_window
         self.openai_dimensions = self.openai_config.dimensions
         self.openai_max_retries = self.openai_config.max_retries
-        self.openai_model_provider = self.openai_config.model_provider
+        self.openai_model_provider = self.openai_config.inference_provider
         self.openai_reuse_client = self.openai_config.reuse_client
         self.openai_seed = self.openai_config.seed
         self.openai_temperature = self.openai_config.temperature

@@ -596,7 +596,7 @@ class OpenAIConfig:
     ctx_window: int
     dimensions: int
     max_retries: int
-    model_provider: str
+    inference_provider: str
     reuse_client: bool
     seed: int
     temperature: float
@@ -648,7 +648,7 @@ def load_openai_env(
         - ctx_window (int): The context window size for models that support it.
         - dimensions (int): The embedding dimensions for embedding models.
         - max_retries (int): The number of retries for API calls.
-        - model_provider (str): The inference server type (e.g. "llama.cpp", "ollama", "openai").
+        - inference_provider (str): The inference server type (e.g. "llama.cpp", "ollama", "openai").
         - reuse_client (bool): Whether to reuse the OpenAI client across calls.
         - seed (int): Random seed for reproducibility.
         - temperature (float): Temperature for text generation.
@@ -661,8 +661,8 @@ def load_openai_env(
     Raises:
         ValueError: If an unsupported inference server is specified.
     """
-    model_provider = os.getenv("MODEL_PROVIDER", default_model_provider).lower()
-    if model_provider not in {
+    inference_provider = os.getenv("INFERENCE_PROVIDER", default_model_provider).lower()
+    if inference_provider not in {
         "llama.cpp",
         "llama_cpp",
         "llamacpp",
@@ -670,7 +670,7 @@ def load_openai_env(
         "openai",
     }:
         raise ValueError(
-            f"Unsupported inference server: {model_provider}. "
+            f"Unsupported inference server: {inference_provider}. "
             f"Supported options are: 'ollama', 'llama.cpp', 'openai'."
         )
 
@@ -694,7 +694,7 @@ def load_openai_env(
         ctx_window=int(os.getenv("OPENAI_CTX_WINDOW", default_ctx_window)),
         dimensions=int(os.getenv("OPENAI_DIMENSIONS", default_dimensions)),
         max_retries=int(os.getenv("OPENAI_MAX_RETRIES", default_max_retries)),
-        model_provider=model_provider,
+        inference_provider=inference_provider,
         reuse_client=str(os.getenv("OPENAI_REUSE_CLIENT", default_reuse_client)).lower()
         in {"true", "1", "yes"},
         seed=int(os.getenv("OPENAI_SEED", default_seed)),

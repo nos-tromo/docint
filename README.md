@@ -97,6 +97,8 @@ Model files are handled automatically by the ingestion pipeline and do not need 
 
    CUDA profiles require a CUDA-compatible GPU and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
+   CUDA profiles also switch Qdrant to the `qdrant/qdrant:gpu-nvidia-latest` image and enable `QDRANT__GPU__INDEXING=1`, so vector indexing can use the same NVIDIA GPU runtime. This follows Qdrant's documented GPU deployment path and therefore requires a Linux `x86_64` Docker host with Vulkan-capable NVIDIA drivers.
+
    Each profile automatically sets `MODEL_PROVIDER` and `OPENAI_API_BASE` to the correct values. For the `*-openai` profiles, set `OPENAI_API_BASE` and `OPENAI_API_KEY` in `.env.docker`.
 
 4. **Start the Services**
@@ -108,7 +110,7 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    **What's Included:**
    - **Backend**: FastAPI application for RAG and orchestration.
    - **Inference Server**: Ollama, `llama.cpp`, or external OpenAI API (depending on profile).
-   - **Qdrant**: Vector database for hybrid (semantic, bm42) search.
+   - **Qdrant**: Vector database for hybrid (semantic, bm42) search. CUDA profiles use Qdrant's NVIDIA GPU image for accelerated indexing; CPU profiles keep the standard image.
    - **Frontend**: Streamlit UI.
 
    On the first run, required ML models are automatically downloaded into the `model-cache` shared volume. This volume is shared between the backend (which handles downloads) and the inference server (which loads them).

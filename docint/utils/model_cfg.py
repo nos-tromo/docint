@@ -358,7 +358,7 @@ def main() -> None:
         )
 
     # LLaMA.cpp
-    if openai_config.model_provider in {"llama.cpp", "llama_cpp", "llamacpp"}:
+    if openai_config.inference_provider in {"llama.cpp", "llama_cpp", "llamacpp"}:
         vision_model_dir = (
             path_config.llama_cpp_cache / Path(model_config.vision_model_file).stem
         )
@@ -395,7 +395,7 @@ def main() -> None:
             )
 
     # Ollama
-    if openai_config.model_provider in {"ollama"}:
+    if openai_config.inference_provider in {"ollama"}:
         for model_id, kw in [
             (model_config.embed_model_file, "embedding"),
             (model_config.text_model_file, "text"),
@@ -404,12 +404,12 @@ def main() -> None:
             load_ollama_model(model_id=model_id, kw=kw, host=openai_config.api_base)
 
     # vLLM
-    if openai_config.model_provider in {"vllm"}:
+    if openai_config.inference_provider in {"vllm"}:
         # TODO: Add vLLM loading logic here when we support vLLM as an inference server option.
         logger.warning("vLLM inference server support is not yet implemented.")
 
     # OpenAI API
-    if openai_config.model_provider in {"openai"}:
+    if openai_config.inference_provider in {"openai"}:
         # For OpenAI API, we don't have local model loading.
         logger.info(
             "Using OpenAI API as inference server. No local model loading required."

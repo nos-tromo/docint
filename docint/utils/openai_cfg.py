@@ -64,7 +64,7 @@ def get_openai_reasoning_effort(openai_config: OpenAIConfig) -> str | None:
     """
     if not openai_config.thinking_enabled:
         return None
-    if openai_config.model_provider != "openai":
+    if openai_config.inference_provider != "openai":
         return None
     return openai_config.thinking_effort
 
