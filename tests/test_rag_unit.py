@@ -164,7 +164,7 @@ def test_create_text_model_disables_reasoning_by_default(
         ctx_window=200000,
         dimensions=1024,
         max_retries=2,
-        model_provider="openai",
+        inference_provider="openai",
         reuse_client=False,
         seed=42,
         temperature=0.0,

@@ -552,7 +552,7 @@ class OpenAIConfig:
     ctx_window: int
     dimensions: int | None
     max_retries: int
-    model_provider: str
+    inference_provider: str
     reuse_client: bool
     seed: int
     temperature: float
@@ -657,7 +657,7 @@ def load_openai_env(
         ctx_window=int(os.getenv("OPENAI_CTX_WINDOW", default_ctx_window)),
         dimensions=dimensions,
         max_retries=int(os.getenv("OPENAI_MAX_RETRIES", default_max_retries)),
-        model_provider=model_provider,
+        inference_provider=inference_provider,
         reuse_client=str(os.getenv("OPENAI_REUSE_CLIENT", default_reuse_client)).lower()
         in {"true", "1", "yes"},
         seed=int(os.getenv("OPENAI_SEED", default_seed)),

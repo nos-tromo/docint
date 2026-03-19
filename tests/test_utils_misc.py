@@ -265,7 +265,7 @@ def test_load_openai_env_clamps_invalid_thinking_effort(
     Args:
         monkeypatch: Fixture to set environment variables.
     """
-    monkeypatch.setenv("MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("INFERENCE_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_ENABLE_THINKING", "true")
     monkeypatch.setenv("OPENAI_THINKING_EFFORT", "unsupported")
 
