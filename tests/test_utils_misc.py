@@ -275,24 +275,21 @@ def test_load_openai_env_clamps_invalid_thinking_effort(
     assert cfg.thinking_effort == "medium"
 
 
-def test_load_model_env_parses_vision_mmproj_repo_and_file(
+def test_load_model_env_reads_direct_text_and_vision_model_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Model env loader should split ``VLM`` into repo/model/mmproj fields.
+    """Model env loader should read direct model identifiers from env vars.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): Fixture to set environment variables.
     """
-    monkeypatch.setenv(
-        "VLM",
-        "Qwen/Qwen3-VL-8B-Instruct-GGUF;Qwen3VL-8B-Instruct-Q4_K_M.gguf;mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf",
-    )
+    monkeypatch.setenv("TEXT_MODEL", "gpt-4o-mini")
+    monkeypatch.setenv("VISION_MODEL", "gpt-4.1-mini")
 
     cfg = load_model_env()
 
-    assert cfg.vision_model_repo == "Qwen/Qwen3-VL-8B-Instruct-GGUF"
-    assert cfg.vision_model_file == "Qwen3VL-8B-Instruct-Q4_K_M.gguf"
-    assert cfg.vision_model_mmproj_file == "mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf"
+    assert cfg.text_model == "gpt-4o-mini"
+    assert cfg.vision_model == "gpt-4.1-mini"
 
 
 def test_load_hate_speech_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
