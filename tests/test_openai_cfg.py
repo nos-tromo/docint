@@ -18,7 +18,7 @@ def test_get_openai_reasoning_effort_requires_toggle_and_provider() -> None:
         ctx_window=4096,
         dimensions=1024,
         max_retries=2,
-        model_provider="openai",
+        inference_provider="openai",
         reuse_client=False,
         seed=42,
         temperature=0.0,
@@ -45,7 +45,7 @@ def test_get_openai_reasoning_effort_requires_toggle_and_provider() -> None:
             OpenAIConfig(
                 **{
                     **base_config.__dict__,
-                    "model_provider": "ollama",
+                    "inference_provider": "ollama",
                 }
             )
         )
@@ -88,7 +88,7 @@ def test_openai_pipeline_call_chat_passes_reasoning_effort(
             ctx_window=200000,
             dimensions=1024,
             max_retries=2,
-            model_provider="openai",
+            inference_provider="openai",
             reuse_client=False,
             seed=42,
             temperature=0.0,
@@ -148,7 +148,7 @@ def test_openai_pipeline_call_chat_omits_reasoning_effort_when_disabled(
             ctx_window=200000,
             dimensions=1024,
             max_retries=2,
-            model_provider="openai",
+            inference_provider="openai",
             reuse_client=False,
             seed=42,
             temperature=0.0,

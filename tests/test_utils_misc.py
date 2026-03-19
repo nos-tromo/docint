@@ -228,7 +228,7 @@ def test_load_openai_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     Args:
         monkeypatch: Fixture to clear environment variables.
     """
-    monkeypatch.delenv("MODEL_PROVIDER", raising=False)
+    monkeypatch.delenv("INFERENCE_PROVIDER", raising=False)
     monkeypatch.delenv("OPENAI_ENABLE_THINKING", raising=False)
     monkeypatch.delenv("OPENAI_THINKING_EFFORT", raising=False)
 
@@ -246,7 +246,7 @@ def test_load_openai_env_clamps_invalid_thinking_effort(
     Args:
         monkeypatch: Fixture to set environment variables.
     """
-    monkeypatch.setenv("MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("INFERENCE_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_ENABLE_THINKING", "true")
     monkeypatch.setenv("OPENAI_THINKING_EFFORT", "unsupported")
 
