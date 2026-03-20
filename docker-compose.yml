@@ -371,11 +371,11 @@ services:
   ##########################################################
   qdrant-cpu:
     <<: *qdrant-cpu
-    profiles: ["cpu-llamacpp", "cpu-ollama", "cpu-openai"]
+    profiles: ["cpu-ollama", "cpu-openai"]
 
   qdrant-cuda:
     <<: *qdrant-cuda
-    profiles: ["cuda-llamacpp", "cuda-ollama", "cuda-openai"]
+    profiles: ["cuda-ollama", "cuda-openai", "cuda-vllm"]
 
 ##########################################################
 # Volumes
