@@ -57,7 +57,7 @@ def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch) -> Non
         model_cfg_module,
         "load_openai_env",
         lambda: SimpleNamespace(
-            model_provider="vllm", api_base="http://vllm-router:9000/v1"
+            inference_provider="vllm", api_base="http://vllm-router:9000/v1"
         ),
     )
     monkeypatch.setattr(

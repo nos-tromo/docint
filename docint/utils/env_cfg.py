@@ -568,7 +568,7 @@ def load_openai_env(
     default_ctx_window: int = 4096,
     default_dimensions: int | None = None,
     default_max_retries: int = 2,
-    default_model_provider: Literal["ollama", "openai", "vllm"] = "ollama",
+    default_inference_provider: Literal["ollama", "openai", "vllm"] = "ollama",
     default_reuse_client: bool = False,
     default_seed: int = 42,
     default_temperature: float = 0.0,
@@ -588,7 +588,7 @@ def load_openai_env(
         default_dimensions (int | None): Optional embedding dimensions override for
             models that support reduced-dimension output.
         default_max_retries (int): Default number of retries.
-        default_model_provider: Default inference server type (e.g. "ollama", "openai", "vllm"). Default is "ollama".
+        default_inference_provider: Default inference server type (e.g. "ollama", "openai", "vllm"). Default is "ollama".
         default_reuse_client (bool): Whether to reuse the OpenAI client across calls. Default is False.
         default_seed (int): Default random seed for reproducibility.
         default_temperature (float): Default temperature for text generation.
@@ -606,7 +606,7 @@ def load_openai_env(
         - dimensions (int | None): Optional embedding dimensions override for
             embedding models.
         - max_retries (int): The number of retries for API calls.
-        - model_provider (Literal["ollama", "openai", "vllm"]): The inference server type.
+        - inference_provider (Literal["ollama", "openai", "vllm"]): The inference server type.
         - reuse_client (bool): Whether to reuse the OpenAI client across calls.
         - seed (int): Random seed for reproducibility.
         - temperature (float): Temperature for text generation.
@@ -619,14 +619,16 @@ def load_openai_env(
     Raises:
         ValueError: If an unsupported inference server is specified.
     """
-    model_provider = os.getenv("MODEL_PROVIDER", default_model_provider).lower()
-    if model_provider not in {
+    inference_provider = os.getenv(
+        "INFERENCE_PROVIDER", default_inference_provider
+    ).lower()
+    if inference_provider not in {
         "ollama",
         "openai",
         "vllm",
     }:
         raise ValueError(
-            f"Unsupported inference server: {model_provider}. "
+            f"Unsupported inference server: {inference_provider}. "
             f"Supported options are: 'ollama', 'openai', 'vllm'."
         )
 

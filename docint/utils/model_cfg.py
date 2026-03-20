@@ -268,10 +268,10 @@ def main() -> None:
         (model_config.text_model, "text"),
         (model_config.vision_model, "vision"),
     ]:
-        if openai_config.model_provider == "ollama":
+        if openai_config.inference_provider == "ollama":
             load_ollama_model(model_id=model_id, kw=kw, host=openai_config.api_base)
 
-        elif openai_config.model_provider == "vllm":
+        elif openai_config.inference_provider == "vllm":
             load_hf_model(
                 model_id=model_id,
                 cache_folder=path_config.hf_hub_cache,
@@ -279,13 +279,13 @@ def main() -> None:
             )
 
     # Remote OpenAI-compatible APIs
-    if openai_config.model_provider in {"openai"}:
+    if openai_config.inference_provider in {"openai"}:
         # For remote OpenAI-compatible APIs, the serving stack provisions the
         # text, embedding, and vision endpoints. Only the app-local auxiliary
         # models above are prepared here.
         logger.info(
             "Using {} as inference server. No local text/embedding/vision model loading required.",
-            openai_config.model_provider,
+            openai_config.inference_provider,
         )
 
     # Whisper

@@ -92,7 +92,7 @@ Model files are handled automatically by the ingestion pipeline and do not need 
 
    CUDA profiles require a CUDA-compatible GPU and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
-   Each profile automatically sets `MODEL_PROVIDER` and `OPENAI_API_BASE` to the correct values. For the `*-openai` profiles, set `OPENAI_API_BASE` and `OPENAI_API_KEY` in `.env.docker`. The `cuda-vllm` profile routes the backend through an internal nginx service so split chat, embedding, and rerank upstreams still appear as one OpenAI-compatible endpoint.
+   Each profile automatically sets `INFERENCE_PROVIDER` and `OPENAI_API_BASE` to the correct values. For the `*-openai` profiles, set `OPENAI_API_BASE` and `OPENAI_API_KEY` in `.env.docker`. The `cuda-vllm` profile routes the backend through an internal nginx service so split chat, embedding, and rerank upstreams still appear as one OpenAI-compatible endpoint.
 
 4. **Start the Services**
 
@@ -128,7 +128,7 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    cp .env.example .env
    ```
 
-   At minimum, confirm `MODEL_PROVIDER`, `OPENAI_API_BASE`, and model IDs (`EMBED_MODEL`, `TEXT_MODEL`, `VISION_MODEL`) match your stack.
+   At minimum, confirm `INFERENCE_PROVIDER`, `OPENAI_API_BASE`, and model IDs (`EMBED_MODEL`, `TEXT_MODEL`, `VISION_MODEL`) match your stack.
 
 3. **Install Dependencies**
 
@@ -222,9 +222,9 @@ Batch-size tuning guidance:
 - `OPENAI_ENABLE_THINKING`: Enable OpenAI reasoning/thinking for text models routed through the native OpenAI provider (default: `false`).
 - `OPENAI_THINKING_EFFORT`: Reasoning effort used when `OPENAI_ENABLE_THINKING=true`. Supported values: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` (default: `medium`).
 - `OPENAI_DIMENSIONS`: Optional embedding dimension override. Only set this for providers and models that support reduced-dimension embeddings; leave it unset for most local OpenAI-compatible backends such as vLLM-served BGE models.
-- `MODEL_PROVIDER`: Inference provider type (`ollama`, `openai`, `vllm`, or another OpenAI-compatible backend mapped to one of those modes).
+- `INFERENCE_PROVIDER`: Inference provider type (`ollama`, `openai`, `vllm`, or another OpenAI-compatible backend mapped to one of those modes).
 - `TEXT_MODEL`: Text/chat model ID served by the configured provider.
-- `EMBED_MODEL`: Embedding model ID served by the configured `MODEL_PROVIDER`. Use an Ollama tag (for example `bge-m3`) with `MODEL_PROVIDER=ollama` or an OpenAI-compatible embedding model name (for example `text-embedding-3-small` or a vLLM-served alias such as `bge-m3-docint`) with `MODEL_PROVIDER=openai` or `MODEL_PROVIDER=vllm`.
+- `EMBED_MODEL`: Embedding model ID served by the configured `INFERENCE_PROVIDER`. Use an Ollama tag (for example `bge-m3`) with `INFERENCE_PROVIDER=ollama` or an OpenAI-compatible embedding model name (for example `text-embedding-3-small` or a vLLM-served alias such as `bge-m3-docint`) with `INFERENCE_PROVIDER=openai` or `INFERENCE_PROVIDER=vllm`.
 - `VISION_MODEL`: Vision-language model ID served by the configured provider (for example an Ollama tag, an OpenAI model name, or a vLLM-served alias). When the bundled `cuda-vllm` profile routes all chat traffic to a single vLLM chat server, set `VISION_MODEL` equal to `TEXT_MODEL` unless you add a dedicated vision upstream.
 
 **Note on Provider Agnosticism:**
@@ -450,7 +450,7 @@ Minimal local example (`.env`):
 
 ```env
 DOCINT_OFFLINE=false
-MODEL_PROVIDER=ollama
+INFERENCE_PROVIDER=ollama
 OPENAI_API_BASE=http://localhost:11434/v1
 OPENAI_API_KEY=sk-no-key-required
 EMBED_MODEL=bge-m3

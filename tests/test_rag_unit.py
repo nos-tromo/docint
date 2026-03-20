@@ -220,7 +220,7 @@ def test_post_retrieval_text_model_enables_reasoning_for_openai(
         ctx_window=200000,
         dimensions=1024,
         max_retries=2,
-        model_provider="openai",
+        inference_provider="openai",
         reuse_client=False,
         seed=42,
         temperature=0.0,
@@ -267,7 +267,7 @@ def test_build_query_engine_uses_post_retrieval_text_model(
         ctx_window=200000,
         dimensions=1024,
         max_retries=2,
-        model_provider="openai",
+        inference_provider="openai",
         reuse_client=False,
         seed=42,
         temperature=0.0,
@@ -1299,7 +1299,7 @@ def test_build_ingestion_pipeline_reuses_text_model_for_ner_and_hate_speech(
     rag = RAG(qdrant_collection="test")
     rag.data_dir = tmp_path
     rag.ner_enabled = True
-    rag.openai_model_provider = "openai"
+    rag.openai_inference_provider = "openai"
 
     monkeypatch.setattr(
         rag_module,
@@ -1345,7 +1345,7 @@ def test_build_ingestion_pipeline_non_openai_keeps_gliner_ner_path(
     rag = RAG(qdrant_collection="test")
     rag.data_dir = tmp_path
     rag.ner_enabled = True
-    rag.openai_model_provider = "ollama"
+    rag.openai_inference_provider = "ollama"
 
     monkeypatch.setattr(
         rag_module,
@@ -1452,7 +1452,7 @@ def test_reranker_passes_configured_fp16(monkeypatch: pytest.MonkeyPatch) -> Non
     )
 
     rag = RAG(qdrant_collection="test")
-    rag.openai_model_provider = "ollama"
+    rag.openai_inference_provider = "ollama"
     rag.rerank_use_fp16 = True
     rag.rerank_top_n = 7
 
@@ -1505,7 +1505,7 @@ def test_openai_reranker_uses_flag_embedding(monkeypatch: pytest.MonkeyPatch) ->
     )
 
     rag = RAG(qdrant_collection="test")
-    rag.openai_model_provider = "openai"
+    rag.openai_inference_provider = "openai"
     rag.rerank_top_n = 6
 
     _ = rag.reranker
@@ -1518,7 +1518,7 @@ def test_vllm_reranker_uses_remote_postprocessor() -> None:
     """vLLM provider should use the remote rerank endpoint postprocessor."""
 
     rag = RAG(qdrant_collection="test")
-    rag.openai_model_provider = "vllm"
+    rag.openai_inference_provider = "vllm"
     rag.openai_api_base = "http://router:8000/v1"
     rag.openai_api_key = "token-abc123"
     rag.rerank_top_n = 4
@@ -1750,7 +1750,7 @@ def test_reranker_falls_back_to_llm_on_meta_tensor_error(
     )
 
     rag = RAG(qdrant_collection="test")
-    rag.openai_model_provider = "ollama"
+    rag.openai_inference_provider = "ollama"
     rag._text_model = None
 
     assert rag.reranker is llm_reranker_obj

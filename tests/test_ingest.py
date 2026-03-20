@@ -314,7 +314,7 @@ def test_openai_provider_uses_llm_extractor(monkeypatch: pytest.MonkeyPatch) -> 
         device="cpu",
         ner_model="fake-llm",  # type: ignore[arg-type]
         progress_callback=None,
-        openai_model_provider="openai",
+        openai_inference_provider="openai",
     )
 
     assert pipeline.entity_extractor is not None

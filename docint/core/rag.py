@@ -555,7 +555,7 @@ class RAG:
     openai_ctx_window: int = field(default=4096, init=False)
     openai_dimensions: int | None = field(default=None, init=False)
     openai_max_retries: int = field(default=2, init=False)
-    openai_model_provider: str = field(default="ollama", init=False)
+    openai_inference_provider: str = field(default="ollama", init=False)
     openai_reuse_client: bool = field(default=True, init=False)
     openai_seed: int = field(default=42, init=False)
     openai_temperature: float = field(default=0.1, init=False)
@@ -681,7 +681,7 @@ class RAG:
         self.openai_ctx_window = self.openai_config.ctx_window
         self.openai_dimensions = self.openai_config.dimensions
         self.openai_max_retries = self.openai_config.max_retries
-        self.openai_model_provider = self.openai_config.inference_provider
+        self.openai_inference_provider = self.openai_config.inference_provider
         self.openai_reuse_client = self.openai_config.reuse_client
         self.openai_seed = self.openai_config.seed
         self.openai_temperature = self.openai_config.temperature
@@ -1022,7 +1022,7 @@ class RAG:
         if self.rerank_model_id is None:
             raise ValueError("rerank_model_id cannot be None")
         if self._reranker is None:
-            provider = self.openai_model_provider.lower()
+            provider = self.openai_inference_provider.lower()
             if provider == "vllm":
                 self._reranker = VLLMRerankPostprocessor(
                     api_base=self.openai_api_base or "",
@@ -1245,7 +1245,7 @@ class RAG:
             raise ValueError("data_dir cannot be None for ingestion pipeline.")
 
         hate_speech_enabled = load_hate_speech_env().enabled
-        use_llm_ner = self.ner_enabled and self.openai_model_provider.lower() in {
+        use_llm_ner = self.ner_enabled and self.openai_inference_provider.lower() in {
             "openai"
         }
 
@@ -1265,7 +1265,7 @@ class RAG:
             device=self.device,
             progress_callback=progress_callback,
             hate_speech_model=hate_speech_model,
-            openai_model_provider=self.openai_model_provider,
+            openai_inference_provider=self.openai_inference_provider,
             target_collection=self.qdrant_collection,
             image_ingestion_service=self._image_ingestion_service,
         )

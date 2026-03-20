@@ -144,7 +144,7 @@ services:
       - vllm-router
     environment:
       <<: *backend-cuda-env
-      MODEL_PROVIDER: vllm
+      INFERENCE_PROVIDER: vllm
       OPENAI_API_BASE: http://vllm-router:9000/v1
 
   ##########################################################
