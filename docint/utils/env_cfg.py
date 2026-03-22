@@ -577,7 +577,7 @@ def load_openai_env(
     ] = "medium",
     default_thinking_enabled: bool = False,
     default_timeout: float = 300.0,
-    default_top_p: float = 0.0,
+    default_top_p: float = 0.1,
 ) -> OpenAIConfig:
     """Loads OpenAI configuration from environment variables or defaults.
 
