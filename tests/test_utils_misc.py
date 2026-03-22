@@ -8,12 +8,14 @@ import pytest
 
 from docint.utils.clean_text import basic_clean
 from docint.utils.env_cfg import (
+    load_frontend_env,
     load_hate_speech_env,
     load_ingestion_env,
     load_model_env,
     load_openai_env,
     load_path_env,
     load_retrieval_env,
+    load_session_env,
     load_summary_env,
 )
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
@@ -166,6 +168,30 @@ def test_load_summary_env_clamps_and_parses(monkeypatch: pytest.MonkeyPatch) -> 
     assert cfg.social_diversity_limit == 3
 
 
+def test_load_frontend_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Frontend env loader should use the documented collection timeout default.
+
+    Args:
+        monkeypatch: Fixture to clear environment variables.
+    """
+    monkeypatch.delenv("FRONTEND_COLLECTION_TIMEOUT", raising=False)
+    cfg = load_frontend_env()
+    assert cfg.collection_timeout == 30
+
+
+def test_load_frontend_env_reads_collection_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Frontend env loader should parse the collection timeout override.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.setenv("FRONTEND_COLLECTION_TIMEOUT", "90")
+    cfg = load_frontend_env()
+    assert cfg.collection_timeout == 90
+
+
 def test_load_retrieval_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """Retrieval env loader should use documented defaults.
 
@@ -229,13 +255,32 @@ def test_load_openai_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch: Fixture to clear environment variables.
     """
     monkeypatch.delenv("INFERENCE_PROVIDER", raising=False)
+    monkeypatch.delenv("OPENAI_DIMENSIONS", raising=False)
     monkeypatch.delenv("OPENAI_ENABLE_THINKING", raising=False)
     monkeypatch.delenv("OPENAI_THINKING_EFFORT", raising=False)
 
     cfg = load_openai_env()
 
+    assert cfg.dimensions is None
     assert cfg.thinking_enabled is False
     assert cfg.thinking_effort == "medium"
+
+
+def test_load_openai_env_accepts_vllm_and_dimensions_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenAI env loader should accept vLLM and parse embedding dimensions.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.setenv("INFERENCE_PROVIDER", "vllm")
+    monkeypatch.setenv("OPENAI_DIMENSIONS", "1024")
+
+    cfg = load_openai_env()
+
+    assert cfg.inference_provider == "vllm"
+    assert cfg.dimensions == 1024
 
 
 def test_load_openai_env_clamps_invalid_thinking_effort(
@@ -256,24 +301,45 @@ def test_load_openai_env_clamps_invalid_thinking_effort(
     assert cfg.thinking_effort == "medium"
 
 
-def test_load_model_env_parses_vision_mmproj_repo_and_file(
+def test_load_session_env_defaults_to_docint_home(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Model env loader should split ``VLM`` into repo/model/mmproj fields.
+    """Session env loader should place the default sqlite file under docint home.
+
+    Args:
+        monkeypatch: Fixture to clear environment variables.
+    """
+    monkeypatch.delenv("SESSION_STORE", raising=False)
+    cfg = load_session_env()
+    assert cfg.session_store == f"sqlite:///{Path.home() / 'docint' / 'sessions.db'}"
+
+
+def test_load_session_env_honors_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SESSION_STORE env var should override the default sqlite location.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.setenv("SESSION_STORE", "sqlite:////tmp/custom-sessions.db")
+    cfg = load_session_env()
+    assert cfg.session_store == "sqlite:////tmp/custom-sessions.db"
+
+
+def test_load_model_env_reads_direct_text_and_vision_model_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model env loader should read direct model identifiers from env vars.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): Fixture to set environment variables.
     """
-    monkeypatch.setenv(
-        "VLM",
-        "Qwen/Qwen3-VL-8B-Instruct-GGUF;Qwen3VL-8B-Instruct-Q4_K_M.gguf;mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf",
-    )
+    monkeypatch.setenv("TEXT_MODEL", "gpt-4o-mini")
+    monkeypatch.setenv("VISION_MODEL", "gpt-4.1-mini")
 
     cfg = load_model_env()
 
-    assert cfg.vision_model_repo == "Qwen/Qwen3-VL-8B-Instruct-GGUF"
-    assert cfg.vision_model_file == "Qwen3VL-8B-Instruct-Q4_K_M.gguf"
-    assert cfg.vision_model_mmproj_file == "mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf"
+    assert cfg.text_model == "gpt-4o-mini"
+    assert cfg.vision_model == "gpt-4.1-mini"
 
 
 def test_load_hate_speech_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

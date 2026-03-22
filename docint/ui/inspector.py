@@ -12,11 +12,12 @@ from docint.ui.components import (
     render_source_item,
     unique_referenced_sources,
 )
-from docint.utils.env_cfg import load_host_env
+from docint.utils.env_cfg import load_frontend_env, load_host_env
 
 host_cfg = load_host_env()
 BACKEND_HOST = host_cfg.backend_host
 BACKEND_PUBLIC_HOST = host_cfg.backend_public_host
+COLLECTION_TIMEOUT = load_frontend_env().collection_timeout
 
 
 def render_inspector() -> None:
@@ -36,7 +37,10 @@ def render_inspector() -> None:
     if st.button("🔄 Load Documents", type="primary", width="stretch"):
         with st.spinner("Fetching document list…"):
             try:
-                resp = requests.get(f"{BACKEND_HOST}/collections/documents", timeout=30)
+                resp = requests.get(
+                    f"{BACKEND_HOST}/collections/documents",
+                    timeout=COLLECTION_TIMEOUT,
+                )
                 if resp.status_code == 200:
                     st.session_state.inspector_docs = resp.json().get("documents", [])
                 else:

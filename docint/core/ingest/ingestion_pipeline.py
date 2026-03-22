@@ -122,7 +122,7 @@ class DocumentIngestionPipeline:
     ingestion_batch_size: int = field(default=5, init=False)
 
     # --- OpenAI config (for LLM-based NER) ---
-    openai_model_provider: str = field(default="llama.cpp")
+    openai_inference_provider: str = field(default="ollama")
 
     # --- Table reader config ---
     table_text_cols: list[str] | None = None
@@ -163,7 +163,7 @@ class DocumentIngestionPipeline:
         self.ner_max_workers = ner_cfg.max_workers
 
         if ner_enabled:
-            if self.openai_model_provider.lower() in {"openai"}:
+            if self.openai_inference_provider.lower() in {"openai"}:
                 ner_prompt = OpenAIPipeline().load_prompt(kw="ner")
                 if ner_prompt and self.ner_model is not None:
                     logger.info("Initializing LLM NER extractor")

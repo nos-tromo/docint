@@ -1,8 +1,14 @@
+"""CLI entry point for chat queries and collection-level exports."""
+
+from __future__ import annotations
+
+import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from time import time
-from typing import Any
+from typing import Any, Sequence
 
 from loguru import logger
 
@@ -15,25 +21,95 @@ from docint.utils.env_cfg import (
     set_offline_env,
 )
 from docint.utils.logging_cfg import setup_logging
+from docint.utils.reference_metadata import REFERENCE_METADATA_FIELDS
+
+DEFAULT_CHAT_SENTINEL = "__default_chat_queries__"
+DEFAULT_ENTITY_LIMIT = 50
 
 
 def get_col_name() -> str:
-    """Prompts the user to enter a collection name.
+    """Prompt the user to enter a collection name.
 
     Returns:
-        str: The entered collection name.
+        The entered collection name.
     """
     return input("Enter collection name: ")
 
 
-def rag_pipeline(col_name: str) -> RAG:
-    """Initializes a Retrieval-Augmented Generation (RAG) session.
-
-    Args:
-        col_name (str): The name of the collection to use.
+def build_parser() -> argparse.ArgumentParser:
+    """Build the command-line parser for the query CLI.
 
     Returns:
-        RAG: The initialized RAG instance.
+        Configured argument parser.
+    """
+    parser = argparse.ArgumentParser(
+        description="Run batch chat queries and collection analysis exports.",
+    )
+    parser.add_argument(
+        "-c",
+        "--collection",
+        metavar="NAME",
+        help="Use NAME as the collection instead of prompting interactively.",
+    )
+    parser.add_argument(
+        "-q",
+        "--query",
+        nargs="?",
+        const=DEFAULT_CHAT_SENTINEL,
+        metavar="PATH",
+        help=(
+            "Run query prompts from PATH. When provided without PATH, use the default "
+            "queries file location. If no query file exists, chat queries are skipped."
+        ),
+    )
+    parser.add_argument(
+        "-s",
+        "--summary",
+        action="store_true",
+        help="Generate a collection summary using the same backend flow as the frontend.",
+    )
+    parser.add_argument(
+        "-e",
+        "--entities",
+        action="store_true",
+        help="Export the 50 most frequent entities and mention counts as a text file.",
+    )
+    parser.add_argument(
+        "-h8",
+        "--hate-speech",
+        dest="hate_speech",
+        action="store_true",
+        help="Export flagged hate-speech findings using the frontend text format.",
+    )
+    parser.add_argument(
+        "-a",
+        "--all",
+        action="store_true",
+        help="Run chat, summary, entities, and hate-speech exports together.",
+    )
+    return parser
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse CLI arguments.
+
+    Args:
+        argv: Optional explicit argument sequence for tests.
+
+    Returns:
+        Parsed CLI namespace.
+    """
+    return build_parser().parse_args(list(argv) if argv is not None else None)
+
+
+def rag_pipeline(col_name: str) -> RAG:
+    """Initialize a Retrieval-Augmented Generation session.
+
+    Args:
+        col_name: The collection to query.
+
+    Returns:
+        Initialized RAG instance.
     """
     logger.info("Initializing RAG pipeline...")
     rag = RAG(qdrant_collection=col_name)
@@ -42,54 +118,67 @@ def rag_pipeline(col_name: str) -> RAG:
     return rag
 
 
-def load_queries(queries_path: Path, prompts_path: Path) -> list[str]:
-    """Loads query strings from a text file. Defaults to creating a file with a default query if none exists.
+def load_queries(
+    queries_path: Path,
+    prompts_path: Path | None = None,
+) -> list[str]:
+    """Load query strings from a text file.
 
     Args:
-        queries_path (Path): The path to the query text file.
-        prompts_path (Path): The path to the prompts directory.
+        queries_path: Path to the query text file.
+        prompts_path: Unused compatibility argument retained for callers/tests.
 
     Returns:
-        list[str]: The list of query strings.
+        Non-empty query strings loaded from the file, or an empty list when the
+        file does not exist.
     """
+    _ = prompts_path
     if not isinstance(queries_path, Path):
         queries_path = Path(queries_path).expanduser()
 
-    if not isinstance(prompts_path, Path):
-        prompts_path = Path(prompts_path).expanduser()
+    if not queries_path.exists():
+        logger.info("No queries file found at {}; skipping chat queries.", queries_path)
+        return []
 
-    if queries_path.exists():
-        logger.info("Loading queries from {}", queries_path)
-        with open(queries_path, "r", encoding="utf-8") as f:
-            return [line.strip() for line in f if line.strip()]
-
-    logger.info("No queries file found, using default summarize prompt")
-    summarize_prompt_path = prompts_path / "summarize.txt"
-    with open(summarize_prompt_path, "r", encoding="utf-8") as f:
-        return [f.read().strip()]
+    logger.info("Loading queries from {}", queries_path)
+    with open(queries_path, "r", encoding="utf-8") as handle:
+        return [line.strip() for line in handle if line.strip()]
 
 
-def _store_output(filename: str, data: dict | list, output_path: str | Path) -> None:
-    """Stores the output data to a JSON file.
+def _ensure_output_path(output_path: str | Path) -> Path:
+    """Ensure the output directory exists and return it.
 
     Args:
-        filename (str): The name of the output file (without extension).
-        data (dict | list): The data to store.
-        output_path (str | Path): The directory to store the output file.
+        output_path: Output directory path.
+
+    Returns:
+        Resolved output directory path.
     """
     if not isinstance(output_path, Path):
         output_path = Path(output_path).expanduser()
 
     if not output_path.exists():
         logger.info("Creating output directory at {}", output_path)
-        output_path.mkdir(exist_ok=True)
+        output_path.mkdir(parents=True, exist_ok=True)
+    return output_path
+
+
+def _store_output(filename: str, data: dict | list, output_path: str | Path) -> None:
+    """Store structured output data to a JSON file.
+
+    Args:
+        filename: Output filename without extension.
+        data: Data payload to serialize.
+        output_path: Directory that will receive the file.
+    """
+    resolved_output_path = _ensure_output_path(output_path)
 
     if isinstance(data, dict):
-        with open(output_path / f"{filename}.json", "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-
-    elif isinstance(data, list):
-        # Detect if list elements are nodes and use .to_dict()
+        with open(
+            resolved_output_path / f"{filename}.json", "w", encoding="utf-8"
+        ) as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+    else:
         serializable = []
         for item in data:
             if hasattr(item, "to_dict"):
@@ -97,19 +186,307 @@ def _store_output(filename: str, data: dict | list, output_path: str | Path) -> 
             else:
                 serializable.append(str(item))
 
-        with open(output_path / f"{filename}.json", "w", encoding="utf-8") as f:
-            json.dump(serializable, f, ensure_ascii=False, indent=2)
-    logger.info("Results stored in {}", output_path / f"{filename}.json")
+        with open(
+            resolved_output_path / f"{filename}.json", "w", encoding="utf-8"
+        ) as handle:
+            json.dump(serializable, handle, ensure_ascii=False, indent=2)
+    logger.info("Results stored in {}", resolved_output_path / f"{filename}.json")
+
+
+def _store_text_output(filename: str, data: str, output_path: str | Path) -> None:
+    """Store plain-text output data to a text file.
+
+    Args:
+        filename: Output filename without extension.
+        data: Text payload to write.
+        output_path: Directory that will receive the file.
+    """
+    resolved_output_path = _ensure_output_path(output_path)
+    target = resolved_output_path / f"{filename}.txt"
+    target.write_text(data, encoding="utf-8")
+    logger.info("Results stored in {}", target)
+
+
+def _get_validation_payload(
+    rag: RAG,
+    *,
+    question: str,
+    answer: str | None,
+    sources: list[dict[str, Any]],
+    summary_diagnostics: dict[str, Any] | None = None,
+) -> dict[str, bool | str | None]:
+    """Validate an answer against sources using the same logic as API/frontend flows.
+
+    Args:
+        rag: Active RAG instance.
+        question: Question or summarize prompt.
+        answer: Generated answer text.
+        sources: Retrieved or summary sources.
+        summary_diagnostics: Optional summary diagnostics payload.
+
+    Returns:
+        Validation metadata dictionary.
+    """
+    validation_cfg = load_response_validation_env()
+    validation_llm = None
+    if getattr(rag, "text_model_id", None):
+        try:
+            validation_llm = rag.text_model
+        except Exception as exc:
+            logger.warning("Failed to initialize validation LLM: {}", exc)
+
+    validator = ResultValidationResponseAgent(
+        enabled=validation_cfg.enabled,
+        llm=validation_llm,
+    )
+    retrieval = RetrievalResult(
+        answer=answer,
+        sources=sources,
+        summary_diagnostics=summary_diagnostics,
+    )
+    validated = validator.finalize(retrieval, Turn(user_input=question))
+    return {
+        "validation_checked": validated.validation_checked,
+        "validation_mismatch": validated.validation_mismatch,
+        "validation_reason": validated.validation_reason,
+    }
+
+
+def _sanitize_filename_fragment(value: str) -> str:
+    """Convert an arbitrary string into a filesystem-friendly filename fragment.
+
+    Args:
+        value: Raw string value.
+
+    Returns:
+        Sanitized filename fragment.
+    """
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value).strip())
+    return normalized.strip("_") or "collection"
+
+
+def _build_run_output_path(base_output_path: Path, *, collection_name: str) -> Path:
+    """Build the per-run results directory path.
+
+    Args:
+        base_output_path: Root results directory.
+        collection_name: Active collection name.
+
+    Returns:
+        Per-run output directory in the form
+        ``{base_output_path}/{unix_timestamp}_{collection_name}``.
+    """
+    timestamp = str(int(time()))
+    collection_fragment = _sanitize_filename_fragment(collection_name)
+    return Path(base_output_path).expanduser() / f"{timestamp}_{collection_fragment}"
+
+
+def _reference_metadata_text_block(src: dict[str, Any]) -> str:
+    """Return a multi-line text block for reference metadata.
+
+    Args:
+        src: Source dictionary containing optional reference metadata.
+
+    Returns:
+        Text block suitable for exports, or an empty string.
+    """
+    raw = src.get("reference_metadata")
+    if not isinstance(raw, dict):
+        return ""
+
+    lines: list[str] = []
+    for key, label in REFERENCE_METADATA_FIELDS.items():
+        value = raw.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        lines.append(f"- {label}: {text}")
+    return "\n".join(lines)
+
+
+def _build_sources_txt(sources: list[dict[str, Any]]) -> str:
+    """Build a text block for retrieved or summary sources.
+
+    Args:
+        sources: Source dictionaries attached to a query or summary result.
+
+    Returns:
+        Formatted text block for source details.
+    """
+    if not sources:
+        return "No sources available.\n"
+
+    lines: list[str] = []
+    for index, source in enumerate(sources, start=1):
+        filename = str(source.get("filename") or source.get("source_ref") or "Unknown")
+        page = source.get("page")
+        row = source.get("row")
+        chunk_id = str(source.get("chunk_id") or "").strip() or "n/a"
+        lines.append(
+            f"[{index}] {filename} page={page if page is not None else 'n/a'} "
+            f"row={row if row is not None else 'n/a'} chunk_id={chunk_id}"
+        )
+        metadata_block = _reference_metadata_text_block(source)
+        if metadata_block:
+            lines.append(metadata_block)
+        content = str(
+            source.get("chunk_text")
+            or source.get("text")
+            or source.get("preview_text")
+            or ""
+        ).strip()
+        if content:
+            lines.append(content)
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _build_query_result_txt(query: str, result: dict[str, Any]) -> str:
+    """Build the text export for one query result.
+
+    Args:
+        query: Original user query.
+        result: Query result payload.
+
+    Returns:
+        Text payload for the query export.
+    """
+    answer = str(result.get("response") or result.get("answer") or "").strip()
+    validation_reason = result.get("validation_reason")
+    lines = [f"Query: {query}", "", "Answer:", answer or "", ""]
+    lines.extend(
+        [
+            "Validation:",
+            f"- checked: {result.get('validation_checked')}",
+            f"- mismatch: {result.get('validation_mismatch')}",
+            f"- reason: {validation_reason if validation_reason is not None else 'n/a'}",
+            "",
+        ]
+    )
+
+    graph_debug = result.get("graph_debug")
+    if isinstance(graph_debug, dict):
+        lines.extend(
+            [
+                "Graph debug:",
+                json.dumps(graph_debug, ensure_ascii=False, indent=2),
+                "",
+            ]
+        )
+
+    lines.extend(["Sources:", _build_sources_txt(list(result.get("sources") or []))])
+    return "\n".join(lines).strip() + "\n"
+
+
+def _build_summary_txt(collection: str, payload: dict[str, Any]) -> str:
+    """Build the text export for a collection summary.
+
+    Args:
+        collection: Active collection name.
+        payload: Summary payload with validation and diagnostics.
+
+    Returns:
+        Text payload for the summary export.
+    """
+    summary = str(payload.get("summary") or payload.get("response") or "").strip()
+    validation_reason = payload.get("validation_reason")
+    lines = [f"Collection summary: {collection}", "", "Summary:", summary or "", ""]
+    lines.extend(
+        [
+            "Validation:",
+            f"- checked: {payload.get('validation_checked')}",
+            f"- mismatch: {payload.get('validation_mismatch')}",
+            f"- reason: {validation_reason if validation_reason is not None else 'n/a'}",
+            "",
+        ]
+    )
+
+    summary_diagnostics = payload.get("summary_diagnostics")
+    if isinstance(summary_diagnostics, dict):
+        lines.extend(
+            [
+                "Summary diagnostics:",
+                json.dumps(summary_diagnostics, ensure_ascii=False, indent=2),
+                "",
+            ]
+        )
+
+    lines.extend(["Sources:", _build_sources_txt(list(payload.get("sources") or []))])
+    return "\n".join(lines).strip() + "\n"
+
+
+def _build_entities_txt(top_entities: list[dict[str, Any]], *, collection: str) -> str:
+    """Build the entity-frequency export text.
+
+    Args:
+        top_entities: Ranked entity rows from collection NER stats.
+        collection: Active collection name.
+
+    Returns:
+        Text payload for the entity export.
+    """
+    lines = [
+        f"Top {DEFAULT_ENTITY_LIMIT} entities for collection: {collection}",
+        "",
+    ]
+    if not top_entities:
+        lines.append("No entities found in this collection.")
+        return "\n".join(lines).strip() + "\n"
+
+    for index, row in enumerate(top_entities[:DEFAULT_ENTITY_LIMIT], start=1):
+        entity = str(row.get("text") or "Unknown")
+        entity_type = str(row.get("type") or "Unlabeled")
+        mentions = int(row.get("mentions", row.get("count", 0)) or 0)
+        lines.append(f"{index}. {entity} [{entity_type}] - {mentions}")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _build_hate_speech_txt(findings: list[dict[str, Any]]) -> str:
+    """Build the hate-speech export text using the frontend format.
+
+    Args:
+        findings: Flagged hate-speech rows.
+
+    Returns:
+        Text payload for the export.
+    """
+    if not findings:
+        return "No hate speech flags detected for this collection.\n"
+
+    lines = ["Flagged hate-speech chunks", ""]
+    for idx, chunk in enumerate(findings, start=1):
+        location_label = "page" if chunk.get("page") is not None else "row"
+        location_value = (
+            chunk.get("page")
+            if chunk.get("page") is not None
+            else chunk.get("row", "n/a")
+        )
+        lines.append(
+            f"[{idx}]\n"
+            f"- source: {chunk.get('source_ref')}\n"
+            f"- {location_label}: {location_value}\n"
+            f"- chunk_id: {chunk.get('chunk_id')}\n"
+            f"- category: {chunk.get('category')}\n"
+            f"- confidence: {chunk.get('confidence')}"
+        )
+        lines.append(f"reason: {chunk.get('reason')}")
+        metadata_block = _reference_metadata_text_block(chunk)
+        if metadata_block:
+            lines.append(metadata_block)
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
 
 
 def run_query(rag: RAG, query: str, index: int, output_path: str | Path) -> None:
-    """Runs a query against the RAG instance and stores the result.
+    """Run one query against the RAG instance and store the result.
 
     Args:
-        rag (RAG): The RAG instance to query.
-        query (str): The query string.
-        index (int): The index of the query (for logging and output purposes).
-        output_path (str | Path): The directory to store the output file.
+        rag: Active RAG instance.
+        query: Query string.
+        index: Query index for naming.
+        output_path: Directory where results are stored.
     """
     logger.info("Running query {}: {}", index, query)
 
@@ -129,51 +506,218 @@ def run_query(rag: RAG, query: str, index: int, output_path: str | Path) -> None
     if graph_debug is not None:
         result["graph_debug"] = graph_debug
 
-    validation_cfg = load_response_validation_env()
-    validation_llm = None
-    if getattr(rag, "text_model_id", None):
-        try:
-            validation_llm = rag.text_model
-        except Exception as exc:
-            logger.warning("Failed to initialize validation LLM: {}", exc)
-    validator = ResultValidationResponseAgent(
-        enabled=validation_cfg.enabled,
-        llm=validation_llm,
-    )
     raw_sources = result.get("sources")
     sources: list[dict[str, Any]] = []
     if isinstance(raw_sources, list):
         sources = [src for src in raw_sources if isinstance(src, dict)]
 
-    retrieval = RetrievalResult(
-        answer=str(result.get("response") or result.get("answer") or ""),
-        sources=sources,
+    result.update(
+        _get_validation_payload(
+            rag,
+            question=query,
+            answer=str(result.get("response") or result.get("answer") or ""),
+            sources=sources,
+        )
     )
-    finalized = validator.finalize(retrieval, Turn(user_input=query))
-    result["validation_checked"] = finalized.validation_checked
-    result["validation_mismatch"] = finalized.validation_mismatch
-    result["validation_reason"] = finalized.validation_reason
 
     timestamp = str(int(time()))
-    _store_output(
-        filename=f"{timestamp}_{index}_result", data=result, output_path=output_path
+    _store_text_output(
+        filename=f"{timestamp}_{index}_result",
+        data=_build_query_result_txt(query, result),
+        output_path=output_path,
     )
 
 
-def main() -> None:
-    """Main entry point for the CLI. Initializes the RAG pipeline, loads queries, and processes each query."""
+def export_chat_queries(
+    rag: RAG,
+    *,
+    queries_path: Path,
+    prompts_path: Path,
+    output_path: Path,
+) -> None:
+    """Run batch chat queries from a text file.
+
+    Args:
+        rag: Active RAG instance.
+        queries_path: Query file path.
+        prompts_path: Prompts directory, kept for compatibility with load_queries.
+        output_path: Results directory.
+    """
+    queries = load_queries(queries_path=queries_path, prompts_path=prompts_path)
+    if not queries:
+        logger.info("No chat queries to run.")
+        return
+
+    for index, query in enumerate(queries, start=1):
+        run_query(rag=rag, query=query, index=index, output_path=output_path)
+
+
+def export_summary(rag: RAG, *, output_path: Path) -> None:
+    """Generate and store a collection summary payload.
+
+    Args:
+        rag: Active RAG instance.
+        output_path: Results directory.
+    """
+    logger.info("Generating collection summary...")
+    data = rag.summarize_collection()
+    summary = str(data.get("response") or data.get("answer") or "")
+    sources = [src for src in data.get("sources", []) if isinstance(src, dict)]
+    summary_diagnostics = data.get("summary_diagnostics")
+    if not isinstance(summary_diagnostics, dict):
+        summary_diagnostics = None
+    payload = {
+        "summary": summary,
+        "sources": sources,
+        "summary_diagnostics": summary_diagnostics,
+        **_get_validation_payload(
+            rag,
+            question=str(getattr(rag, "summarize_prompt", "Summarize the collection.")),
+            answer=summary,
+            sources=sources,
+            summary_diagnostics=summary_diagnostics,
+        ),
+    }
+    collection = _sanitize_filename_fragment(str(rag.qdrant_collection or "collection"))
+    _store_text_output(
+        f"summary_{collection}",
+        _build_summary_txt(str(rag.qdrant_collection or collection), payload),
+        output_path,
+    )
+
+
+def export_entities(rag: RAG, *, output_path: Path) -> None:
+    """Export the top collection entities and their mention counts as text.
+
+    Args:
+        rag: Active RAG instance.
+        output_path: Results directory.
+    """
+    logger.info("Exporting top entities...")
+    stats = rag.get_collection_ner_stats(
+        top_k=DEFAULT_ENTITY_LIMIT,
+        min_mentions=1,
+        include_relations=False,
+    )
+    top_entities = [
+        row for row in list(stats.get("top_entities") or []) if isinstance(row, dict)
+    ]
+    collection = _sanitize_filename_fragment(str(rag.qdrant_collection or "collection"))
+    _store_text_output(
+        f"entities_{collection}",
+        _build_entities_txt(top_entities, collection=str(rag.qdrant_collection or "")),
+        output_path,
+    )
+
+
+def export_hate_speech(rag: RAG, *, output_path: Path) -> None:
+    """Export flagged hate-speech findings as text.
+
+    Args:
+        rag: Active RAG instance.
+        output_path: Results directory.
+    """
+    logger.info("Exporting hate-speech findings...")
+    findings = [
+        row for row in rag.get_collection_hate_speech() if isinstance(row, dict)
+    ]
+    collection = _sanitize_filename_fragment(str(rag.qdrant_collection or "collection"))
+    _store_text_output(
+        f"hate_speech_{collection}",
+        _build_hate_speech_txt(findings),
+        output_path,
+    )
+
+
+def _should_run_chat(args: argparse.Namespace) -> bool:
+    """Return whether chat-query mode is active.
+
+    Args:
+        args: Parsed CLI arguments.
+
+    Returns:
+        Whether chat mode should run.
+    """
+    if args.all or args.query is not None:
+        return True
+    return not (args.summary or args.entities or args.hate_speech)
+
+
+def _resolve_chat_queries_path(
+    args: argparse.Namespace,
+    *,
+    default_queries_path: Path,
+) -> Path:
+    """Resolve the queries file path for chat mode.
+
+    Args:
+        args: Parsed CLI arguments.
+        default_queries_path: Default configured queries file path.
+
+    Returns:
+        Resolved queries file path.
+    """
+    if args.query in {None, DEFAULT_CHAT_SENTINEL}:
+        return default_queries_path
+    return Path(str(args.query)).expanduser()
+
+
+def _resolve_collection_name(args: argparse.Namespace) -> str:
+    """Resolve the target collection name from arguments or interactive input.
+
+    Args:
+        args: Parsed CLI arguments.
+
+    Returns:
+        Selected collection name.
+    """
+    collection_name = str(getattr(args, "collection", "") or "").strip()
+    if collection_name:
+        return collection_name
+    return get_col_name()
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    """Run the query CLI workflow.
+
+    Args:
+        argv: Optional explicit argument sequence for tests.
+    """
     setup_logging()
     set_offline_env()
-    col_name = get_col_name()
+    args = parse_args(argv)
+
+    col_name = _resolve_collection_name(args)
     rag = rag_pipeline(col_name=col_name)
     path_config = load_path_env()
-    queries = load_queries(
-        queries_path=path_config.queries, prompts_path=path_config.prompts
+    run_output_path = _build_run_output_path(
+        path_config.results,
+        collection_name=col_name,
     )
-    for index, query in enumerate(queries, start=1):
-        run_query(rag=rag, query=query, index=index, output_path=path_config.results)
-    rag.unload_models()
-    logger.info("All queries processed.")
+
+    try:
+        if _should_run_chat(args):
+            export_chat_queries(
+                rag,
+                queries_path=_resolve_chat_queries_path(
+                    args, default_queries_path=path_config.queries
+                ),
+                prompts_path=path_config.prompts,
+                output_path=run_output_path,
+            )
+
+        if args.all or args.summary:
+            export_summary(rag, output_path=run_output_path)
+
+        if args.all or args.entities:
+            export_entities(rag, output_path=run_output_path)
+
+        if args.all or args.hate_speech:
+            export_hate_speech(rag, output_path=run_output_path)
+    finally:
+        rag.unload_models()
+
+    logger.info("Query CLI work completed.")
 
 
 if __name__ == "__main__":
