@@ -181,6 +181,15 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
 
     @staticmethod
     def _reference_metadata(node: NodeWithScore) -> dict[str, Any]:
+        """Extract the reference metadata dict from a retrieved node, which may be nested under the
+        "reference_metadata" key in the node's metadata or may be missing entirely.
+
+        Args:
+            node (NodeWithScore): The node from which to extract reference metadata.
+
+        Returns:
+            dict[str, Any]: The reference metadata dictionary, or an empty dictionary if not present.
+        """
         metadata = getattr(node, "metadata", {}) or {}
         reference_metadata = metadata.get("reference_metadata")
         if isinstance(reference_metadata, dict):
@@ -189,6 +198,16 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
 
     @staticmethod
     def _identity_key(node: NodeWithScore) -> str:
+        """Extract a stable identity key for a retrieved node based on its content and metadata, which can be used for deduplication.
+
+        Args:
+            node (NodeWithScore): The node from which to extract an identity key.
+
+        Returns:
+            str: A string identity key that represents the content of the node, such as a text ID, a file hash and row index
+                for tabular data, or a normalized text snippet. Returns an empty string if no meaningful identity can be extracted.
+
+        """
         metadata = getattr(node, "metadata", {}) or {}
         reference_metadata = SocialSourceDiversityPostprocessor._reference_metadata(
             node
@@ -214,6 +233,17 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
 
     @staticmethod
     def _diversity_bucket(node: NodeWithScore) -> str:
+        """Extract a diversity bucket key for a retrieved node based on its author and time, which can be used to limit near-duplicate results from the same source or time period.
+
+        Args:
+            node (NodeWithScore): The node from which to extract a diversity bucket key.
+
+        Returns:
+            str: A string representing the diversity bucket key, combining the author and time information.
+
+        Raises:
+            ValueError: If the timestamp format is invalid and cannot be parsed, which may indicate unexpected metadata structure.
+        """
         metadata = getattr(node, "metadata", {}) or {}
         reference_metadata = SocialSourceDiversityPostprocessor._reference_metadata(
             node
@@ -240,7 +270,15 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
         nodes: list[NodeWithScore],
         query_bundle: QueryBundle | None = None,
     ) -> list[NodeWithScore]:
-        """Deduplicate by post identity and cap near-duplicate author/time buckets."""
+        """Deduplicate by post identity and cap near-duplicate author/time buckets.
+
+        Args:
+            nodes (list[NodeWithScore]): The list of retrieved nodes to postprocess.
+            query_bundle (QueryBundle | None): The original query bundle that led to these retrieval results, which may be used for context but is not modified by this postprocessor.
+
+        Returns:
+            list[NodeWithScore]: The postprocessed list of nodes, where near-duplicate social or tabular sources have been limited according to the configured diversity limit.
+        """
         _ = query_bundle
         seen: set[str] = set()
         bucket_counts: dict[str, int] = defaultdict(int)
