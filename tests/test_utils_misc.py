@@ -8,12 +8,14 @@ import pytest
 
 from docint.utils.clean_text import basic_clean
 from docint.utils.env_cfg import (
+    load_frontend_env,
     load_hate_speech_env,
     load_ingestion_env,
     load_model_env,
     load_openai_env,
     load_path_env,
     load_retrieval_env,
+    load_session_env,
     load_summary_env,
 )
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
@@ -164,6 +166,30 @@ def test_load_summary_env_clamps_and_parses(monkeypatch: pytest.MonkeyPatch) -> 
     assert cfg.social_chunking_enabled is False
     assert cfg.social_candidate_pool == 64
     assert cfg.social_diversity_limit == 3
+
+
+def test_load_frontend_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Frontend env loader should use the documented collection timeout default.
+
+    Args:
+        monkeypatch: Fixture to clear environment variables.
+    """
+    monkeypatch.delenv("FRONTEND_COLLECTION_TIMEOUT", raising=False)
+    cfg = load_frontend_env()
+    assert cfg.collection_timeout == 30
+
+
+def test_load_frontend_env_reads_collection_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Frontend env loader should parse the collection timeout override.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.setenv("FRONTEND_COLLECTION_TIMEOUT", "90")
+    cfg = load_frontend_env()
+    assert cfg.collection_timeout == 90
 
 
 def test_load_retrieval_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

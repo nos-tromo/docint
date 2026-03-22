@@ -8,9 +8,10 @@ import requests
 import streamlit as st
 
 from docint.ui.state import navigate_to
-from docint.utils.env_cfg import load_host_env
+from docint.utils.env_cfg import load_frontend_env, load_host_env
 
 BACKEND_HOST = load_host_env().backend_host
+COLLECTION_TIMEOUT = load_frontend_env().collection_timeout
 
 
 def render_dashboard() -> None:
@@ -25,7 +26,9 @@ def render_dashboard() -> None:
     # Attempt a lightweight backend health-check if we have no cached data
     if not backend_online and not collections:
         try:
-            r = requests.get(f"{BACKEND_HOST}/collections/list", timeout=5)
+            r = requests.get(
+                f"{BACKEND_HOST}/collections/list", timeout=COLLECTION_TIMEOUT
+            )
             backend_online = r.status_code == 200
         except Exception:
             backend_online = False
@@ -252,7 +255,9 @@ def _fetch_documents(collection: str) -> list[dict[str, Any]]:
         List of document dicts, or empty list on failure.
     """
     try:
-        resp = requests.get(f"{BACKEND_HOST}/collections/documents", timeout=10)
+        resp = requests.get(
+            f"{BACKEND_HOST}/collections/documents", timeout=COLLECTION_TIMEOUT
+        )
         if resp.status_code == 200:
             return resp.json().get("documents", [])
     except Exception:

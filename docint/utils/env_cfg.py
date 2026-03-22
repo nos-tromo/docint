@@ -79,6 +79,32 @@ def resolve_hf_cache_path(
 
 
 @dataclass(frozen=True)
+class FrontendConfig:
+    """Dataclass for frontend configuration."""
+
+    collection_timeout: int
+
+
+def load_frontend_env(
+    default_collection_timeout: int = 30,
+) -> FrontendConfig:
+    """Loads frontend configuration from environment variables or defaults.
+
+    Args:
+        default_collection_timeout (int): Default timeout in seconds for fetching collections from the backend.
+
+    Returns:
+        FrontendConfig: Dataclass containing frontend configuration.
+        - collection_timeout (int): Timeout in seconds for fetching collections from the backend.
+    """
+    return FrontendConfig(
+        collection_timeout=int(
+            os.getenv("FRONTEND_COLLECTION_TIMEOUT", default_collection_timeout)
+        )
+    )
+
+
+@dataclass(frozen=True)
 class GraphRAGConfig:
     """Dataclass for graph-assisted retrieval configuration."""
 
