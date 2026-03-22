@@ -349,21 +349,40 @@ matches = service.query_similar_images(Path("query.png"), top_k=5)
 
 1. **Prepare Your Queries**
 
-   Create a `queries.txt` file in the `~/docint` directory. Each line represents a single query. If no file is provided, the default summarize prompt is used.
+   Create a `queries.txt` file in the `~/docint` directory. Each line represents a single query.
 
 2. **Run the Query Command**
 
-   Execute the following command:
+   Execute one of the following commands:
 
    ```bash
    uv run query
    ```
 
+   The query CLI supports these action flags:
+
+   - `-c`, `--collectionn NAME`: Use `NAME` as the target collection instead of prompting interactively.
+   - `-q`, `--query [PATH]`: Run chat queries from `PATH`. If the path is omitted, the CLI falls back to the default `~/docint/queries.txt`. If the file does not exist, query mode is skipped.
+   - `-s`, `--summary`: Generate a collection summary using the same backend flow as the frontend analysis page.
+   - `-e`, `--entities`: Export a `.txt` file containing the 50 most frequent entities and their mention counts.
+   - `-h8`, `--hate-speech`: Export the flagged hate-speech findings as a `.txt` file using the same text format as the frontend download.
+   - `-a`, `--all`: Run all of the above actions together.
+
+   Examples:
+
+   ```bash
+   uv run query -q
+   uv run query -c alpha -q ~/docint/queries.txt
+   uv run query --summary
+   uv run query --entities --hate-speech
+   uv run query -c alpha --all
+   ```
+
 3. **Review the Results**
 
-   Query results will be saved in the `~/docint/results` directory.
-   When GraphRAG is enabled, each result JSON also includes a `graph_debug`
-   object with query-expansion details (anchors, neighbors, and applied/no-op reason).
+   Query results and export files will be saved as `.txt` files in a per-run subdirectory under `~/docint/results`, using the pattern `~/docint/results/{unixtimestamp_collection_name}`.
+   When GraphRAG is enabled, each query result text file also includes a `graph_debug`
+   section with query-expansion details (anchors, neighbors, and applied/no-op reason).
 
 4. **Compare Retrieval Modes**
 
