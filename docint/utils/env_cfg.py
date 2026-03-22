@@ -683,6 +683,7 @@ class PathConfig:
 
     artifacts: Path
     data: Path
+    docint_home_dir: Path
     logs: Path
     queries: Path
     results: Path
@@ -697,6 +698,7 @@ def load_path_env() -> PathConfig:
     Returns:
         PathConfig: Dataclass containing path configuration.
         - artifacts (Path): Root directory for pipeline processing artifacts.
+        - docint_home_dir (Path): The root home directory for docint, used as the base for other default paths. Defaults to ~/docint.
         - data (Path): Path to the data directory.
         - logs (Path): Path to the logs file.
         - queries (Path): Path to the queries file.
@@ -726,6 +728,7 @@ def load_path_env() -> PathConfig:
             os.getenv("PIPELINE_ARTIFACTS_DIR", default_artifacts_dir)
         ).expanduser(),
         data=Path(os.getenv("DATA_PATH", default_data_dir)).expanduser(),
+        docint_home_dir=docint_home_dir,
         logs=Path(os.getenv("LOG_PATH", default_log_dir)).expanduser(),
         queries=Path(os.getenv("QUERIES_PATH", default_query_dir)).expanduser(),
         results=Path(os.getenv("RESULTS_PATH", default_results_dir)).expanduser(),
@@ -975,18 +978,23 @@ class SessionConfig:
 
 
 def load_session_env(
-    default_session_store: str = "sqlite:///sessions.db",
+    default_session_store: str | None = None,
 ) -> SessionConfig:
     """Loads session configuration from environment variables or defaults.
 
     Args:
         default_session_store (str): Default session store configuration (e.g. database URL or file path).
-            Default is "sqlite:///sessions.db".
+            Default is ``sqlite:///{Path.home() / "docint" / "sessions.db"}``.
 
     Returns:
         SessionConfig: Dataclass containing session configuration.
-        - session_store (str): The session store configuration. Default is "sqlite:///sessions.db".
+        - session_store (str): The session store configuration. Default is
+          ``sqlite:///{Path.home() / "docint" / "sessions.db"}``.
     """
+    if default_session_store is None:
+        docint_home_dir = load_path_env().docint_home_dir
+        default_session_store = f"sqlite:///{docint_home_dir / 'sessions.db'}"
+
     return SessionConfig(
         session_store=os.getenv("SESSION_STORE", default_session_store)
     )

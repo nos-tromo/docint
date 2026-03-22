@@ -275,6 +275,30 @@ def test_load_openai_env_clamps_invalid_thinking_effort(
     assert cfg.thinking_effort == "medium"
 
 
+def test_load_session_env_defaults_to_docint_home(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session env loader should place the default sqlite file under docint home.
+
+    Args:
+        monkeypatch: Fixture to clear environment variables.
+    """
+    monkeypatch.delenv("SESSION_STORE", raising=False)
+    cfg = load_session_env()
+    assert cfg.session_store == f"sqlite:///{Path.home() / 'docint' / 'sessions.db'}"
+
+
+def test_load_session_env_honors_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SESSION_STORE env var should override the default sqlite location.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.setenv("SESSION_STORE", "sqlite:////tmp/custom-sessions.db")
+    cfg = load_session_env()
+    assert cfg.session_store == "sqlite:////tmp/custom-sessions.db"
+
+
 def test_load_model_env_reads_direct_text_and_vision_model_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
