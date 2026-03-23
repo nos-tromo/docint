@@ -78,6 +78,20 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    cp .env.docker.example .env.docker
    ```
 
+   If the machine must reach the internet through an HTTP/HTTPS proxy, add
+   `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` to `.env.docker`. Include the
+   internal Docker hostnames in `NO_PROXY` so backend-to-Qdrant and backend-to-
+   inference traffic stays inside the Docker network. A good starting point is:
+
+   ```dotenv
+   HTTP_PROXY=http://proxy.example.com:3128
+   HTTPS_PROXY=http://proxy.example.com:3128
+   NO_PROXY=localhost,127.0.0.1,qdrant,ollama-server,vllm-router,vllm-chat,vllm-embed,vllm-rerank,backend-net
+   ```
+
+   If any tooling in your environment only honors lowercase proxy variables,
+   duplicate the same values into `http_proxy`, `https_proxy`, and `no_proxy`.
+
 3. **Choose a Profile**
 
    Profiles follow the pattern `<hardware>-<backend>`:
@@ -97,8 +111,13 @@ Model files are handled automatically by the ingestion pipeline and do not need 
 4. **Start the Services**
 
    ```bash
-   docker compose --profile cpu-ollama up
+   docker compose --env-file .env.docker --profile cpu-ollama up --build
    ```
+
+   Use `--env-file .env.docker` whenever you rely on proxy variables. Docker
+   daemon proxy settings alone cover image pulls, but package managers running
+   during `docker compose build` and applications inside the containers still
+   need the proxy values forwarded explicitly.
 
    **What's Included:**
    - **Backend**: FastAPI application for RAG and orchestration.
