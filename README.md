@@ -92,6 +92,20 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    If any tooling in your environment only honors lowercase proxy variables,
    duplicate the same values into `http_proxy`, `https_proxy`, and `no_proxy`.
 
+   If your network also blocks direct access to Docker Hub, override the base
+   images in `.env.docker` so builds use your registry mirror instead of the
+   hard-coded public image names:
+
+   ```dotenv
+   PYTHON_SLIM_BOOKWORM_IMAGE=registry.example.com/dockerhub/library/python:3.11-slim-bookworm
+   PYTHON_SLIM_IMAGE=registry.example.com/dockerhub/library/python:3.11-slim
+   NVIDIA_CUDA_RUNTIME_IMAGE=registry.example.com/dockerhub/nvidia/cuda:13.0.2-cudnn-runtime-ubuntu22.04
+   VLLM_OPENAI_IMAGE=registry.example.com/dockerhub/vllm/vllm-openai:latest
+   ```
+
+   These variables are consumed during `FROM ...` resolution, which is the step
+   that fails when Docker cannot reach Docker Hub to fetch image metadata.
+
 3. **Choose a Profile**
 
    Profiles follow the pattern `<hardware>-<backend>`:

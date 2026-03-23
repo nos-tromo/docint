@@ -9,6 +9,24 @@ x-proxy-build-args: &proxy-build-args
   https_proxy: ${https_proxy:-}
   no_proxy: ${no_proxy:-}
 
+x-base-image-build-args: &base-image-build-args
+  PYTHON_SLIM_BOOKWORM_IMAGE: ${PYTHON_SLIM_BOOKWORM_IMAGE:-python:3.11-slim-bookworm}
+  PYTHON_SLIM_IMAGE: ${PYTHON_SLIM_IMAGE:-python:3.11-slim}
+  NVIDIA_CUDA_RUNTIME_IMAGE: ${NVIDIA_CUDA_RUNTIME_IMAGE:-nvidia/cuda:13.0.2-cudnn-runtime-ubuntu22.04}
+  VLLM_OPENAI_IMAGE: ${VLLM_OPENAI_IMAGE:-vllm/vllm-openai:latest}
+
+x-build-args: &build-args
+  HTTP_PROXY: ${HTTP_PROXY:-}
+  HTTPS_PROXY: ${HTTPS_PROXY:-}
+  NO_PROXY: ${NO_PROXY:-}
+  http_proxy: ${http_proxy:-}
+  https_proxy: ${https_proxy:-}
+  no_proxy: ${no_proxy:-}
+  PYTHON_SLIM_BOOKWORM_IMAGE: ${PYTHON_SLIM_BOOKWORM_IMAGE:-python:3.11-slim-bookworm}
+  PYTHON_SLIM_IMAGE: ${PYTHON_SLIM_IMAGE:-python:3.11-slim}
+  NVIDIA_CUDA_RUNTIME_IMAGE: ${NVIDIA_CUDA_RUNTIME_IMAGE:-nvidia/cuda:13.0.2-cudnn-runtime-ubuntu22.04}
+  VLLM_OPENAI_IMAGE: ${VLLM_OPENAI_IMAGE:-vllm/vllm-openai:latest}
+
 x-docker-env-file: &docker-env-file
   - .env.docker
 
@@ -17,7 +35,7 @@ x-backend-cpu: &backend-cpu
     context: .
     dockerfile: Dockerfile.backend.cpu
     args:
-      <<: *proxy-build-args
+      <<: *build-args
   ports: &backend-ports
     - 8000:8000
   environment: &backend-cpu-env
@@ -45,7 +63,7 @@ x-backend-cuda: &backend-cuda
     context: .
     dockerfile: Dockerfile.backend.cuda
     args:
-      <<: *proxy-build-args
+      <<: *build-args
   ports: *backend-ports
   environment: &backend-cuda-env
     DATA_PATH: /app/data/in
@@ -241,7 +259,7 @@ services:
       context: .
       dockerfile: Dockerfile.vllm
       args:
-        <<: *proxy-build-args
+        <<: *build-args
     image: docint-vllm-openai:latest
     env_file: *docker-env-file
     ipc: host
@@ -292,7 +310,7 @@ services:
       context: .
       dockerfile: Dockerfile.vllm
       args:
-        <<: *proxy-build-args
+        <<: *build-args
     image: docint-vllm-openai:latest
     env_file: *docker-env-file
     ipc: host
@@ -333,7 +351,7 @@ services:
       context: .
       dockerfile: Dockerfile.vllm
       args:
-        <<: *proxy-build-args
+        <<: *build-args
     image: docint-vllm-openai:latest
     env_file: *docker-env-file
     ipc: host
@@ -372,7 +390,7 @@ services:
       context: .
       dockerfile: Dockerfile.frontend
       args:
-        <<: *proxy-build-args
+        <<: *build-args
     command: streamlit run docint/app.py --server.address 0.0.0.0
     ports:
       - 8501:8501

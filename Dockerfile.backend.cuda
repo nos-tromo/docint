@@ -1,8 +1,11 @@
-FROM python:3.11-slim-bookworm AS uv-installer
+ARG PYTHON_SLIM_BOOKWORM_IMAGE=python:3.11-slim-bookworm
+ARG NVIDIA_CUDA_RUNTIME_IMAGE=nvidia/cuda:13.0.2-cudnn-runtime-ubuntu22.04
+
+FROM ${PYTHON_SLIM_BOOKWORM_IMAGE} AS uv-installer
 
 RUN pip install --no-cache-dir uv==0.9.2
 
-FROM nvidia/cuda:13.0.2-cudnn-runtime-ubuntu22.04
+FROM ${NVIDIA_CUDA_RUNTIME_IMAGE}
 
 ARG HTTP_PROXY
 ARG HTTPS_PROXY

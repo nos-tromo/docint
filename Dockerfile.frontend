@@ -1,8 +1,10 @@
-FROM python:3.11-slim AS uv-installer
+ARG PYTHON_SLIM_IMAGE=python:3.11-slim
+
+FROM ${PYTHON_SLIM_IMAGE} AS uv-installer
 
 RUN pip install --no-cache-dir uv==0.9.2
 
-FROM python:3.11-slim
+FROM ${PYTHON_SLIM_IMAGE}
 
 ARG HTTP_PROXY
 ARG HTTPS_PROXY

@@ -1,3 +1,5 @@
-FROM vllm/vllm-openai:latest
+ARG VLLM_OPENAI_IMAGE=vllm/vllm-openai:latest
+
+FROM ${VLLM_OPENAI_IMAGE}
 
 RUN pip install --no-cache-dir orjson
