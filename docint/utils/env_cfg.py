@@ -1011,19 +1011,31 @@ def load_session_env(
     Args:
         default_session_store (str): Default session store configuration (e.g. database URL or file path).
             Default is ``sqlite:///{Path.home() / "docint" / "sessions.db"}``.
+            When ``DATA_PATH`` is explicitly configured, the default becomes
+            ``sqlite:///{Path(DATA_PATH) / "sessions.db"}`` so Docker deployments
+            persist sessions inside the mounted data directory unless overridden.
 
     Returns:
         SessionConfig: Dataclass containing session configuration.
         - session_store (str): The session store configuration. Default is
-          ``sqlite:///{Path.home() / "docint" / "sessions.db"}``.
+          ``sqlite:///{Path.home() / "docint" / "sessions.db"}`` locally, or
+          ``sqlite:///{Path(DATA_PATH) / "sessions.db"}`` when ``DATA_PATH`` is
+          explicitly configured.
     """
-    if default_session_store is None:
-        docint_home_dir = load_path_env().docint_home_dir
-        default_session_store = f"sqlite:///{docint_home_dir / 'sessions.db'}"
+    session_store_override = os.getenv("SESSION_STORE")
+    if session_store_override:
+        return SessionConfig(session_store=session_store_override)
 
-    return SessionConfig(
-        session_store=os.getenv("SESSION_STORE", default_session_store)
-    )
+    if default_session_store is None:
+        data_path_override = os.getenv("DATA_PATH")
+        if data_path_override:
+            data_dir = Path(data_path_override).expanduser()
+            default_session_store = f"sqlite:///{data_dir / 'sessions.db'}"
+        else:
+            docint_home_dir = load_path_env().docint_home_dir
+            default_session_store = f"sqlite:///{docint_home_dir / 'sessions.db'}"
+
+    return SessionConfig(session_store=default_session_store)
 
 
 @dataclass(frozen=True)
