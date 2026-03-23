@@ -86,7 +86,7 @@ class FrontendConfig:
 
 
 def load_frontend_env(
-    default_collection_timeout: int = 30,
+    default_collection_timeout: int = 120,
 ) -> FrontendConfig:
     """Loads frontend configuration from environment variables or defaults.
 
