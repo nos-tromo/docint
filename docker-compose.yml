@@ -270,6 +270,7 @@ services:
       - >-
         export CUDA_VISIBLE_DEVICES="$${VLLM_CHAT_CUDA_VISIBLE_DEVICES:-0}";
         set -- vllm serve "$${TEXT_MODEL:-$${LLM:-Qwen/Qwen3.5-2B}}"
+        --tensor-parallel-size "$${VLLM_TENSOR_PARALLEL_SIZE:-1}"
         --api-key "$${OPENAI_API_KEY:-sk-no-key-required}"
         --host 0.0.0.0
         --port 8000
