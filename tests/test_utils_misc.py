@@ -176,7 +176,7 @@ def test_load_frontend_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.delenv("FRONTEND_COLLECTION_TIMEOUT", raising=False)
     cfg = load_frontend_env()
-    assert cfg.collection_timeout == 30
+    assert cfg.collection_timeout == 120
 
 
 def test_load_frontend_env_reads_collection_timeout(
@@ -310,8 +310,25 @@ def test_load_session_env_defaults_to_docint_home(
         monkeypatch: Fixture to clear environment variables.
     """
     monkeypatch.delenv("SESSION_STORE", raising=False)
+    monkeypatch.delenv("DATA_PATH", raising=False)
     cfg = load_session_env()
     assert cfg.session_store == f"sqlite:///{Path.home() / 'docint' / 'sessions.db'}"
+
+
+def test_load_session_env_defaults_to_data_path_when_explicitly_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session env loader should default inside DATA_PATH when configured.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.delenv("SESSION_STORE", raising=False)
+    monkeypatch.setenv("DATA_PATH", "/tmp/docint-data")
+
+    cfg = load_session_env()
+
+    assert cfg.session_store == "sqlite:////tmp/docint-data/sessions.db"
 
 
 def test_load_session_env_honors_override(monkeypatch: pytest.MonkeyPatch) -> None:
