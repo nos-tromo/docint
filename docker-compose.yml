@@ -65,6 +65,7 @@ x-backend-cuda: &backend-cuda
     args:
       <<: *build-args
   ports: *backend-ports
+  gpus: all
   environment: &backend-cuda-env
     DATA_PATH: /app/data/in
     LOG_PATH: /app/.logs/backend-cuda.log
@@ -107,6 +108,7 @@ x-qdrant-cpu: &qdrant-cpu
 x-qdrant-cuda: &qdrant-cuda
   <<: *qdrant-common
   image: qdrant/qdrant:gpu-nvidia-latest
+  gpus: all
   environment:
     <<: *qdrant-common-env
     NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics
@@ -119,7 +121,6 @@ x-qdrant-cuda: &qdrant-cuda
           - driver: nvidia
             count: all
             capabilities: [gpu]
-  runtime: nvidia
 
 services:
   ##########################################################
@@ -206,6 +207,7 @@ services:
   ollama-cuda:
     profiles: ["cuda-ollama"]
     image: ollama/ollama:latest
+    gpus: all
     env_file: *docker-env-file
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
@@ -224,7 +226,6 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    runtime: nvidia
     restart: unless-stopped
     networks:
       docint-net:
@@ -261,6 +262,7 @@ services:
       args:
         <<: *build-args
     image: docint-vllm-openai:latest
+    gpus: all
     env_file: *docker-env-file
     ipc: host
     entrypoint: ["/bin/sh", "-lc"]
@@ -294,7 +296,6 @@ services:
           devices:
             - driver: nvidia
               capabilities: [gpu]
-    runtime: nvidia
     networks:
       docint-net:
         aliases:
@@ -312,6 +313,7 @@ services:
       args:
         <<: *build-args
     image: docint-vllm-openai:latest
+    gpus: all
     env_file: *docker-env-file
     ipc: host
     entrypoint: ["/bin/sh", "-lc"]
@@ -335,7 +337,6 @@ services:
           devices:
             - driver: nvidia
               capabilities: [gpu]
-    runtime: nvidia
     networks:
       docint-net:
         aliases:
@@ -353,6 +354,7 @@ services:
       args:
         <<: *build-args
     image: docint-vllm-openai:latest
+    gpus: all
     env_file: *docker-env-file
     ipc: host
     entrypoint: ["/bin/sh", "-lc"]
@@ -375,7 +377,6 @@ services:
           devices:
             - driver: nvidia
               capabilities: [gpu]
-    runtime: nvidia
     networks:
       docint-net:
         aliases:
