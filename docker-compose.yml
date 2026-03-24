@@ -275,7 +275,7 @@ services:
         --host 0.0.0.0
         --port 8000
         --gpu-memory-utilization "$${VLLM_CHAT_GPU_MEMORY_UTILIZATION:-0.9}"
-        --max-model-len "$${VLLM_CHAT_MAX_MODEL_LEN:-4096}"
+        --max-model-len "$${VLLM_CHAT_MAX_MODEL_LEN:-4096}";
         if [ -n "$${VLLM_CHAT_TEMPLATE_CONTENT_FORMAT:-}" ]; then
           set -- "$@" --chat-template-content-format "$${VLLM_CHAT_TEMPLATE_CONTENT_FORMAT}";
         fi;
