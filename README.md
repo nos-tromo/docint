@@ -252,6 +252,7 @@ Batch-size tuning guidance:
 
 - `OPENAI_API_KEY`: API key for the LLM provider (default: `sk-no-key-required`).
 - `OPENAI_API_BASE`: Base API URL. In Docker, this is set automatically per profile (e.g. `http://ollama-server:11434/v1` for `*-ollama`). For local development, point this to your provider (e.g., `http://localhost:11434/v1`).
+- `OPENAI_CTX_WINDOW`: Context window advertised to the backend prompt planner. In the bundled `cuda-vllm` profile this is also passed to the vLLM chat server as `--max-model-len`, so it is the preferred single source of truth. If unset, DocInt still falls back to the legacy `CHAT_MAX_MODEL_LEN` knob when present, then to `8192`.
 - `OPENAI_ENABLE_THINKING`: Enable OpenAI reasoning/thinking for text models routed through the native OpenAI provider (default: `false`).
 - `OPENAI_THINKING_EFFORT`: Reasoning effort used when `OPENAI_ENABLE_THINKING=true`. Supported values: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` (default: `medium`).
 - `OPENAI_DIMENSIONS`: Optional embedding dimension override. Only set this for providers and models that support reduced-dimension embeddings; leave it unset for most local OpenAI-compatible backends such as vLLM-served BGE models.

@@ -258,10 +258,13 @@ def test_load_openai_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENAI_DIMENSIONS", raising=False)
     monkeypatch.delenv("OPENAI_ENABLE_THINKING", raising=False)
     monkeypatch.delenv("OPENAI_THINKING_EFFORT", raising=False)
+    monkeypatch.delenv("OPENAI_CTX_WINDOW", raising=False)
+    monkeypatch.delenv("CHAT_MAX_MODEL_LEN", raising=False)
 
     cfg = load_openai_env()
 
     assert cfg.dimensions is None
+    assert cfg.ctx_window == 4096
     assert cfg.thinking_enabled is False
     assert cfg.thinking_effort == "medium"
 
@@ -276,11 +279,48 @@ def test_load_openai_env_accepts_vllm_and_dimensions_override(
     """
     monkeypatch.setenv("INFERENCE_PROVIDER", "vllm")
     monkeypatch.setenv("OPENAI_DIMENSIONS", "1024")
+    monkeypatch.delenv("OPENAI_CTX_WINDOW", raising=False)
+    monkeypatch.delenv("CHAT_MAX_MODEL_LEN", raising=False)
 
     cfg = load_openai_env()
 
     assert cfg.inference_provider == "vllm"
+    assert cfg.ctx_window == 8192
     assert cfg.dimensions == 1024
+
+
+def test_load_openai_env_uses_chat_max_model_len_for_vllm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """vLLM context window should follow CHAT_MAX_MODEL_LEN when not overridden.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.setenv("INFERENCE_PROVIDER", "vllm")
+    monkeypatch.setenv("CHAT_MAX_MODEL_LEN", "16384")
+    monkeypatch.delenv("OPENAI_CTX_WINDOW", raising=False)
+
+    cfg = load_openai_env()
+
+    assert cfg.ctx_window == 16384
+
+
+def test_load_openai_env_prefers_explicit_ctx_window_over_vllm_model_len(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OPENAI_CTX_WINDOW should override the inferred vLLM model length.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.setenv("INFERENCE_PROVIDER", "vllm")
+    monkeypatch.setenv("CHAT_MAX_MODEL_LEN", "16384")
+    monkeypatch.setenv("OPENAI_CTX_WINDOW", "12288")
+
+    cfg = load_openai_env()
+
+    assert cfg.ctx_window == 12288
 
 
 def test_load_openai_env_clamps_invalid_thinking_effort(

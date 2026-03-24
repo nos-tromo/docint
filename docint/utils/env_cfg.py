@@ -679,10 +679,21 @@ def load_openai_env(
     if thinking_effort not in allowed_thinking_efforts:
         thinking_effort = default_thinking_effort
 
+    raw_ctx_window = os.getenv("OPENAI_CTX_WINDOW")
+    ctx_window = default_ctx_window
+    if raw_ctx_window is not None and raw_ctx_window.strip():
+        ctx_window = int(raw_ctx_window)
+    elif inference_provider == "vllm":
+        raw_chat_max_model_len = os.getenv("CHAT_MAX_MODEL_LEN")
+        if raw_chat_max_model_len is not None and raw_chat_max_model_len.strip():
+            ctx_window = int(raw_chat_max_model_len)
+        else:
+            ctx_window = max(default_ctx_window, 8192)
+
     return OpenAIConfig(
         api_base=os.getenv("OPENAI_API_BASE", default_api_base),
         api_key=os.getenv("OPENAI_API_KEY", default_api_key),
-        ctx_window=int(os.getenv("OPENAI_CTX_WINDOW", default_ctx_window)),
+        ctx_window=ctx_window,
         dimensions=dimensions,
         max_retries=int(os.getenv("OPENAI_MAX_RETRIES", default_max_retries)),
         inference_provider=inference_provider,
