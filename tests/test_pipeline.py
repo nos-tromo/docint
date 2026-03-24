@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import docint.utils.env_cfg as env_cfg
 from docint.core.readers.documents.artifacts import (
     load_manifest,
     save_chunks,
@@ -47,6 +48,34 @@ from docint.core.readers.documents.orchestrator import (
 )
 from docint.core.readers.documents.triage import triage_pdf
 from docint.utils.hashing import compute_file_hash
+
+
+def _write_pipeline_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    profile_body: str = "",
+) -> Path:
+    """Write a temporary TOML config for pipeline tests."""
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        (
+            'active_profile = "test"\n\n'
+            "[profiles.test.shared]\n\n"
+            "[profiles.test.backend]\n\n"
+            "[profiles.test.frontend]\n\n"
+            "[profiles.test.worker]\n"
+        )
+        + profile_body,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(env_cfg, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(env_cfg, "_ACTIVE_PROFILE", None)
+    monkeypatch.setattr(env_cfg, "_ACTIVE_ROLE", None)
+    monkeypatch.delenv("DOCINT_PROFILE", raising=False)
+    return config_path
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -179,20 +208,13 @@ class TestDocumentManifest:
 
 
 class TestPipelineConfig:
-    """Tests for pipeline configuration loading and env overrides."""
+    """Tests for pipeline configuration loading and TOML overrides."""
 
-    def test_load_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_load_defaults(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         """Default config values should match documented defaults."""
-        # Clear any existing env overrides
-        for key in [
-            "PIPELINE_TEXT_COVERAGE_THRESHOLD",
-            "PIPELINE_ARTIFACTS_DIR",
-            "PIPELINE_VERSION",
-            "PIPELINE_MAX_RETRIES",
-            "PIPELINE_FORCE_REPROCESS",
-            "PIPELINE_MAX_WORKERS",
-        ]:
-            monkeypatch.delenv(key, raising=False)
+        _write_pipeline_config(tmp_path, monkeypatch)
 
         cfg = load_pipeline_config()
         assert cfg.text_coverage_threshold == 0.01
@@ -201,35 +223,64 @@ class TestPipelineConfig:
         assert cfg.force_reprocess is False
         assert cfg.max_workers == 4
 
-    def test_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Environment variables should override default config values."""
-        monkeypatch.setenv("PIPELINE_TEXT_COVERAGE_THRESHOLD", "0.5")
-        monkeypatch.setenv("PIPELINE_FORCE_REPROCESS", "true")
-        monkeypatch.setenv("PIPELINE_VERSION", "2.1.0")
+    def test_toml_override(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """TOML values should override default pipeline config values."""
+        _write_pipeline_config(
+            tmp_path,
+            monkeypatch,
+            profile_body=(
+                "\n[profiles.test.shared.pipeline]\n"
+                "text_coverage_threshold = 0.5\n"
+                "force_reprocess = true\n"
+                'pipeline_version = "2.1.0"\n'
+            ),
+        )
         cfg = load_pipeline_config()
         assert cfg.text_coverage_threshold == 0.5
         assert cfg.force_reprocess is True
         assert cfg.pipeline_version == "2.1.0"
 
     def test_empty_pipeline_version_falls_back_to_default(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Empty ``PIPELINE_VERSION`` should fall back to default version."""
-        monkeypatch.setenv("PIPELINE_VERSION", "   ")
+        """Empty pipeline version should fail back to the requested default."""
+        _write_pipeline_config(
+            tmp_path,
+            monkeypatch,
+            profile_body=(
+                '\n[profiles.test.shared.pipeline]\npipeline_version = "   "\n'
+            ),
+        )
         cfg = load_pipeline_config(default_pipeline_version="9.9.9")
         assert cfg.pipeline_version == "9.9.9"
 
-    def test_artifacts_dir_from_env(
+    def test_artifacts_dir_from_toml(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """PIPELINE_ARTIFACTS_DIR env var should propagate into PipelineConfig.
+        """Artifacts dir from TOML should propagate into PipelineConfig.
 
         Args:
             monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture for env manipulation.
             tmp_path (Path): The temporary path fixture for creating test directories.
         """
         custom = str(tmp_path / "custom-artifacts")
-        monkeypatch.setenv("PIPELINE_ARTIFACTS_DIR", custom)
+        _write_pipeline_config(
+            tmp_path,
+            monkeypatch,
+            profile_body=(
+                "\n[profiles.test.backend.paths]\n"
+                f'artifacts = "{custom}"\n'
+                f'data = "{tmp_path / "data"}"\n'
+                f'docint_home_dir = "{tmp_path}"\n'
+                f'logs = "{tmp_path / "backend.log"}"\n'
+                f'queries = "{tmp_path / "queries.txt"}"\n'
+                f'results = "{tmp_path / "results"}"\n'
+                f'qdrant_sources = "{tmp_path / "qdrant_sources"}"\n'
+                f'hf_hub_cache = "{tmp_path / "hf"}"\n'
+            ),
+        )
         cfg = load_pipeline_config()
         assert cfg.artifacts_dir == custom
 

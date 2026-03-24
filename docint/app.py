@@ -1,3 +1,5 @@
+# ruff: noqa: E402
+
 """DocInt Streamlit application entry-point.
 
 This module wires together the sidebar, page router, and shared chrome.
@@ -19,6 +21,10 @@ import sys
 from pathlib import Path
 from typing import Callable
 
+from docint.utils.env_cfg import bootstrap_config, set_offline_env
+
+bootstrap_config(role="frontend")
+
 import streamlit as st
 from loguru import logger
 from streamlit.runtime import exists
@@ -39,7 +45,6 @@ from docint.ui.inspector import render_inspector
 from docint.ui.sidebar import render_sidebar
 from docint.ui.state import init_session_state
 from docint.ui.theme import apply_custom_css, configure_page, render_footer
-from docint.utils.env_cfg import set_offline_env
 from docint.utils.logging_cfg import setup_logging
 
 # ---------------------------------------------------------------------------

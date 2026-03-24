@@ -1,3 +1,5 @@
+# ruff: noqa: E402
+
 """CLI for corpus-specific retrieval evaluation across retrieval modes."""
 
 from __future__ import annotations
@@ -8,10 +10,13 @@ from pathlib import Path
 from time import perf_counter, time
 from typing import Any, Protocol
 
+from docint.utils.env_cfg import bootstrap_config, load_path_env, set_offline_env
+
+bootstrap_config(role="worker")
+
 from loguru import logger
 
 from docint.cli.query import _store_output, get_col_name, rag_pipeline
-from docint.utils.env_cfg import load_path_env, set_offline_env
 from docint.utils.logging_cfg import setup_logging
 
 

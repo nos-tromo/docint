@@ -25,6 +25,7 @@ COPY --from=uv-installer /usr/local/bin/uv /usr/local/bin/uvx /bin/
 # Install only the lightweight dependencies needed for the frontend
 RUN uv pip install --system loguru pandas python-dotenv requests streamlit
 
+COPY config.toml ./
 COPY docint/ docint/
 
 EXPOSE 8501

@@ -1,11 +1,16 @@
+# ruff: noqa: E402
+
 import sys
 from pathlib import Path
 from typing import Callable
 
+from docint.utils.env_cfg import bootstrap_config, load_path_env, set_offline_env
+
+bootstrap_config(role="worker")
+
 from loguru import logger
 
 from docint.core.rag import RAG
-from docint.utils.env_cfg import load_path_env, set_offline_env
 from docint.utils.logging_cfg import setup_logging
 
 

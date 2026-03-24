@@ -1,22 +1,21 @@
-import os
+# ruff: noqa: E402
+
 import shutil
 import sys
 from pathlib import Path
 
-# load-models is an online operation — override offline mode before env_cfg
-# sets HF_HUB_OFFLINE at import time.  load_dotenv() in env_cfg honours
-# existing env vars (override=False), so this takes precedence over .env.
-os.environ["DOCINT_OFFLINE"] = "0"
-
 # isort: off
-# Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
-# TRANSFORMERS_OFFLINE env vars are set before huggingface_hub caches them.
 from docint.utils.env_cfg import (
+    bootstrap_config,
     load_model_env,
     load_openai_env,
     load_path_env,
     resolve_hf_cache_path,
+    set_online_env,
 )
+
+bootstrap_config(role="worker")
+set_online_env()
 # isort: on
 
 import ollama
@@ -34,7 +33,6 @@ from docling.models.inference_engines.image_classification.transformers_engine i
 from docling.models.stages.table_structure.table_structure_model import (
     TableStructureModel,
 )
-from dotenv import load_dotenv
 from gliner import GLiNER
 from huggingface_hub import snapshot_download
 from loguru import logger
@@ -42,7 +40,6 @@ from transformers import AutoProcessor, CLIPModel
 
 from docint.utils.logging_cfg import setup_logging
 
-load_dotenv()
 setup_logging()
 
 

@@ -9,8 +9,35 @@ import pytest
 from llama_index.core import Document
 
 import docint.core.readers.audio as audio_module
+import docint.utils.env_cfg as env_cfg
 from docint.core.readers.audio import AudioReader
 from docint.utils.env_cfg import load_whisper_env
+
+
+def _write_whisper_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    profile_body: str = "",
+) -> None:
+    """Write a temporary TOML config for whisper-related tests."""
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        (
+            'active_profile = "test"\n\n'
+            "[profiles.test.shared]\n\n"
+            "[profiles.test.backend]\n\n"
+            "[profiles.test.frontend]\n\n"
+            "[profiles.test.worker]\n"
+        )
+        + profile_body,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(env_cfg, "DEFAULT_CONFIG_PATH", config_path)
+    monkeypatch.setattr(env_cfg, "_ACTIVE_PROFILE", None)
+    monkeypatch.setattr(env_cfg, "_ACTIVE_ROLE", None)
+    monkeypatch.delenv("DOCINT_PROFILE", raising=False)
 
 
 def _make_audio_reader(
@@ -99,22 +126,25 @@ def test_audio_reader_falls_back_to_text(
     assert docs[0].text == "Just text"
 
 
-def test_load_whisper_env_invalid_values_fall_back(
-    monkeypatch: pytest.MonkeyPatch,
+def test_load_whisper_env_invalid_task_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Invalid Whisper env values should fall back to safe defaults.
+    """Invalid Whisper task values should fail clearly.
 
     Args:
         monkeypatch: The pytest monkeypatch fixture.
     """
 
-    monkeypatch.setenv("WHISPER_MAX_WORKERS", "0")
-    monkeypatch.setenv("WHISPER_TASK", "summarize")
+    _write_whisper_config(
+        tmp_path,
+        monkeypatch,
+        profile_body=(
+            '\n[profiles.test.shared.whisper]\nmax_workers = 0\ntask = "summarize"\n'
+        ),
+    )
 
-    cfg = load_whisper_env()
-
-    assert cfg.max_workers == 1
-    assert cfg.task == "transcribe"
+    with pytest.raises(ValueError, match="Unsupported whisper task"):
+        load_whisper_env()
 
 
 def test_audio_reader_translate_non_english_uses_translate_task(
@@ -127,7 +157,11 @@ def test_audio_reader_translate_non_english_uses_translate_task(
         tmp_path: Temporary directory provided by pytest.
     """
 
-    monkeypatch.setenv("WHISPER_TASK", "translate")
+    _write_whisper_config(
+        tmp_path,
+        monkeypatch,
+        profile_body=('\n[profiles.test.shared.whisper]\ntask = "translate"\n'),
+    )
     reader = AudioReader(device="cpu")
     monkeypatch.setattr(reader, "_load_model", lambda: None)
     monkeypatch.setattr(reader, "_load_audio", lambda _: None)
@@ -162,7 +196,11 @@ def test_audio_reader_translate_english_forces_transcribe(
         tmp_path: Temporary directory provided by pytest.
     """
 
-    monkeypatch.setenv("WHISPER_TASK", "translate")
+    _write_whisper_config(
+        tmp_path,
+        monkeypatch,
+        profile_body=('\n[profiles.test.shared.whisper]\ntask = "translate"\n'),
+    )
     reader = AudioReader(device="cpu")
     monkeypatch.setattr(reader, "_load_model", lambda: None)
     monkeypatch.setattr(reader, "_load_audio", lambda _: None)
@@ -197,7 +235,11 @@ def test_audio_reader_load_batch_data_parallel_preserves_order(
         tmp_path: Temporary directory provided by pytest.
     """
 
-    monkeypatch.setenv("WHISPER_MAX_WORKERS", "2")
+    _write_whisper_config(
+        tmp_path,
+        monkeypatch,
+        profile_body=("\n[profiles.test.shared.whisper]\nmax_workers = 2\n"),
+    )
     reader = AudioReader(device="cpu")
     first = tmp_path / "a.wav"
     second = tmp_path / "b.wav"

@@ -38,14 +38,7 @@ x-backend-cpu: &backend-cpu
       <<: *build-args
   ports: &backend-ports
     - 8000:8000
-  environment: &backend-cpu-env
-    DATA_PATH: /app/data
-    LOG_PATH: /app/.logs/backend-cpu.log
-    QDRANT_HOST: http://qdrant:6333
-    QDRANT_SRC_DIR: /qdrant/storage/sources
-    QUERIES_PATH: /app/data/queries.txt
-    RESULTS_PATH: /app/results
-    USE_DEVICE: auto
+  environment: &backend-cpu-env {}
   env_file: *docker-env-file
   volumes: &backend-volumes
     - ${USERPROFILE:-$HOME}/docint/data:/app/data
@@ -53,6 +46,7 @@ x-backend-cpu: &backend-cpu
     - docint-logs:/app/.logs
     - model-cache:/root/.cache
     - qdrant-storage:/qdrant/storage
+    - ./config.toml:/app/config.toml:ro
   networks: &backend-net
     docint-net:
       aliases:
@@ -67,14 +61,7 @@ x-backend-cuda: &backend-cuda
   ports: *backend-ports
   gpus: all
   environment: &backend-cuda-env
-    DATA_PATH: /app/data/in
-    LOG_PATH: /app/.logs/backend-cuda.log
     NVIDIA_VISIBLE_DEVICES: all
-    QDRANT_HOST: http://qdrant:6333
-    QDRANT_SRC_DIR: /qdrant/storage/sources
-    QUERIES_PATH: /app/data/queries.txt
-    RESULTS_PATH: /app/data/out
-    USE_DEVICE: auto
   env_file: *docker-env-file
   volumes: *backend-volumes
   deploy:
@@ -131,8 +118,7 @@ services:
     profiles: ["cpu-ollama"]
     environment:
       <<: *backend-cpu-env
-      INFERENCE_PROVIDER: ollama
-      OPENAI_API_BASE: http://ollama-server:11434/v1
+      DOCINT_PROFILE: docker-cpu-ollama
 
   ##########################################################
   # Backend – CPU + External OpenAI API
@@ -142,8 +128,7 @@ services:
     profiles: ["cpu-openai"]
     environment:
       <<: *backend-cpu-env
-      INFERENCE_PROVIDER: openai
-      OPENAI_API_BASE: https://api.openai.com/v1
+      DOCINT_PROFILE: docker-cpu-openai
 
   ##########################################################
   # Backend – CUDA + Ollama
@@ -153,8 +138,7 @@ services:
     profiles: ["cuda-ollama"]
     environment:
       <<: *backend-cuda-env
-      INFERENCE_PROVIDER: ollama
-      OPENAI_API_BASE: http://ollama-server:11434/v1
+      DOCINT_PROFILE: docker-cuda-ollama
 
   ##########################################################
   # Backend – CUDA + External OpenAI API
@@ -164,8 +148,7 @@ services:
     profiles: ["cuda-openai"]
     environment:
       <<: *backend-cuda-env
-      INFERENCE_PROVIDER: openai
-      OPENAI_API_BASE: https://api.openai.com/v1
+      DOCINT_PROFILE: docker-cuda-openai
 
   ##########################################################
   # Backend – CUDA + vLLM
@@ -177,8 +160,7 @@ services:
       - vllm-router
     environment:
       <<: *backend-cuda-env
-      INFERENCE_PROVIDER: vllm
-      OPENAI_API_BASE: http://vllm-router:9000/v1
+      DOCINT_PROFILE: docker-cuda-vllm
 
   ##########################################################
   # Ollama (CPU)
@@ -398,14 +380,13 @@ services:
       - 8501:8501
     env_file: *docker-env-file
     environment:
-      - BACKEND_HOST=http://backend-net:8000
-      - BACKEND_PUBLIC_HOST=http://localhost:8000
-      - LOG_PATH=/app/.logs/frontend.log
+      - DOCINT_PROFILE=${DOCINT_PROFILE:-docker-cpu-ollama}
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
     volumes:
       - ${USERPROFILE:-$HOME}/docint/data:/app/data
       - ${USERPROFILE:-$HOME}/docint/results:/app/results
       - docint-logs:/app/.logs
+      - ./config.toml:/app/config.toml:ro
     networks:
       - docint-net
 

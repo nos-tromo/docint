@@ -1,3 +1,5 @@
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import gc
@@ -32,6 +34,7 @@ from docint.utils.env_cfg import (
     RetrievalConfig,
     SessionConfig,
     SummaryConfig,
+    bootstrap_config,
     load_graphrag_env,
     load_hate_speech_env,
     load_host_env,
@@ -45,6 +48,8 @@ from docint.utils.env_cfg import (
     load_summary_env,
     resolve_hf_cache_path,
 )
+
+bootstrap_config()
 # isort: on
 
 import torch

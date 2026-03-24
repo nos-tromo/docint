@@ -24,7 +24,7 @@ This is a proof of concept document intelligence platform offering the following
 
    - Utilize large language models (LLMs) and other AI models for advanced processing tasks.
    - **Flexible Backend**: Supports OpenAI-compatible APIs (OpenAI, Ollama, vLLM, and similar services) for text and vision tasks.
-   - **Provider-Agnostic Architecture**: The system is designed to be backend-agnostic. It uses Ollama for local inference by default, and can switch to any OpenAI-compatible API (vLLM, DeepSeek, LM Studio, etc.) by changing environment variables.
+   - **Provider-Agnostic Architecture**: The system is backend-agnostic. It uses Ollama locally by default and can switch to OpenAI, vLLM, LM Studio, or another OpenAI-compatible API by changing the active profile in `config.toml`.
    - **Performance & Decoupling**: Inference runs in a dedicated container (`ollama-server` by default, or the bundled vLLM router for CUDA profiles), ensuring the application logic remains responsive even during heavy model computations.
 
 5. **Extensibility**
@@ -46,7 +46,7 @@ The platform is provider-agnostic and works with any OpenAI-compatible inference
 | **OpenAI API** | Cloud-hosted models (GPT-4o, etc.) via the official API | [openai/openai-python](https://github.com/openai/openai-python) |
 | **vLLM** | High-throughput OpenAI-compatible serving for CUDA deployments | [vllm-project/vllm](https://github.com/vllm-project/vllm) |
 
-Any other server exposing an OpenAI-compatible `/v1/chat/completions` endpoint (e.g., [LocalAI](https://github.com/mudler/LocalAI), [LM Studio](https://github.com/lmstudio-ai)) can also be used by setting the `OPENAI_API_BASE` environment variable.
+Any other server exposing an OpenAI-compatible `/v1/chat/completions` endpoint (e.g., [LocalAI](https://github.com/mudler/LocalAI), [LM Studio](https://github.com/lmstudio-ai)) can also be used by editing the active profile in `config.toml`.
 
 ## Installation
 
@@ -70,13 +70,17 @@ Model files are handled automatically by the ingestion pipeline and do not need 
 
    Refer to the [Docker installation guide](https://docs.docker.com/get-docker/) if needed.
 
-2. **Configure Environment**
+2. **Configure Bootstrap Environment**
 
    Create the Docker environment file from the example:
 
    ```bash
    cp .env.docker.example .env.docker
    ```
+
+   `config.toml` is the canonical runtime config. `.env.docker` is now only for
+   secrets, `DOCINT_PROFILE` overrides, and Docker-specific proxy or registry
+   settings.
 
    If the machine must reach the internet through an HTTP/HTTPS proxy, add
    `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` to `.env.docker`. Include the
@@ -120,7 +124,11 @@ Model files are handled automatically by the ingestion pipeline and do not need 
 
    CUDA profiles require a CUDA-compatible GPU and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
-   Each profile automatically sets `INFERENCE_PROVIDER` and `OPENAI_API_BASE` to the correct values. For the `*-openai` profiles, set `OPENAI_API_BASE` and `OPENAI_API_KEY` in `.env.docker`. The `cuda-vllm` profile routes the backend through an internal nginx service so split chat, embedding, and rerank upstreams still appear as one OpenAI-compatible endpoint.
+   Runtime behavior comes from `config.toml`. The compose profile chooses the
+   container topology, and each backend service pins its own matching
+   `DOCINT_PROFILE`. If you use a non-default frontend stack, set
+   `DOCINT_PROFILE` in `.env.docker` to the matching `docker-*` profile so the
+   frontend resolves the same backend settings.
 
 4. **Start the Services**
 
@@ -151,17 +159,19 @@ Model files are handled automatically by the ingestion pipeline and do not need 
 
     - **Qdrant**: Must be running (default: `http://localhost:6333`).
     - **Inference Server**: An OpenAI-compatible server (Ollama, LocalAI, vLLM, or another compatible service) must be accessible.
-       - By default, the app expects Ollama at `http://localhost:11434/v1`. Configure `OPENAI_API_BASE` in `.env` accordingly.
+       - By default, the repo uses the `local-ollama` profile in `config.toml`.
 
-2. **Create a Local Environment File**
+2. **Create a Local Bootstrap Environment File**
 
-   Copy the example config and adjust values for your local stack:
+   Copy the example config for secrets and optional profile overrides:
 
    ```bash
    cp .env.example .env
    ```
 
-   At minimum, confirm `INFERENCE_PROVIDER`, `OPENAI_API_BASE`, and model IDs (`EMBED_MODEL`, `TEXT_MODEL`, `VISION_MODEL`) match your stack.
+   Then edit `config.toml` and either change `active_profile` or update the
+   selected profile table. Use `DOCINT_PROFILE` in `.env` only when you want a
+   temporary override without editing `config.toml`.
 
 3. **Install Dependencies**
 
@@ -199,77 +209,44 @@ Model files are handled automatically by the ingestion pipeline and do not need 
 
 ## Configuration
 
-The application is configured via environment variables. Key variables include:
+Runtime configuration now lives in the repo-root [`config.toml`](config.toml).
+The file defines named profiles such as `local-ollama`, `local-openai`,
+`docker-cpu-ollama`, and `docker-cuda-vllm`. Each profile contains:
 
-**General:**
+- `shared`: inference, models, retrieval, pipeline, and other common runtime knobs
+- `backend`, `frontend`, `worker`: role-specific hosts and paths
 
-- `DOCINT_OFFLINE`: Set to `true` to force offline mode (fails if models aren't cached).
-- `NER_ENABLED`: Enable scalable entity/relation extraction during ingestion (default: `true`). Uses parallel execution for maximum throughput.
-- `NER_MAX_WORKERS`: Number of parallel workers for entity extraction (default: `4`).
-- `ENABLE_HATE_SPEECH_DETECTION`: Enable hate-speech detection during ingestion. When disabled/unset, ingestion behavior remains unchanged (default: `false`).
-- `GRAPHRAG_ENABLED`: Enable graph-assisted query expansion during chat/query retrieval (default: `false`).
-- `GRAPHRAG_NEIGHBOR_HOPS`: Neighborhood depth for graph expansion (default: `1`).
-- `GRAPHRAG_TOP_K_NODES`: Graph node cap used for derived in-memory graph construction (default: `100`).
-- `GRAPHRAG_MIN_EDGE_WEIGHT`: Minimum edge weight included in the graph (default: `1`).
-- `GRAPHRAG_MAX_NEIGHBORS`: Maximum neighbor entities appended to a retrieval query (default: `6`).
-- `RESPONSE_VALIDATION_ENABLED`: Enable a second-pass LLM check that verifies answer grounding and source/query fit, and flags mismatches (default: `false`).
-- `CHAT_RESPONSE_MODE`: Chat/query response synthesizer mode. Use `auto` to switch social/table-heavy collections to `refine` while keeping other collections on `compact` (default: `auto`).
-- `RETRIEVAL_VECTOR_QUERY_MODE`: First-stage retrieval mode. `auto` resolves to `hybrid` when hybrid search is enabled for the collection, otherwise `default`. Supported values: `auto`, `default`, `sparse`, `hybrid`, `mmr` (default: `auto`).
-- `RETRIEVAL_HYBRID_ALPHA`: Dense-vs-sparse fusion weight for hybrid retrieval. `1.0` biases dense results, `0.0` biases sparse results (default: `0.5`).
-- `RETRIEVAL_SPARSE_TOP_K`: Sparse candidate depth used by sparse and hybrid retrieval (default: `20`).
-- `RETRIEVAL_HYBRID_TOP_K`: Final candidate depth retained after dense/sparse fusion in hybrid mode (default: `20`).
-- `PARENT_CONTEXT_RETRIEVAL_ENABLED`: When hierarchical chunks are available, retrieve fine chunks first and expand them to their parent context for synthesis (default: `true`).
-- `SUMMARY_COVERAGE_TARGET`: Minimum document coverage ratio considered sufficient for collection summaries (default: `0.70`).
-- `SUMMARY_MAX_DOCS`: Maximum number of documents sampled when building collection summaries (default: `30`).
-- `SUMMARY_PER_DOC_TOP_K`: Maximum evidence chunks retrieved per document during summary preparation (default: `4`).
-- `SUMMARY_FINAL_SOURCE_CAP`: Maximum number of merged sources returned with a collection summary (default: `24`).
-- `SUMMARY_SOCIAL_CHUNKING_ENABLED`: Enable chunk/post-level summary mode for row-heavy social/table collections (default: `true`).
-- `SUMMARY_SOCIAL_CANDIDATE_POOL`: Candidate retrieval depth used by chunk/post-level social summaries (default: `48`).
-- `SUMMARY_SOCIAL_DIVERSITY_LIMIT`: Maximum number of retained social summary sources per author/time bucket (default: `2`).
-- `INGESTION_BATCH_SIZE`: Size of the in-memory enrichment streaming window (NER/hate-speech). Smaller values reduce crash-loss window during enrichment; larger values can improve throughput (default: `5`).
-- `DOCSTORE_BATCH_SIZE`: Size of micro-batches written to docstore/vectorstore after enrichment. Smaller values flush to Qdrant more often; larger values reduce write overhead (default: `100`).
-- `INGEST_BENCHMARK_ENABLED`: Emit ingest benchmark logs (elapsed time, docs/nodes throughput, enrichment and persistence batch counters) to help tune batch sizes (default: `false`).
-- `DOCSTORE_MAX_RETRIES`: Retry count for transient Qdrant docstore transport errors during ingest/read operations (default: `3`).
-- `DOCSTORE_RETRY_BACKOFF_SECONDS`: Initial backoff delay between docstore retries in seconds (default: `0.25`).
-- `DOCSTORE_RETRY_BACKOFF_MAX_SECONDS`: Maximum backoff delay between docstore retries in seconds (default: `2.0`).
-- `PRELOAD_MODELS`: Set to `true` to download all ML models at container startup (default: unset/disabled). Used by `docker-compose.yml` to populate the `model-cache` volume on first run.
+The canonical loader is [`docint/utils/env_cfg.py`](docint/utils/env_cfg.py).
+All app entrypoints bootstrap config through that module before importing
+model-dependent libraries.
 
-Batch-size tuning guidance:
+Only a small env surface remains:
 
-- `INGESTION_BATCH_SIZE` controls how many parsed nodes are enriched before they are yielded to persistence in streaming mode.
-- `DOCSTORE_BATCH_SIZE` controls how many already-enriched nodes are flushed per write call to the persistent stores.
-- Increasing only `INGESTION_BATCH_SIZE` raises enrichment throughput but increases in-flight work that can be lost before first persist.
-- Increasing only `DOCSTORE_BATCH_SIZE` reduces write-call overhead but increases the amount of post-enrichment work that can be in-flight during a transport interruption.
+- `OPENAI_API_KEY`: secret for OpenAI-compatible providers that require it
+- `HF_TOKEN`: optional Hugging Face auth token
+- `DOCINT_PROFILE`: optional override for `active_profile` in `config.toml`
+- Docker-only proxy and registry variables in `.env.docker`
 
-**Hosts / Service Endpoints:**
+Typical workflow:
 
-- `BACKEND_HOST`: Backend base URL used by API/UI clients (default: `http://localhost:8000`).
-- `BACKEND_PUBLIC_HOST`: Public backend URL used for preview/download links (defaults to `BACKEND_HOST`).
-- `QDRANT_HOST`: Qdrant endpoint (default: `http://localhost:6333`).
-- `CORS_ALLOWED_ORIGINS`: Comma-separated allow-list for API CORS.
+- Local development: edit `config.toml` and leave `.env` for secrets only
+- Docker: select a compose profile and keep `.env.docker` for secrets, proxy settings, and optional `DOCINT_PROFILE` overrides
+- One-off experiments: export `DOCINT_PROFILE` instead of editing `active_profile`
 
-**Model Selection (Environment Variables):**
+Common TOML sections you will edit most often:
 
-- `OPENAI_API_KEY`: API key for the LLM provider (default: `sk-no-key-required`).
-- `OPENAI_API_BASE`: Base API URL. In Docker, this is set automatically per profile (e.g. `http://ollama-server:11434/v1` for `*-ollama`). For local development, point this to your provider (e.g., `http://localhost:11434/v1`).
-- `OPENAI_ENABLE_THINKING`: Enable OpenAI reasoning/thinking for text models routed through the native OpenAI provider (default: `false`).
-- `OPENAI_THINKING_EFFORT`: Reasoning effort used when `OPENAI_ENABLE_THINKING=true`. Supported values: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` (default: `medium`).
-- `OPENAI_DIMENSIONS`: Optional embedding dimension override. Only set this for providers and models that support reduced-dimension embeddings; leave it unset for most local OpenAI-compatible backends such as vLLM-served BGE models.
-- `INFERENCE_PROVIDER`: Inference provider type (`ollama`, `openai`, `vllm`, or another OpenAI-compatible backend mapped to one of those modes).
-- `TEXT_MODEL`: Text/chat model ID served by the configured provider.
-- `EMBED_MODEL`: Embedding model ID served by the configured `INFERENCE_PROVIDER`. Use an Ollama tag (for example `bge-m3`) with `INFERENCE_PROVIDER=ollama` or an OpenAI-compatible embedding model name (for example `text-embedding-3-small` or a vLLM-served alias such as `bge-m3-docint`) with `INFERENCE_PROVIDER=openai` or `INFERENCE_PROVIDER=vllm`.
-- `VISION_MODEL`: Vision-language model ID served by the configured provider (for example an Ollama tag, an OpenAI model name, or a vLLM-served alias). When the bundled `cuda-vllm` profile routes all chat traffic to a single vLLM chat server, set `VISION_MODEL` equal to `TEXT_MODEL` unless you add a dedicated vision upstream.
+- `shared.inference`: provider, API base, thinking settings
+- `shared.models`: text, embed, rerank, vision, NER, whisper model IDs
+- `shared.retrieval`, `shared.summary`, `shared.pipeline`, `shared.ingestion`
+- `<role>.hosts` and `<role>.paths`
 
-**Note on Provider Agnosticism:**
-The backend logic is standard OpenAI-compatible. The `docker-compose.yml` profiles bundle Ollama and CUDA vLLM services, but you can also point to any external API by selecting a `*-openai` profile and setting `OPENAI_API_BASE` and `OPENAI_API_KEY` in `.env.docker`.
+Batch-size tuning still works through TOML:
 
-**Local Models (Hugging Face):**
-
-- `SPARSE_MODEL`: Sparse embedding model (default: `Qdrant/all_miniLM_L6_v2_with_attentions`).
-- `RERANK_MODEL`: Cross-encoder reranker (default: `BAAI/bge-reranker-v2-m3`).
-- `NER_MODEL`: Local GLiNER model for entity extraction (default: `gliner-community/gliner_large-v2.5`).
-
-See `docint/utils/env_cfg.py` for the full list of configuration options and defaults.
+- `shared.ingestion.ingestion_batch_size`
+- `shared.ingestion.docstore_batch_size`
+- `shared.ingestion.docstore_max_retries`
+- `shared.ingestion.docstore_retry_backoff_seconds`
+- `shared.ingestion.docstore_retry_backoff_max_seconds`
 
 Collection summary responses (`POST /summarize`, `POST /summarize/stream`) include an optional `summary_diagnostics` object:
 
@@ -303,27 +280,31 @@ By default, image embeddings are written to a per-collection Qdrant collection (
 
 ### Image Config Knobs
 
-- `IMAGE_INGESTION_ENABLED` (default `true`)
-- `IMAGE_EMBEDDING_ENABLED` (default `true`)
-- `IMAGE_TAGGING_ENABLED` (default `true`)
-- `IMAGE_QDRANT_COLLECTION` (default `{collection}_images`)
-- `IMAGE_QDRANT_VECTOR_NAME` (default `image-dense`)
-- `IMAGE_EMBED_MODEL` (default `openai/clip-vit-base-patch32`)
-- `IMAGE_CACHE_BY_HASH` (default `true`)
-- `IMAGE_FAIL_ON_EMBED_ERROR` (default `false`)
-- `IMAGE_FAIL_ON_TAG_ERROR` (default `false`)
-- `IMAGE_TAGGING_MAX_IMAGE_DIM` (default `1024`)
+These map to `shared.image_ingestion` and `shared.models.image_embed_model` in `config.toml`:
+
+- `enabled` (default `true`)
+- `embedding_enabled` (default `true`)
+- `tagging_enabled` (default `true`)
+- `collection_name` (default `{collection}_images`)
+- `vector_name` (default `image-dense`)
+- `image_embed_model` (default `openai/clip-vit-base-patch32`)
+- `cache_by_hash` (default `true`)
+- `fail_on_embedding_error` (default `false`)
+- `fail_on_tagging_error` (default `false`)
+- `tagging_max_image_dimension` (default `1024`)
 
 ### Document Pipeline Config Knobs
 
-- `PIPELINE_TEXT_COVERAGE_THRESHOLD` (default `0.01`)
-- `PIPELINE_ARTIFACTS_DIR` (default `artifacts` under the project root)
-- `PIPELINE_MAX_RETRIES` (default `2`)
-- `PIPELINE_FORCE_REPROCESS` (default `false`)
-- `PIPELINE_MAX_WORKERS` (default `4`)
-- `PIPELINE_ENABLE_VISION_OCR` (default `true`)
-- `PIPELINE_VISION_OCR_TIMEOUT` (default `60.0`)
-- `PIPELINE_VISION_OCR_MAX_RETRIES` (default `1`)
+These map to `shared.pipeline` and the active role's `paths.artifacts` in `config.toml`:
+
+- `text_coverage_threshold` (default `0.01`)
+- `artifacts` path (default under the active role's artifacts directory)
+- `max_retries` (default `2`)
+- `force_reprocess` (default `false`)
+- `max_workers` (default `4`)
+- `enable_vision_ocr` (default `true`)
+- `vision_ocr_timeout` (default `60.0`)
+- `vision_ocr_max_retries` (default `1`)
 
 ## Information Extraction Endpoints
 
@@ -501,16 +482,24 @@ cp .env.docker.example .env.docker
 Minimal local example (`.env`):
 
 ```env
-DOCINT_OFFLINE=false
-INFERENCE_PROVIDER=ollama
-OPENAI_API_BASE=http://localhost:11434/v1
-OPENAI_API_KEY=sk-no-key-required
-EMBED_MODEL=bge-m3
-TEXT_MODEL=gpt-oss:20b
-VISION_MODEL=qwen3-vl:8b
-NER_ENABLED=true
-NER_MAX_WORKERS=4
-ENABLE_HATE_SPEECH_DETECTION=false
+# OPENAI_API_KEY=sk-no-key-required
+# DOCINT_PROFILE=local-openai
+# HF_TOKEN=hf_your_token_here
+```
+
+Minimal local example (`config.toml`):
+
+```toml
+active_profile = "local-ollama"
+
+[profiles.local-ollama.shared.inference]
+provider = "ollama"
+api_base = "http://localhost:11434/v1"
+
+[profiles.local-ollama.shared.models]
+embed_model = "bge-m3"
+text_model = "gpt-oss:20b"
+vision_model = "qwen3.5:9b"
 ```
 
 ## Unit Tests
@@ -551,20 +540,19 @@ artifacts/{doc_id}/
 
 ### Document Pipeline Configuration
 
-Pipeline behaviour is controlled via environment variables:
+Pipeline behaviour is controlled via `shared.pipeline` in `config.toml`:
 
-| Variable | Default | Description |
+| TOML key | Default | Description |
 |----------|---------|-------------|
-| `PIPELINE_TEXT_COVERAGE_THRESHOLD` | `0.01` | Chars-per-area ratio below which a page needs OCR |
-| `PIPELINE_ARTIFACTS_DIR` | `artifacts` | Root directory for artifact output |
-| `PIPELINE_MAX_RETRIES` | `2` | Max retry attempts per processing stage |
-| `PIPELINE_FORCE_REPROCESS` | `false` | Ignore existing artifacts and reprocess |
-| `PIPELINE_MAX_WORKERS` | `4` | Document-level parallelism |
-| `PIPELINE_ENABLE_VISION_OCR` | `true` | Enable vision-LLM OCR fallback for scanned pages |
-| `PIPELINE_VISION_OCR_TIMEOUT` | `60.0` | Per-request timeout (seconds) for vision OCR calls |
-| `PIPELINE_VISION_OCR_MAX_RETRIES` | `1` | Retry count for a single vision OCR call |
-| `PIPELINE_VISION_OCR_MAX_IMAGE_DIM` | `1024` | Max image dimension before downscaling for OCR |
-| `PIPELINE_VISION_OCR_MAX_TOKENS` | `4096` | Max output tokens for vision OCR responses |
+| `text_coverage_threshold` | `0.01` | Chars-per-area ratio below which a page needs OCR |
+| `max_retries` | `2` | Max retry attempts per processing stage |
+| `force_reprocess` | `false` | Ignore existing artifacts and reprocess |
+| `max_workers` | `4` | Document-level parallelism |
+| `enable_vision_ocr` | `true` | Enable vision-LLM OCR fallback for scanned pages |
+| `vision_ocr_timeout` | `60.0` | Per-request timeout (seconds) for vision OCR calls |
+| `vision_ocr_max_retries` | `1` | Retry count for a single vision OCR call |
+| `vision_ocr_max_image_dimension` | `1024` | Max image dimension before downscaling for OCR |
+| `vision_ocr_max_tokens` | `4096` | Max output tokens for vision OCR responses |
 
 ### Programmatic Usage
 
@@ -593,7 +581,7 @@ print(f"Tables: {manifest.tables_found}, Images: {manifest.images_found}")
 
 ### Idempotency
 
-The pipeline uses SHA-256 of file bytes as `doc_id`. Re-running on the same file with the same `pipeline_version` skips processing unless `--force` / `PIPELINE_FORCE_REPROCESS=true` is set.
+The pipeline uses SHA-256 of file bytes as `doc_id`. Re-running on the same file with the same `pipeline_version` skips processing unless `--force` is set or `shared.pipeline.force_reprocess = true`.
 
 ### Error Isolation
 
@@ -601,4 +589,4 @@ Failures on individual pages do not crash the entire document. Failed pages are 
 
 ### Offline Compliance
 
-Core PDF processing runs locally. Vision OCR fallback uses the configured OpenAI-compatible inference endpoint (local or remote), and can be disabled with `PIPELINE_ENABLE_VISION_OCR=false`. Set `DOCINT_OFFLINE=true` to enforce offline mode for Hugging Face model loading. When using local model assets, `uv run load-models` must be run before startup so embedding, sparse, rerank, and related model files are present in the local cache.
+Core PDF processing runs locally. Vision OCR fallback uses the configured OpenAI-compatible inference endpoint (local or remote), and can be disabled with `shared.pipeline.enable_vision_ocr = false`. Offline Hugging Face behaviour is controlled by `shared.runtime.docint_offline` in `config.toml`. When using local model assets, `uv run load-models` must be run before startup so embedding, sparse, rerank, and related model files are present in the local cache.
