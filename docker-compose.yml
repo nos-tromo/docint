@@ -253,6 +253,8 @@ services:
 
   ##########################################################
   # vLLM Chat (CUDA)
+  # Requires model artifacts to already exist in the shared cache volume when
+  # HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are enabled.
   ##########################################################
   vllm-chat-cuda:
     profiles: ["cuda-vllm"]
@@ -275,15 +277,14 @@ services:
         --host 0.0.0.0
         --port 8000
         --gpu-memory-utilization "$${CHAT_GPU_MEMORY_UTILIZATION:-0.9}"
-        --enable-prefix-caching
         --max-model-len "$${CHAT_MAX_MODEL_LEN:-8192}"
-        --max-num-seqs "$${CHAT_MAX_NUM_SEQS:-8}";
+        --max-num-seqs "$${CHAT_MAX_NUM_SEQS:-8}"
         --max-num-batched-tokens "$${CHAT_MAX_NUM_BATCHED_TOKENS:-16384}";
-        if [ -n "$${CHAT_TEMPLATE_CONTENT_FORMAT:-}" ]; then
-          set -- "$@" --chat-template-content-format "$${CHAT_TEMPLATE_CONTENT_FORMAT}";
-        fi;
         if [ "$${CHAT_ENABLE_PREFIX_CACHING:-true}" = "true" ]; then
           set -- "$@" --enable-prefix-caching;
+        fi;
+        if [ -n "$${CHAT_TEMPLATE_CONTENT_FORMAT:-}" ]; then
+          set -- "$@" --chat-template-content-format "$${CHAT_TEMPLATE_CONTENT_FORMAT}";
         fi;
         if [ -n "$${CHAT_DEFAULT_CHAT_TEMPLATE_KWARGS:-}" ]; then
           set -- "$@" --default-chat-template-kwargs "$${CHAT_DEFAULT_CHAT_TEMPLATE_KWARGS}";
@@ -294,6 +295,8 @@ services:
         exec "$@"
     environment:
       NVIDIA_VISIBLE_DEVICES: all
+      HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-1}"
+      TRANSFORMERS_OFFLINE: "${TRANSFORMERS_OFFLINE:-1}"
     volumes:
       - model-cache:/root/.cache
     deploy:
@@ -310,6 +313,8 @@ services:
 
   ##########################################################
   # vLLM Embeddings (CUDA)
+  # Requires model artifacts to already exist in the shared cache volume when
+  # HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are enabled.
   ##########################################################
   vllm-embed-cuda:
     profiles: ["cuda-vllm"]
@@ -335,6 +340,8 @@ services:
         --gpu-memory-utilization "$${VLLM_EMBED_GPU_MEMORY_UTILIZATION:-0.5}"
     environment:
       NVIDIA_VISIBLE_DEVICES: all
+      HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-1}"
+      TRANSFORMERS_OFFLINE: "${TRANSFORMERS_OFFLINE:-1}"
     volumes:
       - model-cache:/root/.cache
     deploy:
@@ -351,6 +358,8 @@ services:
 
   ##########################################################
   # vLLM Rerank (CUDA)
+  # Requires model artifacts to already exist in the shared cache volume when
+  # HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are enabled.
   ##########################################################
   vllm-rerank-cuda:
     profiles: ["cuda-vllm"]
@@ -375,6 +384,8 @@ services:
         --gpu-memory-utilization "$${VLLM_RERANK_GPU_MEMORY_UTILIZATION:-0.3}"
     environment:
       NVIDIA_VISIBLE_DEVICES: all
+      HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-1}"
+      TRANSFORMERS_OFFLINE: "${TRANSFORMERS_OFFLINE:-1}"
     volumes:
       - model-cache:/root/.cache
     deploy:
