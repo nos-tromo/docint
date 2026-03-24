@@ -1,13 +1,7 @@
-# ruff: noqa: E402
-
 import asyncio
 import json
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal, cast
-
-from docint.utils.env_cfg import bootstrap_config
-
-bootstrap_config(role="backend")
 
 from anyio import to_thread
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile

@@ -1,5 +1,3 @@
-# ruff: noqa: E402
-
 """CLI entry point for chat queries and collection-level exports."""
 
 from __future__ import annotations
@@ -12,20 +10,16 @@ from pathlib import Path
 from time import time
 from typing import Any, Sequence
 
-from docint.utils.env_cfg import (
-    bootstrap_config,
-    load_path_env,
-    load_response_validation_env,
-    set_offline_env,
-)
-
-bootstrap_config(role="worker")
-
 from loguru import logger
 
 from docint.agents.generation import ResultValidationResponseAgent
 from docint.agents.types import RetrievalResult, Turn
 from docint.core.rag import RAG
+from docint.utils.env_cfg import (
+    load_path_env,
+    load_response_validation_env,
+    set_offline_env,
+)
 from docint.utils.logging_cfg import setup_logging
 from docint.utils.reference_metadata import REFERENCE_METADATA_FIELDS
 

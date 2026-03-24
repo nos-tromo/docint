@@ -1,347 +1,112 @@
-"""Centralized TOML-backed application configuration."""
-
-from __future__ import annotations
-
 import os
-import tomllib
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Literal, cast
 
 from dotenv import load_dotenv
 from loguru import logger
 
-Role = Literal["backend", "frontend", "worker"]
-
-DEFAULT_PIPELINE_VERSION = "1.0.0"
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.toml"
-DEFAULT_PROFILE = "local-ollama"
-PROFILE_ENV_VAR = "DOCINT_PROFILE"
-
-_TRUTHY_VALUES = {"1", "true", "yes"}
-_VALID_ROLES: set[Role] = {"backend", "frontend", "worker"}
-_VALID_PROVIDERS = {"ollama", "openai", "vllm"}
-_VALID_THINKING_EFFORTS = {
-    "none",
-    "minimal",
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-}
-_ACTIVE_PROFILE: str | None = None
-_ACTIVE_ROLE: Role | None = None
+load_dotenv()
 
 
-def _is_truthy(value: Any) -> bool:
-    """Return whether *value* matches an accepted truthy token."""
+def set_offline_env() -> None:
+    """Log the current offline mode status.
 
-    return str(value).strip().lower() in _TRUTHY_VALUES
+    The actual env vars (HF_HUB_OFFLINE, TRANSFORMERS_OFFLINE, etc.) are set at
+    module level immediately after ``load_dotenv()`` so they are available before
+    ``huggingface_hub`` / ``transformers`` cache their values at import time.
+    This function re-applies them (idempotent) and emits a log message.
+    """
+    if str(os.getenv("DOCINT_OFFLINE", "1")).lower() in {"1", "true", "yes"}:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+        os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+        os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
-
-def _as_table(value: Any, *, label: str) -> dict[str, Any]:
-    """Return *value* as a plain dict when it is a TOML table."""
-
-    if not isinstance(value, Mapping):
-        raise ValueError(f"{label} must be a TOML table.")
-    return dict(value)
-
-
-def _read_config_document() -> dict[str, Any]:
-    """Read the root ``config.toml`` document."""
-
-    if not DEFAULT_CONFIG_PATH.is_file():
-        raise FileNotFoundError(
-            f"Config file not found at '{DEFAULT_CONFIG_PATH}'. Expected repo-root config.toml."
-        )
-    with open(DEFAULT_CONFIG_PATH, "rb") as handle:
-        return cast(dict[str, Any], tomllib.load(handle))
-
-
-def _resolve_profile(document: Mapping[str, Any], profile: str | None) -> str:
-    """Resolve the active config profile from env, bootstrap state, or TOML."""
-
-    active_profile = (
-        profile
-        or os.getenv(PROFILE_ENV_VAR)
-        or _ACTIVE_PROFILE
-        or str(document.get("active_profile") or "").strip()
-        or DEFAULT_PROFILE
-    )
-    profiles = document.get("profiles")
-    if not isinstance(profiles, Mapping) or active_profile not in profiles:
-        available = (
-            ", ".join(sorted(cast(Mapping[str, Any], profiles).keys()))
-            if isinstance(profiles, Mapping)
-            else ""
-        )
-        raise ValueError(
-            f"Config profile '{active_profile}' is not defined in '{DEFAULT_CONFIG_PATH}'."
-            + (f" Available profiles: {available}." if available else "")
-        )
-    return active_profile
-
-
-def _resolve_role(role: Role | None) -> Role:
-    """Resolve the active runtime role."""
-
-    resolved = role or _ACTIVE_ROLE or cast(Role, "backend")
-    if resolved not in _VALID_ROLES:
-        raise ValueError(f"Unsupported config role '{resolved}'.")
-    return resolved
-
-
-def _merge_tables(
-    base: Mapping[str, Any], override: Mapping[str, Any]
-) -> dict[str, Any]:
-    """Recursively merge TOML table-like mappings."""
-
-    merged: dict[str, Any] = dict(base)
-    for key, value in override.items():
-        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
-            merged[key] = _merge_tables(
-                cast(Mapping[str, Any], merged[key]),
-                cast(Mapping[str, Any], value),
+        # Point fastembed at the HF hub cache so it reuses models downloaded
+        # by ``model_cfg.py`` instead of trying to fetch them.
+        if not os.getenv("FASTEMBED_CACHE_PATH"):
+            default_hf_cache = str(Path.home() / ".cache" / "huggingface" / "hub")
+            os.environ["FASTEMBED_CACHE_PATH"] = os.getenv(
+                "HF_HUB_CACHE", default_hf_cache
             )
-        else:
-            merged[key] = value
-    return merged
+
+        logger.info("Set Hugging Face libraries to offline mode.")
+    else:
+        logger.info("Hugging Face libraries are in online mode.")
 
 
-def _default_sections() -> dict[str, dict[str, Any]]:
-    """Return fallback section values for omitted TOML fields."""
-
-    home_dir = Path.home()
-    docint_home_dir = home_dir / "docint"
-    project_root = Path(__file__).resolve().parents[2]
-    return {
-        "runtime": {
-            "docint_offline": True,
-            "preload_models": False,
-        },
-        "frontend": {
-            "collection_timeout": 120,
-        },
-        "graphrag": {
-            "enabled": True,
-            "neighbor_hops": 2,
-            "top_k_nodes": 50,
-            "min_edge_weight": 3,
-            "max_neighbors": 6,
-        },
-        "hate_speech": {
-            "enabled": False,
-            "max_chars": 2048,
-            "max_workers": 1,
-        },
-        "image_ingestion": {
-            "enabled": True,
-            "embedding_enabled": True,
-            "tagging_enabled": True,
-            "collection_name": "{collection}_images",
-            "vector_name": "image-dense",
-            "cache_by_hash": True,
-            "fail_on_embedding_error": False,
-            "fail_on_tagging_error": False,
-            "retrieve_top_k": 5,
-            "tagging_max_image_dimension": 1024,
-        },
-        "ingestion": {
-            "coarse_chunk_size": 8192,
-            "docling_accelerator_num_threads": 4,
-            "docstore_batch_size": 100,
-            "ingest_benchmark_enabled": False,
-            "docstore_max_retries": 3,
-            "docstore_retry_backoff_seconds": 0.25,
-            "docstore_retry_backoff_max_seconds": 2.0,
-            "fine_chunk_overlap": 0,
-            "fine_chunk_size": 8192,
-            "hierarchical_chunking_enabled": True,
-            "ingestion_batch_size": 50,
-            "sentence_splitter_chunk_overlap": 64,
-            "sentence_splitter_chunk_size": 1024,
-            "supported_filetypes": [
-                ".avi",
-                ".csv",
-                ".docx",
-                ".flv",
-                ".gif",
-                ".jpeg",
-                ".jpg",
-                ".jsonl",
-                ".md",
-                ".mkv",
-                ".mov",
-                ".mpeg",
-                ".mpg",
-                ".mp3",
-                ".mp4",
-                ".m4a",
-                ".m4v",
-                ".ogg",
-                ".parquet",
-                ".pdf",
-                ".png",
-                ".tsv",
-                ".txt",
-                ".wav",
-                ".webm",
-                ".wmv",
-                ".xls",
-                ".xlsx",
-            ],
-        },
-        "models": {
-            "embed_model": "bge-m3",
-            "image_embed_model": "openai/clip-vit-base-patch32",
-            "ner_model": "gliner-community/gliner_large-v2.5",
-            "rerank_model": "BAAI/bge-reranker-v2-m3",
-            "sparse_model": "Qdrant/all_miniLM_L6_v2_with_attentions",
-            "text_model": "gpt-oss:20b",
-            "vision_model": "qwen3.5:9b",
-            "whisper_model": "turbo",
-        },
-        "inference": {
-            "api_base": "http://localhost:11434/v1",
-            "ctx_window": 4096,
-            "dimensions": None,
-            "max_retries": 2,
-            "provider": "ollama",
-            "reuse_client": False,
-            "seed": 42,
-            "temperature": 0.0,
-            "thinking_effort": "medium",
-            "thinking_enabled": False,
-            "timeout": 300.0,
-            "top_p": 0.1,
-        },
-        "paths": {
-            "artifacts": str(docint_home_dir / "artifacts"),
-            "data": str(docint_home_dir / "data"),
-            "docint_home_dir": str(docint_home_dir),
-            "logs": str(project_root / ".logs" / "docint.log"),
-            "queries": str(docint_home_dir / "queries.txt"),
-            "results": str(docint_home_dir / "results"),
-            "qdrant_sources": str(docint_home_dir / "qdrant_sources"),
-            "hf_hub_cache": str(home_dir / ".cache" / "huggingface" / "hub"),
-        },
-        "hosts": {
-            "backend_host": "http://localhost:8000",
-            "backend_public_host": "http://localhost:8000",
-            "qdrant_host": "http://localhost:6333",
-            "cors_allowed_origins": "http://localhost:8501,http://127.0.0.1:8501",
-        },
-        "ner": {
-            "enabled": True,
-            "max_chars": 1024,
-            "max_workers": 4,
-        },
-        "pipeline": {
-            "text_coverage_threshold": 0.01,
-            "pipeline_version": DEFAULT_PIPELINE_VERSION,
-            "max_retries": 2,
-            "force_reprocess": False,
-            "max_workers": 4,
-            "enable_vision_ocr": True,
-            "vision_ocr_timeout": 60.0,
-            "vision_ocr_max_retries": 1,
-            "vision_ocr_max_image_dimension": 1024,
-            "vision_ocr_max_tokens": 4096,
-        },
-        "response_validation": {
-            "enabled": True,
-        },
-        "retrieval": {
-            "rerank_use_fp16": False,
-            "retrieve_top_k": 20,
-            "chat_response_mode": "auto",
-            "vector_store_query_mode": "auto",
-            "hybrid_alpha": 0.5,
-            "sparse_top_k": 20,
-            "hybrid_top_k": 20,
-            "parent_context_enabled": True,
-        },
-        "session": {
-            "session_store": "",
-        },
-        "summary": {
-            "coverage_target": 0.70,
-            "max_docs": 30,
-            "per_doc_top_k": 4,
-            "final_source_cap": 24,
-            "social_chunking_enabled": True,
-            "social_candidate_pool": 48,
-            "social_diversity_limit": 2,
-        },
-        "whisper": {
-            "max_workers": 1,
-            "task": "transcribe",
-        },
-    }
+set_offline_env()  # Apply offline settings at module load time
 
 
-def _resolve_sections(
-    document: Mapping[str, Any],
-    profile: str,
-    role: Role,
-) -> dict[str, dict[str, Any]]:
-    """Resolve merged shared and role-specific config sections."""
+def resolve_hf_cache_path(
+    cache_dir: Path, repo_id: str, filename: str | None = None
+) -> Path | None:
+    """Resolve a HuggingFace model or file path from the local HF cache.
 
-    profiles = _as_table(document.get("profiles"), label="profiles")
-    profile_table = _as_table(profiles.get(profile), label=f"profiles.{profile}")
-    shared = _as_table(
-        profile_table.get("shared", {}), label=f"profiles.{profile}.shared"
-    )
-    role_table = _as_table(
-        profile_table.get(role, {}),
-        label=f"profiles.{profile}.{role}",
-    )
-    defaults = _default_sections()
-    merged = _merge_tables(defaults, shared)
-    merged = _merge_tables(merged, role_table)
-    return {key: _as_table(value, label=key) for key, value in merged.items()}
+    HF hub stores downloads under:
+        {cache_dir}/models--{org}--{repo}/snapshots/{commit_hash}/
 
+    Args:
+        cache_dir: The HF hub cache directory (e.g. ~/.cache/huggingface/hub).
+        repo_id: The HuggingFace repository ID (e.g. "BAAI/bge-m3").
+        filename: Optional file name within the snapshot directory. If provided,
+                  return the path to that specific file; otherwise return the
+                  snapshot directory itself.
 
-def _path(value: Any) -> Path:
-    """Convert TOML path values into expanded ``Path`` objects."""
+    Returns:
+        The resolved Path if found, otherwise None.
+    """
+    model_dir_name = f"models--{repo_id.replace('/', '--')}"
+    model_cache_dir = cache_dir / model_dir_name
 
-    raw_value = str(value)
-    expanded = raw_value.replace(
-        "${PROJECT_ROOT}", str(DEFAULT_CONFIG_PATH.parent)
-    ).replace("${HOME}", str(Path.home()))
-    return Path(expanded).expanduser()
+    if not model_cache_dir.exists():
+        return None
 
+    ref_path = model_cache_dir / "refs" / "main"
+    if not ref_path.exists():
+        return None
 
-def _string(section: Mapping[str, Any], key: str) -> str:
-    """Read a required string field."""
+    commit_hash = ref_path.read_text().strip()
+    snapshot_path = model_cache_dir / "snapshots" / commit_hash
 
-    value = section.get(key)
-    if value is None:
-        raise ValueError(f"Missing config value '{key}'.")
-    return str(value)
+    if filename:
+        file_path = snapshot_path / filename
+        return file_path if file_path.exists() else None
 
-
-@dataclass(frozen=True)
-class RuntimeConfig:
-    """Runtime configuration."""
-
-    profile: str
-    role: Role
-    docint_offline: bool
-    preload_models: bool
+    return snapshot_path if snapshot_path.exists() else None
 
 
 @dataclass(frozen=True)
 class FrontendConfig:
-    """Frontend configuration."""
+    """Dataclass for frontend configuration."""
 
     collection_timeout: int
 
 
+def load_frontend_env(
+    default_collection_timeout: int = 120,
+) -> FrontendConfig:
+    """Loads frontend configuration from environment variables or defaults.
+
+    Args:
+        default_collection_timeout (int): Default timeout in seconds for fetching collections from the backend.
+
+    Returns:
+        FrontendConfig: Dataclass containing frontend configuration.
+        - collection_timeout (int): Timeout in seconds for fetching collections from the backend.
+    """
+    return FrontendConfig(
+        collection_timeout=int(
+            os.getenv("FRONTEND_COLLECTION_TIMEOUT", default_collection_timeout)
+        )
+    )
+
+
 @dataclass(frozen=True)
 class GraphRAGConfig:
-    """Graph-assisted retrieval configuration."""
+    """Dataclass for graph-assisted retrieval configuration."""
 
     enabled: bool
     neighbor_hops: int
@@ -350,18 +115,78 @@ class GraphRAGConfig:
     max_neighbors: int
 
 
+def load_graphrag_env(
+    default_enabled: bool = True,
+    default_neighbor_hops: int = 2,
+    default_top_k_nodes: int = 50,
+    default_min_edge_weight: int = 3,
+    default_max_neighbors: int = 6,
+) -> GraphRAGConfig:
+    """Load GraphRAG configuration from environment variables.
+
+    Args:
+        default_enabled: Whether graph-assisted retrieval is enabled by default.
+        default_neighbor_hops: Number of graph hops used for query expansion.
+        default_top_k_nodes: Maximum number of graph nodes kept in memory.
+        default_min_edge_weight: Minimum edge weight used for graph filtering.
+        default_max_neighbors: Maximum number of neighbor entities appended to a query.
+
+    Returns:
+        GraphRAGConfig: Parsed graph retrieval settings.
+    """
+    return GraphRAGConfig(
+        enabled=str(os.getenv("GRAPHRAG_ENABLED", default_enabled)).lower()
+        in {"true", "1", "yes"},
+        neighbor_hops=max(
+            1, int(os.getenv("GRAPHRAG_NEIGHBOR_HOPS", default_neighbor_hops))
+        ),
+        top_k_nodes=max(1, int(os.getenv("GRAPHRAG_TOP_K_NODES", default_top_k_nodes))),
+        min_edge_weight=max(
+            1, int(os.getenv("GRAPHRAG_MIN_EDGE_WEIGHT", default_min_edge_weight))
+        ),
+        max_neighbors=max(
+            1, int(os.getenv("GRAPHRAG_MAX_NEIGHBORS", default_max_neighbors))
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class HateSpeechConfig:
-    """Hate-speech detection configuration."""
+    """Dataclass for hate-speech detection configuration."""
 
     enabled: bool
     max_chars: int
     max_workers: int
 
 
+def load_hate_speech_env(
+    default_enabled: bool = False,
+    default_max_chars: int = 2048,
+    default_max_workers: int = 1,
+) -> HateSpeechConfig:
+    """Load hate-speech detection settings from environment variables.
+
+    Args:
+        default_enabled: Whether hate-speech detection runs during ingestion.
+        default_max_chars: Maximum characters from each chunk sent to the detector.
+        default_max_workers: Maximum worker threads for parallel hate-speech detection.
+
+    Returns:
+        HateSpeechConfig: Parsed hate-speech detection configuration.
+    """
+    return HateSpeechConfig(
+        enabled=str(os.getenv("ENABLE_HATE_SPEECH_DETECTION", default_enabled)).lower()
+        in {"true", "1", "yes"},
+        max_chars=max(256, int(os.getenv("HATE_SPEECH_MAX_CHARS", default_max_chars))),
+        max_workers=max(
+            1, int(os.getenv("HATE_SPEECH_MAX_WORKERS", default_max_workers))
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class HostConfig:
-    """Host configuration."""
+    """Dataclass for host configuration."""
 
     backend_host: str
     backend_public_host: str
@@ -369,9 +194,37 @@ class HostConfig:
     cors_allowed_origins: str
 
 
+def load_host_env(
+    default_backend_host: str = "http://localhost:8000",
+    default_qdrant_host: str = "http://localhost:6333",
+    default_cors_origins: str = "http://localhost:8501,http://127.0.0.1:8501",
+) -> HostConfig:
+    """Loads host configuration from environment variables or defaults.
+
+    Args:
+        default_backend_host (str): Default backend host URL.
+        default_qdrant_host (str): Default Qdrant host URL.
+        default_cors_origins (str): Default CORS allowed origins.
+
+    Returns:
+        HostConfig: Dataclass containing host configuration.
+        - backend_host (str): The backend host URL.
+        - backend_public_host (str): The public backend host URL. Required to enable document preview features
+            in the Docker environment.
+        - qdrant_host (str): The Qdrant host URL.
+        - cors_allowed_origins (str): Comma-separated list of allowed CORS origins.
+    """
+    return HostConfig(
+        backend_host=os.getenv("BACKEND_HOST", default_backend_host),
+        backend_public_host=os.getenv("BACKEND_PUBLIC_HOST", default_backend_host),
+        qdrant_host=os.getenv("QDRANT_HOST", default_qdrant_host),
+        cors_allowed_origins=os.getenv("CORS_ALLOWED_ORIGINS", default_cors_origins),
+    )
+
+
 @dataclass(frozen=True)
 class ImageIngestionConfig:
-    """Image-ingestion configuration."""
+    """Configuration for image ingestion and image-vector indexing."""
 
     enabled: bool
     embedding_enabled: bool
@@ -385,9 +238,90 @@ class ImageIngestionConfig:
     tagging_max_image_dimension: int = 1024
 
 
+def load_image_ingestion_config(
+    default_image_ingestion_enabled: bool = True,
+    default_image_embedding_enabled: bool = True,
+    default_image_tagging_enabled: bool = True,
+    default_image_qdrant_collection: str = "{collection}_images",
+    default_image_qdrant_vector_name: str = "image-dense",
+    default_image_cache_by_hash: bool = True,
+    default_fail_on_embedding_error: bool = False,
+    default_fail_on_tagging_error: bool = False,
+    default_retrieve_top_k: int = 5,
+    default_tagging_max_image_dimension: int = 1024,
+) -> ImageIngestionConfig:
+    """Load image ingestion settings from environment variables.
+
+    Args:
+        default_image_ingestion_enabled (bool): Whether image ingestion is enabled by default.
+        default_image_embedding_enabled (bool): Whether to generate embeddings for images by default.
+        default_image_tagging_enabled (bool): Whether to generate tags for images by default.
+        default_image_qdrant_collection (str): Default Qdrant collection name for storing image vectors.
+        default_image_qdrant_vector_name (str): Default name of the vector field in Qdrant for image vectors.
+        default_image_cache_by_hash (bool): Whether to cache image embeddings by hash to avoid redundant computation. Default is True.
+        default_fail_on_embedding_error (bool): Whether to fail the entire ingestion if image embedding fails. Default is False.
+        default_fail_on_tagging_error (bool): Whether to fail the entire ingestion if image tagging fails. Default is False.
+        default_retrieve_top_k (int): The number of top image matches to retrieve for a text query. Default is 5.
+        default_tagging_max_image_dimension (int): Maximum pixel dimension (width or height) for
+            images sent to the vision tagging endpoint. Larger images are down-scaled. Default is 1024.
+
+    Returns:
+        ImageIngestionConfig: Dataclass containing image ingestion configuration.
+        - enabled (bool): Whether image ingestion is enabled.
+        - embedding_enabled (bool): Whether to generate embeddings for images.
+        - tagging_enabled (bool): Whether to generate tags for images.
+        - collection_name (str): The Qdrant collection name for storing image vectors.
+        - vector_name (str): The name of the vector field in Qdrant.
+        - cache_by_hash (bool): Whether to cache image embeddings by hash to avoid redundant computation.
+        - fail_on_embedding_error (bool): Whether to fail the entire ingestion if image embedding fails.
+        - fail_on_tagging_error (bool): Whether to fail the entire ingestion if image tagging fails.
+        - retrieve_top_k (int): The number of top image matches to retrieve for a text query.
+        - tagging_max_image_dimension (int): Maximum pixel dimension (width or height) for
+            images sent to the vision tagging endpoint. Larger images are down-scaled.
+    """
+    return ImageIngestionConfig(
+        enabled=str(
+            os.getenv("IMAGE_INGESTION_ENABLED", default_image_ingestion_enabled)
+        ).lower()
+        in {"1", "true", "yes"},
+        embedding_enabled=str(
+            os.getenv("IMAGE_EMBEDDING_ENABLED", default_image_embedding_enabled)
+        ).lower()
+        in {"1", "true", "yes"},
+        tagging_enabled=str(
+            os.getenv("IMAGE_TAGGING_ENABLED", default_image_tagging_enabled)
+        ).lower()
+        in {"1", "true", "yes"},
+        collection_name=os.getenv(
+            "IMAGE_QDRANT_COLLECTION", default_image_qdrant_collection
+        ),
+        vector_name=os.getenv(
+            "IMAGE_QDRANT_VECTOR_NAME", default_image_qdrant_vector_name
+        ),
+        cache_by_hash=str(
+            os.getenv("IMAGE_CACHE_BY_HASH", default_image_cache_by_hash)
+        ).lower()
+        in {"1", "true", "yes"},
+        fail_on_embedding_error=str(
+            os.getenv("IMAGE_FAIL_ON_EMBED_ERROR", default_fail_on_embedding_error)
+        ).lower()
+        in {"1", "true", "yes"},
+        fail_on_tagging_error=str(
+            os.getenv("IMAGE_FAIL_ON_TAG_ERROR", default_fail_on_tagging_error)
+        ).lower()
+        in {"1", "true", "yes"},
+        retrieve_top_k=int(os.getenv("IMAGE_RETRIEVE_TOP_K", default_retrieve_top_k)),
+        tagging_max_image_dimension=int(
+            os.getenv(
+                "IMAGE_TAGGING_MAX_IMAGE_DIM", default_tagging_max_image_dimension
+            )
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class IngestionConfig:
-    """Ingestion configuration."""
+    """Dataclass for ingestion configuration."""
 
     coarse_chunk_size: int
     docling_accelerator_num_threads: int
@@ -405,717 +339,6 @@ class IngestionConfig:
     supported_filetypes: list[str]
 
 
-@dataclass(frozen=True)
-class ModelConfig:
-    """Model configuration."""
-
-    embed_model: str
-    image_embed_model: str
-    ner_model: str
-    rerank_model: str
-    sparse_model: str
-    text_model: str
-    vision_model: str
-    whisper_model: str
-
-
-@dataclass(frozen=True)
-class NERConfig:
-    """NER configuration."""
-
-    enabled: bool
-    max_chars: int
-    max_workers: int
-
-
-@dataclass(frozen=True)
-class OpenAIConfig:
-    """OpenAI-compatible inference configuration."""
-
-    api_base: str
-    api_key: str
-    ctx_window: int
-    dimensions: int | None
-    max_retries: int
-    inference_provider: str
-    reuse_client: bool
-    seed: int
-    temperature: float
-    thinking_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"]
-    thinking_enabled: bool
-    timeout: float
-    top_p: float
-
-
-@dataclass(frozen=True)
-class PathConfig:
-    """Path configuration."""
-
-    artifacts: Path
-    data: Path
-    docint_home_dir: Path
-    logs: Path
-    queries: Path
-    results: Path
-    prompts: Path
-    qdrant_sources: Path
-    hf_hub_cache: Path
-
-
-@dataclass(frozen=True)
-class PipelineConfig:
-    """Document pipeline configuration."""
-
-    text_coverage_threshold: float
-    pipeline_version: str
-    artifacts_dir: str
-    max_retries: int
-    force_reprocess: bool
-    max_workers: int
-    enable_vision_ocr: bool
-    vision_ocr_timeout: float
-    vision_ocr_max_retries: int
-    vision_ocr_max_image_dimension: int
-    vision_ocr_max_tokens: int
-
-
-@dataclass(frozen=True)
-class ResponseValidationConfig:
-    """Response validation configuration."""
-
-    enabled: bool
-
-
-@dataclass(frozen=True)
-class RetrievalConfig:
-    """Retrieval configuration."""
-
-    rerank_use_fp16: bool
-    retrieve_top_k: int
-    chat_response_mode: Literal["auto", "compact", "refine"]
-    vector_store_query_mode: Literal["auto", "default", "sparse", "hybrid", "mmr"]
-    hybrid_alpha: float
-    sparse_top_k: int
-    hybrid_top_k: int
-    parent_context_enabled: bool
-
-
-@dataclass(frozen=True)
-class SessionConfig:
-    """Session-store configuration."""
-
-    session_store: str
-
-
-@dataclass(frozen=True)
-class SummaryConfig:
-    """Collection-summary configuration."""
-
-    coverage_target: float
-    max_docs: int
-    per_doc_top_k: int
-    final_source_cap: int
-    social_chunking_enabled: bool
-    social_candidate_pool: int
-    social_diversity_limit: int
-
-
-@dataclass(frozen=True)
-class WhisperConfig:
-    """Whisper configuration."""
-
-    max_workers: int
-    task: Literal["transcribe", "translate"]
-
-
-@dataclass(frozen=True)
-class AppConfig:
-    """Canonical application configuration."""
-
-    runtime: RuntimeConfig
-    frontend: FrontendConfig
-    graphrag: GraphRAGConfig
-    hate_speech: HateSpeechConfig
-    hosts: HostConfig
-    image_ingestion: ImageIngestionConfig
-    ingestion: IngestionConfig
-    inference: OpenAIConfig
-    models: ModelConfig
-    ner: NERConfig
-    paths: PathConfig
-    pipeline: PipelineConfig
-    response_validation: ResponseValidationConfig
-    retrieval: RetrievalConfig
-    session: SessionConfig
-    summary: SummaryConfig
-    whisper: WhisperConfig
-
-
-def _build_runtime_config(
-    section: Mapping[str, Any],
-    *,
-    profile: str,
-    role: Role,
-) -> RuntimeConfig:
-    """Build the runtime config section."""
-
-    return RuntimeConfig(
-        profile=profile,
-        role=role,
-        docint_offline=_is_truthy(section.get("docint_offline", True)),
-        preload_models=_is_truthy(section.get("preload_models", False)),
-    )
-
-
-def _build_frontend_config(section: Mapping[str, Any]) -> FrontendConfig:
-    """Build the frontend config section."""
-
-    return FrontendConfig(
-        collection_timeout=int(section.get("collection_timeout", 120))
-    )
-
-
-def _build_graphrag_config(section: Mapping[str, Any]) -> GraphRAGConfig:
-    """Build the GraphRAG config section."""
-
-    return GraphRAGConfig(
-        enabled=_is_truthy(section.get("enabled", True)),
-        neighbor_hops=max(1, int(section.get("neighbor_hops", 2))),
-        top_k_nodes=max(1, int(section.get("top_k_nodes", 50))),
-        min_edge_weight=max(1, int(section.get("min_edge_weight", 3))),
-        max_neighbors=max(1, int(section.get("max_neighbors", 6))),
-    )
-
-
-def _build_hate_speech_config(section: Mapping[str, Any]) -> HateSpeechConfig:
-    """Build the hate-speech config section."""
-
-    return HateSpeechConfig(
-        enabled=_is_truthy(section.get("enabled", False)),
-        max_chars=max(256, int(section.get("max_chars", 2048))),
-        max_workers=max(1, int(section.get("max_workers", 1))),
-    )
-
-
-def _build_host_config(section: Mapping[str, Any]) -> HostConfig:
-    """Build the host config section."""
-
-    backend_host = _string(section, "backend_host")
-    backend_public_host = _string(section, "backend_public_host") or backend_host
-    return HostConfig(
-        backend_host=backend_host,
-        backend_public_host=backend_public_host,
-        qdrant_host=_string(section, "qdrant_host"),
-        cors_allowed_origins=_string(section, "cors_allowed_origins"),
-    )
-
-
-def _build_image_ingestion_config(section: Mapping[str, Any]) -> ImageIngestionConfig:
-    """Build the image-ingestion config section."""
-
-    return ImageIngestionConfig(
-        enabled=_is_truthy(section.get("enabled", True)),
-        embedding_enabled=_is_truthy(section.get("embedding_enabled", True)),
-        tagging_enabled=_is_truthy(section.get("tagging_enabled", True)),
-        collection_name=_string(section, "collection_name"),
-        vector_name=_string(section, "vector_name"),
-        cache_by_hash=_is_truthy(section.get("cache_by_hash", True)),
-        fail_on_embedding_error=_is_truthy(
-            section.get("fail_on_embedding_error", False)
-        ),
-        fail_on_tagging_error=_is_truthy(section.get("fail_on_tagging_error", False)),
-        retrieve_top_k=int(section.get("retrieve_top_k", 5)),
-        tagging_max_image_dimension=int(
-            section.get("tagging_max_image_dimension", 1024)
-        ),
-    )
-
-
-def _build_ingestion_config(section: Mapping[str, Any]) -> IngestionConfig:
-    """Build the ingestion config section."""
-
-    return IngestionConfig(
-        coarse_chunk_size=int(section.get("coarse_chunk_size", 8192)),
-        docling_accelerator_num_threads=int(
-            section.get("docling_accelerator_num_threads", 4)
-        ),
-        docstore_batch_size=int(section.get("docstore_batch_size", 100)),
-        ingest_benchmark_enabled=_is_truthy(
-            section.get("ingest_benchmark_enabled", False)
-        ),
-        docstore_max_retries=max(0, int(section.get("docstore_max_retries", 3))),
-        docstore_retry_backoff_max_seconds=max(
-            0.0, float(section.get("docstore_retry_backoff_max_seconds", 2.0))
-        ),
-        docstore_retry_backoff_seconds=max(
-            0.0, float(section.get("docstore_retry_backoff_seconds", 0.25))
-        ),
-        fine_chunk_overlap=int(section.get("fine_chunk_overlap", 0)),
-        fine_chunk_size=int(section.get("fine_chunk_size", 8192)),
-        hierarchical_chunking_enabled=_is_truthy(
-            section.get("hierarchical_chunking_enabled", True)
-        ),
-        ingestion_batch_size=int(section.get("ingestion_batch_size", 50)),
-        sentence_splitter_chunk_overlap=int(
-            section.get("sentence_splitter_chunk_overlap", 64)
-        ),
-        sentence_splitter_chunk_size=int(
-            section.get("sentence_splitter_chunk_size", 1024)
-        ),
-        supported_filetypes=[
-            str(item) for item in section.get("supported_filetypes", [])
-        ],
-    )
-
-
-def _build_model_config(section: Mapping[str, Any]) -> ModelConfig:
-    """Build the model config section."""
-
-    return ModelConfig(
-        embed_model=_string(section, "embed_model"),
-        image_embed_model=_string(section, "image_embed_model"),
-        ner_model=_string(section, "ner_model"),
-        rerank_model=_string(section, "rerank_model"),
-        sparse_model=_string(section, "sparse_model"),
-        text_model=_string(section, "text_model"),
-        vision_model=_string(section, "vision_model"),
-        whisper_model=_string(section, "whisper_model"),
-    )
-
-
-def _build_ner_config(section: Mapping[str, Any]) -> NERConfig:
-    """Build the NER config section."""
-
-    return NERConfig(
-        enabled=_is_truthy(section.get("enabled", True)),
-        max_chars=int(section.get("max_chars", 1024)),
-        max_workers=int(section.get("max_workers", 4)),
-    )
-
-
-def _build_inference_config(section: Mapping[str, Any]) -> OpenAIConfig:
-    """Build the OpenAI-compatible inference config section."""
-
-    provider = _string(section, "provider").lower()
-    if provider not in _VALID_PROVIDERS:
-        raise ValueError(
-            f"Unsupported inference provider '{provider}'. Expected one of {sorted(_VALID_PROVIDERS)}."
-        )
-    thinking_effort = _string(section, "thinking_effort").lower()
-    if thinking_effort not in _VALID_THINKING_EFFORTS:
-        raise ValueError(
-            f"Unsupported thinking_effort '{thinking_effort}'. Expected one of {sorted(_VALID_THINKING_EFFORTS)}."
-        )
-    dimensions_value = section.get("dimensions")
-    return OpenAIConfig(
-        api_base=_string(section, "api_base"),
-        api_key=os.getenv("OPENAI_API_KEY", "sk-no-key-required"),
-        ctx_window=int(section.get("ctx_window", 4096)),
-        dimensions=(
-            None
-            if dimensions_value in {None, ""}
-            else int(cast(int | str, dimensions_value))
-        ),
-        max_retries=int(section.get("max_retries", 2)),
-        inference_provider=provider,
-        reuse_client=_is_truthy(section.get("reuse_client", False)),
-        seed=int(section.get("seed", 42)),
-        temperature=float(section.get("temperature", 0.0)),
-        thinking_effort=cast(
-            Literal["none", "minimal", "low", "medium", "high", "xhigh"],
-            thinking_effort,
-        ),
-        thinking_enabled=_is_truthy(section.get("thinking_enabled", False)),
-        timeout=float(section.get("timeout", 300.0)),
-        top_p=float(section.get("top_p", 0.1)),
-    )
-
-
-def _build_path_config(section: Mapping[str, Any]) -> PathConfig:
-    """Build the path config section."""
-
-    prompts_dir = Path(__file__).resolve().parent / "prompts"
-    return PathConfig(
-        artifacts=_path(section.get("artifacts")),
-        data=_path(section.get("data")),
-        docint_home_dir=_path(section.get("docint_home_dir")),
-        logs=_path(section.get("logs")),
-        queries=_path(section.get("queries")),
-        results=_path(section.get("results")),
-        prompts=prompts_dir,
-        qdrant_sources=_path(section.get("qdrant_sources")),
-        hf_hub_cache=_path(section.get("hf_hub_cache")),
-    )
-
-
-def _build_pipeline_config(
-    section: Mapping[str, Any],
-    *,
-    artifacts_dir: Path,
-    default_pipeline_version: str = DEFAULT_PIPELINE_VERSION,
-) -> PipelineConfig:
-    """Build the pipeline config section."""
-
-    pipeline_version = (
-        _string(section, "pipeline_version").strip() or default_pipeline_version
-    )
-    return PipelineConfig(
-        text_coverage_threshold=float(section.get("text_coverage_threshold", 0.01)),
-        pipeline_version=pipeline_version,
-        artifacts_dir=str(artifacts_dir),
-        max_retries=int(section.get("max_retries", 2)),
-        force_reprocess=_is_truthy(section.get("force_reprocess", False)),
-        max_workers=int(section.get("max_workers", 4)),
-        enable_vision_ocr=_is_truthy(section.get("enable_vision_ocr", True)),
-        vision_ocr_timeout=float(section.get("vision_ocr_timeout", 60.0)),
-        vision_ocr_max_retries=int(section.get("vision_ocr_max_retries", 1)),
-        vision_ocr_max_image_dimension=int(
-            section.get("vision_ocr_max_image_dimension", 1024)
-        ),
-        vision_ocr_max_tokens=int(section.get("vision_ocr_max_tokens", 4096)),
-    )
-
-
-def _build_response_validation_config(
-    section: Mapping[str, Any],
-) -> ResponseValidationConfig:
-    """Build the response-validation config section."""
-
-    return ResponseValidationConfig(enabled=_is_truthy(section.get("enabled", True)))
-
-
-def _build_retrieval_config(section: Mapping[str, Any]) -> RetrievalConfig:
-    """Build the retrieval config section."""
-
-    chat_response_mode = _string(section, "chat_response_mode").lower()
-    if chat_response_mode not in {"auto", "compact", "refine"}:
-        raise ValueError(f"Unsupported chat_response_mode '{chat_response_mode}'.")
-    vector_query_mode = _string(section, "vector_store_query_mode").lower()
-    if vector_query_mode not in {"auto", "default", "sparse", "hybrid", "mmr"}:
-        raise ValueError(f"Unsupported vector_store_query_mode '{vector_query_mode}'.")
-    return RetrievalConfig(
-        rerank_use_fp16=_is_truthy(section.get("rerank_use_fp16", False)),
-        retrieve_top_k=int(section.get("retrieve_top_k", 20)),
-        chat_response_mode=cast(
-            Literal["auto", "compact", "refine"],
-            chat_response_mode,
-        ),
-        vector_store_query_mode=cast(
-            Literal["auto", "default", "sparse", "hybrid", "mmr"],
-            vector_query_mode,
-        ),
-        hybrid_alpha=min(1.0, max(0.0, float(section.get("hybrid_alpha", 0.5)))),
-        sparse_top_k=max(1, int(section.get("sparse_top_k", 20))),
-        hybrid_top_k=max(1, int(section.get("hybrid_top_k", 20))),
-        parent_context_enabled=_is_truthy(section.get("parent_context_enabled", True)),
-    )
-
-
-def _build_session_config(
-    section: Mapping[str, Any],
-    *,
-    paths: PathConfig,
-) -> SessionConfig:
-    """Build the session config section."""
-
-    session_store = str(section.get("session_store") or "").strip()
-    if not session_store:
-        if paths.data == paths.docint_home_dir / "data":
-            session_store = f"sqlite:///{paths.docint_home_dir / 'sessions.db'}"
-        else:
-            session_store = f"sqlite:///{paths.data / 'sessions.db'}"
-    return SessionConfig(session_store=session_store)
-
-
-def _build_summary_config(section: Mapping[str, Any]) -> SummaryConfig:
-    """Build the summary config section."""
-
-    return SummaryConfig(
-        coverage_target=min(1.0, max(0.0, float(section.get("coverage_target", 0.70)))),
-        max_docs=max(1, int(section.get("max_docs", 30))),
-        per_doc_top_k=max(1, int(section.get("per_doc_top_k", 4))),
-        final_source_cap=max(1, int(section.get("final_source_cap", 24))),
-        social_chunking_enabled=_is_truthy(
-            section.get("social_chunking_enabled", True)
-        ),
-        social_candidate_pool=max(1, int(section.get("social_candidate_pool", 48))),
-        social_diversity_limit=max(1, int(section.get("social_diversity_limit", 2))),
-    )
-
-
-def _build_whisper_config(section: Mapping[str, Any]) -> WhisperConfig:
-    """Build the whisper config section."""
-
-    task = _string(section, "task").strip().lower()
-    if task not in {"transcribe", "translate"}:
-        raise ValueError(f"Unsupported whisper task '{task}'.")
-    return WhisperConfig(
-        max_workers=max(1, int(section.get("max_workers", 1))),
-        task=cast(Literal["transcribe", "translate"], task),
-    )
-
-
-def _validate_config(config: AppConfig) -> None:
-    """Validate cross-field invariants for the resolved application config."""
-
-    api_base = config.inference.api_base.rstrip("/")
-    if not api_base.endswith("/v1"):
-        raise ValueError(
-            "Config value 'inference.api_base' must point at an OpenAI-compatible '/v1' endpoint."
-        )
-
-    for label, path in {
-        "paths.artifacts": config.paths.artifacts,
-        "paths.data": config.paths.data,
-        "paths.docint_home_dir": config.paths.docint_home_dir,
-        "paths.logs": config.paths.logs,
-        "paths.queries": config.paths.queries,
-        "paths.results": config.paths.results,
-        "paths.qdrant_sources": config.paths.qdrant_sources,
-        "paths.hf_hub_cache": config.paths.hf_hub_cache,
-    }.items():
-        if not path.is_absolute():
-            raise ValueError(f"Config value '{label}' must be an absolute path.")
-
-    if not config.hosts.backend_host.strip():
-        raise ValueError("Config value 'hosts.backend_host' must not be empty.")
-    if not config.hosts.backend_public_host.strip():
-        raise ValueError("Config value 'hosts.backend_public_host' must not be empty.")
-    if not config.hosts.qdrant_host.strip():
-        raise ValueError("Config value 'hosts.qdrant_host' must not be empty.")
-
-    if config.inference.inference_provider == "openai" and api_base.startswith(
-        "http://localhost"
-    ):
-        raise ValueError(
-            "OpenAI profiles should not point 'inference.api_base' at localhost."
-        )
-    if config.inference.inference_provider == "ollama" and "11434" not in api_base:
-        raise ValueError(
-            "Ollama profiles should point 'inference.api_base' at the Ollama server."
-        )
-    if config.inference.inference_provider == "vllm" and "vllm" not in api_base:
-        raise ValueError(
-            "vLLM profiles should point 'inference.api_base' at the vLLM router or server."
-        )
-
-
-def load_config(
-    *,
-    profile: str | None = None,
-    role: Role | None = None,
-) -> AppConfig:
-    """Load the canonical TOML-backed application config."""
-
-    document = _read_config_document()
-    resolved_profile = _resolve_profile(document, profile)
-    resolved_role = _resolve_role(role)
-    sections = _resolve_sections(document, resolved_profile, resolved_role)
-    paths = _build_path_config(sections["paths"])
-    config = AppConfig(
-        runtime=_build_runtime_config(
-            sections["runtime"],
-            profile=resolved_profile,
-            role=resolved_role,
-        ),
-        frontend=_build_frontend_config(sections["frontend"]),
-        graphrag=_build_graphrag_config(sections["graphrag"]),
-        hate_speech=_build_hate_speech_config(sections["hate_speech"]),
-        hosts=_build_host_config(sections["hosts"]),
-        image_ingestion=_build_image_ingestion_config(sections["image_ingestion"]),
-        ingestion=_build_ingestion_config(sections["ingestion"]),
-        inference=_build_inference_config(sections["inference"]),
-        models=_build_model_config(sections["models"]),
-        ner=_build_ner_config(sections["ner"]),
-        paths=paths,
-        pipeline=_build_pipeline_config(
-            sections["pipeline"], artifacts_dir=paths.artifacts
-        ),
-        response_validation=_build_response_validation_config(
-            sections["response_validation"]
-        ),
-        retrieval=_build_retrieval_config(sections["retrieval"]),
-        session=_build_session_config(sections["session"], paths=paths),
-        summary=_build_summary_config(sections["summary"]),
-        whisper=_build_whisper_config(sections["whisper"]),
-    )
-    _validate_config(config)
-    return config
-
-
-def _apply_runtime_env(config: AppConfig) -> None:
-    """Apply Hugging Face and related runtime env vars from the active config."""
-
-    if config.runtime.docint_offline:
-        os.environ["DOCINT_OFFLINE"] = "1"
-        os.environ["HF_HUB_OFFLINE"] = "1"
-        os.environ["TRANSFORMERS_OFFLINE"] = "1"
-        os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
-        os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-        os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-        if not os.getenv("FASTEMBED_CACHE_PATH"):
-            os.environ["FASTEMBED_CACHE_PATH"] = str(config.paths.hf_hub_cache)
-        logger.info("Set Hugging Face libraries to offline mode.")
-        return
-
-    os.environ["DOCINT_OFFLINE"] = "0"
-    os.environ["HF_HUB_OFFLINE"] = "0"
-    os.environ["TRANSFORMERS_OFFLINE"] = "0"
-    logger.info("Hugging Face libraries are in online mode.")
-
-
-def bootstrap_config(
-    *,
-    role: Role | None = None,
-    profile: str | None = None,
-) -> AppConfig:
-    """Load dotenv, resolve the active TOML profile, and apply runtime env vars."""
-
-    global _ACTIVE_PROFILE, _ACTIVE_ROLE
-
-    load_dotenv(override=False)
-    resolved_role = _resolve_role(role)
-    config = load_config(profile=profile, role=resolved_role)
-    _ACTIVE_PROFILE = config.runtime.profile
-    _ACTIVE_ROLE = config.runtime.role
-    _apply_runtime_env(config)
-    return config
-
-
-def set_offline_env() -> None:
-    """Backward-compatible runtime bootstrap wrapper."""
-
-    bootstrap_config(role=_ACTIVE_ROLE, profile=_ACTIVE_PROFILE)
-
-
-def set_online_env() -> None:
-    """Force online Hugging Face env vars for the current process."""
-
-    os.environ["DOCINT_OFFLINE"] = "0"
-    os.environ["HF_HUB_OFFLINE"] = "0"
-    os.environ["TRANSFORMERS_OFFLINE"] = "0"
-    logger.info("Forced Hugging Face libraries to online mode.")
-
-
-def resolve_hf_cache_path(
-    cache_dir: Path, repo_id: str, filename: str | None = None
-) -> Path | None:
-    """Resolve a Hugging Face cache path for a repo snapshot."""
-
-    model_dir_name = f"models--{repo_id.replace('/', '--')}"
-    model_cache_dir = cache_dir / model_dir_name
-    if not model_cache_dir.exists():
-        return None
-
-    ref_path = model_cache_dir / "refs" / "main"
-    if not ref_path.exists():
-        return None
-
-    commit_hash = ref_path.read_text().strip()
-    snapshot_path = model_cache_dir / "snapshots" / commit_hash
-    if filename:
-        file_path = snapshot_path / filename
-        return file_path if file_path.exists() else None
-    return snapshot_path if snapshot_path.exists() else None
-
-
-def _current_role(role: Role | None = None) -> Role:
-    """Resolve a wrapper role using bootstrap state when available."""
-
-    return _resolve_role(role or _ACTIVE_ROLE or "backend")
-
-
-def load_frontend_env(
-    default_collection_timeout: int = 120,
-    *,
-    role: Role | None = None,
-) -> FrontendConfig:
-    """Compatibility wrapper for frontend config."""
-
-    config = load_config(role=_current_role(role))
-    if config.frontend.collection_timeout == 0:
-        return FrontendConfig(collection_timeout=default_collection_timeout)
-    return config.frontend
-
-
-def load_graphrag_env(
-    default_enabled: bool = True,
-    default_neighbor_hops: int = 2,
-    default_top_k_nodes: int = 50,
-    default_min_edge_weight: int = 3,
-    default_max_neighbors: int = 6,
-    *,
-    role: Role | None = None,
-) -> GraphRAGConfig:
-    """Compatibility wrapper for GraphRAG config."""
-
-    _ = (
-        default_enabled,
-        default_neighbor_hops,
-        default_top_k_nodes,
-        default_min_edge_weight,
-        default_max_neighbors,
-    )
-    return load_config(role=_current_role(role)).graphrag
-
-
-def load_hate_speech_env(
-    default_enabled: bool = False,
-    default_max_chars: int = 2048,
-    default_max_workers: int = 1,
-    *,
-    role: Role | None = None,
-) -> HateSpeechConfig:
-    """Compatibility wrapper for hate-speech config."""
-
-    _ = (default_enabled, default_max_chars, default_max_workers)
-    return load_config(role=_current_role(role)).hate_speech
-
-
-def load_host_env(
-    default_backend_host: str = "http://localhost:8000",
-    default_qdrant_host: str = "http://localhost:6333",
-    default_cors_origins: str = "http://localhost:8501,http://127.0.0.1:8501",
-    *,
-    role: Role | None = None,
-) -> HostConfig:
-    """Compatibility wrapper for host config."""
-
-    _ = (default_backend_host, default_qdrant_host, default_cors_origins)
-    return load_config(role=_current_role(role)).hosts
-
-
-def load_image_ingestion_config(
-    default_image_ingestion_enabled: bool = True,
-    default_image_embedding_enabled: bool = True,
-    default_image_tagging_enabled: bool = True,
-    default_image_qdrant_collection: str = "{collection}_images",
-    default_image_qdrant_vector_name: str = "image-dense",
-    default_image_cache_by_hash: bool = True,
-    default_fail_on_embedding_error: bool = False,
-    default_fail_on_tagging_error: bool = False,
-    default_retrieve_top_k: int = 5,
-    default_tagging_max_image_dimension: int = 1024,
-    *,
-    role: Role | None = None,
-) -> ImageIngestionConfig:
-    """Compatibility wrapper for image-ingestion config."""
-
-    _ = (
-        default_image_ingestion_enabled,
-        default_image_embedding_enabled,
-        default_image_tagging_enabled,
-        default_image_qdrant_collection,
-        default_image_qdrant_vector_name,
-        default_image_cache_by_hash,
-        default_fail_on_embedding_error,
-        default_fail_on_tagging_error,
-        default_retrieve_top_k,
-        default_tagging_max_image_dimension,
-    )
-    return load_config(role=_current_role(role)).image_ingestion
-
-
 def load_ingestion_env(
     default_coarse_chunk_size: int = 8192,
     default_docling_accelerator_num_threads: int = 4,
@@ -1130,29 +353,137 @@ def load_ingestion_env(
     default_ingestion_batch_size: int = 50,
     default_sentence_splitter_chunk_overlap: int = 64,
     default_sentence_splitter_chunk_size: int = 1024,
-    default_supported_filetypes: list[str] | None = None,
-    *,
-    role: Role | None = None,
+    default_supported_filetypes: list[str] = [
+        ".avi",
+        ".csv",
+        ".docx",
+        ".flv",
+        ".gif",
+        ".jpeg",
+        ".jpg",
+        ".jsonl",
+        ".md",
+        ".mkv",
+        ".mov",
+        ".mpeg",
+        ".mpg",
+        ".mp3",
+        ".mp4",
+        ".m4a",
+        ".m4v",
+        ".ogg",
+        ".parquet",
+        ".pdf",
+        ".png",
+        ".tsv",
+        ".txt",
+        ".wav",
+        ".webm",
+        ".wmv",
+        ".xls",
+        ".xlsx",
+    ],
 ) -> IngestionConfig:
-    """Compatibility wrapper for ingestion config."""
+    """Loads ingestion configuration from environment variables or defaults.
 
-    _ = (
-        default_coarse_chunk_size,
-        default_docling_accelerator_num_threads,
-        default_docstore_batch_size,
-        default_ingest_benchmark_enabled,
-        default_docstore_max_retries,
-        default_docstore_retry_backoff_seconds,
-        default_docstore_retry_backoff_max_seconds,
-        default_fine_chunk_overlap,
-        default_fine_chunk_size,
-        default_hierarchical_chunking_enabled,
-        default_ingestion_batch_size,
-        default_sentence_splitter_chunk_overlap,
-        default_sentence_splitter_chunk_size,
-        default_supported_filetypes,
+    Returns:
+        IngestionConfig: Dataclass containing ingestion configuration.
+        - coarse_chunk_size (int): The coarse chunk size for hierarchical chunking.
+        - docling_accelerator_num_threads (int): The default number of threads for Docling accelerator.
+        - docstore_batch_size (int): The batch size for document store operations.
+        - ingest_benchmark_enabled (bool): Emit ingestion benchmark summary logs
+            for throughput and batch diagnostics.
+        - docstore_max_retries (int): Maximum retries for transient docstore/Qdrant
+            transport failures.
+        - docstore_retry_backoff_seconds (float): Initial retry backoff in seconds
+            for docstore/Qdrant operations.
+        - docstore_retry_backoff_max_seconds (float): Maximum retry backoff in
+            seconds for docstore/Qdrant operations.
+        - fine_chunk_overlap (int): The fine chunk overlap size for hierarchical chunking.
+        - fine_chunk_size (int): The fine chunk size for hierarchical chunking.
+        - hierarchical_chunking_enabled (bool): Whether hierarchical chunking is enabled.
+        - ingestion_batch_size (int): The batch size for ingestion.
+        - sentence_splitter_chunk_overlap (int): The chunk overlap size for sentence splitting.
+        - sentence_splitter_chunk_size (int): The chunk size for sentence splitting.
+        - supported_filetypes (list[str]): List of supported file extensions for ingestion.
+    """
+    return IngestionConfig(
+        coarse_chunk_size=int(
+            os.getenv("COARSE_CHUNK_SIZE", default_coarse_chunk_size)
+        ),
+        docling_accelerator_num_threads=int(
+            os.getenv(
+                "DOCLING_ACCELERATOR_NUM_THREADS",
+                default_docling_accelerator_num_threads,
+            )
+        ),
+        docstore_batch_size=int(
+            os.getenv("DOCSTORE_BATCH_SIZE", default_docstore_batch_size)
+        ),
+        ingest_benchmark_enabled=str(
+            os.getenv("INGEST_BENCHMARK_ENABLED", default_ingest_benchmark_enabled)
+        ).lower()
+        in {"true", "1", "yes"},
+        docstore_max_retries=max(
+            0,
+            int(os.getenv("DOCSTORE_MAX_RETRIES", default_docstore_max_retries)),
+        ),
+        docstore_retry_backoff_seconds=max(
+            0.0,
+            float(
+                os.getenv(
+                    "DOCSTORE_RETRY_BACKOFF_SECONDS",
+                    default_docstore_retry_backoff_seconds,
+                )
+            ),
+        ),
+        docstore_retry_backoff_max_seconds=max(
+            0.0,
+            float(
+                os.getenv(
+                    "DOCSTORE_RETRY_BACKOFF_MAX_SECONDS",
+                    default_docstore_retry_backoff_max_seconds,
+                )
+            ),
+        ),
+        fine_chunk_overlap=int(
+            os.getenv("FINE_CHUNK_OVERLAP", default_fine_chunk_overlap)
+        ),
+        fine_chunk_size=int(os.getenv("FINE_CHUNK_SIZE", default_fine_chunk_size)),
+        hierarchical_chunking_enabled=str(
+            os.getenv("HIERARCHICAL_CHUNKING_ENABLED", "true")
+        ).lower()
+        in {"true", "1", "yes"},
+        ingestion_batch_size=int(
+            os.getenv("INGESTION_BATCH_SIZE", default_ingestion_batch_size)
+        ),
+        sentence_splitter_chunk_overlap=int(
+            os.getenv(
+                "SENTENCE_SPLITTER_CHUNK_OVERLAP",
+                default_sentence_splitter_chunk_overlap,
+            )
+        ),
+        sentence_splitter_chunk_size=int(
+            os.getenv(
+                "SENTENCE_SPLITTER_CHUNK_SIZE", default_sentence_splitter_chunk_size
+            )
+        ),
+        supported_filetypes=default_supported_filetypes,
     )
-    return load_config(role=_current_role(role)).ingestion
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    """Dataclass for model configuration."""
+
+    embed_model: str
+    image_embed_model: str
+    ner_model: str
+    rerank_model: str
+    sparse_model: str
+    text_model: str
+    vision_model: str
+    whisper_model: str
 
 
 def load_model_env(
@@ -1164,35 +495,97 @@ def load_model_env(
     default_text_model: str = "gpt-oss:20b",
     default_vision_model: str = "qwen3.5:9b",
     default_whisper_model: str = "turbo",
-    *,
-    role: Role | None = None,
 ) -> ModelConfig:
-    """Compatibility wrapper for model config."""
+    """Loads model configuration from environment variables or defaults.
 
-    _ = (
-        default_embed_model,
-        default_image_embed_model,
-        default_ner_model,
-        default_rerank_model,
-        default_sparse_model,
-        default_text_model,
-        default_vision_model,
-        default_whisper_model,
+    Args:
+        default_embed_model(str): Default embedding model identifier for Ollama-compatible embeddings.
+        default_image_embed_model (str): Default image embedding model identifier.
+        default_ner_model (str): Default NER model identifier.
+        default_rerank_model (str): Default reranker model identifier.
+        default_sparse_model (str): Default sparse model identifier.
+        default_text_model_str (str): Default text model identifier.
+        default_vision_model_str (str): Default vision model identifier.
+        default_whisper_model (str): Default Whisper model identifier.
+
+    Returns:
+        ModelConfig: Dataclass containing model configuration.
+        - embed_model (str): The embedding model identifier for Ollama-compatible embeddings.
+        - image_embed_model (str): The image embedding model identifier.
+        - ner_model (str): The NER model identifier.
+        - rerank_model (str): The reranker model identifier.
+        - sparse_model (str): The sparse model identifier.
+        - text_model (str): The text model identifier.
+        - vision_model (str): The vision model identifier.
+        - whisper_model (str): The Whisper model identifier.
+    """
+    return ModelConfig(
+        embed_model=os.getenv("EMBED_MODEL", default_embed_model),
+        image_embed_model=os.getenv("IMAGE_EMBED_MODEL", default_image_embed_model),
+        ner_model=os.getenv("NER_MODEL", default_ner_model),
+        rerank_model=os.getenv("RERANK_MODEL", default_rerank_model),
+        sparse_model=os.getenv("SPARSE_MODEL", default_sparse_model),
+        text_model=os.getenv("TEXT_MODEL", default_text_model),
+        vision_model=os.getenv("VISION_MODEL", default_vision_model),
+        whisper_model=os.getenv("WHISPER_MODEL", default_whisper_model),
     )
-    return load_config(role=_current_role(role)).models
+
+
+@dataclass(frozen=True)
+class NERConfig:
+    """Dataclass for information extraction configuration."""
+
+    enabled: bool
+    max_chars: int
+    max_workers: int
 
 
 def load_ner_env(
     default_enabled: bool = True,
     default_max_chars: int = 1024,
     default_max_workers: int = 4,
-    *,
-    role: Role | None = None,
 ) -> NERConfig:
-    """Compatibility wrapper for NER config."""
+    """Loads information extraction configuration from environment variables or defaults.
 
-    _ = (default_enabled, default_max_chars, default_max_workers)
-    return load_config(role=_current_role(role)).ner
+    Args:
+        default_enabled (bool): Default value to enable NER extraction. Set to True to enable by default.
+        default_max_chars (int): Default maximum characters for a processed chunk for NER extraction.
+        default_max_workers (int): Default maximum worker threads for NER extraction.
+
+    Returns:
+        NERConfig: Dataclass containing NER configuration.
+        - enabled (bool): Whether to run entity/relation extraction during ingestion.
+        - max_chars (int): Maximum characters from each node to send to the extractor.
+        - max_workers (int): Maximum number of worker threads for NER extraction.
+
+    Raises:
+        ValueError: If an unsupported NER engine is specified.
+    """
+    return NERConfig(
+        enabled=str(os.getenv("NER_ENABLED", default_enabled)).lower()
+        in {"true", "1", "yes"},
+        max_chars=int(os.getenv("NER_MAX_CHARS", default_max_chars)),
+        max_workers=int(os.getenv("NER_MAX_WORKERS", default_max_workers)),
+    )
+
+
+@dataclass(frozen=True)
+class OpenAIConfig:
+    """Dataclass for OpenAI-compatible API configuration."""
+
+    api_base: str
+    api_key: str
+    ctx_window: int
+    dimensions: int | None
+    max_retries: int
+    inference_provider: str
+    reuse_client: bool
+    seed: int
+    temperature: float
+    thinking_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+    thinking_enabled: bool
+    timeout: float
+    top_p: float
 
 
 def load_openai_env(
@@ -1211,38 +604,188 @@ def load_openai_env(
     default_thinking_enabled: bool = False,
     default_timeout: float = 300.0,
     default_top_p: float = 0.1,
-    *,
-    role: Role | None = None,
 ) -> OpenAIConfig:
-    """Compatibility wrapper for inference config."""
+    """Loads OpenAI configuration from environment variables or defaults.
 
-    _ = (
-        default_api_base,
-        default_api_key,
-        default_ctx_window,
-        default_dimensions,
-        default_max_retries,
-        default_inference_provider,
-        default_reuse_client,
-        default_seed,
-        default_temperature,
-        default_thinking_effort,
-        default_thinking_enabled,
-        default_timeout,
-        default_top_p,
+    Args:
+        default_api_base (str): Default OpenAI API base URL.
+        default_api_key (str): Default OpenAI API key.
+        default_ctx_window (int): Default context window size for models that support it.
+        default_dimensions (int | None): Optional embedding dimensions override for
+            models that support reduced-dimension output.
+        default_max_retries (int): Default number of retries.
+        default_inference_provider: Default inference server type (e.g. "ollama", "openai", "vllm"). Default is "ollama".
+        default_reuse_client (bool): Whether to reuse the OpenAI client across calls. Default is False.
+        default_seed (int): Default random seed for reproducibility.
+        default_temperature (float): Default temperature for text generation.
+        default_thinking_effort: Default reasoning effort to request when
+            thinking is enabled.
+        default_thinking_enabled: Whether OpenAI reasoning/thinking is enabled.
+        default_timeout (float): Default timeout in seconds.
+        default_top_p (float): Default top_p for nucleus sampling.
+
+    Returns:
+        OpenAIConfig: Dataclass containing OpenAI configuration.
+        - api_base (str): The OpenAI API base URL.
+        - api_key (str): The OpenAI API key.
+        - ctx_window (int): The context window size for models that support it.
+        - dimensions (int | None): Optional embedding dimensions override for
+            embedding models.
+        - max_retries (int): The number of retries for API calls.
+        - inference_provider (Literal["ollama", "openai", "vllm"]): The inference server type.
+        - reuse_client (bool): Whether to reuse the OpenAI client across calls.
+        - seed (int): Random seed for reproducibility.
+        - temperature (float): Temperature for text generation.
+        - thinking_effort (Literal["none", "minimal", "low", "medium", "high", "xhigh"]):
+          Reasoning effort requested for OpenAI chat completions when thinking is enabled.
+        - thinking_enabled (bool): Whether OpenAI reasoning/thinking is enabled.
+        - timeout (float): Timeout in seconds for API calls.
+        - top_p (float): Top_p for nucleus sampling.
+
+    Raises:
+        ValueError: If an unsupported inference server is specified.
+    """
+    inference_provider = os.getenv(
+        "INFERENCE_PROVIDER", default_inference_provider
+    ).lower()
+    if inference_provider not in {
+        "ollama",
+        "openai",
+        "vllm",
+    }:
+        raise ValueError(
+            f"Unsupported inference server: {inference_provider}. "
+            f"Supported options are: 'ollama', 'openai', 'vllm'."
+        )
+
+    raw_dimensions = os.getenv("OPENAI_DIMENSIONS")
+    dimensions = (
+        default_dimensions
+        if raw_dimensions is None or not raw_dimensions.strip()
+        else int(raw_dimensions)
     )
-    return load_config(role=_current_role(role)).inference
+
+    thinking_effort = os.getenv(
+        "OPENAI_THINKING_EFFORT", default_thinking_effort
+    ).lower()
+    allowed_thinking_efforts = {
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    }
+    if thinking_effort not in allowed_thinking_efforts:
+        thinking_effort = default_thinking_effort
+
+    return OpenAIConfig(
+        api_base=os.getenv("OPENAI_API_BASE", default_api_base),
+        api_key=os.getenv("OPENAI_API_KEY", default_api_key),
+        ctx_window=int(os.getenv("OPENAI_CTX_WINDOW", default_ctx_window)),
+        dimensions=dimensions,
+        max_retries=int(os.getenv("OPENAI_MAX_RETRIES", default_max_retries)),
+        inference_provider=inference_provider,
+        reuse_client=str(os.getenv("OPENAI_REUSE_CLIENT", default_reuse_client)).lower()
+        in {"true", "1", "yes"},
+        seed=int(os.getenv("OPENAI_SEED", default_seed)),
+        temperature=float(os.getenv("OPENAI_TEMPERATURE", default_temperature)),
+        thinking_effort=cast(
+            Literal["none", "minimal", "low", "medium", "high", "xhigh"],
+            thinking_effort,
+        ),
+        thinking_enabled=str(
+            os.getenv("OPENAI_ENABLE_THINKING", default_thinking_enabled)
+        ).lower()
+        in {"true", "1", "yes"},
+        timeout=float(os.getenv("OPENAI_TIMEOUT", default_timeout)),
+        top_p=float(os.getenv("OPENAI_TOP_P", default_top_p)),
+    )
 
 
-def load_path_env(*, role: Role | None = None) -> PathConfig:
-    """Compatibility wrapper for path config."""
+@dataclass(frozen=True)
+class PathConfig:
+    """Dataclass for path configuration."""
 
-    return load_config(role=_current_role(role)).paths
+    artifacts: Path
+    data: Path
+    docint_home_dir: Path
+    logs: Path
+    queries: Path
+    results: Path
+    prompts: Path
+    qdrant_sources: Path
+    hf_hub_cache: Path
+
+
+def load_path_env() -> PathConfig:
+    """Loads path configuration from environment variables or defaults.
+
+    Returns:
+        PathConfig: Dataclass containing path configuration.
+        - artifacts (Path): Root directory for pipeline processing artifacts.
+        - docint_home_dir (Path): The root home directory for docint, used as the base for other default paths. Defaults to ~/docint.
+        - data (Path): Path to the data directory.
+        - logs (Path): Path to the logs file.
+        - queries (Path): Path to the queries file.
+        - results (Path): Path to the results directory.
+        - prompts (Path): Path to the prompts directory.
+        - qdrant_sources (Path): Path to the Qdrant sources directory.
+        - hf_hub_cache (Path): Path to the Hugging Face Hub cache directory.
+    """
+    home_dir: Path = Path.home()
+    docint_home_dir: Path = home_dir / "docint"
+    default_data_dir: Path = docint_home_dir / "data"
+    default_query_dir: Path = docint_home_dir / "queries.txt"
+    default_results_dir: Path = docint_home_dir / "results"
+    default_model_cache: Path = home_dir / ".cache"
+    default_hf_hub_cache: Path = default_model_cache / "huggingface" / "hub"
+
+    utils_dir: Path = Path(__file__).parent.resolve()
+    default_prompts_dir: Path = utils_dir / "prompts"
+    project_root: Path = utils_dir.parents[1]
+    default_log_dir = project_root / ".logs" / "docint.log"
+
+    default_qdrant_sources: Path = docint_home_dir / "qdrant_sources"
+    default_artifacts_dir: Path = docint_home_dir / "artifacts"
+
+    return PathConfig(
+        artifacts=Path(
+            os.getenv("PIPELINE_ARTIFACTS_DIR", default_artifacts_dir)
+        ).expanduser(),
+        data=Path(os.getenv("DATA_PATH", default_data_dir)).expanduser(),
+        docint_home_dir=docint_home_dir,
+        logs=Path(os.getenv("LOG_PATH", default_log_dir)).expanduser(),
+        queries=Path(os.getenv("QUERIES_PATH", default_query_dir)).expanduser(),
+        results=Path(os.getenv("RESULTS_PATH", default_results_dir)).expanduser(),
+        prompts=default_prompts_dir,
+        qdrant_sources=Path(
+            os.getenv("QDRANT_SRC_DIR", default_qdrant_sources)
+        ).expanduser(),
+        hf_hub_cache=Path(os.getenv("HF_HUB_CACHE", default_hf_hub_cache)).expanduser(),
+    )
+
+
+@dataclass(frozen=True)
+class PipelineConfig:
+    """Configuration for the document processing pipeline."""
+
+    text_coverage_threshold: float
+    pipeline_version: str
+    artifacts_dir: str
+    max_retries: int
+    force_reprocess: bool
+    max_workers: int
+    enable_vision_ocr: bool
+    vision_ocr_timeout: float
+    vision_ocr_max_retries: int
+    vision_ocr_max_image_dimension: int
+    vision_ocr_max_tokens: int
 
 
 def load_pipeline_config(
     default_text_coverage_threshold: float = 0.01,
-    default_pipeline_version: str = DEFAULT_PIPELINE_VERSION,
+    default_pipeline_version: str = "1.0.0",
     default_artifacts_dir: str | None = None,
     default_max_retries: int = 2,
     default_force_reprocess: bool = False,
@@ -1252,48 +795,109 @@ def load_pipeline_config(
     default_vision_ocr_max_retries: int = 1,
     default_vision_ocr_max_image_dimension: int = 1024,
     default_vision_ocr_max_tokens: int = 4096,
-    *,
-    role: Role | None = None,
 ) -> PipelineConfig:
-    """Compatibility wrapper for pipeline config."""
+    """Build a ``PipelineConfig`` from environment variables with sensible defaults.
 
-    _ = (
-        default_text_coverage_threshold,
-        default_max_retries,
-        default_force_reprocess,
-        default_max_workers,
-        default_enable_vision_ocr,
-        default_vision_ocr_timeout,
-        default_vision_ocr_max_retries,
-        default_vision_ocr_max_image_dimension,
-        default_vision_ocr_max_tokens,
+    Args:
+        default_text_coverage_threshold: Default characters-per-area threshold for OCR classification.
+        default_pipeline_version: Default pipeline version string.
+        default_artifacts_dir: Default root directory for artifacts. If None, uses the value from ``load_path_env().artifacts``.
+        default_max_retries: Default maximum retry attempts per page stage.
+        default_force_reprocess: Default flag to force reprocessing of pages.
+        default_max_workers: Default maximum number of parallel workers for document processing.
+        default_enable_vision_ocr: Default flag to enable vision OCR fallback for scanned pages.
+        default_vision_ocr_timeout: Default per-request timeout in seconds for vision OCR API calls.
+        default_vision_ocr_max_retries: Default maximum retries for a single vision OCR API call.
+        default_vision_ocr_max_image_dimension: Default maximum pixel dimension for images sent to the vision OCR endpoint.
+        default_vision_ocr_max_tokens: Default maximum number of tokens the vision LLM may generate per OCR request.
+
+    Returns:
+        A fully-initialised ``PipelineConfig``.
+        - text_coverage_threshold (float): Characters-per-area threshold for OCR classification.
+        - pipeline_version (str): Semver string identifying the pipeline logic version.
+        - artifacts_dir (str): Root directory for artifact output.
+        - max_retries (int): Maximum retry attempts per stage on a given page.
+        - force_reprocess (bool): When True, ignore existing artifacts and reprocess.
+        - max_workers (int): Maximum parallel workers for document-level processing.
+        - enable_vision_ocr (bool): When True, use the vision LLM as a fallback OCR engine for scanned pages that have no extractable text layer.
+        - vision_ocr_timeout (float): Per-request timeout in seconds for vision OCR API calls (separate from the global ``OPENAI_TIMEOUT``).
+        - vision_ocr_max_retries (int): Maximum retries for a single vision OCR API call.
+        - vision_ocr_max_image_dimension (int): Maximum pixel dimension (width or height) for images sent to the vision OCR endpoint.  Larger renders are down-scaled proportionally before encoding.
+        - vision_ocr_max_tokens (int): Maximum number of tokens the vision LLM may generate per OCR request.  Keeps response time bounded.
+    """
+    pipeline_version = os.getenv("PIPELINE_VERSION", default_pipeline_version).strip()
+    if not pipeline_version:
+        pipeline_version = default_pipeline_version
+
+    return PipelineConfig(
+        text_coverage_threshold=float(
+            os.getenv(
+                "PIPELINE_TEXT_COVERAGE_THRESHOLD", default_text_coverage_threshold
+            )
+        ),
+        pipeline_version=pipeline_version,
+        artifacts_dir=str(load_path_env().artifacts),
+        max_retries=int(os.getenv("PIPELINE_MAX_RETRIES", default_max_retries)),
+        force_reprocess=os.getenv("PIPELINE_FORCE_REPROCESS", "false").lower()
+        in {"true", "1", "yes"},
+        max_workers=int(os.getenv("PIPELINE_MAX_WORKERS", default_max_workers)),
+        enable_vision_ocr=os.getenv("PIPELINE_ENABLE_VISION_OCR", "true").lower()
+        in {"true", "1", "yes"},
+        vision_ocr_timeout=float(
+            os.getenv("PIPELINE_VISION_OCR_TIMEOUT", default_vision_ocr_timeout)
+        ),
+        vision_ocr_max_retries=int(
+            os.getenv("PIPELINE_VISION_OCR_MAX_RETRIES", default_vision_ocr_max_retries)
+        ),
+        vision_ocr_max_image_dimension=int(
+            os.getenv(
+                "PIPELINE_VISION_OCR_MAX_IMAGE_DIM",
+                default_vision_ocr_max_image_dimension,
+            )
+        ),
+        vision_ocr_max_tokens=int(
+            os.getenv("PIPELINE_VISION_OCR_MAX_TOKENS", default_vision_ocr_max_tokens)
+        ),
     )
-    resolved_role = _current_role(role)
-    document = _read_config_document()
-    resolved_profile = _resolve_profile(document, None)
-    sections = _resolve_sections(document, resolved_profile, resolved_role)
-    paths = _build_path_config(sections["paths"])
-    artifacts_dir = (
-        Path(default_artifacts_dir).expanduser()
-        if default_artifacts_dir is not None
-        else paths.artifacts
-    )
-    return _build_pipeline_config(
-        sections["pipeline"],
-        artifacts_dir=artifacts_dir,
-        default_pipeline_version=default_pipeline_version,
-    )
+
+
+@dataclass(frozen=True)
+class ResponseValidationConfig:
+    """Dataclass for response validation configuration."""
+
+    enabled: bool
 
 
 def load_response_validation_env(
     default_enabled: bool = True,
-    *,
-    role: Role | None = None,
 ) -> ResponseValidationConfig:
-    """Compatibility wrapper for response-validation config."""
+    """Load response-validation configuration from environment variables.
 
-    _ = default_enabled
-    return load_config(role=_current_role(role)).response_validation
+    Args:
+        default_enabled (bool): Whether response validation is enabled by default.
+
+    Returns:
+        ResponseValidationConfig: Parsed response-validation settings.
+        - enabled (bool): Whether to run response validation on generated answers.
+    """
+    return ResponseValidationConfig(
+        enabled=str(os.getenv("RESPONSE_VALIDATION_ENABLED", default_enabled)).lower()
+        in {"true", "1", "yes"}
+    )
+
+
+@dataclass(frozen=True)
+class RetrievalConfig:
+    """Dataclass for RAG (Retrieval-Augmented Generation) configuration."""
+
+    rerank_use_fp16: bool
+    retrieve_top_k: int
+    chat_response_mode: Literal["auto", "compact", "refine"]
+    vector_store_query_mode: Literal["auto", "default", "sparse", "hybrid", "mmr"]
+    hybrid_alpha: float
+    sparse_top_k: int
+    hybrid_top_k: int
+    parent_context_enabled: bool
 
 
 def load_retrieval_env(
@@ -1307,33 +911,144 @@ def load_retrieval_env(
     default_sparse_top_k: int = 20,
     default_hybrid_top_k: int = 20,
     default_parent_context_enabled: bool = True,
-    *,
-    role: Role | None = None,
 ) -> RetrievalConfig:
-    """Compatibility wrapper for retrieval config."""
+    """Loads retrieval configuration from environment variables or defaults.
 
-    _ = (
-        default_rerank_use_fp16,
-        default_retrieve_top_k,
-        default_chat_response_mode,
-        default_vector_store_query_mode,
-        default_hybrid_alpha,
-        default_sparse_top_k,
-        default_hybrid_top_k,
-        default_parent_context_enabled,
+    Args:
+        default_rerank_use_fp16 (bool): Default flag to use FP16 for reranker model. Default is False.
+        default_retrieve_top_k (int): Default number of top documents to retrieve.
+        default_chat_response_mode (Literal["auto", "compact", "refine"]): Default response synthesizer mode for chat/query answers. Default is "auto".
+        default_vector_store_query_mode (Literal["auto", "default", "sparse", "hybrid", "mmr"]): Default retrieval mode to use for vector store queries. Default is "auto".
+        default_hybrid_alpha (float): Default dense-vs-sparse fusion weight for hybrid search. Value should be in [0.0, 1.0]. Default is 0.5.
+        default_sparse_top_k (int): Default candidate depth for sparse retrieval in hybrid/sparse modes. Default is 20.
+        default_hybrid_top_k (int): Default final candidate depth after dense/sparse fusion. Default is 20.
+        default_parent_context_enabled (bool): Default flag to enable hierarchical parent context retrieval. Default is True.
+
+    Returns:
+        RetrievalConfig: Dataclass containing retrieval configuration.
+        - rerank_use_fp16 (bool): Whether to use FP16 for the reranker model.
+        - retrieve_top_k (int): The number of top documents to retrieve for RAG
+        - chat_response_mode (Literal["auto", "compact", "refine"]): The
+          response synthesizer mode for chat/query answers.
+                - vector_store_query_mode (Literal["auto", "default", "sparse", "hybrid", "mmr"]):
+                    Retrieval mode to use for vector store queries.
+                - hybrid_alpha (float): Dense-vs-sparse fusion weight for hybrid search.
+                - sparse_top_k (int): Candidate depth for sparse retrieval in hybrid/sparse modes.
+                - hybrid_top_k (int): Final candidate depth after dense/sparse fusion.
+                - parent_context_enabled (bool): Whether fine-grained matches should expand
+                    to their hierarchical parent context when available.
+    """
+    raw_mode = (
+        str(os.getenv("CHAT_RESPONSE_MODE", default_chat_response_mode)).strip().lower()
     )
-    return load_config(role=_current_role(role)).retrieval
+    chat_response_mode: Literal["auto", "compact", "refine"] = "auto"
+    if raw_mode in {"compact", "refine"}:
+        chat_response_mode = cast(Literal["compact", "refine"], raw_mode)
+    elif raw_mode == "auto":
+        chat_response_mode = "auto"
+
+    raw_query_mode = (
+        str(os.getenv("RETRIEVAL_VECTOR_QUERY_MODE", default_vector_store_query_mode))
+        .strip()
+        .lower()
+    )
+    vector_store_query_mode: Literal["auto", "default", "sparse", "hybrid", "mmr"] = (
+        "auto"
+    )
+    if raw_query_mode in {"default", "sparse", "hybrid", "mmr"}:
+        vector_store_query_mode = cast(
+            Literal["default", "sparse", "hybrid", "mmr"],
+            raw_query_mode,
+        )
+    elif raw_query_mode == "auto":
+        vector_store_query_mode = "auto"
+
+    return RetrievalConfig(
+        rerank_use_fp16=str(
+            os.getenv("RERANK_USE_FP16", default_rerank_use_fp16)
+        ).lower()
+        in {"true", "1", "yes"},
+        retrieve_top_k=int(os.getenv("RETRIEVE_TOP_K", default_retrieve_top_k)),
+        chat_response_mode=chat_response_mode,
+        vector_store_query_mode=vector_store_query_mode,
+        hybrid_alpha=min(
+            1.0,
+            max(
+                0.0,
+                float(os.getenv("RETRIEVAL_HYBRID_ALPHA", default_hybrid_alpha)),
+            ),
+        ),
+        sparse_top_k=max(
+            1,
+            int(os.getenv("RETRIEVAL_SPARSE_TOP_K", default_sparse_top_k)),
+        ),
+        hybrid_top_k=max(
+            1,
+            int(os.getenv("RETRIEVAL_HYBRID_TOP_K", default_hybrid_top_k)),
+        ),
+        parent_context_enabled=str(
+            os.getenv(
+                "PARENT_CONTEXT_RETRIEVAL_ENABLED",
+                default_parent_context_enabled,
+            )
+        ).lower()
+        in {"true", "1", "yes"},
+    )
+
+
+@dataclass(frozen=True)
+class SessionConfig:
+    """Dataclass for session configuration."""
+
+    session_store: str
 
 
 def load_session_env(
     default_session_store: str | None = None,
-    *,
-    role: Role | None = None,
 ) -> SessionConfig:
-    """Compatibility wrapper for session config."""
+    """Loads session configuration from environment variables or defaults.
 
-    _ = default_session_store
-    return load_config(role=_current_role(role)).session
+    Args:
+        default_session_store (str): Default session store configuration (e.g. database URL or file path).
+            Default is ``sqlite:///{Path.home() / "docint" / "sessions.db"}``.
+            When ``DATA_PATH`` is explicitly configured, the default becomes
+            ``sqlite:///{Path(DATA_PATH) / "sessions.db"}`` so Docker deployments
+            persist sessions inside the mounted data directory unless overridden.
+
+    Returns:
+        SessionConfig: Dataclass containing session configuration.
+        - session_store (str): The session store configuration. Default is
+          ``sqlite:///{Path.home() / "docint" / "sessions.db"}`` locally, or
+          ``sqlite:///{Path(DATA_PATH) / "sessions.db"}`` when ``DATA_PATH`` is
+          explicitly configured.
+    """
+    session_store_override = os.getenv("SESSION_STORE")
+    if session_store_override:
+        return SessionConfig(session_store=session_store_override)
+
+    if default_session_store is None:
+        data_path_override = os.getenv("DATA_PATH")
+        if data_path_override:
+            data_dir = Path(data_path_override).expanduser()
+            default_session_store = f"sqlite:///{data_dir / 'sessions.db'}"
+        else:
+            docint_home_dir = load_path_env().docint_home_dir
+            default_session_store = f"sqlite:///{docint_home_dir / 'sessions.db'}"
+
+    return SessionConfig(session_store=default_session_store)
+
+
+@dataclass(frozen=True)
+class SummaryConfig:
+    """Dataclass for collection summarization precision settings."""
+
+    coverage_target: float
+    max_docs: int
+    per_doc_top_k: int
+    final_source_cap: int
+    social_chunking_enabled: bool
+    social_candidate_pool: int
+    social_diversity_limit: int
 
 
 def load_summary_env(
@@ -1344,33 +1059,126 @@ def load_summary_env(
     default_social_chunking_enabled: bool = True,
     default_social_candidate_pool: int = 48,
     default_social_diversity_limit: int = 2,
-    *,
-    role: Role | None = None,
 ) -> SummaryConfig:
-    """Compatibility wrapper for summary config."""
+    """Load collection summary precision settings from environment variables.
 
-    _ = (
-        default_coverage_target,
-        default_max_docs,
-        default_per_doc_top_k,
-        default_final_source_cap,
-        default_social_chunking_enabled,
-        default_social_candidate_pool,
-        default_social_diversity_limit,
+    Args:
+        default_coverage_target (float): Target minimum document coverage ratio.
+        default_max_docs (int): Maximum number of documents sampled for summary.
+        default_per_doc_top_k (int): Maximum evidence chunks retrieved per document.
+        default_final_source_cap (int): Maximum number of merged summary sources.
+
+    Returns:
+        SummaryConfig: Parsed summary precision settings.
+        - coverage_target (float): Target minimum document coverage ratio for summaries. Value is clamped to [0.0, 1.0].
+        - max_docs (int): Maximum number of documents to sample for summarization.
+        - per_doc_top_k (int): Maximum number of evidence chunks to retrieve per document.
+        - final_source_cap (int): Maximum number of merged sources to include in the final summary answer to keep it concise and focused.
+        - social_chunking_enabled (bool): Whether row-heavy social/table
+          collections should use chunk/post-level summarization.
+        - social_candidate_pool (int): Candidate retrieval depth for social/table
+          collection summaries.
+        - social_diversity_limit (int): Maximum number of sources retained per
+          diversity bucket during social/table collection summaries.
+    """
+    raw_target = float(os.getenv("SUMMARY_COVERAGE_TARGET", default_coverage_target))
+    target = min(1.0, max(0.0, raw_target))
+    return SummaryConfig(
+        coverage_target=target,
+        max_docs=max(1, int(os.getenv("SUMMARY_MAX_DOCS", default_max_docs))),
+        per_doc_top_k=max(
+            1, int(os.getenv("SUMMARY_PER_DOC_TOP_K", default_per_doc_top_k))
+        ),
+        final_source_cap=max(
+            1, int(os.getenv("SUMMARY_FINAL_SOURCE_CAP", default_final_source_cap))
+        ),
+        social_chunking_enabled=str(
+            os.getenv(
+                "SUMMARY_SOCIAL_CHUNKING_ENABLED",
+                default_social_chunking_enabled,
+            )
+        ).lower()
+        in {"true", "1", "yes"},
+        social_candidate_pool=max(
+            1,
+            int(
+                os.getenv(
+                    "SUMMARY_SOCIAL_CANDIDATE_POOL",
+                    default_social_candidate_pool,
+                )
+            ),
+        ),
+        social_diversity_limit=max(
+            1,
+            int(
+                os.getenv(
+                    "SUMMARY_SOCIAL_DIVERSITY_LIMIT",
+                    default_social_diversity_limit,
+                )
+            ),
+        ),
     )
-    return load_config(role=_current_role(role)).summary
+
+
+@dataclass(frozen=True)
+class WhisperConfig:
+    """Dataclass for Whisper runtime configuration."""
+
+    max_workers: int
+    task: Literal["transcribe", "translate"]
 
 
 def load_whisper_env(
     default_max_workers: int = 1,
     default_task: Literal["transcribe", "translate"] = "transcribe",
-    *,
-    role: Role | None = None,
 ) -> WhisperConfig:
-    """Compatibility wrapper for whisper config."""
+    """Load Whisper runtime settings from environment variables.
 
-    _ = (default_max_workers, default_task)
-    return load_config(role=_current_role(role)).whisper
+    Args:
+        default_max_workers: Default number of file-level Whisper workers.
+        default_task: Default Whisper task selector.
 
+    Returns:
+        WhisperConfig: Parsed Whisper runtime configuration.
 
-PIPELINE_VERSION = DEFAULT_PIPELINE_VERSION
+    Raises:
+        ValueError: If an invalid value is provided for WHISPER_TASK or WHISPER_MAX_WORKERS.
+    """
+
+    raw_max_workers = os.getenv("WHISPER_MAX_WORKERS")
+    if raw_max_workers is None:
+        max_workers = default_max_workers
+    else:
+        try:
+            parsed_max_workers = int(raw_max_workers)
+        except ValueError:
+            logger.warning(
+                "Invalid WHISPER_MAX_WORKERS value '{}'; falling back to {}.",
+                raw_max_workers,
+                default_max_workers,
+            )
+            parsed_max_workers = default_max_workers
+
+        if parsed_max_workers < 1:
+            logger.warning(
+                "WHISPER_MAX_WORKERS must be >= 1; received '{}'. Falling back to {}.",
+                raw_max_workers,
+                default_max_workers,
+            )
+            parsed_max_workers = default_max_workers
+        max_workers = parsed_max_workers
+
+    raw_task = os.getenv("WHISPER_TASK", default_task)
+    task = raw_task.strip().lower()
+    if task not in {"transcribe", "translate"}:
+        logger.warning(
+            "Invalid WHISPER_TASK value '{}'; falling back to '{}'.",
+            raw_task,
+            default_task,
+        )
+        task = default_task
+
+    return WhisperConfig(
+        max_workers=max_workers,
+        task=cast(Literal["transcribe", "translate"], task),
+    )
