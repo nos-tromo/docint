@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from docint.core.state.base import _make_session_maker
 from docint.core.state.session_manager import SessionManager
 from docint.core.state.base import Base
 
@@ -297,6 +298,21 @@ def test_stream_chat_includes_final_response_when_no_tokens(
             "retrieval_mode": "rewrite_compact",
         }
     ]
+
+
+def test_make_session_maker_creates_parent_dir(tmp_path: Path) -> None:
+    """File-backed SQLite session stores should create missing parent dirs.
+
+    Args:
+        tmp_path: Temporary directory provided by pytest.
+    """
+    db_path = tmp_path / "nested" / "state" / "sessions.db"
+
+    session_maker = _make_session_maker(f"sqlite:///{db_path}")
+
+    assert db_path.parent.exists()
+    session = session_maker()
+    session.close()
 
 
 def test_chat_rewrites_retrieval_query_without_prefixing_session_context(

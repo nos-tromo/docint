@@ -23,9 +23,9 @@ This is a proof of concept document intelligence platform offering the following
 4. **Integration with LLMs and Models**
 
    - Utilize large language models (LLMs) and other AI models for advanced processing tasks.
-   - **Flexible Backend**: Supports OpenAI-compatible APIs (OpenAI, Ollama, llama.cpp, vLLM, etc.) for text and vision tasks.
-   - **Provider-Agnostic Architecture**: The system is designed to be backend-agnostic. It uses Ollama for local inference by default, and can switch to any OpenAI-compatible API (`llama.cpp`, vLLM, DeepSeek, etc.) by changing environment variables.
-   - **Performance & Decoupling**: Inference runs in a dedicated container (`ollama-server` by default; `llamacpp-server` for llama.cpp profiles), ensuring the application logic remains responsive even during heavy model computations.
+   - **Flexible Backend**: Supports OpenAI-compatible APIs (OpenAI, Ollama, vLLM, and similar services) for text and vision tasks.
+   - **Provider-Agnostic Architecture**: The system is designed to be backend-agnostic. It uses Ollama for local inference by default, and can switch to any OpenAI-compatible API (vLLM, DeepSeek, LM Studio, etc.) by changing environment variables.
+   - **Performance & Decoupling**: Inference runs in a dedicated container (`ollama-server` by default, or the bundled vLLM router for CUDA profiles), ensuring the application logic remains responsive even during heavy model computations.
 
 5. **Extensibility**
 
@@ -43,9 +43,8 @@ The platform is provider-agnostic and works with any OpenAI-compatible inference
 | Backend | Description | Link |
 |---------|-------------|------|
 | **Ollama** | Easy-to-use local model runner with built-in model management | [ollama/ollama](https://github.com/ollama/ollama) |
-| **llama.cpp** | High-performance local inference for GGUF models (bundled in Docker profiles) | [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) |
 | **OpenAI API** | Cloud-hosted models (GPT-4o, etc.) via the official API | [openai/openai-python](https://github.com/openai/openai-python) |
-| **vLLM** *(planned)* | High-throughput serving engine with PagedAttention | [vllm-project/vllm](https://github.com/vllm-project/vllm) |
+| **vLLM** | High-throughput OpenAI-compatible serving for CUDA deployments | [vllm-project/vllm](https://github.com/vllm-project/vllm) |
 
 Any other server exposing an OpenAI-compatible `/v1/chat/completions` endpoint (e.g., [LocalAI](https://github.com/mudler/LocalAI), [LM Studio](https://github.com/lmstudio-ai)) can also be used by setting the `OPENAI_API_BASE` environment variable.
 
@@ -79,38 +78,65 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    cp .env.docker.example .env.docker
    ```
 
-3. **Choose a Profile**
+   If the machine must reach the internet through an HTTP/HTTPS proxy, add
+   `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` to `.env.docker`. Include the
+   internal Docker hostnames in `NO_PROXY` so backend-to-Qdrant and backend-to-
+   inference traffic stays inside the Docker network. A good starting point is:
 
-   > `llama.cpp` images are built for **amd64** architecture systems. Consider using Ollama for local inference when running the
-   > app via an arm64 machine.
+   ```dotenv
+   HTTP_PROXY=http://proxy.example.com:3128
+   HTTPS_PROXY=http://proxy.example.com:3128
+   NO_PROXY=localhost,127.0.0.1,qdrant,ollama-server,vllm-router,vllm-chat,vllm-embed,vllm-rerank,backend-net
+   ```
+
+   If any tooling in your environment only honors lowercase proxy variables,
+   duplicate the same values into `http_proxy`, `https_proxy`, and `no_proxy`.
+
+   If your network also blocks direct access to Docker Hub, override the base
+   images in `.env.docker` so builds use your registry mirror instead of the
+   hard-coded public image names:
+
+   ```dotenv
+   PYTHON_SLIM_BOOKWORM_IMAGE=registry.example.com/dockerhub/library/python:3.11-slim-bookworm
+   PYTHON_SLIM_IMAGE=registry.example.com/dockerhub/library/python:3.11-slim
+   NVIDIA_CUDA_RUNTIME_IMAGE=registry.example.com/dockerhub/nvidia/cuda:13.0.2-cudnn-runtime-ubuntu22.04
+   VLLM_OPENAI_IMAGE=registry.example.com/dockerhub/vllm/vllm-openai:latest
+   ```
+
+   These variables are consumed during `FROM ...` resolution, which is the step
+   that fails when Docker cannot reach Docker Hub to fetch image metadata.
+
+3. **Choose a Profile**
 
    Profiles follow the pattern `<hardware>-<backend>`:
 
    | Profile | Hardware | Inference Backend |
    |---------|----------|-------------------|
    | `cpu-ollama` | CPU | Ollama |
-   | `cpu-llamacpp` | CPU | Llama.cpp |
    | `cpu-openai` | CPU | External OpenAI API |
    | `cuda-ollama` | NVIDIA GPU | Ollama |
-   | `cuda-llamacpp` | NVIDIA GPU | Llama.cpp |
+   | `cuda-vllm` | NVIDIA GPU | vLLM with bundled router |
    | `cuda-openai` | NVIDIA GPU | External OpenAI API |
 
    CUDA profiles require a CUDA-compatible GPU and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
-   CUDA profiles also switch Qdrant to the `qdrant/qdrant:gpu-nvidia-latest` image and enable `QDRANT__GPU__INDEXING=1`, so vector indexing can use the same NVIDIA GPU runtime. This follows Qdrant's documented GPU deployment path and therefore requires a Linux `x86_64` Docker host with Vulkan-capable NVIDIA drivers.
-
-   Each profile automatically sets `MODEL_PROVIDER` and `OPENAI_API_BASE` to the correct values. For the `*-openai` profiles, set `OPENAI_API_BASE` and `OPENAI_API_KEY` in `.env.docker`.
+   Each profile automatically sets `INFERENCE_PROVIDER` and `OPENAI_API_BASE` to the correct values. For the `*-openai` profiles, set `OPENAI_API_BASE` and `OPENAI_API_KEY` in `.env.docker`. The `cuda-vllm` profile routes the backend through an internal nginx service so split chat, embedding, and rerank upstreams still appear as one OpenAI-compatible endpoint.
 
 4. **Start the Services**
 
    ```bash
-   docker compose --profile cpu-ollama up
+   docker compose --env-file .env.docker --profile cpu-ollama up --build
    ```
+
+   Use `--env-file .env.docker` whenever you rely on proxy variables. Docker
+   daemon proxy settings alone cover image pulls, but package managers running
+   during `docker compose build` and applications inside the containers still
+   need the proxy values forwarded explicitly.
 
    **What's Included:**
    - **Backend**: FastAPI application for RAG and orchestration.
-   - **Inference Server**: Ollama, `llama.cpp`, or external OpenAI API (depending on profile).
-   - **Qdrant**: Vector database for hybrid (semantic, bm42) search. CUDA profiles use Qdrant's NVIDIA GPU image for accelerated indexing; CPU profiles keep the standard image.
+   - **Inference Server**: Ollama, CUDA vLLM via the bundled router, or external OpenAI API (depending on profile).
+   - **Qdrant**: Vector database for hybrid (semantic, bm42) search.
    - **Frontend**: Streamlit UI.
 
    On the first run, required ML models are automatically downloaded into the `model-cache` shared volume. This volume is shared between the backend (which handles downloads) and the inference server (which loads them).
@@ -123,9 +149,9 @@ Model files are handled automatically by the ingestion pipeline and do not need 
 
    For local Python development (without Docker), you must provide your own inference endpoints.
 
-   - **Qdrant**: Must be running (default: `http://localhost:6333`).
-   - **Inference Server**: An OpenAI-compatible server (Ollama, LocalAI, vLLM, or `llama-server`) must be accessible.
-     - By default, the app expects Ollama at `http://localhost:11434/v1`. For `llama-server`, use `http://localhost:8080/v1`. Configure `OPENAI_API_BASE` in `.env` accordingly.
+    - **Qdrant**: Must be running (default: `http://localhost:6333`).
+    - **Inference Server**: An OpenAI-compatible server (Ollama, LocalAI, vLLM, or another compatible service) must be accessible.
+       - By default, the app expects Ollama at `http://localhost:11434/v1`. Configure `OPENAI_API_BASE` in `.env` accordingly.
 
 2. **Create a Local Environment File**
 
@@ -135,7 +161,7 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    cp .env.example .env
    ```
 
-   At minimum, confirm `MODEL_PROVIDER`, `OPENAI_API_BASE`, and model IDs (`EMBED_MODEL`, `LLM`, `VLM`) match your stack.
+   At minimum, confirm `INFERENCE_PROVIDER`, `OPENAI_API_BASE`, and model IDs (`EMBED_MODEL`, `TEXT_MODEL`, `VISION_MODEL`) match your stack.
 
 3. **Install Dependencies**
 
@@ -226,15 +252,17 @@ Batch-size tuning guidance:
 
 - `OPENAI_API_KEY`: API key for the LLM provider (default: `sk-no-key-required`).
 - `OPENAI_API_BASE`: Base API URL. In Docker, this is set automatically per profile (e.g. `http://ollama-server:11434/v1` for `*-ollama`). For local development, point this to your provider (e.g., `http://localhost:11434/v1`).
+- `OPENAI_CTX_WINDOW`: Context window advertised to the backend prompt planner. In the bundled `cuda-vllm` profile this is also passed to the vLLM chat server as `--max-model-len`, so it is the preferred single source of truth. If unset, DocInt still falls back to the legacy `CHAT_MAX_MODEL_LEN` knob when present, then to `8192`.
 - `OPENAI_ENABLE_THINKING`: Enable OpenAI reasoning/thinking for text models routed through the native OpenAI provider (default: `false`).
 - `OPENAI_THINKING_EFFORT`: Reasoning effort used when `OPENAI_ENABLE_THINKING=true`. Supported values: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` (default: `medium`).
-- `MODEL_PROVIDER`: Inference provider type (`llama.cpp`, `ollama`, `openai`).
-- `LLM`: Repo ID (e.g., `bartowski/Meta-Llama-3-8B-Instruct-GGUF`) for automatic download.
-- `EMBED_MODEL`: Embedding model ID served by the configured `MODEL_PROVIDER`. Use an Ollama tag (for example `bge-m3`) with `MODEL_PROVIDER=ollama`, an OpenAI embedding model name (for example `text-embedding-3-small`) with `MODEL_PROVIDER=openai`, or a GGUF spec (for example `ggml-org/bge-m3-Q8_0-GGUF;bge-m3-q8_0.gguf`) with `MODEL_PROVIDER=llama.cpp`.
-- `VLM`: Vision-language model ID (GGUF `repo;filename` for `llama.cpp` or model tag for Ollama/OpenAI).
+- `OPENAI_DIMENSIONS`: Optional embedding dimension override. Only set this for providers and models that support reduced-dimension embeddings; leave it unset for most local OpenAI-compatible backends such as vLLM-served BGE models.
+- `INFERENCE_PROVIDER`: Inference provider type (`ollama`, `openai`, `vllm`, or another OpenAI-compatible backend mapped to one of those modes).
+- `TEXT_MODEL`: Text/chat model ID served by the configured provider.
+- `EMBED_MODEL`: Embedding model ID served by the configured `INFERENCE_PROVIDER`. Use an Ollama tag (for example `bge-m3`) with `INFERENCE_PROVIDER=ollama` or an OpenAI-compatible embedding model name (for example `text-embedding-3-small` or a vLLM-served alias such as `bge-m3-docint`) with `INFERENCE_PROVIDER=openai` or `INFERENCE_PROVIDER=vllm`.
+- `VISION_MODEL`: Vision-language model ID served by the configured provider (for example an Ollama tag, an OpenAI model name, or a vLLM-served alias). When the bundled `cuda-vllm` profile routes all chat traffic to a single vLLM chat server, set `VISION_MODEL` equal to `TEXT_MODEL` unless you add a dedicated vision upstream.
 
 **Note on Provider Agnosticism:**
-The backend logic is standard OpenAI-compatible. The `docker-compose.yml` profiles bundle Ollama and `llama.cpp` servers, but you can also point to any external API by selecting a `*-openai` profile and setting `OPENAI_API_BASE` and `OPENAI_API_KEY` in `.env.docker`.
+The backend logic is standard OpenAI-compatible. The `docker-compose.yml` profiles bundle Ollama and CUDA vLLM services, but you can also point to any external API by selecting a `*-openai` profile and setting `OPENAI_API_BASE` and `OPENAI_API_KEY` in `.env.docker`.
 
 **Local Models (Hugging Face):**
 
@@ -286,12 +314,6 @@ By default, image embeddings are written to a per-collection Qdrant collection (
 - `IMAGE_FAIL_ON_EMBED_ERROR` (default `false`)
 - `IMAGE_FAIL_ON_TAG_ERROR` (default `false`)
 - `IMAGE_TAGGING_MAX_IMAGE_DIM` (default `1024`)
-
-If `MODEL_PROVIDER=llama.cpp` and your `llama-server` VLM is started without a
-valid `--mmproj`, image requests can fail with `image input is not supported`.
-DocInt now treats this as non-retryable, logs it once, and disables image
-tagging for the rest of the run. To skip tagging entirely, set
-`IMAGE_TAGGING_ENABLED=false`.
 
 ### Document Pipeline Config Knobs
 
@@ -361,21 +383,40 @@ matches = service.query_similar_images(Path("query.png"), top_k=5)
 
 1. **Prepare Your Queries**
 
-   Create a `queries.txt` file in the `~/docint` directory. Each line represents a single query. If no file is provided, the default summarize prompt is used.
+   Create a `queries.txt` file in the `~/docint` directory. Each line represents a single query.
 
 2. **Run the Query Command**
 
-   Execute the following command:
+   Execute one of the following commands:
 
    ```bash
    uv run query
    ```
 
+   The query CLI supports these action flags:
+
+   - `-c`, `--collectionn NAME`: Use `NAME` as the target collection instead of prompting interactively.
+   - `-q`, `--query [PATH]`: Run chat queries from `PATH`. If the path is omitted, the CLI falls back to the default `~/docint/queries.txt`. If the file does not exist, query mode is skipped.
+   - `-s`, `--summary`: Generate a collection summary using the same backend flow as the frontend analysis page.
+   - `-e`, `--entities`: Export a `.txt` file containing the 50 most frequent entities and their mention counts.
+   - `-h8`, `--hate-speech`: Export the flagged hate-speech findings as a `.txt` file using the same text format as the frontend download.
+   - `-a`, `--all`: Run all of the above actions together.
+
+   Examples:
+
+   ```bash
+   uv run query -q
+   uv run query -c alpha -q ~/docint/queries.txt
+   uv run query --summary
+   uv run query --entities --hate-speech
+   uv run query -c alpha --all
+   ```
+
 3. **Review the Results**
 
-   Query results will be saved in the `~/docint/results` directory.
-   When GraphRAG is enabled, each result JSON also includes a `graph_debug`
-   object with query-expansion details (anchors, neighbors, and applied/no-op reason).
+   Query results and export files will be saved as `.txt` files in a per-run subdirectory under `~/docint/results`, using the pattern `~/docint/results/{unixtimestamp_collection_name}`.
+   When GraphRAG is enabled, each query result text file also includes a `graph_debug`
+   section with query-expansion details (anchors, neighbors, and applied/no-op reason).
 
 4. **Compare Retrieval Modes**
 
@@ -462,12 +503,12 @@ Minimal local example (`.env`):
 
 ```env
 DOCINT_OFFLINE=false
-MODEL_PROVIDER=ollama
+INFERENCE_PROVIDER=ollama
 OPENAI_API_BASE=http://localhost:11434/v1
 OPENAI_API_KEY=sk-no-key-required
 EMBED_MODEL=bge-m3
-LLM=gpt-oss:20b
-VLM=qwen3-vl:8b
+TEXT_MODEL=gpt-oss:20b
+VISION_MODEL=qwen3-vl:8b
 NER_ENABLED=true
 NER_MAX_WORKERS=4
 ENABLE_HATE_SPEECH_DETECTION=false

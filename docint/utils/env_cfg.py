@@ -79,6 +79,32 @@ def resolve_hf_cache_path(
 
 
 @dataclass(frozen=True)
+class FrontendConfig:
+    """Dataclass for frontend configuration."""
+
+    collection_timeout: int
+
+
+def load_frontend_env(
+    default_collection_timeout: int = 120,
+) -> FrontendConfig:
+    """Loads frontend configuration from environment variables or defaults.
+
+    Args:
+        default_collection_timeout (int): Default timeout in seconds for fetching collections from the backend.
+
+    Returns:
+        FrontendConfig: Dataclass containing frontend configuration.
+        - collection_timeout (int): Timeout in seconds for fetching collections from the backend.
+    """
+    return FrontendConfig(
+        collection_timeout=int(
+            os.getenv("FRONTEND_COLLECTION_TIMEOUT", default_collection_timeout)
+        )
+    )
+
+
+@dataclass(frozen=True)
 class GraphRAGConfig:
     """Dataclass for graph-assisted retrieval configuration."""
 
@@ -324,7 +350,7 @@ def load_ingestion_env(
     default_fine_chunk_overlap: int = 0,
     default_fine_chunk_size: int = 8192,
     default_hierarchical_chunking_enabled: bool = True,
-    default_ingestion_batch_size: int = 5,
+    default_ingestion_batch_size: int = 50,
     default_sentence_splitter_chunk_overlap: int = 64,
     default_sentence_splitter_chunk_size: int = 1024,
     default_supported_filetypes: list[str] = [
@@ -450,17 +476,13 @@ def load_ingestion_env(
 class ModelConfig:
     """Dataclass for model configuration."""
 
-    embed_model_file: str
-    embed_model_repo: str
+    embed_model: str
     image_embed_model: str
     ner_model: str
     rerank_model: str
     sparse_model: str
-    text_model_file: str
-    text_model_repo: str
-    vision_model_file: str
-    vision_model_mmproj_file: str
-    vision_model_repo: str
+    text_model: str
+    vision_model: str
     whisper_model: str
 
 
@@ -470,8 +492,8 @@ def load_model_env(
     default_ner_model: str = "gliner-community/gliner_large-v2.5",
     default_rerank_model: str = "BAAI/bge-reranker-v2-m3",
     default_sparse_model: str = "Qdrant/all_miniLM_L6_v2_with_attentions",
-    default_text_model_str: str = "gpt-oss:20b",
-    default_vision_model_str: str = "qwen3.5:9b",
+    default_text_model: str = "gpt-oss:20b",
+    default_vision_model: str = "qwen3.5:9b",
     default_whisper_model: str = "turbo",
 ) -> ModelConfig:
     """Loads model configuration from environment variables or defaults.
@@ -488,63 +510,23 @@ def load_model_env(
 
     Returns:
         ModelConfig: Dataclass containing model configuration.
-        - embed_model_file (str): The embedding model file name.
-        - embed_model_repo (str): The embedding model HuggingFace repo ID for cache resolution
+        - embed_model (str): The embedding model identifier for Ollama-compatible embeddings.
         - image_embed_model (str): The image embedding model identifier.
         - ner_model (str): The NER model identifier.
         - rerank_model (str): The reranker model identifier.
         - sparse_model (str): The sparse model identifier.
-        - text_model_file (str): The text model file name.
-        - text_model_repo (str): The text model HuggingFace repo ID for cache resolution
-        - vision_model_file (str): The vision model file name.
-        - vision_model_mmproj_file (str): The vision model MMProj file name.
-        - vision_model_repo (str): The vision model HuggingFace repo ID for cache resolution
+        - text_model (str): The text model identifier.
+        - vision_model (str): The vision model identifier.
         - whisper_model (str): The Whisper model identifier.
     """
-
-    def resolve_model_name(model_str: str) -> tuple[str, str, str]:
-        """Resolves a model string into its components: repo, model, and mmproj.
-
-        Args:
-            model_str (str): The model string in the format "repo;model;mmproj".
-
-        Raises:
-            ValueError: If the model string is not in the expected format.
-
-        Returns:
-            tuple[str, str, str]: A tuple containing the repo, model, and mmproj identifiers.
-        """
-        parts = [p.strip() for p in model_str.split(";")]
-        if not 1 <= len(parts) <= 3:
-            raise ValueError(f"Invalid vision model string: {model_str}")
-
-        repo = parts[0]
-        model = parts[1] if len(parts) >= 2 else repo
-        mmproj = parts[2] if len(parts) == 3 else model
-        return repo, model, mmproj
-
-    embed_model_repo, embed_model_file, _ = resolve_model_name(
-        os.getenv("EMBED_MODEL", default_embed_model)
-    )
-    text_model_repo, text_model_file, _ = resolve_model_name(
-        os.getenv("LLM", default_text_model_str)
-    )
-    vision_model_repo, vision_model_file, vision_model_mmproj_file = resolve_model_name(
-        os.getenv("VLM", default_vision_model_str)
-    )
-
     return ModelConfig(
-        embed_model_file=embed_model_file,
-        embed_model_repo=embed_model_repo,
+        embed_model=os.getenv("EMBED_MODEL", default_embed_model),
         image_embed_model=os.getenv("IMAGE_EMBED_MODEL", default_image_embed_model),
         ner_model=os.getenv("NER_MODEL", default_ner_model),
         rerank_model=os.getenv("RERANK_MODEL", default_rerank_model),
         sparse_model=os.getenv("SPARSE_MODEL", default_sparse_model),
-        text_model_file=text_model_file,
-        text_model_repo=text_model_repo,
-        vision_model_file=vision_model_file,
-        vision_model_mmproj_file=vision_model_mmproj_file,
-        vision_model_repo=vision_model_repo,
+        text_model=os.getenv("TEXT_MODEL", default_text_model),
+        vision_model=os.getenv("VISION_MODEL", default_vision_model),
         whisper_model=os.getenv("WHISPER_MODEL", default_whisper_model),
     )
 
@@ -594,7 +576,7 @@ class OpenAIConfig:
     api_base: str
     api_key: str
     ctx_window: int
-    dimensions: int
+    dimensions: int | None
     max_retries: int
     inference_provider: str
     reuse_client: bool
@@ -610,9 +592,9 @@ def load_openai_env(
     default_api_base: str = "http://localhost:11434/v1",
     default_api_key: str = "sk-no-key-required",
     default_ctx_window: int = 4096,
-    default_dimensions: int = 1024,
+    default_dimensions: int | None = None,
     default_max_retries: int = 2,
-    default_model_provider: str = "ollama",
+    default_inference_provider: Literal["ollama", "openai", "vllm"] = "ollama",
     default_reuse_client: bool = False,
     default_seed: int = 42,
     default_temperature: float = 0.0,
@@ -621,7 +603,7 @@ def load_openai_env(
     ] = "medium",
     default_thinking_enabled: bool = False,
     default_timeout: float = 300.0,
-    default_top_p: float = 0.0,
+    default_top_p: float = 0.1,
 ) -> OpenAIConfig:
     """Loads OpenAI configuration from environment variables or defaults.
 
@@ -629,9 +611,10 @@ def load_openai_env(
         default_api_base (str): Default OpenAI API base URL.
         default_api_key (str): Default OpenAI API key.
         default_ctx_window (int): Default context window size for models that support it.
-        default_dimensions (int): Default embedding dimensions for embedding models.
+        default_dimensions (int | None): Optional embedding dimensions override for
+            models that support reduced-dimension output.
         default_max_retries (int): Default number of retries.
-        default_model_provider (str): Default inference server type (e.g. "llama.cpp", "ollama", "openai", "vllm"). Default is "ollama".
+        default_inference_provider: Default inference server type (e.g. "ollama", "openai", "vllm"). Default is "ollama".
         default_reuse_client (bool): Whether to reuse the OpenAI client across calls. Default is False.
         default_seed (int): Default random seed for reproducibility.
         default_temperature (float): Default temperature for text generation.
@@ -646,9 +629,10 @@ def load_openai_env(
         - api_base (str): The OpenAI API base URL.
         - api_key (str): The OpenAI API key.
         - ctx_window (int): The context window size for models that support it.
-        - dimensions (int): The embedding dimensions for embedding models.
+        - dimensions (int | None): Optional embedding dimensions override for
+            embedding models.
         - max_retries (int): The number of retries for API calls.
-        - inference_provider (str): The inference server type (e.g. "llama.cpp", "ollama", "openai").
+        - inference_provider (Literal["ollama", "openai", "vllm"]): The inference server type.
         - reuse_client (bool): Whether to reuse the OpenAI client across calls.
         - seed (int): Random seed for reproducibility.
         - temperature (float): Temperature for text generation.
@@ -661,18 +645,25 @@ def load_openai_env(
     Raises:
         ValueError: If an unsupported inference server is specified.
     """
-    inference_provider = os.getenv("INFERENCE_PROVIDER", default_model_provider).lower()
+    inference_provider = os.getenv(
+        "INFERENCE_PROVIDER", default_inference_provider
+    ).lower()
     if inference_provider not in {
-        "llama.cpp",
-        "llama_cpp",
-        "llamacpp",
         "ollama",
         "openai",
+        "vllm",
     }:
         raise ValueError(
             f"Unsupported inference server: {inference_provider}. "
-            f"Supported options are: 'ollama', 'llama.cpp', 'openai'."
+            f"Supported options are: 'ollama', 'openai', 'vllm'."
         )
+
+    raw_dimensions = os.getenv("OPENAI_DIMENSIONS")
+    dimensions = (
+        default_dimensions
+        if raw_dimensions is None or not raw_dimensions.strip()
+        else int(raw_dimensions)
+    )
 
     thinking_effort = os.getenv(
         "OPENAI_THINKING_EFFORT", default_thinking_effort
@@ -688,11 +679,22 @@ def load_openai_env(
     if thinking_effort not in allowed_thinking_efforts:
         thinking_effort = default_thinking_effort
 
+    raw_ctx_window = os.getenv("OPENAI_CTX_WINDOW")
+    ctx_window = default_ctx_window
+    if raw_ctx_window is not None and raw_ctx_window.strip():
+        ctx_window = int(raw_ctx_window)
+    elif inference_provider == "vllm":
+        raw_chat_max_model_len = os.getenv("CHAT_MAX_MODEL_LEN")
+        if raw_chat_max_model_len is not None and raw_chat_max_model_len.strip():
+            ctx_window = int(raw_chat_max_model_len)
+        else:
+            ctx_window = max(default_ctx_window, 8192)
+
     return OpenAIConfig(
         api_base=os.getenv("OPENAI_API_BASE", default_api_base),
         api_key=os.getenv("OPENAI_API_KEY", default_api_key),
-        ctx_window=int(os.getenv("OPENAI_CTX_WINDOW", default_ctx_window)),
-        dimensions=int(os.getenv("OPENAI_DIMENSIONS", default_dimensions)),
+        ctx_window=ctx_window,
+        dimensions=dimensions,
         max_retries=int(os.getenv("OPENAI_MAX_RETRIES", default_max_retries)),
         inference_provider=inference_provider,
         reuse_client=str(os.getenv("OPENAI_REUSE_CLIENT", default_reuse_client)).lower()
@@ -718,13 +720,13 @@ class PathConfig:
 
     artifacts: Path
     data: Path
+    docint_home_dir: Path
     logs: Path
     queries: Path
     results: Path
     prompts: Path
     qdrant_sources: Path
     hf_hub_cache: Path
-    llama_cpp_cache: Path
 
 
 def load_path_env() -> PathConfig:
@@ -733,6 +735,7 @@ def load_path_env() -> PathConfig:
     Returns:
         PathConfig: Dataclass containing path configuration.
         - artifacts (Path): Root directory for pipeline processing artifacts.
+        - docint_home_dir (Path): The root home directory for docint, used as the base for other default paths. Defaults to ~/docint.
         - data (Path): Path to the data directory.
         - logs (Path): Path to the logs file.
         - queries (Path): Path to the queries file.
@@ -740,7 +743,6 @@ def load_path_env() -> PathConfig:
         - prompts (Path): Path to the prompts directory.
         - qdrant_sources (Path): Path to the Qdrant sources directory.
         - hf_hub_cache (Path): Path to the Hugging Face Hub cache directory.
-        - llama_cpp_cache (Path): Path to the llama.cpp cache directory.
     """
     home_dir: Path = Path.home()
     docint_home_dir: Path = home_dir / "docint"
@@ -749,7 +751,6 @@ def load_path_env() -> PathConfig:
     default_results_dir: Path = docint_home_dir / "results"
     default_model_cache: Path = home_dir / ".cache"
     default_hf_hub_cache: Path = default_model_cache / "huggingface" / "hub"
-    default_llama_cpp_cache: Path = default_model_cache / "llama.cpp"
 
     utils_dir: Path = Path(__file__).parent.resolve()
     default_prompts_dir: Path = utils_dir / "prompts"
@@ -764,6 +765,7 @@ def load_path_env() -> PathConfig:
             os.getenv("PIPELINE_ARTIFACTS_DIR", default_artifacts_dir)
         ).expanduser(),
         data=Path(os.getenv("DATA_PATH", default_data_dir)).expanduser(),
+        docint_home_dir=docint_home_dir,
         logs=Path(os.getenv("LOG_PATH", default_log_dir)).expanduser(),
         queries=Path(os.getenv("QUERIES_PATH", default_query_dir)).expanduser(),
         results=Path(os.getenv("RESULTS_PATH", default_results_dir)).expanduser(),
@@ -772,9 +774,6 @@ def load_path_env() -> PathConfig:
             os.getenv("QDRANT_SRC_DIR", default_qdrant_sources)
         ).expanduser(),
         hf_hub_cache=Path(os.getenv("HF_HUB_CACHE", default_hf_hub_cache)).expanduser(),
-        llama_cpp_cache=Path(
-            os.getenv("LLAMA_CPP_CACHE", default_llama_cpp_cache)
-        ).expanduser(),
     )
 
 
@@ -1016,21 +1015,38 @@ class SessionConfig:
 
 
 def load_session_env(
-    default_session_store: str = "sqlite:///sessions.db",
+    default_session_store: str | None = None,
 ) -> SessionConfig:
     """Loads session configuration from environment variables or defaults.
 
     Args:
         default_session_store (str): Default session store configuration (e.g. database URL or file path).
-            Default is "sqlite:///sessions.db".
+            Default is ``sqlite:///{Path.home() / "docint" / "sessions.db"}``.
+            When ``DATA_PATH`` is explicitly configured, the default becomes
+            ``sqlite:///{Path(DATA_PATH) / "sessions.db"}`` so Docker deployments
+            persist sessions inside the mounted data directory unless overridden.
 
     Returns:
         SessionConfig: Dataclass containing session configuration.
-        - session_store (str): The session store configuration. Default is "sqlite:///sessions.db".
+        - session_store (str): The session store configuration. Default is
+          ``sqlite:///{Path.home() / "docint" / "sessions.db"}`` locally, or
+          ``sqlite:///{Path(DATA_PATH) / "sessions.db"}`` when ``DATA_PATH`` is
+          explicitly configured.
     """
-    return SessionConfig(
-        session_store=os.getenv("SESSION_STORE", default_session_store)
-    )
+    session_store_override = os.getenv("SESSION_STORE")
+    if session_store_override:
+        return SessionConfig(session_store=session_store_override)
+
+    if default_session_store is None:
+        data_path_override = os.getenv("DATA_PATH")
+        if data_path_override:
+            data_dir = Path(data_path_override).expanduser()
+            default_session_store = f"sqlite:///{data_dir / 'sessions.db'}"
+        else:
+            docint_home_dir = load_path_env().docint_home_dir
+            default_session_store = f"sqlite:///{docint_home_dir / 'sessions.db'}"
+
+    return SessionConfig(session_store=default_session_store)
 
 
 @dataclass(frozen=True)

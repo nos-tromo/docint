@@ -10,6 +10,8 @@ import shutil
 import stat
 import sys
 import time
+import urllib.error
+import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -179,6 +181,15 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
 
     @staticmethod
     def _reference_metadata(node: NodeWithScore) -> dict[str, Any]:
+        """Extract the reference metadata dict from a retrieved node, which may be nested under the
+        "reference_metadata" key in the node's metadata or may be missing entirely.
+
+        Args:
+            node (NodeWithScore): The node from which to extract reference metadata.
+
+        Returns:
+            dict[str, Any]: The reference metadata dictionary, or an empty dictionary if not present.
+        """
         metadata = getattr(node, "metadata", {}) or {}
         reference_metadata = metadata.get("reference_metadata")
         if isinstance(reference_metadata, dict):
@@ -187,6 +198,16 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
 
     @staticmethod
     def _identity_key(node: NodeWithScore) -> str:
+        """Extract a stable identity key for a retrieved node based on its content and metadata, which can be used for deduplication.
+
+        Args:
+            node (NodeWithScore): The node from which to extract an identity key.
+
+        Returns:
+            str: A string identity key that represents the content of the node, such as a text ID, a file hash and row index
+                for tabular data, or a normalized text snippet. Returns an empty string if no meaningful identity can be extracted.
+
+        """
         metadata = getattr(node, "metadata", {}) or {}
         reference_metadata = SocialSourceDiversityPostprocessor._reference_metadata(
             node
@@ -212,6 +233,17 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
 
     @staticmethod
     def _diversity_bucket(node: NodeWithScore) -> str:
+        """Extract a diversity bucket key for a retrieved node based on its author and time, which can be used to limit near-duplicate results from the same source or time period.
+
+        Args:
+            node (NodeWithScore): The node from which to extract a diversity bucket key.
+
+        Returns:
+            str: A string representing the diversity bucket key, combining the author and time information.
+
+        Raises:
+            ValueError: If the timestamp format is invalid and cannot be parsed, which may indicate unexpected metadata structure.
+        """
         metadata = getattr(node, "metadata", {}) or {}
         reference_metadata = SocialSourceDiversityPostprocessor._reference_metadata(
             node
@@ -238,7 +270,15 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
         nodes: list[NodeWithScore],
         query_bundle: QueryBundle | None = None,
     ) -> list[NodeWithScore]:
-        """Deduplicate by post identity and cap near-duplicate author/time buckets."""
+        """Deduplicate by post identity and cap near-duplicate author/time buckets.
+
+        Args:
+            nodes (list[NodeWithScore]): The list of retrieved nodes to postprocess.
+            query_bundle (QueryBundle | None): The original query bundle that led to these retrieval results, which may be used for context but is not modified by this postprocessor.
+
+        Returns:
+            list[NodeWithScore]: The postprocessed list of nodes, where near-duplicate social or tabular sources have been limited according to the configured diversity limit.
+        """
         _ = query_bundle
         seen: set[str] = set()
         bucket_counts: dict[str, int] = defaultdict(int)
@@ -354,6 +394,141 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
         return expanded
 
 
+class VLLMRerankPostprocessor(BaseNodePostprocessor):
+    """Call a vLLM-compatible rerank endpoint and map results back to nodes."""
+
+    api_base: str
+    api_key: str | None = None
+    model: str
+    timeout: float = 300.0
+    top_n: int = 5
+
+    @classmethod
+    def class_name(cls) -> str:
+        """Return a stable class identifier.
+
+        Args:
+            cls: The class for which to return the identifier.
+
+        Returns:
+            A string identifier for this postprocessor class.
+        """
+        return "VLLMRerankPostprocessor"
+
+    @staticmethod
+    def _node_text(node: NodeWithScore) -> str:
+        """Extract the text content from a retrieved node, trying multiple strategies to find meaningful text for reranking.
+
+        Args:
+            node (NodeWithScore): The node from which to extract text.
+
+        Returns:
+            str: The extracted text content from the node.
+        """
+        raw_node = getattr(node, "node", None)
+        if raw_node is not None:
+            try:
+                content = raw_node.get_content()
+            except AttributeError:
+                content = getattr(raw_node, "text", "")
+            if isinstance(content, str) and content.strip():
+                return content
+        text = getattr(node, "text", "")
+        return text if isinstance(text, str) else ""
+
+    def _fallback_nodes(self, nodes: list[NodeWithScore]) -> list[NodeWithScore]:
+        """Fallback strategy to return original nodes in a stable order when vLLM reranking fails.
+
+        Args:
+            nodes (list[NodeWithScore]): The original list of nodes to return in fallback.
+
+        Returns:
+            list[NodeWithScore]: The fallback list of nodes, which is a slice of the original nodes list up to the configured
+                top_n limit, ensuring at least one node is returned if available.
+        """
+        return nodes[: max(1, min(int(self.top_n), len(nodes)))]
+
+    def _postprocess_nodes(
+        self,
+        nodes: list[NodeWithScore],
+        query_bundle: QueryBundle | None = None,
+    ) -> list[NodeWithScore]:
+        """Rerank nodes via vLLM and degrade to the original order on failure.
+
+        Args:
+            nodes (list[NodeWithScore]): The list of nodes to rerank.
+            query_bundle (QueryBundle | None): The original query bundle that led to these retrieval results, which may contain the original query string needed for reranking.
+
+        Returns:
+            list[NodeWithScore]: The reranked list of nodes, or the original order if reranking fails.
+
+        Raises:
+            ValueError: If the vLLM rerank response is malformed or does not contain usable results.
+            urllib.error.HTTPError: If the HTTP request to the vLLM rerank endpoint fails with an HTTP error.
+            urllib.error.URLError: If the HTTP request to the vLLM rerank endpoint fails with a URL error, such as a connection failure or timeout.
+        """
+        if not nodes:
+            return nodes
+
+        query_text = str(getattr(query_bundle, "query_str", "") or "").strip()
+        if not query_text:
+            return self._fallback_nodes(nodes)
+
+        documents = [self._node_text(node) for node in nodes]
+        request_url = f"{self.api_base.rstrip('/')}/rerank"
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        payload = {
+            "model": self.model,
+            "query": query_text,
+            "documents": documents,
+            "top_n": min(max(1, int(self.top_n)), len(documents)),
+        }
+
+        try:
+            request = urllib.request.Request(
+                request_url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                response_body = json.loads(response.read().decode("utf-8"))
+            results = response_body.get("results")
+            if not isinstance(results, list):
+                raise ValueError("vLLM rerank response did not contain a results list")
+
+            reranked: list[NodeWithScore] = []
+            seen_indices: set[int] = set()
+            for result in results:
+                if not isinstance(result, dict):
+                    continue
+                index = result.get("index")
+                if not isinstance(index, int) or index < 0 or index >= len(nodes):
+                    continue
+                if index in seen_indices:
+                    continue
+                seen_indices.add(index)
+
+                score_value = result.get("relevance_score", result.get("score"))
+                score = nodes[index].score
+                if isinstance(score_value, int | float):
+                    score = float(score_value)
+                reranked.append(NodeWithScore(node=nodes[index].node, score=score))
+
+            if not reranked:
+                raise ValueError("vLLM rerank response did not contain usable results")
+            return reranked
+        except (urllib.error.HTTPError, urllib.error.URLError, ValueError) as exc:
+            logger.warning(
+                "vLLM rerank request failed at '{}': {}. Returning original retrieval order.",
+                request_url,
+                exc,
+            )
+            return self._fallback_nodes(nodes)
+
+
 @dataclass(slots=True)
 class RAG:
     """Represents a Retrieval-Augmented Generation (RAG) model. Handles configuration,
@@ -416,9 +591,9 @@ class RAG:
     openai_api_base: str | None = field(default=None, init=False)
     openai_api_key: str | None = field(default=None, init=False)
     openai_ctx_window: int = field(default=4096, init=False)
-    openai_dimensions: int = field(default=1024, init=False)
+    openai_dimensions: int | None = field(default=None, init=False)
     openai_max_retries: int = field(default=2, init=False)
-    openai_model_provider: str = field(default="llama.cpp", init=False)
+    openai_inference_provider: str = field(default="ollama", init=False)
     openai_reuse_client: bool = field(default=True, init=False)
     openai_seed: int = field(default=42, init=False)
     openai_temperature: float = field(default=0.1, init=False)
@@ -485,7 +660,10 @@ class RAG:
     _device: str | None = field(default=None, init=False, repr=False)
     _embed_model: BaseEmbedding | None = field(default=None, init=False, repr=False)
     _text_model: OpenAI | None = field(default=None, init=False, repr=False)
-    _reranker: LLMRerank | FlagEmbeddingReranker | None = field(
+    _post_retrieval_text_model: OpenAI | None = field(
+        default=None, init=False, repr=False
+    )
+    _reranker: BaseNodePostprocessor | None = field(
         default=None, init=False, repr=False
     )
     _qdrant_client: QdrantClient | None = field(default=None, init=False, repr=False)
@@ -530,11 +708,10 @@ class RAG:
         )
 
         # --- Model config ---
-        suffix = ".gguf"
-        self.embed_model_id = self.model_config.embed_model_file.removesuffix(suffix)
+        self.embed_model_id = self.model_config.embed_model
         self.rerank_model_id = self.model_config.rerank_model
         self.sparse_model_id = self.model_config.sparse_model
-        self.text_model_id = self.model_config.text_model_file.removesuffix(suffix)
+        self.text_model_id = self.model_config.text_model
 
         # --- OpenAI config ---
         self.openai_api_key = self.openai_config.api_key
@@ -542,7 +719,7 @@ class RAG:
         self.openai_ctx_window = self.openai_config.ctx_window
         self.openai_dimensions = self.openai_config.dimensions
         self.openai_max_retries = self.openai_config.max_retries
-        self.openai_model_provider = self.openai_config.inference_provider
+        self.openai_inference_provider = self.openai_config.inference_provider
         self.openai_reuse_client = self.openai_config.reuse_client
         self.openai_seed = self.openai_config.seed
         self.openai_temperature = self.openai_config.temperature
@@ -795,14 +972,19 @@ class RAG:
 
             logger.info("Initializing embedding model: {}", self.embed_model_id)
 
+            embedding_kwargs: dict[str, Any] = {
+                "api_base": self.openai_api_base,
+                "api_key": self.openai_api_key,
+                "max_retries": self.openai_max_retries,
+                "model_name": self.embed_model_id,
+                "reuse_client": False,
+                "timeout": self.openai_timeout,
+            }
+            if self.openai_dimensions is not None:
+                embedding_kwargs["dimensions"] = self.openai_dimensions
+
             self._embed_model = OpenAIEmbedding(
-                api_base=self.openai_api_base,
-                api_key=self.openai_api_key,
-                dimensions=self.openai_dimensions,
-                max_retries=self.openai_max_retries,
-                model_name=self.embed_model_id,
-                reuse_client=False,
-                timeout=self.openai_timeout,
+                **embedding_kwargs,
             )
 
         return self._embed_model
@@ -864,29 +1046,32 @@ class RAG:
         return chosen
 
     @property
-    def reranker(self) -> LLMRerank | FlagEmbeddingReranker:
-        """Lazily initializes and returns the reranker model. The type of reranker is determined by the configuration:
-        - If the openai_model_provider is "openai" or "azure", an LLMRerank is used.
-        - Otherwise, a FlagEmbeddingReranker is used with the specified rerank_model_id.
+    def reranker(self) -> BaseNodePostprocessor:
+        """Lazily initialize the configured reranker postprocessor.
 
         Returns:
-            LLMRerank | FlagEmbeddingReranker: The initialized reranker model.
+            BaseNodePostprocessor: The initialized reranker.
 
         Raises:
             ValueError: If rerank_model_id is None.
-            NotImplementedError: If FlagEmbeddingReranker fails to initialize due to an unsupported operation (e.g., missing GPU support).
-            RuntimeError: If FlagEmbeddingReranker fails to initialize due to a meta-tensor device transfer issue.
+            NotImplementedError: If FlagEmbeddingReranker fails for an unsupported operation unrelated to meta tensors.
+            RuntimeError: If FlagEmbeddingReranker fails for an unsupported runtime condition unrelated to meta tensors.
         """
         if self.rerank_model_id is None:
             raise ValueError("rerank_model_id cannot be None")
         if self._reranker is None:
-            if self.openai_model_provider.lower() in {"openai"}:
-                self._reranker = LLMRerank(
+            provider = self.openai_inference_provider.lower()
+            if provider == "vllm":
+                self._reranker = VLLMRerankPostprocessor(
+                    api_base=self.openai_api_base or "",
+                    api_key=self.openai_api_key,
+                    model=self.rerank_model_id,
+                    timeout=self.openai_timeout,
                     top_n=self.rerank_top_n,
-                    llm=self.text_model,
                 )
                 logger.info(
-                    "Initializing LLM reranker with model: {}", self.text_model_id
+                    "Initializing vLLM reranker endpoint client with model: {}",
+                    self.rerank_model_id,
                 )
             else:
                 # Resolve to local cache path for offline compatibility
@@ -906,8 +1091,9 @@ class RAG:
                     flag_reranker._model.compute_score([("healthcheck", "healthcheck")])
                     self._reranker = flag_reranker
                     logger.info(
-                        "Initializing FlagEmbeddingReranker with model: {}",
+                        "Initializing FlagEmbeddingReranker with model: {} for provider {}",
                         self.rerank_model_id,
+                        provider,
                     )
                 except (NotImplementedError, RuntimeError) as exc:
                     if "meta tensor" not in str(exc).lower():
@@ -922,8 +1108,12 @@ class RAG:
                     )
         return self._reranker
 
-    def _create_text_model(self) -> OpenAI:
+    def _create_text_model(self, *, enable_reasoning: bool = False) -> OpenAI:
         """Helper to create an OpenAI (or compatible) model instance.
+
+        Args:
+            enable_reasoning: Whether this model instance should request the
+                provider reasoning/thinking mode.
 
         Returns:
             OpenAI: The initialized model.
@@ -935,7 +1125,10 @@ class RAG:
             raise ValueError("text_model_id cannot be None")
 
         additional_kwargs: dict[str, Any] = {}
-        reasoning_effort = get_openai_reasoning_effort(self.openai_config)
+        reasoning_effort = get_openai_reasoning_effort(
+            self.openai_config,
+            enabled=enable_reasoning,
+        )
 
         # LlamaIndex OpenAI class supports api_key, api_base, timeout, max_retries, seed, top_p
         # Use LocalOpenAI which tolerates unknown model names (e.g. paths) by falling back to default metadata
@@ -970,6 +1163,26 @@ class RAG:
         if self._text_model is None:
             self._text_model = self._create_text_model()
         return self._text_model
+
+    @property
+    def post_retrieval_text_model(self) -> OpenAI:
+        """Return the model used for post-retrieval response generation.
+
+        Grounded answer synthesis after retrieval should request provider
+        reasoning/thinking. Pre-retrieval steps such as query rewriting remain
+        on the default non-reasoning model.
+
+        Returns:
+            OpenAI: The post-retrieval generation model.
+        """
+        if get_openai_reasoning_effort(self.openai_config, enabled=True) is None:
+            return self.text_model
+
+        if self._post_retrieval_text_model is None:
+            self._post_retrieval_text_model = self._create_text_model(
+                enable_reasoning=True
+            )
+        return self._post_retrieval_text_model
 
     @property
     def qdrant_client(self) -> QdrantClient:
@@ -1070,7 +1283,7 @@ class RAG:
             raise ValueError("data_dir cannot be None for ingestion pipeline.")
 
         hate_speech_enabled = load_hate_speech_env().enabled
-        use_llm_ner = self.ner_enabled and self.openai_model_provider.lower() in {
+        use_llm_ner = self.ner_enabled and self.openai_inference_provider.lower() in {
             "openai"
         }
 
@@ -1090,7 +1303,7 @@ class RAG:
             device=self.device,
             progress_callback=progress_callback,
             hate_speech_model=hate_speech_model,
-            openai_model_provider=self.openai_model_provider,
+            openai_inference_provider=self.openai_inference_provider,
             target_collection=self.qdrant_collection,
             image_ingestion_service=self._image_ingestion_service,
         )
@@ -2241,9 +2454,7 @@ class RAG:
             retrieval_options=retrieval_options,
         )
         response_mode = self._resolve_chat_response_mode()
-        node_postprocessors: list[
-            BaseNodePostprocessor | LLMRerank | FlagEmbeddingReranker
-        ] = [self.reranker]
+        node_postprocessors: list[BaseNodePostprocessor] = [self.reranker]
         if retrieval_settings["parent_context_enabled"] and self.index is not None:
             node_postprocessors.append(
                 ParentContextPostprocessor(docstore=self.index.docstore)
@@ -2261,7 +2472,7 @@ class RAG:
                 vector_store_kwargs=vector_store_kwargs,
                 retrieval_options=retrieval_options,
             ),
-            llm=self.text_model,
+            llm=self.post_retrieval_text_model,
             node_postprocessors=node_postprocessors,
             streaming=streaming,
             response_mode=response_mode,
@@ -4644,7 +4855,9 @@ class RAG:
                 "Unable to extract grounded evidence from the selected collection."
             )
         else:
-            completion = self.text_model.complete(context["synthesis_prompt"])
+            completion = self.post_retrieval_text_model.complete(
+                context["synthesis_prompt"]
+            )
             summary_text = str(getattr(completion, "text", "") or "").strip()
 
         payload = {
@@ -4717,7 +4930,9 @@ class RAG:
 
         full_text = ""
         running_text = ""
-        for chunk in self.text_model.stream_complete(context["synthesis_prompt"]):
+        for chunk in self.post_retrieval_text_model.stream_complete(
+            context["synthesis_prompt"]
+        ):
             delta = getattr(chunk, "delta", None)
             if isinstance(delta, str) and delta:
                 token = delta
@@ -5131,6 +5346,7 @@ class RAG:
         """Unload models to free up memory."""
         self._embed_model = None
         self._text_model = None
+        self._post_retrieval_text_model = None
         self._reranker = None
         self._image_ingestion_service = None
         self._invalidate_ner_cache()

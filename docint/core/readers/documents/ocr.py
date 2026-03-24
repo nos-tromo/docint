@@ -383,7 +383,7 @@ class VisionOCREngine(OCREngine):
         Raises:
             RuntimeError: If the vision inference fails.
         """
-        vision_model_id = load_model_env().vision_model_file.removesuffix(".gguf")
+        vision_model_id = load_model_env().vision_model
 
         prompt_text = prompt_override or self._ocr_prompt
         content_parts: list[ChatCompletionContentPartParam] = [

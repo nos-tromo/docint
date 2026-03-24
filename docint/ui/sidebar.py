@@ -1,13 +1,16 @@
 """Sidebar: navigation, collection selector, and chat-session management."""
 
+from typing import Literal
+
 import requests
 import streamlit as st
 from loguru import logger
 
 from docint.ui.state import PAGE_ICONS, PAGES
-from docint.utils.env_cfg import load_host_env
+from docint.utils.env_cfg import load_frontend_env, load_host_env
 
 BACKEND_HOST = load_host_env().backend_host
+COLLECTION_TIMEOUT = load_frontend_env().collection_timeout
 
 
 def render_sidebar() -> None:
@@ -54,7 +57,9 @@ def _render_collection_selector() -> None:
     st.markdown("##### 📁 Collection")
 
     try:
-        resp = requests.get(f"{BACKEND_HOST}/collections/list", timeout=10)
+        resp = requests.get(
+            f"{BACKEND_HOST}/collections/list", timeout=COLLECTION_TIMEOUT
+        )
         if resp.status_code == 200:
             cols = [
                 c
@@ -99,7 +104,8 @@ def _render_collection_selector() -> None:
             if st.button("Yes, delete", type="primary"):
                 try:
                     r = requests.delete(
-                        f"{BACKEND_HOST}/collections/{selected}", timeout=10
+                        f"{BACKEND_HOST}/collections/{selected}",
+                        timeout=COLLECTION_TIMEOUT,
                     )
                     if r.status_code == 200:
                         if st.session_state.selected_collection == selected:
@@ -119,7 +125,7 @@ def _render_collection_selector() -> None:
             r = requests.post(
                 f"{BACKEND_HOST}/collections/select",
                 json={"name": selected},
-                timeout=10,
+                timeout=COLLECTION_TIMEOUT,
             )
             if r.status_code == 200:
                 st.session_state.selected_collection = selected
@@ -166,7 +172,9 @@ def _render_chat_sessions() -> None:
         return
 
     for s in sessions:
-        b_type = "primary" if s["id"] == st.session_state.session_id else "secondary"
+        b_type: Literal["primary", "secondary", "tertiary"] = (
+            "primary" if s["id"] == st.session_state.session_id else "secondary"
+        )
         if st.button(
             s["title"],
             key=f"sess_{s['id']}",
@@ -181,7 +189,7 @@ def _render_chat_sessions() -> None:
                         r = requests.post(
                             f"{BACKEND_HOST}/collections/select",
                             json={"name": clicked_col},
-                            timeout=10,
+                            timeout=COLLECTION_TIMEOUT,
                         )
                         if r.status_code == 200:
                             st.session_state.selected_collection = clicked_col

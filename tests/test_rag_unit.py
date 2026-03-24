@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 import types
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -136,10 +138,10 @@ def test_normalize_response_data_extracts_sources(
     assert first_source.get("document_url") == first_source.get("preview_url")
 
 
-def test_create_text_model_passes_reasoning_effort_for_openai(
+def test_create_text_model_disables_reasoning_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RAG text model creation should enable reasoning only for OpenAI provider.
+    """Shared RAG text model should omit reasoning by default.
 
     Args:
         monkeypatch: The monkeypatch fixture.
@@ -183,7 +185,119 @@ def test_create_text_model_passes_reasoning_effort_for_openai(
 
     rag._create_text_model()
 
-    assert captured["reasoning_effort"] == "high"
+    assert captured["reasoning_effort"] is None
+
+
+def test_post_retrieval_text_model_enables_reasoning_for_openai(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Post-retrieval generation should use a reasoning-enabled model.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    calls: list[bool] = []
+
+    class _FakeModel:
+        """A minimal stand-in for the text model that captures whether reasoning is enabled."""
+
+        def complete(self, prompt: str) -> _FakeCompletion:
+            """Simulate the completion method of the text model.
+
+            Args:
+                prompt (str): The input prompt for the model.
+
+            Returns:
+                _FakeCompletion: A fake completion response.
+            """
+            _ = prompt
+            return _FakeCompletion("summary")
+
+    rag = RAG(qdrant_collection="test")
+    rag.openai_config = OpenAIConfig(
+        api_base="https://api.openai.com/v1",
+        api_key="sk-test",
+        ctx_window=200000,
+        dimensions=1024,
+        max_retries=2,
+        inference_provider="openai",
+        reuse_client=False,
+        seed=42,
+        temperature=0.0,
+        thinking_effort="high",
+        thinking_enabled=True,
+        timeout=300.0,
+        top_p=0.0,
+    )
+
+    def _fake_create_text_model(self: RAG, *, enable_reasoning: bool = False) -> Any:
+        """Simulate the text model creation method, capturing whether reasoning is enabled.
+
+        Args:
+            self (RAG): The RAG instance for which the text model is being created.
+            enable_reasoning (bool, optional): Whether reasoning is enabled for the text model. Defaults to False.
+
+        Returns:
+            Any: A fake text model instance.
+        """
+        _ = self
+        calls.append(enable_reasoning)
+        return _FakeModel()
+
+    monkeypatch.setattr(RAG, "_create_text_model", _fake_create_text_model)
+
+    _ = rag.text_model
+    _ = rag.post_retrieval_text_model
+
+    assert calls == [False, True]
+
+
+def test_build_query_engine_uses_post_retrieval_text_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Query-engine answer generation should use the post-retrieval model.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag.openai_config = OpenAIConfig(
+        api_base="https://api.openai.com/v1",
+        api_key="sk-test",
+        ctx_window=200000,
+        dimensions=1024,
+        max_retries=2,
+        inference_provider="openai",
+        reuse_client=False,
+        seed=42,
+        temperature=0.0,
+        thinking_effort="high",
+        thinking_enabled=True,
+        timeout=300.0,
+        top_p=0.0,
+    )
+    rag._post_retrieval_text_model = cast(Any, object())
+    rag._reranker = cast(Any, object())
+    rag.index = cast(
+        Any,
+        types.SimpleNamespace(
+            docstore=object(),
+            as_retriever=lambda **kwargs: {"retriever_kwargs": kwargs},
+        ),
+    )
+    monkeypatch.setattr(RAG, "list_documents", lambda self: [])
+    monkeypatch.setattr(RAG, "_sample_collection_payloads", lambda self, limit=128: [])
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        rag_module.RetrieverQueryEngine,
+        "from_args",
+        staticmethod(lambda **kwargs: captured.update(kwargs) or kwargs),
+    )
+
+    rag.build_query_engine()
+
+    assert captured["llm"] is rag._post_retrieval_text_model
 
 
 def test_normalize_response_data_appends_image_sources(
@@ -309,7 +423,11 @@ def test_normalize_response_data_falls_back_for_empty_model_output(
 def test_normalize_response_data_falls_back_for_empty_response_sentinel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Normalization should hide upstream empty-response sentinels."""
+    """Normalization should hide upstream empty-response sentinels.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
     rag = RAG(qdrant_collection="test")
     monkeypatch.setattr(
         RAG,
@@ -327,7 +445,11 @@ def test_normalize_response_data_falls_back_for_empty_response_sentinel(
 def test_normalize_response_data_builds_source_backed_answer_when_sources_exist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Normalization should summarize matching sources instead of claiming no context."""
+    """Normalization should summarize matching sources instead of claiming no context.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
     rag = RAG(qdrant_collection="test")
     monkeypatch.setattr(
         RAG,
@@ -464,9 +586,15 @@ def test_retrieve_image_sources_skips_when_image_collection_missing() -> None:
         """Image service stub that raises if unexpectedly queried."""
 
         def __init__(self) -> None:
+            """Initialize the DummyImageService with a flag to track if it was called."""
             self.called = False
 
         def _resolve_collection_name(self, source_collection: str | None = None) -> str:
+            """Resolve the collection name for the given source collection.
+
+            Args:
+                source_collection: The name of the source collection, or None for default.
+            """
             return f"{source_collection}_images"
 
         def query_similar_images_by_text(
@@ -476,6 +604,19 @@ def test_retrieve_image_sources_skips_when_image_collection_missing() -> None:
             *,
             source_collection: str | None = None,
         ) -> list[dict[str, Any]]:
+            """Query for similar images based on the provided text and optional source collection.
+
+            Args:
+                query_text (str): The text query to find similar images for.
+                top_k (int, optional): The maximum number of similar images to return. Defaults to 3.
+                source_collection (str | None, optional): The name of the source collection to query. Defaults to None.
+
+            Returns:
+                list[dict[str, Any]]: The list of similar images.
+
+            Raises:
+                AssertionError: If the method is called unexpectedly.
+            """
             self.called = True
             raise AssertionError("query_similar_images_by_text should not be called")
 
@@ -1037,18 +1178,38 @@ def test_start_session_initializes_memory(
     rag._text_model = cast(Any, object())
 
     class FakeMemory:
+        """A fake memory class for testing purposes."""
+
         def __init__(self) -> None:
+            """Initialize the FakeMemory with an empty message list."""
             self.messages: list[object] = []
 
         def put(self, message) -> None:
+            """Add a message to the FakeMemory."""
             self.messages.append(message)
 
     class FakeChatEngine:
+        """A fake chat engine class for testing purposes."""
+
         def __init__(self, **kwargs) -> None:
+            """Initialize the FakeChatEngine with the provided keyword arguments.
+
+            Args:
+                **kwargs: Arbitrary keyword arguments to store in the instance.
+            """
+
             self.kwargs = kwargs
 
         @classmethod
-        def from_defaults(cls, **kwargs):
+        def from_defaults(cls, **kwargs) -> FakeChatEngine:
+            """Create a FakeChatEngine instance from default settings.
+
+            Args:
+                **kwargs: Arbitrary keyword arguments to pass to the constructor.
+
+            Returns:
+                An instance of FakeChatEngine initialized with the provided keyword arguments.
+            """
             return cls(**kwargs)
 
     monkeypatch.setattr(
@@ -1082,6 +1243,11 @@ def test_sparse_model_raises_import_error_when_fastembed_broken(
     """
 
     def broken() -> list[dict[str, str]]:
+        """Simulate a broken SparseTextEmbedding.list_supported_models method.
+
+        Raises:
+            ImportError: Always raised to simulate the absence of fastembed.
+        """
         raise ImportError("missing")
 
     monkeypatch.setattr(
@@ -1124,11 +1290,16 @@ def test_build_ingestion_pipeline_reuses_text_model_for_ner_and_hate_speech(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """LLM-NER and hate-speech should share one cached text model instance."""
+    """LLM-NER and hate-speech should share one cached text model instance.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The temporary path fixture.
+    """
     rag = RAG(qdrant_collection="test")
     rag.data_dir = tmp_path
     rag.ner_enabled = True
-    rag.openai_model_provider = "openai"
+    rag.openai_inference_provider = "openai"
 
     monkeypatch.setattr(
         rag_module,
@@ -1139,6 +1310,15 @@ def test_build_ingestion_pipeline_reuses_text_model_for_ner_and_hate_speech(
     created: list[object] = []
 
     def _fake_create_text_model(self: RAG) -> object:
+        """Create a fake text model instance for testing purposes.
+
+        Args:
+            self: The RAG instance.
+
+        Returns:
+            A fake text model instance.
+        """
+
         model = object()
         created.append(model)
         return model
@@ -1156,11 +1336,16 @@ def test_build_ingestion_pipeline_non_openai_keeps_gliner_ner_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Non-OpenAI provider should not wire LLM NER model into the pipeline."""
+    """Non-OpenAI provider should not wire LLM NER model into the pipeline.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The temporary path fixture.
+    """
     rag = RAG(qdrant_collection="test")
     rag.data_dir = tmp_path
     rag.ner_enabled = True
-    rag.openai_model_provider = "llama.cpp"
+    rag.openai_inference_provider = "ollama"
 
     monkeypatch.setattr(
         rag_module,
@@ -1171,6 +1356,15 @@ def test_build_ingestion_pipeline_non_openai_keeps_gliner_ner_path(
     created: list[object] = []
 
     def _fake_create_text_model(self: RAG) -> object:
+        """Create a fake text model instance for testing purposes.
+
+        Args:
+            self: The RAG instance.
+
+        Returns:
+            A fake text model instance.
+        """
+
         model = object()
         created.append(model)
         return model
@@ -1235,7 +1429,16 @@ def test_reranker_passes_configured_fp16(monkeypatch: pytest.MonkeyPatch) -> Non
     captured: dict[str, object] = {}
 
     class FakeFlagReranker:
+        """A fake FlagEmbeddingReranker for testing purposes."""
+
         def __init__(self, top_n: int, model: str, use_fp16: bool) -> None:
+            """Initialize the FakeFlagReranker and capture the initialization parameters.
+
+            Args:
+                top_n (int): The number of top results to rerank.
+                model (str): The model identifier to use for reranking.
+                use_fp16 (bool): Whether to use fp16 precision for the model.
+            """
             captured["top_n"] = top_n
             captured["model"] = model
             captured["use_fp16"] = use_fp16
@@ -1249,7 +1452,7 @@ def test_reranker_passes_configured_fp16(monkeypatch: pytest.MonkeyPatch) -> Non
     )
 
     rag = RAG(qdrant_collection="test")
-    rag.openai_model_provider = "llama.cpp"
+    rag.openai_inference_provider = "ollama"
     rag.rerank_use_fp16 = True
     rag.rerank_top_n = 7
 
@@ -1258,6 +1461,208 @@ def test_reranker_passes_configured_fp16(monkeypatch: pytest.MonkeyPatch) -> Non
     assert captured["top_n"] == 7
     assert captured["model"] == rag.rerank_model_id
     assert captured["use_fp16"] is True
+
+
+def test_openai_reranker_uses_flag_embedding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OpenAI provider should use the local FlagEmbedding reranker by default.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+
+    captured: dict[str, object] = {}
+
+    class FakeFlagReranker:
+        """A fake FlagEmbeddingReranker for testing purposes."""
+
+        def __init__(self, top_n: int, model: str, use_fp16: bool) -> None:
+            """Initialize the FakeFlagReranker and capture the initialization parameters.
+
+            Args:
+                top_n (int): The number of top results to rerank.
+                model (str): The model identifier to use for reranking.
+                use_fp16 (bool): Whether to use fp16 precision for the model.
+            """
+            captured["top_n"] = top_n
+            captured["model"] = model
+            captured["use_fp16"] = use_fp16
+            self._model = types.SimpleNamespace(compute_score=lambda _: [0.0])
+
+    def fail_llm_rerank(*args: object, **kwargs: object) -> object:
+        """A fake LLMRerank that raises an error if used.
+
+        Raises:
+            AssertionError: Always raised to indicate that LLMRerank should not be used.
+        """
+        raise AssertionError("LLMRerank should not be used for the openai provider")
+
+    monkeypatch.setattr(rag_module, "FlagEmbeddingReranker", FakeFlagReranker)
+    monkeypatch.setattr(rag_module, "LLMRerank", fail_llm_rerank)
+    monkeypatch.setattr(
+        rag_module,
+        "resolve_hf_cache_path",
+        lambda cache_dir, repo_id: None,
+    )
+
+    rag = RAG(qdrant_collection="test")
+    rag.openai_inference_provider = "openai"
+    rag.rerank_top_n = 6
+
+    _ = rag.reranker
+
+    assert captured["top_n"] == 6
+    assert captured["model"] == rag.rerank_model_id
+
+
+def test_vllm_reranker_uses_remote_postprocessor() -> None:
+    """vLLM provider should use the remote rerank endpoint postprocessor."""
+
+    rag = RAG(qdrant_collection="test")
+    rag.openai_inference_provider = "vllm"
+    rag.openai_api_base = "http://router:8000/v1"
+    rag.openai_api_key = "token-abc123"
+    rag.rerank_top_n = 4
+
+    reranker = rag.reranker
+
+    assert isinstance(reranker, rag_module.VLLMRerankPostprocessor)
+    assert reranker.api_base == "http://router:8000/v1"
+    assert reranker.api_key == "token-abc123"
+    assert reranker.model == rag.rerank_model_id
+    assert reranker.top_n == 4
+
+
+def test_vllm_reranker_reorders_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The vLLM reranker should reorder nodes using returned result indices.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        """A fake HTTP response object that simulates the expected output of the vLLM rerank endpoint."""
+
+        def __enter__(self) -> "FakeResponse":
+            """A context manager enter method that returns self.
+
+            Returns:
+                FakeResponse: The fake response object itself.
+            """
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            """A context manager exit method that does nothing.
+
+            Args:
+                exc_type (object): The exception type, if any.
+                exc (object): The exception instance, if any.
+                tb (object): The traceback object, if any.
+            """
+            _ = (exc_type, exc, tb)
+
+        def read(self) -> bytes:
+            """Simulates reading the response body, returning a JSON-encoded byte string with relevance scores and indices.
+
+            Returns:
+                bytes: A JSON-encoded byte string containing the reranking results.
+            """
+            return json.dumps(
+                {
+                    "results": [
+                        {"index": 2, "relevance_score": 0.91},
+                        {"index": 0, "relevance_score": 0.44},
+                    ]
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> FakeResponse:
+        """A fake urlopen function that captures the request details and simulates a response from the vLLM rerank endpoint.
+
+        Args:
+            request (urllib.request.Request): The HTTP request object sent to the rerank endpoint.
+            timeout (float): The timeout value for the request.
+
+        Returns:
+            FakeResponse: A fake response object containing the simulated reranking results.
+        """
+        captured["url"] = request.full_url
+        captured["headers"] = dict(request.header_items())
+        captured["json"] = json.loads(
+            request.data.decode("utf-8") if isinstance(request.data, bytes) else "{}"
+        )
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(rag_module.urllib.request, "urlopen", fake_urlopen)
+
+    reranker = rag_module.VLLMRerankPostprocessor(
+        api_base="http://router:8000/v1",
+        api_key="secret",
+        model="BAAI/bge-reranker-v2-m3",
+        timeout=12.5,
+        top_n=2,
+    )
+    nodes = [
+        NodeWithScore(node=TextNode(text="alpha"), score=0.1),
+        NodeWithScore(node=TextNode(text="beta"), score=0.2),
+        NodeWithScore(node=TextNode(text="gamma"), score=0.3),
+    ]
+
+    reranked = reranker.postprocess_nodes(
+        nodes,
+        query_bundle=rag_module.QueryBundle(query_str="which greek letter?"),
+    )
+
+    assert [node.node.get_content() for node in reranked] == ["gamma", "alpha"]
+    assert [node.score for node in reranked] == [0.91, 0.44]
+    assert captured["url"] == "http://router:8000/v1/rerank"
+    assert captured["headers"] == {
+        "Content-type": "application/json",
+        "Authorization": "Bearer secret",
+    }
+    assert captured["json"] == {
+        "model": "BAAI/bge-reranker-v2-m3",
+        "query": "which greek letter?",
+        "documents": ["alpha", "beta", "gamma"],
+        "top_n": 2,
+    }
+    assert captured["timeout"] == 12.5
+
+
+def test_vllm_reranker_falls_back_to_original_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The vLLM reranker should degrade to original ordering when the call fails.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+
+    def fake_urlopen(request: object, timeout: float) -> object:
+        _ = (request, timeout)
+        raise urllib.error.URLError("upstream down")
+
+    monkeypatch.setattr(rag_module.urllib.request, "urlopen", fake_urlopen)
+
+    reranker = rag_module.VLLMRerankPostprocessor(
+        api_base="http://router:8000/v1",
+        model="BAAI/bge-reranker-v2-m3",
+        top_n=2,
+    )
+    nodes = [
+        NodeWithScore(node=TextNode(text="alpha"), score=0.3),
+        NodeWithScore(node=TextNode(text="beta"), score=0.2),
+        NodeWithScore(node=TextNode(text="gamma"), score=0.1),
+    ]
+
+    reranked = reranker.postprocess_nodes(
+        nodes,
+        query_bundle=rag_module.QueryBundle(query_str="which greek letter?"),
+    )
+
+    assert [node.node.get_content() for node in reranked] == ["alpha", "beta"]
 
 
 def test_embed_model_uses_ollama_embedding_backend(
@@ -1275,6 +1680,7 @@ def test_embed_model_uses_ollama_embedding_backend(
             captured.update(kwargs)
 
     monkeypatch.setattr(rag_module, "OpenAIEmbedding", FakeOpenAIEmbedding)
+    monkeypatch.delenv("OPENAI_DIMENSIONS", raising=False)
 
     rag = RAG(qdrant_collection="test")
     rag.embed_model_id = "bge-m3"
@@ -1283,7 +1689,32 @@ def test_embed_model_uses_ollama_embedding_backend(
 
     assert captured["model_name"] == "bge-m3"
     assert captured["api_base"] == rag.openai_api_base
-    assert captured["dimensions"] == rag.openai_dimensions
+    assert "dimensions" not in captured
+
+
+def test_embed_model_forwards_explicit_dimensions_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit embedding dimensions should only be sent when configured.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    captured: dict[str, object] = {}
+
+    class FakeOpenAIEmbedding:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(rag_module, "OpenAIEmbedding", FakeOpenAIEmbedding)
+
+    rag = RAG(qdrant_collection="test")
+    rag.embed_model_id = "text-embedding-3-small"
+    rag.openai_dimensions = 1024
+
+    _ = rag.embed_model
+
+    assert captured["dimensions"] == 1024
 
 
 def test_reranker_falls_back_to_llm_on_meta_tensor_error(
@@ -1319,7 +1750,7 @@ def test_reranker_falls_back_to_llm_on_meta_tensor_error(
     )
 
     rag = RAG(qdrant_collection="test")
-    rag.openai_model_provider = "llama.cpp"
+    rag.openai_inference_provider = "ollama"
     rag._text_model = None
 
     assert rag.reranker is llm_reranker_obj
@@ -1411,7 +1842,22 @@ def _social_summary_node(
     row: int,
     score: float = 0.9,
 ) -> DummyNodeWithScore:
-    """Build a dummy row-level social source node for summary tests."""
+    """Build a dummy row-level social source node for summary tests.
+
+    Args:
+        text: The text content of the node.
+        filename: The name of the source file.
+        file_hash: The hash of the source file.
+        text_id: The unique identifier for the social media text (e.g., comment ID).
+        author: The author of the social media text.
+        author_id: The unique identifier for the author.
+        timestamp: The timestamp of the social media text.
+        row: The row index in the table.
+        score: The relevance score. Defaults to 0.9.
+
+    Returns:
+        A ``DummyNodeWithScore`` with the specified metadata.
+    """
     node = DummyNode(
         text,
         {
@@ -1440,12 +1886,19 @@ def _social_summary_node(
 def test_build_query_engine_uses_refine_prompts_for_social_table_collection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Social/table-heavy collections should use grounded refine synthesis."""
+    """Social/table-heavy collections should use grounded refine synthesis.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
     rag = RAG(qdrant_collection="test")
     rag._text_model = cast(Any, object())
     rag._reranker = cast(Any, object())
-    rag.index = types.SimpleNamespace(
-        as_retriever=lambda **kwargs: {"retriever_kwargs": kwargs}
+    rag.index = cast(
+        Any,
+        types.SimpleNamespace(
+            as_retriever=lambda **kwargs: {"retriever_kwargs": kwargs}
+        ),
     )
     monkeypatch.setattr(
         RAG,
@@ -1467,6 +1920,14 @@ def test_build_query_engine_uses_refine_prompts_for_social_table_collection(
     sentinel = object()
 
     def fake_from_args(**kwargs: Any) -> object:
+        """Fake implementation of the from_args method.
+
+        Args:
+            **kwargs: Arbitrary keyword arguments.
+
+        Returns:
+            object: A sentinel object to simulate the return value.
+        """
         captured.update(kwargs)
         return sentinel
 
@@ -1489,16 +1950,24 @@ def test_build_query_engine_uses_refine_prompts_for_social_table_collection(
 def test_build_query_engine_uses_hybrid_retrieval_by_default_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Hybrid-capable collections should default to actual hybrid retrieval."""
+    """Hybrid-capable collections should default to actual hybrid retrieval.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
     rag = RAG(qdrant_collection="test", enable_hybrid=True)
     rag._text_model = cast(Any, object())
     rag._reranker = cast(Any, object())
 
     captured_retriever_kwargs: dict[str, Any] = {}
-    rag.index = types.SimpleNamespace(
-        docstore=object(),
-        as_retriever=lambda **kwargs: captured_retriever_kwargs.update(kwargs)
-        or {"retriever_kwargs": kwargs},
+    rag.index = cast(
+        Any,
+        types.SimpleNamespace(
+            docstore=object(),
+            as_retriever=lambda **kwargs: (
+                captured_retriever_kwargs.update(kwargs) or {"retriever_kwargs": kwargs}
+            ),
+        ),
     )
     monkeypatch.setattr(RAG, "list_documents", lambda self: [])
     monkeypatch.setattr(RAG, "_sample_collection_payloads", lambda self, limit=128: [])
@@ -1522,13 +1991,20 @@ def test_build_query_engine_uses_hybrid_retrieval_by_default_when_enabled(
 def test_build_query_engine_adds_parent_context_postprocessor_when_supported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Hierarchical collections should expand fine hits to parent context."""
+    """Hierarchical collections should expand fine hits to parent context.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
     rag = RAG(qdrant_collection="test")
     rag._text_model = cast(Any, object())
     rag._reranker = cast(Any, object())
-    rag.index = types.SimpleNamespace(
-        docstore=object(),
-        as_retriever=lambda **kwargs: {"retriever_kwargs": kwargs},
+    rag.index = cast(
+        Any,
+        types.SimpleNamespace(
+            docstore=object(),
+            as_retriever=lambda **kwargs: {"retriever_kwargs": kwargs},
+        ),
     )
     monkeypatch.setattr(RAG, "list_documents", lambda self: [])
     monkeypatch.setattr(
@@ -1567,9 +2043,9 @@ def test_parent_context_postprocessor_promotes_parent_nodes() -> None:
 
     postprocessor = rag_module.ParentContextPostprocessor(
         docstore=types.SimpleNamespace(
-            get_node=lambda node_id, raise_error=False: parent
-            if node_id == "parent-1"
-            else None
+            get_node=lambda node_id, raise_error=False: (
+                parent if node_id == "parent-1" else None
+            )
         )
     )
 
@@ -1589,7 +2065,7 @@ def test_summarize_collection_reports_coverage_diagnostics(
         monkeypatch: The monkeypatch fixture.
     """
     rag = RAG(qdrant_collection="test")
-    rag._text_model = _FakeSummaryLLM("Collection summary")  # type: ignore[assignment]
+    rag._post_retrieval_text_model = _FakeSummaryLLM("Collection summary")  # type: ignore[assignment]
 
     docs = [
         {"filename": "a.pdf", "file_hash": "ha", "node_count": 9},
@@ -1632,9 +2108,14 @@ def test_summarize_collection_reports_coverage_diagnostics(
 def test_summarize_collection_uses_post_coverage_for_social_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Social summaries should report post-level coverage and preserve source distinctions."""
+    """Social summaries should report post-level coverage and preserve source distinctions.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
     rag = RAG(qdrant_collection="test")
-    rag._text_model = _FakeSummaryLLM("Social summary")  # type: ignore[assignment]
+    llm = _FakeSummaryLLM("Social summary")
+    rag._post_retrieval_text_model = llm  # type: ignore[assignment]
     rag.social_summary_diversity_limit = 1
 
     monkeypatch.setattr(
@@ -1697,8 +2178,8 @@ def test_summarize_collection_uses_post_coverage_for_social_rows(
     assert diagnostics["deduped_count"] == 2
     assert diagnostics["sampled_count"] == 2
     assert len(summary["sources"]) == 2
-    assert "author=Alice" in rag._text_model.prompts[0]
-    assert "author=Bob" in rag._text_model.prompts[0]
+    assert "author=Alice" in llm.prompts[0]
+    assert "author=Bob" in llm.prompts[0]
 
 
 def test_merge_summary_sources_deduplicates_and_preserves_doc_coverage() -> None:
@@ -1743,7 +2224,7 @@ def test_summarize_collection_handles_no_documents(
         monkeypatch: The monkeypatch fixture.
     """
     rag = RAG(qdrant_collection="test")
-    rag._text_model = _FakeSummaryLLM("unused")  # type: ignore[assignment]
+    rag._post_retrieval_text_model = _FakeSummaryLLM("unused")  # type: ignore[assignment]
     rag.summary_coverage_target = 0.7
     rag.summary_max_docs = 30
 
@@ -1873,7 +2354,7 @@ def test_summarize_collection_cache_miss_then_hit(
     """
     rag = RAG(qdrant_collection="test")
     llm = _FakeSummaryLLM("Collection summary")
-    rag._text_model = llm  # type: ignore[assignment]
+    rag._post_retrieval_text_model = llm  # type: ignore[assignment]
     _patch_summary_context(monkeypatch)
 
     kv_store = _InMemorySummaryKVStore()
@@ -1884,6 +2365,16 @@ def test_summarize_collection_cache_miss_then_hit(
         *,
         allow_create: bool = True,
     ) -> _InMemorySummaryKVStore:
+        """Return the in-memory summary KV store.
+
+        Args:
+            self (RAG): The RAG instance.
+            collection (str | None, optional): The collection name. Defaults to None.
+            allow_create (bool, optional): Whether to allow creation of a new store. Defaults to True.
+
+        Returns:
+            _InMemorySummaryKVStore: _description_
+        """
         _ = (self, collection, allow_create)
         return kv_store
 
@@ -1914,7 +2405,7 @@ def test_summarize_collection_refresh_bypasses_cache(
     """
     rag = RAG(qdrant_collection="test")
     llm = _FakeSummaryLLM("Collection summary")
-    rag._text_model = llm  # type: ignore[assignment]
+    rag._post_retrieval_text_model = llm  # type: ignore[assignment]
     _patch_summary_context(monkeypatch)
 
     kv_store = _InMemorySummaryKVStore()
@@ -1925,6 +2416,16 @@ def test_summarize_collection_refresh_bypasses_cache(
         *,
         allow_create: bool = True,
     ) -> _InMemorySummaryKVStore:
+        """Return the in-memory summary KV store.
+
+        Args:
+            self (RAG): The RAG instance.
+            collection (str | None, optional): The collection name. Defaults to None.
+            allow_create (bool, optional): Whether to allow creation of a new store. Defaults to True.
+
+        Returns:
+            _InMemorySummaryKVStore: The in-memory summary KV store.
+        """
         _ = (self, collection, allow_create)
         return kv_store
 
@@ -1946,7 +2447,7 @@ def test_summarize_collection_prompt_fingerprint_change_forces_recompute(
     """
     rag = RAG(qdrant_collection="test")
     llm = _FakeSummaryLLM("Collection summary")
-    rag._text_model = llm  # type: ignore[assignment]
+    rag._post_retrieval_text_model = llm  # type: ignore[assignment]
     _patch_summary_context(monkeypatch)
 
     kv_store = _InMemorySummaryKVStore()
@@ -1957,6 +2458,16 @@ def test_summarize_collection_prompt_fingerprint_change_forces_recompute(
         *,
         allow_create: bool = True,
     ) -> _InMemorySummaryKVStore:
+        """Return the in-memory summary KV store.
+
+        Args:
+            self (RAG): The RAG instance.
+            collection (str | None, optional): The collection name. Defaults to None.
+            allow_create (bool, optional): Whether to allow creation of a new store. Defaults to True.
+
+        Returns:
+            _InMemorySummaryKVStore: The in-memory summary KV store.
+        """
         _ = (self, collection, allow_create)
         return kv_store
 
@@ -1979,7 +2490,7 @@ def test_summarize_collection_revision_bump_invalidates_cache(
     """
     rag = RAG(qdrant_collection="test")
     llm = _FakeSummaryLLM("Collection summary")
-    rag._text_model = llm  # type: ignore[assignment]
+    rag._post_retrieval_text_model = llm  # type: ignore[assignment]
     _patch_summary_context(monkeypatch)
 
     kv_store = _InMemorySummaryKVStore()
@@ -1990,6 +2501,16 @@ def test_summarize_collection_revision_bump_invalidates_cache(
         *,
         allow_create: bool = True,
     ) -> _InMemorySummaryKVStore:
+        """Return the in-memory summary KV store.
+
+        Args:
+            self (RAG): The RAG instance.
+            collection (str | None, optional): The collection name. Defaults to None.
+            allow_create (bool, optional): Whether to allow creation of a new store. Defaults to True.
+
+        Returns:
+            _InMemorySummaryKVStore: The in-memory summary KV store.
+        """
         _ = (self, collection, allow_create)
         return kv_store
 
@@ -2178,9 +2699,16 @@ def test_persist_node_batches_streams_micro_batches() -> None:
         """Capture docstore write batch sizes."""
 
         def __init__(self) -> None:
+            """Initialise an empty list to capture batch sizes."""
             self.batch_sizes: list[int] = []
 
         def add_documents(self, nodes: list[Any], allow_update: bool = True) -> None:
+            """Capture the size of each batch of documents added to the docstore.
+
+            Args:
+                nodes (list[Any]): The list of nodes being added to the docstore.
+                allow_update (bool, optional): Whether to allow updating existing nodes. Defaults to True.
+            """
             _ = allow_update
             self.batch_sizes.append(len(nodes))
 
@@ -2188,10 +2716,16 @@ def test_persist_node_batches_streams_micro_batches() -> None:
         """Capture vector insert batch sizes."""
 
         def __init__(self) -> None:
+            """Initialise an empty list to capture batch sizes."""
             self.docstore = FakeDocStore()
             self.vector_batch_sizes: list[int] = []
 
         def insert_nodes(self, nodes: list[Any]) -> None:
+            """Capture the size of each batch of nodes inserted into the vector store.
+
+            Args:
+                nodes (list[Any]): The list of nodes being inserted into the vector store.
+            """
             self.vector_batch_sizes.append(len(nodes))
 
     rag = RAG(qdrant_collection="test")
@@ -2212,9 +2746,16 @@ def test_apersist_node_batches_streams_micro_batches() -> None:
         """Capture docstore write batch sizes."""
 
         def __init__(self) -> None:
+            """Initialise an empty list to capture batch sizes."""
             self.batch_sizes: list[int] = []
 
         def add_documents(self, nodes: list[Any], allow_update: bool = True) -> None:
+            """Capture the size of each batch of documents added to the docstore.
+
+            Args:
+                nodes (list[Any]): The list of nodes being added to the docstore.
+                allow_update (bool, optional): Whether to allow updating existing nodes. Defaults to True.
+            """
             _ = allow_update
             self.batch_sizes.append(len(nodes))
 
@@ -2222,10 +2763,16 @@ def test_apersist_node_batches_streams_micro_batches() -> None:
         """Capture async vector insert batch sizes."""
 
         def __init__(self) -> None:
+            """Initialise an empty list to capture batch sizes."""
             self.docstore = FakeDocStore()
             self.vector_batch_sizes: list[int] = []
 
         async def ainsert_nodes(self, nodes: list[Any]) -> None:
+            """Capture the size of each batch of nodes inserted into the vector store.
+
+            Args:
+                nodes (list[Any]): The list of nodes being inserted into the vector store.
+            """
             self.vector_batch_sizes.append(len(nodes))
 
     rag = RAG(qdrant_collection="test")
@@ -2295,6 +2842,16 @@ def test_ingest_docs_bumps_summary_revision(
         *,
         allow_create: bool = True,
     ) -> int:
+        """Bump the summary revision.
+
+        Args:
+            self (RAG): The RAG instance.
+            collection (str | None, optional): The collection name. Defaults to None.
+            allow_create (bool, optional): Whether to allow creation of a new store. Defaults to True.
+
+        Returns:
+            int: The new summary revision.
+        """
         _ = self
         bumps.append((collection, allow_create))
         return len(bumps)
@@ -2327,6 +2884,16 @@ def test_asingest_docs_bumps_summary_revision(
         *,
         allow_create: bool = True,
     ) -> int:
+        """Bump the summary revision.
+
+        Args:
+            self (RAG): The RAG instance.
+            collection (str | None, optional): The collection name. Defaults to None.
+            allow_create (bool, optional): Whether to allow creation of a new store. Defaults to True.
+
+        Returns:
+            int: The new summary revision.
+        """
         _ = self
         bumps.append((collection, allow_create))
         return len(bumps)
@@ -2358,6 +2925,16 @@ def test_delete_collection_attempts_summary_invalidation(
         *,
         allow_create: bool = True,
     ) -> int:
+        """Bump the summary revision.
+
+        Args:
+            self (RAG): The RAG instance.
+            collection (str | None, optional): The collection name. Defaults to None.
+            allow_create (bool, optional): Whether to allow creation of a new store. Defaults to True.
+
+        Returns:
+            int: The new summary revision.
+        """
         _ = self
         bumps.append((collection, allow_create))
         return 1
@@ -2377,7 +2954,11 @@ def test_delete_collection_attempts_summary_invalidation(
 def test_delete_collection_companion_name_does_not_expand(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Deleting a companion collection directly should not expand to siblings."""
+    """Deleting a companion collection directly should not expand to siblings.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
     rag = RAG(qdrant_collection="active")
     rag._qdrant_client = MagicMock()
     monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)

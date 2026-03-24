@@ -48,23 +48,28 @@ class LocalOpenAI(LlamaIndexOpenAI):
             )
 
 
-def get_openai_reasoning_effort(openai_config: OpenAIConfig) -> str | None:
+def get_openai_reasoning_effort(
+    openai_config: OpenAIConfig,
+    *,
+    enabled: bool | None = None,
+) -> str | None:
     """Return the OpenAI reasoning effort to request for chat completions.
 
-    Reasoning is only enabled for the native OpenAI provider to avoid sending
-    unsupported parameters to other OpenAI-compatible backends such as Ollama
-    or llama.cpp.
+    Reasoning is enabled whenever the request scope asks for it, regardless of
+    which OpenAI-compatible provider is serving the model.
 
     Args:
         openai_config: Parsed OpenAI environment configuration.
+        enabled: Optional per-request override for whether reasoning should be
+            requested. When omitted, the config default is used.
 
     Returns:
-        The configured reasoning effort string when enabled for the OpenAI
-        provider, otherwise ``None``.
+        The configured reasoning effort string when enabled, otherwise ``None``.
     """
-    if not openai_config.thinking_enabled:
-        return None
-    if openai_config.inference_provider != "openai":
+    if enabled is None:
+        enabled = openai_config.thinking_enabled
+
+    if not enabled:
         return None
     return openai_config.thinking_effort
 
@@ -83,8 +88,8 @@ class OpenAIPipeline:
     def __post_init__(self) -> None:
         """Post-initialization to load configurations."""
         _model_config = load_model_env()
-        self.text_model_id = _model_config.text_model_file.removesuffix(".gguf")
-        self.vision_model_id = _model_config.vision_model_file.removesuffix(".gguf")
+        self.text_model_id = _model_config.text_model.removesuffix(".gguf")
+        self.vision_model_id = _model_config.vision_model.removesuffix(".gguf")
 
         _openai_config = load_openai_env()
         api_key = _openai_config.api_key
