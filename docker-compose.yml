@@ -276,7 +276,9 @@ services:
         --port 8000
         --gpu-memory-utilization "$${VLLM_CHAT_GPU_MEMORY_UTILIZATION:-0.9}"
         --max-model-len "$${VLLM_CHAT_MAX_MODEL_LEN:-4096}"
-        --chat-template-content-format "$${VLLM_CHAT_TEMPLATE_CONTENT_FORMAT:-openai}";
+        if [ -n "$${VLLM_CHAT_TEMPLATE_CONTENT_FORMAT:-}" ]; then
+          set -- "$@" --chat-template-content-format "$${VLLM_CHAT_TEMPLATE_CONTENT_FORMAT}";
+        fi;
         if [ "$${VLLM_CHAT_ENABLE_PREFIX_CACHING:-true}" = "true" ]; then
           set -- "$@" --enable-prefix-caching;
         fi;
