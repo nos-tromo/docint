@@ -276,7 +276,7 @@ services:
         --api-key "$${OPENAI_API_KEY:-sk-no-key-required}"
         --host 0.0.0.0
         --port 8000
-        --gpu-memory-utilization "$${CHAT_GPU_MEMORY_UTILIZATION:-0.9}"
+        --gpu-memory-utilization "$${CHAT_GPU_MEMORY_UTILIZATION:-0.5}"
         --max-model-len "$${OPENAI_CTX_WINDOW:-$${CHAT_MAX_MODEL_LEN:-8192}}"
         --max-num-seqs "$${CHAT_MAX_NUM_SEQS:-8}"
         --max-num-batched-tokens "$${CHAT_MAX_NUM_BATCHED_TOKENS:-16384}";
@@ -330,14 +330,14 @@ services:
     entrypoint: ["/bin/sh", "-lc"]
     command:
       - >-
-        export CUDA_VISIBLE_DEVICES="$${VLLM_EMBED_CUDA_VISIBLE_DEVICES:-0}";
+        export CUDA_VISIBLE_DEVICES="$${EMBED_CUDA_VISIBLE_DEVICES:-0}";
         exec vllm serve "$${EMBED_MODEL:-BAAI/bge-m3}"
         --api-key "$${OPENAI_API_KEY:-sk-no-key-required}"
         --host 0.0.0.0
         --port 8000
-        --runner "$${VLLM_EMBED_RUNNER:-pooling}"
-        --convert "$${VLLM_EMBED_CONVERT:-embed}"
-        --gpu-memory-utilization "$${VLLM_EMBED_GPU_MEMORY_UTILIZATION:-0.5}"
+        --runner "$${EMBED_RUNNER:-pooling}"
+        --convert "$${EMBED_CONVERT:-embed}"
+        --gpu-memory-utilization "$${EMBED_GPU_MEMORY_UTILIZATION:-0.15}"
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-1}"
@@ -375,13 +375,13 @@ services:
     entrypoint: ["/bin/sh", "-lc"]
     command:
       - >-
-        export CUDA_VISIBLE_DEVICES="$${VLLM_RERANK_CUDA_VISIBLE_DEVICES:-0}";
+        export CUDA_VISIBLE_DEVICES="$${RERANK_CUDA_VISIBLE_DEVICES:-0}";
         exec vllm serve "$${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}"
         --api-key "$${OPENAI_API_KEY:-sk-no-key-required}"
         --host 0.0.0.0
         --port 8000
-        --runner "$${VLLM_RERANK_RUNNER:-pooling}"
-        --gpu-memory-utilization "$${VLLM_RERANK_GPU_MEMORY_UTILIZATION:-0.3}"
+        --runner "$${RERANK_RUNNER:-pooling}"
+        --gpu-memory-utilization "$${RERANK_GPU_MEMORY_UTILIZATION:-0.15}"
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-1}"
