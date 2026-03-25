@@ -13,7 +13,7 @@ x-base-image-build-args: &base-image-build-args
   PYTHON_SLIM_BOOKWORM_IMAGE: ${PYTHON_SLIM_BOOKWORM_IMAGE:-python:3.11-slim-bookworm}
   PYTHON_SLIM_IMAGE: ${PYTHON_SLIM_IMAGE:-python:3.11-slim}
   NVIDIA_CUDA_RUNTIME_IMAGE: ${NVIDIA_CUDA_RUNTIME_IMAGE:-nvidia/cuda:13.0.2-cudnn-runtime-ubuntu22.04}
-  VLLM_OPENAI_IMAGE: ${VLLM_OPENAI_IMAGE:-vllm/vllm-openai:latest}
+  VLLM_OPENAI_IMAGE: ${VLLM_OPENAI_IMAGE:-vllm/vllm-openai:v0.17.1}
 
 x-build-args: &build-args
   HTTP_PROXY: ${HTTP_PROXY:-}
@@ -25,7 +25,7 @@ x-build-args: &build-args
   PYTHON_SLIM_BOOKWORM_IMAGE: ${PYTHON_SLIM_BOOKWORM_IMAGE:-python:3.11-slim-bookworm}
   PYTHON_SLIM_IMAGE: ${PYTHON_SLIM_IMAGE:-python:3.11-slim}
   NVIDIA_CUDA_RUNTIME_IMAGE: ${NVIDIA_CUDA_RUNTIME_IMAGE:-nvidia/cuda:13.0.2-cudnn-runtime-ubuntu22.04}
-  VLLM_OPENAI_IMAGE: ${VLLM_OPENAI_IMAGE:-vllm/vllm-openai:latest}
+  VLLM_OPENAI_IMAGE: ${VLLM_OPENAI_IMAGE:-vllm/vllm-openai:v0.17.1}
 
 x-docker-env-file: &docker-env-file
   - .env.docker
@@ -39,20 +39,19 @@ x-backend-cpu: &backend-cpu
   ports: &backend-ports
     - 8000:8000
   environment: &backend-cpu-env
-    DATA_PATH: /app/data
-    LOG_PATH: /app/.logs/backend-cpu.log
+    LOG_PATH: /var/log/docint/backend-cpu.log
     QDRANT_HOST: http://qdrant:6333
     QDRANT_SRC_DIR: /qdrant/storage/sources
-    QUERIES_PATH: /app/data/queries.txt
-    RESULTS_PATH: /app/results
+    SESSIONS_PATH: /var/lib/docint/sessions/sessions.db
     USE_DEVICE: auto
   env_file: *docker-env-file
   volumes: &backend-volumes
-    - ${USERPROFILE:-$HOME}/docint/data:/app/data
-    - ${USERPROFILE:-$HOME}/docint/results:/app/results
-    - docint-logs:/app/.logs
-    - model-cache:/root/.cache
+    - docint-logs:/var/log/docint
+    - docling-cache:/root/.cache/docling
+    - huggingface-cache:/root/.cache/huggingface/hub
     - qdrant-storage:/qdrant/storage
+    - sessions-storage:/var/lib/docint/sessions/
+    - whisper-cache:/root/.cache/whisper
   networks: &backend-net
     docint-net:
       aliases:
@@ -67,13 +66,11 @@ x-backend-cuda: &backend-cuda
   ports: *backend-ports
   gpus: all
   environment: &backend-cuda-env
-    DATA_PATH: /app/data/in
-    LOG_PATH: /app/.logs/backend-cuda.log
+    LOG_PATH: /var/log/docint/backend-cuda.log
     NVIDIA_VISIBLE_DEVICES: all
     QDRANT_HOST: http://qdrant:6333
     QDRANT_SRC_DIR: /qdrant/storage/sources
-    QUERIES_PATH: /app/data/queries.txt
-    RESULTS_PATH: /app/data/out
+    SESSIONS_PATH: /var/lib/docint/sessions/sessions.db
     USE_DEVICE: auto
   env_file: *docker-env-file
   volumes: *backend-volumes
@@ -103,11 +100,11 @@ x-qdrant-common: &qdrant-common
 
 x-qdrant-cpu: &qdrant-cpu
   <<: *qdrant-common
-  image: qdrant/qdrant:latest
+  image: qdrant/qdrant:v1.17.0
 
 x-qdrant-cuda: &qdrant-cuda
   <<: *qdrant-common
-  image: qdrant/qdrant:gpu-nvidia-latest
+  image: qdrant/qdrant:v1.17.0-gpu-nvidia
   gpus: all
   environment:
     <<: *qdrant-common-env
@@ -129,6 +126,9 @@ services:
   backend-cpu-ollama:
     <<: *backend-cpu
     profiles: ["cpu-ollama"]
+    depends_on:
+      - ollama-cpu
+      - qdrant
     environment:
       <<: *backend-cpu-env
       INFERENCE_PROVIDER: ollama
@@ -140,6 +140,8 @@ services:
   backend-cpu-openai:
     <<: *backend-cpu
     profiles: ["cpu-openai"]
+    depends_on:
+      - qdrant
     environment:
       <<: *backend-cpu-env
       INFERENCE_PROVIDER: openai
@@ -151,6 +153,9 @@ services:
   backend-cuda-ollama:
     <<: *backend-cuda
     profiles: ["cuda-ollama"]
+    depends_on:
+      - ollama-cuda
+      - qdrant-cuda
     environment:
       <<: *backend-cuda-env
       INFERENCE_PROVIDER: ollama
@@ -162,6 +167,8 @@ services:
   backend-cuda-openai:
     <<: *backend-cuda
     profiles: ["cuda-openai"]
+    depends_on:
+      - qdrant-cuda
     environment:
       <<: *backend-cuda-env
       INFERENCE_PROVIDER: openai
@@ -175,6 +182,7 @@ services:
     profiles: ["cuda-vllm"]
     depends_on:
       - vllm-router
+      - qdrant-cuda
     environment:
       <<: *backend-cuda-env
       INFERENCE_PROVIDER: vllm
@@ -185,12 +193,12 @@ services:
   ##########################################################
   ollama-cpu:
     profiles: ["cpu-ollama"]
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.17.7
     env_file: *docker-env-file
     environment:
       - OLLAMA_HOST=0.0.0.0
     volumes:
-      - ollama-models:/root/.ollama
+      - ollama-cache:/root/.ollama
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 5s
@@ -206,14 +214,14 @@ services:
   ##########################################################
   ollama-cuda:
     profiles: ["cuda-ollama"]
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.17.7
     gpus: all
     env_file: *docker-env-file
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - OLLAMA_HOST=0.0.0.0
     volumes:
-      - ollama-models:/root/.ollama
+      - ollama-cache:/root/.ollama
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 5s
@@ -237,7 +245,7 @@ services:
   ##########################################################
   vllm-router:
     profiles: ["cuda-vllm"]
-    image: nginx:1.27-alpine
+    image: nginx:1.28.2-alpine
     env_file: *docker-env-file
     depends_on:
       - vllm-chat-cuda
@@ -263,7 +271,7 @@ services:
       dockerfile: Dockerfile.vllm
       args:
         <<: *build-args
-    image: docint-vllm-openai:latest
+    image: docint-vllm-openai:v0.17.1
     gpus: all
     env_file: *docker-env-file
     ipc: host
@@ -298,7 +306,8 @@ services:
       HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-1}"
       TRANSFORMERS_OFFLINE: "${TRANSFORMERS_OFFLINE:-1}"
     volumes:
-      - model-cache:/root/.cache
+      - huggingface-cache:/root/.cache/huggingface/hub
+
     deploy:
       resources:
         reservations:
@@ -323,7 +332,7 @@ services:
       dockerfile: Dockerfile.vllm
       args:
         <<: *build-args
-    image: docint-vllm-openai:latest
+    image: docint-vllm-openai:v0.17.1
     gpus: all
     env_file: *docker-env-file
     ipc: host
@@ -343,7 +352,7 @@ services:
       HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-1}"
       TRANSFORMERS_OFFLINE: "${TRANSFORMERS_OFFLINE:-1}"
     volumes:
-      - model-cache:/root/.cache
+      - huggingface-cache:/root/.cache/huggingface/hub
     deploy:
       resources:
         reservations:
@@ -368,7 +377,7 @@ services:
       dockerfile: Dockerfile.vllm
       args:
         <<: *build-args
-    image: docint-vllm-openai:latest
+    image: docint-vllm-openai:v0.17.1
     gpus: all
     env_file: *docker-env-file
     ipc: host
@@ -387,7 +396,7 @@ services:
       HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-1}"
       TRANSFORMERS_OFFLINE: "${TRANSFORMERS_OFFLINE:-1}"
     volumes:
-      - model-cache:/root/.cache
+      - huggingface-cache:/root/.cache/huggingface/hub
     deploy:
       resources:
         reservations:
@@ -414,21 +423,19 @@ services:
       - 8501:8501
     env_file: *docker-env-file
     environment:
-      - BACKEND_HOST=http://backend-net:8000
-      - BACKEND_PUBLIC_HOST=http://localhost:8000
-      - LOG_PATH=/app/.logs/frontend.log
-      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+      BACKEND_HOST: http://backend-net:8000
+      BACKEND_PUBLIC_HOST: http://localhost:8000
+      LOG_PATH: /var/log/docint/frontend.log
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
     volumes:
-      - ${USERPROFILE:-$HOME}/docint/data:/app/data
-      - ${USERPROFILE:-$HOME}/docint/results:/app/results
-      - docint-logs:/app/.logs
+      - docint-logs:/var/log/docint
     networks:
       - docint-net
 
   ##########################################################
   # Qdrant
   ##########################################################
-  qdrant-cpu:
+  qdrant:
     <<: *qdrant-cpu
     profiles: ["cpu-ollama", "cpu-openai"]
 
@@ -441,10 +448,13 @@ services:
 ##########################################################
 volumes:
   docint-logs:
-  model-cache:
-  ollama-models:
+  docling-cache:
+  huggingface-cache:
+  ollama-cache:
   qdrant-snapshots:
   qdrant-storage:
+  sessions-storage:
+  whisper-cache:
 
 ##########################################################
 # Networks
