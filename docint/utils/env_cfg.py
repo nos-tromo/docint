@@ -151,6 +151,119 @@ def load_graphrag_env(
 
 
 @dataclass(frozen=True)
+class GraphStoreConfig:
+    """Dataclass for Neo4j-backed graph retrieval and analysis configuration."""
+
+    enabled: bool
+    uri: str
+    username: str
+    password: str
+    database: str
+    write_batch_size: int
+    max_hops: int
+    traversal_fanout: int
+    resolution_min_confidence: float
+    exact_score_weight: float
+    graph_score_weight: float
+    rerank_score_weight: float
+    vector_score_weight: float
+
+
+def load_graph_store_env(
+    default_enabled: bool = True,
+    default_uri: str = "bolt://localhost:7687",
+    default_username: str = "neo4j",
+    default_password: str = "docint-password",
+    default_database: str = "neo4j",
+    default_write_batch_size: int = 100,
+    default_max_hops: int = 2,
+    default_traversal_fanout: int = 25,
+    default_resolution_min_confidence: float = 0.85,
+    default_exact_score_weight: float = 0.45,
+    default_graph_score_weight: float = 0.30,
+    default_rerank_score_weight: float = 0.15,
+    default_vector_score_weight: float = 0.10,
+) -> GraphStoreConfig:
+    """Load Neo4j graph-store settings from environment variables.
+
+    Args:
+        default_enabled: Whether graph services are enabled by default.
+        default_uri: Default Neo4j Bolt URI.
+        default_username: Default Neo4j username.
+        default_password: Default Neo4j password.
+        default_database: Default Neo4j database.
+        default_write_batch_size: Default write batch size for graph upserts.
+        default_max_hops: Default maximum graph traversal depth.
+        default_traversal_fanout: Default per-hop traversal fanout.
+        default_resolution_min_confidence: Default minimum confidence required
+            before cross-collection canonical merges are applied automatically.
+        default_exact_score_weight: Default fusion weight for exact structured matches.
+        default_graph_score_weight: Default fusion weight for graph traversal proximity.
+        default_rerank_score_weight: Default fusion weight for reranker score.
+        default_vector_score_weight: Default fusion weight for vector similarity.
+
+    Returns:
+        GraphStoreConfig: Parsed graph store settings.
+        - enabled (bool): Whether graph services are enabled.
+        - uri (str): Neo4j Bolt URI.
+        - username (str): Neo4j username.
+        - password (str): Neo4j password.
+        - database (str): Neo4j database name.
+        - write_batch_size (int): Write batch size for graph upserts.
+        - max_hops (int): Maximum graph traversal depth.
+        - traversal_fanout (int): Per-hop traversal fanout.
+        - resolution_min_confidence (float): Minimum confidence required before cross-collection canonical merges are applied automatically.
+        - exact_score_weight (float): Fusion weight for exact structured matches.
+        - graph_score_weight (float): Fusion weight for graph traversal proximity.
+        - rerank_score_weight (float): Fusion weight for reranker score.
+        - vector_score_weight (float): Fusion weight for vector similarity.
+    """
+    return GraphStoreConfig(
+        enabled=str(os.getenv("GRAPH_ENABLED", default_enabled)).lower()
+        in {"true", "1", "yes"},
+        uri=os.getenv("NEO4J_URI", default_uri),
+        username=os.getenv("NEO4J_USERNAME", default_username),
+        password=os.getenv("NEO4J_PASSWORD", default_password),
+        database=os.getenv("NEO4J_DATABASE", default_database),
+        write_batch_size=max(
+            1, int(os.getenv("GRAPH_WRITE_BATCH_SIZE", default_write_batch_size))
+        ),
+        max_hops=max(1, int(os.getenv("GRAPH_MAX_HOPS", default_max_hops))),
+        traversal_fanout=max(
+            1, int(os.getenv("GRAPH_TRAVERSAL_FANOUT", default_traversal_fanout))
+        ),
+        resolution_min_confidence=min(
+            1.0,
+            max(
+                0.0,
+                float(
+                    os.getenv(
+                        "GRAPH_RESOLUTION_MIN_CONFIDENCE",
+                        default_resolution_min_confidence,
+                    )
+                ),
+            ),
+        ),
+        exact_score_weight=max(
+            0.0,
+            float(os.getenv("GRAPH_EXACT_SCORE_WEIGHT", default_exact_score_weight)),
+        ),
+        graph_score_weight=max(
+            0.0,
+            float(os.getenv("GRAPH_SCORE_WEIGHT", default_graph_score_weight)),
+        ),
+        rerank_score_weight=max(
+            0.0,
+            float(os.getenv("GRAPH_RERANK_SCORE_WEIGHT", default_rerank_score_weight)),
+        ),
+        vector_score_weight=max(
+            0.0,
+            float(os.getenv("GRAPH_VECTOR_SCORE_WEIGHT", default_vector_score_weight)),
+        ),
+    )
+
+
+@dataclass(frozen=True)
 class HateSpeechConfig:
     """Dataclass for hate-speech detection configuration."""
 

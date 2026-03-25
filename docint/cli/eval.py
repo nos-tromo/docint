@@ -25,6 +25,7 @@ class RetrievalEvalRAG(Protocol):
         self,
         prompt: str,
         *,
+        query_mode: str | None = None,
         retrieval_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]: ...
 
@@ -175,7 +176,9 @@ def evaluate_retrieval(
         A dictionary containing the collection name, tested modes, query count, a summary of results by mode, and the detailed results for each query and mode.
     """
     selected_modes = modes or (
-        ["default", "hybrid", "sparse"] if rag.enable_hybrid else ["default"]
+        ["default", "hybrid", "sparse", "graph_lookup", "graph_synthesis"]
+        if rag.enable_hybrid
+        else ["default", "graph_lookup", "graph_synthesis"]
     )
     results: list[dict[str, Any]] = []
     summary_by_mode: dict[str, dict[str, Any]] = {}
@@ -185,10 +188,13 @@ def evaluate_retrieval(
         mode_results: list[dict[str, Any]] = []
         for mode in selected_modes:
             started_at = perf_counter()
-            payload = rag.run_query(
-                query_text,
-                retrieval_options={"vector_store_query_mode": mode},
-            )
+            if mode.startswith("graph_"):
+                payload = rag.run_query(query_text, query_mode=mode)
+            else:
+                payload = rag.run_query(
+                    query_text,
+                    retrieval_options={"vector_store_query_mode": mode},
+                )
             latency_ms = round((perf_counter() - started_at) * 1000, 2)
             sources = [
                 source

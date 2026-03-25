@@ -221,6 +221,26 @@ class SessionManager:
             user_msg=user_msg,
             conversation_context=session_context,
         )
+        should_route_graph = getattr(self.rag, "_should_route_graph_query", None)
+        use_graph_route = False
+        if callable(should_route_graph):
+            try:
+                use_graph_route = should_route_graph("answer") is True
+            except Exception:
+                use_graph_route = False
+        if use_graph_route:
+            response = self.rag.run_graph_query(
+                retrieval_query,
+                query_mode="graph_synthesis",
+                metadata_filters=metadata_filters,
+                vector_store_kwargs=vector_store_kwargs,
+            )
+            response["retrieval_query"] = retrieval_query
+            self._persist_turn(
+                session_id, user_msg, Response(response=response["response"]), response
+            )
+            self._maybe_update_summary(session_id)
+            return response
         expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(
             retrieval_query
         )
@@ -301,6 +321,38 @@ class SessionManager:
             user_msg=user_msg,
             conversation_context=session_context,
         )
+        should_route_graph = getattr(self.rag, "_should_route_graph_query", None)
+        use_graph_route = False
+        if callable(should_route_graph):
+            try:
+                use_graph_route = should_route_graph("answer") is True
+            except Exception:
+                use_graph_route = False
+        if use_graph_route:
+            normalized = self.rag.run_graph_query(
+                retrieval_query,
+                query_mode="graph_synthesis",
+                metadata_filters=metadata_filters,
+                vector_store_kwargs=vector_store_kwargs,
+            )
+            normalized["retrieval_query"] = retrieval_query
+            answer_text = str(normalized.get("response") or "")
+            yield answer_text
+            final_response = Response(response=answer_text, source_nodes=[])
+            self._persist_turn(session_id, user_msg, final_response, normalized)
+            self._maybe_update_summary(session_id)
+            yield {
+                "response": normalized.get("response"),
+                "sources": normalized.get("sources", []),
+                "session_id": session_id,
+                "reasoning": normalized.get("reasoning"),
+                "graph_debug": normalized.get("graph_debug"),
+                "retrieval_query": normalized.get("retrieval_query"),
+                "coverage_unit": normalized.get("coverage_unit"),
+                "retrieval_mode": normalized.get("retrieval_mode"),
+                "retrieval_trace": normalized.get("retrieval_trace"),
+            }
+            return
         expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(
             retrieval_query
         )
@@ -351,7 +403,7 @@ class SessionManager:
         self._maybe_update_summary(session_id)
 
         # Yield metadata
-        yield {
+        payload = {
             "response": normalized.get("response"),
             "sources": normalized.get("sources", []),
             "session_id": session_id,
@@ -361,6 +413,9 @@ class SessionManager:
             "coverage_unit": normalized.get("coverage_unit"),
             "retrieval_mode": normalized.get("retrieval_mode"),
         }
+        if normalized.get("retrieval_trace") is not None:
+            payload["retrieval_trace"] = normalized.get("retrieval_trace")
+        yield payload
 
     def export_session(
         self, session_id: str | None = None, out_dir: str | Path = "session"

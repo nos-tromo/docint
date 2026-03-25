@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from docint.utils.clean_text import basic_clean
+from docint.utils.env_cfg import load_graph_store_env
 from docint.utils.env_cfg import (
     load_frontend_env,
     load_hate_speech_env,
@@ -217,6 +218,35 @@ def test_load_retrieval_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.sparse_top_k == 20
     assert cfg.hybrid_top_k == 20
     assert cfg.parent_context_enabled is True
+
+
+def test_load_graph_store_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Graph store env loader should use documented defaults.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Fixture to clear environment variables.
+    """
+
+    monkeypatch.delenv("GRAPH_ENABLED", raising=False)
+    monkeypatch.delenv("NEO4J_URI", raising=False)
+    monkeypatch.delenv("NEO4J_USERNAME", raising=False)
+    monkeypatch.delenv("NEO4J_PASSWORD", raising=False)
+    monkeypatch.delenv("NEO4J_DATABASE", raising=False)
+    monkeypatch.delenv("GRAPH_WRITE_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("GRAPH_MAX_HOPS", raising=False)
+    monkeypatch.delenv("GRAPH_TRAVERSAL_FANOUT", raising=False)
+    monkeypatch.delenv("GRAPH_RESOLUTION_MIN_CONFIDENCE", raising=False)
+
+    cfg = load_graph_store_env()
+
+    assert cfg.enabled is True
+    assert cfg.uri == "bolt://localhost:7687"
+    assert cfg.username == "neo4j"
+    assert cfg.database == "neo4j"
+    assert cfg.write_batch_size == 100
+    assert cfg.max_hops == 2
+    assert cfg.traversal_fanout == 25
+    assert cfg.resolution_min_confidence == 0.85
 
 
 def test_load_retrieval_env_parses_chat_response_mode(

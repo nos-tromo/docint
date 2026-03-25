@@ -23,6 +23,7 @@ from typing import Any, Callable, Sequence, cast
 # TRANSFORMERS_OFFLINE env vars are set before huggingface_hub caches them.
 from docint.utils.env_cfg import (
     GraphRAGConfig,
+    GraphStoreConfig,
     HostConfig,
     IngestionConfig,
     NERConfig,
@@ -33,6 +34,7 @@ from docint.utils.env_cfg import (
     SessionConfig,
     SummaryConfig,
     load_graphrag_env,
+    load_graph_store_env,
     load_hate_speech_env,
     load_host_env,
     load_ingestion_env,
@@ -85,6 +87,13 @@ from qdrant_client import QdrantClient
 from qdrant_client import models as qdrant_models
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 
+from docint.core.graph import (
+    GraphPathResult,
+    GraphQueryPlan,
+    GraphSourceRecord,
+    Neo4jGraphService,
+    plan_graph_query,
+)
 from docint.core.ner import (
     aggregate_ner_sources,
     build_entity_graph,
@@ -561,6 +570,9 @@ class RAG:
     graphrag_config: GraphRAGConfig = field(
         default_factory=load_graphrag_env, init=False, repr=False
     )
+    graph_store_config: GraphStoreConfig = field(
+        default_factory=load_graph_store_env, init=False, repr=False
+    )
     retrieval_config: RetrievalConfig = field(
         default_factory=load_retrieval_env, init=False, repr=False
     )
@@ -628,6 +640,15 @@ class RAG:
     social_summary_enabled: bool = field(default=True, init=False)
     social_summary_candidate_pool: int = field(default=48, init=False)
     social_summary_diversity_limit: int = field(default=2, init=False)
+    graph_enabled: bool = field(default=True, init=False)
+    graph_write_batch_size: int = field(default=100, init=False)
+    graph_max_hops: int = field(default=2, init=False)
+    graph_traversal_fanout: int = field(default=25, init=False)
+    graph_resolution_min_confidence: float = field(default=0.85, init=False)
+    graph_exact_score_weight: float = field(default=0.45, init=False)
+    graph_score_weight: float = field(default=0.30, init=False)
+    graph_rerank_score_weight: float = field(default=0.15, init=False)
+    graph_vector_score_weight: float = field(default=0.10, init=False)
 
     # --- Session config ---
     session_store: str = field(default="", init=False)
@@ -674,6 +695,9 @@ class RAG:
         default_factory=dict, init=False, repr=False
     )
     _image_ingestion_service: ImageIngestionService | None = field(
+        default=None, init=False, repr=False
+    )
+    _graph_service: Neo4jGraphService | None = field(
         default=None, init=False, repr=False
     )
 
@@ -798,6 +822,17 @@ class RAG:
         self.graphrag_top_k_nodes = self.graphrag_config.top_k_nodes
         self.graphrag_min_edge_weight = self.graphrag_config.min_edge_weight
         self.graphrag_max_neighbors = self.graphrag_config.max_neighbors
+        self.graph_enabled = self.graph_store_config.enabled
+        self.graph_write_batch_size = self.graph_store_config.write_batch_size
+        self.graph_max_hops = self.graph_store_config.max_hops
+        self.graph_traversal_fanout = self.graph_store_config.traversal_fanout
+        self.graph_resolution_min_confidence = (
+            self.graph_store_config.resolution_min_confidence
+        )
+        self.graph_exact_score_weight = self.graph_store_config.exact_score_weight
+        self.graph_score_weight = self.graph_store_config.graph_score_weight
+        self.graph_rerank_score_weight = self.graph_store_config.rerank_score_weight
+        self.graph_vector_score_weight = self.graph_store_config.vector_score_weight
 
         # --- Session config ---
         self.session_store = self.session_config.session_store
@@ -1525,6 +1560,7 @@ class RAG:
             vector_nodes = self._select_vector_nodes(batch)
             if vector_nodes:
                 self.index.insert_nodes(vector_nodes)
+            self._ingest_graph_nodes(batch)
 
     def _log_ingest_benchmark_summary(
         self,
@@ -1598,6 +1634,7 @@ class RAG:
             vector_nodes = self._select_vector_nodes(batch)
             if vector_nodes:
                 await self.index.ainsert_nodes(vector_nodes)
+            self._ingest_graph_nodes(batch)
 
     @staticmethod
     def _extract_file_hash(data: Any) -> str | None:
@@ -1914,6 +1951,810 @@ class RAG:
             collection=self.qdrant_collection,
             payload=payload,
             score=score,
+        )
+
+    @property
+    def graph_service(self) -> Neo4jGraphService:
+        """Return the lazily initialized Neo4j graph service.
+
+        Raises:
+            ValueError: If graph_store_config is not provided when graph_service is accessed.
+
+        Raises:
+            RuntimeError: If graph_service initialization fails due to configuration issues.
+        """
+
+        if self._graph_service is None:
+            if self.graph_store_config is None:
+                raise ValueError(
+                    "graph_store_config must be provided to initialize graph_service."
+                )
+            self._graph_service = Neo4jGraphService(self.graph_store_config)
+        return self._graph_service
+
+    def _collection_supports_graph(self) -> bool:
+        """Return whether graph-backed retrieval should be available.
+
+        Returns:
+            bool: True if graph-backed retrieval is supported, False otherwise.
+        """
+
+        return bool(self.graph_enabled and self.qdrant_collection)
+
+    def _should_route_graph_query(self, query_mode: str | None = None) -> bool:
+        """Return whether the current collection should use graph-backed routing.
+
+        Args:
+            query_mode: Optional override for the query mode, which can be used to force graph or vector routing.
+                If not provided, routing will be determined based on collection capabilities and inferred profile.
+
+        Returns:
+            bool: True if the query should be routed to the graph service, False if it should use vector retrieval.
+        """
+
+        if query_mode == "vector_fallback":
+            return False
+        if query_mode and query_mode.startswith("graph_"):
+            return True
+        if not self._collection_supports_graph():
+            return False
+        profile = self._infer_collection_profile()
+        return bool(profile.get("is_social_table"))
+
+    def _run_query_vector_only(
+        self,
+        prompt: str,
+        *,
+        metadata_filters: MetadataFilters | None = None,
+        metadata_filter_rules: Sequence[Any] | None = None,
+        vector_store_kwargs: dict[str, Any] | None = None,
+        retrieval_options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run the existing vector-first query path without graph routing.
+
+        Args:
+            prompt: The query prompt to be processed.
+            metadata_filters: Optional metadata filters to apply.
+            metadata_filter_rules: Optional rules for metadata filtering.
+            vector_store_kwargs: Optional keyword arguments for the vector store.
+            retrieval_options: Optional retrieval options.
+
+        Returns:
+            dict[str, Any]: The normalized response data.
+
+        Raises:
+            RuntimeError: If the query engine has not been initialized.
+            TypeError: If the query result is not of type Response.
+        """
+
+        engine = (
+            self.build_query_engine(
+                metadata_filters=metadata_filters,
+                vector_store_kwargs=vector_store_kwargs,
+                retrieval_options=retrieval_options,
+            )
+            if metadata_filters is not None or vector_store_kwargs or retrieval_options
+            else self.query_engine
+        )
+        if engine is None:
+            logger.error("RuntimeError: Query engine has not been initialized.")
+            raise RuntimeError(
+                "Query engine has not been initialized. Call ingest_docs() first."
+            )
+        result = engine.query(prompt)
+        if not isinstance(result, Response):
+            logger.error("TypeError: Expected Response, got {}.", type(result).__name__)
+            raise TypeError(f"Expected Response, got {type(result).__name__}")
+        normalized = self._normalize_response_data(
+            prompt,
+            result,
+            metadata_filters_active=(
+                metadata_filters is not None or bool(vector_store_kwargs)
+            ),
+            metadata_filter_rules=metadata_filter_rules,
+        )
+        retrieval_settings = self._resolve_runtime_retrieval_settings(
+            retrieval_options=retrieval_options,
+        )
+        normalized["vector_query_mode"] = retrieval_settings[
+            "vector_store_query_mode"
+        ].value
+        normalized["retrieval_profile"] = retrieval_settings["label"]
+        normalized["parent_context_enabled"] = retrieval_settings[
+            "parent_context_enabled"
+        ]
+        return normalized
+
+    def _get_node_by_id(self, node_id: str) -> BaseNode | None:
+        """Resolve one node id from the docstore when available.
+
+        Args:
+            node_id: The unique identifier of the node to retrieve.
+
+        Returns:
+            BaseNode | None: The node if found, otherwise None.
+        """
+
+        try:
+            index = self.index
+            if index is None:
+                return None
+            docstore = getattr(index, "storage_context", None)
+            if docstore is not None:
+                docstore = getattr(docstore, "docstore", None)
+            else:
+                docstore = getattr(index, "docstore", None)
+            if docstore is None:
+                return None
+            for getter in ("get_node", "get", "get_document"):
+                fn = getattr(docstore, getter, None)
+                if not callable(fn):
+                    continue
+                try:
+                    node = fn(node_id)
+                except Exception:
+                    continue
+                if isinstance(node, BaseNode):
+                    return node
+        except Exception:
+            return None
+        return None
+
+    def _graph_source_record_from_node(
+        self, node: BaseNode
+    ) -> GraphSourceRecord | None:
+        """Convert an indexed node into a graph-ingest source record.
+
+        Args:
+            node: The node to convert.
+
+        Returns:
+            GraphSourceRecord | None: The graph-ingest source record if conversion is successful, otherwise None.
+        """
+
+        metadata = dict(getattr(node, "metadata", {}) or {})
+        node_id = str(
+            getattr(node, "node_id", None) or getattr(node, "id_", None) or ""
+        ).strip()
+        if not node_id:
+            return None
+        text_value = str(getattr(node, "text", "") or "").strip()
+        if (
+            not text_value
+            and hasattr(node, "get_content")
+            and callable(node.get_content)
+        ):
+            text_value = str(node.get_content() or "").strip()
+        if not text_value:
+            return None
+
+        source_kind = str(
+            metadata.get("source") or metadata.get("source_type") or "document"
+        ).strip()
+        table_meta_raw = metadata.get("table")
+        table_meta: dict[str, Any] = (
+            table_meta_raw if isinstance(table_meta_raw, dict) else {}
+        )
+        graph_meta_raw = metadata.get("graph")
+        graph_meta: dict[str, Any] = (
+            graph_meta_raw if isinstance(graph_meta_raw, dict) else {}
+        )
+        reference_metadata_raw = self._extract_reference_metadata(metadata)
+        reference_metadata: dict[str, Any] = (
+            reference_metadata_raw if isinstance(reference_metadata_raw, dict) else {}
+        )
+        origin_raw = metadata.get("origin")
+        origin: dict[str, Any] = origin_raw if isinstance(origin_raw, dict) else {}
+        filename = (
+            str(
+                metadata.get("filename")
+                or metadata.get("file_name")
+                or metadata.get("file_path")
+                or origin.get("filename")
+                or ""
+            ).strip()
+            or None
+        )
+        file_hash = self._extract_file_hash(metadata)
+        row_value = graph_meta.get("row_index", table_meta.get("row_index"))
+        try:
+            row_index = int(row_value) if row_value is not None else None
+        except Exception:
+            row_index = None
+        page_value = metadata.get("page") or metadata.get("page_number")
+        try:
+            page_index = int(page_value) if page_value is not None else None
+        except Exception:
+            page_index = None
+
+        return GraphSourceRecord(
+            node_id=node_id,
+            collection=self.qdrant_collection,
+            source_kind=source_kind or "document",
+            record_kind=str(
+                graph_meta.get("record_kind") or source_kind or "document_chunk"
+            ),
+            text=text_value,
+            filename=filename,
+            file_hash=file_hash,
+            text_id=str(
+                reference_metadata.get("text_id") or graph_meta.get("record_id") or ""
+            ).strip()
+            or None,
+            thread_id=str(graph_meta.get("thread_id") or "").strip() or None,
+            parent_record_id=str(graph_meta.get("parent_record_id") or "").strip()
+            or None,
+            author=str(
+                reference_metadata.get("author") or graph_meta.get("author") or ""
+            ).strip()
+            or None,
+            author_id=str(
+                reference_metadata.get("author_id") or graph_meta.get("author_id") or ""
+            ).strip()
+            or None,
+            platform=str(
+                reference_metadata.get("network") or graph_meta.get("platform") or ""
+            ).strip()
+            or None,
+            timestamp=str(
+                reference_metadata.get("timestamp") or graph_meta.get("timestamp") or ""
+            ).strip()
+            or None,
+            page=page_index,
+            row=row_index,
+            url=str(graph_meta.get("url") or metadata.get("URL") or "").strip() or None,
+            domain=str(graph_meta.get("domain") or "").strip() or None,
+            tags=list(graph_meta.get("tags") or []),
+            entities=list(metadata.get("entities") or []),
+            relations=list(metadata.get("relations") or []),
+            search_blob=str(metadata.get("graph_search_text") or text_value),
+            metadata=metadata,
+        )
+
+    def _ingest_graph_nodes(self, nodes: list[BaseNode]) -> None:
+        """Upsert graph facts for a persisted node batch.
+
+        Args:
+            nodes: The list of nodes that were persisted and should be ingested into the graph.
+        """
+
+        if not self._collection_supports_graph() or not nodes:
+            return
+        records: list[GraphSourceRecord] = []
+        seen_node_ids: set[str] = set()
+        for node in nodes:
+            if (
+                str((getattr(node, "metadata", {}) or {}).get("docint_hier_type") or "")
+                == "coarse"
+            ):
+                continue
+            record = self._graph_source_record_from_node(node)
+            if record is None or record.node_id in seen_node_ids:
+                continue
+            seen_node_ids.add(record.node_id)
+            records.append(record)
+        if not records:
+            return
+        try:
+            self.graph_service.ingest_source_records(
+                collection=self.qdrant_collection,
+                records=records,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Graph ingestion skipped for '{}': {}", self.qdrant_collection, exc
+            )
+
+    @staticmethod
+    def _node_identity(node: BaseNode) -> str:
+        """Return a stable identity string for a node.
+
+        Args:
+            node: The node for which to compute the identity.
+
+        Returns:
+            str: The stable identity string for the node.
+        """
+
+        return str(
+            getattr(node, "node_id", None) or getattr(node, "id_", None) or ""
+        ).strip()
+
+    def _graph_nodes_from_candidates(
+        self,
+        *,
+        prompt: str,
+        plan: GraphQueryPlan,
+        metadata_filters: MetadataFilters | None = None,
+        vector_store_kwargs: dict[str, Any] | None = None,
+        limit: int = 12,
+    ) -> tuple[list[NodeWithScore], dict[str, Any]]:
+        """Fuse graph candidates with vector retrieval and reranking.
+
+        Args:
+            prompt: The original query prompt.
+            plan: The graph query plan containing the traversal instructions.
+            metadata_filters: Optional metadata filters to apply to vector retrieval.
+            vector_store_kwargs: Optional keyword arguments for vector retrieval.
+            limit: The maximum number of results to return after fusion and reranking.
+
+        Returns:
+            tuple[list[NodeWithScore], dict[str, Any]]: A tuple containing the list of
+                nodes with scores after fusion and reranking, and a trace dictionary
+                with retrieval details.
+        """
+
+        traversal = self.graph_service.retrieve_candidates(
+            collection=self.qdrant_collection,
+            plan=plan,
+            limit=max(1, int(limit)),
+        )
+        merged_scores: dict[str, float] = {}
+        merged_nodes: dict[str, NodeWithScore] = {}
+        trace = dict(traversal.trace)
+
+        for candidate in traversal.candidates:
+            node = self._get_node_by_id(candidate.node_id)
+            if node is None:
+                continue
+            fused_score = self.graph_exact_score_weight * float(
+                candidate.exact_score
+            ) + self.graph_score_weight * float(candidate.graph_score)
+            merged_scores[candidate.node_id] = fused_score
+            merged_nodes[candidate.node_id] = NodeWithScore(
+                node=node, score=fused_score
+            )
+
+        if self.index is not None:
+            try:
+                retriever = self._build_retriever(
+                    metadata_filters=metadata_filters,
+                    similarity_top_k=max(limit, self.rerank_top_n * 2),
+                    vector_store_kwargs=vector_store_kwargs,
+                )
+                vector_nodes = retriever.retrieve(prompt)
+            except Exception as exc:
+                logger.warning(
+                    "Vector fallback retrieval failed during graph route: {}", exc
+                )
+                vector_nodes = []
+            for nws in vector_nodes if isinstance(vector_nodes, list) else []:
+                node = getattr(nws, "node", None)
+                if not isinstance(node, BaseNode):
+                    continue
+                node_id = self._node_identity(node)
+                if not node_id:
+                    continue
+                fused_score = merged_scores.get(node_id, 0.0) + (
+                    self.graph_vector_score_weight
+                    * float(getattr(nws, "score", 0.0) or 0.0)
+                )
+                merged_scores[node_id] = fused_score
+                merged_nodes[node_id] = NodeWithScore(node=node, score=fused_score)
+
+        combined = sorted(
+            merged_nodes.values(),
+            key=lambda item: float(getattr(item, "score", 0.0) or 0.0),
+            reverse=True,
+        )
+        if combined and self._reranker is not None:
+            try:
+                reranked = self.reranker.postprocess_nodes(
+                    combined,
+                    query_bundle=QueryBundle(query_str=prompt),
+                )
+                if isinstance(reranked, list) and reranked:
+                    total = max(1, len(reranked))
+                    rescored: list[NodeWithScore] = []
+                    for index, nws in enumerate(reranked):
+                        node = getattr(nws, "node", None)
+                        if not isinstance(node, BaseNode):
+                            continue
+                        node_id = self._node_identity(node)
+                        rank_boost = self.graph_rerank_score_weight * (
+                            (total - index) / total
+                        )
+                        score = merged_scores.get(node_id, 0.0) + rank_boost
+                        merged_scores[node_id] = score
+                        rescored.append(NodeWithScore(node=node, score=score))
+                    combined = sorted(
+                        rescored,
+                        key=lambda item: float(getattr(item, "score", 0.0) or 0.0),
+                        reverse=True,
+                    )
+            except Exception as exc:
+                logger.warning("Graph rerank step failed: {}", exc)
+
+        trace["fused_candidate_count"] = len(combined)
+        return combined[: max(1, int(limit))], trace
+
+    def _build_graph_context(self, sources: Sequence[dict[str, Any]]) -> str:
+        """Build a grounded context block from normalized sources.
+
+        Args:
+            sources: A sequence of dictionaries containing source information.
+
+        Returns:
+            str: A string representing the grounded context block.
+        """
+
+        context_blocks: list[str] = []
+        for index, source in enumerate(sources, start=1):
+            reference_metadata = source.get("reference_metadata")
+            ref = reference_metadata if isinstance(reference_metadata, dict) else {}
+            meta_bits = [
+                f"filename={source.get('filename')}" if source.get("filename") else "",
+                f"row={source.get('row')}" if source.get("row") is not None else "",
+                f"page={source.get('page')}" if source.get("page") is not None else "",
+                f"text_id={ref.get('text_id')}" if ref.get("text_id") else "",
+                f"author={ref.get('author') or ref.get('author_id')}"
+                if (ref.get("author") or ref.get("author_id"))
+                else "",
+                f"network={ref.get('network')}" if ref.get("network") else "",
+                f"timestamp={ref.get('timestamp')}" if ref.get("timestamp") else "",
+            ]
+            metadata_line = ", ".join(bit for bit in meta_bits if bit) or "metadata=n/a"
+            text_value = str(
+                source.get("text") or source.get("preview_text") or ""
+            ).strip()
+            if not text_value:
+                continue
+            context_blocks.append(f"Source {index}: {metadata_line}\n{text_value}")
+        return "\n\n".join(context_blocks)
+
+    def _synthesize_answer_from_sources(
+        self,
+        *,
+        query: str,
+        sources: Sequence[dict[str, Any]],
+    ) -> str:
+        """Synthesize an answer from already selected graph-backed evidence.
+
+        Args:
+            query: The original query prompt.
+            sources: A sequence of dictionaries containing the selected source information.
+
+        Returns:
+            str: The synthesized answer text.
+        """
+
+        if not sources:
+            return EMPTY_RESPONSE_FALLBACK
+        context_str = self._build_graph_context(sources)
+        if not context_str.strip():
+            return self._source_backed_fallback_response(list(sources))
+        profile = self._infer_collection_profile()
+        prompt = self._build_grounded_text_qa_template(
+            social_table=bool(profile.get("is_social_table"))
+        ).format(context_str=context_str, query_str=query)
+        try:
+            completion = self.post_retrieval_text_model.complete(prompt)
+            text = str(getattr(completion, "text", completion) or "").strip()
+            return text or self._source_backed_fallback_response(list(sources))
+        except Exception as exc:
+            logger.warning("Graph answer synthesis failed: {}", exc)
+            return self._source_backed_fallback_response(list(sources))
+
+    def run_graph_neighborhood_query(
+        self,
+        prompt: str,
+        *,
+        hops: int | None = None,
+        limit: int = 25,
+    ) -> dict[str, Any]:
+        """Return a graph neighborhood payload backed by Neo4j.
+
+        Args:
+            prompt: The original query prompt.
+            hops: The number of hops to traverse in the graph neighborhood. If not provided,
+                defaults to the graph_max_hops configuration.
+            limit: The maximum number of neighboring nodes to return.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the query, response summary, sources,
+                and retrieval trace information.
+        """
+
+        plan = plan_graph_query(prompt, requested_mode="graph_neighborhood")
+        seed = next(
+            (
+                seed.value
+                for seed in plan.seeds
+                if seed.kind in {"entity", "phrase", "text_id"}
+            ),
+            prompt,
+        )
+        neighborhood = self.graph_service.get_neighborhood(
+            collection=self.qdrant_collection,
+            entity=seed,
+            hops=hops or self.graph_max_hops,
+            limit=limit,
+        )
+        source_ids = [
+            str((item.get("properties") or {}).get("node_id") or "").strip()
+            for item in neighborhood.get("neighbors", [])
+            if isinstance(item, dict)
+        ]
+        sources = [
+            source
+            for source in (
+                self.get_source_by_node_id(node_id) for node_id in source_ids
+            )
+            if source is not None
+        ]
+        return {
+            "query": prompt,
+            "response": f"Found {len(neighborhood.get('neighbors', []))} graph neighbor(s) around '{seed}'.",
+            "sources": sources,
+            "retrieval_query": prompt,
+            "coverage_unit": self._infer_collection_profile().get("coverage_unit"),
+            "retrieval_mode": "graph_neighborhood",
+            "retrieval_profile": "graph_neighborhood",
+            "vector_query_mode": "graph",
+            "parent_context_enabled": False,
+            "retrieval_trace": neighborhood,
+        }
+
+    def run_graph_path_query(
+        self,
+        prompt: str,
+        *,
+        source: str | None = None,
+        target: str | None = None,
+        max_hops: int | None = None,
+    ) -> dict[str, Any]:
+        """Return a graph path explanation between two entities.
+
+        Args:
+            prompt: The original query prompt.
+            source: Optional override for the source entity in the graph path. If not provided,
+                the system will attempt to infer it from the query plan.
+            target: Optional override for the target entity in the graph path. If not provided,
+                the system will attempt to infer it from the query plan.
+            max_hops: The maximum number of hops to traverse when searching for a path. If not
+                provided, defaults to three times the graph_max_hops configuration.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the query, response summary, sources,
+                and retrieval trace information about the graph path.
+        """
+
+        plan = plan_graph_query(prompt, requested_mode="graph_path")
+        path_terms = plan.path_terms or (source or prompt, target or "")
+        path_result: GraphPathResult = self.graph_service.find_path(
+            collection=self.qdrant_collection,
+            source=str(path_terms[0]).strip(),
+            target=str(path_terms[1]).strip(),
+            max_hops=max_hops or self.graph_max_hops * 3,
+        )
+        source_ids = [
+            str((node.get("properties") or {}).get("node_id") or "").strip()
+            for node in path_result.nodes
+            if isinstance(node, dict)
+        ]
+        sources = [
+            source_row
+            for source_row in (
+                self.get_source_by_node_id(node_id) for node_id in source_ids
+            )
+            if source_row is not None
+        ]
+        answer = (
+            f"Found a graph path between '{path_result.source}' and '{path_result.target}' "
+            f"with {len(path_result.relationships)} relationship(s)."
+            if path_result.relationships
+            else f"I couldn't find a graph path between '{path_result.source}' and '{path_result.target}'."
+        )
+        return {
+            "query": prompt,
+            "response": answer,
+            "sources": sources,
+            "retrieval_query": prompt,
+            "coverage_unit": self._infer_collection_profile().get("coverage_unit"),
+            "retrieval_mode": "graph_path",
+            "retrieval_profile": "graph_path",
+            "vector_query_mode": "graph",
+            "parent_context_enabled": False,
+            "retrieval_trace": {
+                "source": path_result.source,
+                "target": path_result.target,
+                "nodes": path_result.nodes,
+                "relationships": path_result.relationships,
+                **path_result.trace,
+            },
+        }
+
+    def run_graph_query(
+        self,
+        prompt: str,
+        *,
+        query_mode: str | None = None,
+        metadata_filters: MetadataFilters | None = None,
+        vector_store_kwargs: dict[str, Any] | None = None,
+        limit: int = 12,
+    ) -> dict[str, Any]:
+        """Run a graph-backed retrieval or analysis query.
+
+        Args:
+            prompt: The original query prompt.
+            query_mode: Optional override for the query mode, which can be used to force graph or
+                vector routing. If not provided, routing will be determined based on collection
+                capabilities and inferred profile.
+            metadata_filters: Optional metadata filters to apply to vector retrieval when fusing
+                with graph candidates.
+            vector_store_kwargs: Optional keyword arguments for vector retrieval when fusing with
+                graph candidates.
+            limit: The maximum number of results to return after fusion and reranking when using
+                graph-backed retrieval.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the query, synthesized response, sources, and retrieval
+                trace information.
+
+        Raises:
+            ValueError: If the query prompt is empty.
+        """
+
+        if not prompt.strip():
+            raise ValueError("Query prompt cannot be empty.")
+        if not self._collection_supports_graph():
+            return self._run_query_vector_only(
+                prompt,
+                metadata_filters=metadata_filters,
+                vector_store_kwargs=vector_store_kwargs,
+            )
+
+        plan = plan_graph_query(prompt, requested_mode=query_mode)
+        if plan.mode == "graph_neighborhood":
+            return self.run_graph_neighborhood_query(prompt, limit=limit)
+        if plan.mode == "graph_path":
+            return self.run_graph_path_query(prompt)
+
+        if self.index is None:
+            self.create_index()
+        nodes, trace = self._graph_nodes_from_candidates(
+            prompt=prompt,
+            plan=plan,
+            metadata_filters=metadata_filters,
+            vector_store_kwargs=vector_store_kwargs,
+            limit=limit,
+        )
+        sources: list[dict[str, Any]] = []
+        for nws in nodes:
+            normalized = self._source_from_node_with_score(nws)
+            if normalized is not None:
+                sources.append(normalized)
+        if not sources:
+            fallback = self._run_query_vector_only(
+                prompt,
+                metadata_filters=metadata_filters,
+                vector_store_kwargs=vector_store_kwargs,
+            )
+            fallback["retrieval_mode"] = plan.mode
+            fallback["retrieval_profile"] = plan.mode
+            fallback["vector_query_mode"] = "graph_fallback"
+            fallback["retrieval_trace"] = {
+                **trace,
+                "fallback": "vector_only",
+            }
+            return fallback
+
+        answer = self._synthesize_answer_from_sources(query=prompt, sources=sources)
+        return {
+            "query": prompt,
+            "reasoning": None,
+            "response": answer,
+            "sources": sources,
+            "retrieval_query": prompt,
+            "coverage_unit": self._infer_collection_profile().get("coverage_unit"),
+            "retrieval_mode": plan.mode,
+            "retrieval_profile": plan.mode,
+            "vector_query_mode": "graph_hybrid",
+            "parent_context_enabled": False,
+            "retrieval_trace": trace,
+        }
+
+    def search_graph_entities(
+        self, *, q: str = "", limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Search canonical graph entities for the active collection.
+
+        Args:
+            q: An optional search string to filter entities by name or properties.
+            limit: The maximum number of entities to return.
+
+        Returns:
+            list[dict[str, Any]]: A list of dictionaries representing the matching graph entities.
+        """
+
+        if not self._collection_supports_graph():
+            return []
+        return self.graph_service.search_entities(
+            collection=self.qdrant_collection,
+            q=q,
+            limit=limit,
+        )
+
+    def get_graph_neighborhood(
+        self,
+        *,
+        entity: str,
+        hops: int = 2,
+        limit: int = 25,
+    ) -> dict[str, Any]:
+        """Expose graph neighborhood lookup for the active collection.
+
+        Args:
+            entity: The canonical name of the graph entity around which to retrieve the neighborhood.
+            hops: The number of hops to traverse in the graph neighborhood.
+            limit: The maximum number of neighboring nodes to return.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the center entity and a list of neighboring entities
+                with their relationships and properties.
+        """
+
+        if not self._collection_supports_graph():
+            return {"center": entity, "neighbors": []}
+        return self.graph_service.get_neighborhood(
+            collection=self.qdrant_collection,
+            entity=entity,
+            hops=hops,
+            limit=limit,
+        )
+
+    def get_graph_path(
+        self,
+        *,
+        source: str,
+        target: str,
+        max_hops: int = 6,
+    ) -> dict[str, Any]:
+        """Expose graph path lookup for the active collection.
+
+        Args:
+            source: The canonical name of the source entity in the graph path.
+            target: The canonical name of the target entity in the graph path.
+            max_hops: The maximum number of hops to traverse when searching for a path between the source
+                and target entities.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the source and target entities, a list of nodes and
+                relationships in the path, and any relevant trace information about the path search process.
+        """
+
+        if not self._collection_supports_graph():
+            return {
+                "source": source,
+                "target": target,
+                "nodes": [],
+                "relationships": [],
+            }
+        result = self.graph_service.find_path(
+            collection=self.qdrant_collection,
+            source=source,
+            target=target,
+            max_hops=max_hops,
+        )
+        return {
+            "source": result.source,
+            "target": result.target,
+            "nodes": result.nodes,
+            "relationships": result.relationships,
+            **result.trace,
+        }
+
+    def get_graph_stats(self) -> dict[str, Any]:
+        """Return graph statistics for the active collection.
+
+        Returns:
+            dict[str, Any]: A dictionary containing graph statistics such as the number of source records and entities.
+        """
+
+        if not self._collection_supports_graph():
+            return {"source_records": 0, "entities": 0}
+        return self.graph_service.get_collection_stats(
+            collection=self.qdrant_collection
         )
 
     def _get_existing_file_hashes(self) -> set[str]:
@@ -3192,6 +4033,13 @@ class RAG:
         target = name.strip()
         self._invalidate_ner_cache(target)
         self._bump_summary_revision(target, allow_create=False)
+        if self._collection_supports_graph():
+            try:
+                self.graph_service.delete_collection(collection=target)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to delete graph collection '{}': {}", target, exc
+                )
 
         collections_to_delete = [target]
         if not target.endswith("_images") and not target.endswith("_dockv"):
@@ -3588,6 +4436,7 @@ class RAG:
         self,
         prompt: str,
         *,
+        query_mode: str | None = None,
         metadata_filters: MetadataFilters | None = None,
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
@@ -3617,48 +4466,26 @@ class RAG:
         if not prompt.strip():
             logger.error("ValueError: Query prompt cannot be empty.")
             raise ValueError("Query prompt cannot be empty.")
-        engine = (
-            self.build_query_engine(
+        if self._should_route_graph_query(query_mode):
+            return self.run_graph_query(
+                prompt,
+                query_mode=query_mode,
                 metadata_filters=metadata_filters,
                 vector_store_kwargs=vector_store_kwargs,
-                retrieval_options=retrieval_options,
             )
-            if metadata_filters is not None or vector_store_kwargs or retrieval_options
-            else self.query_engine
-        )
-        if engine is None:
-            logger.error("RuntimeError: Query engine has not been initialized.")
-            raise RuntimeError(
-                "Query engine has not been initialized. Call ingest_docs() first."
-            )
-        result = engine.query(prompt)
-        if not isinstance(result, Response):
-            logger.error("TypeError: Expected Response, got {}.", type(result).__name__)
-            raise TypeError(f"Expected Response, got {type(result).__name__}")
-        normalized = self._normalize_response_data(
+        return self._run_query_vector_only(
             prompt,
-            result,
-            metadata_filters_active=(
-                metadata_filters is not None or bool(vector_store_kwargs)
-            ),
+            metadata_filters=metadata_filters,
             metadata_filter_rules=metadata_filter_rules,
-        )
-        retrieval_settings = self._resolve_runtime_retrieval_settings(
             retrieval_options=retrieval_options,
+            vector_store_kwargs=vector_store_kwargs,
         )
-        normalized["vector_query_mode"] = retrieval_settings[
-            "vector_store_query_mode"
-        ].value
-        normalized["retrieval_profile"] = retrieval_settings["label"]
-        normalized["parent_context_enabled"] = retrieval_settings[
-            "parent_context_enabled"
-        ]
-        return normalized
 
     async def run_query_async(
         self,
         prompt: str,
         *,
+        query_mode: str | None = None,
         metadata_filters: MetadataFilters | None = None,
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
@@ -3688,6 +4515,13 @@ class RAG:
         if not prompt.strip():
             logger.error("ValueError: Query prompt cannot be empty.")
             raise ValueError("Query prompt cannot be empty.")
+        if self._should_route_graph_query(query_mode):
+            return self.run_graph_query(
+                prompt,
+                query_mode=query_mode,
+                metadata_filters=metadata_filters,
+                vector_store_kwargs=vector_store_kwargs,
+            )
         engine = (
             self.build_query_engine(
                 metadata_filters=metadata_filters,
@@ -5349,6 +6183,9 @@ class RAG:
         self._post_retrieval_text_model = None
         self._reranker = None
         self._image_ingestion_service = None
+        if self._graph_service is not None:
+            self._graph_service.close()
+            self._graph_service = None
         self._invalidate_ner_cache()
 
         gc.collect()

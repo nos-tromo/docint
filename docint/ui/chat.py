@@ -25,6 +25,10 @@ CHAT_QUERY_MODE_OPTIONS: tuple[str, ...] = (
     "answer",
     "entity_occurrence",
     "entity_occurrence_multi",
+    "graph_lookup",
+    "graph_neighborhood",
+    "graph_path",
+    "graph_synthesis",
 )
 CHAT_SCOPE_OPTIONS: tuple[str, ...] = (
     "All content",
@@ -245,8 +249,23 @@ def _retrieval_mode_badge_label(mode: str | None) -> str:
 
 
 def _query_mode_badge_label(mode: str | None) -> str:
-    """Return a compact badge label for the active chat query mode."""
+    """Return a compact badge label for the active chat query mode.
+
+    Args:
+        mode: Raw query mode value from session state.
+
+    Returns:
+        str: Human-readable badge label.
+    """
     normalized = str(mode or "answer").strip().lower()
+    if normalized == "graph_synthesis":
+        return "Graph Synthesis Mode"
+    if normalized == "graph_path":
+        return "Graph Path Mode"
+    if normalized == "graph_neighborhood":
+        return "Graph Neighborhood Mode"
+    if normalized == "graph_lookup":
+        return "Graph Lookup Mode"
     if normalized == "entity_occurrence_multi":
         return "Multi-Entity Occurrence Mode"
     if normalized == "entity_occurrence":
@@ -255,7 +274,14 @@ def _query_mode_badge_label(mode: str | None) -> str:
 
 
 def _entity_candidate_label(candidate: Mapping[str, Any]) -> str:
-    """Build a compact button label for one ambiguous entity candidate."""
+    """Build a compact button label for one ambiguous entity candidate.
+
+    Args:
+        candidate: Entity match candidate dictionary from the backend.
+
+    Returns:
+        str: Compact button label for the entity candidate.
+    """
     text = str(candidate.get("text") or "").strip() or "Unknown"
     entity_type = str(candidate.get("type") or "Unlabeled").strip()
     mentions = int(candidate.get("mentions", 0) or 0)
@@ -263,7 +289,11 @@ def _entity_candidate_label(candidate: Mapping[str, Any]) -> str:
 
 
 def _queue_entity_occurrence_prompt(candidate: Mapping[str, Any]) -> None:
-    """Queue a follow-up occurrence lookup for one chosen entity."""
+    """Queue a follow-up occurrence lookup for one chosen entity.
+
+    Args:
+        candidate: Entity match candidate dictionary for the selected entity.
+    """
     st.session_state.chat_pending_prompt = str(candidate.get("text") or "").strip()
     st.session_state.chat_query_mode = "entity_occurrence"
     st.rerun()
@@ -274,7 +304,12 @@ def _render_entity_match_candidates(
     *,
     message_key: str,
 ) -> None:
-    """Render disambiguation controls for equally strong entity matches."""
+    """Render disambiguation controls for equally strong entity matches.
+
+    Args:
+        candidates: List of entity match candidates from the backend.
+        message_key: Unique key to scope button states within the chat message.
+    """
     if not candidates:
         return
     st.info(
@@ -296,7 +331,13 @@ def _render_entity_match_groups(
     collection: str,
     message_key: str,
 ) -> None:
-    """Render grouped multi-entity occurrence results in the chat UI."""
+    """Render grouped multi-entity occurrence results in the chat UI.
+
+    Args:
+        groups: List of entity match groups from the backend, each containing one or more equally strong entity candidates and their associated sources.
+        collection: Active collection name for source download links.
+        message_key: Unique key to scope button states within the chat message.
+    """
     if not groups:
         return
     st.markdown("**Matched Entities**")
@@ -504,7 +545,13 @@ def _render_retrieval_debug_panel(
     retrieval_mode: str | None,
     coverage_unit: str | None,
 ) -> None:
-    """Render retrieval diagnostics in a popover."""
+    """Render retrieval diagnostics in a popover.
+
+    Args:
+        retrieval_query: The retrieval query issued to the backend, if any.
+        retrieval_mode: The retrieval mode used for the current answer, if any.
+        coverage_unit: The unit of retrieval coverage measurement, if any.
+    """
     payload = {
         "retrieval_query": retrieval_query,
         "retrieval_mode": retrieval_mode,
@@ -530,6 +577,9 @@ def _render_answer_tool_panels(
         graph_debug: Optional GraphRAG debug payload.
         sources: Optional source rows associated with a chat answer.
         collection: Active collection name for source downloads.
+        retrieval_query: The retrieval query issued to the backend, if any.
+        retrieval_mode: The retrieval mode used for the current answer, if any.
+        coverage_unit: The unit of retrieval coverage measurement, if any.
     """
     tool_count = (
         int(bool(sources))

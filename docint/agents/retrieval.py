@@ -36,6 +36,7 @@ class RAGRetrievalAgent(RetrievalAgent):
         analysis = request.analysis
         intent = analysis.intent
         start = time.monotonic()
+        query_text = analysis.rewritten_query or turn.user_input
 
         if intent in {"ner", "extract"}:
             raw_sources = self.rag.get_collection_ner()
@@ -52,18 +53,18 @@ class RAGRetrievalAgent(RetrievalAgent):
             )
 
         if intent == "table":
+            data = self.rag.run_graph_query(query_text, query_mode="graph_lookup")
             latency = (time.monotonic() - start) * 1000
             return RetrievalResult(
-                answer="Table lookup not yet implemented",
-                sources=[],
+                answer=str(data.get("response") or data.get("answer") or ""),
+                sources=data.get("sources", []) if isinstance(data, dict) else [],
                 session_id=session_id,
                 intent=intent,
                 confidence=analysis.confidence,
-                tool_used="table_lookup",
+                tool_used="graph_table_lookup",
                 latency_ms=latency,
             )
 
-        query_text = analysis.rewritten_query or turn.user_input
         data = self.rag.chat(query_text)
         latency = (time.monotonic() - start) * 1000
 

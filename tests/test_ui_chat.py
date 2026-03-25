@@ -70,6 +70,13 @@ def test_query_mode_badge_label_multi_occurrence() -> None:
     )
 
 
+def test_query_mode_badge_label_graph_modes() -> None:
+    """Query mode badge should render graph analysis labels."""
+
+    assert _query_mode_badge_label("graph_lookup") == "Graph Lookup Mode"
+    assert _query_mode_badge_label("graph_path") == "Graph Path Mode"
+
+
 def test_entity_candidate_label_includes_type_and_mentions() -> None:
     """Candidate labels should help users disambiguate tied entities quickly."""
     label = _entity_candidate_label({"text": "Acme", "type": "ORG", "mentions": 3})

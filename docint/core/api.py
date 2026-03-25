@@ -240,9 +240,15 @@ class QueryIn(BaseModel):
     session_id: str | None = None
     metadata_filters: list[MetadataFilterIn] = Field(default_factory=list)
     retrieval_mode: Literal["session", "stateless"] = "session"
-    query_mode: Literal["answer", "entity_occurrence", "entity_occurrence_multi"] = (
-        "answer"
-    )
+    query_mode: Literal[
+        "answer",
+        "entity_occurrence",
+        "entity_occurrence_multi",
+        "graph_lookup",
+        "graph_path",
+        "graph_neighborhood",
+        "graph_synthesis",
+    ] = "answer"
 
 
 class QueryOut(BaseModel):
@@ -250,6 +256,7 @@ class QueryOut(BaseModel):
     sources: list[dict] = []
     session_id: str
     graph_debug: dict[str, Any] | None = None
+    retrieval_trace: dict[str, Any] | None = None
     retrieval_query: str | None = None
     coverage_unit: str | None = None
     retrieval_mode: str | None = None
@@ -311,6 +318,29 @@ class NERStatsOut(BaseModel):
 
 class NERSearchOut(BaseModel):
     results: list[dict] = []
+
+
+class GraphSearchOut(BaseModel):
+    results: list[dict] = []
+
+
+class GraphStatsOut(BaseModel):
+    source_records: int = 0
+    entities: int = 0
+
+
+class GraphNeighborhoodOut(BaseModel):
+    center: str
+    neighbors: list[dict] = []
+
+
+class GraphPathOut(BaseModel):
+    source: str
+    target: str
+    nodes: list[dict] = []
+    relationships: list[dict] = []
+    found: bool | None = None
+    max_hops: int | None = None
 
 
 class HateSpeechOut(BaseModel):
@@ -460,6 +490,19 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
                     qdrant_filter=qdrant_filter,
                 )
             session_id = payload.session_id or "stateless"
+        elif payload.query_mode in {
+            "graph_lookup",
+            "graph_path",
+            "graph_neighborhood",
+            "graph_synthesis",
+        }:
+            data = rag.run_graph_query(
+                payload.question,
+                query_mode=payload.query_mode,
+                metadata_filters=metadata_filters,
+                vector_store_kwargs=vector_store_kwargs or None,
+            )
+            session_id = payload.session_id or "stateless"
         else:
             if getattr(rag, "query_engine", None) is None:
                 if getattr(rag, "index", None) is None:
@@ -484,12 +527,21 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
                             exc,
                         )
 
-                data = rag.run_query(
-                    retrieval_query,
-                    metadata_filters=metadata_filters,
-                    metadata_filter_rules=payload.metadata_filters,
-                    vector_store_kwargs=vector_store_kwargs or None,
-                )
+                if payload.query_mode != "answer":
+                    data = rag.run_query(
+                        retrieval_query,
+                        query_mode=payload.query_mode,
+                        metadata_filters=metadata_filters,
+                        metadata_filter_rules=payload.metadata_filters,
+                        vector_store_kwargs=vector_store_kwargs or None,
+                    )
+                else:
+                    data = rag.run_query(
+                        retrieval_query,
+                        metadata_filters=metadata_filters,
+                        metadata_filter_rules=payload.metadata_filters,
+                        vector_store_kwargs=vector_store_kwargs or None,
+                    )
                 if graph_debug is not None:
                     data["graph_debug"] = graph_debug
                 session_id = payload.session_id or "stateless"
@@ -514,6 +566,11 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
         graph_debug = (
             data.get("graph_debug")
             if isinstance(data, dict) and isinstance(data.get("graph_debug"), dict)
+            else None
+        )
+        retrieval_trace = (
+            data.get("retrieval_trace")
+            if isinstance(data, dict) and isinstance(data.get("retrieval_trace"), dict)
             else None
         )
         retrieval_query_value: str | None = (
@@ -554,6 +611,7 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
             "sources": sources,
             "session_id": session_id,
             "graph_debug": graph_debug,
+            "retrieval_trace": retrieval_trace,
             "retrieval_query": retrieval_query_value,
             "coverage_unit": coverage_unit,
             "retrieval_mode": retrieval_mode,
@@ -643,6 +701,37 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                     "entity_match_groups": occurrence_data.get("entity_match_groups")
                     or [],
                 }
+            elif payload.query_mode in {
+                "graph_lookup",
+                "graph_path",
+                "graph_neighborhood",
+                "graph_synthesis",
+            }:
+                graph_data = rag.run_graph_query(
+                    payload.question,
+                    query_mode=payload.query_mode,
+                    metadata_filters=metadata_filters,
+                    vector_store_kwargs=vector_store_kwargs or None,
+                )
+                answer_text = str(
+                    graph_data.get("response") or graph_data.get("answer") or ""
+                )
+                async for event in _stream_simulated_text(answer_text):
+                    event_payload = json.loads(event[6:].strip())
+                    token = str(event_payload.get("token") or "")
+                    full_answer += token
+                    yield event
+
+                final_payload = {
+                    "response": answer_text,
+                    "sources": graph_data.get("sources") or [],
+                    "session_id": payload.session_id or "stateless",
+                    "reasoning": graph_data.get("reasoning"),
+                    "retrieval_query": graph_data.get("retrieval_query"),
+                    "coverage_unit": graph_data.get("coverage_unit"),
+                    "retrieval_mode": graph_data.get("retrieval_mode"),
+                    "retrieval_trace": graph_data.get("retrieval_trace"),
+                }
             elif payload.retrieval_mode == "stateless":
                 retrieval_query = payload.question
                 graph_debug: dict[str, Any] | None = None
@@ -661,12 +750,21 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                             exc,
                         )
 
-                stateless_data = rag.run_query(
-                    retrieval_query,
-                    metadata_filters=metadata_filters,
-                    metadata_filter_rules=payload.metadata_filters,
-                    vector_store_kwargs=vector_store_kwargs or None,
-                )
+                if payload.query_mode != "answer":
+                    stateless_data = rag.run_query(
+                        retrieval_query,
+                        query_mode=payload.query_mode,
+                        metadata_filters=metadata_filters,
+                        metadata_filter_rules=payload.metadata_filters,
+                        vector_store_kwargs=vector_store_kwargs or None,
+                    )
+                else:
+                    stateless_data = rag.run_query(
+                        retrieval_query,
+                        metadata_filters=metadata_filters,
+                        metadata_filter_rules=payload.metadata_filters,
+                        vector_store_kwargs=vector_store_kwargs or None,
+                    )
                 if graph_debug is not None:
                     stateless_data["graph_debug"] = graph_debug
 
@@ -685,6 +783,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                     "session_id": payload.session_id or "stateless",
                     "reasoning": stateless_data.get("reasoning"),
                     "graph_debug": stateless_data.get("graph_debug"),
+                    "retrieval_trace": stateless_data.get("retrieval_trace"),
                 }
             else:
                 rag.start_session(payload.session_id)
@@ -947,6 +1046,121 @@ def search_collection_ner_entities(
         }
     except Exception as e:
         logger.error("Error searching collection entities: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/collections/graph/stats", response_model=GraphStatsOut, tags=["Query"])
+def get_collection_graph_stats() -> dict[str, Any]:
+    """Return graph statistics for the currently selected collection.
+
+    Returns:
+        dict[str, Any]: A dictionary containing graph statistics such as source record count and entity count
+
+    Raises:
+        HTTPException: If no collection is selected or an internal error occurs.
+    """
+
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+    try:
+        return rag.get_graph_stats()
+    except Exception as e:
+        logger.error("Error fetching collection graph stats: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/collections/graph/entities", response_model=GraphSearchOut, tags=["Query"])
+def search_collection_graph_entities(
+    q: str = "",
+    limit: int = 100,
+) -> dict[str, list[dict]]:
+    """Search graph entities across the selected collection.
+
+    Args:
+        q: Substring query applied to entity text.
+        limit: Maximum number of rows to return.
+
+    Returns:
+        dict[str, list[dict]]: A dictionary containing matched graph entities.
+
+    Raises:
+        HTTPException: If no collection is selected or an internal error occurs.
+    """
+
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+    try:
+        return {
+            "results": rag.search_graph_entities(
+                q=q,
+                limit=limit,
+            )
+        }
+    except Exception as e:
+        logger.error("Error searching graph entities: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/collections/graph/neighborhood",
+    response_model=GraphNeighborhoodOut,
+    tags=["Query"],
+)
+def get_collection_graph_neighborhood(
+    entity: str = Query(..., min_length=1),
+    hops: int = Query(2, ge=1, le=6),
+    limit: int = Query(25, ge=1, le=100),
+) -> dict[str, Any]:
+    """Return a graph neighborhood around one entity.
+
+    Args:
+        entity: The central entity for the neighborhood query.
+        hops: The number of hops to include in the neighborhood.
+        limit: The maximum number of neighboring entities/relationships to return.
+
+    Returns:
+        dict[str, Any]: A dictionary containing the central entity and its neighbors.
+
+    Raises:
+        HTTPException: If no collection is selected or an internal error occurs.
+    """
+
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+    try:
+        return rag.get_graph_neighborhood(entity=entity, hops=hops, limit=limit)
+    except Exception as e:
+        logger.error("Error fetching graph neighborhood: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/collections/graph/path", response_model=GraphPathOut, tags=["Query"])
+def get_collection_graph_path(
+    source: str = Query(..., min_length=1),
+    target: str = Query(..., min_length=1),
+    max_hops: int = Query(6, ge=1, le=12),
+) -> dict[str, Any]:
+    """Return a graph path between two entities.
+
+    Args:
+        source: The source entity for the path query.
+        target: The target entity for the path query.
+        max_hops: The maximum number of hops to search for a path.
+
+    Returns:
+        dict[str, Any]: A dictionary containing the source, target, path nodes and relationships,
+        and whether a path was found.
+
+    Raises:
+        HTTPException: If no collection is selected or an internal error occurs.
+    """
+
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+    try:
+        return rag.get_graph_path(source=source, target=target, max_hops=max_hops)
+    except Exception as e:
+        logger.error("Error fetching graph path: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 

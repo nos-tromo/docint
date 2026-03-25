@@ -45,8 +45,20 @@ def test_evaluate_retrieval_compares_modes_and_expectations() -> None:
             self,
             prompt: str,
             *,
+            query_mode: str | None = None,
             retrieval_options: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
+            """Simulate a query run for testing purposes.
+
+            Args:
+                prompt (str): The input query prompt to process.
+                query_mode (str | None, optional): The query mode to use. Defaults to None.
+                retrieval_options (dict[str, Any] | None, optional): Additional retrieval options. Defaults to None.
+
+            Returns:
+                dict[str, Any]: A dictionary containing the simulated query response.
+            """
+            _ = query_mode
             mode = str(
                 (retrieval_options or {}).get("vector_store_query_mode") or "default"
             )
@@ -92,7 +104,11 @@ def test_evaluate_retrieval_compares_modes_and_expectations() -> None:
 
 
 def test_load_eval_queries_falls_back_to_summarize_prompt(tmp_path: Path) -> None:
-    """Missing query files should fall back to the summarize prompt."""
+    """Missing query files should fall back to the summarize prompt.
+
+    Args:
+        tmp_path (Path): A temporary directory provided by pytest for testing file operations.
+    """
     prompts = tmp_path / "prompts"
     prompts.mkdir()
     (prompts / "summarize.txt").write_text("Summarize collection.", encoding="utf-8")

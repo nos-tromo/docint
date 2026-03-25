@@ -107,6 +107,12 @@ def test_table_reader_detects_social_media_comments_schema(tmp_path: Path) -> No
         "text": "Comment body",
         "text_id": "c1",
     }
+    assert docs[0].metadata["graph"]["record_kind"] == "comment"
+    assert docs[0].metadata["graph"]["record_id"] == "c1"
+    assert docs[0].metadata["graph"]["thread_id"] == "p1"
+    assert docs[0].metadata["graph"]["parent_record_id"] == "pc1"
+    assert docs[0].metadata["graph"]["domain"] == "example.com"
+    assert docs[0].metadata["graph_search_text"]
 
 
 def test_table_reader_detects_social_media_messages_schema(tmp_path: Path) -> None:
@@ -175,6 +181,9 @@ def test_table_reader_detects_social_media_postings_schema_out_of_order(
     assert docs[0].metadata["table"]["style"] == "postings"
     assert docs[0].metadata["reference_metadata"]["type"] == "posting"
     assert docs[0].metadata["reference_metadata"]["network"] == "Facebook"
+    assert docs[0].metadata["graph"]["record_kind"] == "posting"
+    assert docs[0].metadata["graph"]["platform"] == "Facebook"
+    assert docs[0].metadata["graph"]["tags"] == ["tag"]
 
 
 def test_table_reader_preserves_generic_behavior_for_non_matching_schema(

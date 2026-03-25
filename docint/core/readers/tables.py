@@ -10,6 +10,7 @@ from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from loguru import logger
 
+from docint.core.graph.entity_resolution import extract_domain, parse_tag_values
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.mimetype import get_mimetype
 from docint.utils.reference_metadata import REFERENCE_METADATA_FIELDS
@@ -48,6 +49,35 @@ def _normalize_column_name(value: Any) -> str:
         str: The normalized column name.
     """
     return str(value or "").strip().casefold()
+
+
+def _first_row_value(
+    row_dict: dict[str, Any],
+    normalized_map: dict[str, str],
+    *column_names: str,
+) -> Any:
+    """Return the first non-empty row value among candidate column names.
+
+    Args:
+        row_dict: A dictionary representing the current row's data.
+        normalized_map: A mapping of normalized column names to their original names.
+        column_names: A variable-length list of candidate column names to check in order.
+
+    Returns:
+        Any: The first non-empty value found for the specified column names, or None if none are found.
+    """
+
+    for column_name in column_names:
+        original = normalized_map.get(_normalize_column_name(column_name))
+        if original is None:
+            continue
+        value = row_dict.get(original)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
 
 
 @dataclass(slots=True)
@@ -376,6 +406,121 @@ class TableReader(BaseReader):
             metadata[key] = row_dict.get(original_column) if original_column else None
         return metadata
 
+    @staticmethod
+    def _build_graph_metadata(
+        *,
+        profile: TableSchemaProfile | None,
+        row_dict: dict[str, Any],
+        normalized_map: dict[str, str],
+        table_info: dict[str, Any],
+        file_hash: str,
+    ) -> dict[str, Any]:
+        """Build graph-ready metadata for structured table/social ingestion.
+
+        Args:
+            profile: The matched schema profile for the table, if any.
+            row_dict: The dictionary representation of the current row.
+            normalized_map: A mapping of normalized column names to their original names.
+            table_info: A dictionary containing contextual information about the table and row.
+            file_hash: A hash string representing the source file, used for generating stable IDs.
+
+        Returns:
+            dict[str, Any]: A dictionary containing graph-ready metadata fields extracted from the row.
+        """
+
+        record_kind = profile.style.rstrip("s") if profile is not None else "table_row"
+        record_id = _first_row_value(
+            row_dict,
+            normalized_map,
+            "Comment ID",
+            "Posting ID",
+            "Chat ID",
+            "UUID",
+        )
+        url = _first_row_value(row_dict, normalized_map, "URL")
+        author = _first_row_value(row_dict, normalized_map, "Author", "Sender")
+        author_id = _first_row_value(row_dict, normalized_map, "Author ID")
+        platform = _first_row_value(row_dict, normalized_map, "Network")
+        timestamp = _first_row_value(row_dict, normalized_map, "Timestamp")
+        thread_id = _first_row_value(
+            row_dict,
+            normalized_map,
+            "Posting ID",
+            "Network Posting ID",
+            "Chat Group",
+            "Network Object ID",
+        )
+        parent_record_id = _first_row_value(
+            row_dict,
+            normalized_map,
+            "Parent Comment ID",
+            "Reply To",
+        )
+        tags = parse_tag_values(_first_row_value(row_dict, normalized_map, "Tags"))
+        return {
+            "record_kind": record_kind,
+            "record_id": str(record_id).strip() if record_id is not None else None,
+            "thread_id": str(thread_id).strip() if thread_id is not None else None,
+            "parent_record_id": (
+                str(parent_record_id).strip() if parent_record_id is not None else None
+            ),
+            "author": str(author).strip() if author is not None else None,
+            "author_id": str(author_id).strip() if author_id is not None else None,
+            "platform": str(platform).strip() if platform is not None else None,
+            "timestamp": str(timestamp).strip() if timestamp is not None else None,
+            "url": str(url).strip() if url is not None else None,
+            "domain": extract_domain(str(url).strip()) if url is not None else None,
+            "tags": tags,
+            "row_index": table_info.get("row_index"),
+            "source_key": (
+                str(record_id).strip()
+                if record_id is not None and str(record_id).strip()
+                else f"{file_hash}:{table_info.get('row_index')}"
+            ),
+        }
+
+    @staticmethod
+    def _build_graph_search_text(
+        *,
+        content: str,
+        graph_metadata: dict[str, Any],
+        reference_metadata: dict[str, Any] | None,
+    ) -> str:
+        """Compose a structured search blob for graph-first retrieval.
+
+        Args:
+            content: The main text content extracted from the row, used as the core of the search text.
+                graph_metadata: A dictionary containing graph-ready metadata fields extracted from the row.
+                reference_metadata: A dictionary containing reference metadata fields, if any.
+
+        Returns:
+            str: A structured search blob for graph-first retrieval.
+        """
+
+        parts: list[str] = [content]
+        for key in (
+            "record_id",
+            "thread_id",
+            "parent_record_id",
+            "author",
+            "author_id",
+            "platform",
+            "timestamp",
+            "url",
+            "domain",
+        ):
+            value = graph_metadata.get(key)
+            if value:
+                parts.append(str(value))
+        for tag in graph_metadata.get("tags") or []:
+            parts.append(str(tag))
+        ref = reference_metadata if isinstance(reference_metadata, dict) else {}
+        for key in ("network", "type", "author", "author_id", "text_id"):
+            value = ref.get(key)
+            if value:
+                parts.append(str(value))
+        return "\n".join(part for part in parts if str(part).strip())
+
     def load_data(self, file: str | Path, **kwargs) -> list[Document]:
         """Load data from a file into a list of Document objects.
 
@@ -517,12 +662,28 @@ class TableReader(BaseReader):
             }
             if extra_info:
                 metadata.update(extra_info)
+            reference_metadata: dict[str, Any] | None = None
             if schema_profile is not None:
-                metadata["reference_metadata"] = self._build_reference_metadata(
+                reference_metadata = self._build_reference_metadata(
                     profile=schema_profile,
                     row_dict=cast(dict[str, Any], row_dict),
                     normalized_map=normalized_columns,
                 )
+                metadata["reference_metadata"] = reference_metadata
+
+            graph_metadata = self._build_graph_metadata(
+                profile=schema_profile,
+                row_dict=cast(dict[str, Any], row_dict),
+                normalized_map=normalized_columns,
+                table_info=table_info,
+                file_hash=file_hash,
+            )
+            metadata["graph"] = graph_metadata
+            metadata["graph_search_text"] = self._build_graph_search_text(
+                content=content,
+                graph_metadata=graph_metadata,
+                reference_metadata=reference_metadata,
+            )
 
             for k in meta_cols:
                 metadata[k] = row_dict.get(k, "")

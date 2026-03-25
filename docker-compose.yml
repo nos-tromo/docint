@@ -41,12 +41,18 @@ x-backend-cpu: &backend-cpu
   environment: &backend-cpu-env
     DATA_PATH: /app/data
     LOG_PATH: /app/.logs/backend-cpu.log
+    NEO4J_DATABASE: neo4j
+    NEO4J_PASSWORD: ${NEO4J_PASSWORD:-docint-password}
+    NEO4J_URI: bolt://neo4j:7687
+    NEO4J_USERNAME: neo4j
     QDRANT_HOST: http://qdrant:6333
     QDRANT_SRC_DIR: /qdrant/storage/sources
     QUERIES_PATH: /app/data/queries.txt
     RESULTS_PATH: /app/results
     USE_DEVICE: auto
   env_file: *docker-env-file
+  depends_on:
+    - neo4j
   volumes: &backend-volumes
     - ${USERPROFILE:-$HOME}/docint/data:/app/data
     - ${USERPROFILE:-$HOME}/docint/results:/app/results
@@ -69,6 +75,10 @@ x-backend-cuda: &backend-cuda
   environment: &backend-cuda-env
     DATA_PATH: /app/data/in
     LOG_PATH: /app/.logs/backend-cuda.log
+    NEO4J_DATABASE: neo4j
+    NEO4J_PASSWORD: ${NEO4J_PASSWORD:-docint-password}
+    NEO4J_URI: bolt://neo4j:7687
+    NEO4J_USERNAME: neo4j
     NVIDIA_VISIBLE_DEVICES: all
     QDRANT_HOST: http://qdrant:6333
     QDRANT_SRC_DIR: /qdrant/storage/sources
@@ -76,6 +86,8 @@ x-backend-cuda: &backend-cuda
     RESULTS_PATH: /app/data/out
     USE_DEVICE: auto
   env_file: *docker-env-file
+  depends_on:
+    - neo4j
   volumes: *backend-volumes
   deploy:
     resources:
@@ -122,7 +134,28 @@ x-qdrant-cuda: &qdrant-cuda
             count: all
             capabilities: [gpu]
 
+x-neo4j-common: &neo4j-common
+  image: neo4j:5.26.22-community
+  env_file: *docker-env-file
+  environment:
+    NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-docint-password}
+    NEO4J_server_bolt_advertised__address: neo4j:7687
+    NEO4J_server_http_advertised__address: neo4j:7474
+  ports:
+    - 7474:7474
+    - 7687:7687
+  volumes:
+    - neo4j-data:/data
+  restart: unless-stopped
+  networks:
+    docint-net:
+      aliases:
+        - neo4j
+
 services:
+  neo4j:
+    <<: *neo4j-common
+
   ##########################################################
   # Backend – CPU + Ollama
   ##########################################################
@@ -174,6 +207,7 @@ services:
     <<: *backend-cuda
     profiles: ["cuda-vllm"]
     depends_on:
+      - neo4j
       - vllm-router
     environment:
       <<: *backend-cuda-env
@@ -442,6 +476,7 @@ services:
 volumes:
   docint-logs:
   model-cache:
+  neo4j-data:
   ollama-models:
   qdrant-snapshots:
   qdrant-storage:

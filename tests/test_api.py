@@ -81,6 +81,7 @@ class DummyRAG:
         self.entity_occurrence_filters: list[Any] = []
         self.multi_entity_occurrence_queries: list[str] = []
         self.multi_entity_occurrence_filters: list[Any] = []
+        self.graph_queries: list[tuple[str, str | None]] = []
         self.chat_filters: list[Any] = []
         self.stream_filters: list[Any] = []
         self.created_index = 0  # Tracks the number of times an index is created
@@ -359,6 +360,72 @@ class DummyRAG:
                     "truncated": False,
                 },
             ],
+        }
+
+    def run_graph_query(
+        self,
+        prompt: str,
+        *,
+        query_mode: str | None = None,
+        metadata_filters: Any = None,
+        vector_store_kwargs: Any = None,
+    ) -> dict[str, Any]:
+        """Return canned graph-backed retrieval results.
+
+        Args:
+            prompt: Query prompt.
+            query_mode: Optional hint for the graph query mode to test.
+            metadata_filters: Optional compiled metadata filters.
+            vector_store_kwargs: Optional native vector-store query kwargs.
+
+        Returns:
+            dict[str, Any]: Canned graph query response payload.
+        """
+
+        _ = (metadata_filters, vector_store_kwargs)
+        self.graph_queries.append((prompt, query_mode))
+        return {
+            "response": f"graph::{query_mode or 'graph_lookup'}::{prompt}",
+            "sources": [{"id": "graph-1"}],
+            "retrieval_query": prompt,
+            "coverage_unit": "posts",
+            "retrieval_mode": query_mode or "graph_lookup",
+            "retrieval_trace": {"query_mode": query_mode or "graph_lookup"},
+        }
+
+    def search_graph_entities(
+        self, *, q: str = "", limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Return canned graph entity search rows."""
+
+        _ = limit
+        return [{"text": q or "Acme", "type": "ORG"}]
+
+    def get_graph_stats(self) -> dict[str, Any]:
+        """Return canned graph stats."""
+
+        return {"source_records": 3, "entities": 2}
+
+    def get_graph_neighborhood(
+        self, *, entity: str, hops: int = 2, limit: int = 25
+    ) -> dict[str, Any]:
+        """Return a canned graph neighborhood response."""
+
+        _ = (hops, limit)
+        return {"center": entity, "neighbors": [{"properties": {"node_id": "n1"}}]}
+
+    def get_graph_path(
+        self, *, source: str, target: str, max_hops: int = 6
+    ) -> dict[str, Any]:
+        """Return a canned graph path response."""
+
+        return {
+            "source": source,
+            "target": target,
+            "nodes": [{"properties": {"node_id": "n1"}}],
+            "relationships": [{"type": "MENTIONS"}],
+            "found": True,
+            "max_hops": max_hops,
         }
 
     def expand_query_with_graph_with_debug(
@@ -650,6 +717,30 @@ def test_collections_ner_stats_success(client: TestClient) -> None:
     assert payload["top_entities"][0]["text"] == "Acme"
 
 
+def test_collections_graph_endpoints_success(client: TestClient) -> None:
+    """Graph analysis endpoints should return canned graph data."""
+
+    stats = client.get("/collections/graph/stats")
+    entities = client.get("/collections/graph/entities", params={"q": "Acme"})
+    neighborhood = client.get(
+        "/collections/graph/neighborhood",
+        params={"entity": "Acme", "hops": 2},
+    )
+    path = client.get(
+        "/collections/graph/path",
+        params={"source": "Acme", "target": "Widget"},
+    )
+
+    assert stats.status_code == 200
+    assert stats.json() == {"source_records": 3, "entities": 2}
+    assert entities.status_code == 200
+    assert entities.json()["results"][0]["text"] == "Acme"
+    assert neighborhood.status_code == 200
+    assert neighborhood.json()["center"] == "Acme"
+    assert path.status_code == 200
+    assert path.json()["found"] is True
+
+
 def test_collections_hate_speech_success(client: TestClient) -> None:
     """Hate-speech endpoint should return flagged rows.
 
@@ -889,6 +980,38 @@ def test_stream_query_stateless_mode_emits_tokens(client: TestClient) -> None:
     assert '"token"' in text
     assert '"session_id": "stateless"' in text
     assert '"graph_debug"' in text
+
+
+def test_query_graph_lookup_mode_uses_graph_service(client: TestClient) -> None:
+    """Graph lookup mode should route directly to graph-backed retrieval."""
+
+    rag = cast(DummyRAG, api_module.rag)
+    response = client.post(
+        "/query",
+        json={"question": "Acme", "query_mode": "graph_lookup"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["answer"] == "graph::graph_lookup::Acme"
+    assert body["retrieval_mode"] == "graph_lookup"
+    assert body["retrieval_trace"]["query_mode"] == "graph_lookup"
+    assert rag.graph_queries[-1] == ("Acme", "graph_lookup")
+
+
+def test_stream_query_graph_mode_emits_trace(client: TestClient) -> None:
+    """Streaming graph modes should emit the final retrieval trace payload."""
+
+    with client.stream(
+        "POST",
+        "/stream_query",
+        json={"question": "Acme", "query_mode": "graph_synthesis"},
+    ) as resp:
+        assert resp.status_code == 200
+        text = "".join([chunk.decode() for chunk in resp.iter_raw()])
+
+    assert '"retrieval_mode": "graph_synthesis"' in text
+    assert '"retrieval_trace"' in text
 
 
 @pytest.mark.anyio

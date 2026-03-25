@@ -136,7 +136,8 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    **What's Included:**
    - **Backend**: FastAPI application for RAG and orchestration.
    - **Inference Server**: Ollama, CUDA vLLM via the bundled router, or external OpenAI API (depending on profile).
-   - **Qdrant**: Vector database for hybrid (semantic, bm42) search.
+   - **Qdrant**: Vector database for hybrid (semantic, bm42) search and grounded evidence recall.
+   - **Neo4j**: Graph database for canonical entities, relations, provenance, and analytical traversals.
    - **Frontend**: Streamlit UI.
 
    On the first run, required ML models are automatically downloaded into the `model-cache` shared volume. This volume is shared between the backend (which handles downloads) and the inference server (which loads them).
@@ -150,6 +151,7 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    For local Python development (without Docker), you must provide your own inference endpoints.
 
     - **Qdrant**: Must be running (default: `http://localhost:6333`).
+    - **Neo4j**: Must be running (default: `bolt://localhost:7687`, database `neo4j`).
     - **Inference Server**: An OpenAI-compatible server (Ollama, LocalAI, vLLM, or another compatible service) must be accessible.
        - By default, the app expects Ollama at `http://localhost:11434/v1`. Configure `OPENAI_API_BASE` in `.env` accordingly.
 
@@ -212,6 +214,19 @@ The application is configured via environment variables. Key variables include:
 - `GRAPHRAG_TOP_K_NODES`: Graph node cap used for derived in-memory graph construction (default: `100`).
 - `GRAPHRAG_MIN_EDGE_WEIGHT`: Minimum edge weight included in the graph (default: `1`).
 - `GRAPHRAG_MAX_NEIGHBORS`: Maximum neighbor entities appended to a retrieval query (default: `6`).
+- `GRAPH_ENABLED`: Enable the Neo4j-backed graph ingestion and retrieval layer (default: `true`).
+- `NEO4J_URI`: Neo4j Bolt endpoint used for graph ingestion and analysis (default: `bolt://localhost:7687`).
+- `NEO4J_USERNAME`: Neo4j username (default: `neo4j`).
+- `NEO4J_PASSWORD`: Neo4j password used by the backend and Docker service (default: `docint-password`).
+- `NEO4J_DATABASE`: Neo4j database name (default: `neo4j`).
+- `GRAPH_WRITE_BATCH_SIZE`: Number of graph source records upserted per write batch (default: `100`).
+- `GRAPH_MAX_HOPS`: Maximum graph traversal depth for graph-backed lookups and synthesis (default: `2`).
+- `GRAPH_TRAVERSAL_FANOUT`: Per-hop traversal fanout budget for graph neighborhood expansion (default: `25`).
+- `GRAPH_RESOLUTION_MIN_CONFIDENCE`: Minimum entity confidence required before cross-collection canonical merges are auto-applied (default: `0.85`).
+- `GRAPH_EXACT_SCORE_WEIGHT`: Fusion weight for exact structured graph matches (default: `0.45`).
+- `GRAPH_SCORE_WEIGHT`: Fusion weight for graph proximity/traversal matches (default: `0.30`).
+- `GRAPH_RERANK_SCORE_WEIGHT`: Fusion weight for reranker ordering inside graph-backed retrieval (default: `0.15`).
+- `GRAPH_VECTOR_SCORE_WEIGHT`: Fusion weight for vector fallback candidates inside graph-backed retrieval (default: `0.10`).
 - `RESPONSE_VALIDATION_ENABLED`: Enable a second-pass LLM check that verifies answer grounding and source/query fit, and flags mismatches (default: `false`).
 - `CHAT_RESPONSE_MODE`: Chat/query response synthesizer mode. Use `auto` to switch social/table-heavy collections to `refine` while keeping other collections on `compact` (default: `auto`).
 - `RETRIEVAL_VECTOR_QUERY_MODE`: First-stage retrieval mode. `auto` resolves to `hybrid` when hybrid search is enabled for the collection, otherwise `default`. Supported values: `auto`, `default`, `sparse`, `hybrid`, `mmr` (default: `auto`).
@@ -333,6 +348,10 @@ DocInt exposes collection-level IE APIs in addition to raw source payloads:
 - `GET /collections/ner`: Raw source-level entities/relations for the selected collection.
 - `GET /collections/ner/stats`: Aggregated IE metrics and top entities/relations.
 - `GET /collections/ner/search`: Entity search with optional type filter.
+- `GET /collections/graph/stats`: Graph counts for source records and canonical entities in the selected collection.
+- `GET /collections/graph/entities`: Canonical entity and alias search backed by Neo4j.
+- `GET /collections/graph/neighborhood`: Bounded neighborhood expansion around one entity.
+- `GET /collections/graph/path`: Shortest-path style relation lookup between two entities.
 - `PIPELINE_VISION_OCR_MAX_IMAGE_DIM` (default `1024`)
 - `PIPELINE_VISION_OCR_MAX_TOKENS` (default `4096`)
 

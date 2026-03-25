@@ -25,6 +25,7 @@ dependencies = [
   "llama-index-readers-docling>=0.4.0",
   "llama-index-vector-stores-qdrant>=0.7.1",
   "loguru>=0.7.2",
+  "neo4j>=6.1.0",
   "numba>=0.63.1",
   "numpy>=1.26,<2.4",
   "ollama>=0.6.1",
