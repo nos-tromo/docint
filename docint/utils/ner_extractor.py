@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 import warnings
@@ -18,6 +19,12 @@ from docint.utils.env_cfg import (
 )
 
 _GLINER_OFFLINE_DIR = Path(tempfile.gettempdir()) / "docint-gliner-offline"
+_DEFAULT_GLINER_CONTEXT_WINDOW = 768
+_GLINER_SPECIAL_TOKEN_RESERVE = 2
+_SENTENCE_RE = re.compile(
+    r".+?(?:[.!?]+[\"')\]]*(?=\s+|$)|\n{2,}|$)",
+    re.DOTALL,
+)
 
 
 def _parse_ner_payload(raw: str) -> dict[str, Any]:
@@ -298,6 +305,226 @@ def _resolve_gliner_load_target(model_id: str, cache_dir: Path) -> tuple[str, bo
     return model_id, False
 
 
+def _resolve_gliner_context_window(model: Any) -> int:
+    """Return the usable GLiNER context window in tokens.
+
+    Args:
+        model: Loaded GLiNER model instance.
+
+    Returns:
+        Maximum number of non-special tokens to send in a single request.
+
+    Raises:
+        TypeError, ValueError: If the model config contains an invalid max_len value.
+    """
+    config = getattr(model, "config", None)
+    raw_max_len = getattr(config, "max_len", _DEFAULT_GLINER_CONTEXT_WINDOW)
+    try:
+        max_len = int(raw_max_len)
+    except (TypeError, ValueError):
+        max_len = _DEFAULT_GLINER_CONTEXT_WINDOW
+    return max(1, max_len - _GLINER_SPECIAL_TOKEN_RESERVE)
+
+
+def _get_gliner_tokenizer(model: Any) -> Any | None:
+    """Return the GLiNER backbone tokenizer when available.
+
+    Args:
+        model: Loaded GLiNER model instance.
+
+    Returns:
+        Tokenizer object or ``None`` when unavailable.
+    """
+    data_processor = getattr(model, "data_processor", None)
+    return getattr(data_processor, "transformer_tokenizer", None)
+
+
+def _count_text_tokens(text: str, tokenizer: Any | None) -> int:
+    """Count tokens for a text span using the model tokenizer when possible.
+
+    Args:
+        text: Input text span.
+        tokenizer: Tokenizer associated with the loaded GLiNER model.
+
+    Returns:
+        Estimated token count for the input text.
+
+    Raises:
+        Any exceptions raised by the tokenizer are caught and logged, with a fallback to whitespace token counting.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return 0
+
+    if tokenizer is not None and hasattr(tokenizer, "encode"):
+        try:
+            return len(
+                tokenizer.encode(
+                    stripped,
+                    add_special_tokens=False,
+                    truncation=False,
+                )
+            )
+        except TypeError:
+            try:
+                return len(tokenizer.encode(stripped, add_special_tokens=False))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    return len(re.findall(r"\S+", stripped))
+
+
+def _split_text_into_sentences(text: str) -> list[str]:
+    """Split text into sentence-like spans while preserving readable boundaries.
+
+    Args:
+        text: Raw text to split.
+
+    Returns:
+        Sentence-like spans. Falls back to the full text when no sentence
+        boundary is detected.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return []
+
+    sentences = [match.group(0).strip() for match in _SENTENCE_RE.finditer(stripped)]
+    sentences = [sentence for sentence in sentences if sentence]
+    return sentences or [stripped]
+
+
+def _split_text_into_words(text: str) -> list[str]:
+    """Split text into word-like spans for fallback chunking.
+
+    Args:
+        text: Raw text to split.
+
+    Returns:
+        Word-like spans. Punctuation stays attached to its word.
+    """
+    return re.findall(r"\S+", text)
+
+
+def _split_oversized_token(
+    token: str,
+    max_tokens: int,
+    tokenizer: Any | None,
+) -> list[str]:
+    """Split a single oversized token as a last-resort fallback.
+
+    Args:
+        token: Single token-like span that still exceeds the model budget.
+        max_tokens: Maximum token budget per chunk.
+        tokenizer: Tokenizer associated with the loaded GLiNER model.
+
+    Returns:
+        Smaller character-based chunks guaranteed to fit the budget.
+    """
+    pieces: list[str] = []
+    start = 0
+    token = token.strip()
+    while start < len(token):
+        end = start + 1
+        last_fit = end
+        while end <= len(token):
+            candidate = token[start:end]
+            if _count_text_tokens(candidate, tokenizer) > max_tokens:
+                break
+            last_fit = end
+            end += 1
+        if last_fit == start:
+            last_fit = min(len(token), start + 1)
+        pieces.append(token[start:last_fit])
+        start = last_fit
+    return pieces
+
+
+def _pack_text_segments(
+    segments: list[str],
+    max_tokens: int,
+    tokenizer: Any | None,
+) -> list[str]:
+    """Pack sentence or word segments into GLiNER-sized chunks.
+
+    Args:
+        segments: Ordered text segments to pack.
+        max_tokens: Maximum token budget per chunk.
+        tokenizer: Tokenizer associated with the loaded GLiNER model.
+
+    Returns:
+        Packed chunks whose token counts fit the requested budget.
+    """
+    chunks: list[str] = []
+    current = ""
+
+    for segment in segments:
+        segment = segment.strip()
+        if not segment:
+            continue
+
+        segment_tokens = _count_text_tokens(segment, tokenizer)
+        if segment_tokens > max_tokens:
+            if current:
+                chunks.append(current)
+                current = ""
+
+            word_segments = _split_text_into_words(segment)
+            if len(word_segments) <= 1:
+                chunks.extend(
+                    _split_oversized_token(
+                        token=segment,
+                        max_tokens=max_tokens,
+                        tokenizer=tokenizer,
+                    )
+                )
+            else:
+                chunks.extend(
+                    _pack_text_segments(
+                        segments=word_segments,
+                        max_tokens=max_tokens,
+                        tokenizer=tokenizer,
+                    )
+                )
+            continue
+
+        candidate = segment if not current else f"{current} {segment}"
+        if current and _count_text_tokens(candidate, tokenizer) > max_tokens:
+            chunks.append(current)
+            current = segment
+        else:
+            current = candidate
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
+def _chunk_text_for_gliner(
+    text: str,
+    max_tokens: int,
+    tokenizer: Any | None,
+) -> list[str]:
+    """Split text into GLiNER-safe chunks with sentence-first packing.
+
+    Args:
+        text: Raw input text.
+        max_tokens: Maximum token budget per chunk.
+        tokenizer: Tokenizer associated with the loaded GLiNER model.
+
+    Returns:
+        Ordered list of chunks suitable for repeated GLiNER inference.
+    """
+    sentences = _split_text_into_sentences(text)
+    return _pack_text_segments(
+        segments=sentences,
+        max_tokens=max_tokens,
+        tokenizer=tokenizer,
+    )
+
+
 def build_gliner_ner_extractor(
     labels: list[str] | None = None,
     threshold: float = 0.3,
@@ -354,6 +581,9 @@ def build_gliner_ner_extractor(
         model = model.to("mps")
         logger.info("GLiNER moved to MPS")
 
+    max_tokens = _resolve_gliner_context_window(model)
+    tokenizer = _get_gliner_tokenizer(model)
+
     def _extract(text: str) -> tuple[list[dict], list[dict]]:
         """Extract entities using GLiNER.
 
@@ -367,17 +597,22 @@ def build_gliner_ner_extractor(
             return [], []
 
         try:
-            # GLiNER predict_entities
-            # Suppress the "Asking to truncate to max_length but no maximum
-            # length is provided" warning from the internal DeBERTa tokenizer.
-            # Input chunks are already size-limited by SentenceSplitter, so
-            # truncation is not needed.
-            with warnings.catch_warnings():
-                warnings.filterwarnings(
-                    "ignore",
-                    message=".*truncat.*max_length.*no maximum length.*",
-                )
-                preds = model.predict_entities(text, labels, threshold=threshold)
+            preds: list[dict[str, Any]] = []
+            for chunk in _chunk_text_for_gliner(
+                text=text,
+                max_tokens=max_tokens,
+                tokenizer=tokenizer,
+            ):
+                # Suppress the "Asking to truncate to max_length but no maximum
+                # length is provided" warning from the internal DeBERTa tokenizer.
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=".*truncat.*max_length.*no maximum length.*",
+                    )
+                    preds.extend(
+                        model.predict_entities(chunk, labels, threshold=threshold)
+                    )
         except Exception as e:
             logger.warning("GLiNER extraction failed: {}", e)
             return [], []

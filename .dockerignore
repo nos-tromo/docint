@@ -1,6 +1,5 @@
 # Ignore Git and local metadata
 .git
-.gitignore
 .vscode
 .idea
 *.code-workspace
@@ -8,15 +7,14 @@
 
 # Backend build artifacts and caches
 **/__pycache__/
-*.pyc
-*.pyo
-*.so
 **/*.egg-info/
 **/.github/
 **/.logs/
 **/.mypy_cache/
+**/.pre-commit-cache/
 **/.pytest_cache/
 **/.ruff_cache/
+**/.uv-cache/
 **/.venv/
 **/build/
 **/data/
@@ -28,10 +26,20 @@
 **/qdrant*/
 **/results/
 **/session/
+**/tests/
 
 # Environment and config files
-.env
+*.conf
+*.pyc
+*.pyo
+*.so
+.env*
+.pre-commit-config.yaml
 AGENTS.md
+docker-compose.yml
+Dockerfile*
+LICENSE
+README.md
 
 # Media, data, and large files not needed for build
 .DS_Store
