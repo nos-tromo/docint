@@ -100,7 +100,7 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    PYTHON_SLIM_BOOKWORM_IMAGE=registry.example.com/dockerhub/library/python:3.11-slim-bookworm
    PYTHON_SLIM_IMAGE=registry.example.com/dockerhub/library/python:3.11-slim
    NVIDIA_CUDA_RUNTIME_IMAGE=registry.example.com/dockerhub/nvidia/cuda:13.0.2-cudnn-runtime-ubuntu22.04
-   VLLM_OPENAI_IMAGE=registry.example.com/dockerhub/vllm/vllm-openai:latest
+   VLLM_OPENAI_IMAGE=registry.example.com/dockerhub/vllm/vllm-openai:v0.17.1
    ```
 
    These variables are consumed during `FROM ...` resolution, which is the step
@@ -247,6 +247,8 @@ Batch-size tuning guidance:
 - `BACKEND_PUBLIC_HOST`: Public backend URL used for preview/download links (defaults to `BACKEND_HOST`).
 - `QDRANT_HOST`: Qdrant endpoint (default: `http://localhost:6333`).
 - `CORS_ALLOWED_ORIGINS`: Comma-separated allow-list for API CORS.
+- `SESSIONS_PATH`: Directory for the default file-backed chat session store. Local default: `~/docint/sessions`. Docker Compose sets this to `/var/lib/docint/sessions`.
+- `SESSION_STORE`: Full SQLAlchemy session-store URL override. Use this if you want something other than the default SQLite file under `SESSIONS_PATH`.
 
 **Model Selection (Environment Variables):**
 
