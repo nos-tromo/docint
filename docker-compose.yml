@@ -205,13 +205,13 @@ services:
   # Backend – CUDA + vLLM
   ##########################################################
   backend-cuda-vllm:
-    <<: *backend-cuda
+    <<: *backend-cpu
     profiles: ["cuda-vllm"]
     depends_on:
       - neo4j
       - vllm-router
     environment:
-      <<: *backend-cuda-env
+      <<: *backend-cpu-env
       INFERENCE_PROVIDER: vllm
       OPENAI_API_BASE: http://vllm-router:9000/v1
 
