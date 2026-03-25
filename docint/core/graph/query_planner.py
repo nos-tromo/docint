@@ -21,13 +21,13 @@ def plan_graph_query(
     query: str, *, requested_mode: str | None = None
 ) -> GraphQueryPlan:
     """Infer a graph retrieval or analysis plan from a user query.
-    
+
     Args:
         query: The raw user query string to analyze for graph retrieval planning.
         requested_mode: An optional explicitly requested retrieval mode to override inference.
 
     Returns:
-        GraphQueryPlan: A structured plan containing the inferred retrieval mode, query seeds, 
+        GraphQueryPlan: A structured plan containing the inferred retrieval mode, query seeds,
             and any path terms for graph traversal.
     """
 

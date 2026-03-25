@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 def canonicalize_value(value: Any) -> str:
     """Normalize an arbitrary value into a stable lowercase identifier fragment.
-    
+
     Args:
         value: The input value to normalize.
 
@@ -25,7 +25,7 @@ def canonicalize_value(value: Any) -> str:
 
 def extract_domain(url: str | None) -> str | None:
     """Extract a lowercase domain from a URL string.
-    
+
     Args:
         url: The input URL string to extract the domain from.
 
@@ -43,7 +43,7 @@ def extract_domain(url: str | None) -> str | None:
 
 def parse_tag_values(raw: Any) -> list[str]:
     """Parse tags from scalar or list-like inputs.
-    
+
     Args:
         raw: The raw input value, which can be a string, list, or other scalar type.
 
@@ -82,7 +82,7 @@ def resolve_entity_identity(
     min_confidence: float,
 ) -> ResolvedIdentity:
     """Resolve an entity mention into a canonical or collection-scoped identity.
-    
+
     Args:
         text: The raw text of the entity mention.
         entity_type: The type or category of the entity, if available.
@@ -122,7 +122,7 @@ def resolve_author_identity(
     collection: str,
 ) -> ResolvedIdentity | None:
     """Resolve an author/account identity with deterministic preference for author IDs.
-    
+
     Args:
         author: The display name of the author or account, if available.
         author_id: The unique identifier of the author or account, if available.

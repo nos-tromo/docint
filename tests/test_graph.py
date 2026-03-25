@@ -40,7 +40,7 @@ def test_graph_service_ingest_source_records_writes_provenance_and_entities(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Graph ingestion should emit provenance and entity upsert Cypher writes.
-    
+
     Args:
         monkeypatch (pytest.MonkeyPatch): A pytest fixture for monkeypatching.
     """
@@ -56,9 +56,9 @@ def test_graph_service_ingest_source_records_writes_provenance_and_entities(
             parameters (dict[str, object]): The parameters being passed to the Cypher query.
 
         Returns:
-            list[dict[str, object]]: An empty list simulating no results from the query, while capturing 
+            list[dict[str, object]]: An empty list simulating no results from the query, while capturing
                 the query and parameters for assertions.
-        """        
+        """
         captured.append((query, parameters))
         return []
 
@@ -98,7 +98,7 @@ def test_graph_service_ingest_source_records_writes_provenance_and_entities(
 
 def test_run_graph_query_returns_graph_trace(monkeypatch: pytest.MonkeyPatch) -> None:
     """Graph-backed RAG queries should synthesize an answer from graph-selected sources.
-    
+
     Args:
         monkeypatch (pytest.MonkeyPatch): A pytest fixture for monkeypatching.
     """
@@ -161,9 +161,9 @@ def test_run_graph_query_returns_graph_trace(monkeypatch: pytest.MonkeyPatch) ->
                 query (str): The input query string for which retrieval would normally be performed.
 
             Returns:
-                list[object]: An empty list simulating no retrieval results, allowing the test to focus on the graph 
+                list[object]: An empty list simulating no retrieval results, allowing the test to focus on the graph
                     query logic and response synthesis.
-            """            
+            """
             _ = query
             return []
 

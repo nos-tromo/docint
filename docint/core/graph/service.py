@@ -35,7 +35,7 @@ class Neo4jGraphService:
     @property
     def enabled(self) -> bool:
         """Return whether the graph service is enabled.
-        
+
         Returns:
             bool: True if the graph service is enabled, False otherwise.
         """
@@ -45,7 +45,7 @@ class Neo4jGraphService:
     @property
     def driver(self) -> Any:
         """Lazily construct the Neo4j driver.
-        
+
         Returns:
             Any: The Neo4j driver instance.
         """
@@ -68,15 +68,15 @@ class Neo4jGraphService:
         self, query: str, parameters: dict[str, Any]
     ) -> list[dict[str, Any]]:
         """Execute a write query and return normalized row dictionaries.
-        
+
         Args:
             query: The Cypher query string to execute.
             parameters: A dictionary of parameters to pass to the query.
 
         Returns:
-            list[dict[str, Any]]: A list of dictionaries representing the query results, or 
+            list[dict[str, Any]]: A list of dictionaries representing the query results, or
                 an empty list if the query failed.
-        
+
         Raises:
             Neo4jError: If the query execution fails due to a Neo4j error.
         """
@@ -93,13 +93,13 @@ class Neo4jGraphService:
 
     def _run_read(self, query: str, parameters: dict[str, Any]) -> list[dict[str, Any]]:
         """Execute a read query and return normalized row dictionaries.
-        
+
         Args:
             query: The Cypher query string to execute.
             parameters: A dictionary of parameters to pass to the query.
 
         Returns:
-            list[dict[str, Any]]: A list of dictionaries representing the query results, or 
+            list[dict[str, Any]]: A list of dictionaries representing the query results, or
                 an empty list if the query failed.
 
         Raises:
@@ -123,7 +123,7 @@ class Neo4jGraphService:
         records: Iterable[GraphSourceRecord],
     ) -> dict[str, int]:
         """Upsert graph facts for a batch of source records.
-        
+
         Args:
             collection: The name of the collection to which the records belong.
             records: An iterable of GraphSourceRecord objects to ingest.
@@ -142,7 +142,7 @@ class Neo4jGraphService:
         self, *, collection: str, record: GraphSourceRecord
     ) -> None:
         """Upsert a single source record and its core graph neighborhood.
-        
+
         Args:
             collection: The name of the collection to which the record belongs.
             record: A GraphSourceRecord object to upsert.
@@ -367,7 +367,7 @@ class Neo4jGraphService:
         limit: int = 20,
     ) -> list[dict[str, Any]]:
         """Search canonical entities and aliases within a collection.
-        
+
         Args:
             collection: The name of the collection to search within.
             q: The raw search query string to match against entity texts and aliases.
@@ -406,7 +406,7 @@ class Neo4jGraphService:
         limit: int = 12,
     ) -> GraphTraversalResult:
         """Retrieve source-record candidates from direct and graph-expanded matches.
-        
+
         Args:
             collection: The name of the collection to search within.
             plan: A GraphQueryPlan object containing the retrieval mode, seeds, and path terms.
@@ -534,7 +534,7 @@ class Neo4jGraphService:
         limit: int = 25,
     ) -> dict[str, Any]:
         """Return a compact neighborhood payload around one entity.
-        
+
         Args:
             collection: The name of the collection to search within.
             entity: The raw entity text to find the neighborhood around.
@@ -542,7 +542,7 @@ class Neo4jGraphService:
             limit: The maximum number of neighboring nodes to return.
 
         Returns:
-            dict[str, Any]: A dictionary containing the center entity and a list of neighboring nodes with their 
+            dict[str, Any]: A dictionary containing the center entity and a list of neighboring nodes with their
                 labels, properties, and hop distance.
         """
 
@@ -574,7 +574,7 @@ class Neo4jGraphService:
         max_hops: int = 6,
     ) -> GraphPathResult:
         """Return a shortest path between two entities or aliases.
-        
+
         Args:
             collection: The name of the collection to search within.
             source: The raw text of the source entity or alias.
@@ -582,7 +582,7 @@ class Neo4jGraphService:
             max_hops: The maximum number of hops to consider for path finding.
 
         Returns:
-            GraphPathResult: An object containing the source and target texts, lists of nodes and relationships 
+            GraphPathResult: An object containing the source and target texts, lists of nodes and relationships
                 in the found path, and a trace of the path finding process.
         """
 
@@ -615,7 +615,7 @@ class Neo4jGraphService:
 
     def get_collection_stats(self, *, collection: str) -> dict[str, Any]:
         """Return simple graph stats for the active collection.
-        
+
         Args:
             collection: The name of the collection to retrieve stats for.
 
@@ -637,7 +637,7 @@ class Neo4jGraphService:
 
     def delete_collection(self, *, collection: str) -> None:
         """Delete graph nodes scoped to one collection.
-        
+
         Args:
             collection: The name of the collection to delete.
         """
