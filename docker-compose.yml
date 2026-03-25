@@ -49,7 +49,7 @@ x-backend-cpu: &backend-cpu
     - docint-logs:/var/log/docint
     - docling-cache:/root/.cache/docling
     - huggingface-cache:/root/.cache/huggingface/hub
-    - qdrant-storage:/qdrant/storage
+    - qdrant-sources:/qdrant/storage/sources
     - sessions-storage:/var/lib/docint/sessions/
     - whisper-cache:/root/.cache/whisper
   networks: &backend-net
@@ -452,6 +452,7 @@ volumes:
   huggingface-cache:
   ollama-cache:
   qdrant-snapshots:
+  qdrant-sources:
   qdrant-storage:
   sessions-storage:
   whisper-cache:
