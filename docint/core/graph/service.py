@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -163,7 +164,7 @@ class Neo4jGraphService:
             "page": record.page,
             "row": record.row,
             "search_blob": record.search_blob,
-            "metadata": record.metadata,
+            "metadata": json.dumps(record.metadata),
         }
         self._run_write(
             """
@@ -181,7 +182,7 @@ class Neo4jGraphService:
                 s.page = $page,
                 s.row = $row,
                 s.search_blob = $search_blob,
-                s.metadata_json = toString($metadata)
+                s.metadata_json = $metadata
             MERGE (s)-[:IN_COLLECTION]->(c)
             FOREACH (_ IN CASE WHEN $filename IS NULL THEN [] ELSE [1] END |
                 MERGE (d:Document {collection: $collection, filename: $filename})
