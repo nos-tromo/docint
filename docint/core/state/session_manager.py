@@ -241,17 +241,12 @@ class SessionManager:
             )
             self._maybe_update_summary(session_id)
             return response
-        expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(
-            retrieval_query
-        )
         coverage_unit = str(
             self.rag._infer_collection_profile().get("coverage_unit") or "documents"
         )
         retrieval_mode = f"rewrite_{self.rag._resolve_chat_response_mode().value}"
-        if bool(graph_debug.get("applied")):
-            retrieval_mode += "_graph"
 
-        resp = engine.query(expanded_query)
+        resp = engine.query(retrieval_query)
         response = self.rag._normalize_response_data(
             user_msg,
             resp,
@@ -261,7 +256,6 @@ class SessionManager:
             coverage_unit=coverage_unit,
             retrieval_mode=retrieval_mode,
         )
-        response["graph_debug"] = graph_debug
         self._persist_turn(session_id, user_msg, resp, response)
         self._maybe_update_summary(session_id)
         return response
@@ -346,24 +340,18 @@ class SessionManager:
                 "sources": normalized.get("sources", []),
                 "session_id": session_id,
                 "reasoning": normalized.get("reasoning"),
-                "graph_debug": normalized.get("graph_debug"),
                 "retrieval_query": normalized.get("retrieval_query"),
                 "coverage_unit": normalized.get("coverage_unit"),
                 "retrieval_mode": normalized.get("retrieval_mode"),
                 "retrieval_trace": normalized.get("retrieval_trace"),
             }
             return
-        expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(
-            retrieval_query
-        )
         coverage_unit = str(
             self.rag._infer_collection_profile().get("coverage_unit") or "documents"
         )
         retrieval_mode = f"rewrite_{self.rag._resolve_chat_response_mode().value}"
-        if bool(graph_debug.get("applied")):
-            retrieval_mode += "_graph"
 
-        response = streaming_engine.query(expanded_query)
+        response = streaming_engine.query(retrieval_query)
         response_gen = getattr(response, "response_gen", None)
         if response_gen is None:
             logger.error("RuntimeError: Streaming response generator is unavailable.")
@@ -398,7 +386,6 @@ class SessionManager:
             coverage_unit=coverage_unit,
             retrieval_mode=retrieval_mode,
         )
-        normalized["graph_debug"] = graph_debug
         self._persist_turn(session_id, user_msg, final_response, normalized)
         self._maybe_update_summary(session_id)
 
@@ -408,7 +395,6 @@ class SessionManager:
             "sources": normalized.get("sources", []),
             "session_id": session_id,
             "reasoning": normalized.get("reasoning"),
-            "graph_debug": normalized.get("graph_debug"),
             "retrieval_query": normalized.get("retrieval_query"),
             "coverage_unit": normalized.get("coverage_unit"),
             "retrieval_mode": normalized.get("retrieval_mode"),

@@ -22,7 +22,6 @@ from typing import Any, Callable, Sequence, cast
 # Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
 # TRANSFORMERS_OFFLINE env vars are set before huggingface_hub caches them.
 from docint.utils.env_cfg import (
-    GraphRAGConfig,
     GraphStoreConfig,
     HostConfig,
     IngestionConfig,
@@ -33,7 +32,6 @@ from docint.utils.env_cfg import (
     RetrievalConfig,
     SessionConfig,
     SummaryConfig,
-    load_graphrag_env,
     load_graph_store_env,
     load_hate_speech_env,
     load_host_env,
@@ -567,9 +565,6 @@ class RAG:
     path_config: PathConfig = field(
         default_factory=load_path_env, init=False, repr=False
     )
-    graphrag_config: GraphRAGConfig = field(
-        default_factory=load_graphrag_env, init=False, repr=False
-    )
     graph_store_config: GraphStoreConfig = field(
         default_factory=load_graph_store_env, init=False, repr=False
     )
@@ -628,11 +623,6 @@ class RAG:
     sparse_top_k: int = field(default=20, init=False)
     hybrid_top_k: int = field(default=20, init=False)
     parent_context_enabled: bool = field(default=True, init=False)
-    graphrag_enabled: bool = field(default=False, init=False)
-    graphrag_neighbor_hops: int = field(default=1, init=False)
-    graphrag_top_k_nodes: int = field(default=100, init=False)
-    graphrag_min_edge_weight: int = field(default=1, init=False)
-    graphrag_max_neighbors: int = field(default=6, init=False)
     summary_coverage_target: float = field(default=0.70, init=False)
     summary_max_docs: int = field(default=30, init=False)
     summary_per_doc_top_k: int = field(default=4, init=False)
@@ -817,11 +807,6 @@ class RAG:
         self.hybrid_top_k = self.retrieval_config.hybrid_top_k
         self.parent_context_enabled = self.retrieval_config.parent_context_enabled
         self.rerank_top_n = int(self.retrieve_similarity_top_k // 4)
-        self.graphrag_enabled = self.graphrag_config.enabled
-        self.graphrag_neighbor_hops = self.graphrag_config.neighbor_hops
-        self.graphrag_top_k_nodes = self.graphrag_config.top_k_nodes
-        self.graphrag_min_edge_weight = self.graphrag_config.min_edge_weight
-        self.graphrag_max_neighbors = self.graphrag_config.max_neighbors
         self.graph_enabled = self.graph_store_config.enabled
         self.graph_write_batch_size = self.graph_store_config.write_batch_size
         self.graph_max_hops = self.graph_store_config.max_hops
@@ -4695,117 +4680,6 @@ class RAG:
             metadata_filter_rules=metadata_filter_rules,
             vector_store_kwargs=vector_store_kwargs,
         )
-
-    def expand_query_with_graph_with_debug(
-        self, query: str
-    ) -> tuple[str, dict[str, Any]]:
-        """Optionally expand a query and return GraphRAG debug metadata.
-
-        Args:
-            query: Original retrieval query.
-
-        Returns:
-            A tuple of ``(expanded_query, debug_payload)``.
-        """
-        debug: dict[str, Any] = {
-            "enabled": bool(self.graphrag_enabled),
-            "applied": False,
-            "original_query": query,
-            "expanded_query": query,
-            "anchor_entities": [],
-            "neighbor_entities": [],
-        }
-
-        if not query.strip():
-            debug["reason"] = "empty_query"
-            return query, debug
-        if not self.qdrant_collection:
-            debug["reason"] = "no_collection_selected"
-            return query, debug
-        if not self.graphrag_enabled:
-            debug["reason"] = "graphrag_disabled"
-            return query, debug
-
-        try:
-            aggregate = self._get_collection_ner_aggregate(refresh=False)
-            entities = list(aggregate.get("entities") or [])
-            anchors = []
-            for ent in entities:
-                text = str(ent.get("text") or "").strip()
-                if not text:
-                    continue
-                match = match_entity_text(text, query)
-                if match is None:
-                    continue
-                anchors.append((match[0], ent))
-            anchors.sort(
-                key=lambda item: (
-                    int(item[0]),
-                    -int(item[1].get("mentions", 0) or 0),
-                    str(item[1].get("text") or "").lower(),
-                )
-            )
-            if not anchors:
-                debug["reason"] = "no_anchor_entities"
-                return query, debug
-
-            selected_anchors = [ent for _, ent in anchors[:2]]
-            anchor_texts = [
-                str(ent.get("text") or "").strip() for ent in selected_anchors
-            ]
-            debug["anchor_entities"] = [txt for txt in anchor_texts if txt]
-            anchor_text_set = set(debug["anchor_entities"])
-            neighbor_texts: list[str] = []
-            seen: set[str] = set()
-            for ent in selected_anchors:
-                neighborhood = self.get_collection_ner_graph_neighbors(
-                    entity=str(ent.get("text") or ""),
-                    hops=self.graphrag_neighbor_hops,
-                    top_k_nodes=self.graphrag_top_k_nodes,
-                    min_edge_weight=self.graphrag_min_edge_weight,
-                    refresh=False,
-                )
-                for nbr in neighborhood.get("neighbors") or []:
-                    text = str(nbr.get("text") or "").strip()
-                    if (
-                        not text
-                        or text in anchor_text_set
-                        or text.lower() in seen
-                        or len(neighbor_texts) >= self.graphrag_max_neighbors
-                    ):
-                        continue
-                    seen.add(text.lower())
-                    neighbor_texts.append(text)
-                if len(neighbor_texts) >= self.graphrag_max_neighbors:
-                    break
-
-            debug["neighbor_entities"] = neighbor_texts
-            if not neighbor_texts:
-                debug["reason"] = "no_neighbors_found"
-                return query, debug
-
-            related = ", ".join(neighbor_texts)
-            expanded = f"{query}\n\nRelated entities for retrieval: {related}"
-            debug["applied"] = True
-            debug["expanded_query"] = expanded
-            return expanded, debug
-        except Exception as exc:
-            logger.warning("Graph query expansion skipped: {}", exc)
-            debug["reason"] = f"error:{type(exc).__name__}"
-            return query, debug
-
-    def expand_query_with_graph(self, query: str) -> str:
-        """Optionally expand a query using graph-neighbor entities.
-
-        Args:
-            query: Original retrieval query.
-
-        Returns:
-            Expanded query when graph expansion is enabled and applicable,
-            otherwise the original query.
-        """
-        expanded_query, _ = self.expand_query_with_graph_with_debug(query)
-        return expanded_query
 
     def _summary_document_targets(self) -> list[dict[str, Any]]:
         """Return capped document targets ordered by descending node count."""

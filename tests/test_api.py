@@ -182,15 +182,7 @@ class DummyRAG:
             "sources": [{"id": 1}],
             "retrieval_query": f"rewritten::{question}",
             "coverage_unit": "documents",
-            "retrieval_mode": "rewrite_compact_graph",
-            "graph_debug": {
-                "enabled": True,
-                "applied": True,
-                "original_query": question,
-                "expanded_query": f"{question}\n\nRelated entities for retrieval: Acme",
-                "anchor_entities": ["Acme"],
-                "neighbor_entities": ["Widget"],
-            },
+            "retrieval_mode": "rewrite_compact",
         }
 
     def stream_chat(
@@ -230,15 +222,7 @@ class DummyRAG:
             "session_id": "generated-session",
             "retrieval_query": f"rewritten::{question}",
             "coverage_unit": "documents",
-            "retrieval_mode": "rewrite_compact_graph",
-            "graph_debug": {
-                "enabled": True,
-                "applied": True,
-                "original_query": question,
-                "expanded_query": f"{question}\n\nRelated entities for retrieval: Acme",
-                "anchor_entities": ["Acme"],
-                "neighbor_entities": ["Widget"],
-            },
+            "retrieval_mode": "rewrite_compact",
         }
 
     def run_query(
@@ -427,29 +411,6 @@ class DummyRAG:
             "found": True,
             "max_hops": max_hops,
         }
-
-    def expand_query_with_graph_with_debug(
-        self, query: str
-    ) -> tuple[str, dict[str, Any]]:
-        """Return deterministic GraphRAG expansion metadata for tests.
-
-        Args:
-            query: Input query.
-
-        Returns:
-            tuple[str, dict[str, Any]]: Expanded query and debug metadata.
-        """
-        return (
-            f"{query}\n\nRelated entities for retrieval: Acme",
-            {
-                "enabled": True,
-                "applied": True,
-                "original_query": query,
-                "expanded_query": f"{query}\n\nRelated entities for retrieval: Acme",
-                "anchor_entities": ["Acme"],
-                "neighbor_entities": ["Widget"],
-            },
-        )
 
     def summarize_collection(self, refresh: bool = False) -> dict[str, Any]:
         """Return canned summarize payload.
@@ -934,7 +895,6 @@ def test_stream_query_includes_validation_metadata(client: TestClient) -> None:
         text = "".join([chunk.decode() for chunk in resp.iter_raw()])
     assert '"validation_checked"' in text
     assert '"validation_mismatch"' in text
-    assert '"graph_debug"' in text
     assert '"retrieval_query"' in text
     assert '"retrieval_mode"' in text
     assert '"response": "answer"' in text
@@ -960,7 +920,7 @@ def test_query_stateless_mode_skips_session_chat(client: TestClient) -> None:
     assert body["session_id"] == "stateless"
     assert len(rag.chats) == before_chats
     assert rag.stateless_queries[-1].startswith("What?")
-    assert body["graph_debug"]["applied"] is True
+    assert body["retrieval_trace"] is None
 
 
 def test_stream_query_stateless_mode_emits_tokens(client: TestClient) -> None:
@@ -979,7 +939,7 @@ def test_stream_query_stateless_mode_emits_tokens(client: TestClient) -> None:
 
     assert '"token"' in text
     assert '"session_id": "stateless"' in text
-    assert '"graph_debug"' in text
+    assert '"retrieval_trace"' in text
 
 
 def test_query_graph_lookup_mode_uses_graph_service(client: TestClient) -> None:
@@ -1418,8 +1378,7 @@ def test_query_success(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> N
     assert body["answer"] == "answer"
     assert body["sources"] == [{"id": 1}]
     assert body["session_id"] == "abc"
-    assert body["graph_debug"]["applied"] is True
-    assert body["graph_debug"]["anchor_entities"] == ["Acme"]
+    assert body["retrieval_trace"] is None
 
 
 def test_query_builds_and_passes_metadata_filters(client: TestClient) -> None:

@@ -206,10 +206,6 @@ def test_chat_uses_request_scoped_filtered_engine(
     session_manager.rag.query_engine = MagicMock()
     session_manager.rag.build_query_engine.return_value = filtered_engine
     session_manager.rag.rewrite_retrieval_query.return_value = "rewritten hello"
-    session_manager.rag.expand_query_with_graph_with_debug.return_value = (
-        "expanded hello",
-        {},
-    )
     session_manager.rag._normalize_response_data.return_value = {
         "response": "Hi",
         "sources": [],
@@ -228,7 +224,7 @@ def test_chat_uses_request_scoped_filtered_engine(
     )
 
     session_manager.rag.build_query_engine.assert_called_once()
-    filtered_engine.query.assert_called_once_with("expanded hello")
+    filtered_engine.query.assert_called_once_with("rewritten hello")
     session_manager.rag._normalize_response_data.assert_called_once_with(
         "hello",
         filtered_response,
@@ -259,10 +255,6 @@ def test_stream_chat_includes_final_response_when_no_tokens(
 
     session_manager.rag.build_query_engine.return_value = streaming_engine
     session_manager.rag.rewrite_retrieval_query.return_value = "rewritten hello"
-    session_manager.rag.expand_query_with_graph_with_debug.return_value = (
-        "expanded hello",
-        {},
-    )
     session_manager.rag._normalize_response_data.return_value = {
         "response": "Fallback answer",
         "sources": [],
@@ -292,7 +284,6 @@ def test_stream_chat_includes_final_response_when_no_tokens(
             "sources": [],
             "session_id": "session-1",
             "reasoning": None,
-            "graph_debug": {},
             "retrieval_query": "rewritten hello",
             "coverage_unit": "documents",
             "retrieval_mode": "rewrite_compact",
@@ -341,10 +332,6 @@ def test_chat_rewrites_retrieval_query_without_prefixing_session_context(
     engine.query.return_value = filtered_response
     session_manager.rag.query_engine = engine
     session_manager.rag.rewrite_retrieval_query.return_value = "What did Alice post?"
-    session_manager.rag.expand_query_with_graph_with_debug.return_value = (
-        "What did Alice post?",
-        {"applied": False},
-    )
     session_manager.rag._normalize_response_data.return_value = {
         "response": "Grounded answer",
         "sources": [],

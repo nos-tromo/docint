@@ -4,7 +4,7 @@ This module provides pure helper functions for:
 - canonicalizing entity/relation payloads
 - collection-wide NER aggregation
 - stats/search views
-- lightweight derived graph construction for GraphRAG-style exploration
+- lightweight derived graph construction for entity-neighborhood exploration
 """
 
 from __future__ import annotations

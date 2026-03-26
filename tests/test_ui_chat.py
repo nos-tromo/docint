@@ -8,7 +8,6 @@ from docint.ui import chat as chat_module
 from docint.ui.chat import (
     ChatStreamState,
     _entity_candidate_label,
-    _format_graph_debug_summary,
     _iter_chat_stream_text,
     _parse_sse_payload,
     _prime_chat_stream,
@@ -16,28 +15,6 @@ from docint.ui.chat import (
     _retrieval_mode_badge_label,
     build_chat_metadata_filters,
 )
-
-
-def test_format_graph_debug_summary_includes_core_fields() -> None:
-    """Graph debug formatter should render key GraphRAG fields in one line."""
-    summary = _format_graph_debug_summary(
-        {
-            "enabled": True,
-            "applied": False,
-            "reason": "no_anchor_entities",
-            "anchor_entities": [],
-            "neighbor_entities": [],
-        }
-    )
-    assert summary is not None
-    assert "enabled=True" in summary
-    assert "applied=False" in summary
-    assert "reason=no_anchor_entities" in summary
-
-
-def test_format_graph_debug_summary_none_returns_none() -> None:
-    """Formatter should gracefully return None when no payload is provided."""
-    assert _format_graph_debug_summary(None) is None
 
 
 def test_retrieval_mode_badge_label_defaults_to_stateless() -> None:
@@ -199,10 +176,10 @@ def test_render_sources_panel_uses_popover_with_scrolling_container(
     assert ("ner", 2) in events
 
 
-def test_render_graph_debug_panel_uses_popover_with_scrolling_container(
+def test_render_retrieval_debug_panel_uses_popover_with_scrolling_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """GraphRAG debug details should render in a fixed-height popover.
+    """Retrieval diagnostics should render in a fixed-height popover.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
@@ -225,17 +202,30 @@ def test_render_graph_debug_panel_uses_popover_with_scrolling_container(
         lambda payload: events.append(("json", payload)),
     )
 
-    chat_module._render_graph_debug_panel({"enabled": True, "applied": False})
+    chat_module._render_retrieval_debug_panel(
+        retrieval_query="rewritten::hello",
+        retrieval_mode="graph_lookup",
+        coverage_unit="posts",
+        retrieval_trace={"query_mode": "graph_lookup"},
+    )
 
-    assert ("popover", "GraphRAG Debug") in events
+    assert ("popover", "Retrieval Debug") in events
     assert ("container", chat_module.CHAT_DEBUG_CONTAINER_HEIGHT) in events
-    assert ("json", {"enabled": True, "applied": False}) in events
+    assert (
+        "json",
+        {
+            "retrieval_query": "rewritten::hello",
+            "retrieval_mode": "graph_lookup",
+            "coverage_unit": "posts",
+            "retrieval_trace": {"query_mode": "graph_lookup"},
+        },
+    ) in events
 
 
 def test_render_answer_tool_panels_aligns_buttons_horizontally(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Graph debug and source controls should share one horizontal row.
+    """Retrieval debug and source controls should share one horizontal row.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
@@ -249,8 +239,8 @@ def test_render_answer_tool_panels_aligns_buttons_horizontally(
     monkeypatch.setattr(chat_module.st, "columns", _columns)
     monkeypatch.setattr(
         chat_module,
-        "_render_graph_debug_panel",
-        lambda payload: events.append(("graph_debug", dict(payload))),
+        "_render_retrieval_debug_panel",
+        lambda **payload: events.append(("retrieval_debug", payload)),
     )
     monkeypatch.setattr(
         chat_module,
@@ -261,13 +251,21 @@ def test_render_answer_tool_panels_aligns_buttons_horizontally(
     )
 
     chat_module._render_answer_tool_panels(
-        graph_debug={"enabled": True},
         sources=[{"filename": "alpha.pdf"}],
         collection="collection-a",
+        retrieval_trace={"query_mode": "graph_lookup"},
     )
 
     assert ("columns", 2) in events
-    assert ("graph_debug", {"enabled": True}) in events
+    assert (
+        "retrieval_debug",
+        {
+            "retrieval_query": None,
+            "retrieval_mode": None,
+            "coverage_unit": None,
+            "retrieval_trace": {"query_mode": "graph_lookup"},
+        },
+    ) in events
     assert ("sources", (1, "collection-a")) in events
 
 
@@ -298,10 +296,10 @@ def test_chat_stream_state_accumulates_text_and_metadata() -> None:
                 "validation_checked": True,
                 "validation_mismatch": False,
                 "validation_reason": None,
-                "graph_debug": {"enabled": True},
+                "retrieval_trace": {"query_mode": "graph_lookup"},
                 "retrieval_query": "rewritten::hello",
                 "coverage_unit": "documents",
-                "retrieval_mode": "rewrite_compact_graph",
+                "retrieval_mode": "rewrite_compact",
                 "entity_match_candidates": [{"text": "Acme"}],
                 "entity_match_groups": [{"entity": {"text": "Acme"}}],
             }
@@ -315,10 +313,10 @@ def test_chat_stream_state_accumulates_text_and_metadata() -> None:
     assert state.reasoning == "Grounded in sources."
     assert state.validation_checked is True
     assert state.validation_mismatch is False
-    assert state.graph_debug == {"enabled": True}
+    assert state.retrieval_trace == {"query_mode": "graph_lookup"}
     assert state.retrieval_query == "rewritten::hello"
     assert state.coverage_unit == "documents"
-    assert state.retrieval_mode == "rewrite_compact_graph"
+    assert state.retrieval_mode == "rewrite_compact"
     assert state.entity_match_candidates == [{"text": "Acme"}]
     assert state.entity_match_groups == [{"entity": {"text": "Acme"}}]
 

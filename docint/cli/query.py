@@ -366,12 +366,12 @@ def _build_query_result_txt(query: str, result: dict[str, Any]) -> str:
         ]
     )
 
-    graph_debug = result.get("graph_debug")
-    if isinstance(graph_debug, dict):
+    retrieval_trace = result.get("retrieval_trace")
+    if isinstance(retrieval_trace, dict):
         lines.extend(
             [
-                "Graph debug:",
-                json.dumps(graph_debug, ensure_ascii=False, indent=2),
+                "Retrieval trace:",
+                json.dumps(retrieval_trace, ensure_ascii=False, indent=2),
                 "",
             ]
         )
@@ -490,21 +490,7 @@ def run_query(rag: RAG, query: str, index: int, output_path: str | Path) -> None
     """
     logger.info("Running query {}: {}", index, query)
 
-    retrieval_query = query
-    graph_debug: dict[str, Any] | None = None
-    expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
-    if callable(expand_with_debug):
-        try:
-            expanded, debug_payload = expand_with_debug(query)
-            retrieval_query = str(expanded)
-            if isinstance(debug_payload, dict):
-                graph_debug = debug_payload
-        except Exception as exc:
-            logger.warning("Graph debug expansion failed in query CLI: {}", exc)
-
-    result = rag.run_query(retrieval_query)
-    if graph_debug is not None:
-        result["graph_debug"] = graph_debug
+    result = rag.run_query(query)
 
     raw_sources = result.get("sources")
     sources: list[dict[str, Any]] = []

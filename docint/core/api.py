@@ -255,7 +255,6 @@ class QueryOut(BaseModel):
     answer: str
     sources: list[dict] = []
     session_id: str
-    graph_debug: dict[str, Any] | None = None
     retrieval_trace: dict[str, Any] | None = None
     retrieval_query: str | None = None
     coverage_unit: str | None = None
@@ -510,26 +509,9 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
                 rag.create_query_engine()
 
             if payload.retrieval_mode == "stateless":
-                retrieval_query = payload.question
-                graph_debug: dict[str, Any] | None = None
-                expand_with_debug = getattr(
-                    rag, "expand_query_with_graph_with_debug", None
-                )
-                if callable(expand_with_debug):
-                    try:
-                        expanded, debug_payload = expand_with_debug(retrieval_query)
-                        retrieval_query = str(expanded)
-                        if isinstance(debug_payload, dict):
-                            graph_debug = debug_payload
-                    except Exception as exc:
-                        logger.warning(
-                            "Graph debug expansion failed for stateless query: {}",
-                            exc,
-                        )
-
                 if payload.query_mode != "answer":
                     data = rag.run_query(
-                        retrieval_query,
+                        payload.question,
                         query_mode=payload.query_mode,
                         metadata_filters=metadata_filters,
                         metadata_filter_rules=payload.metadata_filters,
@@ -537,13 +519,11 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
                     )
                 else:
                     data = rag.run_query(
-                        retrieval_query,
+                        payload.question,
                         metadata_filters=metadata_filters,
                         metadata_filter_rules=payload.metadata_filters,
                         vector_store_kwargs=vector_store_kwargs or None,
                     )
-                if graph_debug is not None:
-                    data["graph_debug"] = graph_debug
                 session_id = payload.session_id or "stateless"
             else:
                 session_id = rag.start_session(payload.session_id)
@@ -563,11 +543,6 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
             else ""
         )
         sources: list[dict] = data.get("sources", []) if isinstance(data, dict) else []
-        graph_debug = (
-            data.get("graph_debug")
-            if isinstance(data, dict) and isinstance(data.get("graph_debug"), dict)
-            else None
-        )
         retrieval_trace = (
             data.get("retrieval_trace")
             if isinstance(data, dict) and isinstance(data.get("retrieval_trace"), dict)
@@ -610,7 +585,6 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
             "answer": answer,
             "sources": sources,
             "session_id": session_id,
-            "graph_debug": graph_debug,
             "retrieval_trace": retrieval_trace,
             "retrieval_query": retrieval_query_value,
             "coverage_unit": coverage_unit,
@@ -733,26 +707,9 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                     "retrieval_trace": graph_data.get("retrieval_trace"),
                 }
             elif payload.retrieval_mode == "stateless":
-                retrieval_query = payload.question
-                graph_debug: dict[str, Any] | None = None
-                expand_with_debug = getattr(
-                    rag, "expand_query_with_graph_with_debug", None
-                )
-                if callable(expand_with_debug):
-                    try:
-                        expanded, debug_payload = expand_with_debug(retrieval_query)
-                        retrieval_query = str(expanded)
-                        if isinstance(debug_payload, dict):
-                            graph_debug = debug_payload
-                    except Exception as exc:
-                        logger.warning(
-                            "Graph debug expansion failed for stateless stream query: {}",
-                            exc,
-                        )
-
                 if payload.query_mode != "answer":
                     stateless_data = rag.run_query(
-                        retrieval_query,
+                        payload.question,
                         query_mode=payload.query_mode,
                         metadata_filters=metadata_filters,
                         metadata_filter_rules=payload.metadata_filters,
@@ -760,13 +717,11 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                     )
                 else:
                     stateless_data = rag.run_query(
-                        retrieval_query,
+                        payload.question,
                         metadata_filters=metadata_filters,
                         metadata_filter_rules=payload.metadata_filters,
                         vector_store_kwargs=vector_store_kwargs or None,
                     )
-                if graph_debug is not None:
-                    stateless_data["graph_debug"] = graph_debug
 
                 answer_text = str(
                     stateless_data.get("response") or stateless_data.get("answer") or ""
@@ -782,7 +737,6 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                     "sources": stateless_data.get("sources") or [],
                     "session_id": payload.session_id or "stateless",
                     "reasoning": stateless_data.get("reasoning"),
-                    "graph_debug": stateless_data.get("graph_debug"),
                     "retrieval_trace": stateless_data.get("retrieval_trace"),
                 }
             else:

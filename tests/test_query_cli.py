@@ -216,38 +216,11 @@ def test_run_query_records_results(
     """
 
     class DummyRAG:
-        """Dummy RAG class for testing the run_query function, simulating query expansion
-        and execution with debug information.
-        """
+        """Dummy RAG class for testing the run_query function."""
 
         def __init__(self) -> None:
             """Initialize the DummyRAG with an empty list of seen queries."""
             self.seen_queries: list[str] = []
-
-        def expand_query_with_graph_with_debug(
-            self, query: str
-        ) -> tuple[str, dict[str, Any]]:
-            """Simulate query expansion with graph-assisted retrieval by returning an expanded
-            query and debug information.
-
-            Args:
-                query (str): The original query string to expand.
-
-            Returns:
-                tuple[str, dict[str, Any]]: A tuple containing the expanded query string and a
-                dictionary with debug information about the expansion process.
-            """
-            return (
-                f"{query}\n\nRelated entities for retrieval: Acme",
-                {
-                    "enabled": True,
-                    "applied": True,
-                    "original_query": query,
-                    "expanded_query": f"{query}\n\nRelated entities for retrieval: Acme",
-                    "anchor_entities": ["Acme"],
-                    "neighbor_entities": ["Widget"],
-                },
-            )
 
         def run_query(self, query: str) -> dict[str, Any]:
             """Simulate running a query by returning the query in the response and recording seen queries.
@@ -261,6 +234,7 @@ def test_run_query_records_results(
             self.seen_queries.append(query)
             return {
                 "response": query,
+                "retrieval_trace": {"path": "graph"},
                 "sources": [
                     {
                         "filename": "social.csv",
@@ -302,9 +276,8 @@ def test_run_query_records_results(
     assert "_3_result" in name
     assert "Query: hello" in data
     assert "Answer:" in data
-    assert "hello\n\nRelated entities for retrieval: Acme" in data
-    assert '"applied": true' in data
-    assert '"anchor_entities": [' in data
+    assert "Retrieval trace:" in data
+    assert '"path": "graph"' in data
     assert "- Text ID: c1" in data
     assert "Validation:" in data
 

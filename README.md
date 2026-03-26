@@ -209,11 +209,6 @@ The application is configured via environment variables. Key variables include:
 - `NER_ENABLED`: Enable scalable entity/relation extraction during ingestion (default: `true`). Uses parallel execution for maximum throughput.
 - `NER_MAX_WORKERS`: Number of parallel workers for entity extraction (default: `4`).
 - `ENABLE_HATE_SPEECH_DETECTION`: Enable hate-speech detection during ingestion. When disabled/unset, ingestion behavior remains unchanged (default: `false`).
-- `GRAPHRAG_ENABLED`: Enable graph-assisted query expansion during chat/query retrieval (default: `false`).
-- `GRAPHRAG_NEIGHBOR_HOPS`: Neighborhood depth for graph expansion (default: `1`).
-- `GRAPHRAG_TOP_K_NODES`: Graph node cap used for derived in-memory graph construction (default: `100`).
-- `GRAPHRAG_MIN_EDGE_WEIGHT`: Minimum edge weight included in the graph (default: `1`).
-- `GRAPHRAG_MAX_NEIGHBORS`: Maximum neighbor entities appended to a retrieval query (default: `6`).
 - `GRAPH_ENABLED`: Enable the Neo4j-backed graph ingestion and retrieval layer (default: `true`).
 - `NEO4J_URI`: Neo4j Bolt endpoint used for graph ingestion and analysis (default: `bolt://localhost:7687`).
 - `NEO4J_USERNAME`: Neo4j username (default: `neo4j`).
@@ -434,8 +429,8 @@ matches = service.query_similar_images(Path("query.png"), top_k=5)
 3. **Review the Results**
 
    Query results and export files will be saved as `.txt` files in a per-run subdirectory under `~/docint/results`, using the pattern `~/docint/results/{unixtimestamp_collection_name}`.
-   When GraphRAG is enabled, each query result text file also includes a `graph_debug`
-   section with query-expansion details (anchors, neighbors, and applied/no-op reason).
+   Graph-backed queries can include a `retrieval_trace` section with candidate-selection
+   and traversal diagnostics from the Neo4j-backed retrieval path.
 
 4. **Compare Retrieval Modes**
 

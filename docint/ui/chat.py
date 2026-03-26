@@ -78,7 +78,7 @@ class ChatStreamState:
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
     validation_reason: str | None = None
-    graph_debug: dict[str, Any] | None = None
+    retrieval_trace: dict[str, Any] | None = None
     retrieval_query: str | None = None
     coverage_unit: str | None = None
     retrieval_mode: str | None = None
@@ -102,8 +102,8 @@ class ChatStreamState:
             self.validation_mismatch = payload.get("validation_mismatch")
         if "validation_reason" in payload:
             self.validation_reason = payload.get("validation_reason")
-        if isinstance(payload.get("graph_debug"), dict):
-            self.graph_debug = dict(payload["graph_debug"])
+        if isinstance(payload.get("retrieval_trace"), dict):
+            self.retrieval_trace = dict(payload["retrieval_trace"])
         if payload.get("retrieval_query") is not None:
             self.retrieval_query = str(payload.get("retrieval_query") or "")
         if payload.get("coverage_unit") is not None:
@@ -358,28 +358,6 @@ def _render_entity_match_groups(
                     render_source_item(dict(source), collection)
 
 
-def _format_graph_debug_summary(graph_debug: dict[str, Any] | None) -> str | None:
-    """Build a compact text line for GraphRAG debug metadata.
-
-    Args:
-        graph_debug: Optional GraphRAG debug payload.
-
-    Returns:
-        A compact summary string or ``None`` when unavailable.
-    """
-    if not isinstance(graph_debug, dict):
-        return None
-    enabled = graph_debug.get("enabled")
-    applied = graph_debug.get("applied")
-    reason = graph_debug.get("reason")
-    anchors = graph_debug.get("anchor_entities")
-    neighbors = graph_debug.get("neighbor_entities")
-    return (
-        f"enabled={enabled}, applied={applied}, reason={reason}, "
-        f"anchors={anchors}, neighbors={neighbors}"
-    )
-
-
 def _build_custom_metadata_rules(count: int) -> list[dict[str, Any]]:
     """Build request payloads for user-defined custom metadata rules.
 
@@ -528,22 +506,12 @@ def _render_sources_panel(
             render_ner_overview([dict(src) for src in sources])
 
 
-def _render_graph_debug_panel(graph_debug: Mapping[str, Any]) -> None:
-    """Render GraphRAG debug details in a popover.
-
-    Args:
-        graph_debug: GraphRAG debug payload for the current answer.
-    """
-    with st.popover("GraphRAG Debug"):
-        with st.container(height=CHAT_DEBUG_CONTAINER_HEIGHT):
-            st.json(dict(graph_debug))
-
-
 def _render_retrieval_debug_panel(
     *,
     retrieval_query: str | None,
     retrieval_mode: str | None,
     coverage_unit: str | None,
+    retrieval_trace: Mapping[str, Any] | None = None,
 ) -> None:
     """Render retrieval diagnostics in a popover.
 
@@ -551,12 +519,15 @@ def _render_retrieval_debug_panel(
         retrieval_query: The retrieval query issued to the backend, if any.
         retrieval_mode: The retrieval mode used for the current answer, if any.
         coverage_unit: The unit of retrieval coverage measurement, if any.
+        retrieval_trace: Optional graph-backed retrieval trace payload.
     """
     payload = {
         "retrieval_query": retrieval_query,
         "retrieval_mode": retrieval_mode,
         "coverage_unit": coverage_unit,
     }
+    if isinstance(retrieval_trace, Mapping):
+        payload["retrieval_trace"] = dict(retrieval_trace)
     with st.popover("Retrieval Debug"):
         with st.container(height=CHAT_DEBUG_CONTAINER_HEIGHT):
             st.json(payload)
@@ -564,27 +535,30 @@ def _render_retrieval_debug_panel(
 
 def _render_answer_tool_panels(
     *,
-    graph_debug: Mapping[str, Any] | None,
     sources: Sequence[Mapping[str, Any]] | None,
     collection: str,
     retrieval_query: str | None = None,
     retrieval_mode: str | None = None,
     coverage_unit: str | None = None,
+    retrieval_trace: Mapping[str, Any] | None = None,
 ) -> None:
     """Render optional chat detail controls in one horizontal row.
 
     Args:
-        graph_debug: Optional GraphRAG debug payload.
         sources: Optional source rows associated with a chat answer.
         collection: Active collection name for source downloads.
         retrieval_query: The retrieval query issued to the backend, if any.
         retrieval_mode: The retrieval mode used for the current answer, if any.
         coverage_unit: The unit of retrieval coverage measurement, if any.
+        retrieval_trace: Optional graph-backed retrieval trace payload.
     """
-    tool_count = (
-        int(bool(sources))
-        + int(isinstance(graph_debug, Mapping))
-        + int(bool(retrieval_query or retrieval_mode or coverage_unit))
+    tool_count = int(bool(sources)) + int(
+        bool(
+            retrieval_query
+            or retrieval_mode
+            or coverage_unit
+            or isinstance(retrieval_trace, Mapping)
+        )
     )
     if tool_count == 0:
         return
@@ -597,17 +571,18 @@ def _render_answer_tool_panels(
             _render_sources_panel(sources, collection)
         column_index += 1
 
-    if isinstance(graph_debug, Mapping):
-        with columns[column_index]:
-            _render_graph_debug_panel(graph_debug)
-        column_index += 1
-
-    if retrieval_query or retrieval_mode or coverage_unit:
+    if (
+        retrieval_query
+        or retrieval_mode
+        or coverage_unit
+        or isinstance(retrieval_trace, Mapping)
+    ):
         with columns[column_index]:
             _render_retrieval_debug_panel(
                 retrieval_query=retrieval_query,
                 retrieval_mode=retrieval_mode,
                 coverage_unit=coverage_unit,
+                retrieval_trace=retrieval_trace,
             )
 
 
@@ -652,13 +627,11 @@ def render_chat() -> None:
                 if msg.get("validation_reason"):
                     chat_text += f", reason={msg['validation_reason']}"
                 chat_text += "\n\n"
-            graph_line = _format_graph_debug_summary(msg.get("graph_debug"))
-            if graph_line:
-                chat_text += f"GRAPHRAG: {graph_line}\n\n"
             if (
                 msg.get("retrieval_query")
                 or msg.get("retrieval_mode")
                 or msg.get("coverage_unit")
+                or msg.get("retrieval_trace")
             ):
                 chat_text += (
                     "RETRIEVAL: "
@@ -666,6 +639,9 @@ def render_chat() -> None:
                     f"mode={msg.get('retrieval_mode')}, "
                     f"coverage_unit={msg.get('coverage_unit')}\n\n"
                 )
+                if isinstance(msg.get("retrieval_trace"), Mapping):
+                    chat_text += "RETRIEVAL TRACE:\n"
+                    chat_text += f"{json.dumps(dict(msg['retrieval_trace']), ensure_ascii=False, indent=2)}\n\n"
             if msg.get("sources"):
                 chat_text += "SOURCES:\n"
                 for idx, src in enumerate(msg["sources"], start=1):
@@ -719,12 +695,12 @@ def render_chat() -> None:
                 validation_reason=msg.get("validation_reason"),
             )
             _render_answer_tool_panels(
-                graph_debug=msg.get("graph_debug"),
                 sources=msg.get("sources"),
                 collection=collection,
                 retrieval_query=msg.get("retrieval_query"),
                 retrieval_mode=msg.get("retrieval_mode"),
                 coverage_unit=msg.get("coverage_unit"),
+                retrieval_trace=msg.get("retrieval_trace"),
             )
 
     with st.expander("Retrieval filters", expanded=False):
@@ -971,12 +947,12 @@ def render_chat() -> None:
                             validation_reason=stream_state.validation_reason,
                         )
                         _render_answer_tool_panels(
-                            graph_debug=stream_state.graph_debug,
                             sources=stream_state.sources,
                             collection=collection,
                             retrieval_query=stream_state.retrieval_query,
                             retrieval_mode=stream_state.retrieval_mode,
                             coverage_unit=stream_state.coverage_unit,
+                            retrieval_trace=stream_state.retrieval_trace,
                         )
 
                         # Persist message
@@ -999,14 +975,14 @@ def render_chat() -> None:
                             msg_entry["validation_reason"] = (
                                 stream_state.validation_reason
                             )
-                        if stream_state.graph_debug is not None:
-                            msg_entry["graph_debug"] = stream_state.graph_debug
                         if stream_state.retrieval_query is not None:
                             msg_entry["retrieval_query"] = stream_state.retrieval_query
                         if stream_state.retrieval_mode is not None:
                             msg_entry["retrieval_mode"] = stream_state.retrieval_mode
                         if stream_state.coverage_unit is not None:
                             msg_entry["coverage_unit"] = stream_state.coverage_unit
+                        if stream_state.retrieval_trace is not None:
+                            msg_entry["retrieval_trace"] = stream_state.retrieval_trace
                         if stream_state.entity_match_candidates:
                             msg_entry["entity_match_candidates"] = (
                                 stream_state.entity_match_candidates
