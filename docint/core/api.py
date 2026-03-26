@@ -1369,7 +1369,13 @@ async def ingest_upload(
                     break
                 if isinstance(msg, Exception):
                     raise msg
-                yield _format_sse("ingestion_progress", {"message": msg})
+                event_name = (
+                    "warning"
+                    if isinstance(msg, str)
+                    and msg.strip().lower().startswith("warning:")
+                    else "ingestion_progress"
+                )
+                yield _format_sse(event_name, {"message": msg})
 
             rag.select_collection(name)
             try:

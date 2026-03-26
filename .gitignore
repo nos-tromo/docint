@@ -8,6 +8,7 @@
 .vscode/
 *.code-workspace
 *.bin
+*.bundle
 *.env
 *.ipynb
 *.log
