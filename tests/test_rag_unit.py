@@ -1679,7 +1679,7 @@ def test_embed_model_uses_ollama_embedding_backend(
         def __init__(self, **kwargs: object) -> None:
             captured.update(kwargs)
 
-    monkeypatch.setattr(rag_module, "OpenAIEmbedding", FakeOpenAIEmbedding)
+    monkeypatch.setattr(rag_module, "TruncatingOpenAIEmbedding", FakeOpenAIEmbedding)
     monkeypatch.delenv("OPENAI_DIMENSIONS", raising=False)
 
     rag = RAG(qdrant_collection="test")
@@ -1706,7 +1706,7 @@ def test_embed_model_forwards_explicit_dimensions_override(
         def __init__(self, **kwargs: object) -> None:
             captured.update(kwargs)
 
-    monkeypatch.setattr(rag_module, "OpenAIEmbedding", FakeOpenAIEmbedding)
+    monkeypatch.setattr(rag_module, "TruncatingOpenAIEmbedding", FakeOpenAIEmbedding)
 
     rag = RAG(qdrant_collection="test")
     rag.embed_model_id = "text-embedding-3-small"
@@ -2734,9 +2734,10 @@ def test_persist_node_batches_streams_micro_batches() -> None:
 
     nodes = [types.SimpleNamespace(metadata={}) for _ in range(5)]
     rag._persist_node_batches(cast(list[Any], nodes))
+    index = cast(Any, rag.index)
 
-    assert rag.index.docstore.batch_sizes == [2, 2, 1]
-    assert rag.index.vector_batch_sizes == [2, 2, 1]
+    assert index.docstore.batch_sizes == [2, 2, 1]
+    assert index.vector_batch_sizes == [2, 2, 1]
 
 
 def test_apersist_node_batches_streams_micro_batches() -> None:
@@ -2781,9 +2782,10 @@ def test_apersist_node_batches_streams_micro_batches() -> None:
 
     nodes = [types.SimpleNamespace(metadata={}) for _ in range(7)]
     asyncio.run(rag._apersist_node_batches(cast(list[Any], nodes)))
+    index = cast(Any, rag.index)
 
-    assert rag.index.docstore.batch_sizes == [3, 3, 1]
-    assert rag.index.vector_batch_sizes == [3, 3, 1]
+    assert index.docstore.batch_sizes == [3, 3, 1]
+    assert index.vector_batch_sizes == [3, 3, 1]
 
 
 def test_log_ingest_benchmark_summary_emits_metrics(
@@ -2861,6 +2863,41 @@ def test_ingest_docs_bumps_summary_revision(
     rag.ingest_docs(tmp_path, build_query_engine=False)
 
     assert bumps == [("test", True)]
+
+
+def test_ingest_docs_sets_and_clears_embedding_warning_callback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Ingestion should attach and then clear embedding warning callbacks.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The temporary path fixture.
+    """
+    rag = RAG(qdrant_collection="test")
+    _patch_ingest_dependencies(monkeypatch)
+
+    captured_callbacks: list[Any] = []
+
+    class FakeEmbedModel:
+        """Capture warning callback changes."""
+
+        def set_warning_callback(self, callback: Any) -> None:
+            """Record callback updates.
+
+            Args:
+                callback: Callback being registered or cleared.
+            """
+            captured_callbacks.append(callback)
+
+    rag._embed_model = cast(Any, FakeEmbedModel())
+    progress_callback = lambda message: None
+
+    rag.ingest_docs(
+        tmp_path, build_query_engine=False, progress_callback=progress_callback
+    )
+
+    assert captured_callbacks == [progress_callback, None]
 
 
 def test_asingest_docs_bumps_summary_revision(

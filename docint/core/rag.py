@@ -76,7 +76,6 @@ from llama_index.core.vector_stores.types import (
     MetadataFilters,
     VectorStoreQueryMode,
 )
-from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai import OpenAI
 from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
 from llama_index.vector_stores.qdrant import QdrantVectorStore
@@ -101,7 +100,11 @@ from docint.core.retrieval_filters import matches_metadata_filters
 from docint.core.state.session_manager import SessionManager
 from docint.core.storage.docstore import QdrantKVStore
 from docint.core.storage.sources import stage_sources_to_qdrant
-from docint.utils.openai_cfg import LocalOpenAI, get_openai_reasoning_effort
+from docint.utils.openai_cfg import (
+    LocalOpenAI,
+    TruncatingOpenAIEmbedding,
+    get_openai_reasoning_effort,
+)
 from docint.utils.reference_metadata import REFERENCE_METADATA_FIELDS
 
 
@@ -983,11 +986,26 @@ class RAG:
             if self.openai_dimensions is not None:
                 embedding_kwargs["dimensions"] = self.openai_dimensions
 
-            self._embed_model = OpenAIEmbedding(
+            self._embed_model = TruncatingOpenAIEmbedding(
                 **embedding_kwargs,
+                context_window=self.openai_ctx_window,
             )
 
         return self._embed_model
+
+    def _set_embedding_warning_callback(
+        self, callback: Callable[[str], None] | None
+    ) -> None:
+        """Attach or clear the embedding warning callback on the active model.
+
+        Args:
+            callback: Warning callback used during ingestion, or ``None``.
+        """
+        if self._embed_model is None:
+            return
+        setter = getattr(self._embed_model, "set_warning_callback", None)
+        if callable(setter):
+            setter(callback)
 
     @property
     def sparse_model(self) -> str | None:
@@ -3340,112 +3358,123 @@ class RAG:
         storage_ctx = self._storage_context(vector_store)
 
         # Build index with explicit storage_context so it uses the persistent docstore.
-        self.index = VectorStoreIndex(
-            nodes=[],
-            embed_model=self.embed_model,
-            storage_context=storage_ctx,
-        )
+        embed_model = self.embed_model
+        self._set_embedding_warning_callback(progress_callback)
+        try:
+            self.index = VectorStoreIndex(
+                nodes=[],
+                embed_model=embed_model,
+                storage_context=storage_ctx,
+            )
 
-        pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
-        existing_hashes = self._get_existing_file_hashes()
-        processed_hashes = set(existing_hashes)
-        image_ingestion_service = getattr(pipeline, "image_ingestion_service", None)
-        core_pdf_reader = CorePDFPipelineReader(
-            data_dir=prepared_dir,
-            entity_extractor=pipeline.entity_extractor,
-            ner_max_workers=pipeline.ner_max_workers,
-            source_collection=self.qdrant_collection,
-            image_ingestion_service=image_ingestion_service,
-        )
+            pipeline = self._build_ingestion_pipeline(
+                progress_callback=progress_callback
+            )
+            existing_hashes = self._get_existing_file_hashes()
+            processed_hashes = set(existing_hashes)
+            image_ingestion_service = getattr(pipeline, "image_ingestion_service", None)
+            core_pdf_reader = CorePDFPipelineReader(
+                data_dir=prepared_dir,
+                entity_extractor=pipeline.entity_extractor,
+                ner_max_workers=pipeline.ner_max_workers,
+                source_collection=self.qdrant_collection,
+                image_ingestion_service=image_ingestion_service,
+            )
 
-        for docs, nodes, file_hash in core_pdf_reader.build(
-            existing_hashes=processed_hashes, progress_callback=progress_callback
-        ):
-            core_docs += len(docs)
-            if nodes:
-                self._persist_node_batches(nodes)
-                core_nodes += len(nodes)
-                persist_batches += len(
-                    self._chunk_nodes(nodes, self.docstore_batch_size)
-                )
-                processed_hashes.add(file_hash)
-
-        # PDFs are owned by the core pipeline reader and should not be
-        # re-processed by the legacy ingestion path.
-        processed_hashes.update(core_pdf_reader.discovered_hashes)
-
-        # Process batches from the pipeline generator, persisting nodes as soon
-        # as each enrichment micro-batch completes when supported.
-        if hasattr(pipeline, "build_streaming") and callable(
-            getattr(pipeline, "build_streaming")
-        ):
-            for docs, nodes, completed_hashes in pipeline.build_streaming(
-                processed_hashes
+            for docs, nodes, file_hash in core_pdf_reader.build(
+                existing_hashes=processed_hashes, progress_callback=progress_callback
             ):
-                if docs:
-                    streaming_docs += len(docs)
+                core_docs += len(docs)
                 if nodes:
                     self._persist_node_batches(nodes)
-                    streaming_nodes += len(nodes)
+                    core_nodes += len(nodes)
                     persist_batches += len(
                         self._chunk_nodes(nodes, self.docstore_batch_size)
                     )
-                    enrich_batches += 1
-                if completed_hashes:
-                    processed_hashes.update(completed_hashes)
-        else:
-            for docs, nodes in pipeline.build(processed_hashes):
-                if docs:
-                    streaming_docs += len(docs)
-                if nodes:
-                    self._persist_node_batches(nodes)
-                    streaming_nodes += len(nodes)
-                    persist_batches += len(
-                        self._chunk_nodes(nodes, self.docstore_batch_size)
+                    processed_hashes.add(file_hash)
+
+            # PDFs are owned by the core pipeline reader and should not be
+            # re-processed by the legacy ingestion path.
+            processed_hashes.update(core_pdf_reader.discovered_hashes)
+
+            # Process batches from the pipeline generator, persisting nodes as soon
+            # as each enrichment micro-batch completes when supported.
+            if hasattr(pipeline, "build_streaming") and callable(
+                getattr(pipeline, "build_streaming")
+            ):
+                for docs, nodes, completed_hashes in pipeline.build_streaming(
+                    processed_hashes
+                ):
+                    if docs:
+                        streaming_docs += len(docs)
+                    if nodes:
+                        self._persist_node_batches(nodes)
+                        streaming_nodes += len(nodes)
+                        persist_batches += len(
+                            self._chunk_nodes(nodes, self.docstore_batch_size)
+                        )
+                        enrich_batches += 1
+                    if completed_hashes:
+                        processed_hashes.update(completed_hashes)
+            else:
+                for docs, nodes in pipeline.build(processed_hashes):
+                    if docs:
+                        streaming_docs += len(docs)
+                    if nodes:
+                        self._persist_node_batches(nodes)
+                        streaming_nodes += len(nodes)
+                        persist_batches += len(
+                            self._chunk_nodes(nodes, self.docstore_batch_size)
+                        )
+
+            self.dir_reader = pipeline.dir_reader
+            # Clear memory-heavy lists as they are persisted in the vector store
+            self.docs = []
+            self.nodes = []
+
+            if build_query_engine:
+                self.create_query_engine()
+            else:
+                # Ensure downstream callers recreate a fresh query engine as needed.
+                self.query_engine = None
+
+            self.reset_session_state()
+            self._invalidate_ner_cache(self.qdrant_collection)
+
+            eff_k = None
+            if self.query_engine is not None and hasattr(
+                self.query_engine, "retriever"
+            ):
+                try:
+                    eff_k = getattr(
+                        self.query_engine.retriever, "similarity_top_k", None
                     )
+                except Exception:
+                    eff_k = None
 
-        self.dir_reader = pipeline.dir_reader
-        # Clear memory-heavy lists as we've persisted them to the vector store
-        self.docs = []
-        self.nodes = []
-
-        if build_query_engine:
-            self.create_query_engine()
-        else:
-            # Ensure downstream callers recreate a fresh query engine as needed.
-            self.query_engine = None
-
-        self.reset_session_state()
-        self._invalidate_ner_cache(self.qdrant_collection)
-
-        eff_k = None
-        if self.query_engine is not None and hasattr(self.query_engine, "retriever"):
-            try:
-                eff_k = getattr(self.query_engine.retriever, "similarity_top_k", None)
-            except Exception:
-                eff_k = None
-
-        if self.query_engine is not None:
-            logger.info(
-                "Effective retrieval k={} | top_n={} | embed_device={} | rerank_device={}",
-                eff_k,
-                self.rerank_top_n,
-                self.device,
-                self.device,
-            )
-        if self.ingest_benchmark_enabled:
-            self._log_ingest_benchmark_summary(
-                mode="sync",
-                started_at=ingest_started_at,
-                core_docs=core_docs,
-                core_nodes=core_nodes,
-                streaming_docs=streaming_docs,
-                streaming_nodes=streaming_nodes,
-                enrich_batches=enrich_batches,
-                persist_batches=persist_batches,
-            )
-        self._bump_summary_revision(self.qdrant_collection)
-        logger.info("Documents ingested successfully.")
+            if self.query_engine is not None:
+                logger.info(
+                    "Effective retrieval k={} | top_n={} | embed_device={} | rerank_device={}",
+                    eff_k,
+                    self.rerank_top_n,
+                    self.device,
+                    self.device,
+                )
+            if self.ingest_benchmark_enabled:
+                self._log_ingest_benchmark_summary(
+                    mode="sync",
+                    started_at=ingest_started_at,
+                    core_docs=core_docs,
+                    core_nodes=core_nodes,
+                    streaming_docs=streaming_docs,
+                    streaming_nodes=streaming_nodes,
+                    enrich_batches=enrich_batches,
+                    persist_batches=persist_batches,
+                )
+            self._bump_summary_revision(self.qdrant_collection)
+            logger.info("Documents ingested successfully.")
+        finally:
+            self._set_embedding_warning_callback(None)
 
     async def asingest_docs(
         self,
@@ -3480,109 +3509,119 @@ class RAG:
         # Initialize index
         vector_store = self._vector_store()
         storage_ctx = self._storage_context(vector_store)
-        self.index = VectorStoreIndex(
-            nodes=[],
-            embed_model=self.embed_model,
-            storage_context=storage_ctx,
-        )
+        embed_model = self.embed_model
+        self._set_embedding_warning_callback(progress_callback)
+        try:
+            self.index = VectorStoreIndex(
+                nodes=[],
+                embed_model=embed_model,
+                storage_context=storage_ctx,
+            )
 
-        pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
-        existing_hashes = self._get_existing_file_hashes()
-        processed_hashes = set(existing_hashes)
-        image_ingestion_service = getattr(pipeline, "image_ingestion_service", None)
-        core_pdf_reader = CorePDFPipelineReader(
-            data_dir=prepared_dir,
-            entity_extractor=pipeline.entity_extractor,
-            ner_max_workers=pipeline.ner_max_workers,
-            source_collection=self.qdrant_collection,
-            image_ingestion_service=image_ingestion_service,
-        )
+            pipeline = self._build_ingestion_pipeline(
+                progress_callback=progress_callback
+            )
+            existing_hashes = self._get_existing_file_hashes()
+            processed_hashes = set(existing_hashes)
+            image_ingestion_service = getattr(pipeline, "image_ingestion_service", None)
+            core_pdf_reader = CorePDFPipelineReader(
+                data_dir=prepared_dir,
+                entity_extractor=pipeline.entity_extractor,
+                ner_max_workers=pipeline.ner_max_workers,
+                source_collection=self.qdrant_collection,
+                image_ingestion_service=image_ingestion_service,
+            )
 
-        for docs, nodes, file_hash in core_pdf_reader.build(
-            existing_hashes=processed_hashes, progress_callback=progress_callback
-        ):
-            core_docs += len(docs)
-            if nodes:
-                await self._apersist_node_batches(nodes)
-                core_nodes += len(nodes)
-                persist_batches += len(
-                    self._chunk_nodes(nodes, self.docstore_batch_size)
-                )
-                processed_hashes.add(file_hash)
-
-        processed_hashes.update(core_pdf_reader.discovered_hashes)
-
-        # Process batches, persisting nodes as soon as each enrichment
-        # micro-batch completes when supported.
-        if hasattr(pipeline, "build_streaming") and callable(
-            getattr(pipeline, "build_streaming")
-        ):
-            for docs, nodes, completed_hashes in pipeline.build_streaming(
-                processed_hashes
+            for docs, nodes, file_hash in core_pdf_reader.build(
+                existing_hashes=processed_hashes, progress_callback=progress_callback
             ):
-                if docs:
-                    streaming_docs += len(docs)
+                core_docs += len(docs)
                 if nodes:
                     await self._apersist_node_batches(nodes)
-                    streaming_nodes += len(nodes)
+                    core_nodes += len(nodes)
                     persist_batches += len(
                         self._chunk_nodes(nodes, self.docstore_batch_size)
                     )
-                    enrich_batches += 1
-                if completed_hashes:
-                    processed_hashes.update(completed_hashes)
-        else:
-            for docs, nodes in pipeline.build(processed_hashes):
-                if docs:
-                    streaming_docs += len(docs)
-                if nodes:
-                    await self._apersist_node_batches(nodes)
-                    streaming_nodes += len(nodes)
-                    persist_batches += len(
-                        self._chunk_nodes(nodes, self.docstore_batch_size)
-                    )
+                    processed_hashes.add(file_hash)
 
-        self.dir_reader = pipeline.dir_reader
-        self.docs = []
-        self.nodes = []
+            processed_hashes.update(core_pdf_reader.discovered_hashes)
 
-        if build_query_engine:
-            if self.query_engine is None:
+            # Process batches, persisting nodes as soon as each enrichment
+            # micro-batch completes when supported.
+            if hasattr(pipeline, "build_streaming") and callable(
+                getattr(pipeline, "build_streaming")
+            ):
+                for docs, nodes, completed_hashes in pipeline.build_streaming(
+                    processed_hashes
+                ):
+                    if docs:
+                        streaming_docs += len(docs)
+                    if nodes:
+                        await self._apersist_node_batches(nodes)
+                        streaming_nodes += len(nodes)
+                        persist_batches += len(
+                            self._chunk_nodes(nodes, self.docstore_batch_size)
+                        )
+                        enrich_batches += 1
+                    if completed_hashes:
+                        processed_hashes.update(completed_hashes)
+            else:
+                for docs, nodes in pipeline.build(processed_hashes):
+                    if docs:
+                        streaming_docs += len(docs)
+                    if nodes:
+                        await self._apersist_node_batches(nodes)
+                        streaming_nodes += len(nodes)
+                        persist_batches += len(
+                            self._chunk_nodes(nodes, self.docstore_batch_size)
+                        )
+
+            self.dir_reader = pipeline.dir_reader
+            self.docs = []
+            self.nodes = []
+
+            if build_query_engine:
                 self.create_query_engine()
-        else:
-            self.query_engine = None
+            else:
+                self.query_engine = None
 
-        self.reset_session_state()
-        self._invalidate_ner_cache(self.qdrant_collection)
+            self.reset_session_state()
+            self._invalidate_ner_cache(self.qdrant_collection)
 
-        eff_k = None
-        if self.query_engine is not None and hasattr(self.query_engine, "retriever"):
-            try:
-                eff_k = getattr(self.query_engine.retriever, "similarity_top_k", None)
-            except Exception:
-                eff_k = None
+            eff_k = None
+            if self.query_engine is not None and hasattr(
+                self.query_engine, "retriever"
+            ):
+                try:
+                    eff_k = getattr(
+                        self.query_engine.retriever, "similarity_top_k", None
+                    )
+                except Exception:
+                    eff_k = None
 
-        if self.query_engine is not None:
-            logger.info(
-                "Effective retrieval k={} | top_n={} | embed_device={} | rerank_device={}",
-                eff_k,
-                self.rerank_top_n,
-                self.device,
-                self.device,
-            )
-        if self.ingest_benchmark_enabled:
-            self._log_ingest_benchmark_summary(
-                mode="async",
-                started_at=ingest_started_at,
-                core_docs=core_docs,
-                core_nodes=core_nodes,
-                streaming_docs=streaming_docs,
-                streaming_nodes=streaming_nodes,
-                enrich_batches=enrich_batches,
-                persist_batches=persist_batches,
-            )
-        self._bump_summary_revision(self.qdrant_collection)
-        logger.info("Documents ingested successfully (async path).")
+            if self.query_engine is not None:
+                logger.info(
+                    "Effective retrieval k={} | top_n={} | embed_device={} | rerank_device={}",
+                    eff_k,
+                    self.rerank_top_n,
+                    self.device,
+                    self.device,
+                )
+            if self.ingest_benchmark_enabled:
+                self._log_ingest_benchmark_summary(
+                    mode="async",
+                    started_at=ingest_started_at,
+                    core_docs=core_docs,
+                    core_nodes=core_nodes,
+                    streaming_docs=streaming_docs,
+                    streaming_nodes=streaming_nodes,
+                    enrich_batches=enrich_batches,
+                    persist_batches=persist_batches,
+                )
+            self._bump_summary_revision(self.qdrant_collection)
+            logger.info("Documents ingested successfully.")
+        finally:
+            self._set_embedding_warning_callback(None)
 
     def run_query(
         self,

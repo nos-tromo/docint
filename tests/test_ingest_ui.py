@@ -39,6 +39,21 @@ def test_render_event_list_formats_bullet_timeline() -> None:
     assert "- 💾 `paper.pdf` · Saved upload" in timeline
 
 
+def test_render_event_list_formats_warning_events() -> None:
+    """Warning events should render with a dedicated warning icon."""
+    events = [
+        {
+            "stage": "warning",
+            "message": "Warning: truncated oversized embedding input",
+            "filename": "",
+        }
+    ]
+
+    timeline = _render_event_list(events, limit=5)
+
+    assert "- ⚠️ Warning: truncated oversized embedding input" in timeline
+
+
 def test_normalize_file_status_maps_common_stage_names() -> None:
     """Raw stage names should map to stable, user-facing statuses."""
     assert _normalize_file_status("file_saved") == "Uploading"

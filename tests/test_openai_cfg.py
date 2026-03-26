@@ -7,7 +7,11 @@ from types import SimpleNamespace
 from typing import Any
 
 from docint.utils.env_cfg import OpenAIConfig
-from docint.utils.openai_cfg import OpenAIPipeline, get_openai_reasoning_effort
+from docint.utils.openai_cfg import (
+    OpenAIPipeline,
+    TruncatingOpenAIEmbedding,
+    get_openai_reasoning_effort,
+)
 
 
 def test_get_openai_reasoning_effort_requires_toggle_only() -> None:
@@ -278,3 +282,80 @@ def test_openai_pipeline_call_chat_omits_reasoning_effort_when_disabled(
     pipeline.call_chat("hello")
 
     assert "reasoning_effort" not in captured
+
+
+def test_truncating_embedding_retries_oversized_inputs(
+    monkeypatch,
+) -> None:
+    """Oversized embedding inputs should be retried with truncated text.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+
+    error = RuntimeError(
+        "This model's maximum context length is 8192 tokens. However, you requested 0 output tokens "
+        "and your prompt contains at least 8193 input tokens, for a total of at least 8193 tokens."
+    )
+    single_inputs: list[str] = []
+    warnings: list[str] = []
+    original_text = "x" * 12000
+
+    def fake_get_text_embeddings(self: Any, texts: list[str]) -> list[list[float]]:
+        """Simulate the batch text embeddings method, raising an error for oversized inputs.
+
+        Args:
+            self (Any): The embedding instance.
+            texts (list[str]): The list of texts to embed.
+
+        Raises:
+            error: If the input text exceeds the model's context length.
+
+        Returns:
+            list[list[float]]: A list of embedding vectors.
+        """
+        raise error
+
+    def fake_get_text_embedding(self: Any, text: str) -> list[float]:
+        """Simulate the single text embedding method, capturing the input and raising an error for oversized text.
+
+        Args:
+            self (Any): The embedding instance.
+            text (str): The text to embed.
+
+        Raises:
+            error: If the input text exceeds the model's context length.
+
+        Returns:
+            list[float]: A list of embedding vectors.
+        """
+        single_inputs.append(text)
+        if len(text) >= len(original_text):
+            raise error
+        return [0.25, 0.5]
+
+    monkeypatch.setattr(
+        "llama_index.embeddings.openai.base.OpenAIEmbedding._get_text_embeddings",
+        fake_get_text_embeddings,
+    )
+    monkeypatch.setattr(
+        "llama_index.embeddings.openai.base.OpenAIEmbedding._get_text_embedding",
+        fake_get_text_embedding,
+    )
+
+    embedding = TruncatingOpenAIEmbedding(
+        model_name="BAAI/bge-m3",
+        api_key="sk-test",
+        api_base="http://localhost:8000/v1",
+        reuse_client=False,
+        context_window=8192,
+    )
+    embedding.set_warning_callback(warnings.append)
+
+    result = embedding._get_text_embeddings([original_text])
+
+    assert result == [[0.25, 0.5]]
+    assert single_inputs
+    assert len(single_inputs[-1]) < len(original_text)
+    assert warnings
+    assert "truncated oversized embedding input" in warnings[0].lower()

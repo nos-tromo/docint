@@ -128,6 +128,7 @@ def _render_event_list(events_raw: list[Any] | None, *, limit: int = 8) -> str:
         "ingestion_started": "⚙️",
         "ingestion_progress": "🔄",
         "ingestion_complete": "✅",
+        "warning": "⚠️",
         "error": "❌",
     }
     lines: list[str] = []
