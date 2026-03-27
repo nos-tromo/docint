@@ -2891,7 +2891,14 @@ def test_ingest_docs_sets_and_clears_embedding_warning_callback(
             captured_callbacks.append(callback)
 
     rag._embed_model = cast(Any, FakeEmbedModel())
-    progress_callback = lambda message: None
+
+    def progress_callback(message: str) -> None:
+        """Handle progress updates during ingestion.
+
+        Args:
+            message (str): The progress message.
+        """
+        del message
 
     rag.ingest_docs(
         tmp_path, build_query_engine=False, progress_callback=progress_callback
