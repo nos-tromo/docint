@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import warnings
 from pathlib import Path
 from typing import Any, Callable
@@ -583,6 +584,7 @@ def build_gliner_ner_extractor(
 
     max_tokens = _resolve_gliner_context_window(model)
     tokenizer = _get_gliner_tokenizer(model)
+    gliner_lock = threading.Lock()
 
     def _extract(text: str) -> tuple[list[dict], list[dict]]:
         """Extract entities using GLiNER.
@@ -598,21 +600,24 @@ def build_gliner_ner_extractor(
 
         try:
             preds: list[dict[str, Any]] = []
-            for chunk in _chunk_text_for_gliner(
-                text=text,
-                max_tokens=max_tokens,
-                tokenizer=tokenizer,
-            ):
-                # Suppress the "Asking to truncate to max_length but no maximum
-                # length is provided" warning from the internal DeBERTa tokenizer.
-                with warnings.catch_warnings():
-                    warnings.filterwarnings(
-                        "ignore",
-                        message=".*truncat.*max_length.*no maximum length.*",
-                    )
-                    preds.extend(
-                        model.predict_entities(chunk, labels, threshold=threshold)
-                    )
+            # GLiNER and its tokenizer share PyO3-backed state that is not safe
+            # for concurrent use across ingestion threads.
+            with gliner_lock:
+                for chunk in _chunk_text_for_gliner(
+                    text=text,
+                    max_tokens=max_tokens,
+                    tokenizer=tokenizer,
+                ):
+                    # Suppress the "Asking to truncate to max_length but no maximum
+                    # length is provided" warning from the internal DeBERTa tokenizer.
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings(
+                            "ignore",
+                            message=".*truncat.*max_length.*no maximum length.*",
+                        )
+                        preds.extend(
+                            model.predict_entities(chunk, labels, threshold=threshold)
+                        )
         except Exception as e:
             logger.warning("GLiNER extraction failed: {}", e)
             return [], []
