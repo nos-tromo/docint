@@ -90,7 +90,7 @@ def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.setattr(
         model_cfg_module,
         "load_whisper_model",
-        lambda model_id: calls.append(("whisper", model_id)),
+        lambda model_id: calls.append(("local-whisper", model_id)),
     )
 
     model_cfg_module.main()
@@ -103,4 +103,5 @@ def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch) -> Non
     assert ("text", "Qwen/Qwen3.5-2B") in calls
     assert ("vision", "Qwen/Qwen3.5-2B") in calls
     assert ("whisper", "base") in calls
+    assert ("local-whisper", "base") not in calls
     assert ("ollama", "called") not in calls

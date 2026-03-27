@@ -288,8 +288,15 @@ def main() -> None:
             openai_config.inference_provider,
         )
 
-    # Whisper
-    load_whisper_model(model_id=model_config.whisper_model)
+    # Whisper / ASR
+    if openai_config.inference_provider == "vllm":
+        load_hf_model(
+            model_id=model_config.whisper_model,
+            cache_folder=path_config.hf_hub_cache,
+            kw="whisper",
+        )
+    else:
+        load_whisper_model(model_id=model_config.whisper_model)
 
 
 if __name__ == "__main__":

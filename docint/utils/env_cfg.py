@@ -495,6 +495,7 @@ def load_model_env(
     default_text_model: str = "gpt-oss:20b",
     default_vision_model: str = "qwen3.5:9b",
     default_whisper_model: str = "turbo",
+    default_vllm_whisper_model: str = "openai/whisper-large-v3-turbo",
 ) -> ModelConfig:
     """Loads model configuration from environment variables or defaults.
 
@@ -506,7 +507,10 @@ def load_model_env(
         default_sparse_model (str): Default sparse model identifier.
         default_text_model_str (str): Default text model identifier.
         default_vision_model_str (str): Default vision model identifier.
-        default_whisper_model (str): Default Whisper model identifier.
+        default_whisper_model (str): Default Whisper model identifier for local
+            backends.
+        default_vllm_whisper_model (str): Default Whisper-compatible ASR model
+            identifier when ``INFERENCE_PROVIDER=vllm``.
 
     Returns:
         ModelConfig: Dataclass containing model configuration.
@@ -519,15 +523,23 @@ def load_model_env(
         - vision_model (str): The vision model identifier.
         - whisper_model (str): The Whisper model identifier.
     """
+    inference_provider = os.getenv("INFERENCE_PROVIDER", "ollama").strip().lower()
+    embed_model = os.getenv("EMBED_MODEL", default_embed_model)
+    sparse_default = default_sparse_model
+    whisper_default = default_whisper_model
+    if inference_provider == "vllm":
+        sparse_default = embed_model
+        whisper_default = default_vllm_whisper_model
+
     return ModelConfig(
-        embed_model=os.getenv("EMBED_MODEL", default_embed_model),
+        embed_model=embed_model,
         image_embed_model=os.getenv("IMAGE_EMBED_MODEL", default_image_embed_model),
         ner_model=os.getenv("NER_MODEL", default_ner_model),
         rerank_model=os.getenv("RERANK_MODEL", default_rerank_model),
-        sparse_model=os.getenv("SPARSE_MODEL", default_sparse_model),
+        sparse_model=os.getenv("SPARSE_MODEL", sparse_default),
         text_model=os.getenv("TEXT_MODEL", default_text_model),
         vision_model=os.getenv("VISION_MODEL", default_vision_model),
-        whisper_model=os.getenv("WHISPER_MODEL", default_whisper_model),
+        whisper_model=os.getenv("WHISPER_MODEL", whisper_default),
     )
 
 

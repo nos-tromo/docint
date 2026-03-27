@@ -51,6 +51,74 @@ def _make_audio_reader(
     return reader
 
 
+def _install_vllm_audio_client(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    transcription_response: dict[str, Any],
+    translation_response: dict[str, Any] | None = None,
+    translation_error: Exception | None = None,
+) -> list[tuple[str, dict[str, Any]]]:
+    """Install a fake OpenAI-compatible audio client for vLLM tests.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        transcription_response: Response returned by transcriptions.
+        translation_response: Optional response returned by translations.
+        translation_error: Optional exception raised by translations.
+
+    Returns:
+        Captured API call names and keyword arguments.
+    """
+
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class FakeTranscriptions:
+        """Fake transcriptions endpoint."""
+        def create(self, **kwargs: Any) -> dict[str, Any]:
+            """Create a transcription.
+
+            Returns:
+                dict[str, Any]: The fake transcription result.
+            """            
+            calls.append(("transcriptions", kwargs))
+            return transcription_response
+
+    class FakeTranslations:
+        def create(self, **kwargs: Any) -> dict[str, Any]:
+            """Create a translation.
+
+            Returns:
+                dict[str, Any]: The fake translation result.
+            """
+            calls.append(("translations", kwargs))
+            if translation_error is not None:
+                raise translation_error
+            if translation_response is None:
+                raise AssertionError("translation_response must be provided")
+            return translation_response
+
+    class FakeClient:
+        """Fake OpenAI-compatible client with audio endpoints."""
+        def __init__(self, **kwargs: Any) -> None:
+            """Initialize the fake client.
+
+            Args:
+                **kwargs: Arbitrary keyword arguments.
+            """
+            self.kwargs = kwargs
+            self.audio = type(
+                "FakeAudioNamespace",
+                (),
+                {
+                    "transcriptions": FakeTranscriptions(),
+                    "translations": FakeTranslations(),
+                },
+            )()
+
+    monkeypatch.setattr(audio_module, "_OpenAIClient", FakeClient)
+    return calls
+
+
 def test_audio_reader_builds_segmented_transcript(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -185,6 +253,117 @@ def test_audio_reader_translate_english_forces_transcribe(
     assert captured["language"] == "en"
     assert docs[0].metadata["whisper_task"] == "transcribe"
     assert docs[0].metadata["whisper_language"] == "en"
+
+
+def test_audio_reader_vllm_transcribe_uses_provider_backend(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """vLLM provider should use the OpenAI-compatible transcriptions endpoint.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+    """
+
+    monkeypatch.setenv("INFERENCE_PROVIDER", "vllm")
+    calls = _install_vllm_audio_client(
+        monkeypatch,
+        transcription_response={
+            "language": "en",
+            "segments": [
+                {"start": 1.0, "end": 2.5, "text": "Hello"},
+                {"start": 2.5, "end": 4.0, "text": "provider."},
+            ],
+            "text": "Hello provider.",
+        },
+    )
+    audio_path = tmp_path / "provider.wav"
+    audio_path.write_bytes(b"fake")
+
+    docs = AudioReader(device="cpu").load_data(audio_path)
+
+    assert len(docs) == 1
+    assert docs[0].text == "Hello provider."
+    assert docs[0].metadata["start_ts"] == "00:00:01"
+    assert docs[0].metadata["end_ts"] == "00:00:04"
+    assert docs[0].metadata["whisper_task"] == "transcribe"
+    assert docs[0].metadata["whisper_language"] == "en"
+    assert [name for name, _ in calls] == ["transcriptions"]
+    assert calls[0][1]["response_format"] == "verbose_json"
+    assert calls[0][1]["timestamp_granularities"] == ["segment"]
+
+
+def test_audio_reader_vllm_translate_non_english_uses_translation_endpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """vLLM provider should translate non-English audio when configured.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+    """
+
+    monkeypatch.setenv("INFERENCE_PROVIDER", "vllm")
+    monkeypatch.setenv("WHISPER_TASK", "translate")
+    monkeypatch.setenv("WHISPER_MODEL", "openai/whisper-large-v3")
+    calls = _install_vllm_audio_client(
+        monkeypatch,
+        transcription_response={
+            "language": "es",
+            "segments": [{"start": 0.0, "end": 1.0, "text": "Hola"}],
+            "text": "Hola",
+        },
+        translation_response={
+            "segments": [
+                {"start": 0.0, "end": 1.2, "text": "Hello"},
+                {"start": 1.2, "end": 2.0, "text": "world."},
+            ],
+            "text": "Hello world.",
+        },
+    )
+    audio_path = tmp_path / "spanish-provider.wav"
+    audio_path.write_bytes(b"fake")
+
+    docs = AudioReader(device="cpu").load_data(audio_path)
+
+    assert docs[0].text == "Hello world."
+    assert docs[0].metadata["whisper_task"] == "translate"
+    assert docs[0].metadata["whisper_language"] == "es"
+    assert docs[0].metadata["start_ts"] == "00:00:00"
+    assert docs[0].metadata["end_ts"] == "00:00:02"
+    assert [name for name, _ in calls] == ["transcriptions", "translations"]
+
+
+def test_audio_reader_vllm_translate_unsupported_model_falls_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Unsupported provider translation models should fall back to transcription.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+    """
+
+    monkeypatch.setenv("INFERENCE_PROVIDER", "vllm")
+    monkeypatch.setenv("WHISPER_TASK", "translate")
+    monkeypatch.setenv("WHISPER_MODEL", "turbo")
+    calls = _install_vllm_audio_client(
+        monkeypatch,
+        transcription_response={
+            "language": "fr",
+            "segments": None,
+            "text": "Bonjour",
+        },
+    )
+    audio_path = tmp_path / "fallback.wav"
+    audio_path.write_bytes(b"fake")
+
+    docs = AudioReader(device="cpu").load_data(audio_path)
+
+    assert docs[0].text == "Bonjour"
+    assert docs[0].metadata["whisper_task"] == "transcribe"
+    assert docs[0].metadata["whisper_language"] == "fr"
+    assert [name for name, _ in calls] == ["transcriptions"]
 
 
 def test_audio_reader_load_batch_data_parallel_preserves_order(
