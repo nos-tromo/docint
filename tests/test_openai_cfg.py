@@ -359,3 +359,81 @@ def test_truncating_embedding_retries_oversized_inputs(
     assert len(single_inputs[-1]) < len(original_text)
     assert warnings
     assert "truncated oversized embedding input" in warnings[0].lower()
+
+
+def test_truncating_embedding_retries_vllm_oversized_inputs(
+    monkeypatch,
+) -> None:
+    """vLLM-style embedding overflows should also trigger truncation retries.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+
+    error = RuntimeError(
+        "You passed 8193 input tokens and requested 0 output tokens. However, "
+        "the model's context length is only 8192 tokens, resulting in a maximum "
+        "input length of 8192 tokens. Please reduce the length of the input prompt. "
+        "(parameter=input_tokens, value=8193)"
+    )
+    single_inputs: list[str] = []
+    warnings: list[str] = []
+    original_text = "x" * 12000
+
+    def fake_get_text_embeddings(self: Any, texts: list[str]) -> list[list[float]]:
+        """Simulate a batch embedding failure for oversized inputs.
+
+        Args:
+            self: Embedding instance.
+            texts: Texts to embed.
+
+        Raises:
+            RuntimeError: Always, to force the fallback path.
+        """
+
+        raise error
+
+    def fake_get_text_embedding(self: Any, text: str) -> list[float]:
+        """Simulate retry success after truncation.
+
+        Args:
+            self: Embedding instance.
+            text: Text to embed.
+
+        Raises:
+            RuntimeError: When the input is still oversized.
+
+        Returns:
+            list[float]: A fake embedding vector.
+        """
+
+        single_inputs.append(text)
+        if len(text) >= len(original_text):
+            raise error
+        return [0.1, 0.2, 0.3]
+
+    monkeypatch.setattr(
+        "llama_index.embeddings.openai.base.OpenAIEmbedding._get_text_embeddings",
+        fake_get_text_embeddings,
+    )
+    monkeypatch.setattr(
+        "llama_index.embeddings.openai.base.OpenAIEmbedding._get_text_embedding",
+        fake_get_text_embedding,
+    )
+
+    embedding = TruncatingOpenAIEmbedding(
+        model_name="BAAI/bge-m3",
+        api_key="sk-test",
+        api_base="http://localhost:8000/v1",
+        reuse_client=False,
+        context_window=8192,
+    )
+    embedding.set_warning_callback(warnings.append)
+
+    result = embedding._get_text_embeddings([original_text])
+
+    assert result == [[0.1, 0.2, 0.3]]
+    assert single_inputs
+    assert len(single_inputs[-1]) < len(original_text)
+    assert warnings
+    assert "8193 input tokens" in warnings[0]

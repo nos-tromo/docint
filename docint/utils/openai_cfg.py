@@ -95,14 +95,32 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
         Returns:
             tuple[int | None, int | None]: Parsed model limit and input token count.
         """
-        match = re.search(
-            r"maximum context length is\s*(\d+)\s*tokens.*?contains at least\s*(\d+)\s*input tokens",
-            message,
-            flags=re.IGNORECASE | re.DOTALL,
+        patterns = (
+            (
+                r"maximum context length is\s*(\d+)\s*tokens.*?contains at least\s*(\d+)\s*input tokens",
+                (1, 2),
+            ),
+            (
+                r"passed\s*(\d+)\s*input tokens.*?context length is only\s*(\d+)\s*tokens",
+                (2, 1),
+            ),
+            (
+                r"passed\s*(\d+)\s*input tokens.*?maximum input length of\s*(\d+)\s*tokens",
+                (2, 1),
+            ),
         )
-        if not match:
-            return None, None
-        return int(match.group(1)), int(match.group(2))
+        for pattern, groups in patterns:
+            match = re.search(
+                pattern,
+                message,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            if match:
+                model_limit_group, input_tokens_group = groups
+                return int(match.group(model_limit_group)), int(
+                    match.group(input_tokens_group)
+                )
+        return None, None
 
     @classmethod
     def _is_context_limit_error(cls, exc: Exception) -> bool:
@@ -116,8 +134,14 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
         """
         message = str(exc).lower()
         return (
-            "maximum context length" in message
-            and "input tokens" in message
+            (
+                (
+                    "maximum context length" in message
+                    or "context length is only" in message
+                )
+                and "input tokens" in message
+            )
+            or ("maximum input length" in message and "input tokens" in message)
             or "context_length_exceeded" in message
         )
 
