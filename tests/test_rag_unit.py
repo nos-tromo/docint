@@ -2893,13 +2893,12 @@ def test_ingest_docs_sets_and_clears_embedding_warning_callback(
     rag._embed_model = cast(Any, FakeEmbedModel())
 
     def progress_callback(message: str) -> None:
-        """Accept embedding warnings without mutating test state.
+        """Handle progress updates during ingestion.
 
         Args:
-            message: Progress or warning message emitted during ingestion.
+            message (str): The progress message.
         """
-
-        _ = message
+        del message
 
     rag.ingest_docs(
         tmp_path, build_query_engine=False, progress_callback=progress_callback
