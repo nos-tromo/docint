@@ -74,12 +74,13 @@ def _install_vllm_audio_client(
 
     class FakeTranscriptions:
         """Fake transcriptions endpoint."""
+
         def create(self, **kwargs: Any) -> dict[str, Any]:
             """Create a transcription.
 
             Returns:
                 dict[str, Any]: The fake transcription result.
-            """            
+            """
             calls.append(("transcriptions", kwargs))
             return transcription_response
 
@@ -99,6 +100,7 @@ def _install_vllm_audio_client(
 
     class FakeClient:
         """Fake OpenAI-compatible client with audio endpoints."""
+
         def __init__(self, **kwargs: Any) -> None:
             """Initialize the fake client.
 

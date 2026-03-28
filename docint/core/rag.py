@@ -584,7 +584,7 @@ class VLLMSparseEncoder:
 
     def _headers(self) -> dict[str, str]:
         """Build the JSON request headers for vLLM requests.
-        
+
         Returns:
             dict[str, str]: The headers for the vLLM request.
         """
@@ -596,7 +596,7 @@ class VLLMSparseEncoder:
 
     def _request_json(self, url: str, payload: dict[str, Any]) -> Any:
         """POST JSON to a vLLM endpoint and decode the JSON response.
-        
+
         Args:
             url: The full URL of the vLLM endpoint to which the request should be sent.
             payload: A dictionary representing the JSON payload to be sent in the POST request.
@@ -616,7 +616,7 @@ class VLLMSparseEncoder:
 
     def _pool_token_scores(self, texts: list[str]) -> list[list[float]]:
         """Fetch token-level sparse scores for a batch of texts.
-        
+
         Args:
             texts: A list of input texts for which to pool token scores.
 
@@ -653,7 +653,7 @@ class VLLMSparseEncoder:
 
     def _tokenize(self, text: str) -> list[int]:
         """Tokenize a single text through the vLLM tokenizer endpoint.
-        
+
         Args:
             text: The input text to be tokenized.
 
@@ -677,7 +677,7 @@ class VLLMSparseEncoder:
     @classmethod
     def _extract_token_ids(cls, payload: Any) -> list[int]:
         """Extract token ids from a vLLM tokenize response payload.
-        
+
         Args:
             payload: The JSON-decoded response from the vLLM tokenize endpoint, which may have various structures but is expected to contain token ID information in one of several possible locations.
 
@@ -757,17 +757,17 @@ class VLLMSparseEncoder:
         token_scores: list[float],
     ) -> tuple[list[int], list[float]]:
         """Aggregate token ids and scores into a Qdrant sparse vector.
-        
+
         Args:
             token_ids: A list of token IDs corresponding to the input text.
             token_scores: A list of token scores corresponding to the input text, aligned with the token IDs.
 
         Returns:
-            A tuple containing two lists: the first list is the aggregated token IDs for the sparse 
-                vector, and the second list is the corresponding aggregated scores for those token 
-                IDs. The aggregation process involves merging duplicate token IDs by taking the maximum 
-                score for each unique token ID, and filtering out any token IDs that are negative or 
-                have non-finite or non-positive scores. The resulting lists are ordered by token ID 
+            A tuple containing two lists: the first list is the aggregated token IDs for the sparse
+                vector, and the second list is the corresponding aggregated scores for those token
+                IDs. The aggregation process involves merging duplicate token IDs by taking the maximum
+                score for each unique token ID, and filtering out any token IDs that are negative or
+                have non-finite or non-positive scores. The resulting lists are ordered by token ID
                 in ascending order. If there are no valid token IDs after filtering, both lists will be empty.
         """
 

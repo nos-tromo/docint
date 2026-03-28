@@ -20,5 +20,8 @@ def test_docker_compose_vllm_profile_includes_audio_service() -> None:
     compose = Path("/Users/himarc/dev/nos-tromo/docint/docker-compose.yml").read_text()
 
     assert "vllm-audio-cuda:" in compose
-    assert 'depends_on:\n      - vllm-chat-cuda\n      - vllm-embed-cuda\n      - vllm-audio-cuda' in compose
+    assert (
+        "depends_on:\n      - vllm-chat-cuda\n      - vllm-embed-cuda\n      - vllm-audio-cuda"
+        in compose
+    )
     assert '--hf-overrides \'{"architectures":["BgeM3EmbeddingModel"]}\'' in compose

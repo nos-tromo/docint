@@ -291,7 +291,7 @@ class OpenAICompatibleAudioBackend:
     @staticmethod
     def _response_to_dict(response: Any) -> dict[str, Any]:
         """Normalize OpenAI client responses into plain dictionaries.
-        
+
         Args:
             response: The raw response object from the OpenAI client.
 
@@ -311,7 +311,7 @@ class OpenAICompatibleAudioBackend:
     @staticmethod
     def _translation_supported(model_id: str) -> bool:
         """Return whether the configured ASR model should support translation.
-        
+
         Args:
             model_id: The ASR model identifier to evaluate.
 
@@ -324,7 +324,7 @@ class OpenAICompatibleAudioBackend:
 
     def _transcribe_via_provider(self, file_path: Path) -> dict[str, Any]:
         """Call the provider transcriptions endpoint with verbose segments.
-        
+
         Args:
             file_path: The path to the audio file to transcribe.
 
@@ -343,7 +343,7 @@ class OpenAICompatibleAudioBackend:
 
     def _translate_via_provider(self, file_path: Path) -> dict[str, Any]:
         """Call the provider translations endpoint with verbose output.
-        
+
         Args:
             file_path: The path to the audio file to translate.
 
