@@ -450,7 +450,7 @@ def test_load_model_env_uses_vllm_sparse_and_asr_defaults(
     cfg = load_model_env()
 
     assert cfg.sparse_model == "BAAI/bge-m3"
-    assert cfg.whisper_model == "openai/whisper-large-v3"
+    assert cfg.whisper_model == "openai/whisper-large-v3-turbo"
 
 
 def test_load_hate_speech_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
