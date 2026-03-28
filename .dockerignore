@@ -29,7 +29,6 @@
 **/tests/
 
 # Environment and config files
-*.conf
 *.bundle
 *.pyc
 *.pyo
