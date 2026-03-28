@@ -86,7 +86,7 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    ```dotenv
    HTTP_PROXY=http://proxy.example.com:3128
    HTTPS_PROXY=http://proxy.example.com:3128
-   NO_PROXY=localhost,127.0.0.1,qdrant,ollama-server,vllm-router,vllm-chat,vllm-embed,vllm-rerank,backend-net
+   NO_PROXY=localhost,127.0.0.1,qdrant,ollama-server,vllm-router,vllm-chat,vllm-embed,vllm-audio,vllm-rerank,backend-net
    ```
 
    If any tooling in your environment only honors lowercase proxy variables,
@@ -120,7 +120,7 @@ Model files are handled automatically by the ingestion pipeline and do not need 
 
    CUDA profiles require a CUDA-compatible GPU and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
-   Each profile automatically sets `INFERENCE_PROVIDER` and `OPENAI_API_BASE` to the correct values. For the `*-openai` profiles, set `OPENAI_API_BASE` and `OPENAI_API_KEY` in `.env.docker`. The `cuda-vllm` profile routes the backend through an internal nginx service so split chat, embedding, and rerank upstreams still appear as one OpenAI-compatible endpoint.
+   Each profile automatically sets `INFERENCE_PROVIDER` and `OPENAI_API_BASE` to the correct values. For the `*-openai` profiles, set `OPENAI_API_BASE` and `OPENAI_API_KEY` in `.env.docker`. The `cuda-vllm` profile routes the backend through an internal nginx service so split chat, embedding, sparse, audio, and rerank upstreams still appear as one OpenAI-compatible endpoint.
 
 4. **Start the Services**
 
@@ -171,9 +171,9 @@ Model files are handled automatically by the ingestion pipeline and do not need 
    uv sync
    ```
 
-4. **Download Embedding/Rerank Models**
+4. **Download Required Model Snapshots**
 
-   Pre-download required local models (Embeddings, Sparse, Rerank, Text, Vision, Whisper) to your local cache:
+   Pre-download the model snapshots required by your configured stack. For local backends this includes app-local models such as sparse, rerank, and Whisper; for `INFERENCE_PROVIDER=vllm` it also preloads the provider-served model snapshots used by the bundled vLLM services:
 
    ```bash
    uv run load-models
@@ -268,9 +268,10 @@ The backend logic is standard OpenAI-compatible. The `docker-compose.yml` profil
 
 **Local Models (Hugging Face):**
 
-- `SPARSE_MODEL`: Sparse embedding model (default: `Qdrant/all_miniLM_L6_v2_with_attentions`).
+- `SPARSE_MODEL`: Sparse embedding model. For local hybrid retrieval the default is `Qdrant/all_miniLM_L6_v2_with_attentions`. For `INFERENCE_PROVIDER=vllm`, the default follows `EMBED_MODEL` so the bundled profile can serve dense and sparse retrieval from the same pooling model (`BAAI/bge-m3` by default).
 - `RERANK_MODEL`: Cross-encoder reranker (default: `BAAI/bge-reranker-v2-m3`).
 - `NER_MODEL`: Local GLiNER model for entity extraction (default: `gliner-community/gliner_large-v2.5`).
+- `WHISPER_MODEL`: Audio transcription model. Local backends default to the packaged Whisper `turbo` model; `INFERENCE_PROVIDER=vllm` defaults to the translation-capable `openai/whisper-large-v3`.
 
 See `docint/utils/env_cfg.py` for the full list of configuration options and defaults.
 

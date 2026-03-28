@@ -250,6 +250,7 @@ services:
     depends_on:
       - vllm-chat-cuda
       - vllm-embed-cuda
+      - vllm-audio-cuda
       - vllm-rerank-cuda
     volumes:
       - ./nginx.vllm.conf:/etc/nginx/conf.d/default.conf:ro
@@ -340,13 +341,19 @@ services:
     command:
       - >-
         export CUDA_VISIBLE_DEVICES="$${EMBED_CUDA_VISIBLE_DEVICES:-0}";
-        exec vllm serve "$${EMBED_MODEL:-BAAI/bge-m3}"
+        set -- vllm serve "$${EMBED_MODEL:-BAAI/bge-m3}"
         --api-key "$${OPENAI_API_KEY:-sk-no-key-required}"
         --host 0.0.0.0
         --port 8000
         --runner "$${EMBED_RUNNER:-pooling}"
         --convert "$${EMBED_CONVERT:-embed}"
-        --gpu-memory-utilization "$${EMBED_GPU_MEMORY_UTILIZATION:-0.15}"
+        --gpu-memory-utilization "$${EMBED_GPU_MEMORY_UTILIZATION:-0.15}";
+        if [ -n "$${EMBED_HF_OVERRIDES:-}" ]; then
+          set -- "$@" --hf-overrides "$${EMBED_HF_OVERRIDES}";
+        elif [ "$${EMBED_MODEL:-BAAI/bge-m3}" = "BAAI/bge-m3" ]; then
+          set -- "$@" --hf-overrides '{"architectures":["BgeM3EmbeddingModel"]}';
+        fi;
+        exec "$@"
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-1}"
@@ -363,6 +370,49 @@ services:
       docint-net:
         aliases:
           - vllm-embed
+    restart: unless-stopped
+
+  ##########################################################
+  # vLLM Audio / ASR (CUDA)
+  # Requires model artifacts to already exist in the shared cache volume when
+  # HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are enabled.
+  ##########################################################
+  vllm-audio-cuda:
+    profiles: ["cuda-vllm"]
+    build:
+      context: .
+      dockerfile: Dockerfile.vllm
+      args:
+        <<: *build-args
+    image: docint-vllm-openai:v0.17.1
+    gpus: all
+    env_file: *docker-env-file
+    ipc: host
+    entrypoint: ["/bin/sh", "-lc"]
+    command:
+      - >-
+        export CUDA_VISIBLE_DEVICES="$${AUDIO_CUDA_VISIBLE_DEVICES:-0}";
+        exec vllm serve "$${WHISPER_MODEL:-openai/whisper-large-v3}"
+        --api-key "$${OPENAI_API_KEY:-sk-no-key-required}"
+        --host 0.0.0.0
+        --port 8000
+        --gpu-memory-utilization "$${AUDIO_GPU_MEMORY_UTILIZATION:-0.2}"
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-1}"
+      TRANSFORMERS_OFFLINE: "${TRANSFORMERS_OFFLINE:-1}"
+    volumes:
+      - huggingface-cache:/root/.cache/huggingface/hub
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+    networks:
+      docint-net:
+        aliases:
+          - vllm-audio
     restart: unless-stopped
 
   ##########################################################

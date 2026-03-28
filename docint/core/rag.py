@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import hashlib
 import json
+import math
 import operator
 import os
 import re
@@ -111,6 +112,7 @@ from docint.utils.reference_metadata import REFERENCE_METADATA_FIELDS
 SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
 SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
 SUMMARY_CACHE_REVISION_KEY = "summary_revision"
+BatchSparseEncoding = tuple[list[list[int]], list[list[float]]]
 EMPTY_RESPONSE_FALLBACK = (
     "I couldn't generate a grounded answer from the retrieved context. "
     "Please try rephrasing the question or ingesting more relevant documents."
@@ -530,6 +532,262 @@ class VLLMRerankPostprocessor(BaseNodePostprocessor):
                 exc,
             )
             return self._fallback_nodes(nodes)
+
+
+def _vllm_service_root(api_base: str) -> str:
+    """Normalize an OpenAI-compatible base URL to the vLLM service root.
+
+    Args:
+        api_base: OpenAI-compatible API base URL, typically ending in ``/v1``.
+
+    Returns:
+        The vLLM service root without the trailing ``/v1`` suffix.
+    """
+
+    normalized = api_base.rstrip("/")
+    return normalized.removesuffix("/v1")
+
+
+@dataclass(slots=True)
+class VLLMSparseEncoder:
+    """Adapter that turns vLLM pooling/tokenize responses into Qdrant sparse vectors."""
+
+    api_base: str
+    model: str
+    api_key: str | None = None
+    timeout: float = 300.0
+
+    def encode_texts(self, texts: list[str]) -> BatchSparseEncoding:
+        """Encode texts as sparse vectors using the configured vLLM service.
+
+        Args:
+            texts: Input texts to encode.
+
+        Returns:
+            Sparse indices and values aligned with the input order.
+        """
+
+        if not texts:
+            return [], []
+
+        score_batches = self._pool_token_scores(texts)
+        sparse_indices: list[list[int]] = []
+        sparse_values: list[list[float]] = []
+
+        for text, token_scores in zip(texts, score_batches, strict=False):
+            token_ids = self._tokenize(text)
+            indices, values = self._build_sparse_vector(token_ids, token_scores)
+            sparse_indices.append(indices)
+            sparse_values.append(values)
+
+        return sparse_indices, sparse_values
+
+    def _headers(self) -> dict[str, str]:
+        """Build the JSON request headers for vLLM requests.
+
+        Returns:
+            dict[str, str]: The headers for the vLLM request.
+        """
+
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    def _request_json(self, url: str, payload: dict[str, Any]) -> Any:
+        """POST JSON to a vLLM endpoint and decode the JSON response.
+
+        Args:
+            url: The full URL of the vLLM endpoint to which the request should be sent.
+            payload: A dictionary representing the JSON payload to be sent in the POST request.
+
+        Returns:
+            The decoded JSON response from the vLLM service, which may be a dictionary, list, or other JSON structure depending on the endpoint.
+        """
+
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=self._headers(),
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _pool_token_scores(self, texts: list[str]) -> list[list[float]]:
+        """Fetch token-level sparse scores for a batch of texts.
+
+        Args:
+            texts: A list of input texts for which to pool token scores.
+
+        Returns:
+            A list of token score lists, where each inner list corresponds to the token scores for the respective input text. The length of the outer list matches the length of the input texts, and each inner list contains float scores aligned with the tokens of the corresponding text.
+        """
+
+        request_url = f"{_vllm_service_root(self.api_base)}/pooling"
+        response_body = self._request_json(
+            request_url,
+            {
+                "model": self.model,
+                "task": "token_classify",
+                "input": texts,
+            },
+        )
+
+        response_data = (
+            response_body.get("data") if isinstance(response_body, dict) else None
+        )
+        if not isinstance(response_data, list):
+            raise ValueError("vLLM sparse pooling response did not contain a data list")
+
+        pooled_scores: list[list[float]] = []
+        for item in response_data:
+            raw_scores = item.get("data") if isinstance(item, dict) else item
+            pooled_scores.append(self._coerce_token_scores(raw_scores))
+
+        if len(pooled_scores) != len(texts):
+            raise ValueError(
+                "vLLM sparse pooling response count did not match the input batch size"
+            )
+        return pooled_scores
+
+    def _tokenize(self, text: str) -> list[int]:
+        """Tokenize a single text through the vLLM tokenizer endpoint.
+
+        Args:
+            text: The input text to be tokenized.
+
+        Returns:
+            A list of token IDs corresponding to the input text.
+        """
+
+        request_url = f"{_vllm_service_root(self.api_base)}/tokenize"
+        response_body = self._request_json(
+            request_url,
+            {
+                "model": self.model,
+                "prompt": text,
+            },
+        )
+        token_ids = self._extract_token_ids(response_body)
+        if not token_ids:
+            raise ValueError("vLLM tokenize response did not contain token ids")
+        return token_ids
+
+    @classmethod
+    def _extract_token_ids(cls, payload: Any) -> list[int]:
+        """Extract token ids from a vLLM tokenize response payload.
+
+        Args:
+            payload: The JSON-decoded response from the vLLM tokenize endpoint, which may have various structures but is expected to contain token ID information in one of several possible locations.
+
+        Returns:
+            A list of token IDs extracted from the payload. If no valid token IDs can be found, an empty list is returned.
+        """
+
+        candidates: list[Any] = []
+        if isinstance(payload, dict):
+            candidates.extend(
+                [
+                    payload.get("token_ids"),
+                    payload.get("tokens"),
+                    payload.get("prompt_token_ids"),
+                ]
+            )
+            data = payload.get("data")
+            if isinstance(data, list) and data:
+                candidates.extend(data)
+
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                nested = cls._extract_token_ids(candidate)
+                if nested:
+                    return nested
+                continue
+            if (
+                isinstance(candidate, list)
+                and candidate
+                and all(isinstance(item, int) for item in candidate)
+            ):
+                return [int(item) for item in candidate]
+            if isinstance(candidate, list) and not candidate:
+                return []
+
+        return []
+
+    @classmethod
+    def _coerce_token_scores(cls, raw_scores: Any) -> list[float]:
+        """Normalize pooled token outputs into one float score per token.
+
+        Args:
+            raw_scores: The raw token scores from the vLLM sparse pooling response.
+
+        Returns:
+            A list of float scores corresponding to each token.
+        """
+
+        if not isinstance(raw_scores, list):
+            raise ValueError("vLLM sparse pooling item did not contain a score list")
+
+        token_scores: list[float] = []
+        for item in raw_scores:
+            if isinstance(item, int | float):
+                token_scores.append(float(item))
+                continue
+
+            if isinstance(item, list | tuple):
+                numeric_values = [
+                    float(value) for value in item if isinstance(value, int | float)
+                ]
+                if not numeric_values:
+                    continue
+                if len(numeric_values) == 1:
+                    token_scores.append(numeric_values[0])
+                else:
+                    token_scores.append(max(numeric_values))
+                continue
+
+            raise ValueError("vLLM sparse pooling item contained a non-numeric score")
+
+        return token_scores
+
+    @staticmethod
+    def _build_sparse_vector(
+        token_ids: list[int],
+        token_scores: list[float],
+    ) -> tuple[list[int], list[float]]:
+        """Aggregate token ids and scores into a Qdrant sparse vector.
+
+        Args:
+            token_ids: A list of token IDs corresponding to the input text.
+            token_scores: A list of token scores corresponding to the input text, aligned with the token IDs.
+
+        Returns:
+            A tuple containing two lists: the first list is the aggregated token IDs for the sparse
+                vector, and the second list is the corresponding aggregated scores for those token
+                IDs. The aggregation process involves merging duplicate token IDs by taking the maximum
+                score for each unique token ID, and filtering out any token IDs that are negative or
+                have non-finite or non-positive scores. The resulting lists are ordered by token ID
+                in ascending order. If there are no valid token IDs after filtering, both lists will be empty.
+        """
+
+        if len(token_ids) != len(token_scores):
+            logger.debug(
+                "vLLM sparse token length mismatch: {} token ids vs {} scores",
+                len(token_ids),
+                len(token_scores),
+            )
+
+        merged_scores: dict[int, float] = {}
+        for token_id, score in zip(token_ids, token_scores, strict=False):
+            if token_id < 0 or not math.isfinite(score) or score <= 0.0:
+                continue
+            existing = merged_scores.get(token_id)
+            if existing is None or score > existing:
+                merged_scores[token_id] = score
+
+        ordered = sorted(merged_scores.items())
+        return [token_id for token_id, _ in ordered], [score for _, score in ordered]
 
 
 @dataclass(slots=True)
@@ -1024,6 +1282,9 @@ class RAG:
         if self.sparse_model_id is None:
             raise ValueError("sparse_model_id is None")
 
+        if self.openai_inference_provider.lower() == "vllm":
+            return self.sparse_model_id
+
         try:
             supported_models = SparseTextEmbedding.list_supported_models()
         except ImportError:
@@ -1246,13 +1507,25 @@ class RAG:
             logger.error("ValueError: qdrant_collection cannot be None")
             raise ValueError("qdrant_collection cannot be None")
 
-        return QdrantVectorStore(
-            collection_name=self.qdrant_collection,
-            client=self.qdrant_client,
-            aclient=self.qdrant_aclient,
-            enable_hybrid=self.enable_hybrid,
-            fastembed_sparse_model=self.sparse_model,
-        )
+        vector_store_kwargs: dict[str, Any] = {
+            "collection_name": self.qdrant_collection,
+            "client": self.qdrant_client,
+            "aclient": self.qdrant_aclient,
+            "enable_hybrid": self.enable_hybrid,
+        }
+        if self.enable_hybrid and self.openai_inference_provider.lower() == "vllm":
+            sparse_encoder = VLLMSparseEncoder(
+                api_base=self.openai_api_base or "",
+                api_key=self.openai_api_key,
+                model=self.sparse_model or "",
+                timeout=self.openai_timeout,
+            )
+            vector_store_kwargs["sparse_doc_fn"] = sparse_encoder.encode_texts
+            vector_store_kwargs["sparse_query_fn"] = sparse_encoder.encode_texts
+        else:
+            vector_store_kwargs["fastembed_sparse_model"] = self.sparse_model
+
+        return QdrantVectorStore(**vector_store_kwargs)
 
     def _storage_context(self, vector_store: QdrantVectorStore) -> StorageContext:
         """Creates the storage context for document embeddings.

@@ -3019,3 +3019,83 @@ def test_delete_collection_companion_name_does_not_expand(
         for call in rag._qdrant_client.delete_collection.call_args_list
     ]
     assert deleted == ["target_images"]
+
+
+def test_vllm_sparse_encoder_converts_pooling_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """vLLM sparse encoder should map token scores into Qdrant sparse vectors.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+
+    responses: dict[str, dict[str, Any]] = {
+        "http://vllm-router:9000/pooling": {
+            "data": [{"data": [[0.0], [0.5], [0.3], [0.7], [0.0]]}]
+        },
+        "http://vllm-router:9000/tokenize": {"tokens": [101, 10, 20, 10, 102]},
+    }
+
+    class FakeResponse:
+        def __init__(self, payload: dict[str, Any]) -> None:
+            self._payload = payload
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(self._payload).encode("utf-8")
+
+    def fake_urlopen(request, timeout: float = 300.0) -> FakeResponse:
+        _ = timeout
+        return FakeResponse(responses[request.full_url])
+
+    monkeypatch.setattr(rag_module.urllib.request, "urlopen", fake_urlopen)
+
+    encoder = rag_module.VLLMSparseEncoder(
+        api_base="http://vllm-router:9000/v1",
+        api_key="sk-no-key-required",
+        model="BAAI/bge-m3",
+        timeout=30.0,
+    )
+
+    indices, values = encoder.encode_texts(["hello world"])
+
+    assert indices == [[10, 20]]
+    assert values == [[0.7, 0.3]]
+
+
+def test_vector_store_uses_vllm_sparse_functions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """vLLM hybrid retrieval should use custom sparse encoder callables.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+
+    captured: dict[str, Any] = {}
+
+    class FakeQdrantVectorStore:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(rag_module, "QdrantVectorStore", FakeQdrantVectorStore)
+
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = object()  # type: ignore[assignment]
+    rag._qdrant_aclient = object()  # type: ignore[assignment]
+    rag.openai_inference_provider = "vllm"
+    rag.openai_api_base = "http://vllm-router:9000/v1"
+    rag.openai_api_key = "sk-no-key-required"
+    rag.sparse_model_id = "BAAI/bge-m3"
+
+    rag._vector_store()
+
+    assert "sparse_doc_fn" in captured
+    assert "sparse_query_fn" in captured
+    assert "fastembed_sparse_model" not in captured

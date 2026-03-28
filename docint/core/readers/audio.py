@@ -10,8 +10,9 @@ from llama_index.core.schema import MediaResource
 from loguru import logger
 from numpy import floating
 from numpy.typing import NDArray
+from openai import OpenAI as _OpenAIClient
 
-from docint.utils.env_cfg import load_model_env, load_whisper_env
+from docint.utils.env_cfg import load_model_env, load_openai_env, load_whisper_env
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.mimetype import get_mimetype
 
@@ -257,6 +258,168 @@ def _transcribe_audio_job(job: tuple[str, str | None]) -> dict[str, Any]:
         }
 
 
+class OpenAICompatibleAudioBackend:
+    """Provider-backed audio transcription helper for OpenAI-compatible APIs."""
+
+    def __init__(
+        self,
+        *,
+        api_base: str,
+        api_key: str,
+        max_retries: int,
+        model_id: str,
+        timeout: float,
+    ) -> None:
+        """Initialize the provider-backed audio client.
+
+        Args:
+            api_base: OpenAI-compatible base URL.
+            api_key: API key used for authorization.
+            max_retries: Maximum request retries.
+            model_id: Served ASR model identifier.
+            timeout: Request timeout in seconds.
+        """
+
+        self.model_id = model_id
+        self._client = _OpenAIClient(
+            api_key=api_key,
+            base_url=api_base,
+            max_retries=max_retries,
+            timeout=timeout,
+        )
+
+    @staticmethod
+    def _response_to_dict(response: Any) -> dict[str, Any]:
+        """Normalize OpenAI client responses into plain dictionaries.
+
+        Args:
+            response: The raw response object from the OpenAI client.
+
+        Returns:
+            dict[str, Any]: A normalized dictionary representation of the response.
+        """
+
+        if isinstance(response, dict):
+            return cast(dict[str, Any], response)
+        model_dump = getattr(response, "model_dump", None)
+        if callable(model_dump):
+            dumped = model_dump()
+            if isinstance(dumped, dict):
+                return cast(dict[str, Any], dumped)
+        return cast(dict[str, Any], vars(response))
+
+    @staticmethod
+    def _translation_supported(model_id: str) -> bool:
+        """Return whether the configured ASR model should support translation.
+
+        Args:
+            model_id: The ASR model identifier to evaluate.
+
+        Returns:
+            bool: True when the model is expected to support translation, otherwise False.
+        """
+
+        normalized = model_id.strip().lower()
+        return normalized != "turbo" and "whisper-large-v3-turbo" not in normalized
+
+    def _transcribe_via_provider(self, file_path: Path) -> dict[str, Any]:
+        """Call the provider transcriptions endpoint with verbose segments.
+
+        Args:
+            file_path: The path to the audio file to transcribe.
+
+        Returns:
+            dict[str, Any]: The normalized transcription result from the provider.
+        """
+
+        with file_path.open("rb") as audio_file:
+            response = self._client.audio.transcriptions.create(
+                file=audio_file,
+                model=self.model_id,
+                response_format="verbose_json",
+                timestamp_granularities=["segment"],
+            )
+        return self._response_to_dict(response)
+
+    def _translate_via_provider(self, file_path: Path) -> dict[str, Any]:
+        """Call the provider translations endpoint with verbose output.
+
+        Args:
+            file_path: The path to the audio file to translate.
+
+        Returns:
+            dict[str, Any]: The normalized translation result from the provider.
+        """
+
+        with file_path.open("rb") as audio_file:
+            response = self._client.audio.translations.create(
+                file=audio_file,
+                model=self.model_id,
+                response_format="verbose_json",
+            )
+        return self._response_to_dict(response)
+
+    def transcribe_file(
+        self, file_path: Path, *, configured_task: WhisperTask
+    ) -> dict[str, Any]:
+        """Transcribe or translate a file through the provider backend.
+
+        Args:
+            file_path: Source audio file.
+            configured_task: Requested task from configuration.
+
+        Returns:
+            A normalized transcription payload.
+        """
+
+        transcription = self._transcribe_via_provider(file_path)
+        detected_language = _normalize_language_code(
+            cast(str | None, transcription.get("language"))
+        )
+        if configured_task == "translate" and detected_language is None:
+            logger.warning(
+                "Provider-backed Whisper translation requested but language detection was unavailable; falling back to transcription."
+            )
+        selected_task = _select_whisper_task(configured_task, detected_language)
+        if selected_task != "translate":
+            return {
+                "detected_language": detected_language,
+                "result": transcription,
+                "selected_task": "transcribe",
+            }
+
+        if not self._translation_supported(self.model_id):
+            logger.warning(
+                "Provider-backed Whisper model '{}' does not support translation; falling back to transcription.",
+                self.model_id,
+            )
+            return {
+                "detected_language": detected_language,
+                "result": transcription,
+                "selected_task": "transcribe",
+            }
+
+        try:
+            translated = self._translate_via_provider(file_path)
+        except Exception as exc:
+            logger.warning(
+                "Provider-backed Whisper translation failed for '{}': {}. Falling back to transcription.",
+                file_path,
+                exc,
+            )
+            return {
+                "detected_language": detected_language,
+                "result": transcription,
+                "selected_task": "transcribe",
+            }
+
+        return {
+            "detected_language": detected_language,
+            "result": translated,
+            "selected_task": "translate",
+        }
+
+
 class AudioReader(BaseReader):
     """A reader for audio files using the Whisper model.
 
@@ -272,10 +435,21 @@ class AudioReader(BaseReader):
         """
         self.device: str | None = device
         self.model_id: str = load_model_env().whisper_model
+        openai_cfg = load_openai_env()
+        self.inference_provider: str = openai_cfg.inference_provider.lower()
         whisper_cfg = load_whisper_env()
         self.max_workers: int = whisper_cfg.max_workers
         self.task: WhisperTask = whisper_cfg.task
         self._model: whisper.Whisper | None = None
+        self._provider_backend: OpenAICompatibleAudioBackend | None = None
+        if self.inference_provider == "vllm":
+            self._provider_backend = OpenAICompatibleAudioBackend(
+                api_base=openai_cfg.api_base,
+                api_key=openai_cfg.api_key,
+                max_retries=openai_cfg.max_retries,
+                model_id=self.model_id,
+                timeout=openai_cfg.timeout,
+            )
         self.result: dict[str, str | list[Any]] | None = None
 
     def _load_model(self) -> whisper.Whisper:
@@ -579,6 +753,9 @@ class AudioReader(BaseReader):
             int: The safe number of workers to use for the batch.
         """
 
+        if self._provider_backend is not None:
+            return 1
+
         if file_count <= 1:
             return 1
 
@@ -630,6 +807,15 @@ class AudioReader(BaseReader):
             dict[str, Any]: A normalized payload containing the transcription
             result and selected Whisper metadata.
         """
+        if self._provider_backend is not None:
+            payload = self._provider_backend.transcribe_file(
+                file_path,
+                configured_task=self.task,
+            )
+            payload["file_hash"] = file_hash
+            payload["file_path"] = str(file_path)
+            return payload
+
         model = self._load_model()
         audio = self._load_audio(file_path)
         selected_task, detected_language = self._resolve_task_for_audio(audio, model)
