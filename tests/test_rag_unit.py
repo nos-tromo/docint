@@ -705,8 +705,12 @@ def test_select_collection_invalidates_ner_cache(
     """
     rag = RAG(qdrant_collection="alpha")
     rag.ner_sources = [{"filename": "a.pdf", "entities": [{"text": "Acme"}]}]
-    rag.ner_aggregate_cache["alpha"] = {"entities": []}
-    rag.ner_graph_cache[("alpha", 100, 1)] = {"nodes": [], "edges": [], "meta": {}}
+    rag.ner_aggregate_cache[("alpha", "orthographic")] = {"entities": []}
+    rag.ner_graph_cache[("alpha", "orthographic", 100, 1)] = {
+        "nodes": [],
+        "edges": [],
+        "meta": {},
+    }
     monkeypatch.setattr(
         RAG,
         "list_collections",
@@ -716,8 +720,8 @@ def test_select_collection_invalidates_ner_cache(
     rag.select_collection("beta")
 
     assert rag.ner_sources == []
-    assert rag.ner_aggregate_cache.get("alpha") is None
-    assert ("alpha", 100, 1) not in rag.ner_graph_cache
+    assert rag.ner_aggregate_cache.get(("alpha", "orthographic")) is None
+    assert ("alpha", "orthographic", 100, 1) not in rag.ner_graph_cache
 
 
 def test_get_collection_ner_refresh_bypasses_cache() -> None:
@@ -871,6 +875,7 @@ def test_collection_ner_stats_and_search() -> None:
     assert stats["totals"]["entity_mentions"] == 4
     assert stats["top_entities"][0]["text"] == "Acme"
     assert stats["top_entities"][0]["mentions"] == 3
+    assert stats["top_entities"][0]["variant_count"] == 2
 
     loc_stats = rag.get_collection_ner_stats(
         top_k=10, min_mentions=1, entity_type="loc", include_relations=False
@@ -881,6 +886,64 @@ def test_collection_ner_stats_and_search() -> None:
     results = rag.search_collection_ner_entities(q="ac", limit=10)
     assert results[0]["text"] == "Acme"
     assert results[0]["mentions"] == 3
+    assert results[0]["variant_count"] == 2
+
+
+def test_collection_ner_stats_condense_orthographic_variants() -> None:
+    """Orthographic variants should condense into one canonical entity by default."""
+    rag = RAG(qdrant_collection="test")
+    rag.ner_sources = [
+        {
+            "filename": "a.pdf",
+            "entities": [{"text": "Parteitag", "type": "EVENT", "score": 0.7}],
+            "relations": [{"head": "Parteitag", "label": "in", "tail": "Berlin"}],
+        },
+        {
+            "filename": "b.pdf",
+            "entities": [{"text": "Partei Tag", "type": "EVENT", "score": 0.9}],
+            "relations": [{"head": "Partei Tag", "label": "in", "tail": "Berlin"}],
+        },
+        {
+            "filename": "c.pdf",
+            "entities": [{"text": "Parteitag", "type": "EVENT", "score": 0.6}],
+        },
+    ]
+
+    stats = rag.get_collection_ner_stats(top_k=10, min_mentions=1)
+    assert stats["totals"]["unique_entities"] == 1
+    assert stats["top_entities"][0]["text"] == "Parteitag"
+    assert stats["top_entities"][0]["mentions"] == 3
+    assert stats["top_entities"][0]["variant_count"] == 2
+    assert {row["text"] for row in stats["top_entities"][0]["variants"]} == {
+        "Parteitag",
+        "Partei Tag",
+    }
+
+    results = rag.search_collection_ner_entities(q="partei tag", limit=10)
+    assert len(results) == 1
+    assert results[0]["text"] == "Parteitag"
+    assert results[0]["mentions"] == 3
+
+
+def test_collection_ner_stats_exact_mode_preserves_orthographic_variants() -> None:
+    """Exact mode should keep orthographic variants split."""
+    rag = RAG(qdrant_collection="test")
+    rag.ner_sources = [
+        {"filename": "a.pdf", "entities": [{"text": "Parteitag", "type": "EVENT"}]},
+        {"filename": "b.pdf", "entities": [{"text": "Partei Tag", "type": "EVENT"}]},
+    ]
+
+    stats = rag.get_collection_ner_stats(
+        top_k=10,
+        min_mentions=1,
+        entity_merge_mode="exact",
+    )
+
+    assert stats["totals"]["unique_entities"] == 2
+    assert {row["text"] for row in stats["top_entities"]} == {
+        "Parteitag",
+        "Partei Tag",
+    }
 
 
 def test_collection_ner_search_matches_entity_acronyms() -> None:
@@ -946,6 +1009,42 @@ def test_run_entity_occurrence_query_returns_matching_sources() -> None:
     assert result["sources"][0]["matched_entity"]["text"] == "Remigration"
     assert result["sources"][0]["occurrence_count"] == 1
     assert "Found 2 occurrence(s) of 'Remigration'" in result["response"]
+
+
+def test_run_entity_occurrence_query_includes_orthographic_variants() -> None:
+    """Occurrence mode should include all mentions from condensed variants."""
+    rag = RAG(qdrant_collection="test")
+    rag.ner_sources = [
+        {
+            "filename": "a.pdf",
+            "chunk_id": "chunk-1",
+            "chunk_text": "Parteitag appears here.",
+            "text": "Parteitag appears here.",
+            "entities": [{"text": "Parteitag", "type": "EVENT", "score": 0.8}],
+        },
+        {
+            "filename": "b.pdf",
+            "chunk_id": "chunk-2",
+            "chunk_text": "Partei Tag appears here.",
+            "text": "Partei Tag appears here.",
+            "entities": [{"text": "Partei Tag", "type": "EVENT", "score": 0.9}],
+        },
+    ]
+
+    result = rag.run_entity_occurrence_query("Partei Tag")
+
+    assert result["retrieval_mode"] == "entity_occurrence"
+    assert len(result["sources"]) == 2
+    assert result["sources"][0]["matched_entity"]["text"] == "Partei Tag"
+    assert result["sources"][0]["matched_entity"]["variant_count"] == 2
+    assert {
+        mention["text"]
+        for source in result["sources"]
+        for mention in source["matched_mentions"]
+    } == {
+        "Parteitag",
+        "Partei Tag",
+    }
 
 
 def test_run_entity_occurrence_query_reports_no_match() -> None:
@@ -1062,6 +1161,36 @@ def test_collection_ner_graph_and_neighbors() -> None:
     assert neighbors["neighbors"]
 
 
+def test_collection_ner_graph_merges_orthographic_relation_nodes() -> None:
+    """Graph construction should merge orthographic variants before building edges."""
+    rag = RAG(qdrant_collection="test")
+    rag.ner_sources = [
+        {
+            "filename": "a.pdf",
+            "entities": [
+                {"text": "Parteitag", "type": "EVENT"},
+                {"text": "Berlin", "type": "LOC"},
+            ],
+            "relations": [{"head": "Parteitag", "label": "in", "tail": "Berlin"}],
+        },
+        {
+            "filename": "b.pdf",
+            "entities": [
+                {"text": "Partei Tag", "type": "EVENT"},
+                {"text": "Berlin", "type": "LOC"},
+            ],
+            "relations": [{"head": "Partei Tag", "label": "in", "tail": "Berlin"}],
+        },
+    ]
+
+    graph = rag.get_collection_ner_graph(top_k_nodes=10, min_edge_weight=1)
+
+    assert {node["text"] for node in graph["nodes"]} == {"Parteitag", "Berlin"}
+    relation_edges = [edge for edge in graph["edges"] if edge["kind"] == "relation"]
+    assert len(relation_edges) == 1
+    assert relation_edges[0]["weight"] == 2
+
+
 def test_expand_query_with_graph_with_debug_applies_neighbors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1080,7 +1209,7 @@ def test_expand_query_with_graph_with_debug_applies_neighbors(
     monkeypatch.setattr(
         RAG,
         "_get_collection_ner_aggregate",
-        lambda self, refresh=False: {
+        lambda self, refresh=False, entity_merge_mode="orthographic": {
             "entities": [
                 {"text": "Acme", "mentions": 10},
                 {"text": "Widget", "mentions": 3},
@@ -1090,7 +1219,14 @@ def test_expand_query_with_graph_with_debug_applies_neighbors(
     monkeypatch.setattr(
         RAG,
         "get_collection_ner_graph_neighbors",
-        lambda self, *, entity, hops, top_k_nodes, min_edge_weight, refresh=False: {
+        lambda self,
+        *,
+        entity,
+        hops,
+        top_k_nodes,
+        min_edge_weight,
+        refresh=False,
+        entity_merge_mode="orthographic": {
             "neighbors": [{"text": "Widget"}, {"text": "Rivertown"}]
         },
     )
@@ -1125,7 +1261,7 @@ def test_expand_query_with_graph_with_debug_matches_acronym_anchors(
     monkeypatch.setattr(
         RAG,
         "_get_collection_ner_aggregate",
-        lambda self, refresh=False: {
+        lambda self, refresh=False, entity_merge_mode="orthographic": {
             "entities": [
                 {"text": "European Union", "mentions": 10},
                 {"text": "Brussels", "mentions": 4},
@@ -1135,9 +1271,14 @@ def test_expand_query_with_graph_with_debug_matches_acronym_anchors(
     monkeypatch.setattr(
         RAG,
         "get_collection_ner_graph_neighbors",
-        lambda self, *, entity, hops, top_k_nodes, min_edge_weight, refresh=False: {
-            "neighbors": [{"text": "Brussels"}]
-        },
+        lambda self,
+        *,
+        entity,
+        hops,
+        top_k_nodes,
+        min_edge_weight,
+        refresh=False,
+        entity_merge_mode="orthographic": {"neighbors": [{"text": "Brussels"}]},
     )
 
     query = "What is said about the EU?"

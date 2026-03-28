@@ -381,6 +381,7 @@ def test_export_entities_writes_top_entity_text(
             """
             assert kwargs["top_k"] == query_cli.DEFAULT_ENTITY_LIMIT
             assert kwargs["min_mentions"] == 1
+            assert kwargs["entity_merge_mode"] == "orthographic"
             return {
                 "top_entities": [
                     {"text": "Acme", "type": "ORG", "mentions": 12},

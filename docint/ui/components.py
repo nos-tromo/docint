@@ -12,6 +12,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import requests
 import streamlit as st
 
+from docint.core.ner import aggregate_ner_sources, entity_cluster_key
 from docint.utils.env_cfg import load_host_env
 from docint.utils.reference_metadata import REFERENCE_METADATA_FIELDS
 
@@ -61,7 +62,7 @@ def normalize_entities(entities: Iterable[Any] | None) -> list[dict[str, Any]]:
         normalized.append(
             {
                 "text": text_val,
-                "type": ent.get("type") or ent.get("label"),
+                "type": ent.get("type") or ent.get("label") or "Unlabeled",
                 "score": ent.get("score"),
             }
         )
@@ -196,12 +197,42 @@ def aggregate_ner(
         item carries ``text``, ``type``, ``best_score``, ``count``,
         ``files``, and ``occurrences``.
     """
-    entity_index: dict[tuple[str, str], dict[str, Any]] = {}
+    source_rows = [src for src in sources or [] if isinstance(src, dict)]
+    aggregate = aggregate_ner_sources(source_rows)
+    entity_index: dict[str, dict[str, Any]] = {}
     relation_index: dict[tuple[str, str, str], dict[str, Any]] = {}
 
-    for src in sources or []:
-        if not isinstance(src, dict):
-            continue
+    for row in list(aggregate.get("entities") or []):
+        key = str(row.get("key") or "")
+        entity_index[key] = {
+            "text": row.get("text"),
+            "type": row.get("type"),
+            "best_score": row.get("best_score"),
+            "count": int(row.get("mentions", 0) or 0),
+            "files": set(),
+            "occurrences": [],
+            "variant_count": int(row.get("variant_count", 0) or 0),
+            "variants": list(row.get("variants") or []),
+        }
+
+    text_to_keys = dict(aggregate.get("text_to_keys") or {})
+    compact_to_keys = dict(aggregate.get("compact_to_keys") or {})
+
+    def _resolve_entity(text: str) -> tuple[str | None, str]:
+        lowered = str(text or "").strip().lower()
+        compact = "".join(ch for ch in lowered if ch.isalnum())
+        for candidates in (
+            text_to_keys.get(lowered, []),
+            compact_to_keys.get(compact, []),
+        ):
+            if len(candidates) == 1:
+                key = candidates[0]
+                entry = entity_index.get(key)
+                if entry is not None:
+                    return key, str(entry.get("text") or text)
+        return None, text
+
+    for src in source_rows:
         label = source_label(src)
         entities = normalize_entities(src.get("entities"))
         relations = normalize_relations(src.get("relations"))
@@ -209,34 +240,25 @@ def aggregate_ner(
         for ent in entities:
             text_val = str(ent.get("text") or "")
             type_val = str(ent.get("type") or "")
-            ent_key: tuple[str, str] = (text_val.lower(), type_val.lower())
-            if ent_key not in entity_index:
-                entity_index[ent_key] = {
-                    "text": text_val,
-                    "type": ent.get("type"),
-                    "best_score": ent.get("score"),
-                    "count": 0,
-                    "files": set(),
-                    "occurrences": [],
-                }
-            entry = entity_index[ent_key]
-            entry["count"] += 1
+            ent_key = entity_cluster_key(text_val, type_val)
+            entry = entity_index.get(ent_key)
+            if entry is None:
+                continue
             entry["files"].add(label)
-            if ent.get("score") is not None:
-                prev = entry.get("best_score")
-                entry["best_score"] = (
-                    max(prev, ent["score"]) if prev is not None else ent["score"]
-                )
-            entry["occurrences"].append({"source": label, "score": ent.get("score")})
+            entry["occurrences"].append(
+                {"source": label, "score": ent.get("score"), "text": text_val}
+            )
 
         for rel in relations:
-            head_val = str(rel.get("head") or "")
+            head_raw = str(rel.get("head") or "")
             label_val = str(rel.get("label") or "")
-            tail_val = str(rel.get("tail") or "")
+            tail_raw = str(rel.get("tail") or "")
+            head_key, head_val = _resolve_entity(head_raw)
+            tail_key, tail_val = _resolve_entity(tail_raw)
             rel_key: tuple[str, str, str] = (
-                head_val.lower(),
+                head_key or head_val.lower(),
                 label_val.lower(),
-                tail_val.lower(),
+                tail_key or tail_val.lower(),
             )
             if rel_key not in relation_index:
                 relation_index[rel_key] = {
@@ -693,6 +715,7 @@ def render_ner_overview(sources: list[dict[str, Any]]) -> None:
                 "Entity": [e["text"] for e in entities],
                 "Type": [e.get("type") or "Unlabeled" for e in entities],
                 "Mentions": [e["count"] for e in entities],
+                "Variants": [int(e.get("variant_count", 0) or 0) for e in entities],
                 "Best score": [format_score(e.get("best_score")) for e in entities],
                 "Sources": [", ".join(e["files"]) for e in entities],
             },
@@ -704,6 +727,11 @@ def render_ner_overview(sources: list[dict[str, Any]]) -> None:
                 f"{ent['text']} ({ent.get('type') or 'Unlabeled'}) "
                 f"— {ent['count']} mention(s)"
             ):
+                variants = [
+                    str(row.get("text") or "") for row in ent.get("variants", [])
+                ]
+                if variants:
+                    st.caption(f"Variants: {', '.join(variants)}")
                 for occ in ent["occurrences"]:
                     st.markdown(
                         f"- {occ['source']} (score {format_score(occ.get('score'))})"

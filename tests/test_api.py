@@ -79,14 +79,18 @@ class DummyRAG:
         self.stateless_queries: list[str] = []
         self.entity_occurrence_queries: list[str] = []
         self.entity_occurrence_filters: list[Any] = []
+        self.entity_occurrence_merge_modes: list[str] = []
         self.multi_entity_occurrence_queries: list[str] = []
         self.multi_entity_occurrence_filters: list[Any] = []
+        self.multi_entity_occurrence_merge_modes: list[str] = []
         self.chat_filters: list[Any] = []
         self.stream_filters: list[Any] = []
         self.created_index = 0  # Tracks the number of times an index is created
         self.created_query_engine = 0
         self.ner_sources: list[dict[str, Any]] = []
         self.ner_refresh_calls: list[bool] = []
+        self.ner_stats_merge_modes: list[str] = []
+        self.ner_search_merge_modes: list[str] = []
         self.hate_speech_rows: list[dict[str, Any]] = []
         self.summary_refresh_calls: list[bool] = []
         self.summary_stream_refresh_calls: list[bool] = []
@@ -275,6 +279,7 @@ class DummyRAG:
         qdrant_filter: Any = None,
         limit: int = 100,
         refresh: bool = False,
+        entity_merge_mode: str = "orthographic",
     ) -> dict[str, Any]:
         """Return canned entity-occurrence results for tests.
 
@@ -290,6 +295,7 @@ class DummyRAG:
         _ = (limit, refresh)
         self.entity_occurrence_queries.append(prompt)
         self.entity_occurrence_filters.append(qdrant_filter)
+        self.entity_occurrence_merge_modes.append(entity_merge_mode)
         if prompt == "Ambiguous":
             return {
                 "response": "Your query matches multiple entities equally well.",
@@ -328,11 +334,13 @@ class DummyRAG:
         qdrant_filter: Any = None,
         limit: int = 100,
         refresh: bool = False,
+        entity_merge_mode: str = "orthographic",
     ) -> dict[str, Any]:
         """Return canned multi-entity occurrence results for tests."""
         _ = (limit, refresh)
         self.multi_entity_occurrence_queries.append(prompt)
         self.multi_entity_occurrence_filters.append(qdrant_filter)
+        self.multi_entity_occurrence_merge_modes.append(entity_merge_mode)
         return {
             "response": "Found 2 equally strong entity match(es) for 'Acme', covering 2 chunk(s) across 2 document(s).",
             "sources": [{"id": "occ-org"}, {"id": "occ-product"}],
@@ -444,6 +452,7 @@ class DummyRAG:
         min_mentions: int = 2,
         entity_type: str | None = None,
         include_relations: bool = True,
+        entity_merge_mode: str = "orthographic",
     ) -> dict[str, Any]:
         """Return canned NER stats payload.
 
@@ -457,6 +466,7 @@ class DummyRAG:
             dict[str, Any]: A dictionary containing information extraction statistics, including totals, top entities, entity types, top relations, and document-level stats.
         """
         _ = (top_k, min_mentions, entity_type, include_relations)
+        self.ner_stats_merge_modes.append(entity_merge_mode)
         return {
             "totals": {
                 "unique_entities": 1,
@@ -493,6 +503,7 @@ class DummyRAG:
         q: str = "",
         entity_type: str | None = None,
         limit: int = 100,
+        entity_merge_mode: str = "orthographic",
     ) -> list[dict[str, Any]]:
         """Return simple entity search results.
 
@@ -505,6 +516,7 @@ class DummyRAG:
             list[dict[str, Any]]: A list of entity dictionaries that match the search criteria.
         """
         _ = (entity_type, limit)
+        self.ner_search_merge_modes.append(entity_merge_mode)
         if q and q.lower() not in "acme":
             return []
         return [
@@ -648,6 +660,16 @@ def test_collections_ner_stats_success(client: TestClient) -> None:
     payload = response.json()
     assert payload["totals"]["unique_entities"] == 1
     assert payload["top_entities"][0]["text"] == "Acme"
+    assert cast(DummyRAG, api_module.rag).ner_stats_merge_modes[-1] == "orthographic"
+
+
+def test_collections_ner_stats_support_exact_merge_mode(client: TestClient) -> None:
+    """Stats endpoint should forward explicit merge-mode overrides."""
+    response = client.get(
+        "/collections/ner/stats", params={"entity_merge_mode": "exact"}
+    )
+    assert response.status_code == 200
+    assert cast(DummyRAG, api_module.rag).ner_stats_merge_modes[-1] == "exact"
 
 
 def test_collections_hate_speech_success(client: TestClient) -> None:
@@ -684,6 +706,17 @@ def test_collections_ner_search_success(client: TestClient) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["results"][0]["text"] == "Acme"
+    assert cast(DummyRAG, api_module.rag).ner_search_merge_modes[-1] == "orthographic"
+
+
+def test_collections_ner_search_support_exact_merge_mode(client: TestClient) -> None:
+    """Search endpoint should forward explicit merge-mode overrides."""
+    response = client.get(
+        "/collections/ner/search",
+        params={"q": "ac", "entity_merge_mode": "exact"},
+    )
+    assert response.status_code == 200
+    assert cast(DummyRAG, api_module.rag).ner_search_merge_modes[-1] == "exact"
 
 
 def test_agent_chat_answers(
