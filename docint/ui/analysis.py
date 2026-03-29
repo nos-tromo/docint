@@ -311,7 +311,7 @@ def _render_summary_section(collection: str) -> dict[str, Any]:
 
 def _entity_option_label(entity: dict[str, Any]) -> str:
     """Build a compact selectbox label for an aggregated entity row.
-    
+
     Args:
         entity: The aggregated entity dictionary containing text, type, and mention count.
 
@@ -326,7 +326,7 @@ def _entity_option_label(entity: dict[str, Any]) -> str:
 
 def _entity_highlight_terms(entity: str | dict[str, Any]) -> list[str]:
     """Return unique entity terms that should be highlighted in chunk text.
-    
+
     Args:
         entity: The selected entity, either as a string or an aggregated entity dictionary.
 
@@ -360,7 +360,7 @@ def _entity_highlight_terms(entity: str | dict[str, Any]) -> list[str]:
 
 def _highlight_entity_text(chunk_text: str, entity: str | dict[str, Any]) -> str:
     """Return HTML with matching entity variants highlighted.
-    
+
     Args:
         chunk_text: The original text of the chunk to process.
         entity: The selected entity, either as a string or an aggregated entity dictionary.
