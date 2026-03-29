@@ -334,8 +334,8 @@ By default, image embeddings are written to a per-collection Qdrant collection (
 DocInt exposes collection-level IE APIs in addition to raw source payloads:
 
 - `GET /collections/ner`: Raw source-level entities/relations for the selected collection.
-- `GET /collections/ner/stats`: Aggregated IE metrics and top entities/relations.
-- `GET /collections/ner/search`: Entity search with optional type filter.
+- `GET /collections/ner/stats`: Aggregated IE metrics and top entities/relations. Supports `entity_merge_mode=orthographic|exact` and defaults to orthographic condensation.
+- `GET /collections/ner/search`: Entity search with optional type filter. Supports `entity_merge_mode=orthographic|exact` and defaults to orthographic condensation.
 - `PIPELINE_VISION_OCR_MAX_IMAGE_DIM` (default `1024`)
 - `PIPELINE_VISION_OCR_MAX_TOKENS` (default `4096`)
 

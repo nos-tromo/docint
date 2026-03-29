@@ -1,6 +1,8 @@
 """Analysis page: collection summarisation and NER overview."""
 
+import html
 import json
+import re
 import time
 from typing import Any
 
@@ -307,21 +309,131 @@ def _render_summary_section(collection: str) -> dict[str, Any]:
     return summary_state
 
 
+def _entity_option_label(entity: dict[str, Any]) -> str:
+    """Build a compact selectbox label for an aggregated entity row.
+
+    Args:
+        entity: The aggregated entity dictionary containing text, type, and mention count.
+
+    Returns:
+        A formatted string label for the entity selectbox option.
+    """
+    text = str(entity.get("text") or "Unknown")
+    entity_type = str(entity.get("type") or "Unlabeled")
+    mentions = int(entity.get("count", entity.get("mentions", 0)) or 0)
+    return f"{text} [{entity_type}] · {mentions}"
+
+
+def _entity_highlight_terms(entity: str | dict[str, Any]) -> list[str]:
+    """Return unique entity terms that should be highlighted in chunk text.
+
+    Args:
+        entity: The selected entity, either as a string or an aggregated entity dictionary.
+
+    Returns:
+        A list of unique entity terms to highlight, sorted by length and deduplicated case-insensitively.
+    """
+    terms: list[str] = []
+    if isinstance(entity, dict):
+        for variant in list(entity.get("variants") or []):
+            text = str(variant.get("text") or "").strip()
+            if text:
+                terms.append(text)
+        selected_text = str(entity.get("text") or "").strip()
+        if selected_text:
+            terms.append(selected_text)
+    else:
+        selected_text = str(entity or "").strip()
+        if selected_text:
+            terms.append(selected_text)
+
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for term in sorted(terms, key=lambda item: (-len(item), item.lower())):
+        lowered = term.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        deduped.append(term)
+    return deduped
+
+
+def _highlight_entity_text(chunk_text: str, entity: str | dict[str, Any]) -> str:
+    """Return HTML with matching entity variants highlighted.
+
+    Args:
+        chunk_text: The original text of the chunk to process.
+        entity: The selected entity, either as a string or an aggregated entity dictionary.
+
+    Returns:
+        An HTML string with entity terms highlighted and non-matching text escaped.
+    """
+    text = str(chunk_text or "")
+    terms = _entity_highlight_terms(entity)
+    if not text or not terms:
+        return (
+            "<div style='white-space: pre-wrap; line-height: 1.6;'>"
+            f"{html.escape(text)}"
+            "</div>"
+        )
+
+    pattern = re.compile(
+        "|".join(re.escape(term) for term in terms),
+        flags=re.IGNORECASE,
+    )
+    parts: list[str] = []
+    cursor = 0
+    for match in pattern.finditer(text):
+        start, end = match.span()
+        if start > cursor:
+            parts.append(html.escape(text[cursor:start]))
+        parts.append(
+            "<mark style='background-color: rgba(255, 255, 0, 1.0); "
+            "color: black; padding: 0 0.16rem; border-radius: 0.25rem;'>"
+            f"{html.escape(match.group(0))}"
+            "</mark>"
+        )
+        cursor = end
+    if cursor < len(text):
+        parts.append(html.escape(text[cursor:]))
+
+    return (
+        f"<div style='white-space: pre-wrap; line-height: 1.6;'>{''.join(parts)}</div>"
+    )
+
+
 def _entity_related_chunks(
-    entity: str,
+    entity: str | dict[str, Any],
     sources: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Return source chunks that mention a selected entity.
 
     Args:
-        entity: The selected entity text to match.
+        entity: The selected entity text or aggregated entity row to match.
         sources: List of source dictionaries containing chunk and entity information.
 
     Returns:
         A list of source dictionaries that contain the selected entity.
     """
-    needle = str(entity or "").strip().lower()
-    if not needle:
+    selected_text = str(entity or "").strip()
+    selected_key = ""
+    variant_lookups: set[str] = set()
+    variant_compacts: set[str] = set()
+    if isinstance(entity, dict):
+        selected_text = str(entity.get("text") or "").strip()
+        selected_key = str(entity.get("key") or "").strip().lower()
+        for variant in list(entity.get("variants") or []):
+            variant_text = str(variant.get("text") or "").strip().lower()
+            if not variant_text:
+                continue
+            variant_lookups.add(variant_text)
+            variant_compacts.add("".join(ch for ch in variant_text if ch.isalnum()))
+
+    needle = selected_text.lower()
+    if needle:
+        variant_lookups.add(needle)
+        variant_compacts.add("".join(ch for ch in needle if ch.isalnum()))
+    if not variant_lookups and not selected_key:
         return []
 
     matches: list[dict[str, Any]] = []
@@ -332,9 +444,22 @@ def _entity_related_chunks(
         if not any(
             isinstance(ent, dict)
             and (
-                str(ent.get("text") or ent.get("name") or "").strip().lower() == needle
+                (
+                    bool(selected_key)
+                    and str(ent.get("key") or "").strip().lower() == selected_key
+                )
+                or str(ent.get("text") or ent.get("name") or "").strip().lower()
+                in variant_lookups
+                or "".join(
+                    ch
+                    for ch in str(ent.get("text") or ent.get("name") or "")
+                    .strip()
+                    .lower()
+                    if ch.isalnum()
+                )
+                in variant_compacts
                 or str(ent.get("key") or "").split("::", maxsplit=1)[0].strip().lower()
-                == needle
+                in variant_lookups
             )
             for ent in entities
         ):
@@ -426,27 +551,58 @@ def _render_entities_tab(result: dict[str, Any], collection: str) -> None:
         return
 
     entities, _ = aggregate_ner(ner_sources)
-    node_options = sorted(
-        {
-            str(entity.get("text") or "").strip()
-            for entity in entities
-            if str(entity.get("text") or "").strip()
-        }
-    )
-    if not node_options:
+    entity_rows = [
+        entity for entity in entities if str(entity.get("text") or "").strip()
+    ]
+    if not entity_rows:
         st.caption("No entities available for chunk drill-down.")
         return
 
-    selected_entity = st.selectbox(
-        "Select entity to inspect related chunks",
-        options=node_options,
-        index=0,
-        key=f"analysis_entity_selected_{collection}",
+    entity_types = sorted(
+        {
+            str(entity.get("type") or "Unlabeled").strip()
+            for entity in entity_rows
+            if str(entity.get("type") or "Unlabeled").strip()
+        }
     )
+    filter_col, entity_col = st.columns([1, 2], gap="medium")
+    with filter_col:
+        selected_type = st.selectbox(
+            "Entity category",
+            options=["All", *entity_types],
+            index=0,
+            key=f"analysis_entity_type_{collection}",
+        )
+
+    filtered_entities = [
+        entity
+        for entity in entity_rows
+        if selected_type == "All"
+        or str(entity.get("type") or "Unlabeled") == selected_type
+    ]
+    if not filtered_entities:
+        st.caption("No entities available for the selected category.")
+        return
+
+    option_map = {
+        str(entity.get("key") or entity.get("text") or ""): entity
+        for entity in filtered_entities
+    }
+    with entity_col:
+        selected_entity_key = st.selectbox(
+            "Entity",
+            options=list(option_map),
+            index=0,
+            format_func=lambda option: _entity_option_label(option_map[option]),
+            key=f"analysis_entity_selected_{collection}",
+        )
+
+    selected_entity = option_map.get(selected_entity_key)
 
     if selected_entity:
+        selected_entity_text = str(selected_entity.get("text") or "").strip()
         chunks = _entity_related_chunks(selected_entity, ner_sources)
-        st.markdown(f"#### Entity findings related to **{selected_entity}**")
+        st.markdown(f"#### Entity findings related to **{selected_entity_text}**")
         if chunks:
             for idx, chunk in enumerate(chunks, start=1):
                 label = (
@@ -459,13 +615,16 @@ def _render_entities_tab(result: dict[str, Any], collection: str) -> None:
                         st.caption(metadata_line)
                     chunk_text = str(chunk.get("chunk_text") or "").strip()
                     if chunk_text:
-                        st.write(chunk_text)
+                        st.markdown(
+                            _highlight_entity_text(chunk_text, selected_entity),
+                            unsafe_allow_html=True,
+                        )
                     else:
                         st.caption("Chunk text unavailable for this record.")
             st.download_button(
                 label="Download",
-                data=_entity_chunks_to_txt(selected_entity, chunks),
-                file_name=f"entity_{selected_entity}_{collection}.txt".replace(
+                data=_entity_chunks_to_txt(selected_entity_text, chunks),
+                file_name=f"entity_{selected_entity_text}_{collection}.txt".replace(
                     " ", "_"
                 ),
                 mime="text/plain",

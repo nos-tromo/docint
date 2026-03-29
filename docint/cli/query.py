@@ -597,7 +597,8 @@ def export_entities(rag: RAG, *, output_path: Path) -> None:
     stats = rag.get_collection_ner_stats(
         top_k=DEFAULT_ENTITY_LIMIT,
         min_mentions=1,
-        include_relations=False,
+        include_relations=True,
+        entity_merge_mode="orthographic",
     )
     top_entities = [
         row for row in list(stats.get("top_entities") or []) if isinstance(row, dict)
