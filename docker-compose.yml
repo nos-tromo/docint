@@ -70,7 +70,7 @@ x-backend-cuda: &backend-cuda
     LOG_PATH: /var/log/docint/backend-cuda.log
     NVIDIA_VISIBLE_DEVICES: all
     QDRANT_HOST: http://qdrant:6333
-    QDRANT_SRC_DIR: /qdrant/storage/sources
+    QDRANT_SRC_DIR: /var/lib/docint/sources
     SESSIONS_PATH: /var/lib/docint/sessions
     USE_DEVICE: auto
   env_file: *docker-env-file
