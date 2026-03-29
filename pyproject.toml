@@ -50,6 +50,9 @@ dependencies = [
   "watchdog>=6.0.0",
 ]
 
+[project.urls]
+Repository = "https://github.com/nos-tromo/docint.git"
+
 [project.scripts]
 docint = "docint.app:run"
 ingest = "docint.cli.ingest:main"
