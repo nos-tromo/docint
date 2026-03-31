@@ -368,7 +368,7 @@ services:
         --api-key "$${OPENAI_API_KEY:-sk-no-key-required}"
         --host 0.0.0.0
         --port 8000
-        --gpu-memory-utilization "$${AUDIO_GPU_MEMORY_UTILIZATION:-0.1}"
+        --gpu-memory-utilization "$${AUDIO_GPU_MEMORY_UTILIZATION:-0.15}"
     environment: *vllm-env
     volumes: *vllm-volumes
     deploy: *cuda-deploy
