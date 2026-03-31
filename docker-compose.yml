@@ -16,16 +16,7 @@ x-base-image-build-args: &base-image-build-args
   VLLM_OPENAI_IMAGE: ${VLLM_OPENAI_IMAGE:-vllm/vllm-openai:v0.17.1}
 
 x-build-args: &build-args
-  HTTP_PROXY: ${HTTP_PROXY:-}
-  HTTPS_PROXY: ${HTTPS_PROXY:-}
-  NO_PROXY: ${NO_PROXY:-}
-  http_proxy: ${http_proxy:-}
-  https_proxy: ${https_proxy:-}
-  no_proxy: ${no_proxy:-}
-  PYTHON_SLIM_BOOKWORM_IMAGE: ${PYTHON_SLIM_BOOKWORM_IMAGE:-python:3.11-slim-bookworm}
-  PYTHON_SLIM_IMAGE: ${PYTHON_SLIM_IMAGE:-python:3.11-slim}
-  NVIDIA_CUDA_RUNTIME_IMAGE: ${NVIDIA_CUDA_RUNTIME_IMAGE:-nvidia/cuda:13.0.2-cudnn-runtime-ubuntu22.04}
-  VLLM_OPENAI_IMAGE: ${VLLM_OPENAI_IMAGE:-vllm/vllm-openai:v0.17.1}
+  <<: [*proxy-build-args, *base-image-build-args]
 
 x-docker-env-file: &docker-env-file
   - .env.docker
@@ -259,7 +250,6 @@ services:
       dockerfile: Dockerfile.vllm
       args:
         <<: *build-args
-    image: docint-vllm-openai:v0.17.1
     gpus: all
     env_file: *docker-env-file
     ipc: host
@@ -314,7 +304,6 @@ services:
       dockerfile: Dockerfile.vllm
       args:
         <<: *build-args
-    image: docint-vllm-openai:v0.17.1
     gpus: all
     env_file: *docker-env-file
     ipc: host
@@ -356,7 +345,6 @@ services:
       dockerfile: Dockerfile.vllm
       args:
         <<: *build-args
-    image: docint-vllm-openai:v0.17.1
     gpus: all
     env_file: *docker-env-file
     ipc: host
@@ -390,7 +378,6 @@ services:
       dockerfile: Dockerfile.vllm
       args:
         <<: *build-args
-    image: docint-vllm-openai:v0.17.1
     gpus: all
     env_file: *docker-env-file
     ipc: host
