@@ -27,4 +27,5 @@ def test_docker_compose_vllm_profile_includes_audio_service() -> None:
         "depends_on:\n      - vllm-chat-cuda\n      - vllm-embed-cuda\n      - vllm-audio-cuda"
         in compose
     )
+    assert "USE_DEVICE: ${USE_DEVICE:-cpu}" in compose
     assert '--hf-overrides \'{"architectures":["BgeM3EmbeddingModel"]}\'' in compose

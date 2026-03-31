@@ -43,7 +43,7 @@ x-backend-cpu: &backend-cpu
     QDRANT_HOST: http://qdrant:6333
     QDRANT_SRC_DIR: /var/lib/docint/sources
     SESSIONS_PATH: /var/lib/docint/sessions
-    USE_DEVICE: auto
+    USE_DEVICE: ${USE_DEVICE:-auto}
   env_file: *docker-env-file
   volumes: &backend-volumes
     - docint-logs:/var/log/docint
@@ -72,7 +72,7 @@ x-backend-cuda: &backend-cuda
     QDRANT_HOST: http://qdrant:6333
     QDRANT_SRC_DIR: /var/lib/docint/sources
     SESSIONS_PATH: /var/lib/docint/sessions
-    USE_DEVICE: auto
+    USE_DEVICE: ${USE_DEVICE:-auto}
   env_file: *docker-env-file
   volumes: *backend-volumes
   deploy:
@@ -188,6 +188,7 @@ services:
       <<: *backend-cuda-env
       INFERENCE_PROVIDER: vllm
       OPENAI_API_BASE: http://vllm-router:9000/v1
+      USE_DEVICE: ${USE_DEVICE:-cpu}
 
   ##########################################################
   # Ollama (CPU)

@@ -1518,6 +1518,87 @@ def test_build_ingestion_pipeline_non_openai_keeps_gliner_ner_path(
     assert pipeline.hate_speech_model is created[0]
     assert len(created) == 1
 
+
+def test_device_uses_use_device_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RAG device selection should honor the explicit runtime override.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    monkeypatch.setenv("USE_DEVICE", "cpu")
+    monkeypatch.setattr(rag_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(rag_module.torch.backends.mps, "is_available", lambda: False)
+    monkeypatch.setattr(rag_module.torch.backends.mps, "is_built", lambda: False)
+
+    rag = RAG(qdrant_collection="test")
+
+    assert rag.device == "cpu"
+
+
+def test_build_ingestion_pipeline_passes_configured_device_to_gliner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Non-OpenAI ingestion should forward the resolved device to GLiNER.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The temporary path fixture.
+    """
+    import docint.core.ingest.ingestion_pipeline as pipeline_module
+
+    monkeypatch.setenv("USE_DEVICE", "cpu")
+    monkeypatch.setenv("NER_ENABLED", "true")
+
+    captured: dict[str, Any] = {}
+
+    def _fake_build_gliner_ner_extractor(
+        labels: list[str] | None = None,
+        threshold: float = 0.3,
+        device: str | None = None,
+    ) -> object:
+        """Capture GLiNER device selection during pipeline construction.
+
+        Args:
+            labels: Requested GLiNER labels.
+            threshold: Requested GLiNER threshold.
+            device: Requested execution device.
+
+        Returns:
+            object: Placeholder extractor object.
+        """
+        del labels, threshold
+        captured["device"] = device
+        return object()
+
+    rag = RAG(qdrant_collection="test")
+    rag.data_dir = tmp_path
+    rag.openai_inference_provider = "ollama"
+
+    monkeypatch.setattr(
+        rag_module,
+        "load_hate_speech_env",
+        lambda: types.SimpleNamespace(enabled=False),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "build_gliner_ner_extractor",
+        _fake_build_gliner_ner_extractor,
+    )
+    monkeypatch.setattr(
+        rag_module,
+        "ImageIngestionService",
+        lambda device: types.SimpleNamespace(device=device),
+    )
+
+    pipeline = rag._build_ingestion_pipeline()
+
+    assert pipeline.entity_extractor is not None
+    assert captured["device"] == "cpu"
+    assert getattr(rag._image_ingestion_service, "device", None) == "cpu"
+
     def test_sparse_model_uses_cached_path(
         monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

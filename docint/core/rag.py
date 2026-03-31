@@ -31,6 +31,7 @@ from docint.utils.env_cfg import (
     OpenAIConfig,
     PathConfig,
     RetrievalConfig,
+    RuntimeConfig,
     SessionConfig,
     SummaryConfig,
     load_graphrag_env,
@@ -42,6 +43,7 @@ from docint.utils.env_cfg import (
     load_openai_env,
     load_path_env,
     load_retrieval_env,
+    load_runtime_env,
     load_session_env,
     load_summary_env,
     resolve_hf_cache_path,
@@ -822,6 +824,9 @@ class RAG:
     path_config: PathConfig = field(
         default_factory=load_path_env, init=False, repr=False
     )
+    runtime_config: RuntimeConfig = field(
+        default_factory=load_runtime_env, init=False, repr=False
+    )
     graphrag_config: GraphRAGConfig = field(
         default_factory=load_graphrag_env, init=False, repr=False
     )
@@ -1195,6 +1200,70 @@ class RAG:
             raise ValueError("Qdrant source host directory is not set.")
         return self._qdrant_src_dir
 
+    def _resolve_requested_device(self, requested_device: str) -> str | None:
+        """Resolve an explicit runtime device preference.
+
+        Args:
+            requested_device (str): Normalized ``USE_DEVICE`` preference.
+
+        Returns:
+            str | None: Resolved device string, or ``None`` when auto-detection
+            should be used instead.
+        """
+        if requested_device == "cpu":
+            logger.info("Using configured CPU device for local workloads.")
+            return "cpu"
+
+        if requested_device == "mps":
+            if (
+                getattr(torch.backends, "mps", None)
+                and torch.backends.mps.is_available()
+                and torch.backends.mps.is_built()
+            ):
+                logger.info("Using configured MPS device for local workloads.")
+                return "mps"
+            logger.warning(
+                "Configured device '{}' is unavailable; falling back to auto detection.",
+                requested_device,
+            )
+            return None
+
+        if requested_device == "cuda" or requested_device.startswith("cuda:"):
+            if not torch.cuda.is_available():
+                logger.warning(
+                    "Configured device '{}' is unavailable; falling back to auto detection.",
+                    requested_device,
+                )
+                return None
+
+            if requested_device.startswith("cuda:"):
+                try:
+                    device_index = int(requested_device.split(":", maxsplit=1)[1])
+                except ValueError:
+                    logger.warning(
+                        "Configured device '{}' is invalid; falling back to auto detection.",
+                        requested_device,
+                    )
+                    return None
+                if device_index < 0 or device_index >= torch.cuda.device_count():
+                    logger.warning(
+                        "Configured device '{}' is unavailable; falling back to auto detection.",
+                        requested_device,
+                    )
+                    return None
+
+            logger.info(
+                "Using configured CUDA device '{}' for local workloads.",
+                requested_device,
+            )
+            return requested_device
+
+        logger.warning(
+            "Unsupported USE_DEVICE value '{}'; falling back to auto detection.",
+            requested_device,
+        )
+        return None
+
     @property
     def device(self) -> str:
         """Returns the device being used for computation.
@@ -1203,6 +1272,13 @@ class RAG:
             str: The device being used ("cpu", "cuda", or "mps").
         """
         if self._device is None:
+            requested_device = self.runtime_config.use_device
+            if requested_device != "auto":
+                resolved_device = self._resolve_requested_device(requested_device)
+                if resolved_device is not None:
+                    self._device = resolved_device
+                    return self._device
+
             if torch.cuda.is_available():
                 self._device = "cuda"
                 logger.info("Using CUDA for GPU acceleration.")

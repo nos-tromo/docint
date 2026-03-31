@@ -120,7 +120,7 @@ Model files are handled automatically by the ingestion pipeline and do not need 
 
    CUDA profiles require a CUDA-compatible GPU and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
-   Each profile automatically sets `INFERENCE_PROVIDER` and `OPENAI_API_BASE` to the correct values. For the `*-openai` profiles, set `OPENAI_API_BASE` and `OPENAI_API_KEY` in `.env.docker`. The `cuda-vllm` profile routes the backend through an internal nginx service so split chat, embedding, sparse, audio, and rerank upstreams still appear as one OpenAI-compatible endpoint.
+   Each profile automatically sets `INFERENCE_PROVIDER` and `OPENAI_API_BASE` to the correct values. For the `*-openai` profiles, set `OPENAI_API_BASE` and `OPENAI_API_KEY` in `.env.docker`. The `cuda-vllm` profile routes the backend through an internal nginx service so split chat, embedding, sparse, audio, and rerank upstreams still appear as one OpenAI-compatible endpoint. It also defaults the backend's local auxiliary workloads to `USE_DEVICE=cpu` so GLiNER, CLIP, and similar helpers do not compete with the vLLM workers for VRAM.
 
 4. **Start the Services**
 
@@ -249,6 +249,7 @@ Batch-size tuning guidance:
 - `CORS_ALLOWED_ORIGINS`: Comma-separated allow-list for API CORS.
 - `SESSIONS_PATH`: Directory for the default file-backed chat session store. Local default: `~/docint/sessions`. Docker Compose sets this to `/var/lib/docint/sessions`.
 - `SESSION_STORE`: Full SQLAlchemy session-store URL override. Use this if you want something other than the default SQLite file under `SESSIONS_PATH`.
+- `USE_DEVICE`: Device used by backend-local auxiliary models such as GLiNER, CLIP, and Whisper. Supported values are `auto`, `cpu`, `mps`, `cuda`, and `cuda:<index>`. The bundled `cuda-vllm` profile defaults this to `cpu`.
 
 **Model Selection (Environment Variables):**
 
