@@ -151,7 +151,7 @@ def test_highlight_entity_text_escapes_non_matching_html() -> None:
 
 
 def test_chunk_download_text_helpers_include_metadata() -> None:
-    """Download text helpers should include chunk metadata and body text."""
+    """Download text helpers should include metadata without body duplication."""
     entity_text = _entity_chunks_to_txt(
         "Acme",
         [
@@ -202,6 +202,8 @@ def test_chunk_download_text_helpers_include_metadata() -> None:
     assert "chunk_id=c1" in entity_text
     assert "Acme content" in entity_text
     assert "- Network: Telegram" in entity_text
+    assert "- Text: Acme content" not in entity_text
+    assert entity_text.count("Acme content") == 1
     assert "- category: ethnicity" in hate_text
     assert "flagged chunk body" in hate_text
     assert "- row: 5" in hate_text

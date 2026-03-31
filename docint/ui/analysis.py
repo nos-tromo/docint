@@ -497,7 +497,10 @@ def _entity_chunks_to_txt(entity: str, chunks: list[dict[str, Any]]) -> str:
             f"[{idx}] {chunk.get('filename')} page={chunk.get('page')} row={chunk.get('row')} "
             f"chunk_id={chunk.get('chunk_id')}"
         )
-        metadata_block = reference_metadata_text_block(chunk)
+        metadata_block = reference_metadata_text_block(
+            chunk,
+            include_text=False,
+        )
         if metadata_block:
             lines.append(metadata_block)
         lines.append(str(chunk.get("chunk_text") or ""))

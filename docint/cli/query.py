@@ -281,11 +281,16 @@ def _build_run_output_path(base_output_path: Path, *, collection_name: str) -> P
     return Path(base_output_path).expanduser() / f"{timestamp}_{collection_fragment}"
 
 
-def _reference_metadata_text_block(src: dict[str, Any]) -> str:
+def _reference_metadata_text_block(
+    src: dict[str, Any],
+    *,
+    include_text: bool = True,
+) -> str:
     """Return a multi-line text block for reference metadata.
 
     Args:
         src: Source dictionary containing optional reference metadata.
+        include_text: Whether to include the raw ``text`` field.
 
     Returns:
         Text block suitable for exports, or an empty string.
@@ -296,6 +301,8 @@ def _reference_metadata_text_block(src: dict[str, Any]) -> str:
 
     lines: list[str] = []
     for key, label in REFERENCE_METADATA_FIELDS.items():
+        if not include_text and key == "text":
+            continue
         value = raw.get(key)
         if value is None:
             continue
@@ -324,19 +331,22 @@ def _build_sources_txt(sources: list[dict[str, Any]]) -> str:
         page = source.get("page")
         row = source.get("row")
         chunk_id = str(source.get("chunk_id") or "").strip() or "n/a"
-        lines.append(
-            f"[{index}] {filename} page={page if page is not None else 'n/a'} "
-            f"row={row if row is not None else 'n/a'} chunk_id={chunk_id}"
-        )
-        metadata_block = _reference_metadata_text_block(source)
-        if metadata_block:
-            lines.append(metadata_block)
         content = str(
             source.get("chunk_text")
             or source.get("text")
             or source.get("preview_text")
             or ""
         ).strip()
+        lines.append(
+            f"[{index}] {filename} page={page if page is not None else 'n/a'} "
+            f"row={row if row is not None else 'n/a'} chunk_id={chunk_id}"
+        )
+        metadata_block = _reference_metadata_text_block(
+            source,
+            include_text=not bool(content),
+        )
+        if metadata_block:
+            lines.append(metadata_block)
         if content:
             lines.append(content)
         lines.append("")

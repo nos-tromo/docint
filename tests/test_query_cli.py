@@ -405,6 +405,35 @@ def test_export_entities_writes_top_entity_text(
     assert "2. Rivertown [LOC] - 4" in data
 
 
+def test_build_sources_txt_avoids_duplicate_reference_text() -> None:
+    """Source TXT export should not repeat the social-post body text."""
+    output = query_cli._build_sources_txt(
+        [
+            {
+                "filename": "posts.csv",
+                "row": 5,
+                "chunk_id": "p1",
+                "chunk_text": "Posting body",
+                "reference_metadata": {
+                    "network": "Facebook",
+                    "type": "posting",
+                    "timestamp": "2026-02-02T12:00:00Z",
+                    "author": "Alice",
+                    "author_id": "a1",
+                    "vanity": "alice-v",
+                    "text": "Posting body",
+                    "text_id": "p1",
+                },
+            }
+        ]
+    )
+
+    assert "- Network: Facebook" in output
+    assert "- Text ID: p1" in output
+    assert "- Text: Posting body" not in output
+    assert output.count("Posting body") == 1
+
+
 def test_export_hate_speech_writes_frontend_text_format(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

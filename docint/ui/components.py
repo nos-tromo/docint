@@ -164,16 +164,22 @@ def reference_metadata_inline(src: dict[str, Any]) -> str | None:
     return "  \n".join(f"**{label}**: {value}" for label, value in items)
 
 
-def reference_metadata_text_block(src: dict[str, Any]) -> str:
+def reference_metadata_text_block(
+    src: dict[str, Any],
+    *,
+    include_text: bool = True,
+) -> str:
     """Return a multiline text block for source reference metadata exports.
 
     Args:
         src: Source dictionary containing a possible ``reference_metadata`` dict.
+        include_text: Whether to include the raw ``text`` field in the results.
 
     Returns:
-        A multiline string summarising available reference metadata, or an empty string if none is available.
+        A multiline string summarising available reference metadata, or
+        an empty string if none is available.
     """
-    items = reference_metadata_items(src)
+    items = reference_metadata_items(src, include_text=include_text)
     if not items:
         return ""
     lines: list[str] = [f"- {label}: {value}" for label, value in items]
