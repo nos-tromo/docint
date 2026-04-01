@@ -210,12 +210,15 @@ def test_reference_metadata_helpers_format_compact_and_multiline_text() -> None:
         "reference_metadata": {
             "network": "Telegram",
             "type": "comment",
+            "uuid": "u1",
             "timestamp": "2026-01-02T10:00:00Z",
             "author": "Alice",
             "author_id": "a1",
             "vanity": "alice-v",
             "text": "Acme content",
             "text_id": "c1",
+            "parent_text": "Earlier comment",
+            "anchor_text": "Original post",
         }
     }
 
@@ -225,9 +228,15 @@ def test_reference_metadata_helpers_format_compact_and_multiline_text() -> None:
     assert inline is not None
     assert "**Network**: Telegram" in inline
     assert "**Text ID**: c1" in inline
+    assert "**UUID**: u1" in inline
+    assert "**Parent Text**: Earlier comment" in inline
+    assert "**Anchor Text**: Original post" in inline
     assert "Text: Acme content" not in inline
     assert text_block.startswith("- Network: Telegram\n")
+    assert "- UUID: u1" in text_block
     assert "- Author: Alice" in text_block
+    assert "- Parent Text: Earlier comment" in text_block
+    assert "- Anchor Text: Original post" in text_block
     assert "- Text: Acme content" in text_block
 
 
