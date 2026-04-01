@@ -1,8 +1,10 @@
+"""OpenAI-compatible model helpers and truncation-aware embedding wrappers."""
+
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from llama_index.core.bridge.pydantic import PrivateAttr
 from llama_index.core.base.llms.types import LLMMetadata
@@ -18,6 +20,10 @@ from docint.utils.env_cfg import (
     load_openai_env,
     load_path_env,
 )
+
+
+class EmbeddingInputTooLongError(RuntimeError):
+    """Raised when an embedding input still exceeds the context window."""
 
 
 class LocalOpenAI(LlamaIndexOpenAI):
@@ -177,6 +183,50 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
         except Exception as exc:  # pragma: no cover - defensive logging only
             logger.debug("Failed to deliver embedding truncation warning: {}", exc)
 
+    def _emit_skip_warning(
+        self,
+        *,
+        original_chars: int,
+        truncated_chars: int,
+        retries: int,
+        model_limit: int | None,
+        input_tokens: int | None,
+    ) -> str:
+        """Log and forward a warning for an input that must be skipped.
+
+        Args:
+            original_chars: Original payload size in characters.
+            truncated_chars: Final candidate size in characters.
+            retries: Number of truncation retries attempted.
+            model_limit: Parsed model limit in tokens, when available.
+            input_tokens: Parsed input token count, when available.
+
+        Returns:
+            str: The emitted warning message.
+        """
+        detail = ""
+        if model_limit is not None and input_tokens is not None:
+            detail = (
+                " Provider reported "
+                f"{input_tokens} input tokens against a "
+                f"{model_limit}-token limit."
+            )
+        message = (
+            "Warning: skipping embedding input after "
+            f"{retries} truncation attempt(s). Final candidate length was "
+            f"{truncated_chars} characters after starting at "
+            f"{original_chars} characters, but the payload still exceeded "
+            f"the model context window.{detail}"
+        )
+        logger.warning(message)
+        if self._warning_callback is None:
+            return message
+        try:
+            self._warning_callback(message)
+        except Exception as exc:  # pragma: no cover - defensive logging only
+            logger.debug("Failed to deliver embedding skip warning: {}", exc)
+        return message
+
     def _truncate_text(self, text: str, exc: Exception) -> str:
         """Return a smaller text candidate after a context-limit failure.
 
@@ -211,11 +261,14 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
         fallback_chars = max(1, len(text) - max(64, len(text) // 5))
         return text[:fallback_chars].rstrip() or text[:1]
 
-    def _embed_text_with_truncation(self, text: str) -> list[float]:
+    def _embed_text_with_truncation(
+        self, text: str, n_retries: int = 24
+    ) -> list[float]:
         """Embed a single text, truncating and retrying on context-limit errors.
 
         Args:
             text: Input text to embed.
+            n_retries: Maximum number of truncation attempts before giving up.
 
         Returns:
             list[float]: The embedding vector.
@@ -224,7 +277,7 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
         candidate = text
         last_exc: Exception | None = None
 
-        for _ in range(8):
+        for attempt in range(1, n_retries + 1):
             try:
                 embedding = super()._get_text_embedding(candidate)
                 if candidate != text:
@@ -244,16 +297,54 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
                 last_exc = exc
                 next_candidate = self._truncate_text(candidate, exc)
                 if not next_candidate or next_candidate == candidate:
-                    raise
+                    model_limit, input_tokens = self._extract_context_limit_details(
+                        str(exc)
+                    )
+                    message = self._emit_skip_warning(
+                        original_chars=original_chars,
+                        truncated_chars=len(candidate),
+                        retries=attempt,
+                        model_limit=model_limit,
+                        input_tokens=input_tokens,
+                    )
+                    raise EmbeddingInputTooLongError(message) from exc
                 candidate = next_candidate
 
-        return super()._get_text_embedding(candidate)
+        try:
+            embedding = super()._get_text_embedding(candidate)
+        except Exception as exc:
+            if not self._is_context_limit_error(exc):
+                raise
+            model_limit, input_tokens = self._extract_context_limit_details(str(exc))
+            message = self._emit_skip_warning(
+                original_chars=original_chars,
+                truncated_chars=len(candidate),
+                retries=n_retries,
+                model_limit=model_limit,
+                input_tokens=input_tokens,
+            )
+            raise EmbeddingInputTooLongError(message) from exc
 
-    async def _aembed_text_with_truncation(self, text: str) -> list[float]:
+        if candidate != text:
+            model_limit, input_tokens = self._extract_context_limit_details(
+                str(last_exc) if last_exc is not None else ""
+            )
+            self._emit_truncation_warning(
+                original_chars=original_chars,
+                truncated_chars=len(candidate),
+                model_limit=model_limit,
+                input_tokens=input_tokens,
+            )
+        return embedding
+
+    async def _aembed_text_with_truncation(
+        self, text: str, n_retries: int = 24
+    ) -> list[float]:
         """Async variant of ``_embed_text_with_truncation``.
 
         Args:
             text: Input text to embed.
+            n_retries: Maximum number of truncation attempts before giving up.
 
         Returns:
             list[float]: The embedding vector.
@@ -262,7 +353,7 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
         candidate = text
         last_exc: Exception | None = None
 
-        for _ in range(8):
+        for attempt in range(1, n_retries + 1):
             try:
                 embedding = await super()._aget_text_embedding(candidate)
                 if candidate != text:
@@ -282,10 +373,102 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
                 last_exc = exc
                 next_candidate = self._truncate_text(candidate, exc)
                 if not next_candidate or next_candidate == candidate:
-                    raise
+                    model_limit, input_tokens = self._extract_context_limit_details(
+                        str(exc)
+                    )
+                    message = self._emit_skip_warning(
+                        original_chars=original_chars,
+                        truncated_chars=len(candidate),
+                        retries=attempt,
+                        model_limit=model_limit,
+                        input_tokens=input_tokens,
+                    )
+                    raise EmbeddingInputTooLongError(message) from exc
                 candidate = next_candidate
 
-        return await super()._aget_text_embedding(candidate)
+        try:
+            embedding = await super()._aget_text_embedding(candidate)
+        except Exception as exc:
+            if not self._is_context_limit_error(exc):
+                raise
+            model_limit, input_tokens = self._extract_context_limit_details(str(exc))
+            message = self._emit_skip_warning(
+                original_chars=original_chars,
+                truncated_chars=len(candidate),
+                retries=n_retries,
+                model_limit=model_limit,
+                input_tokens=input_tokens,
+            )
+            raise EmbeddingInputTooLongError(message) from exc
+
+        if candidate != text:
+            model_limit, input_tokens = self._extract_context_limit_details(
+                str(last_exc) if last_exc is not None else ""
+            )
+            self._emit_truncation_warning(
+                original_chars=original_chars,
+                truncated_chars=len(candidate),
+                model_limit=model_limit,
+                input_tokens=input_tokens,
+            )
+        return embedding
+
+    def get_text_embeddings_with_skips(
+        self, texts: list[str]
+    ) -> list[list[float] | None]:
+        """Embed a batch of texts while allowing irreducible inputs to skip.
+
+        Args:
+            texts: Text batch to embed.
+
+        Returns:
+            list[list[float] | None]: Embeddings aligned to the input order.
+                ``None`` marks a skipped text that still exceeded the context
+                window after truncation retries.
+        """
+        try:
+            return cast(list[list[float] | None], super()._get_text_embeddings(texts))
+        except Exception as exc:
+            if not self._is_context_limit_error(exc):
+                raise
+
+        embeddings: list[list[float] | None] = []
+        for text in texts:
+            try:
+                embeddings.append(self._embed_text_with_truncation(text))
+            except EmbeddingInputTooLongError:
+                embeddings.append(None)
+        return embeddings
+
+    async def aget_text_embeddings_with_skips(
+        self, texts: list[str]
+    ) -> list[list[float] | None]:
+        """Async batch embedding that allows irreducible inputs to skip.
+
+        Args:
+            texts: Text batch to embed.
+
+        Returns:
+            list[list[float] | None]: Embeddings aligned to the input order.
+                ``None`` marks a skipped text that still exceeded the context
+                window after truncation retries.
+        """
+        try:
+            return cast(
+                list[list[float] | None],
+                await super()._aget_text_embeddings(texts),
+            )
+        except Exception as exc:
+            if not self._is_context_limit_error(exc):
+                raise
+
+        embeddings: list[list[float] | None] = []
+        for text in texts:
+            try:
+                embeddings.append(await self._aembed_text_with_truncation(text))
+            except EmbeddingInputTooLongError:
+                embeddings.append(None)
+        return embeddings
 
     def _get_text_embeddings(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts, falling back to per-item truncation on overflow.

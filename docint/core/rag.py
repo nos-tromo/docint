@@ -1,3 +1,5 @@
+"""Core RAG engine, ingestion, retrieval, and collection management."""
+
 from __future__ import annotations
 
 import gc
@@ -67,6 +69,7 @@ from llama_index.core.response_synthesizers.type import ResponseMode
 from llama_index.core.schema import (
     BaseNode,
     Document,
+    MetadataMode,
     NodeWithScore,
     QueryBundle,
     TextNode,
@@ -1852,6 +1855,112 @@ class RAG:
             return [n for n in nodes if n.metadata.get("docint_hier_type") != "coarse"]
         return nodes
 
+    def _prepare_vector_nodes_for_insert(
+        self,
+        nodes: list[BaseNode],
+    ) -> tuple[list[BaseNode], set[int]]:
+        """Attach embeddings and identify vector nodes that must be skipped.
+
+        Args:
+            nodes: Vector-indexable nodes for the current persistence batch.
+
+        Returns:
+            tuple[list[BaseNode], set[int]]: The embeddable nodes and the
+                ``id()`` values of skipped nodes.
+        """
+        embed_model = self._embed_model
+        get_embeddings_with_skips = getattr(
+            embed_model,
+            "get_text_embeddings_with_skips",
+            None,
+        )
+        if embed_model is None or not callable(get_embeddings_with_skips):
+            return nodes, set()
+
+        nodes_to_embed: list[BaseNode] = []
+        texts_to_embed: list[str] = []
+        for node in nodes:
+            if node.embedding is not None:
+                continue
+            nodes_to_embed.append(node)
+            texts_to_embed.append(node.get_content(metadata_mode=MetadataMode.EMBED))
+
+        if not nodes_to_embed:
+            return nodes, set()
+
+        embeddings = cast(
+            list[list[float] | None],
+            get_embeddings_with_skips(texts_to_embed),
+        )
+        skipped_node_ids: set[int] = set()
+        for node, embedding in zip(nodes_to_embed, embeddings):
+            if embedding is None:
+                skipped_node_ids.add(id(node))
+                chunk_id = str(node.metadata.get("chunk_id") or node.node_id)
+                logger.warning(
+                    "Skipping chunk '{}' because its embedding input still "
+                    "exceeded the context window after truncation retries.",
+                    chunk_id,
+                )
+                continue
+            node.embedding = embedding
+
+        prepared_nodes = [node for node in nodes if id(node) not in skipped_node_ids]
+        return prepared_nodes, skipped_node_ids
+
+    async def _aprepare_vector_nodes_for_insert(
+        self,
+        nodes: list[BaseNode],
+    ) -> tuple[list[BaseNode], set[int]]:
+        """Async variant of ``_prepare_vector_nodes_for_insert``.
+
+        Args:
+            nodes: Vector-indexable nodes for the current persistence batch.
+
+        Returns:
+            tuple[list[BaseNode], set[int]]: The embeddable nodes and the
+                ``id()`` values of skipped nodes.
+        """
+        embed_model = self._embed_model
+        aget_embeddings_with_skips = getattr(
+            embed_model,
+            "aget_text_embeddings_with_skips",
+            None,
+        )
+        if embed_model is None or not callable(aget_embeddings_with_skips):
+            return nodes, set()
+
+        nodes_to_embed: list[BaseNode] = []
+        texts_to_embed: list[str] = []
+        for node in nodes:
+            if node.embedding is not None:
+                continue
+            nodes_to_embed.append(node)
+            texts_to_embed.append(node.get_content(metadata_mode=MetadataMode.EMBED))
+
+        if not nodes_to_embed:
+            return nodes, set()
+
+        embeddings = cast(
+            list[list[float] | None],
+            await aget_embeddings_with_skips(texts_to_embed),
+        )
+        skipped_node_ids: set[int] = set()
+        for node, embedding in zip(nodes_to_embed, embeddings):
+            if embedding is None:
+                skipped_node_ids.add(id(node))
+                chunk_id = str(node.metadata.get("chunk_id") or node.node_id)
+                logger.warning(
+                    "Skipping chunk '{}' because its embedding input still "
+                    "exceeded the context window after truncation retries.",
+                    chunk_id,
+                )
+                continue
+            node.embedding = embedding
+
+        prepared_nodes = [node for node in nodes if id(node) not in skipped_node_ids]
+        return prepared_nodes, skipped_node_ids
+
     @staticmethod
     def _chunk_nodes(nodes: list[BaseNode], batch_size: int) -> list[list[BaseNode]]:
         """Split nodes into non-empty batches.
@@ -1891,10 +2000,20 @@ class RAG:
                 len(batches),
                 len(batch),
             )
-            self.index.docstore.add_documents(batch, allow_update=True)
             vector_nodes = self._select_vector_nodes(batch)
-            if vector_nodes:
-                self.index.insert_nodes(vector_nodes)
+            prepared_vector_nodes, skipped_node_ids = (
+                self._prepare_vector_nodes_for_insert(vector_nodes)
+            )
+            persisted_batch = [
+                node for node in batch if id(node) not in skipped_node_ids
+            ]
+            if persisted_batch:
+                self.index.docstore.add_documents(
+                    persisted_batch,
+                    allow_update=True,
+                )
+            if prepared_vector_nodes:
+                self.index.insert_nodes(prepared_vector_nodes)
 
     def _log_ingest_benchmark_summary(
         self,
@@ -1964,10 +2083,21 @@ class RAG:
                 len(batches),
                 len(batch),
             )
-            self.index.docstore.add_documents(batch, allow_update=True)
             vector_nodes = self._select_vector_nodes(batch)
-            if vector_nodes:
-                await self.index.ainsert_nodes(vector_nodes)
+            (
+                prepared_vector_nodes,
+                skipped_node_ids,
+            ) = await self._aprepare_vector_nodes_for_insert(vector_nodes)
+            persisted_batch = [
+                node for node in batch if id(node) not in skipped_node_ids
+            ]
+            if persisted_batch:
+                self.index.docstore.add_documents(
+                    persisted_batch,
+                    allow_update=True,
+                )
+            if prepared_vector_nodes:
+                await self.index.ainsert_nodes(prepared_vector_nodes)
 
     @staticmethod
     def _extract_file_hash(data: Any) -> str | None:
