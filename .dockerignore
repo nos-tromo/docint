@@ -25,14 +25,18 @@
 **/output/
 **/qdrant*/
 **/results/
+**/scripts/
 **/session/
 **/tests/
 
 # Environment and config files
 *.bundle
+*.conf
 *.pyc
 *.pyo
 *.so
+.gitignore
+.dockerignore
 .env*
 .pre-commit-config.yaml
 AGENTS.md
@@ -72,7 +76,5 @@ README.md
 docker-compose.override.yml
 
 # Exceptions
-!.gitignore
-!**/.dockerignore
 !**/prompts/*.txt
 !**/required_exts.txt

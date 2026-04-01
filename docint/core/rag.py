@@ -31,6 +31,7 @@ from docint.utils.env_cfg import (
     OpenAIConfig,
     PathConfig,
     RetrievalConfig,
+    RuntimeConfig,
     SessionConfig,
     SummaryConfig,
     load_graphrag_env,
@@ -42,6 +43,7 @@ from docint.utils.env_cfg import (
     load_openai_env,
     load_path_env,
     load_retrieval_env,
+    load_runtime_env,
     load_session_env,
     load_summary_env,
     resolve_hf_cache_path,
@@ -86,12 +88,15 @@ from qdrant_client import models as qdrant_models
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 
 from docint.core.ner import (
+    EntityMergeMode,
     aggregate_ner_sources,
     build_entity_graph,
     build_ner_stats,
+    entity_cluster_key,
     graph_neighbors,
     match_entity_text,
     normalize_entities,
+    normalize_entity_merge_mode,
     search_entities,
 )
 from docint.core.ingest.images_service import ImageIngestionService
@@ -819,6 +824,9 @@ class RAG:
     path_config: PathConfig = field(
         default_factory=load_path_env, init=False, repr=False
     )
+    runtime_config: RuntimeConfig = field(
+        default_factory=load_runtime_env, init=False, repr=False
+    )
     graphrag_config: GraphRAGConfig = field(
         default_factory=load_graphrag_env, init=False, repr=False
     )
@@ -841,10 +849,10 @@ class RAG:
     # --- Named entity recognition ---
     ner_enabled: bool = field(default=False, init=False)
     ner_sources: list[dict[str, Any]] = field(default_factory=list, init=False)
-    ner_aggregate_cache: dict[str, dict[str, Any]] = field(
+    ner_aggregate_cache: dict[tuple[str, str], dict[str, Any]] = field(
         default_factory=dict, init=False, repr=False
     )
-    ner_graph_cache: dict[tuple[str, int, int], dict[str, Any]] = field(
+    ner_graph_cache: dict[tuple[str, str, int, int], dict[str, Any]] = field(
         default_factory=dict, init=False, repr=False
     )
 
@@ -1192,6 +1200,70 @@ class RAG:
             raise ValueError("Qdrant source host directory is not set.")
         return self._qdrant_src_dir
 
+    def _resolve_requested_device(self, requested_device: str) -> str | None:
+        """Resolve an explicit runtime device preference.
+
+        Args:
+            requested_device (str): Normalized ``USE_DEVICE`` preference.
+
+        Returns:
+            str | None: Resolved device string, or ``None`` when auto-detection
+            should be used instead.
+        """
+        if requested_device == "cpu":
+            logger.info("Using configured CPU device for local workloads.")
+            return "cpu"
+
+        if requested_device == "mps":
+            if (
+                getattr(torch.backends, "mps", None)
+                and torch.backends.mps.is_available()
+                and torch.backends.mps.is_built()
+            ):
+                logger.info("Using configured MPS device for local workloads.")
+                return "mps"
+            logger.warning(
+                "Configured device '{}' is unavailable; falling back to auto detection.",
+                requested_device,
+            )
+            return None
+
+        if requested_device == "cuda" or requested_device.startswith("cuda:"):
+            if not torch.cuda.is_available():
+                logger.warning(
+                    "Configured device '{}' is unavailable; falling back to auto detection.",
+                    requested_device,
+                )
+                return None
+
+            if requested_device.startswith("cuda:"):
+                try:
+                    device_index = int(requested_device.split(":", maxsplit=1)[1])
+                except ValueError:
+                    logger.warning(
+                        "Configured device '{}' is invalid; falling back to auto detection.",
+                        requested_device,
+                    )
+                    return None
+                if device_index < 0 or device_index >= torch.cuda.device_count():
+                    logger.warning(
+                        "Configured device '{}' is unavailable; falling back to auto detection.",
+                        requested_device,
+                    )
+                    return None
+
+            logger.info(
+                "Using configured CUDA device '{}' for local workloads.",
+                requested_device,
+            )
+            return requested_device
+
+        logger.warning(
+            "Unsupported USE_DEVICE value '{}'; falling back to auto detection.",
+            requested_device,
+        )
+        return None
+
     @property
     def device(self) -> str:
         """Returns the device being used for computation.
@@ -1200,6 +1272,13 @@ class RAG:
             str: The device being used ("cpu", "cuda", or "mps").
         """
         if self._device is None:
+            requested_device = self.runtime_config.use_device
+            if requested_device != "auto":
+                resolved_device = self._resolve_requested_device(requested_device)
+                if resolved_device is not None:
+                    self._device = resolved_device
+                    return self._device
+
             if torch.cuda.is_available():
                 self._device = "cuda"
                 logger.info("Using CUDA for GPU acceleration.")
@@ -3087,11 +3166,14 @@ class RAG:
                 continue
             entity_matches.append(
                 {
+                    "key": str(entity.get("key") or ""),
                     "text": entity_text,
                     "type": str(entity.get("type") or "Unlabeled"),
                     "mentions": int(entity.get("mentions", 0) or 0),
                     "source_count": int(entity.get("source_count", 0) or 0),
                     "best_score": entity.get("best_score"),
+                    "variant_count": int(entity.get("variant_count", 0) or 0),
+                    "variants": list(entity.get("variants") or []),
                     "match_rank": int(match[0]),
                     "match_alias": str(match[1]),
                 }
@@ -3136,11 +3218,14 @@ class RAG:
     def _entity_candidate_payload(entity_match: dict[str, Any]) -> dict[str, Any]:
         """Normalize an entity match row for API/UI disambiguation payloads."""
         return {
+            "key": str(entity_match.get("key") or ""),
             "text": str(entity_match.get("text") or ""),
             "type": str(entity_match.get("type") or "Unlabeled"),
             "mentions": int(entity_match.get("mentions", 0) or 0),
             "source_count": int(entity_match.get("source_count", 0) or 0),
             "best_score": entity_match.get("best_score"),
+            "variant_count": int(entity_match.get("variant_count", 0) or 0),
+            "variants": list(entity_match.get("variants") or []),
             "match_rank": int(entity_match.get("match_rank", 99) or 99),
             "match_alias": str(entity_match.get("match_alias") or ""),
         }
@@ -3151,6 +3236,7 @@ class RAG:
         sources: list[dict[str, Any]],
         matched_entity: dict[str, Any],
         limit: int,
+        entity_merge_mode: EntityMergeMode,
     ) -> dict[str, Any]:
         """Build grouped occurrence results for one matched entity.
 
@@ -3162,19 +3248,28 @@ class RAG:
         Returns:
             dict[str, Any]: Group payload containing entity metadata and sources.
         """
+        matched_key = str(matched_entity.get("key") or "")
         matched_text = str(matched_entity["text"])
         matched_type = str(matched_entity["type"])
         occurrence_sources: list[dict[str, Any]] = []
         seen_keys: set[str] = set()
+        merge_mode = normalize_entity_merge_mode(entity_merge_mode)
 
         for source in sources:
             mention_rows: list[dict[str, Any]] = []
             for entity in normalize_entities(source.get("entities")):
                 entity_text = str(entity.get("text") or "").strip()
                 entity_type = str(entity.get("type") or "Unlabeled")
-                if entity_text.lower() != matched_text.lower():
-                    continue
                 if entity_type.lower() != matched_type.lower():
+                    continue
+                source_key = entity_cluster_key(
+                    entity_text,
+                    entity_type,
+                    entity_merge_mode=merge_mode,
+                )
+                if matched_key and source_key != matched_key:
+                    continue
+                if not matched_key and entity_text.lower() != matched_text.lower():
                     continue
                 mention_rows.append(
                     {
@@ -3189,8 +3284,11 @@ class RAG:
 
             source_row = dict(source)
             source_row["matched_entity"] = {
+                "key": matched_key,
                 "text": matched_text,
                 "type": matched_type,
+                "variant_count": int(matched_entity.get("variant_count", 0) or 0),
+                "variants": list(matched_entity.get("variants") or []),
                 "match_alias": str(matched_entity.get("match_alias") or ""),
             }
             source_row["matched_mentions"] = mention_rows
@@ -3255,6 +3353,7 @@ class RAG:
         qdrant_filter: qdrant_models.Filter | None = None,
         limit: int = 100,
         refresh: bool = False,
+        entity_merge_mode: EntityMergeMode = "orthographic",
     ) -> dict[str, Any]:
         """Return mention-level source rows for the best matching entity.
 
@@ -3277,7 +3376,8 @@ class RAG:
             if qdrant_filter is not None
             else self.get_collection_ner(refresh=refresh)
         )
-        aggregate = aggregate_ner_sources(sources)
+        merge_mode = normalize_entity_merge_mode(entity_merge_mode)
+        aggregate = aggregate_ner_sources(sources, entity_merge_mode=merge_mode)
         entity_matches = self._collect_entity_matches(aggregate, query=query)
 
         if not entity_matches:
@@ -3325,6 +3425,7 @@ class RAG:
             sources=sources,
             matched_entity=matched_entity,
             limit=limit,
+            entity_merge_mode=merge_mode,
         )
 
         response_text = (
@@ -3360,6 +3461,7 @@ class RAG:
         qdrant_filter: qdrant_models.Filter | None = None,
         limit: int = 100,
         refresh: bool = False,
+        entity_merge_mode: EntityMergeMode = "orthographic",
     ) -> dict[str, Any]:
         """Return grouped occurrence results for all strong entity matches.
 
@@ -3382,7 +3484,8 @@ class RAG:
             if qdrant_filter is not None
             else self.get_collection_ner(refresh=refresh)
         )
-        aggregate = aggregate_ner_sources(sources)
+        merge_mode = normalize_entity_merge_mode(entity_merge_mode)
+        aggregate = aggregate_ner_sources(sources, entity_merge_mode=merge_mode)
         entity_matches = self._collect_entity_matches(aggregate, query=query)
 
         if not entity_matches:
@@ -3411,6 +3514,7 @@ class RAG:
                 sources=sources,
                 matched_entity=match,
                 limit=per_group_limit,
+                entity_merge_mode=merge_mode,
             )
             for match in strong_matches
         ]
@@ -4067,10 +4171,16 @@ class RAG:
             self._parent_context_support_cache.clear()
             return
 
-        self.ner_aggregate_cache.pop(collection, None)
-        stale_graph_keys = [k for k in self.ner_graph_cache if k[0] == collection]
-        for key in stale_graph_keys:
-            self.ner_graph_cache.pop(key, None)
+        stale_aggregate_keys = [
+            key for key in self.ner_aggregate_cache if key[0] == collection
+        ]
+        for aggregate_key in stale_aggregate_keys:
+            self.ner_aggregate_cache.pop(aggregate_key, None)
+        stale_graph_keys: list[tuple[str, str, int, int]] = [
+            key for key in self.ner_graph_cache if key[0] == collection
+        ]
+        for graph_key in stale_graph_keys:
+            self.ner_graph_cache.pop(graph_key, None)
 
         if collection == self.qdrant_collection:
             self.ner_sources = []
@@ -5503,27 +5613,35 @@ class RAG:
         findings.sort(key=operator.itemgetter("source_ref", "chunk_id"))
         return findings
 
-    def _get_collection_ner_aggregate(self, refresh: bool = False) -> dict[str, Any]:
+    def _get_collection_ner_aggregate(
+        self,
+        *,
+        refresh: bool = False,
+        entity_merge_mode: EntityMergeMode = "orthographic",
+    ) -> dict[str, Any]:
         """Return cached aggregate NER payload for the active collection.
 
         Args:
             refresh: If ``True``, recompute aggregate from fresh collection NER rows.
+            entity_merge_mode: Entity clustering mode used for derived views.
 
         Returns:
             Aggregation dictionary for stats/search/graph operations.
         """
+        merge_mode = normalize_entity_merge_mode(entity_merge_mode)
         if not self.qdrant_collection:
-            return aggregate_ner_sources([])
+            return aggregate_ner_sources([], entity_merge_mode=merge_mode)
         if refresh:
             self._invalidate_ner_cache(self.qdrant_collection)
 
         collection = self.qdrant_collection
-        if collection in self.ner_aggregate_cache:
-            return self.ner_aggregate_cache[collection]
+        cache_key = (collection, merge_mode)
+        if cache_key in self.ner_aggregate_cache:
+            return self.ner_aggregate_cache[cache_key]
 
         sources = self.get_collection_ner(refresh=refresh)
-        aggregate = aggregate_ner_sources(sources)
-        self.ner_aggregate_cache[collection] = aggregate
+        aggregate = aggregate_ner_sources(sources, entity_merge_mode=merge_mode)
+        self.ner_aggregate_cache[cache_key] = aggregate
         return aggregate
 
     def get_collection_ner_stats(
@@ -5534,6 +5652,7 @@ class RAG:
         entity_type: str | None = None,
         include_relations: bool = True,
         refresh: bool = False,
+        entity_merge_mode: EntityMergeMode = "orthographic",
     ) -> dict[str, Any]:
         """Return collection-wide NER statistics for dashboard and analysis views.
 
@@ -5547,7 +5666,10 @@ class RAG:
         Returns:
             NER stats payload.
         """
-        aggregate = self._get_collection_ner_aggregate(refresh=refresh)
+        aggregate = self._get_collection_ner_aggregate(
+            refresh=refresh,
+            entity_merge_mode=entity_merge_mode,
+        )
         return build_ner_stats(
             aggregate,
             top_k=max(1, int(top_k)),
@@ -5563,6 +5685,7 @@ class RAG:
         entity_type: str | None = None,
         limit: int = 100,
         refresh: bool = False,
+        entity_merge_mode: EntityMergeMode = "orthographic",
     ) -> list[dict[str, Any]]:
         """Search canonicalized entities across the selected collection.
 
@@ -5575,7 +5698,10 @@ class RAG:
         Returns:
             Search result rows sorted by mention frequency.
         """
-        aggregate = self._get_collection_ner_aggregate(refresh=refresh)
+        aggregate = self._get_collection_ner_aggregate(
+            refresh=refresh,
+            entity_merge_mode=entity_merge_mode,
+        )
         return search_entities(
             aggregate,
             q=q,
@@ -5589,6 +5715,7 @@ class RAG:
         top_k_nodes: int = 100,
         min_edge_weight: int = 1,
         refresh: bool = False,
+        entity_merge_mode: EntityMergeMode = "orthographic",
     ) -> dict[str, Any]:
         """Build a derived NER graph for the selected collection.
 
@@ -5609,15 +5736,20 @@ class RAG:
         if refresh:
             self._invalidate_ner_cache(self.qdrant_collection)
 
+        merge_mode = normalize_entity_merge_mode(entity_merge_mode)
         cache_key = (
             self.qdrant_collection,
+            merge_mode,
             max(1, int(top_k_nodes)),
             max(1, int(min_edge_weight)),
         )
         if cache_key in self.ner_graph_cache:
             return self.ner_graph_cache[cache_key]
 
-        aggregate = self._get_collection_ner_aggregate(refresh=refresh)
+        aggregate = self._get_collection_ner_aggregate(
+            refresh=refresh,
+            entity_merge_mode=merge_mode,
+        )
         graph = build_entity_graph(
             aggregate,
             top_k_nodes=max(1, int(top_k_nodes)),
@@ -5634,6 +5766,7 @@ class RAG:
         top_k_nodes: int = 100,
         min_edge_weight: int = 1,
         refresh: bool = False,
+        entity_merge_mode: EntityMergeMode = "orthographic",
     ) -> dict[str, Any]:
         """Return a local graph neighborhood around a specific entity.
 
@@ -5651,6 +5784,7 @@ class RAG:
             top_k_nodes=top_k_nodes,
             min_edge_weight=min_edge_weight,
             refresh=refresh,
+            entity_merge_mode=entity_merge_mode,
         )
         return graph_neighbors(graph, entity=entity, hops=max(1, int(hops)))
 

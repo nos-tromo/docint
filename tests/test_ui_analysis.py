@@ -2,6 +2,7 @@
 
 from docint.ui.analysis import (
     _entity_chunks_to_txt,
+    _highlight_entity_text,
     _entity_related_chunks,
     _hate_speech_chunks_to_txt,
     _update_summary_metadata,
@@ -91,8 +92,66 @@ def test_entity_related_chunks_supports_name_key_and_missing_chunk_text() -> Non
     assert rows[1]["chunk_text"] == ""
 
 
+def test_entity_related_chunks_supports_condensed_entity_rows() -> None:
+    """Chunk matching should use aggregated variant metadata when available."""
+    sources = [
+        {
+            "filename": "docA.pdf",
+            "page": 1,
+            "chunk_id": "n1",
+            "chunk_text": "Parteitag mention.",
+            "entities": [{"text": "Parteitag", "type": "EVENT"}],
+        },
+        {
+            "filename": "docB.pdf",
+            "page": 2,
+            "chunk_id": "n2",
+            "chunk_text": "Partei Tag mention.",
+            "entities": [{"text": "Partei Tag", "type": "EVENT"}],
+        },
+    ]
+
+    rows = _entity_related_chunks(
+        {
+            "key": "parteitag::event",
+            "text": "Partei Tag",
+            "variants": [
+                {"text": "Parteitag"},
+                {"text": "Partei Tag"},
+            ],
+        },
+        sources,
+    )
+
+    assert [row["chunk_id"] for row in rows] == ["n1", "n2"]
+
+
+def test_highlight_entity_text_marks_all_variants() -> None:
+    """Highlighted entity text should mark all matched orthographic variants."""
+    highlighted = _highlight_entity_text(
+        "Parteitag and Partei Tag are both present.",
+        {
+            "text": "Partei Tag",
+            "variants": [{"text": "Parteitag"}, {"text": "Partei Tag"}],
+        },
+    )
+
+    assert "<mark" in highlighted
+    assert "Parteitag" in highlighted
+    assert "Partei Tag" in highlighted
+
+
+def test_highlight_entity_text_escapes_non_matching_html() -> None:
+    """Highlight helper should escape raw HTML outside of highlighted terms."""
+    highlighted = _highlight_entity_text("<b>Acme</b> & Co.", "Acme")
+
+    assert "&lt;b&gt;" in highlighted
+    assert "&amp; Co." in highlighted
+    assert "<mark" in highlighted
+
+
 def test_chunk_download_text_helpers_include_metadata() -> None:
-    """Download text helpers should include chunk metadata and body text."""
+    """Download text helpers should include metadata without body duplication."""
     entity_text = _entity_chunks_to_txt(
         "Acme",
         [
@@ -143,6 +202,8 @@ def test_chunk_download_text_helpers_include_metadata() -> None:
     assert "chunk_id=c1" in entity_text
     assert "Acme content" in entity_text
     assert "- Network: Telegram" in entity_text
+    assert "- Text: Acme content" not in entity_text
+    assert entity_text.count("Acme content") == 1
     assert "- category: ethnicity" in hate_text
     assert "flagged chunk body" in hate_text
     assert "- row: 5" in hate_text

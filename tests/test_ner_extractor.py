@@ -290,6 +290,206 @@ def test_build_gliner_ner_extractor_rewrites_backbone_to_local_cache(
     assert seen["model_name"] == str(deberta_snapshot)
 
 
+def test_build_gliner_ner_extractor_respects_requested_cpu_device(
+    monkeypatch,
+) -> None:
+    """GLiNER should stay on CPU when the caller requests ``cpu``.
+
+    Args:
+        monkeypatch: pytest fixture for safely patching functions and environment variables.
+    """
+
+    move_calls: list[str] = []
+
+    class FakeModel:
+        """Minimal GLiNER stand-in used for unit testing."""
+
+        def __init__(self) -> None:
+            """Initialize fake model runtime metadata."""
+            self.config, self.data_processor = _fake_gliner_runtime()
+
+        def to(self, device: str) -> "FakeModel":
+            """Record requested device moves.
+
+            Args:
+                device: Requested execution device.
+
+            Returns:
+                FakeModel: The model instance itself.
+            """
+            move_calls.append(device)
+            return self
+
+        def predict_entities(
+            self,
+            text: str,
+            labels: list[str],
+            *,
+            threshold: float,
+        ) -> list[dict[str, object]]:
+            """Return no entities for the provided text.
+
+            Args:
+                text: Input text.
+                labels: Requested labels.
+                threshold: Confidence threshold.
+
+            Returns:
+                list[dict[str, object]]: Empty predictions.
+            """
+            del text, labels, threshold
+            return []
+
+    monkeypatch.setattr(
+        ner_extractor_module,
+        "load_model_env",
+        lambda: SimpleNamespace(ner_model="urchade/gliner_small-v2.1"),
+    )
+    monkeypatch.setattr(
+        ner_extractor_module,
+        "load_path_env",
+        lambda: SimpleNamespace(hf_hub_cache="/tmp"),
+    )
+    monkeypatch.setattr(
+        ner_extractor_module,
+        "resolve_hf_cache_path",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    monkeypatch.setattr(
+        ner_extractor_module,
+        "_get_gliner_class",
+        lambda: SimpleNamespace(from_pretrained=lambda *_args, **_kwargs: FakeModel()),
+    )
+    monkeypatch.setattr(
+        ner_extractor_module.torch.cuda,
+        "is_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        ner_extractor_module.torch.cuda,
+        "device_count",
+        lambda: 2,
+    )
+    monkeypatch.setattr(
+        ner_extractor_module.torch.backends.mps,
+        "is_available",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        ner_extractor_module.torch.backends.mps,
+        "is_built",
+        lambda: False,
+    )
+
+    extractor = ner_extractor_module.build_gliner_ner_extractor(device="cpu")
+    entities, relations = extractor("Alice met Bob in Berlin")
+
+    assert entities == []
+    assert relations == []
+    assert move_calls == []
+
+
+def test_build_gliner_ner_extractor_moves_to_requested_cuda_device(
+    monkeypatch,
+) -> None:
+    """GLiNER should honor an explicit CUDA device selection.
+
+    Args:
+        monkeypatch: pytest fixture for safely patching functions and environment variables.
+    """
+
+    move_calls: list[str] = []
+
+    class FakeModel:
+        """Minimal GLiNER stand-in used for unit testing."""
+
+        def __init__(self) -> None:
+            """Initialize fake model runtime metadata."""
+            self.config, self.data_processor = _fake_gliner_runtime()
+
+        def to(self, device: str) -> "FakeModel":
+            """Record requested device moves.
+
+            Args:
+                device: Requested execution device.
+
+            Returns:
+                FakeModel: The model instance itself.
+            """
+            move_calls.append(device)
+            return self
+
+        def predict_entities(
+            self,
+            text: str,
+            labels: list[str],
+            *,
+            threshold: float,
+        ) -> list[dict[str, object]]:
+            """Return no entities for the provided text.
+
+            Args:
+                text: Input text.
+                labels: Requested labels.
+                threshold: Confidence threshold.
+
+            Returns:
+                list[dict[str, object]]: Empty predictions.
+            """
+            del text, labels, threshold
+            return []
+
+    monkeypatch.setattr(
+        ner_extractor_module,
+        "load_model_env",
+        lambda: SimpleNamespace(ner_model="urchade/gliner_small-v2.1"),
+    )
+    monkeypatch.setattr(
+        ner_extractor_module,
+        "load_path_env",
+        lambda: SimpleNamespace(hf_hub_cache="/tmp"),
+    )
+    monkeypatch.setattr(
+        ner_extractor_module,
+        "resolve_hf_cache_path",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    monkeypatch.setattr(
+        ner_extractor_module,
+        "_get_gliner_class",
+        lambda: SimpleNamespace(from_pretrained=lambda *_args, **_kwargs: FakeModel()),
+    )
+    monkeypatch.setattr(
+        ner_extractor_module.torch.cuda,
+        "is_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        ner_extractor_module.torch.cuda,
+        "device_count",
+        lambda: 2,
+    )
+    monkeypatch.setattr(
+        ner_extractor_module.torch.backends.mps,
+        "is_available",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        ner_extractor_module.torch.backends.mps,
+        "is_built",
+        lambda: False,
+    )
+
+    extractor = ner_extractor_module.build_gliner_ner_extractor(device="cuda:1")
+    entities, relations = extractor("Alice met Bob in Berlin")
+
+    assert entities == []
+    assert relations == []
+    assert move_calls == ["cuda:1"]
+
+
 def test_build_gliner_ner_extractor_chunks_long_inputs_on_sentence_boundaries(
     monkeypatch,
 ) -> None:

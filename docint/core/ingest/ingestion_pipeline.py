@@ -175,7 +175,9 @@ class DocumentIngestionPipeline:
             else:
                 logger.info("Initializing GLiNER NER extractor")
                 try:
-                    self.entity_extractor = build_gliner_ner_extractor()
+                    self.entity_extractor = build_gliner_ner_extractor(
+                        device=self.device
+                    )
                 except Exception:
                     logger.warning("GLiNER model unavailable – continuing without NER")
                     self.entity_extractor = None

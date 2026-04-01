@@ -73,3 +73,29 @@ def test_aggregate_ner_deduplicates_and_tracks_sources() -> None:
     assert rel["count"] == 2
     assert rel["best_score"] == 0.7
     assert rel["files"] == ["docA.pdf (p1)", "docA.pdf (row 2)"]
+
+
+def test_aggregate_ner_condenses_orthographic_entity_variants() -> None:
+    """UI aggregation should condense orthographic variants into one entity row."""
+    sources: list[dict[str, Any]] = [
+        {
+            "filename": "docA.pdf",
+            "page": 1,
+            "entities": [{"text": "Parteitag", "type": "EVENT", "score": 0.7}],
+        },
+        {
+            "filename": "docB.pdf",
+            "row": 2,
+            "entities": [{"text": "Partei Tag", "type": "EVENT", "score": 0.9}],
+        },
+    ]
+
+    entities, _ = app._aggregate_ner(sources)
+
+    assert len(entities) == 1
+    entity = entities[0]
+    assert entity["text"] == "Partei Tag"
+    assert entity["count"] == 2
+    assert entity["variant_count"] == 2
+    assert {row["text"] for row in entity["variants"]} == {"Parteitag", "Partei Tag"}
+    assert entity["files"] == ["docA.pdf (p1)", "docB.pdf (row 2)"]

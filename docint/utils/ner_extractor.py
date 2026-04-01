@@ -51,6 +51,76 @@ def _parse_ner_payload(raw: str) -> dict[str, Any]:
     return {}
 
 
+def _resolve_gliner_device(device: str | None) -> str | None:
+    """Resolve the execution device for GLiNER.
+
+    Args:
+        device (str | None): Requested device name.
+
+    Returns:
+        str | None: Device string to pass to ``model.to()``, or ``None`` to
+        keep GLiNER on CPU.
+    """
+    normalized = (device or "auto").strip().lower()
+    if not normalized or normalized == "auto":
+        if torch.cuda.is_available():
+            return "cuda"
+        if (
+            getattr(torch.backends, "mps", None)
+            and torch.backends.mps.is_available()
+            and torch.backends.mps.is_built()
+        ):
+            return "mps"
+        return None
+
+    if normalized == "cpu":
+        return None
+
+    if normalized == "mps":
+        if (
+            getattr(torch.backends, "mps", None)
+            and torch.backends.mps.is_available()
+            and torch.backends.mps.is_built()
+        ):
+            return "mps"
+        logger.warning(
+            "GLiNER requested device '{}' but MPS is unavailable; continuing on CPU.",
+            normalized,
+        )
+        return None
+
+    if normalized == "cuda" or normalized.startswith("cuda:"):
+        if not torch.cuda.is_available():
+            logger.warning(
+                "GLiNER requested device '{}' but CUDA is unavailable; continuing on CPU.",
+                normalized,
+            )
+            return None
+
+        if normalized.startswith("cuda:"):
+            try:
+                device_index = int(normalized.split(":", maxsplit=1)[1])
+            except ValueError:
+                logger.warning(
+                    "GLiNER requested invalid device '{}' and will continue on CPU.",
+                    normalized,
+                )
+                return None
+            if device_index < 0 or device_index >= torch.cuda.device_count():
+                logger.warning(
+                    "GLiNER requested device '{}' but it is unavailable; continuing on CPU.",
+                    normalized,
+                )
+                return None
+        return normalized
+
+    logger.warning(
+        "GLiNER received unsupported device '{}' and will continue on CPU.",
+        normalized,
+    )
+    return None
+
+
 def build_llm_ner_extractor(
     model: Any, prompt: str, max_chars: int
 ) -> Callable[[str], tuple[list[dict], list[dict]]]:
@@ -529,12 +599,14 @@ def _chunk_text_for_gliner(
 def build_gliner_ner_extractor(
     labels: list[str] | None = None,
     threshold: float = 0.3,
+    device: str | None = None,
 ) -> Callable[[str], tuple[list[dict], list[dict]]]:
     """Create an NER extractor bound to a GLiNER model.
 
     Args:
         labels (list[str] | None): The entity labels to extract.
         threshold (float): Confidence threshold.
+        device (str | None): Preferred execution device.
 
     Returns:
         Callable[[str], tuple[list[dict], list[dict]]]: The NER extraction function.
@@ -575,12 +647,10 @@ def build_gliner_ner_extractor(
         logger.error("Failed to load GLiNER model: {}. Error: {}", model_id, e)
         raise
 
-    if torch.cuda.is_available():
-        model = model.to("cuda")
-        logger.info("GLiNER moved to CUDA")
-    elif torch.backends.mps.is_available():
-        model = model.to("mps")
-        logger.info("GLiNER moved to MPS")
+    target_device = _resolve_gliner_device(device)
+    if target_device is not None:
+        model = model.to(target_device)
+        logger.info("GLiNER moved to {}", target_device)
 
     max_tokens = _resolve_gliner_context_window(model)
     tokenizer = _get_gliner_tokenizer(model)

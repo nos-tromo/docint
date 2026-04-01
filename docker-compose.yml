@@ -16,16 +16,7 @@ x-base-image-build-args: &base-image-build-args
   VLLM_OPENAI_IMAGE: ${VLLM_OPENAI_IMAGE:-vllm/vllm-openai:v0.17.1}
 
 x-build-args: &build-args
-  HTTP_PROXY: ${HTTP_PROXY:-}
-  HTTPS_PROXY: ${HTTPS_PROXY:-}
-  NO_PROXY: ${NO_PROXY:-}
-  http_proxy: ${http_proxy:-}
-  https_proxy: ${https_proxy:-}
-  no_proxy: ${no_proxy:-}
-  PYTHON_SLIM_BOOKWORM_IMAGE: ${PYTHON_SLIM_BOOKWORM_IMAGE:-python:3.11-slim-bookworm}
-  PYTHON_SLIM_IMAGE: ${PYTHON_SLIM_IMAGE:-python:3.11-slim}
-  NVIDIA_CUDA_RUNTIME_IMAGE: ${NVIDIA_CUDA_RUNTIME_IMAGE:-nvidia/cuda:13.0.2-cudnn-runtime-ubuntu22.04}
-  VLLM_OPENAI_IMAGE: ${VLLM_OPENAI_IMAGE:-vllm/vllm-openai:v0.17.1}
+  <<: [*proxy-build-args, *base-image-build-args]
 
 x-docker-env-file: &docker-env-file
   - .env.docker
@@ -41,16 +32,16 @@ x-backend-cpu: &backend-cpu
   environment: &backend-cpu-env
     LOG_PATH: /var/log/docint/backend-cpu.log
     QDRANT_HOST: http://qdrant:6333
-    QDRANT_SRC_DIR: /qdrant/storage/sources
-    SESSIONS_PATH: /var/lib/docint/sessions/sessions.db
-    USE_DEVICE: auto
+    QDRANT_SRC_DIR: /var/lib/docint/sources
+    SESSIONS_PATH: /var/lib/docint/sessions
+    USE_DEVICE: ${USE_DEVICE:-auto}
   env_file: *docker-env-file
   volumes: &backend-volumes
     - docint-logs:/var/log/docint
     - docling-cache:/root/.cache/docling
     - huggingface-cache:/root/.cache/huggingface/hub
-    - qdrant-sources:/qdrant/storage/sources
-    - sessions-storage:/var/lib/docint/sessions/
+    - qdrant-sources:/var/lib/docint/sources
+    - sessions-storage:/var/lib/docint/sessions
     - whisper-cache:/root/.cache/whisper
   networks: &backend-net
     docint-net:
@@ -69,9 +60,9 @@ x-backend-cuda: &backend-cuda
     LOG_PATH: /var/log/docint/backend-cuda.log
     NVIDIA_VISIBLE_DEVICES: all
     QDRANT_HOST: http://qdrant:6333
-    QDRANT_SRC_DIR: /qdrant/storage/sources
-    SESSIONS_PATH: /var/lib/docint/sessions/sessions.db
-    USE_DEVICE: auto
+    QDRANT_SRC_DIR: /var/lib/docint/sources
+    SESSIONS_PATH: /var/lib/docint/sessions
+    USE_DEVICE: ${USE_DEVICE:-auto}
   env_file: *docker-env-file
   volumes: *backend-volumes
   deploy:
@@ -111,7 +102,7 @@ x-qdrant-cuda: &qdrant-cuda
     NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics
     NVIDIA_VISIBLE_DEVICES: all
     QDRANT__GPU__INDEXING: "1"
-  deploy:
+  deploy: &cuda-deploy
     resources:
       reservations:
         devices:
@@ -187,6 +178,7 @@ services:
       <<: *backend-cuda-env
       INFERENCE_PROVIDER: vllm
       OPENAI_API_BASE: http://vllm-router:9000/v1
+      USE_DEVICE: ${USE_DEVICE:-cpu}
 
   ##########################################################
   # Ollama (CPU)
@@ -195,16 +187,16 @@ services:
     profiles: ["cpu-ollama"]
     image: ollama/ollama:0.17.7
     env_file: *docker-env-file
-    environment:
-      - OLLAMA_HOST=0.0.0.0
-    volumes:
+    environment: &ollama-env
+      OLLAMA_HOST: 0.0.0.0
+    volumes: &ollama-volumes
       - ollama-cache:/root/.ollama
-    healthcheck:
+    healthcheck: &ollama-healthcheck
       test: ["CMD", "ollama", "list"]
       interval: 5s
       timeout: 10s
       retries: 5
-    networks:
+    networks: &ollama-net
       docint-net:
         aliases:
           - ollama-server
@@ -218,27 +210,13 @@ services:
     gpus: all
     env_file: *docker-env-file
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - OLLAMA_HOST=0.0.0.0
-    volumes:
-      - ollama-cache:/root/.ollama
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 5s
-      timeout: 10s
-      retries: 5
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+      <<: *ollama-env
+      NVIDIA_VISIBLE_DEVICES: all
+    volumes: *ollama-volumes
+    healthcheck: *ollama-healthcheck
+    deploy: *cuda-deploy
     restart: unless-stopped
-    networks:
-      docint-net:
-        aliases:
-          - ollama-server
+    networks: *ollama-net
 
   ##########################################################
   # vLLM Router (CUDA)
@@ -272,7 +250,6 @@ services:
       dockerfile: Dockerfile.vllm
       args:
         <<: *build-args
-    image: docint-vllm-openai:v0.17.1
     gpus: all
     env_file: *docker-env-file
     ipc: host
@@ -302,19 +279,13 @@ services:
           set -- "$@" --limit-mm-per-prompt "$${CHAT_LIMIT_MM_PER_PROMPT}";
         fi;
         exec "$@"
-    environment:
+    environment: &vllm-env
       NVIDIA_VISIBLE_DEVICES: all
       HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-1}"
       TRANSFORMERS_OFFLINE: "${TRANSFORMERS_OFFLINE:-1}"
-    volumes:
+    volumes: &vllm-volumes
       - huggingface-cache:/root/.cache/huggingface/hub
-
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              capabilities: [gpu]
+    deploy: *cuda-deploy
     networks:
       docint-net:
         aliases:
@@ -333,7 +304,6 @@ services:
       dockerfile: Dockerfile.vllm
       args:
         <<: *build-args
-    image: docint-vllm-openai:v0.17.1
     gpus: all
     env_file: *docker-env-file
     ipc: host
@@ -354,18 +324,9 @@ services:
           set -- "$@" --hf-overrides '{"architectures":["BgeM3EmbeddingModel"]}';
         fi;
         exec "$@"
-    environment:
-      NVIDIA_VISIBLE_DEVICES: all
-      HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-1}"
-      TRANSFORMERS_OFFLINE: "${TRANSFORMERS_OFFLINE:-1}"
-    volumes:
-      - huggingface-cache:/root/.cache/huggingface/hub
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              capabilities: [gpu]
+    environment: *vllm-env
+    volumes: *vllm-volumes
+    deploy: *cuda-deploy
     networks:
       docint-net:
         aliases:
@@ -384,7 +345,6 @@ services:
       dockerfile: Dockerfile.vllm
       args:
         <<: *build-args
-    image: docint-vllm-openai:v0.17.1
     gpus: all
     env_file: *docker-env-file
     ipc: host
@@ -396,19 +356,10 @@ services:
         --api-key "$${OPENAI_API_KEY:-sk-no-key-required}"
         --host 0.0.0.0
         --port 8000
-        --gpu-memory-utilization "$${AUDIO_GPU_MEMORY_UTILIZATION:-0.1}"
-    environment:
-      NVIDIA_VISIBLE_DEVICES: all
-      HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-1}"
-      TRANSFORMERS_OFFLINE: "${TRANSFORMERS_OFFLINE:-1}"
-    volumes:
-      - huggingface-cache:/root/.cache/huggingface/hub
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              capabilities: [gpu]
+        --gpu-memory-utilization "$${AUDIO_GPU_MEMORY_UTILIZATION:-0.15}"
+    environment: *vllm-env
+    volumes: *vllm-volumes
+    deploy: *cuda-deploy
     networks:
       docint-net:
         aliases:
@@ -427,7 +378,6 @@ services:
       dockerfile: Dockerfile.vllm
       args:
         <<: *build-args
-    image: docint-vllm-openai:v0.17.1
     gpus: all
     env_file: *docker-env-file
     ipc: host
@@ -441,18 +391,9 @@ services:
         --port 8000
         --runner "$${RERANK_RUNNER:-pooling}"
         --gpu-memory-utilization "$${RERANK_GPU_MEMORY_UTILIZATION:-0.15}"
-    environment:
-      NVIDIA_VISIBLE_DEVICES: all
-      HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-1}"
-      TRANSFORMERS_OFFLINE: "${TRANSFORMERS_OFFLINE:-1}"
-    volumes:
-      - huggingface-cache:/root/.cache/huggingface/hub
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              capabilities: [gpu]
+    environment: *vllm-env
+    volumes: *vllm-volumes
+    deploy: *cuda-deploy
     networks:
       docint-net:
         aliases:
@@ -499,13 +440,17 @@ services:
 volumes:
   docint-logs:
   docling-cache:
+    external: true
   huggingface-cache:
+    external: true
   ollama-cache:
+    external: true
   qdrant-snapshots:
   qdrant-sources:
   qdrant-storage:
   sessions-storage:
   whisper-cache:
+    external: true
 
 ##########################################################
 # Networks

@@ -12,8 +12,10 @@ from __future__ import annotations
 from collections import defaultdict
 from itertools import combinations
 import re
-from typing import Any
+from typing import Any, Literal
 
+
+EntityMergeMode = Literal["orthographic", "exact"]
 
 _LOOKUP_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 _ACRONYM_STOPWORDS = {
@@ -90,15 +92,27 @@ def _normalize_type(value: Any) -> str:
     return txt if txt else "Unlabeled"
 
 
+def normalize_entity_merge_mode(value: Any) -> EntityMergeMode:
+    """Normalize entity-merge mode inputs.
+
+    Args:
+        value: Requested merge mode.
+
+    Returns:
+        Supported merge mode, defaulting to ``"orthographic"``.
+    """
+    return "exact" if str(value or "").strip().lower() == "exact" else "orthographic"
+
+
 def _entity_key(text: str, entity_type: str) -> str:
-    """Build a canonical entity key.
+    """Build an exact canonical entity key.
 
     Args:
         text: Entity text.
         entity_type: Entity type/label.
 
     Returns:
-        Canonical key for indexing.
+        Stable cluster key for entity aggregation.
     """
     return f"{text.lower()}::{entity_type.lower()}"
 
@@ -125,6 +139,30 @@ def _compact_lookup(text: str) -> str:
         Lowercase compact lookup form.
     """
     return "".join(token.lower() for token in _tokenize_lookup(text))
+
+
+def entity_cluster_key(
+    text: str,
+    entity_type: str,
+    *,
+    entity_merge_mode: EntityMergeMode = "orthographic",
+) -> str:
+    """Build an entity cluster key for the configured merge mode.
+
+    Args:
+        text: Entity text.
+        entity_type: Entity type/label.
+        entity_merge_mode: Merge mode used for canonicalization.
+
+    Returns:
+        Stable cluster key for entity aggregation.
+    """
+    merge_mode = normalize_entity_merge_mode(entity_merge_mode)
+    if merge_mode == "exact":
+        return _entity_key(text, entity_type)
+
+    compact = _compact_lookup(text) or str(text or "").strip().lower()
+    return f"{compact}::{entity_type.lower()}"
 
 
 def _entity_aliases(text: str) -> set[str]:
@@ -265,19 +303,140 @@ def normalize_relations(relations: list[Any] | None) -> list[dict[str, Any]]:
     return normalized
 
 
-def aggregate_ner_sources(sources: list[dict[str, Any]] | None) -> dict[str, Any]:
+def _variant_rows(row: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return sorted variant payloads for an entity row.
+
+    Args:
+        row: Entity cluster row containing a ``variant_map``.
+
+    Returns:
+        List of variant dictionaries sorted by mention count and score.
+    """
+    variants: list[dict[str, Any]] = []
+    for variant in row["variant_map"].values():
+        variants.append(
+            {
+                "text": variant["text"],
+                "mentions": int(variant["mentions"]),
+                "best_score": variant.get("best_score"),
+                "source_count": len(variant["sources"]),
+            }
+        )
+    variants.sort(
+        key=lambda item: (
+            -int(item["mentions"]),
+            -(
+                float(item["best_score"])
+                if item.get("best_score") is not None
+                else -1.0
+            ),
+            str(item["text"]).lower(),
+        )
+    )
+    return variants
+
+
+def _canonical_variant_text(row: dict[str, Any]) -> str:
+    """Choose the canonical display text for a merged entity row.
+
+    Args:
+        row: Entity cluster row containing a ``variant_map``.
+
+    Returns:
+        Canonical display text for the entity row.
+    """
+    winner = min(
+        row["variant_map"].values(),
+        key=lambda item: (
+            -int(item["mentions"]),
+            -(
+                float(item["best_score"])
+                if item.get("best_score") is not None
+                else -1.0
+            ),
+            int(item["first_seen"]),
+        ),
+    )
+    return str(winner["text"])
+
+
+def _add_lookup_key(index: dict[str, list[str]], lookup: str, key: str) -> None:
+    """Append a cluster key to a lookup map without duplicates.
+
+    Args:
+        index: Lookup map to update.
+        lookup: Lookup key.
+        key: Cluster key to append.
+    """
+    if not lookup:
+        return
+    keys = index.setdefault(lookup, [])
+    if key not in keys:
+        keys.append(key)
+
+
+def _resolve_entity_reference(
+    text: str,
+    *,
+    local_text_to_keys: dict[str, list[str]],
+    local_compact_to_keys: dict[str, list[str]],
+    global_text_to_keys: dict[str, list[str]],
+    global_compact_to_keys: dict[str, list[str]],
+    canonical_text_by_key: dict[str, str],
+) -> tuple[str | None, str]:
+    """Resolve a relation endpoint to a canonical entity when unambiguous.
+
+    Args:
+        text: Raw relation endpoint text.
+        local_text_to_keys: Local lookup map for exact text matches.
+        local_compact_to_keys: Local lookup map for compacted text matches.
+        global_text_to_keys: Global lookup map for exact text matches.
+        global_compact_to_keys: Global lookup map for compacted text matches.
+        canonical_text_by_key: Mapping of cluster keys to canonical text.
+
+    Returns:
+        Tuple containing the resolved cluster key (or None) and the canonical text.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return None, ""
+
+    text_lookup = raw.lower()
+    compact_lookup = _compact_lookup(raw)
+    for mapping in (
+        local_text_to_keys.get(text_lookup, []),
+        local_compact_to_keys.get(compact_lookup, []),
+        global_text_to_keys.get(text_lookup, []),
+        global_compact_to_keys.get(compact_lookup, []),
+    ):
+        if len(mapping) == 1:
+            key = mapping[0]
+            return key, str(canonical_text_by_key.get(key) or raw)
+
+    return None, raw
+
+
+def aggregate_ner_sources(
+    sources: list[dict[str, Any]] | None,
+    *,
+    entity_merge_mode: EntityMergeMode = "orthographic",
+) -> dict[str, Any]:
     """Aggregate NER payloads across source rows.
 
     Args:
         sources: Source metadata rows containing optional ``entities`` and ``relations``.
+        entity_merge_mode: Entity clustering mode used for aggregation.
 
     Returns:
         Aggregation dictionary used by stats/search/graph helpers.
     """
+    merge_mode = normalize_entity_merge_mode(entity_merge_mode)
     entity_index: dict[str, dict[str, Any]] = {}
     relation_index: dict[tuple[str, str, str], dict[str, Any]] = {}
     doc_index: dict[str, dict[str, Any]] = {}
     source_entity_sets: list[set[str]] = []
+    pending_relations: list[dict[str, Any]] = []
+    seen_counter = 0
 
     for src in sources or []:
         if not isinstance(src, dict):
@@ -299,20 +458,29 @@ def aggregate_ner_sources(sources: list[dict[str, Any]] | None) -> dict[str, Any
             doc_entry["ie_source_count"] += 1
 
         source_keys: set[str] = set()
+        local_text_to_keys: dict[str, list[str]] = {}
+        local_compact_to_keys: dict[str, list[str]] = {}
+
         for ent in normalized_entities:
             text = str(ent["text"])
             entity_type = str(ent["type"])
-            key = _entity_key(text, entity_type)
+            key = entity_cluster_key(
+                text,
+                entity_type,
+                entity_merge_mode=merge_mode,
+            )
             source_keys.add(key)
+            _add_lookup_key(local_text_to_keys, text.lower(), key)
+            _add_lookup_key(local_compact_to_keys, _compact_lookup(text), key)
 
             if key not in entity_index:
                 entity_index[key] = {
                     "key": key,
-                    "text": text,
                     "type": entity_type,
                     "mentions": 0,
                     "best_score": ent.get("score"),
                     "sources": set(),
+                    "variant_map": {},
                 }
             row = entity_index[key]
             row["mentions"] += 1
@@ -325,23 +493,108 @@ def aggregate_ner_sources(sources: list[dict[str, Any]] | None) -> dict[str, Any
                     else ent["score"]
                 )
 
+            variant_map = row["variant_map"]
+            if text not in variant_map:
+                variant_map[text] = {
+                    "text": text,
+                    "mentions": 0,
+                    "best_score": ent.get("score"),
+                    "sources": set(),
+                    "first_seen": seen_counter,
+                }
+                seen_counter += 1
+            variant_row = variant_map[text]
+            variant_row["mentions"] += 1
+            variant_row["sources"].add(filename)
+            if ent.get("score") is not None:
+                current = variant_row.get("best_score")
+                variant_row["best_score"] = (
+                    max(float(current), float(ent["score"]))
+                    if current is not None
+                    else ent["score"]
+                )
+
             doc_entry["entity_mentions"] += 1
             doc_entry["entity_counter"][key] += 1
 
         if source_keys:
             source_entity_sets.append(source_keys)
 
-        for rel in normalized_relations:
+        pending_relations.append(
+            {
+                "filename": filename,
+                "relations": normalized_relations,
+                "local_text_to_keys": local_text_to_keys,
+                "local_compact_to_keys": local_compact_to_keys,
+            }
+        )
+
+    entity_rows: list[dict[str, Any]] = []
+    canonical_text_by_key: dict[str, str] = {}
+    text_to_keys: dict[str, list[str]] = {}
+    compact_to_keys: dict[str, list[str]] = {}
+    for row in entity_index.values():
+        canonical_text = _canonical_variant_text(row)
+        canonical_text_by_key[row["key"]] = canonical_text
+        variants = _variant_rows(row)
+        entity_row = {
+            "key": row["key"],
+            "text": canonical_text,
+            "type": row["type"],
+            "mentions": int(row["mentions"]),
+            "best_score": row.get("best_score"),
+            "sources": sorted(row["sources"]),
+            "source_count": len(row["sources"]),
+            "variant_count": len(variants),
+            "variants": variants,
+        }
+        entity_rows.append(entity_row)
+
+        _add_lookup_key(text_to_keys, canonical_text.lower(), row["key"])
+        _add_lookup_key(text_to_keys, _compact_lookup(canonical_text), row["key"])
+        _add_lookup_key(compact_to_keys, _compact_lookup(canonical_text), row["key"])
+        for variant in variants:
+            variant_text = str(variant["text"])
+            _add_lookup_key(text_to_keys, variant_text.lower(), row["key"])
+            _add_lookup_key(text_to_keys, _compact_lookup(variant_text), row["key"])
+            _add_lookup_key(compact_to_keys, _compact_lookup(variant_text), row["key"])
+
+    entity_rows.sort(key=lambda x: (-int(x["mentions"]), str(x["text"]).lower()))
+
+    for pending in pending_relations:
+        filename = str(pending["filename"])
+        local_text_to_keys = dict(pending["local_text_to_keys"])
+        local_compact_to_keys = dict(pending["local_compact_to_keys"])
+        for rel in pending["relations"]:
+            head_key, head_text = _resolve_entity_reference(
+                str(rel["head"]),
+                local_text_to_keys=local_text_to_keys,
+                local_compact_to_keys=local_compact_to_keys,
+                global_text_to_keys=text_to_keys,
+                global_compact_to_keys=compact_to_keys,
+                canonical_text_by_key=canonical_text_by_key,
+            )
+            tail_key, tail_text = _resolve_entity_reference(
+                str(rel["tail"]),
+                local_text_to_keys=local_text_to_keys,
+                local_compact_to_keys=local_compact_to_keys,
+                global_text_to_keys=text_to_keys,
+                global_compact_to_keys=compact_to_keys,
+                canonical_text_by_key=canonical_text_by_key,
+            )
+            label = str(rel["label"] or "rel")
             rel_key = (
-                str(rel["head"]).lower(),
-                str(rel["label"]).lower(),
-                str(rel["tail"]).lower(),
+                head_key or head_text.lower(),
+                label.lower(),
+                tail_key or tail_text.lower(),
             )
             if rel_key not in relation_index:
                 relation_index[rel_key] = {
-                    "head": rel["head"],
-                    "tail": rel["tail"],
-                    "label": rel["label"],
+                    "head": head_text,
+                    "head_key": head_key,
+                    "tail": tail_text,
+                    "tail_key": tail_key,
+                    "label": label,
                     "mentions": 0,
                     "best_score": rel.get("score"),
                     "sources": set(),
@@ -357,27 +610,14 @@ def aggregate_ner_sources(sources: list[dict[str, Any]] | None) -> dict[str, Any
                     else rel["score"]
                 )
 
-    entity_rows: list[dict[str, Any]] = []
-    for row in entity_index.values():
-        entity_rows.append(
-            {
-                "key": row["key"],
-                "text": row["text"],
-                "type": row["type"],
-                "mentions": int(row["mentions"]),
-                "best_score": row.get("best_score"),
-                "sources": sorted(row["sources"]),
-                "source_count": len(row["sources"]),
-            }
-        )
-    entity_rows.sort(key=lambda x: (-int(x["mentions"]), str(x["text"]).lower()))
-
     relation_rows: list[dict[str, Any]] = []
     for row in relation_index.values():
         relation_rows.append(
             {
                 "head": row["head"],
+                "head_key": row.get("head_key"),
                 "tail": row["tail"],
+                "tail_key": row.get("tail_key"),
                 "label": row["label"],
                 "mentions": int(row["mentions"]),
                 "best_score": row.get("best_score"),
@@ -416,16 +656,14 @@ def aggregate_ner_sources(sources: list[dict[str, Any]] | None) -> dict[str, Any
         )
     documents.sort(key=lambda x: (-int(x["entity_mentions"]), str(x["filename"])))
 
-    text_to_keys: dict[str, list[str]] = defaultdict(list)
-    for ent in entity_rows:
-        text_to_keys[str(ent["text"]).lower()].append(str(ent["key"]))
-
     return {
         "entities": entity_rows,
         "relations": relation_rows,
         "documents": documents,
         "source_entity_sets": source_entity_sets,
-        "text_to_keys": dict(text_to_keys),
+        "text_to_keys": text_to_keys,
+        "compact_to_keys": compact_to_keys,
+        "entity_merge_mode": merge_mode,
     }
 
 
@@ -440,14 +678,14 @@ def build_ner_stats(
     """Build dashboard-friendly NER statistics from an aggregate payload.
 
     Args:
-        aggregate: Output of ``aggregate_ner_sources`` helper.
-        top_k: Number of top entities and relations to return.
-        min_mentions: Minimum mention count for entities and relations to be included.
-        entity_type: Optional filter to include only entities of a given type/label.
-        include_relations: Whether to include relations in the statistics.
+        aggregate: Aggregated NER payload from ``aggregate_ner_sources``.
+        top_k: Maximum number of entities and relations to include in the output.
+        min_mentions: Minimum number of mentions for entities and relations to be included.
+        entity_type: Optional filter to include only entities of a specific type/label.
+        include_relations: Whether to include relation statistics in the output.
 
     Returns:
-        dict[str, Any]: A dictionary containing the dashboard-friendly NER statistics.
+        Dictionary containing totals, top entities, entity type rollups, top relations, and document stats
     """
     entities_all = list(aggregate.get("entities") or [])
     relations_all = list(aggregate.get("relations") or [])
@@ -460,13 +698,13 @@ def build_ner_stats(
         else entities_all
     )
 
-    allowed_texts = {str(e.get("text") or "").lower() for e in entities}
+    allowed_keys = {str(e.get("key") or "") for e in entities}
     if type_filter:
         relations = [
             r
             for r in relations_all
-            if str(r.get("head") or "").lower() in allowed_texts
-            or str(r.get("tail") or "").lower() in allowed_texts
+            if str(r.get("head_key") or "") in allowed_keys
+            or str(r.get("tail_key") or "") in allowed_keys
         ]
     else:
         relations = relations_all
@@ -493,6 +731,8 @@ def build_ner_stats(
             "mentions": int(row["mentions"]),
             "best_score": row.get("best_score"),
             "source_count": int(row.get("source_count", 0) or 0),
+            "variant_count": int(row.get("variant_count", 0) or 0),
+            "variants": list(row.get("variants") or []),
         }
         for row in ranked_entities[:top_k]
     ]
@@ -584,13 +824,13 @@ def search_entities(
     """Search canonicalized entities in aggregated NER payloads.
 
     Args:
-        aggregate: Output of ``aggregate_ner_sources`` helper.
-        q: Optional text query to match against entity text.
-        entity_type: Optional filter to include only entities of a given type/label.
-        limit: Maximum number of results to return.
+        aggregate: Aggregated NER payload from ``aggregate_ner_sources``.
+        q: Search query string to match against entity texts.
+        entity_type: Optional filter to include only entities of a specific type/label.
+        limit: Maximum number of search results to return.
 
     Returns:
-        List of matching entities with their metadata.
+        List of matching entities sorted by relevance and mention count.
     """
     entities = list(aggregate.get("entities") or [])
     query = str(q or "").strip().lower()
@@ -605,12 +845,16 @@ def search_entities(
             continue
         rows.append(
             {
+                "key": ent.get("key"),
                 "text": ent.get("text"),
                 "type": ent.get("type"),
                 "mentions": int(ent.get("mentions", 0) or 0),
                 "best_score": ent.get("best_score"),
                 "source_count": int(ent.get("source_count", 0) or 0),
+                "variant_count": int(ent.get("variant_count", 0) or 0),
+                "variants": list(ent.get("variants") or []),
                 "_match_rank": match[0] if match else 99,
+                "_match_alias": match[1] if match else "",
             }
         )
 
@@ -622,7 +866,15 @@ def search_entities(
         )
     )
     return [
-        {key: value for key, value in row.items() if key != "_match_rank"}
+        {
+            key: value
+            for key, value in row.items()
+            if key not in {"_match_rank", "_match_alias"}
+        }
+        | {
+            "match_rank": int(row.get("_match_rank", 99)),
+            "match_alias": str(row.get("_match_alias") or ""),
+        }
         for row in rows[: max(1, int(limit))]
     ]
 
@@ -636,17 +888,18 @@ def build_entity_graph(
     """Build a lightweight graph from aggregated entities and relations.
 
     Args:
-        aggregate: Output of ``aggregate_ner_sources`` helper.
-        top_k_nodes: Maximum number of top entities to include as nodes.
-        min_edge_weight: Minimum weight threshold for edges to be included.
+        aggregate: Aggregated NER payload from ``aggregate_ner_sources``.
+        top_k_nodes: Maximum number of nodes to include in the graph.
+        min_edge_weight: Minimum weight for edges to be included in the graph.
 
     Returns:
-        A dictionary containing nodes, edges, and metadata for graph exploration.
+        Dictionary containing nodes, edges, and metadata about the graph.
     """
     entities = list(aggregate.get("entities") or [])
     relations = list(aggregate.get("relations") or [])
     source_entity_sets = list(aggregate.get("source_entity_sets") or [])
     text_to_keys = dict(aggregate.get("text_to_keys") or {})
+    compact_to_keys = dict(aggregate.get("compact_to_keys") or {})
 
     selected_entities = entities[: max(1, int(top_k_nodes))]
     node_map: dict[str, dict[str, Any]] = {}
@@ -687,16 +940,34 @@ def build_entity_graph(
             }
         edge_index[edge_key]["weight"] += int(weight)
 
+    def _resolve_graph_key(text: str, key: Any) -> str | None:
+        """Resolve a relation endpoint to a node key when possible, using text and optional key hints.
+
+        Args:
+            text (str): Raw relation endpoint text.
+            key (Any): Optional key hint that may directly match a node key.
+
+        Returns:
+            str | None: Resolved node key if found, otherwise None.
+        """
+        key_text = str(key or "")
+        if key_text in node_map:
+            return key_text
+        text_lower = str(text or "").lower()
+        compact = _compact_lookup(text)
+        for candidates in (
+            text_to_keys.get(text_lower, []),
+            compact_to_keys.get(compact, []),
+        ):
+            for candidate in candidates:
+                if candidate in node_map:
+                    return candidate
+        return None
+
     for rel in relations:
-        head_text = str(rel.get("head") or "").lower()
-        tail_text = str(rel.get("tail") or "").lower()
         label = str(rel.get("label") or "rel")
-        head_key = next(
-            (k for k in text_to_keys.get(head_text, []) if k in node_map), None
-        )
-        tail_key = next(
-            (k for k in text_to_keys.get(tail_text, []) if k in node_map), None
-        )
+        head_key = _resolve_graph_key(str(rel.get("head") or ""), rel.get("head_key"))
+        tail_key = _resolve_graph_key(str(rel.get("tail") or ""), rel.get("tail_key"))
         if not head_key or not tail_key:
             continue
         _add_edge(
@@ -743,13 +1014,12 @@ def graph_neighbors(
     """Return graph neighborhood around an entity (by id or text).
 
     Args:
-        graph: Graph dictionary containing "nodes" and "edges".
-        entity: Entity text or ID to find the neighborhood for.
+        graph: Graph payload containing nodes and edges.
+        entity: Entity identifier (node id or text) to find the neighborhood for.
         hops: Number of hops to include in the neighborhood.
 
     Returns:
-        A dictionary containing the center node, its neighbors, and the subgraph
-        of nodes and edges within the specified hops.
+        Dictionary containing the center node, its neighbors with scores and depths, the nodes and edges in the neighborhood, and metadata about the neighborhood.
     """
     nodes = list(graph.get("nodes") or [])
     edges = list(graph.get("edges") or [])

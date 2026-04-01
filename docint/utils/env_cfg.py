@@ -1024,6 +1024,41 @@ def load_retrieval_env(
 
 
 @dataclass(frozen=True)
+class RuntimeConfig:
+    """Dataclass for local runtime device preferences."""
+
+    use_device: str
+
+
+def load_runtime_env(default_use_device: str = "auto") -> RuntimeConfig:
+    """Load local runtime settings from environment variables.
+
+    Args:
+        default_use_device (str): Preferred device for local auxiliary models.
+            Supported values are ``auto``, ``cpu``, ``mps``, ``cuda``, and
+            ``cuda:<index>``.
+
+    Returns:
+        RuntimeConfig: Parsed runtime configuration.
+    """
+    normalized_default = default_use_device.strip().lower() or "auto"
+    requested_device = str(os.getenv("USE_DEVICE", normalized_default)).strip().lower()
+    if not requested_device:
+        requested_device = normalized_default
+
+    is_supported = requested_device in {
+        "auto",
+        "cpu",
+        "cuda",
+        "mps",
+    } or requested_device.startswith("cuda:")
+    if not is_supported:
+        requested_device = normalized_default
+
+    return RuntimeConfig(use_device=requested_device)
+
+
+@dataclass(frozen=True)
 class SessionConfig:
     """Dataclass for session configuration."""
 

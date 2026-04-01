@@ -887,6 +887,7 @@ def get_collection_ner_stats(
     min_mentions: int = 2,
     entity_type: str | None = None,
     include_relations: bool = True,
+    entity_merge_mode: Literal["orthographic", "exact"] = Query(default="orthographic"),
 ) -> dict[str, Any]:
     """Get collection-wide NER statistics.
 
@@ -910,6 +911,7 @@ def get_collection_ner_stats(
             min_mentions=min_mentions,
             entity_type=entity_type,
             include_relations=include_relations,
+            entity_merge_mode=entity_merge_mode,
         )
     except Exception as e:
         logger.error("Error fetching collection NER stats: {}", e)
@@ -921,6 +923,7 @@ def search_collection_ner_entities(
     q: str = "",
     entity_type: str | None = None,
     limit: int = 100,
+    entity_merge_mode: Literal["orthographic", "exact"] = Query(default="orthographic"),
 ) -> dict[str, list[dict]]:
     """Search entities across the selected collection.
 
@@ -943,6 +946,7 @@ def search_collection_ner_entities(
                 q=q,
                 entity_type=entity_type,
                 limit=limit,
+                entity_merge_mode=entity_merge_mode,
             )
         }
     except Exception as e:

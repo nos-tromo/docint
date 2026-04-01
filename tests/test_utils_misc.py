@@ -15,6 +15,7 @@ from docint.utils.env_cfg import (
     load_openai_env,
     load_path_env,
     load_retrieval_env,
+    load_runtime_env,
     load_session_env,
     load_summary_env,
 )
@@ -414,6 +415,36 @@ def test_load_session_env_honors_override(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("SESSION_STORE", "sqlite:////tmp/custom-sessions.db")
     cfg = load_session_env()
     assert cfg.session_store == "sqlite:////tmp/custom-sessions.db"
+
+
+def test_load_runtime_env_defaults_to_auto(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime env loader should default to automatic device selection.
+
+    Args:
+        monkeypatch: Fixture to clear environment variables.
+    """
+    monkeypatch.delenv("USE_DEVICE", raising=False)
+
+    cfg = load_runtime_env()
+
+    assert cfg.use_device == "auto"
+
+
+def test_load_runtime_env_normalizes_supported_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime env loader should normalize supported device overrides.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.setenv("USE_DEVICE", "CUDA:1")
+
+    cfg = load_runtime_env()
+
+    assert cfg.use_device == "cuda:1"
 
 
 def test_load_model_env_reads_direct_text_and_vision_model_ids(

@@ -381,6 +381,7 @@ def test_export_entities_writes_top_entity_text(
             """
             assert kwargs["top_k"] == query_cli.DEFAULT_ENTITY_LIMIT
             assert kwargs["min_mentions"] == 1
+            assert kwargs["entity_merge_mode"] == "orthographic"
             return {
                 "top_entities": [
                     {"text": "Acme", "type": "ORG", "mentions": 12},
@@ -402,6 +403,35 @@ def test_export_entities_writes_top_entity_text(
     assert filename == "entities_alpha"
     assert "1. Acme [ORG] - 12" in data
     assert "2. Rivertown [LOC] - 4" in data
+
+
+def test_build_sources_txt_avoids_duplicate_reference_text() -> None:
+    """Source TXT export should not repeat the social-post body text."""
+    output = query_cli._build_sources_txt(
+        [
+            {
+                "filename": "posts.csv",
+                "row": 5,
+                "chunk_id": "p1",
+                "chunk_text": "Posting body",
+                "reference_metadata": {
+                    "network": "Facebook",
+                    "type": "posting",
+                    "timestamp": "2026-02-02T12:00:00Z",
+                    "author": "Alice",
+                    "author_id": "a1",
+                    "vanity": "alice-v",
+                    "text": "Posting body",
+                    "text_id": "p1",
+                },
+            }
+        ]
+    )
+
+    assert "- Network: Facebook" in output
+    assert "- Text ID: p1" in output
+    assert "- Text: Posting body" not in output
+    assert output.count("Posting body") == 1
 
 
 def test_export_hate_speech_writes_frontend_text_format(
