@@ -164,12 +164,15 @@ def test_chunk_download_text_helpers_include_metadata() -> None:
                 "reference_metadata": {
                     "network": "Telegram",
                     "type": "comment",
+                    "uuid": "u1",
                     "timestamp": "2026-01-02T10:00:00Z",
                     "author": "Alice",
                     "author_id": "a1",
                     "vanity": "alice-v",
                     "text": "Acme content",
                     "text_id": "c1",
+                    "parent_text": "Earlier comment",
+                    "anchor_text": "Original post",
                 },
             }
         ],
@@ -188,23 +191,44 @@ def test_chunk_download_text_helpers_include_metadata() -> None:
                 "reference_metadata": {
                     "network": "Facebook",
                     "type": "posting",
+                    "uuid": "u9",
                     "timestamp": "2026-01-02T10:00:00Z",
                     "author": "Bob",
                     "author_id": "b2",
                     "vanity": "bob-v",
                     "text": "flagged chunk body",
                     "text_id": "p1",
+                    "parent_text": None,
+                    "anchor_text": None,
                 },
             }
         ]
     )
 
-    assert "chunk_id=c1" in entity_text
-    assert "Acme content" in entity_text
+    assert entity_text.startswith(
+        "Entity Findings: Acme\n\n========================================================================"
+    )
+    assert "[1] docA.pdf" in entity_text
+    assert "- Page: 1" in entity_text
+    assert "- Chunk ID: c1" in entity_text
     assert "- Network: Telegram" in entity_text
-    assert "- Text: Acme content" not in entity_text
-    assert entity_text.count("Acme content") == 1
-    assert "- category: ethnicity" in hate_text
-    assert "flagged chunk body" in hate_text
-    assert "- row: 5" in hate_text
+    assert "- UUID: u1" in entity_text
+    assert "- Text ID: c1" in entity_text
+    assert "Anchor Text\n-----------\nOriginal post" in entity_text
+    assert "Parent Text\n-----------\nEarlier comment" in entity_text
+    assert "Text\n----\nAcme content" in entity_text
+    assert entity_text.index("Anchor Text") < entity_text.index("Parent Text")
+    assert entity_text.index("Parent Text") < entity_text.index(
+        "\nText\n----\nAcme content"
+    )
+    assert hate_text.startswith(
+        "Hate-Speech Findings\n\n========================================================================"
+    )
+    assert "[1] docB.pdf" in hate_text
+    assert "- Row: 5" in hate_text
+    assert "- Category: ethnicity" in hate_text
+    assert "- Confidence: high" in hate_text
+    assert "- Reason: Derogatory language" in hate_text
+    assert "- UUID: u9" in hate_text
     assert "- Text ID: p1" in hate_text
+    assert "Text\n----\nflagged chunk body" in hate_text

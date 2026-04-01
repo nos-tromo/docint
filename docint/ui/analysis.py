@@ -12,14 +12,15 @@ import streamlit as st
 from docint.ui.components import (
     aggregate_ner,
     reference_metadata_inline,
-    reference_metadata_text_block,
     render_response_validation,
     render_source_item,
     render_summary_diagnostics,
 )
 from docint.utils.env_cfg import load_host_env
+from docint.utils.reference_metadata import REFERENCE_METADATA_FIELDS
 
 BACKEND_HOST = load_host_env().backend_host
+TXT_EXPORT_SEPARATOR = "=" * 72
 
 
 def render_analysis() -> None:
@@ -491,20 +492,9 @@ def _entity_chunks_to_txt(entity: str, chunks: list[dict[str, Any]]) -> str:
     Returns:
         A formatted string containing metadata and text of chunks related to the entity.
     """
-    lines = [f"Entity: {entity}", ""]
+    lines = [f"Entity Findings: {entity}", ""]
     for idx, chunk in enumerate(chunks, start=1):
-        lines.append(
-            f"[{idx}] {chunk.get('filename')} page={chunk.get('page')} row={chunk.get('row')} "
-            f"chunk_id={chunk.get('chunk_id')}"
-        )
-        metadata_block = reference_metadata_text_block(
-            chunk,
-            include_text=False,
-        )
-        if metadata_block:
-            lines.append(metadata_block)
-        lines.append(str(chunk.get("chunk_text") or ""))
-        lines.append("")
+        lines.extend(_analysis_chunk_export_block(chunk, index=idx))
     return "\n".join(lines).strip() + "\n"
 
 
@@ -517,28 +507,86 @@ def _hate_speech_chunks_to_txt(chunks: list[dict[str, Any]]) -> str:
     Returns:
         A formatted string containing metadata and text of chunks flagged for hate-speech.
     """
-    lines = ["Flagged hate-speech chunks", ""]
+    lines = ["Hate-Speech Findings", ""]
     for idx, chunk in enumerate(chunks, start=1):
-        location_label = "page" if chunk.get("page") is not None else "row"
-        location_value = (
-            chunk.get("page")
-            if chunk.get("page") is not None
-            else chunk.get("row", "n/a")
+        lines.extend(
+            _analysis_chunk_export_block(
+                chunk,
+                index=idx,
+                extra_fields=[
+                    ("Category", chunk.get("category")),
+                    ("Confidence", chunk.get("confidence")),
+                    ("Reason", chunk.get("reason")),
+                ],
+            )
         )
-        lines.append(
-            f"[{idx}]\n"
-            f"- source: {chunk.get('source_ref')}\n"
-            f"- {location_label}: {location_value}\n"
-            f"- chunk_id: {chunk.get('chunk_id')}\n"
-            f"- category: {chunk.get('category')}\n"
-            f"- confidence: {chunk.get('confidence')}"
-        )
-        lines.append(f"reason: {chunk.get('reason')}")
-        metadata_block = reference_metadata_text_block(chunk)
-        if metadata_block:
-            lines.append(metadata_block)
-        lines.append("")
     return "\n".join(lines).strip() + "\n"
+
+
+def _analysis_chunk_export_block(
+    chunk: dict[str, Any],
+    *,
+    index: int,
+    extra_fields: list[tuple[str, Any]] | None = None,
+) -> list[str]:
+    """Build a unified text-export block for analysis chunks."""
+    source = str(chunk.get("filename") or chunk.get("source_ref") or "Unknown")
+    location_label = "Page" if chunk.get("page") is not None else "Row"
+    location_value = (
+        chunk.get("page") if chunk.get("page") is not None else chunk.get("row", "n/a")
+    )
+    lines = [
+        TXT_EXPORT_SEPARATOR,
+        f"[{index}] {source}",
+        f"- {location_label}: {location_value}",
+        f"- Chunk ID: {chunk.get('chunk_id') or 'n/a'}",
+    ]
+    for label, value in extra_fields or []:
+        text = str(value or "").strip()
+        if text:
+            lines.append(f"- {label}: {text}")
+
+    metadata_lines, text_sections = _analysis_reference_export_sections(chunk)
+    if metadata_lines:
+        lines.append("")
+        lines.extend(metadata_lines)
+    if text_sections:
+        lines.append("")
+        lines.extend(text_sections)
+    lines.append("")
+    return lines
+
+
+def _analysis_reference_export_sections(
+    chunk: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Split reference metadata into compact metadata lines and ordered text sections."""
+    raw = chunk.get("reference_metadata")
+    metadata_lines: list[str] = []
+    text_sections: list[str] = []
+    reference_metadata = raw if isinstance(raw, dict) else {}
+
+    for key, label in REFERENCE_METADATA_FIELDS.items():
+        if key in {"anchor_text", "parent_text", "text"}:
+            continue
+        value = reference_metadata.get(key)
+        text = str(value).strip() if value is not None else ""
+        if text:
+            metadata_lines.append(f"- {label}: {text}")
+
+    for key in ("anchor_text", "parent_text", "text"):
+        label = REFERENCE_METADATA_FIELDS[key]
+        value = reference_metadata.get(key)
+        if key == "text" and value is None:
+            value = chunk.get("chunk_text") or chunk.get("text")
+        text = str(value).strip() if value is not None else ""
+        if not text:
+            continue
+        text_sections.extend([label, "-" * len(label), text, ""])
+
+    if text_sections:
+        text_sections.pop()
+    return metadata_lines, text_sections
 
 
 def _render_entities_tab(result: dict[str, Any], collection: str) -> None:

@@ -100,12 +100,15 @@ def test_table_reader_detects_social_media_comments_schema(tmp_path: Path) -> No
     assert docs[0].metadata["reference_metadata"] == {
         "network": "Telegram",
         "type": "comment",
+        "uuid": "u1",
         "timestamp": "2026-01-02T10:00:00Z",
         "author": "Alice",
         "author_id": "a1",
         "vanity": "alice-v",
         "text": "Comment body",
         "text_id": "c1",
+        "parent_text": "parent",
+        "anchor_text": "post",
     }
 
 
@@ -135,12 +138,15 @@ def test_table_reader_detects_social_media_messages_schema(tmp_path: Path) -> No
     assert docs[0].metadata["reference_metadata"] == {
         "network": "Signal",
         "type": "message",
+        "uuid": "u1",
         "timestamp": "2026-02-03T11:00:00Z",
         "author": "Bob",
         "author_id": None,
         "vanity": None,
         "text": "Message body",
         "text_id": "chat-1",
+        "parent_text": "root",
+        "anchor_text": None,
     }
 
 
@@ -175,6 +181,9 @@ def test_table_reader_detects_social_media_postings_schema_out_of_order(
     assert docs[0].metadata["table"]["style"] == "postings"
     assert docs[0].metadata["reference_metadata"]["type"] == "posting"
     assert docs[0].metadata["reference_metadata"]["network"] == "Facebook"
+    assert docs[0].metadata["reference_metadata"]["uuid"] == "u1"
+    assert docs[0].metadata["reference_metadata"]["parent_text"] is None
+    assert docs[0].metadata["reference_metadata"]["anchor_text"] is None
 
 
 def test_table_reader_preserves_generic_behavior_for_non_matching_schema(
