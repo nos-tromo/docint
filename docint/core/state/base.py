@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -13,6 +14,9 @@ def _ensure_sqlite_parent_dir(db_url: str) -> None:
 
     Args:
         db_url: SQLAlchemy database URL.
+
+    Raises:
+        IsADirectoryError: If the SQLite database path points to a non-empty directory.
     """
     sqlite_prefix = "sqlite:///"
     if not db_url.startswith(sqlite_prefix):
@@ -22,7 +26,15 @@ def _ensure_sqlite_parent_dir(db_url: str) -> None:
     if not db_path_str or db_path_str == ":memory:":
         return
 
-    Path(db_path_str).expanduser().parent.mkdir(parents=True, exist_ok=True)
+    db_path = Path(db_path_str).expanduser()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if db_path.exists() and db_path.is_dir():
+        if any(db_path.iterdir()):
+            raise IsADirectoryError(
+                f"SQLite database path points to a non-empty directory: {db_path}"
+            )
+        shutil.rmtree(db_path)
 
 
 # --- Session maker ---

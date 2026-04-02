@@ -386,6 +386,22 @@ def test_load_session_env_defaults_to_sessions_path_when_explicitly_set(
     assert cfg.session_store == "sqlite:////tmp/docint-sessions/sessions.db"
 
 
+def test_load_session_env_accepts_legacy_file_style_sessions_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session env loader should accept legacy file-style SESSIONS_PATH values.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.delenv("SESSION_STORE", raising=False)
+    monkeypatch.setenv("SESSIONS_PATH", "/tmp/docint-sessions/sessions.db")
+
+    cfg = load_session_env()
+
+    assert cfg.session_store == "sqlite:////tmp/docint-sessions/sessions.db"
+
+
 def test_load_session_env_ignores_data_path_without_sessions_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

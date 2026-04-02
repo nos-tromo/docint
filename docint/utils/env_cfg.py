@@ -1086,7 +1086,10 @@ def load_session_env(
 
     if default_session_store is None:
         sessions_dir = load_path_env().sessions
-        default_session_store = f"sqlite:///{sessions_dir / 'sessions.db'}"
+        if sessions_dir.suffix == ".db":
+            default_session_store = f"sqlite:///{sessions_dir}"
+        else:
+            default_session_store = f"sqlite:///{sessions_dir / 'sessions.db'}"
 
     return SessionConfig(session_store=default_session_store)
 
