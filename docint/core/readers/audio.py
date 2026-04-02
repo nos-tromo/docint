@@ -1,7 +1,10 @@
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import contextmanager
 from multiprocessing import get_context
-from typing import Any, Literal, Sequence, cast
+import subprocess
+import tempfile
+from typing import Any, Generator, Literal, Sequence, cast
 
 import whisper
 from llama_index.core import Document
@@ -19,6 +22,35 @@ from docint.utils.mimetype import get_mimetype
 WhisperTask = Literal["transcribe", "translate"]
 _ENGLISH_LANGUAGE_CODES = {"en", "eng", "english"}
 _CPU_DEVICE_NAMES = {"cuda", "mps", "cpu"}
+
+# Suffixes that libsndfile can decode natively.  Files whose extension is
+# *not* in this set must be converted to WAV before being sent to a vLLM
+# provider (which internally uses ``librosa`` → ``soundfile``).
+_LIBSNDFILE_EXTENSIONS = {
+    ".aif",
+    ".aiff",
+    ".au",
+    ".avr",
+    ".caf",
+    ".flac",
+    ".htk",
+    ".mat",
+    ".mpc",
+    ".ogg",
+    ".paf",
+    ".pvf",
+    ".raw",
+    ".rf64",
+    ".sd2",
+    ".sds",
+    ".sf",
+    ".svx",
+    ".voc",
+    ".w64",
+    ".wav",
+    ".wavex",
+    ".xi",
+}
 _WORKER_MODEL: whisper.Whisper | None = None
 _WORKER_MODEL_ID: str | None = None
 _WORKER_DEVICE: str | None = None
@@ -261,6 +293,58 @@ def _transcribe_audio_job(job: tuple[str, str | None]) -> dict[str, Any]:
 class OpenAICompatibleAudioBackend:
     """Provider-backed audio transcription helper for OpenAI-compatible APIs."""
 
+    @staticmethod
+    @contextmanager
+    def _wav_for_provider(
+        file_path: Path,
+    ) -> Generator[Path, None, None]:
+        """Yield a WAV path suitable for the provider API.
+
+        If the file's suffix is already handled by libsndfile the original
+        path is yielded unchanged.  Otherwise the audio is re-encoded to
+        16 kHz mono WAV via *ffmpeg* so that the vLLM ``librosa.load()``
+        call can decode it.
+
+        Args:
+            file_path: Source audio file.
+
+        Yields:
+            Path to a WAV file (either the original or a temporary copy).
+        """
+        if file_path.suffix.lower() in _LIBSNDFILE_EXTENSIONS:
+            yield file_path
+            return
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
+            tmp_path = Path(tmp.name)
+
+        try:
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-nostdin",
+                "-threads",
+                "0",
+                "-i",
+                str(file_path),
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-acodec",
+                "pcm_s16le",
+                str(tmp_path),
+            ]
+            subprocess.run(cmd, capture_output=True, check=True)  # noqa: S603
+            logger.debug(
+                "Converted {} → {} for provider API",
+                file_path.name,
+                tmp_path.name,
+            )
+            yield tmp_path
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
     def __init__(
         self,
         *,
@@ -332,7 +416,10 @@ class OpenAICompatibleAudioBackend:
             dict[str, Any]: The normalized transcription result from the provider.
         """
 
-        with file_path.open("rb") as audio_file:
+        with (
+            self._wav_for_provider(file_path) as send_path,
+            send_path.open("rb") as audio_file,
+        ):
             response = self._client.audio.transcriptions.create(
                 file=audio_file,
                 model=self.model_id,
@@ -351,7 +438,10 @@ class OpenAICompatibleAudioBackend:
             dict[str, Any]: The normalized translation result from the provider.
         """
 
-        with file_path.open("rb") as audio_file:
+        with (
+            self._wav_for_provider(file_path) as send_path,
+            send_path.open("rb") as audio_file,
+        ):
             response = self._client.audio.translations.create(
                 file=audio_file,
                 model=self.model_id,

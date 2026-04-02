@@ -486,3 +486,123 @@ def test_transcribe_audio_job_reports_file_error(
     assert payload["file_hash"] == "hash"
     assert payload["result"] is None
     assert payload["error"] == "boom"
+
+
+# ---------------------------------------------------------------------------
+# _wav_for_provider conversion tests
+# ---------------------------------------------------------------------------
+
+
+def test_wav_for_provider_passthrough_for_native_suffix(tmp_path: Path) -> None:
+    """Files with libsndfile-native suffixes should be yielded as-is.
+
+    Args:
+        tmp_path: Temporary directory provided by pytest.
+    """
+    wav = tmp_path / "clip.wav"
+    wav.write_bytes(b"\x00")
+
+    backend = audio_module.OpenAICompatibleAudioBackend
+    with backend._wav_for_provider(wav) as result:
+        assert result == wav
+
+
+def test_wav_for_provider_converts_webm(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """WebM files should be converted to WAV via ffmpeg before yielding.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+    """
+    webm = tmp_path / "clip.webm"
+    webm.write_bytes(b"\x00")
+    converted_path: Path | None = None
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
+        """Fake subprocess.run that writes a dummy WAV file."""
+        # cmd[-1] is the output path
+        Path(cmd[-1]).write_bytes(b"RIFF")
+
+    monkeypatch.setattr(audio_module.subprocess, "run", fake_run)
+
+    backend = audio_module.OpenAICompatibleAudioBackend
+    with backend._wav_for_provider(webm) as result:
+        converted_path = result
+        assert result.suffix == ".wav"
+        assert result != webm
+        assert result.exists()
+
+    # Temp file should be cleaned up after exiting the context
+    assert converted_path is not None
+    assert not converted_path.exists()
+
+
+def test_wav_for_provider_cleans_up_on_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Temporary WAV file should be removed even when an error occurs.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+    """
+    mp3 = tmp_path / "clip.mp3"
+    mp3.write_bytes(b"\x00")
+    converted_path: Path | None = None
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
+        Path(cmd[-1]).write_bytes(b"RIFF")
+
+    monkeypatch.setattr(audio_module.subprocess, "run", fake_run)
+
+    backend = audio_module.OpenAICompatibleAudioBackend
+    with pytest.raises(RuntimeError, match="deliberate"):
+        with backend._wav_for_provider(mp3) as result:
+            converted_path = result
+            raise RuntimeError("deliberate")
+
+    assert converted_path is not None
+    assert not converted_path.exists()
+
+
+def test_vllm_transcribe_converts_webm_before_sending(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The provider transcription should convert WebM files before the API call.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+    """
+    monkeypatch.setenv("INFERENCE_PROVIDER", "vllm")
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
+        Path(cmd[-1]).write_bytes(b"RIFF")
+
+    monkeypatch.setattr(audio_module.subprocess, "run", fake_run)
+
+    calls = _install_vllm_audio_client(
+        monkeypatch,
+        transcription_response={
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 1.0, "text": "Test."}],
+            "text": "Test.",
+        },
+    )
+
+    # Patch the create method to capture the file name
+    original_calls = calls
+
+    audio_path = tmp_path / "talk.webm"
+    audio_path.write_bytes(b"fake-webm")
+
+    docs = AudioReader(device="cpu").load_data(audio_path)
+
+    assert len(docs) == 1
+    assert docs[0].text == "Test."
+    # Verify the file sent to the API had a .wav suffix
+    assert len(original_calls) == 1
+    sent_file = original_calls[0][1]["file"]
+    assert sent_file.name.endswith(".wav")

@@ -521,20 +521,19 @@ def test_apply_device_visibility_respects_existing_override(
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"
 
 
-def test_load_model_env_uses_smaller_cpu_ner_default(
+def test_load_model_env_uses_default_ner_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CPU-backed auxiliary workloads should default to the smaller GLiNER model.
+    """When NER_MODEL is unset the hardcoded default should be used.
 
     Args:
         monkeypatch: Fixture to override environment variables.
     """
-    monkeypatch.setenv("USE_DEVICE", "cpu")
     monkeypatch.delenv("NER_MODEL", raising=False)
 
     cfg = load_model_env()
 
-    assert cfg.ner_model == "urchade/gliner_small-v2.1"
+    assert cfg.ner_model == "urchade/gliner_multi-v2.1"
 
 
 def test_load_model_env_preserves_explicit_ner_override(
