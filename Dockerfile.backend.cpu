@@ -26,7 +26,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 WORKDIR /app
 
 RUN apt-get update -y && apt-get install -y --no-install-recommends \
-    libmagic1 libgl1 \
+    ffmpeg libmagic1 libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=uv-installer /usr/local/bin/uv /usr/local/bin/uvx /bin/
