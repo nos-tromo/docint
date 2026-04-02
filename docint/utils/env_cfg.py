@@ -736,7 +736,6 @@ class PathConfig:
     logs: Path
     queries: Path
     results: Path
-    sessions: Path
     prompts: Path
     qdrant_sources: Path
     hf_hub_cache: Path
@@ -753,7 +752,6 @@ def load_path_env() -> PathConfig:
         - logs (Path): Path to the logs file.
         - queries (Path): Path to the queries file.
         - results (Path): Path to the results directory.
-        - sessions (Path): Path to the session-state directory.
         - prompts (Path): Path to the prompts directory.
         - qdrant_sources (Path): Path to the Qdrant sources directory.
         - hf_hub_cache (Path): Path to the Hugging Face Hub cache directory.
@@ -773,7 +771,6 @@ def load_path_env() -> PathConfig:
 
     default_qdrant_sources: Path = docint_home_dir / "qdrant_sources"
     default_artifacts_dir: Path = docint_home_dir / "artifacts"
-    default_sessions_dir: Path = docint_home_dir / "sessions"
 
     return PathConfig(
         artifacts=Path(
@@ -784,7 +781,6 @@ def load_path_env() -> PathConfig:
         logs=Path(os.getenv("LOG_PATH", default_log_dir)).expanduser(),
         queries=Path(os.getenv("QUERIES_PATH", default_query_dir)).expanduser(),
         results=Path(os.getenv("RESULTS_PATH", default_results_dir)).expanduser(),
-        sessions=Path(os.getenv("SESSIONS_PATH", default_sessions_dir)).expanduser(),
         prompts=default_prompts_dir,
         qdrant_sources=Path(
             os.getenv("QDRANT_SRC_DIR", default_qdrant_sources)
@@ -1072,12 +1068,12 @@ def load_session_env(
 
     Args:
         default_session_store (str): Default session store configuration (e.g. database URL or file path).
-            Default is ``sqlite:///{load_path_env().sessions / "sessions.db"}``.
+            Default is ``sqlite:///{Path.home() / "docint" / "sessions.sqlite3"}``.
 
     Returns:
         SessionConfig: Dataclass containing session configuration.
         - session_store (str): The session store configuration. Default is
-          ``sqlite:///{load_path_env().sessions / "sessions.db"}`` unless
+          ``sqlite:///{Path.home() / "docint" / "sessions.sqlite3"}`` unless
           ``SESSION_STORE`` is explicitly configured.
     """
     session_store_override = os.getenv("SESSION_STORE")
@@ -1085,11 +1081,9 @@ def load_session_env(
         return SessionConfig(session_store=session_store_override)
 
     if default_session_store is None:
-        sessions_dir = load_path_env().sessions
-        if sessions_dir.suffix == ".db":
-            default_session_store = f"sqlite:///{sessions_dir}"
-        else:
-            default_session_store = f"sqlite:///{sessions_dir / 'sessions.db'}"
+        default_db_path = Path.home() / "docint" / "sessions.sqlite3"
+        db_path = Path(os.getenv("SESSIONS_DB_PATH", default_db_path)).expanduser()
+        default_session_store = f"sqlite:///{db_path}"
 
     return SessionConfig(session_store=default_session_store)
 

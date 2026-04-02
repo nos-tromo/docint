@@ -99,17 +99,6 @@ def test_path_config_artifacts_env_override(
     assert cfg.artifacts == custom
 
 
-def test_path_config_sessions_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """PathConfig.sessions should default to ``~/docint/sessions``.
-
-    Args:
-        monkeypatch: Fixture to clear environment variables.
-    """
-    monkeypatch.delenv("SESSIONS_PATH", raising=False)
-    cfg = load_path_env()
-    assert cfg.sessions == Path.home() / "docint" / "sessions"
-
-
 def test_setup_logging_respects_env_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -356,50 +345,33 @@ def test_load_openai_env_clamps_invalid_thinking_effort(
 def test_load_session_env_defaults_to_docint_home(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Session env loader should place the default sqlite file under the sessions dir.
+    """Session env loader should place the default sqlite file under docint home.
 
     Args:
         monkeypatch: Fixture to clear environment variables.
     """
     monkeypatch.delenv("SESSION_STORE", raising=False)
-    monkeypatch.delenv("SESSIONS_PATH", raising=False)
+    monkeypatch.delenv("SESSIONS_DB_PATH", raising=False)
     cfg = load_session_env()
     assert (
-        cfg.session_store
-        == f"sqlite:///{Path.home() / 'docint' / 'sessions' / 'sessions.db'}"
+        cfg.session_store == f"sqlite:///{Path.home() / 'docint' / 'sessions.sqlite3'}"
     )
 
 
-def test_load_session_env_defaults_to_sessions_path_when_explicitly_set(
+def test_load_session_env_defaults_to_sessions_db_path_when_explicitly_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Session env loader should default inside SESSIONS_PATH when configured.
+    """Session env loader should use SESSIONS_DB_PATH as the exact sqlite file.
 
     Args:
         monkeypatch: Fixture to set environment variables.
     """
     monkeypatch.delenv("SESSION_STORE", raising=False)
-    monkeypatch.setenv("SESSIONS_PATH", "/tmp/docint-sessions")
+    monkeypatch.setenv("SESSIONS_DB_PATH", "/tmp/docint-sessions.sqlite3")
 
     cfg = load_session_env()
 
-    assert cfg.session_store == "sqlite:////tmp/docint-sessions/sessions.db"
-
-
-def test_load_session_env_accepts_legacy_file_style_sessions_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Session env loader should accept legacy file-style SESSIONS_PATH values.
-
-    Args:
-        monkeypatch: Fixture to set environment variables.
-    """
-    monkeypatch.delenv("SESSION_STORE", raising=False)
-    monkeypatch.setenv("SESSIONS_PATH", "/tmp/docint-sessions/sessions.db")
-
-    cfg = load_session_env()
-
-    assert cfg.session_store == "sqlite:////tmp/docint-sessions/sessions.db"
+    assert cfg.session_store == "sqlite:////tmp/docint-sessions.sqlite3"
 
 
 def test_load_session_env_ignores_data_path_without_sessions_override(
@@ -411,14 +383,13 @@ def test_load_session_env_ignores_data_path_without_sessions_override(
         monkeypatch: Fixture to set environment variables.
     """
     monkeypatch.delenv("SESSION_STORE", raising=False)
-    monkeypatch.delenv("SESSIONS_PATH", raising=False)
+    monkeypatch.delenv("SESSIONS_DB_PATH", raising=False)
     monkeypatch.setenv("DATA_PATH", "/tmp/docint-data")
 
     cfg = load_session_env()
 
     assert (
-        cfg.session_store
-        == f"sqlite:///{Path.home() / 'docint' / 'sessions' / 'sessions.db'}"
+        cfg.session_store == f"sqlite:///{Path.home() / 'docint' / 'sessions.sqlite3'}"
     )
 
 

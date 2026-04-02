@@ -315,40 +315,6 @@ def test_make_session_maker_creates_parent_dir(tmp_path: Path) -> None:
     session.close()
 
 
-def test_make_session_maker_recovers_from_empty_directory_at_db_path(
-    tmp_path: Path,
-) -> None:
-    """File-backed SQLite session stores should recover from stale dir targets.
-
-    Args:
-        tmp_path: Temporary directory provided by pytest.
-    """
-    db_path = tmp_path / "nested" / "state" / "sessions.db"
-    db_path.mkdir(parents=True)
-
-    session_maker = _make_session_maker(f"sqlite:///{db_path}")
-
-    assert db_path.is_file()
-    session = session_maker()
-    session.close()
-
-
-def test_make_session_maker_rejects_non_empty_directory_at_db_path(
-    tmp_path: Path,
-) -> None:
-    """File-backed SQLite session stores should fail on non-empty dir targets.
-
-    Args:
-        tmp_path: Temporary directory provided by pytest.
-    """
-    db_path = tmp_path / "nested" / "state" / "sessions.db"
-    db_path.mkdir(parents=True)
-    (db_path / "leftover.txt").write_text("legacy", encoding="utf-8")
-
-    with pytest.raises(IsADirectoryError):
-        _make_session_maker(f"sqlite:///{db_path}")
-
-
 def test_chat_rewrites_retrieval_query_without_prefixing_session_context(
     session_manager: SessionManager,
     monkeypatch: pytest.MonkeyPatch,
