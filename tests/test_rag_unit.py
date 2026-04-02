@@ -3010,6 +3010,154 @@ def test_apersist_node_batches_streams_micro_batches() -> None:
     assert index.vector_batch_sizes == [3, 3, 1]
 
 
+def test_persist_node_batches_skips_unembeddable_chunks() -> None:
+    """Persistence should drop chunks whose embeddings must be skipped."""
+
+    class FakeDocStore:
+        """Capture persisted nodes for verification."""
+
+        def __init__(self) -> None:
+            """Initialise an empty capture list."""
+            self.persisted_nodes: list[list[TextNode]] = []
+
+        def add_documents(
+            self, nodes: list[TextNode], allow_update: bool = True
+        ) -> None:
+            """Record persisted nodes for each batch.
+
+            Args:
+                nodes: Nodes persisted to the docstore.
+                allow_update: Whether overwrites are allowed.
+            """
+            _ = allow_update
+            self.persisted_nodes.append(nodes)
+
+    class FakeIndex:
+        """Capture vector inserts for verification."""
+
+        def __init__(self) -> None:
+            """Initialise the fake index state."""
+            self.docstore = FakeDocStore()
+            self.vector_batches: list[list[TextNode]] = []
+
+        def insert_nodes(self, nodes: list[TextNode]) -> None:
+            """Record vector nodes for each batch.
+
+            Args:
+                nodes: Nodes inserted into the vector store.
+            """
+            self.vector_batches.append(nodes)
+
+    class FakeEmbedModel:
+        """Return one embedding and one skipped result."""
+
+        def get_text_embeddings_with_skips(
+            self, texts: list[str]
+        ) -> list[list[float] | None]:
+            """Return aligned embeddings with one skipped entry.
+
+            Args:
+                texts: Texts to embed.
+
+            Returns:
+                list[list[float] | None]: Embeddings aligned to ``texts``.
+            """
+            assert len(texts) == 2
+            return [[0.1, 0.2], None]
+
+    rag = RAG(qdrant_collection="test")
+    rag.docstore_batch_size = 10
+    rag.index = cast(Any, FakeIndex())
+    rag._embed_model = cast(Any, FakeEmbedModel())
+
+    ok_node = TextNode(text="ok text", metadata={"chunk_id": "chunk-ok"})
+    bad_node = TextNode(text="bad text", metadata={"chunk_id": "chunk-bad"})
+
+    rag._persist_node_batches([ok_node, bad_node])
+    index = cast(Any, rag.index)
+
+    assert len(index.docstore.persisted_nodes) == 1
+    assert index.docstore.persisted_nodes[0] == [ok_node]
+    assert len(index.vector_batches) == 1
+    assert index.vector_batches[0] == [ok_node]
+    assert ok_node.embedding == [0.1, 0.2]
+    assert bad_node.embedding is None
+
+
+def test_apersist_node_batches_skips_unembeddable_chunks() -> None:
+    """Async persistence should drop chunks whose embeddings must be skipped."""
+
+    class FakeDocStore:
+        """Capture persisted nodes for verification."""
+
+        def __init__(self) -> None:
+            """Initialise an empty capture list."""
+            self.persisted_nodes: list[list[TextNode]] = []
+
+        def add_documents(
+            self, nodes: list[TextNode], allow_update: bool = True
+        ) -> None:
+            """Record persisted nodes for each batch.
+
+            Args:
+                nodes: Nodes persisted to the docstore.
+                allow_update: Whether overwrites are allowed.
+            """
+            _ = allow_update
+            self.persisted_nodes.append(nodes)
+
+    class FakeIndex:
+        """Capture async vector inserts for verification."""
+
+        def __init__(self) -> None:
+            """Initialise the fake index state."""
+            self.docstore = FakeDocStore()
+            self.vector_batches: list[list[TextNode]] = []
+
+        async def ainsert_nodes(self, nodes: list[TextNode]) -> None:
+            """Record vector nodes for each batch.
+
+            Args:
+                nodes: Nodes inserted into the vector store.
+            """
+            self.vector_batches.append(nodes)
+
+    class FakeEmbedModel:
+        """Return one embedding and one skipped result asynchronously."""
+
+        async def aget_text_embeddings_with_skips(
+            self, texts: list[str]
+        ) -> list[list[float] | None]:
+            """Return aligned embeddings with one skipped entry.
+
+            Args:
+                texts: Texts to embed.
+
+            Returns:
+                list[list[float] | None]: Embeddings aligned to ``texts``.
+            """
+            assert len(texts) == 2
+            return [[0.3, 0.4], None]
+
+    rag = RAG(qdrant_collection="test")
+    rag.docstore_batch_size = 10
+    rag.index = cast(Any, FakeIndex())
+    rag._embed_model = cast(Any, FakeEmbedModel())
+
+    ok_node = TextNode(text="ok text", metadata={"chunk_id": "chunk-ok"})
+    bad_node = TextNode(text="bad text", metadata={"chunk_id": "chunk-bad"})
+
+    asyncio.run(rag._apersist_node_batches([ok_node, bad_node]))
+    index = rag.index
+
+    assert len(index.docstore.persisted_nodes) == 1
+    assert index.docstore.persisted_nodes[0] == [ok_node]
+    assert len(index.vector_batches) == 1
+    assert index.vector_batches[0] == [ok_node]
+    assert ok_node.embedding == [0.3, 0.4]
+    assert bad_node.embedding is None
+
+
 def test_log_ingest_benchmark_summary_emits_metrics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

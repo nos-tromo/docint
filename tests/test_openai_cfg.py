@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from docint.utils.env_cfg import OpenAIConfig
 from docint.utils.openai_cfg import (
     OpenAIPipeline,
@@ -437,3 +439,80 @@ def test_truncating_embedding_retries_vllm_oversized_inputs(
     assert len(single_inputs[-1]) < len(original_text)
     assert warnings
     assert "8193 input tokens" in warnings[0]
+
+
+def test_truncating_embedding_allows_skipping_irreducible_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Irreducible oversized texts should return ``None`` in skip mode.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+
+    error = RuntimeError(
+        "This model's maximum context length is 8192 tokens, however you "
+        "requested 9000 tokens (9000 in your prompt; 0 for the completion). "
+        "Please reduce your prompt; your prompt contains at least 9000 input "
+        "tokens."
+    )
+    warnings: list[str] = []
+    original_text = "x" * 12000
+
+    def fake_get_text_embeddings(self: Any, texts: list[str]) -> list[list[float]]:
+        """Force the wrapper down the per-item fallback path.
+
+        Args:
+            self: Embedding instance.
+            texts: Texts to embed.
+
+        Returns:
+            list[list[float]]: Never returns successfully.
+
+        Raises:
+            RuntimeError: Always, to trigger per-item handling.
+        """
+        _ = (self, texts)
+        raise error
+
+    def fake_get_text_embedding(self: Any, text: str) -> list[float]:
+        """Keep failing only for the oversized text.
+
+        Args:
+            self: Embedding instance.
+            text: Text to embed.
+
+        Returns:
+            list[float]: A fake embedding vector for embeddable text.
+
+        Raises:
+            RuntimeError: When the input remains oversized.
+        """
+        _ = self
+        if text.startswith("ok"):
+            return [0.75, 0.25]
+        raise error
+
+    monkeypatch.setattr(
+        "llama_index.embeddings.openai.base.OpenAIEmbedding._get_text_embeddings",
+        fake_get_text_embeddings,
+    )
+    monkeypatch.setattr(
+        "llama_index.embeddings.openai.base.OpenAIEmbedding._get_text_embedding",
+        fake_get_text_embedding,
+    )
+
+    embedding = TruncatingOpenAIEmbedding(
+        model_name="BAAI/bge-m3",
+        api_key="sk-test",
+        api_base="http://localhost:8000/v1",
+        reuse_client=False,
+        context_window=8192,
+    )
+    embedding.set_warning_callback(warnings.append)
+
+    result = embedding.get_text_embeddings_with_skips([original_text, "ok text"])
+
+    assert result == [None, [0.75, 0.25]]
+    assert warnings
+    assert "skipping embedding input" in warnings[-1].lower()

@@ -33,7 +33,7 @@ x-backend-cpu: &backend-cpu
     LOG_PATH: /var/log/docint/backend-cpu.log
     QDRANT_HOST: http://qdrant:6333
     QDRANT_SRC_DIR: /var/lib/docint/sources
-    SESSIONS_PATH: /var/lib/docint/sessions
+    SESSIONS_DB_PATH: /var/lib/docint/sessions/sessions.sqlite3
     USE_DEVICE: ${USE_DEVICE:-auto}
   env_file: *docker-env-file
   volumes: &backend-volumes
@@ -61,7 +61,7 @@ x-backend-cuda: &backend-cuda
     NVIDIA_VISIBLE_DEVICES: all
     QDRANT_HOST: http://qdrant:6333
     QDRANT_SRC_DIR: /var/lib/docint/sources
-    SESSIONS_PATH: /var/lib/docint/sessions
+    SESSIONS_DB_PATH: /var/lib/docint/sessions/sessions.sqlite3
     USE_DEVICE: ${USE_DEVICE:-auto}
   env_file: *docker-env-file
   volumes: *backend-volumes

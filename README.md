@@ -60,6 +60,9 @@ and chat. It ships with:
   shared cache volumes.
 - If you use an outbound proxy, put the proxy variables in `.env.docker` and
   keep using `--env-file .env.docker` with `docker compose`.
+- Session persistence uses one SQLite file path. Set `SESSIONS_DB_PATH` for
+   the normal case or `SESSION_STORE` if you want to supply a full SQLAlchemy
+   database URL.
 
 ### Shared Docker Volumes
 
