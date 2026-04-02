@@ -247,10 +247,14 @@ services:
     image: nginx:1.28.2-alpine
     env_file: *docker-env-file
     depends_on:
-      - vllm-chat-cuda
-      - vllm-embed-cuda
-      - vllm-audio-cuda
-      - vllm-rerank-cuda
+      vllm-chat-cuda:
+        condition: service_healthy
+      vllm-embed-cuda:
+        condition: service_healthy
+      vllm-audio-cuda:
+        condition: service_healthy
+      vllm-rerank-cuda:
+        condition: service_healthy
     volumes:
       - ./nginx.vllm.conf:/etc/nginx/conf.d/default.conf:ro
     networks:
@@ -261,6 +265,7 @@ services:
 
   ##########################################################
   # vLLM Chat (CUDA)
+  # Starts first – it is the largest model and takes the most VRAM.
   # Requires model artifacts to already exist in the shared cache volume when
   # HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are enabled.
   ##########################################################
@@ -306,6 +311,12 @@ services:
       TRANSFORMERS_OFFLINE: "${TRANSFORMERS_OFFLINE:-1}"
     volumes: &vllm-volumes
       - huggingface-cache:/root/.cache/huggingface/hub
+    healthcheck: &vllm-healthcheck
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
     deploy: *cuda-deploy
     networks:
       docint-net:
@@ -315,6 +326,8 @@ services:
 
   ##########################################################
   # vLLM Embeddings (CUDA)
+  # Waits for chat to be healthy before starting to avoid GPU
+  # memory profiling races.
   # Requires model artifacts to already exist in the shared cache volume when
   # HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are enabled.
   ##########################################################
@@ -328,6 +341,9 @@ services:
     gpus: all
     env_file: *docker-env-file
     ipc: host
+    depends_on:
+      vllm-chat-cuda:
+        condition: service_healthy
     entrypoint: ["/bin/sh", "-lc"]
     command:
       - >-
@@ -347,6 +363,7 @@ services:
         exec "$@"
     environment: *vllm-env
     volumes: *vllm-volumes
+    healthcheck: *vllm-healthcheck
     deploy: *cuda-deploy
     networks:
       docint-net:
@@ -356,6 +373,7 @@ services:
 
   ##########################################################
   # vLLM Audio / ASR (CUDA)
+  # Waits for embed to be healthy before starting.
   # Requires model artifacts to already exist in the shared cache volume when
   # HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are enabled.
   ##########################################################
@@ -369,6 +387,9 @@ services:
     gpus: all
     env_file: *docker-env-file
     ipc: host
+    depends_on:
+      vllm-embed-cuda:
+        condition: service_healthy
     entrypoint: ["/bin/sh", "-lc"]
     command:
       - >-
@@ -378,8 +399,11 @@ services:
         --host 0.0.0.0
         --port 8000
         --gpu-memory-utilization "$${AUDIO_GPU_MEMORY_UTILIZATION:-0.15}"
-    environment: *vllm-env
+    environment:
+      <<: *vllm-env
+      VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: ${VLLM_MAX_AUDIO_CLIP_FILESIZE_MB:-200}
     volumes: *vllm-volumes
+    healthcheck: *vllm-healthcheck
     deploy: *cuda-deploy
     networks:
       docint-net:
@@ -389,6 +413,7 @@ services:
 
   ##########################################################
   # vLLM Rerank (CUDA)
+  # Waits for audio to be healthy before starting.
   # Requires model artifacts to already exist in the shared cache volume when
   # HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are enabled.
   ##########################################################
@@ -402,6 +427,9 @@ services:
     gpus: all
     env_file: *docker-env-file
     ipc: host
+    depends_on:
+      vllm-audio-cuda:
+        condition: service_healthy
     entrypoint: ["/bin/sh", "-lc"]
     command:
       - >-
@@ -414,6 +442,7 @@ services:
         --gpu-memory-utilization "$${RERANK_GPU_MEMORY_UTILIZATION:-0.15}"
     environment: *vllm-env
     volumes: *vllm-volumes
+    healthcheck: *vllm-healthcheck
     deploy: *cuda-deploy
     networks:
       docint-net:
