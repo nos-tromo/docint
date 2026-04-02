@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import threading
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -22,10 +23,24 @@ from docint.utils.env_cfg import (
 _GLINER_OFFLINE_DIR = Path(tempfile.gettempdir()) / "docint-gliner-offline"
 _DEFAULT_GLINER_CONTEXT_WINDOW = 768
 _GLINER_SPECIAL_TOKEN_RESERVE = 2
+_GLINER_RUNTIME_CACHE_LOCK = threading.Lock()
 _SENTENCE_RE = re.compile(
     r".+?(?:[.!?]+[\"')\]]*(?=\s+|$)|\n{2,}|$)",
     re.DOTALL,
 )
+
+
+@dataclass(slots=True)
+class _GLiNERRuntime:
+    """Reusable GLiNER runtime state shared across extractor instances."""
+
+    model: Any
+    max_tokens: int
+    tokenizer: Any | None
+    lock: threading.Lock
+
+
+_GLINER_RUNTIME_CACHE: dict[tuple[str, bool, str], _GLiNERRuntime] = {}
 
 
 def _parse_ner_payload(raw: str) -> dict[str, Any]:
@@ -202,6 +217,56 @@ def _get_gliner_class() -> type[Any]:
     from gliner import GLiNER
 
     return GLiNER
+
+
+def _get_or_load_gliner_runtime(
+    model_id: str,
+    cache_dir: Path,
+    device: str | None,
+) -> _GLiNERRuntime:
+    """Load or reuse a GLiNER runtime for the requested model/device pair.
+
+    Args:
+        model_id: Configured GLiNER model identifier.
+        cache_dir: Hugging Face cache directory.
+        device: Preferred execution device.
+
+    Returns:
+        _GLiNERRuntime: Cached runtime bundle for inference.
+    """
+    load_id, local_only = _resolve_gliner_load_target(
+        model_id=model_id, cache_dir=cache_dir
+    )
+    target_device = _resolve_gliner_device(device)
+    device_key = target_device or "cpu"
+    cache_key = (load_id, local_only, device_key)
+
+    with _GLINER_RUNTIME_CACHE_LOCK:
+        runtime = _GLINER_RUNTIME_CACHE.get(cache_key)
+        if runtime is not None:
+            logger.info("Reusing cached GLiNER runtime: {} on {}", model_id, device_key)
+            return runtime
+
+        gliner_class = _get_gliner_class()
+
+        try:
+            model = gliner_class.from_pretrained(load_id, local_files_only=local_only)
+        except Exception as e:
+            logger.error("Failed to load GLiNER model: {}. Error: {}", model_id, e)
+            raise
+
+        if target_device is not None:
+            model = model.to(target_device)
+            logger.info("GLiNER moved to {}", target_device)
+
+        runtime = _GLiNERRuntime(
+            model=model,
+            max_tokens=_resolve_gliner_context_window(model),
+            tokenizer=_get_gliner_tokenizer(model),
+            lock=threading.Lock(),
+        )
+        _GLINER_RUNTIME_CACHE[cache_key] = runtime
+        return runtime
 
 
 def _load_gliner_config(model_dir: Path) -> dict[str, Any]:
@@ -635,26 +700,11 @@ def build_gliner_ner_extractor(
     logger.info("Loading GLiNER model: {}", model_id)
 
     hf_cache = load_path_env().hf_hub_cache
-    load_id, local_only = _resolve_gliner_load_target(
-        model_id=model_id, cache_dir=hf_cache
+    runtime = _get_or_load_gliner_runtime(
+        model_id=model_id,
+        cache_dir=hf_cache,
+        device=device,
     )
-    gliner_class = _get_gliner_class()
-
-    # We load initially; moving to device happens if available
-    try:
-        model = gliner_class.from_pretrained(load_id, local_files_only=local_only)
-    except Exception as e:
-        logger.error("Failed to load GLiNER model: {}. Error: {}", model_id, e)
-        raise
-
-    target_device = _resolve_gliner_device(device)
-    if target_device is not None:
-        model = model.to(target_device)
-        logger.info("GLiNER moved to {}", target_device)
-
-    max_tokens = _resolve_gliner_context_window(model)
-    tokenizer = _get_gliner_tokenizer(model)
-    gliner_lock = threading.Lock()
 
     def _extract(text: str) -> tuple[list[dict], list[dict]]:
         """Extract entities using GLiNER.
@@ -672,11 +722,11 @@ def build_gliner_ner_extractor(
             preds: list[dict[str, Any]] = []
             # GLiNER and its tokenizer share PyO3-backed state that is not safe
             # for concurrent use across ingestion threads.
-            with gliner_lock:
+            with runtime.lock:
                 for chunk in _chunk_text_for_gliner(
                     text=text,
-                    max_tokens=max_tokens,
-                    tokenizer=tokenizer,
+                    max_tokens=runtime.max_tokens,
+                    tokenizer=runtime.tokenizer,
                 ):
                     # Suppress the "Asking to truncate to max_length but no maximum
                     # length is provided" warning from the internal DeBERTa tokenizer.
@@ -686,7 +736,9 @@ def build_gliner_ner_extractor(
                             message=".*truncat.*max_length.*no maximum length.*",
                         )
                         preds.extend(
-                            model.predict_entities(chunk, labels, threshold=threshold)
+                            runtime.model.predict_entities(
+                                chunk, labels, threshold=threshold
+                            )
                         )
         except Exception as e:
             logger.warning("GLiNER extraction failed: {}", e)

@@ -471,6 +471,38 @@ def test_load_model_env_uses_vllm_sparse_and_asr_defaults(
     assert cfg.whisper_model == "openai/whisper-large-v3-turbo"
 
 
+def test_load_model_env_uses_smaller_cpu_ner_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CPU-backed auxiliary workloads should default to the smaller GLiNER model.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.setenv("USE_DEVICE", "cpu")
+    monkeypatch.delenv("NER_MODEL", raising=False)
+
+    cfg = load_model_env()
+
+    assert cfg.ner_model == "urchade/gliner_small-v2.1"
+
+
+def test_load_model_env_preserves_explicit_ner_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit NER model configuration should override device-based defaults.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.setenv("USE_DEVICE", "cpu")
+    monkeypatch.setenv("NER_MODEL", "gliner-community/gliner_large-v2.5")
+
+    cfg = load_model_env()
+
+    assert cfg.ner_model == "gliner-community/gliner_large-v2.5"
+
+
 def test_load_hate_speech_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default hate-speech config should be disabled with one worker.
 

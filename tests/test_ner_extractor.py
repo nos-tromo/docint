@@ -5,7 +5,9 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Generator, cast
+
+import pytest
 
 from docint.utils import ner_extractor as ner_extractor_module
 
@@ -49,6 +51,14 @@ def _fake_gliner_runtime(
     config = SimpleNamespace(max_len=max_len)
     data_processor = SimpleNamespace(transformer_tokenizer=FakeTokenizer())
     return config, data_processor
+
+
+@pytest.fixture(autouse=True)
+def clear_gliner_runtime_cache() -> Generator[None, None, None]:
+    """Ensure GLiNER runtime cache state does not leak across tests."""
+    ner_extractor_module._GLINER_RUNTIME_CACHE.clear()
+    yield
+    ner_extractor_module._GLINER_RUNTIME_CACHE.clear()
 
 
 def test_build_gliner_ner_extractor_uses_expanded_default_labels(
@@ -770,6 +780,78 @@ def test_build_gliner_ner_extractor_serializes_concurrent_model_access(
     assert len(results) == 2
     extracted_texts = sorted(result[0][0]["text"] for result in results)
     assert extracted_texts == ["Alice met Bob", "Carol visited Paris"]
+
+
+def test_build_gliner_ner_extractor_reuses_loaded_runtime_across_calls(
+    monkeypatch,
+) -> None:
+    """Repeated extractor construction should reuse the same GLiNER runtime."""
+
+    load_calls: list[tuple[str, bool]] = []
+
+    class FakeModel:
+        """Minimal GLiNER stand-in used for unit testing."""
+
+        def __init__(self) -> None:
+            self.config, self.data_processor = _fake_gliner_runtime()
+
+        def to(self, _device: str) -> "FakeModel":
+            return self
+
+        def predict_entities(
+            self,
+            text: str,
+            labels: list[str],
+            *,
+            threshold: float,
+        ) -> list[dict[str, object]]:
+            del text, labels, threshold
+            return []
+
+    def _fake_from_pretrained(model_id: str, *, local_files_only: bool) -> FakeModel:
+        load_calls.append((model_id, local_files_only))
+        return FakeModel()
+
+    fake_gliner_class = SimpleNamespace(from_pretrained=_fake_from_pretrained)
+
+    monkeypatch.setattr(
+        ner_extractor_module,
+        "load_model_env",
+        lambda: SimpleNamespace(ner_model="urchade/gliner_small-v2.1"),
+    )
+    monkeypatch.setattr(
+        ner_extractor_module,
+        "load_path_env",
+        lambda: SimpleNamespace(hf_hub_cache="/tmp"),
+    )
+    monkeypatch.setattr(
+        ner_extractor_module,
+        "resolve_hf_cache_path",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    monkeypatch.setattr(
+        ner_extractor_module,
+        "_get_gliner_class",
+        lambda: fake_gliner_class,
+    )
+    monkeypatch.setattr(
+        ner_extractor_module.torch.cuda,
+        "is_available",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        ner_extractor_module.torch.backends.mps,
+        "is_available",
+        lambda: False,
+    )
+
+    first_extractor = ner_extractor_module.build_gliner_ner_extractor()
+    second_extractor = ner_extractor_module.build_gliner_ner_extractor()
+
+    assert first_extractor("Alice met Bob") == ([], [])
+    assert second_extractor("Carol visited Paris") == ([], [])
+    assert load_calls == [("urchade/gliner_small-v2.1", False)]
 
 
 def test_build_gliner_ner_extractor_fails_fast_when_offline_model_missing(

@@ -486,6 +486,25 @@ class ModelConfig:
     whisper_model: str
 
 
+def _default_ner_model_for_runtime(
+    requested_device: str,
+    default_ner_model: str,
+) -> str:
+    """Select the implicit NER model for the current runtime.
+
+    Args:
+        requested_device: Normalized ``USE_DEVICE`` preference.
+        default_ner_model: Baseline GLiNER model identifier.
+
+    Returns:
+        str: The model identifier to use when ``NER_MODEL`` is not set.
+    """
+    if requested_device == "cpu":
+        return "urchade/gliner_small-v2.1"
+
+    return default_ner_model
+
+
 def load_model_env(
     default_embed_model: str = "bge-m3",
     default_image_embed_model: str = "openai/clip-vit-base-patch32",
@@ -524,9 +543,14 @@ def load_model_env(
         - whisper_model (str): The Whisper model identifier.
     """
     inference_provider = os.getenv("INFERENCE_PROVIDER", "ollama").strip().lower()
+    requested_device = load_runtime_env().use_device
     embed_model = os.getenv("EMBED_MODEL", default_embed_model)
     sparse_default = default_sparse_model
     whisper_default = default_whisper_model
+    ner_default = _default_ner_model_for_runtime(
+        requested_device=requested_device,
+        default_ner_model=default_ner_model,
+    )
     if inference_provider == "vllm":
         sparse_default = embed_model
         whisper_default = default_vllm_whisper_model
@@ -534,7 +558,7 @@ def load_model_env(
     return ModelConfig(
         embed_model=embed_model,
         image_embed_model=os.getenv("IMAGE_EMBED_MODEL", default_image_embed_model),
-        ner_model=os.getenv("NER_MODEL", default_ner_model),
+        ner_model=os.getenv("NER_MODEL", ner_default),
         rerank_model=os.getenv("RERANK_MODEL", default_rerank_model),
         sparse_model=os.getenv("SPARSE_MODEL", sparse_default),
         text_model=os.getenv("TEXT_MODEL", default_text_model),
