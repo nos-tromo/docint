@@ -23,9 +23,8 @@ def test_docker_compose_vllm_profile_includes_audio_service() -> None:
     compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
     assert "vllm-audio-cuda:" in compose
-    assert (
-        "depends_on:\n      - vllm-chat-cuda\n      - vllm-embed-cuda\n      - vllm-audio-cuda"
-        in compose
-    )
-    assert "USE_DEVICE: ${USE_DEVICE:-cpu}" in compose
+    # Router waits for all vLLM services to pass their health check.
+    assert "vllm-chat-cuda:\n        condition: service_healthy" in compose
+    assert "vllm-audio-cuda:\n        condition: service_healthy" in compose
+    assert "USE_DEVICE: cpu" in compose
     assert '--hf-overrides \'{"architectures":["BgeM3EmbeddingModel"]}\'' in compose

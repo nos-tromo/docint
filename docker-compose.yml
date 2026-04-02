@@ -73,6 +73,28 @@ x-backend-cuda: &backend-cuda
             capabilities: [cuda]
   networks: *backend-net
 
+# CPU-only backend for the cuda-vllm profile.  All GPU workloads are handled
+# by dedicated vLLM containers; this backend only runs lightweight local
+# models (GLiNER, CLIP, fastembed) on CPU.  Using the CPU Dockerfile avoids
+# shipping ~5 GB of unused CUDA/cuDNN libraries and eliminates any risk of
+# accidental GPU context initialisation.
+x-backend-vllm: &backend-vllm
+  build:
+    context: .
+    dockerfile: Dockerfile.backend.cpu
+    args:
+      <<: *build-args
+  ports: *backend-ports
+  environment: &backend-vllm-env
+    LOG_PATH: /var/log/docint/backend-vllm.log
+    QDRANT_HOST: http://qdrant:6333
+    QDRANT_SRC_DIR: /var/lib/docint/sources
+    SESSIONS_DB_PATH: /var/lib/docint/sessions/sessions.sqlite3
+    USE_DEVICE: cpu
+  env_file: *docker-env-file
+  volumes: *backend-volumes
+  networks: *backend-net
+
 x-qdrant-common: &qdrant-common
   ports:
     - 6333:6333
@@ -169,16 +191,15 @@ services:
   # Backend – CUDA + vLLM
   ##########################################################
   backend-cuda-vllm:
-    <<: *backend-cuda
+    <<: *backend-vllm
     profiles: ["cuda-vllm"]
     depends_on:
       - vllm-router
       - qdrant-cuda
     environment:
-      <<: *backend-cuda-env
+      <<: *backend-vllm-env
       INFERENCE_PROVIDER: vllm
       OPENAI_API_BASE: http://vllm-router:9000/v1
-      USE_DEVICE: ${USE_DEVICE:-cpu}
 
   ##########################################################
   # Ollama (CPU)

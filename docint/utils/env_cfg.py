@@ -40,6 +40,29 @@ def set_offline_env() -> None:
 set_offline_env()  # Apply offline settings at module load time
 
 
+def _apply_device_visibility() -> None:
+    """Hide CUDA devices when the backend is configured for CPU-only work.
+
+    When ``USE_DEVICE=cpu`` the process should never initialise a CUDA
+    context.  Setting ``CUDA_VISIBLE_DEVICES=""`` before any PyTorch import
+    prevents accidental GPU memory allocation that can destabilise co-located
+    GPU services (e.g. vLLM workers sharing the same physical GPUs).
+    """
+    requested = os.getenv("USE_DEVICE", "auto").strip().lower()
+    if requested != "cpu":
+        return
+    # Only override when not already set by the operator.
+    if os.getenv("CUDA_VISIBLE_DEVICES") is not None:
+        return
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    logger.info(
+        "USE_DEVICE=cpu: set CUDA_VISIBLE_DEVICES='' to prevent GPU context init."
+    )
+
+
+_apply_device_visibility()  # Must run before any torch.cuda call
+
+
 def resolve_hf_cache_path(
     cache_dir: Path, repo_id: str, filename: str | None = None
 ) -> Path | None:
@@ -486,29 +509,10 @@ class ModelConfig:
     whisper_model: str
 
 
-def _default_ner_model_for_runtime(
-    requested_device: str,
-    default_ner_model: str,
-) -> str:
-    """Select the implicit NER model for the current runtime.
-
-    Args:
-        requested_device: Normalized ``USE_DEVICE`` preference.
-        default_ner_model: Baseline GLiNER model identifier.
-
-    Returns:
-        str: The model identifier to use when ``NER_MODEL`` is not set.
-    """
-    if requested_device == "cpu":
-        return "urchade/gliner_small-v2.1"
-
-    return default_ner_model
-
-
 def load_model_env(
     default_embed_model: str = "bge-m3",
     default_image_embed_model: str = "openai/clip-vit-base-patch32",
-    default_ner_model: str = "gliner-community/gliner_large-v2.5",
+    default_ner_model: str = "urchade/gliner_multi-v2.1",
     default_rerank_model: str = "BAAI/bge-reranker-v2-m3",
     default_sparse_model: str = "Qdrant/all_miniLM_L6_v2_with_attentions",
     default_text_model: str = "gpt-oss:20b",
@@ -543,14 +547,10 @@ def load_model_env(
         - whisper_model (str): The Whisper model identifier.
     """
     inference_provider = os.getenv("INFERENCE_PROVIDER", "ollama").strip().lower()
-    requested_device = load_runtime_env().use_device
     embed_model = os.getenv("EMBED_MODEL", default_embed_model)
     sparse_default = default_sparse_model
     whisper_default = default_whisper_model
-    ner_default = _default_ner_model_for_runtime(
-        requested_device=requested_device,
-        default_ner_model=default_ner_model,
-    )
+
     if inference_provider == "vllm":
         sparse_default = embed_model
         whisper_default = default_vllm_whisper_model
@@ -558,7 +558,7 @@ def load_model_env(
     return ModelConfig(
         embed_model=embed_model,
         image_embed_model=os.getenv("IMAGE_EMBED_MODEL", default_image_embed_model),
-        ner_model=os.getenv("NER_MODEL", ner_default),
+        ner_model=os.getenv("NER_MODEL", default_ner_model),
         rerank_model=os.getenv("RERANK_MODEL", default_rerank_model),
         sparse_model=os.getenv("SPARSE_MODEL", sparse_default),
         text_model=os.getenv("TEXT_MODEL", default_text_model),

@@ -2,12 +2,14 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from docint.utils.clean_text import basic_clean
 from docint.utils.env_cfg import (
+    _apply_device_visibility,
     load_frontend_env,
     load_hate_speech_env,
     load_ingestion_env,
@@ -469,6 +471,54 @@ def test_load_model_env_uses_vllm_sparse_and_asr_defaults(
 
     assert cfg.sparse_model == "BAAI/bge-m3"
     assert cfg.whisper_model == "openai/whisper-large-v3-turbo"
+
+
+def test_apply_device_visibility_hides_cuda_on_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """USE_DEVICE=cpu should set CUDA_VISIBLE_DEVICES='' to prevent GPU context init.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.setenv("USE_DEVICE", "cpu")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    _apply_device_visibility()
+
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == ""
+
+
+def test_apply_device_visibility_skips_non_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-CPU device settings should not mask CUDA devices.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.setenv("USE_DEVICE", "auto")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    _apply_device_visibility()
+
+    assert "CUDA_VISIBLE_DEVICES" not in os.environ
+
+
+def test_apply_device_visibility_respects_existing_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Operator-set CUDA_VISIBLE_DEVICES should not be overwritten.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.setenv("USE_DEVICE", "cpu")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+
+    _apply_device_visibility()
+
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"
 
 
 def test_load_model_env_uses_smaller_cpu_ner_default(
