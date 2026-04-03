@@ -518,26 +518,23 @@ def load_model_env(
     default_text_model: str = "gpt-oss:20b",
     default_vision_model: str = "qwen3.5:9b",
     default_whisper_model: str = "turbo",
-    default_vllm_whisper_model: str = "openai/whisper-large-v3-turbo",
 ) -> ModelConfig:
     """Loads model configuration from environment variables or defaults.
 
     Args:
-        default_embed_model(str): Default embedding model identifier for Ollama-compatible embeddings.
+        default_embed_model(str): Default embedding model identifier for
+            Ollama-compatible embeddings.
         default_image_embed_model (str): Default image embedding model identifier.
         default_ner_model (str): Default NER model identifier.
         default_rerank_model (str): Default reranker model identifier.
         default_sparse_model (str): Default sparse model identifier.
         default_text_model_str (str): Default text model identifier.
         default_vision_model_str (str): Default vision model identifier.
-        default_whisper_model (str): Default Whisper model identifier for local
-            backends.
-        default_vllm_whisper_model (str): Default Whisper-compatible ASR model
-            identifier when ``INFERENCE_PROVIDER=vllm``.
+        default_whisper_model (str): Default Whisper model identifier.
 
     Returns:
         ModelConfig: Dataclass containing model configuration.
-        - embed_model (str): The embedding model identifier for Ollama-compatible embeddings.
+        - embed_model (str): The embedding model identifier.
         - image_embed_model (str): The image embedding model identifier.
         - ner_model (str): The NER model identifier.
         - rerank_model (str): The reranker model identifier.
@@ -547,22 +544,23 @@ def load_model_env(
         - whisper_model (str): The Whisper model identifier.
     """
     inference_provider = os.getenv("INFERENCE_PROVIDER", "ollama").strip().lower()
-    embed_model = os.getenv("EMBED_MODEL", default_embed_model)
-    sparse_default = default_sparse_model
-    whisper_default = default_whisper_model
 
     if inference_provider == "vllm":
-        default_sparse_model = embed_model
+        default_embed_model = "BAAI/bge-m3"
+        default_sparse_model = default_embed_model
+        default_text_model = "Qwen/Qwen3.5-2B"
+        default_vision_model = "Qwen/Qwen3.5-2B"
+        default_whisper_model = "openai/whisper-large-v3-turbo"
 
     return ModelConfig(
-        embed_model=embed_model,
+        embed_model=os.getenv("EMBED_MODEL", default_embed_model),
         image_embed_model=os.getenv("IMAGE_EMBED_MODEL", default_image_embed_model),
         ner_model=os.getenv("NER_MODEL", default_ner_model),
         rerank_model=os.getenv("RERANK_MODEL", default_rerank_model),
         sparse_model=os.getenv("SPARSE_MODEL", default_sparse_model),
         text_model=os.getenv("TEXT_MODEL", default_text_model),
         vision_model=os.getenv("VISION_MODEL", default_vision_model),
-        whisper_model=os.getenv("WHISPER_MODEL", whisper_default),
+        whisper_model=os.getenv("WHISPER_MODEL", default_whisper_model),
     )
 
 
@@ -1199,16 +1197,21 @@ class WhisperConfig:
 
     max_workers: int
     task: Literal["transcribe", "translate"]
+    src_language: str | None = None
 
 
 def load_whisper_env(
     default_max_workers: int = 1,
+    default_src_language: str | None = None,
     default_task: Literal["transcribe", "translate"] = "transcribe",
 ) -> WhisperConfig:
     """Load Whisper runtime settings from environment variables.
 
     Args:
         default_max_workers: Default number of file-level Whisper workers.
+        src_language: Optional source language code to pass to Whisper for improved transcription accuracy.
+            Should be an ISO 639-1 code (e.g. "en" for English, "fr" for French, etc.).  If not set, Whisper
+            will attempt to auto-detect the source language.
         default_task: Default Whisper task selector.
 
     Returns:
@@ -1253,5 +1256,6 @@ def load_whisper_env(
 
     return WhisperConfig(
         max_workers=max_workers,
+        src_language=os.getenv("WHISPER_SRC_LANGUAGE", default_src_language),
         task=cast(Literal["transcribe", "translate"], task),
     )
