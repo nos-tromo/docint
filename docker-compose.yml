@@ -46,6 +46,9 @@ x-backend-cpu: &backend-cpu
     docint-net:
       aliases:
         - backend-net
+    proxy-net:
+      aliases:
+        - docint-backend
 
 x-backend-cuda: &backend-cuda
   build:
@@ -246,7 +249,10 @@ services:
     volumes:
       - docint-logs:/var/log/docint
     networks:
-      - docint-net
+      docint-net:
+      proxy-net:
+        aliases:
+          - docint-frontend
 
   ##########################################################
   # Qdrant
@@ -282,3 +288,6 @@ volumes:
 ##########################################################
 networks:
   docint-net:
+  proxy-net:
+    external: true
+    name: ${PROXY_NETWORK:-proxy-net}

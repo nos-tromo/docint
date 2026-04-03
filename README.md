@@ -61,6 +61,9 @@ and chat. It ships with:
 - Deploy the standalone vLLM app first, then start Docint.
 - Docint expects the vLLM router to expose one OpenAI-compatible base URL that
   ends in `/v1`, plus the vLLM sparse routes at `/pooling` and `/tokenize`.
+- For co-deployed stacks on one server, create one shared external Docker
+  network, attach both compose projects to it, and set
+  `OPENAI_API_BASE=http://vllm-router:9000/v1`.
 - `cuda-vllm` needs an NVIDIA GPU and the NVIDIA Container Toolkit.
 - First startup may take a while because model assets are downloaded into the
   shared cache volumes.
@@ -151,8 +154,26 @@ docker compose --env-file .env.docker down
 
 ## Standalone vLLM App
 
-Docint provides a basic Ollama service for local inference. A standalone app scaffold for the separate deployment lives in
+The standalone deployment lives in
 [vllm-service](https://github.com/nos-tromo/vllm-service/).
+
+For a shared-network deployment on one server:
+
+1. Create the shared external network once:
+
+   ```bash
+   docker network create proxy-net
+   ```
+
+2. Start `vllm-service` on that network.
+3. Set `PROXY_NETWORK=proxy-net` in both projects if you use a different name.
+4. Configure Docint with:
+
+   ```bash
+   INFERENCE_PROVIDER=vllm
+   OPENAI_API_BASE=http://vllm-router:9000/v1
+   OPENAI_API_KEY=<token>
+   ```
 
 Run that stack separately and configure Docint with:
 

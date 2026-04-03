@@ -4,7 +4,6 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TEMPLATE_ROOT = REPO_ROOT / "templates" / "docint-vllm"
 
 
 def test_docint_compose_uses_external_vllm_profiles() -> None:
@@ -24,34 +23,21 @@ def test_docint_compose_uses_external_vllm_profiles() -> None:
     assert "nginx.vllm.conf" not in compose
 
 
-def test_bundled_vllm_artifacts_are_removed_from_repo_root() -> None:
-    """Bundled root-level vLLM deployment artifacts should be gone."""
+def test_docint_compose_joins_shared_proxy_network() -> None:
+    """Docint should join the shared external proxy network."""
+
+    compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "proxy-net:" in compose
+    assert "name: ${PROXY_NETWORK:-proxy-net}" in compose
+    assert "external: true" in compose
+    assert "- docint-backend" in compose
+    assert "- docint-frontend" in compose
+
+
+def test_bundled_vllm_artifacts_are_removed_from_docint() -> None:
+    """Bundled vLLM assets should be removed from the Docint repository."""
 
     assert not (REPO_ROOT / "Dockerfile.vllm").exists()
     assert not (REPO_ROOT / "nginx.vllm.conf").exists()
-
-
-def test_standalone_vllm_template_contains_required_files() -> None:
-    """The standalone vLLM app scaffold should exist in the template path."""
-
-    required_files = {
-        ".env.example",
-        "docker-compose.yml",
-        "Dockerfile.vllm",
-        "nginx.vllm.conf",
-        "README.md",
-    }
-
-    assert TEMPLATE_ROOT.exists()
-    assert required_files.issubset({path.name for path in TEMPLATE_ROOT.iterdir()})
-
-
-def test_standalone_vllm_template_router_exposes_required_routes() -> None:
-    """The standalone vLLM router should expose sparse and audio routes."""
-
-    config = (TEMPLATE_ROOT / "nginx.vllm.conf").read_text(encoding="utf-8")
-
-    assert "location = /pooling" in config
-    assert "location = /tokenize" in config
-    assert "location = /v1/audio/transcriptions" in config
-    assert "location = /v1/audio/translations" in config
+    assert not (REPO_ROOT / "templates" / "docint-vllm").exists()
