@@ -552,15 +552,14 @@ def load_model_env(
     whisper_default = default_whisper_model
 
     if inference_provider == "vllm":
-        sparse_default = embed_model
-        whisper_default = default_vllm_whisper_model
+        default_sparse_model = embed_model
 
     return ModelConfig(
         embed_model=embed_model,
         image_embed_model=os.getenv("IMAGE_EMBED_MODEL", default_image_embed_model),
         ner_model=os.getenv("NER_MODEL", default_ner_model),
         rerank_model=os.getenv("RERANK_MODEL", default_rerank_model),
-        sparse_model=os.getenv("SPARSE_MODEL", sparse_default),
+        sparse_model=os.getenv("SPARSE_MODEL", default_sparse_model),
         text_model=os.getenv("TEXT_MODEL", default_text_model),
         vision_model=os.getenv("VISION_MODEL", default_vision_model),
         whisper_model=os.getenv("WHISPER_MODEL", whisper_default),

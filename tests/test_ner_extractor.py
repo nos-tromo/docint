@@ -243,7 +243,7 @@ def test_build_gliner_ner_extractor_rewrites_backbone_to_local_cache(
     monkeypatch.setattr(
         ner_extractor_module,
         "load_model_env",
-        lambda: SimpleNamespace(ner_model="gliner-community/gliner_large-v2.5"),
+        lambda: SimpleNamespace(ner_model="urchade/gliner_multi-v2.1"),
     )
     monkeypatch.setattr(
         ner_extractor_module,
@@ -263,7 +263,7 @@ def test_build_gliner_ner_extractor_rewrites_backbone_to_local_cache(
             Path | None: The local snapshot path if known, otherwise None.
         """
         del cache_dir
-        if repo_id == "gliner-community/gliner_large-v2.5":
+        if repo_id == "urchade/gliner_multi-v2.1":
             return gliner_snapshot
         if repo_id == "microsoft/deberta-v3-large":
             return deberta_snapshot
@@ -870,7 +870,7 @@ def test_build_gliner_ner_extractor_fails_fast_when_offline_model_missing(
     monkeypatch.setattr(
         ner_extractor_module,
         "load_model_env",
-        lambda: SimpleNamespace(ner_model="gliner-community/gliner_large-v2.5"),
+        lambda: SimpleNamespace(ner_model="urchade/gliner_multi-v2.1"),
     )
     monkeypatch.setattr(
         ner_extractor_module,
@@ -896,7 +896,7 @@ def test_build_gliner_ner_extractor_fails_fast_when_offline_model_missing(
     try:
         ner_extractor_module.build_gliner_ner_extractor()
     except FileNotFoundError as exc:
-        assert "gliner-community/gliner_large-v2.5" in str(exc)
+        assert "urchade/gliner_multi-v2.1" in str(exc)
     else:  # pragma: no cover - defensive branch
         raise AssertionError("Expected build_gliner_ner_extractor() to fail")
 
