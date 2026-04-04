@@ -24,7 +24,7 @@ def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch) -> Non
 
     model_config = SimpleNamespace(
         image_embed_model="openai/clip-vit-base-patch32",
-        ner_model="gliner-community/gliner_large-v2.5",
+        ner_model="urchade/gliner_multi-v2.1",
         sparse_model="Qdrant/all_miniLM_L6_v2_with_attentions",
         rerank_model="BAAI/bge-reranker-v2-m3",
         embed_model="BAAI/bge-m3",
@@ -96,7 +96,7 @@ def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch) -> Non
     model_cfg_module.main()
 
     assert ("clip", "openai/clip-vit-base-patch32") in calls
-    assert ("gliner", "gliner-community/gliner_large-v2.5") in calls
+    assert ("gliner", "urchade/gliner_multi-v2.1") in calls
     assert ("sparse", "Qdrant/all_miniLM_L6_v2_with_attentions") in calls
     assert ("rerank", "BAAI/bge-reranker-v2-m3") in calls
     assert ("embedding", "BAAI/bge-m3") in calls

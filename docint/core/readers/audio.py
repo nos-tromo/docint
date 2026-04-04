@@ -1,7 +1,10 @@
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import contextmanager
 from multiprocessing import get_context
-from typing import Any, Literal, Sequence, cast
+import subprocess
+import tempfile
+from typing import Any, Generator, Literal, Sequence, cast
 
 import whisper
 from llama_index.core import Document
@@ -19,9 +22,39 @@ from docint.utils.mimetype import get_mimetype
 WhisperTask = Literal["transcribe", "translate"]
 _ENGLISH_LANGUAGE_CODES = {"en", "eng", "english"}
 _CPU_DEVICE_NAMES = {"cuda", "mps", "cpu"}
+
+# Suffixes that libsndfile can decode natively.  Files whose extension is
+# *not* in this set must be converted to WAV before being sent to a vLLM
+# provider (which internally uses ``librosa`` → ``soundfile``).
+_LIBSNDFILE_EXTENSIONS = {
+    ".aif",
+    ".aiff",
+    ".au",
+    ".avr",
+    ".caf",
+    ".flac",
+    ".htk",
+    ".mat",
+    ".mpc",
+    ".ogg",
+    ".paf",
+    ".pvf",
+    ".raw",
+    ".rf64",
+    ".sd2",
+    ".sds",
+    ".sf",
+    ".svx",
+    ".voc",
+    ".w64",
+    ".wav",
+    ".wavex",
+    ".xi",
+}
 _WORKER_MODEL: whisper.Whisper | None = None
 _WORKER_MODEL_ID: str | None = None
 _WORKER_DEVICE: str | None = None
+_WORKER_SRC_LANGUAGE: str | None = None
 _WORKER_TASK: WhisperTask = "transcribe"
 
 
@@ -175,6 +208,7 @@ def _init_whisper_worker(
     model_id: str,
     device: str | None,
     configured_task: WhisperTask,
+    src_language: str | None = None,
 ) -> None:
     """Initialize module-level worker state for Whisper multiprocessing.
 
@@ -182,12 +216,19 @@ def _init_whisper_worker(
         model_id (str): The Whisper model identifier to load in workers.
         device (str | None): The inference device to use in workers.
         configured_task (WhisperTask): The configured default Whisper task.
+        src_language (str | None): Optional source language override.
     """
 
-    global _WORKER_DEVICE, _WORKER_MODEL, _WORKER_MODEL_ID, _WORKER_TASK
+    global \
+        _WORKER_DEVICE, \
+        _WORKER_MODEL, \
+        _WORKER_MODEL_ID, \
+        _WORKER_SRC_LANGUAGE, \
+        _WORKER_TASK
     _WORKER_MODEL = None
     _WORKER_MODEL_ID = model_id
     _WORKER_DEVICE = device
+    _WORKER_SRC_LANGUAGE = _normalize_language_code(src_language)
     _WORKER_TASK = configured_task
 
 
@@ -224,8 +265,8 @@ def _transcribe_audio_job(job: tuple[str, str | None]) -> dict[str, Any]:
     try:
         model = _get_worker_model()
         audio = whisper.load_audio(file=file_path_str)
-        detected_language = None
-        if _WORKER_TASK == "translate":
+        detected_language: str | None = _WORKER_SRC_LANGUAGE
+        if detected_language is None and _WORKER_TASK == "translate":
             detected_language = _detect_language_with_model(
                 audio=audio,
                 model=model,
@@ -237,7 +278,7 @@ def _transcribe_audio_job(job: tuple[str, str | None]) -> dict[str, Any]:
             audio=audio,
             model=model,
             task=selected_task,
-            language=detected_language,
+            language=detected_language or _WORKER_SRC_LANGUAGE,
         )
         return {
             "detected_language": detected_language,
@@ -260,6 +301,58 @@ def _transcribe_audio_job(job: tuple[str, str | None]) -> dict[str, Any]:
 
 class OpenAICompatibleAudioBackend:
     """Provider-backed audio transcription helper for OpenAI-compatible APIs."""
+
+    @staticmethod
+    @contextmanager
+    def _wav_for_provider(
+        file_path: Path,
+    ) -> Generator[Path, None, None]:
+        """Yield a WAV path suitable for the provider API.
+
+        If the file's suffix is already handled by libsndfile the original
+        path is yielded unchanged.  Otherwise the audio is re-encoded to
+        16 kHz mono WAV via *ffmpeg* so that the vLLM ``librosa.load()``
+        call can decode it.
+
+        Args:
+            file_path: Source audio file.
+
+        Yields:
+            Path to a WAV file (either the original or a temporary copy).
+        """
+        if file_path.suffix.lower() in _LIBSNDFILE_EXTENSIONS:
+            yield file_path
+            return
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
+            tmp_path = Path(tmp.name)
+
+        try:
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-nostdin",
+                "-threads",
+                "0",
+                "-i",
+                str(file_path),
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-acodec",
+                "pcm_s16le",
+                str(tmp_path),
+            ]
+            subprocess.run(cmd, capture_output=True, check=True)  # noqa: S603
+            logger.debug(
+                "Converted {} → {} for provider API",
+                file_path.name,
+                tmp_path.name,
+            )
+            yield tmp_path
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
     def __init__(
         self,
@@ -322,23 +415,34 @@ class OpenAICompatibleAudioBackend:
         normalized = model_id.strip().lower()
         return normalized != "turbo" and "whisper-large-v3-turbo" not in normalized
 
-    def _transcribe_via_provider(self, file_path: Path) -> dict[str, Any]:
+    def _transcribe_via_provider(
+        self, file_path: Path, *, language: str | None = None
+    ) -> dict[str, Any]:
         """Call the provider transcriptions endpoint with verbose segments.
 
         Args:
             file_path: The path to the audio file to transcribe.
+            language: Optional source language override.
 
         Returns:
             dict[str, Any]: The normalized transcription result from the provider.
         """
 
-        with file_path.open("rb") as audio_file:
-            response = self._client.audio.transcriptions.create(
-                file=audio_file,
-                model=self.model_id,
-                response_format="verbose_json",
-                timestamp_granularities=["segment"],
-            )
+        kwargs: dict[str, Any] = {
+            "file": None,
+            "model": self.model_id,
+            "response_format": "verbose_json",
+            "timestamp_granularities": ["segment"],
+        }
+        if language:
+            kwargs["language"] = language
+
+        with (
+            self._wav_for_provider(file_path) as send_path,
+            send_path.open("rb") as audio_file,
+        ):
+            kwargs["file"] = audio_file
+            response = self._client.audio.transcriptions.create(**kwargs)
         return self._response_to_dict(response)
 
     def _translate_via_provider(self, file_path: Path) -> dict[str, Any]:
@@ -351,7 +455,10 @@ class OpenAICompatibleAudioBackend:
             dict[str, Any]: The normalized translation result from the provider.
         """
 
-        with file_path.open("rb") as audio_file:
+        with (
+            self._wav_for_provider(file_path) as send_path,
+            send_path.open("rb") as audio_file,
+        ):
             response = self._client.audio.translations.create(
                 file=audio_file,
                 model=self.model_id,
@@ -360,21 +467,26 @@ class OpenAICompatibleAudioBackend:
         return self._response_to_dict(response)
 
     def transcribe_file(
-        self, file_path: Path, *, configured_task: WhisperTask
+        self,
+        file_path: Path,
+        *,
+        configured_task: WhisperTask,
+        src_language: str | None = None,
     ) -> dict[str, Any]:
         """Transcribe or translate a file through the provider backend.
 
         Args:
             file_path: Source audio file.
             configured_task: Requested task from configuration.
+            src_language: Optional source language override.
 
         Returns:
             A normalized transcription payload.
         """
 
-        transcription = self._transcribe_via_provider(file_path)
+        transcription = self._transcribe_via_provider(file_path, language=src_language)
         detected_language = _normalize_language_code(
-            cast(str | None, transcription.get("language"))
+            src_language or cast(str | None, transcription.get("language"))
         )
         if configured_task == "translate" and detected_language is None:
             logger.warning(
@@ -439,6 +551,9 @@ class AudioReader(BaseReader):
         self.inference_provider: str = openai_cfg.inference_provider.lower()
         whisper_cfg = load_whisper_env()
         self.max_workers: int = whisper_cfg.max_workers
+        self.src_language: str | None = _normalize_language_code(
+            whisper_cfg.src_language
+        )
         self.task: WhisperTask = whisper_cfg.task
         self._model: whisper.Whisper | None = None
         self._provider_backend: OpenAICompatibleAudioBackend | None = None
@@ -783,8 +898,8 @@ class AudioReader(BaseReader):
             language code for the file.
         """
 
-        detected_language = None
-        if self.task == "translate":
+        detected_language: str | None = self.src_language
+        if detected_language is None and self.task == "translate":
             detected_language = self._detect_language(audio, model)
             if detected_language is None:
                 logger.warning(
@@ -792,7 +907,7 @@ class AudioReader(BaseReader):
                 )
 
         selected_task = _select_whisper_task(self.task, detected_language)
-        return selected_task, detected_language
+        return selected_task, detected_language or self.src_language
 
     def _transcribe_file_payload(
         self, file_path: Path, file_hash: str | None
@@ -811,6 +926,7 @@ class AudioReader(BaseReader):
             payload = self._provider_backend.transcribe_file(
                 file_path,
                 configured_task=self.task,
+                src_language=self.src_language,
             )
             payload["file_hash"] = file_hash
             payload["file_path"] = str(file_path)
@@ -1063,7 +1179,7 @@ class AudioReader(BaseReader):
                 max_workers=worker_count,
                 mp_context=get_context("spawn"),
                 initializer=_init_whisper_worker,
-                initargs=(self.model_id, self.device, self.task),
+                initargs=(self.model_id, self.device, self.task, self.src_language),
             ) as executor:
                 future_to_index: dict[Any, int] = {}
                 next_submit_index = 0

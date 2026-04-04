@@ -6,7 +6,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import whisper
 from llama_index.core import Document
+from numpy import floating
+from numpy.typing import NDArray
 
 import docint.core.readers.audio as audio_module
 from docint.core.readers.audio import AudioReader
@@ -486,3 +489,206 @@ def test_transcribe_audio_job_reports_file_error(
     assert payload["file_hash"] == "hash"
     assert payload["result"] is None
     assert payload["error"] == "boom"
+
+
+# ---------------------------------------------------------------------------
+# _wav_for_provider conversion tests
+# ---------------------------------------------------------------------------
+
+
+def test_wav_for_provider_passthrough_for_native_suffix(tmp_path: Path) -> None:
+    """Files with libsndfile-native suffixes should be yielded as-is.
+
+    Args:
+        tmp_path: Temporary directory provided by pytest.
+    """
+    wav = tmp_path / "clip.wav"
+    wav.write_bytes(b"\x00")
+
+    backend = audio_module.OpenAICompatibleAudioBackend
+    with backend._wav_for_provider(wav) as result:
+        assert result == wav
+
+
+def test_wav_for_provider_converts_webm(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """WebM files should be converted to WAV via ffmpeg before yielding.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+    """
+    webm = tmp_path / "clip.webm"
+    webm.write_bytes(b"\x00")
+    converted_path: Path | None = None
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
+        """Fake subprocess.run that writes a dummy WAV file."""
+        # cmd[-1] is the output path
+        Path(cmd[-1]).write_bytes(b"RIFF")
+
+    monkeypatch.setattr(audio_module.subprocess, "run", fake_run)
+
+    backend = audio_module.OpenAICompatibleAudioBackend
+    with backend._wav_for_provider(webm) as result:
+        converted_path = result
+        assert result.suffix == ".wav"
+        assert result != webm
+        assert result.exists()
+
+    # Temp file should be cleaned up after exiting the context
+    assert converted_path is not None
+    assert not converted_path.exists()
+
+
+def test_wav_for_provider_cleans_up_on_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Temporary WAV file should be removed even when an error occurs.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+    """
+    mp3 = tmp_path / "clip.mp3"
+    mp3.write_bytes(b"\x00")
+    converted_path: Path | None = None
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
+        Path(cmd[-1]).write_bytes(b"RIFF")
+
+    monkeypatch.setattr(audio_module.subprocess, "run", fake_run)
+
+    backend = audio_module.OpenAICompatibleAudioBackend
+    with pytest.raises(RuntimeError, match="deliberate"):
+        with backend._wav_for_provider(mp3) as result:
+            converted_path = result
+            raise RuntimeError("deliberate")
+
+    assert converted_path is not None
+    assert not converted_path.exists()
+
+
+def test_vllm_transcribe_converts_webm_before_sending(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The provider transcription should convert WebM files before the API call.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+    """
+    monkeypatch.setenv("INFERENCE_PROVIDER", "vllm")
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
+        Path(cmd[-1]).write_bytes(b"RIFF")
+
+    monkeypatch.setattr(audio_module.subprocess, "run", fake_run)
+
+    calls = _install_vllm_audio_client(
+        monkeypatch,
+        transcription_response={
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 1.0, "text": "Test."}],
+            "text": "Test.",
+        },
+    )
+
+    # Patch the create method to capture the file name
+    original_calls = calls
+
+    audio_path = tmp_path / "talk.webm"
+    audio_path.write_bytes(b"fake-webm")
+
+    docs = AudioReader(device="cpu").load_data(audio_path)
+
+    assert len(docs) == 1
+    assert docs[0].text == "Test."
+    # Verify the file sent to the API had a .wav suffix
+    assert len(original_calls) == 1
+    sent_file = original_calls[0][1]["file"]
+    assert sent_file.name.endswith(".wav")
+
+
+# ---------------------------------------------------------------------------
+# WHISPER_SRC_LANGUAGE override tests
+# ---------------------------------------------------------------------------
+
+
+def test_src_language_skips_detection_and_passes_language(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When WHISPER_SRC_LANGUAGE is set, detection is skipped and the language is forwarded.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+    """
+    monkeypatch.setenv("WHISPER_SRC_LANGUAGE", "fr")
+    reader = AudioReader(device="cpu")
+    monkeypatch.setattr(reader, "_load_model", lambda: None)
+    monkeypatch.setattr(reader, "_load_audio", lambda _: None)
+
+    detect_called = False
+
+    def _detect_should_not_be_called(
+        _audio: NDArray[floating[Any]], _model: whisper.Whisper
+    ) -> str | None:  # noqa: ANN001, ANN202
+        """This function should not be called when WHISPER_SRC_LANGUAGE is set.
+
+        Args:
+            _audio (NDArray[floating[Any]]): The audio data.
+            _model (whisper.Whisper): The Whisper model.
+
+        Returns:
+            str | None: Always returns None.
+        """
+        nonlocal detect_called
+        detect_called = True
+        return None
+
+    monkeypatch.setattr(reader, "_detect_language", _detect_should_not_be_called)
+
+    captured: dict[str, Any] = {}
+
+    def fake_transcribe(
+        _audio: NDArray[floating[Any]], _model: whisper.Whisper, **kwargs
+    ) -> dict[str, Any]:  # noqa: ANN003
+        """Fake transcribe method that captures the language argument passed to it.
+
+        Args:
+            _audio (NDArray[floating[Any]]): The audio data.
+            _model (whisper.Whisper): The Whisper model.
+
+        Returns:
+            dict[str, Any]: The transcription result.
+        """
+        captured.update(kwargs)
+        return {"segments": None, "text": "Bonjour."}
+
+    monkeypatch.setattr(reader, "_transcribe_audio", fake_transcribe)
+
+    audio_path = tmp_path / "french.wav"
+    audio_path.write_bytes(b"fake")
+    docs = reader.load_data(audio_path)
+
+    assert not detect_called
+    assert captured["language"] == "fr"
+    assert docs[0].text == "Bonjour."
+
+
+def test_src_language_worker_init_sets_global(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_init_whisper_worker should propagate src_language to the module global.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    audio_module._init_whisper_worker("turbo", "cpu", "transcribe", src_language="de")
+    assert audio_module._WORKER_SRC_LANGUAGE == "de"
+
+    # Reset
+    audio_module._init_whisper_worker("turbo", "cpu", "transcribe")
+    assert audio_module._WORKER_SRC_LANGUAGE is None

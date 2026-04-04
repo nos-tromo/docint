@@ -6,14 +6,15 @@ and chat. It ships with:
 - a FastAPI backend
 - a Streamlit UI
 - Qdrant for storage and retrieval
-- pluggable inference via Ollama, OpenAI-compatible APIs, or bundled vLLM
+- pluggable inference via Ollama, OpenAI-compatible APIs, or an external routed vLLM service
 
 ## What You Need
 
 - Docker for the containerized setup
 - Python 3.11 and `uv` for local development
 - an inference backend
-  - Docker profiles can provide Ollama or bundled vLLM
+  - Docker profiles can provide Ollama
+  - vLLM is deployed separately and consumed via one routed base URL
   - local development needs an OpenAI-compatible endpoint you manage yourself
 
 ## Quick Start With Docker
@@ -36,9 +37,10 @@ and chat. It ships with:
    | --- | --- |
    | `cpu-ollama` | CPU-only machine, local Ollama in Docker |
    | `cpu-openai` | CPU-only machine, external OpenAI-compatible API |
+   | `cpu-vllm` | CPU-only machine, external routed vLLM service |
    | `cuda-ollama` | NVIDIA GPU, local Ollama in Docker |
-   | `cuda-vllm` | NVIDIA GPU, bundled vLLM services |
    | `cuda-openai` | NVIDIA GPU, external OpenAI-compatible API |
+   | `cuda-vllm` | NVIDIA GPU, external routed vLLM service |
 
 4. Start the stack:
 
@@ -55,6 +57,13 @@ and chat. It ships with:
 ### Docker Notes
 
 - `cpu-openai` and `cuda-openai` need `OPENAI_API_KEY` in `.env.docker`.
+- `cpu-vllm` and `cuda-vllm` require `OPENAI_API_BASE` in `.env.docker`.
+- Deploy the standalone vLLM app first, then start Docint.
+- Docint expects the vLLM router to expose one OpenAI-compatible base URL that
+  ends in `/v1`, plus the vLLM sparse routes at `/pooling` and `/tokenize`.
+- For co-deployed stacks on one server, create one shared external Docker
+  network, attach both compose projects to it, and set
+  `OPENAI_API_BASE=http://vllm-router:9000/v1`.
 - `cuda-vllm` needs an NVIDIA GPU and the NVIDIA Container Toolkit.
 - First startup may take a while because model assets are downloaded into the
   shared cache volumes.
@@ -90,7 +99,7 @@ Docker.
 2. Ensure the required services exist:
 
    - Qdrant at `http://localhost:6333`
-   - an OpenAI-compatible inference endpoint
+   - an OpenAI-compatible inference endpoint, such as an external vLLM service
 
 3. Install dependencies:
 
@@ -142,6 +151,37 @@ Stop the Docker stack:
 ```bash
 docker compose --env-file .env.docker down
 ```
+
+## Standalone vLLM App
+
+The standalone deployment lives in
+[vllm-service](https://github.com/nos-tromo/vllm-service/).
+
+For a shared-network deployment on one server:
+
+1. Create the shared external network once:
+
+   ```bash
+   docker network create proxy-net
+   ```
+
+2. Start `vllm-service` on that network.
+3. Set `PROXY_NETWORK=proxy-net` in both projects if you use a different name.
+4. Configure Docint with:
+
+   ```bash
+   INFERENCE_PROVIDER=vllm
+   OPENAI_API_BASE=http://vllm-router:9000/v1
+   OPENAI_API_KEY=<token>
+   ```
+
+Run that stack separately and configure Docint with:
+
+- `INFERENCE_PROVIDER=vllm`
+- `OPENAI_API_BASE=https://<router-host>/v1`
+- `OPENAI_API_KEY=<token>`
+- `TEXT_MODEL`, `VISION_MODEL`, `EMBED_MODEL`, `SPARSE_MODEL`,
+  `RERANK_MODEL`, and `WHISPER_MODEL` matching the served model IDs
 
 ## Repository Shape
 

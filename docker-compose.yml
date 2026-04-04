@@ -13,7 +13,6 @@ x-base-image-build-args: &base-image-build-args
   PYTHON_SLIM_BOOKWORM_IMAGE: ${PYTHON_SLIM_BOOKWORM_IMAGE:-python:3.11-slim-bookworm}
   PYTHON_SLIM_IMAGE: ${PYTHON_SLIM_IMAGE:-python:3.11-slim}
   NVIDIA_CUDA_RUNTIME_IMAGE: ${NVIDIA_CUDA_RUNTIME_IMAGE:-nvidia/cuda:13.0.2-cudnn-runtime-ubuntu22.04}
-  VLLM_OPENAI_IMAGE: ${VLLM_OPENAI_IMAGE:-vllm/vllm-openai:v0.17.1}
 
 x-build-args: &build-args
   <<: [*proxy-build-args, *base-image-build-args]
@@ -47,6 +46,9 @@ x-backend-cpu: &backend-cpu
     docint-net:
       aliases:
         - backend-net
+    proxy-net:
+      aliases:
+        - docint-backend
 
 x-backend-cuda: &backend-cuda
   build:
@@ -166,19 +168,27 @@ services:
       OPENAI_API_BASE: https://api.openai.com/v1
 
   ##########################################################
-  # Backend – CUDA + vLLM
+  # Backend – External vLLM
   ##########################################################
+  backend-cpu-vllm:
+    <<: *backend-cpu
+    profiles: ["cpu-vllm"]
+    depends_on:
+      - qdrant
+    environment:
+      <<: *backend-cpu-env
+      INFERENCE_PROVIDER: vllm
+      OPENAI_API_BASE: ${OPENAI_API_BASE:?OPENAI_API_BASE must point to the external vLLM router /v1 endpoint}
+
   backend-cuda-vllm:
     <<: *backend-cuda
     profiles: ["cuda-vllm"]
     depends_on:
-      - vllm-router
       - qdrant-cuda
     environment:
       <<: *backend-cuda-env
       INFERENCE_PROVIDER: vllm
-      OPENAI_API_BASE: http://vllm-router:9000/v1
-      USE_DEVICE: ${USE_DEVICE:-cpu}
+      OPENAI_API_BASE: ${OPENAI_API_BASE:?OPENAI_API_BASE must point to the external vLLM router /v1 endpoint}
 
   ##########################################################
   # Ollama (CPU)
@@ -219,188 +229,6 @@ services:
     networks: *ollama-net
 
   ##########################################################
-  # vLLM Router (CUDA)
-  ##########################################################
-  vllm-router:
-    profiles: ["cuda-vllm"]
-    image: nginx:1.28.2-alpine
-    env_file: *docker-env-file
-    depends_on:
-      - vllm-chat-cuda
-      - vllm-embed-cuda
-      - vllm-audio-cuda
-      - vllm-rerank-cuda
-    volumes:
-      - ./nginx.vllm.conf:/etc/nginx/conf.d/default.conf:ro
-    networks:
-      docint-net:
-        aliases:
-          - vllm-router
-    restart: unless-stopped
-
-  ##########################################################
-  # vLLM Chat (CUDA)
-  # Requires model artifacts to already exist in the shared cache volume when
-  # HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are enabled.
-  ##########################################################
-  vllm-chat-cuda:
-    profiles: ["cuda-vllm"]
-    build:
-      context: .
-      dockerfile: Dockerfile.vllm
-      args:
-        <<: *build-args
-    gpus: all
-    env_file: *docker-env-file
-    ipc: host
-    entrypoint: ["/bin/sh", "-lc"]
-    command:
-      - >-
-        export CUDA_VISIBLE_DEVICES="$${CHAT_CUDA_VISIBLE_DEVICES:-0}";
-        set -- vllm serve "$${TEXT_MODEL:-$${LLM:-Qwen/Qwen3.5-2B}}"
-        --tensor-parallel-size "$${TENSOR_PARALLEL_SIZE:-1}"
-        --api-key "$${OPENAI_API_KEY:-sk-no-key-required}"
-        --host 0.0.0.0
-        --port 8000
-        --gpu-memory-utilization "$${CHAT_GPU_MEMORY_UTILIZATION:-0.5}"
-        --max-model-len "$${OPENAI_CTX_WINDOW:-$${CHAT_MAX_MODEL_LEN:-8192}}"
-        --max-num-seqs "$${CHAT_MAX_NUM_SEQS:-8}"
-        --max-num-batched-tokens "$${CHAT_MAX_NUM_BATCHED_TOKENS:-16384}";
-        if [ "$${CHAT_ENABLE_PREFIX_CACHING:-true}" = "true" ]; then
-          set -- "$@" --enable-prefix-caching;
-        fi;
-        if [ -n "$${CHAT_TEMPLATE_CONTENT_FORMAT:-}" ]; then
-          set -- "$@" --chat-template-content-format "$${CHAT_TEMPLATE_CONTENT_FORMAT}";
-        fi;
-        if [ -n "$${CHAT_DEFAULT_CHAT_TEMPLATE_KWARGS:-}" ]; then
-          set -- "$@" --default-chat-template-kwargs "$${CHAT_DEFAULT_CHAT_TEMPLATE_KWARGS}";
-        fi;
-        if [ -n "$${CHAT_LIMIT_MM_PER_PROMPT:-}" ]; then
-          set -- "$@" --limit-mm-per-prompt "$${CHAT_LIMIT_MM_PER_PROMPT}";
-        fi;
-        exec "$@"
-    environment: &vllm-env
-      NVIDIA_VISIBLE_DEVICES: all
-      HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-1}"
-      TRANSFORMERS_OFFLINE: "${TRANSFORMERS_OFFLINE:-1}"
-    volumes: &vllm-volumes
-      - huggingface-cache:/root/.cache/huggingface/hub
-    deploy: *cuda-deploy
-    networks:
-      docint-net:
-        aliases:
-          - vllm-chat
-    restart: unless-stopped
-
-  ##########################################################
-  # vLLM Embeddings (CUDA)
-  # Requires model artifacts to already exist in the shared cache volume when
-  # HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are enabled.
-  ##########################################################
-  vllm-embed-cuda:
-    profiles: ["cuda-vllm"]
-    build:
-      context: .
-      dockerfile: Dockerfile.vllm
-      args:
-        <<: *build-args
-    gpus: all
-    env_file: *docker-env-file
-    ipc: host
-    entrypoint: ["/bin/sh", "-lc"]
-    command:
-      - >-
-        export CUDA_VISIBLE_DEVICES="$${EMBED_CUDA_VISIBLE_DEVICES:-0}";
-        set -- vllm serve "$${EMBED_MODEL:-BAAI/bge-m3}"
-        --api-key "$${OPENAI_API_KEY:-sk-no-key-required}"
-        --host 0.0.0.0
-        --port 8000
-        --runner "$${EMBED_RUNNER:-pooling}"
-        --convert "$${EMBED_CONVERT:-embed}"
-        --gpu-memory-utilization "$${EMBED_GPU_MEMORY_UTILIZATION:-0.15}";
-        if [ -n "$${EMBED_HF_OVERRIDES:-}" ]; then
-          set -- "$@" --hf-overrides "$${EMBED_HF_OVERRIDES}";
-        elif [ "$${EMBED_MODEL:-BAAI/bge-m3}" = "BAAI/bge-m3" ]; then
-          set -- "$@" --hf-overrides '{"architectures":["BgeM3EmbeddingModel"]}';
-        fi;
-        exec "$@"
-    environment: *vllm-env
-    volumes: *vllm-volumes
-    deploy: *cuda-deploy
-    networks:
-      docint-net:
-        aliases:
-          - vllm-embed
-    restart: unless-stopped
-
-  ##########################################################
-  # vLLM Audio / ASR (CUDA)
-  # Requires model artifacts to already exist in the shared cache volume when
-  # HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are enabled.
-  ##########################################################
-  vllm-audio-cuda:
-    profiles: ["cuda-vllm"]
-    build:
-      context: .
-      dockerfile: Dockerfile.vllm
-      args:
-        <<: *build-args
-    gpus: all
-    env_file: *docker-env-file
-    ipc: host
-    entrypoint: ["/bin/sh", "-lc"]
-    command:
-      - >-
-        export CUDA_VISIBLE_DEVICES="$${AUDIO_CUDA_VISIBLE_DEVICES:-0}";
-        exec vllm serve "$${WHISPER_MODEL:-openai/whisper-large-v3-turbo}"
-        --api-key "$${OPENAI_API_KEY:-sk-no-key-required}"
-        --host 0.0.0.0
-        --port 8000
-        --gpu-memory-utilization "$${AUDIO_GPU_MEMORY_UTILIZATION:-0.15}"
-    environment: *vllm-env
-    volumes: *vllm-volumes
-    deploy: *cuda-deploy
-    networks:
-      docint-net:
-        aliases:
-          - vllm-audio
-    restart: unless-stopped
-
-  ##########################################################
-  # vLLM Rerank (CUDA)
-  # Requires model artifacts to already exist in the shared cache volume when
-  # HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are enabled.
-  ##########################################################
-  vllm-rerank-cuda:
-    profiles: ["cuda-vllm"]
-    build:
-      context: .
-      dockerfile: Dockerfile.vllm
-      args:
-        <<: *build-args
-    gpus: all
-    env_file: *docker-env-file
-    ipc: host
-    entrypoint: ["/bin/sh", "-lc"]
-    command:
-      - >-
-        export CUDA_VISIBLE_DEVICES="$${RERANK_CUDA_VISIBLE_DEVICES:-0}";
-        exec vllm serve "$${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}"
-        --api-key "$${OPENAI_API_KEY:-sk-no-key-required}"
-        --host 0.0.0.0
-        --port 8000
-        --runner "$${RERANK_RUNNER:-pooling}"
-        --gpu-memory-utilization "$${RERANK_GPU_MEMORY_UTILIZATION:-0.15}"
-    environment: *vllm-env
-    volumes: *vllm-volumes
-    deploy: *cuda-deploy
-    networks:
-      docint-net:
-        aliases:
-          - vllm-rerank
-    restart: unless-stopped
-    
-  ##########################################################
   # Frontend (Streamlit)
   ##########################################################
   frontend:
@@ -421,14 +249,17 @@ services:
     volumes:
       - docint-logs:/var/log/docint
     networks:
-      - docint-net
+      docint-net:
+      proxy-net:
+        aliases:
+          - docint-frontend
 
   ##########################################################
   # Qdrant
   ##########################################################
   qdrant:
     <<: *qdrant-cpu
-    profiles: ["cpu-ollama", "cpu-openai"]
+    profiles: ["cpu-ollama", "cpu-openai", "cpu-vllm"]
 
   qdrant-cuda:
     <<: *qdrant-cuda
@@ -457,3 +288,6 @@ volumes:
 ##########################################################
 networks:
   docint-net:
+  proxy-net:
+    external: true
+    name: ${PROXY_NETWORK:-proxy-net}
