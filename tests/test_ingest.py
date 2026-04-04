@@ -266,61 +266,6 @@ def test_audio_extension_classified_as_audio(monkeypatch: pytest.MonkeyPatch) ->
     assert isinstance(nodes, list)
 
 
-def test_openai_provider_uses_llm_extractor(monkeypatch: pytest.MonkeyPatch) -> None:
-    """OpenAI provider should initialize the LLM NER extractor path."""
-
-    class FakeNERConfig:
-        enabled = True
-        max_chars = 256
-        max_workers = 2
-
-    class FakeIngestionConfig:
-        ingestion_batch_size = 2
-        sentence_splitter_chunk_size = 512
-        sentence_splitter_chunk_overlap = 64
-        supported_filetypes: list[str] = []
-        hierarchical_chunking_enabled = False
-        coarse_chunk_size = 1024
-        fine_chunk_size = 256
-        fine_chunk_overlap = 32
-
-    class FakeOpenAIPipeline:
-        def load_prompt(self, kw: str) -> str:
-            assert kw == "ner"
-            return "extract {text}"
-
-    marker: list[str] = []
-
-    def fake_build_llm_extractor(model, prompt: str, max_chars: int):
-        marker.append(f"{model}:{prompt}:{max_chars}")
-        return lambda text: ([], [])
-
-    monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
-    monkeypatch.setattr(
-        pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig()
-    )
-    monkeypatch.setattr(pipeline_module, "OpenAIPipeline", FakeOpenAIPipeline)
-    monkeypatch.setattr(
-        pipeline_module, "build_llm_ner_extractor", fake_build_llm_extractor
-    )
-    monkeypatch.setattr(
-        pipeline_module,
-        "build_gliner_ner_extractor",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not run")),
-    )
-
-    pipeline = DocumentIngestionPipeline(
-        data_dir=Path("/tmp"),
-        device="cpu",
-        ner_model="fake-llm",  # type: ignore[arg-type]
-        progress_callback=None,
-        openai_inference_provider="openai",
-    )
-
-    assert pipeline.entity_extractor is not None
-    assert marker == ["fake-llm:extract {text}:256"]
-
-
 def test_hate_speech_detection_attaches_flagged_metadata(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

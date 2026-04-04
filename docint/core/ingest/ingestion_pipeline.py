@@ -32,7 +32,6 @@ from docint.utils.env_cfg import (
 from docint.utils.hashing import compute_file_hash
 from docint.utils.ner_extractor import (
     build_gliner_ner_extractor,
-    build_llm_ner_extractor,
 )
 from docint.utils.openai_cfg import OpenAIPipeline
 
@@ -164,9 +163,7 @@ class DocumentIngestionPipeline:
         if ner_enabled:
             logger.info("Initializing GLiNER NER extractor")
             try:
-                self.entity_extractor = build_gliner_ner_extractor(
-                    device=self.device
-                )
+                self.entity_extractor = build_gliner_ner_extractor(device=self.device)
             except Exception:
                 logger.warning("GLiNER model unavailable – continuing without NER")
                 self.entity_extractor = None
