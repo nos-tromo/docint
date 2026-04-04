@@ -278,8 +278,9 @@ def main() -> None:
                 kw=kw,
             )
 
+    # ASR / Whisper
     # Remote OpenAI-compatible APIs
-    if openai_config.inference_provider in {"openai"}:
+    if openai_config.inference_provider == "openai":
         # For remote OpenAI-compatible APIs, the serving stack provisions the
         # text, embedding, and vision endpoints. Only the app-local auxiliary
         # models above are prepared here.
@@ -287,9 +288,8 @@ def main() -> None:
             "Using {} as inference server. No local text/embedding/vision model loading required.",
             openai_config.inference_provider,
         )
-
     # Whisper / ASR
-    if openai_config.inference_provider == "vllm":
+    elif openai_config.inference_provider == "vllm":
         load_hf_model(
             model_id=model_config.whisper_model,
             cache_folder=path_config.hf_hub_cache,

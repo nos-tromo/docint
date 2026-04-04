@@ -298,6 +298,43 @@ def test_audio_reader_vllm_transcribe_uses_provider_backend(
     assert calls[0][1]["timestamp_granularities"] == ["segment"]
 
 
+def test_audio_reader_openai_transcribe_uses_provider_backend(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """OpenAI provider should use the transcriptions endpoint.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+    """
+
+    monkeypatch.setenv("INFERENCE_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+    calls = _install_vllm_audio_client(
+        monkeypatch,
+        transcription_response={
+            "language": "en",
+            "segments": [
+                {"start": 0.0, "end": 1.4, "text": "OpenAI"},
+                {"start": 1.4, "end": 2.8, "text": "transcript."},
+            ],
+            "text": "OpenAI transcript.",
+        },
+    )
+    audio_path = tmp_path / "openai.wav"
+    audio_path.write_bytes(b"fake")
+
+    docs = AudioReader(device="cpu").load_data(audio_path)
+
+    assert len(docs) == 1
+    assert docs[0].text == "OpenAI transcript."
+    assert docs[0].metadata["whisper_task"] == "transcribe"
+    assert docs[0].metadata["whisper_language"] == "en"
+    assert [name for name, _ in calls] == ["transcriptions"]
+    assert calls[0][1]["response_format"] == "verbose_json"
+    assert calls[0][1]["timestamp_granularities"] == ["segment"]
+
+
 def test_audio_reader_vllm_translate_non_english_uses_translation_endpoint(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -336,6 +373,47 @@ def test_audio_reader_vllm_translate_non_english_uses_translation_endpoint(
     assert docs[0].metadata["whisper_language"] == "es"
     assert docs[0].metadata["start_ts"] == "00:00:00"
     assert docs[0].metadata["end_ts"] == "00:00:02"
+    assert [name for name, _ in calls] == ["transcriptions", "translations"]
+
+
+def test_audio_reader_openai_translate_non_english_uses_translation_endpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """OpenAI provider should use the translations endpoint when needed.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+    """
+
+    monkeypatch.setenv("INFERENCE_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+    monkeypatch.setenv("WHISPER_TASK", "translate")
+    monkeypatch.setenv("WHISPER_MODEL", "whisper-1")
+    calls = _install_vllm_audio_client(
+        monkeypatch,
+        transcription_response={
+            "language": "de",
+            "segments": [{"start": 0.0, "end": 1.0, "text": "Hallo"}],
+            "text": "Hallo",
+        },
+        translation_response={
+            "segments": [
+                {"start": 0.0, "end": 1.0, "text": "Hello"},
+                {"start": 1.0, "end": 2.0, "text": "there."},
+            ],
+            "text": "Hello there.",
+        },
+    )
+    audio_path = tmp_path / "openai-translate.wav"
+    audio_path.write_bytes(b"fake")
+
+    docs = AudioReader(device="cpu").load_data(audio_path)
+
+    assert len(docs) == 1
+    assert docs[0].text == "Hello there."
+    assert docs[0].metadata["whisper_task"] == "translate"
+    assert docs[0].metadata["whisper_language"] == "de"
     assert [name for name, _ in calls] == ["transcriptions", "translations"]
 
 

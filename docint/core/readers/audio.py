@@ -20,6 +20,7 @@ from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.mimetype import get_mimetype
 
 WhisperTask = Literal["transcribe", "translate"]
+ProviderAudioInference = Literal["openai", "vllm"]
 _ENGLISH_LANGUAGE_CODES = {"en", "eng", "english"}
 _CPU_DEVICE_NAMES = {"cuda", "mps", "cpu"}
 
@@ -557,7 +558,7 @@ class AudioReader(BaseReader):
         self.task: WhisperTask = whisper_cfg.task
         self._model: whisper.Whisper | None = None
         self._provider_backend: OpenAICompatibleAudioBackend | None = None
-        if self.inference_provider == "vllm":
+        if self._uses_provider_audio_backend():
             self._provider_backend = OpenAICompatibleAudioBackend(
                 api_base=openai_cfg.api_base,
                 api_key=openai_cfg.api_key,
@@ -566,6 +567,21 @@ class AudioReader(BaseReader):
                 timeout=openai_cfg.timeout,
             )
         self.result: dict[str, str | list[Any]] | None = None
+
+    def _uses_provider_audio_backend(self) -> bool:
+        """Return whether audio should be routed to a provider API.
+
+        Returns:
+            bool: True when the configured inference provider exposes
+            OpenAI-compatible audio endpoints that should be used instead of
+            local Whisper inference.
+        """
+
+        provider = cast(
+            ProviderAudioInference | str,
+            self.inference_provider.strip().lower(),
+        )
+        return provider in {"openai", "vllm"}
 
     def _load_model(self) -> whisper.Whisper:
         """Load the Whisper model.
