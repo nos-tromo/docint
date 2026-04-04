@@ -552,6 +552,12 @@ def load_model_env(
         default_vision_model = "Qwen/Qwen3.5-2B"
         default_whisper_model = "openai/whisper-large-v3-turbo"
 
+    if inference_provider == "openai":
+        default_embed_model = "text-embedding-3-small"
+        default_text_model = "gpt-4o"
+        default_vision_model = "gpt-4o"
+        default_whisper_model = "whisper-1"
+
     return ModelConfig(
         embed_model=os.getenv("EMBED_MODEL", default_embed_model),
         image_embed_model=os.getenv("IMAGE_EMBED_MODEL", default_image_embed_model),
