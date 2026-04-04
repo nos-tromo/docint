@@ -159,28 +159,17 @@ class DocumentIngestionPipeline:
         # --- Named Entity Recognition (NER) config ---
         ner_cfg = load_ner_env()
         ner_enabled = ner_cfg.enabled
-        ner_max_chars = ner_cfg.max_chars
         self.ner_max_workers = ner_cfg.max_workers
 
         if ner_enabled:
-            if self.openai_inference_provider.lower() in {"openai"}:
-                ner_prompt = OpenAIPipeline().load_prompt(kw="ner")
-                if ner_prompt and self.ner_model is not None:
-                    logger.info("Initializing LLM NER extractor")
-                    self.entity_extractor = build_llm_ner_extractor(
-                        model=self.ner_model,
-                        prompt=ner_prompt,
-                        max_chars=ner_max_chars,
-                    )
-            else:
-                logger.info("Initializing GLiNER NER extractor")
-                try:
-                    self.entity_extractor = build_gliner_ner_extractor(
-                        device=self.device
-                    )
-                except Exception:
-                    logger.warning("GLiNER model unavailable – continuing without NER")
-                    self.entity_extractor = None
+            logger.info("Initializing GLiNER NER extractor")
+            try:
+                self.entity_extractor = build_gliner_ner_extractor(
+                    device=self.device
+                )
+            except Exception:
+                logger.warning("GLiNER model unavailable – continuing without NER")
+                self.entity_extractor = None
 
         hate_speech_cfg = load_hate_speech_env()
         self.hate_speech_enabled = hate_speech_cfg.enabled
