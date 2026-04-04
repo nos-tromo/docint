@@ -178,7 +178,8 @@ services:
     environment:
       <<: *backend-cpu-env
       INFERENCE_PROVIDER: vllm
-      OPENAI_API_BASE: ${OPENAI_API_BASE:?OPENAI_API_BASE must point to the external vLLM router /v1 endpoint}
+      # OPENAI_API_BASE: ${OPENAI_API_BASE:-http://vllm-router:9000/v1}
+      OPENAI_API_BASE: ${OPENAI_API_BASE:-}
 
   backend-cuda-vllm:
     <<: *backend-cuda
@@ -188,7 +189,8 @@ services:
     environment:
       <<: *backend-cuda-env
       INFERENCE_PROVIDER: vllm
-      OPENAI_API_BASE: ${OPENAI_API_BASE:?OPENAI_API_BASE must point to the external vLLM router /v1 endpoint}
+      # OPENAI_API_BASE: ${OPENAI_API_BASE:-http://vllm-router:9000/v1}
+      OPENAI_API_BASE: ${OPENAI_API_BASE:-}
 
   ##########################################################
   # Ollama (CPU)

@@ -13,8 +13,8 @@ def test_docint_compose_uses_external_vllm_profiles() -> None:
 
     assert 'profiles: ["cpu-vllm"]' in compose
     assert 'profiles: ["cuda-vllm"]' in compose
-    assert "OPENAI_API_BASE: ${OPENAI_API_BASE:?" in compose
-    assert "vllm-router:" not in compose
+    assert "OPENAI_API_BASE: ${OPENAI_API_BASE:-http://vllm-router:9000/v1}" in compose
+    assert "\n  vllm-router:\n" not in compose
     assert "vllm-chat-cuda:" not in compose
     assert "vllm-embed-cuda:" not in compose
     assert "vllm-audio-cuda:" not in compose
