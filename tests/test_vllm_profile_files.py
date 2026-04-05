@@ -13,7 +13,7 @@ def test_docint_compose_uses_external_vllm_profiles() -> None:
 
     assert 'profiles: ["cpu-vllm"]' in compose
     assert 'profiles: ["cuda-vllm"]' in compose
-    assert "OPENAI_API_BASE: ${OPENAI_API_BASE:-http://vllm-router:9000/v1}" in compose
+    assert "OPENAI_API_BASE: ${OPENAI_API_BASE:-}" in compose
     assert "\n  vllm-router:\n" not in compose
     assert "vllm-chat-cuda:" not in compose
     assert "vllm-embed-cuda:" not in compose
@@ -24,7 +24,7 @@ def test_docint_compose_uses_external_vllm_profiles() -> None:
 
 
 def test_docint_compose_joins_shared_proxy_network() -> None:
-    """Docint should join the shared external proxy network."""
+    """Docint should expose the backend on the shared external proxy network."""
 
     compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
@@ -32,7 +32,6 @@ def test_docint_compose_joins_shared_proxy_network() -> None:
     assert "name: ${PROXY_NETWORK:-proxy-net}" in compose
     assert "external: true" in compose
     assert "- docint-backend" in compose
-    assert "- docint-frontend" in compose
 
 
 def test_bundled_vllm_artifacts_are_removed_from_docint() -> None:
