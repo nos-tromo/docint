@@ -65,7 +65,7 @@ dev = [
     "mypy>=1.18.2",
     "pre-commit>=4.3.0",
     "pytest>=8.4.2",
-    "ruff==0.15.8",
+    "ruff==0.15.9",
 ]
 
 [build-system]
