@@ -10,8 +10,7 @@ x-proxy-build-args: &proxy-build-args
   no_proxy: ${no_proxy:-}
 
 x-base-image-build-args: &base-image-build-args
-  PYTHON_SLIM_BOOKWORM_IMAGE: ${PYTHON_SLIM_BOOKWORM_IMAGE:-python:3.11-slim-bookworm}
-  PYTHON_SLIM_IMAGE: ${PYTHON_SLIM_IMAGE:-python:3.11-slim}
+  PYTHON_SLIM_BOOKWORM_IMAGE: ${PYTHON_SLIM_BOOKWORM_IMAGE:-python:3.11.12-slim-bookworm}
   NVIDIA_CUDA_RUNTIME_IMAGE: ${NVIDIA_CUDA_RUNTIME_IMAGE:-nvidia/cuda:13.0.2-cudnn-runtime-ubuntu22.04}
 
 x-build-args: &build-args
@@ -178,7 +177,6 @@ services:
     environment:
       <<: *backend-cpu-env
       INFERENCE_PROVIDER: vllm
-      # OPENAI_API_BASE: ${OPENAI_API_BASE:-http://vllm-router:9000/v1}
       OPENAI_API_BASE: ${OPENAI_API_BASE:-}
 
   backend-cuda-vllm:
@@ -189,7 +187,6 @@ services:
     environment:
       <<: *backend-cuda-env
       INFERENCE_PROVIDER: vllm
-      # OPENAI_API_BASE: ${OPENAI_API_BASE:-http://vllm-router:9000/v1}
       OPENAI_API_BASE: ${OPENAI_API_BASE:-}
 
   ##########################################################
@@ -252,9 +249,6 @@ services:
       - docint-logs:/var/log/docint
     networks:
       docint-net:
-      proxy-net:
-        aliases:
-          - docint-frontend
 
   ##########################################################
   # Qdrant

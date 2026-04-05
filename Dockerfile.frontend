@@ -1,4 +1,4 @@
-ARG PYTHON_SLIM_IMAGE=python:3.11-slim
+ARG PYTHON_SLIM_IMAGE=python:3.11.12-slim-bookworm
 
 FROM ${PYTHON_SLIM_IMAGE} AS uv-installer
 
