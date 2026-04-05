@@ -8,6 +8,7 @@ on:
     branches: [main, tests]
     paths:
       - 'docint/app.py'
+      - 'docint/ui/**'
       - 'docint/utils/**'
       - 'Dockerfile.frontend'
       - 'tests/test_streamlit.py'
@@ -16,6 +17,7 @@ on:
     branches: [main, tests]
     paths:
       - 'docint/app.py'
+      - 'docint/ui/**'
       - 'docint/utils/**'
       - 'Dockerfile.frontend'
       - 'tests/test_streamlit.py'
