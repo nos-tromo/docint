@@ -164,6 +164,7 @@ def test_create_text_model_disables_reasoning_by_default(
         ctx_window=200000,
         dimensions=1024,
         max_retries=2,
+        num_output=256,
         inference_provider="openai",
         reuse_client=False,
         seed=42,
@@ -220,6 +221,7 @@ def test_post_retrieval_text_model_enables_reasoning_for_openai(
         ctx_window=200000,
         dimensions=1024,
         max_retries=2,
+        num_output=256,
         inference_provider="openai",
         reuse_client=False,
         seed=42,
@@ -267,6 +269,7 @@ def test_build_query_engine_uses_post_retrieval_text_model(
         ctx_window=200000,
         dimensions=1024,
         max_retries=2,
+        num_output=256,
         inference_provider="openai",
         reuse_client=False,
         seed=42,
@@ -3469,3 +3472,56 @@ def test_vector_store_uses_vllm_sparse_functions(
     assert "sparse_doc_fn" in captured
     assert "sparse_query_fn" in captured
     assert "fastembed_sparse_model" not in captured
+
+
+# ---------------------------------------------------------------------------
+# run_query / run_query_async – context window overflow
+# ---------------------------------------------------------------------------
+
+
+def test_run_query_wraps_context_window_overflow() -> None:
+    """run_query should catch llama_index context-size ValueError and re-raise with guidance."""
+
+    class _FakeEngine:
+        def query(self, prompt: str) -> None:
+            raise ValueError(
+                "Calculated available context size -907 was not non-negative."
+            )
+
+    rag = RAG(qdrant_collection="test")
+    rag.query_engine = _FakeEngine()  # type: ignore[assignment]
+    rag.openai_ctx_window = 4096
+
+    with pytest.raises(ValueError, match="OPENAI_CTX_WINDOW"):
+        rag.run_query("What is the summary?")
+
+
+def test_run_query_propagates_unrelated_value_error() -> None:
+    """ValueError without 'context size' should propagate unchanged."""
+
+    class _FakeEngine:
+        def query(self, prompt: str) -> None:
+            raise ValueError("Something else went wrong")
+
+    rag = RAG(qdrant_collection="test")
+    rag.query_engine = _FakeEngine()  # type: ignore[assignment]
+
+    with pytest.raises(ValueError, match="Something else"):
+        rag.run_query("hello")
+
+
+def test_run_query_async_wraps_context_window_overflow() -> None:
+    """Async variant should also catch context-size overflow."""
+
+    class _FakeEngine:
+        async def aquery(self, prompt: str) -> None:
+            raise ValueError(
+                "Calculated available context size -907 was not non-negative."
+            )
+
+    rag = RAG(qdrant_collection="test")
+    rag.query_engine = _FakeEngine()  # type: ignore[assignment]
+    rag.openai_ctx_window = 4096
+
+    with pytest.raises(ValueError, match="OPENAI_CTX_WINDOW"):
+        asyncio.run(rag.run_query_async("What is the summary?"))

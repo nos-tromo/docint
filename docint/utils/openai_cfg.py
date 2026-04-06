@@ -29,29 +29,49 @@ class EmbeddingInputTooLongError(RuntimeError):
 class LocalOpenAI(LlamaIndexOpenAI):
     """Subclass of LlamaIndex's OpenAI that handles local models with unknown names gracefully."""
 
-    def __init__(self, context_window: int = 4096, **kwargs: Any) -> None:
+    def __init__(
+        self, context_window: int = 4096, num_output: int = 256, **kwargs: Any
+    ) -> None:
         """Initialize the LocalOpenAI instance.
 
         Args:
-            context_window (int, optional): The context window size for the model. Defaults to 4096.
+            context_window: The context window size for the model. Defaults to 4096.
+            num_output: Tokens reserved for the model response in prompt-helper
+                calculations.  Defaults to 256 (llama_index default).
         """
         super().__init__(**kwargs)
         self._context_window = context_window
+        self._num_output = num_output
 
     @property
     def metadata(self) -> LLMMetadata:
-        """Override the metadata property to provide fallback values for unknown models.
+        """Return model metadata, always honouring the configured context window.
+
+        llama_index's built-in model registry only knows about first-party
+        OpenAI model names. For locally-served models (Ollama, vLLM,
+        llama-server) the registry either raises ``ValueError`` or returns
+        a stale context-window size.  We therefore always override
+        ``context_window`` and ``num_output`` with the values the caller
+        provided (which ultimately come from the ``OPENAI_CTX_WINDOW`` /
+        ``OPENAI_NUM_OUTPUT`` env vars or their defaults).
 
         Returns:
-            LLMMetadata: The metadata for the model, with fallback values if the model name is not recognized.
+            LLMMetadata: The metadata for the model.
         """
         try:
-            return super().metadata
+            base = super().metadata
+            return LLMMetadata(
+                context_window=self._context_window,
+                num_output=self._num_output,
+                is_chat_model=base.is_chat_model,
+                is_function_calling_model=base.is_function_calling_model,
+                model_name=base.model_name,
+            )
         except ValueError:
             # Fallback for unknown models (e.g. local paths for llama-server)
             return LLMMetadata(
                 context_window=self._context_window,
-                num_output=self.max_tokens or 2048,
+                num_output=self._num_output,
                 is_chat_model=True,
                 is_function_calling_model=True,
                 model_name=self.model,

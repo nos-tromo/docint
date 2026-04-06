@@ -512,7 +512,7 @@ class ModelConfig:
 def load_model_env(
     default_embed_model: str = "bge-m3",
     default_image_embed_model: str = "openai/clip-vit-base-patch32",
-    default_ner_model: str = "urchade/gliner_multi-v2.1",
+    default_ner_model: str = "gliner-community/gliner_large-v2.5",
     default_rerank_model: str = "BAAI/bge-reranker-v2-m3",
     default_sparse_model: str = "Qdrant/all_miniLM_L6_v2_with_attentions",
     default_text_model: str = "gpt-oss:20b",
@@ -617,6 +617,7 @@ class OpenAIConfig:
     ctx_window: int
     dimensions: int | None
     max_retries: int
+    num_output: int
     inference_provider: str
     reuse_client: bool
     seed: int
@@ -633,6 +634,7 @@ def load_openai_env(
     default_ctx_window: int = 4096,
     default_dimensions: int | None = None,
     default_max_retries: int = 2,
+    default_num_output: int = 256,
     default_inference_provider: Literal["ollama", "openai", "vllm"] = "ollama",
     default_reuse_client: bool = False,
     default_seed: int = 42,
@@ -653,6 +655,9 @@ def load_openai_env(
         default_dimensions (int | None): Optional embedding dimensions override for
             models that support reduced-dimension output.
         default_max_retries (int): Default number of retries.
+        default_num_output (int): Default number of tokens reserved for the
+            model response by the prompt helper.  Matches the llama_index
+            ``LLMMetadata`` default (256).
         default_inference_provider: Default inference server type (e.g. "ollama", "openai", "vllm"). Default is "ollama".
         default_reuse_client (bool): Whether to reuse the OpenAI client across calls. Default is False.
         default_seed (int): Default random seed for reproducibility.
@@ -671,6 +676,7 @@ def load_openai_env(
         - dimensions (int | None): Optional embedding dimensions override for
             embedding models.
         - max_retries (int): The number of retries for API calls.
+        - num_output (int): Tokens reserved for the model response.
         - inference_provider (Literal["ollama", "openai", "vllm"]): The inference server type.
         - reuse_client (bool): Whether to reuse the OpenAI client across calls.
         - seed (int): Random seed for reproducibility.
@@ -729,12 +735,20 @@ def load_openai_env(
         else:
             ctx_window = max(default_ctx_window, 8192)
 
+    raw_num_output = os.getenv("OPENAI_NUM_OUTPUT")
+    num_output = (
+        int(raw_num_output)
+        if raw_num_output is not None and raw_num_output.strip()
+        else default_num_output
+    )
+
     return OpenAIConfig(
         api_base=os.getenv("OPENAI_API_BASE", default_api_base),
         api_key=os.getenv("OPENAI_API_KEY", default_api_key),
         ctx_window=ctx_window,
         dimensions=dimensions,
         max_retries=int(os.getenv("OPENAI_MAX_RETRIES", default_max_retries)),
+        num_output=num_output,
         inference_provider=inference_provider,
         reuse_client=str(os.getenv("OPENAI_REUSE_CLIENT", default_reuse_client)).lower()
         in {"true", "1", "yes"},

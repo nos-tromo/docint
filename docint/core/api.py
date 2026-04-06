@@ -720,6 +720,14 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
             payload_out.update(validation)
             if payload_out:
                 yield f"data: {json.dumps(payload_out)}\n\n"
+        except ValueError as exc:
+            msg = str(exc)
+            if "context window" in msg.lower() or "context size" in msg.lower():
+                logger.warning("Context window overflow during SSE generation: {}", exc)
+                yield f"data: {json.dumps({'error': msg})}\n\n"
+            else:
+                logger.exception("Stream error during SSE generation")
+                yield f"data: {json.dumps({'error': 'Internal server error'})}\n\n"
         except Exception:
             logger.exception("Stream error during SSE generation")
             yield f"data: {json.dumps({'error': 'Internal server error'})}\n\n"

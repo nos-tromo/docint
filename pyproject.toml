@@ -43,8 +43,6 @@ dependencies = [
   "requests>=2.32.5",
   "sqlalchemy>=2.0.42",
   "streamlit>=1.52.1",
-  "torch>=2.10.0",
-  "torchvision>=0.25.0",
   "transformers>=4.57.6",
   "uvicorn>=0.35.0",
   "watchdog>=6.0.0",
@@ -59,6 +57,18 @@ ingest = "docint.cli.ingest:main"
 query = "docint.cli.query:main"
 query-eval = "docint.cli.eval:main"
 load-models = "docint.utils.model_cfg:main"
+
+[project.optional-dependencies]
+cpu = [
+  "torch>=2.10.0",
+  "torchvision>=0.25.0",
+]
+cuda = [
+  "torch>=2.10.0",
+  "torchvision>=0.25.0",
+  "fastembed-gpu",
+  "onnxruntime-gpu",
+]
 
 [dependency-groups]
 dev = [
@@ -78,9 +88,20 @@ include = ["docint*"]
 
 [tool.uv]
 package = true
+conflicts = [
+  [{ extra = "cpu" }, { extra = "cuda" }],
+]
 
 [tool.uv.sources]
 docint = { workspace = true }
+torch = [
+  { index = "pytorch-cu130", extra = "cuda" },
+  { index = "pytorch-cpu", extra = "cpu" },
+]
+torchvision = [
+  { index = "pytorch-cu130", extra = "cuda" },
+  { index = "pytorch-cpu", extra = "cpu" },
+]
 
 [[tool.uv.index]]
 name = "pytorch-cu130"

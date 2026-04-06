@@ -82,10 +82,10 @@ docker-compose.override.yml
 !.github/workflows/ci.yml
 !.dockerignore
 !.env.example
-!.env.docker.example
 !.pre-commit-config.yaml
 !scripts/
 !scripts/create_docker_volumes.sh
 !**/prompts/*.txt
 !**/required_exts.txt
 !AGENTS.md
+!CLAUDE.md
