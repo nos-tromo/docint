@@ -6,7 +6,7 @@ and chat. It ships with:
 - a FastAPI backend
 - a Streamlit UI
 - Qdrant for storage and retrieval
-- pluggable inference via Ollama, OpenAI-compatible APIs, or an external routed vLLM service
+- pluggable inference via any OpenAI-compatible API or an external routed vLLM service
 
 ## What You Need
 
@@ -18,10 +18,10 @@ and chat. It ships with:
 
 ## Quick Start With Docker
 
-1. Create the Docker env file:
+1. Create the shared env file:
 
    ```bash
-   cp .env.docker.example .env.docker
+   cp .env.example .env
    ```
 
 2. Create the shared cache volumes once:
@@ -34,17 +34,13 @@ and chat. It ships with:
 
    | Profile | Use when |
    | --- | --- |
-   | `cpu-ollama` | CPU-only machine, local Ollama in Docker |
-   | `cpu-openai` | CPU-only machine, external OpenAI-compatible API |
-   | `cpu-vllm` | CPU-only machine, external routed vLLM service |
-   | `cuda-ollama` | NVIDIA GPU, local Ollama in Docker |
-   | `cuda-openai` | NVIDIA GPU, external OpenAI-compatible API |
-   | `cuda-vllm` | NVIDIA GPU, external routed vLLM service |
+   | `cpu` | CPU-only machine |
+   | `cuda` | NVIDIA GPU machine |
 
 4. Start the stack:
 
    ```bash
-   docker compose --env-file .env.docker --profile cpu-ollama up --build
+   docker compose --profile cpu up --build
    ```
 
 5. Open the app:
@@ -65,14 +61,14 @@ and chat. It ships with:
 - For co-deployed stacks on one server, create one shared external Docker
   network, attach both compose projects to it, and set
   `OPENAI_API_BASE=http://vllm-router:9000/v1`.
-- `cuda-vllm` needs an NVIDIA GPU and the NVIDIA Container Toolkit.
+- The `cuda` profile needs an NVIDIA GPU and the NVIDIA Container Toolkit.
 - First startup may take a while because model assets are downloaded into the
   shared cache volumes.
 - If you use an outbound proxy, put the proxy variables in `.env` so Compose,
   image builds, and containers use the same values.
 - Session persistence uses one SQLite file path. Set `SESSIONS_DB_PATH` for
-   the normal case or `SESSION_STORE` if you want to supply a full SQLAlchemy
-   database URL.
+  the normal case or `SESSION_STORE` if you want to supply a full SQLAlchemy
+  database URL.
 
 ### Shared Docker Volumes
 
@@ -150,7 +146,7 @@ uv run pre-commit run --all-files
 Stop the Docker stack:
 
 ```bash
-docker compose --env-file .env.docker down
+docker compose down
 ```
 
 ## Standalone vLLM App
@@ -163,11 +159,11 @@ For a shared-network deployment on one server:
 1. Create the shared external network once:
 
    ```bash
-   docker network create proxy-net
+   docker network create inference-net
    ```
 
 2. Start `vllm-service` on that network.
-3. Set `PROXY_NETWORK=proxy-net` in both projects if you use a different name.
+3. Set `INFERENCE_NET=inference-net` in both projects if you use a different name.
 4. Configure Docint with:
 
    ```bash
