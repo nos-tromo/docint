@@ -32,21 +32,16 @@ COPY --from=uv-installer /usr/local/bin/uv /usr/local/bin/uvx /bin/
 # Copy dependency files
 COPY pyproject.toml uv.lock ./
 
-# Install dependencies (using cache mount to speed up downloads)
+# Install dependencies with CUDA extras (cu130 torch + fastembed-gpu + onnxruntime-gpu)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project
+    uv sync --frozen --no-install-project --extra cuda
 
 ENV VIRTUAL_ENV=/app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 
-# Replace CPU-only packages with GPU versions
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip uninstall fastembed onnxruntime && \
-    uv pip install fastembed-gpu onnxruntime-gpu
-
 COPY . .
 
-# Install the project itself without re-syncing dependencies (to preserve GPU overrides)
+# Install the project itself without re-syncing dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --no-deps .
 

@@ -34,19 +34,15 @@ COPY --from=uv-installer /usr/local/bin/uv /usr/local/bin/uvx /bin/
 RUN uv venv
 
 # Copy dependency files
-# Only use pyproject.toml for CPU build because uv.lock resolves to CUDA on Linux
-COPY pyproject.toml ./
+COPY pyproject.toml uv.lock ./
 
 # Install dependencies (using cache mount to speed up downloads)
 RUN --mount=type=cache,target=${UV_CACHE_DIR} \
-    uv pip install \
-    --index-url https://download.pytorch.org/whl/cpu \
-    --extra-index-url https://pypi.org/simple \
-    -r pyproject.toml
+    uv sync --frozen --no-install-project --extra cpu
 
 COPY . .
 
-# Install the project itselfwithout re-installing dependencies (to preserve CPU versions)
+# Install the project itself without re-installing dependencies
 RUN --mount=type=cache,target=${UV_CACHE_DIR} \
     uv pip install --no-deps .
 
