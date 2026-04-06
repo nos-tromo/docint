@@ -549,7 +549,7 @@ def test_load_model_env_uses_default_ner_model(
 
     cfg = load_model_env()
 
-    assert cfg.ner_model == "urchade/gliner_multi-v2.1"
+    assert cfg.ner_model == "gliner-community/gliner_large-v2.5"
 
 
 def test_load_model_env_preserves_explicit_ner_override(
@@ -561,11 +561,11 @@ def test_load_model_env_preserves_explicit_ner_override(
         monkeypatch: Fixture to override environment variables.
     """
     monkeypatch.setenv("USE_DEVICE", "cpu")
-    monkeypatch.setenv("NER_MODEL", "urchade/gliner_multi-v2.1")
+    monkeypatch.setenv("NER_MODEL", "gliner-community/gliner_large-v2.5")
 
     cfg = load_model_env()
 
-    assert cfg.ner_model == "urchade/gliner_multi-v2.1"
+    assert cfg.ner_model == "gliner-community/gliner_large-v2.5"
 
 
 def test_load_hate_speech_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

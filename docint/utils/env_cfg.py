@@ -512,7 +512,7 @@ class ModelConfig:
 def load_model_env(
     default_embed_model: str = "bge-m3",
     default_image_embed_model: str = "openai/clip-vit-base-patch32",
-    default_ner_model: str = "urchade/gliner_multi-v2.1",
+    default_ner_model: str = "gliner-community/gliner_large-v2.5",
     default_rerank_model: str = "BAAI/bge-reranker-v2-m3",
     default_sparse_model: str = "Qdrant/all_miniLM_L6_v2_with_attentions",
     default_text_model: str = "gpt-oss:20b",
