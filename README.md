@@ -12,8 +12,7 @@ and chat. It ships with:
 
 - Docker for the containerized setup
 - Python 3.11 and `uv` for local development
-- an inference backend
-  - Docker profiles can provide Ollama
+- an inference backend: any OpenAI-compatible endpoint configured via `.env`
   - vLLM is deployed separately and consumed via one routed base URL
   - local development needs an OpenAI-compatible endpoint you manage yourself
 
@@ -56,10 +55,12 @@ and chat. It ships with:
 
 ### Docker Notes
 
-- `cpu-openai` and `cuda-openai` need `OPENAI_API_KEY` in `.env.docker`.
-- `cpu-vllm` and `cuda-vllm` require `OPENAI_API_BASE` in `.env.docker`.
-- Deploy the standalone vLLM app first, then start Docint.
-- Docint expects the vLLM router to expose one OpenAI-compatible base URL that
+- Set `INFERENCE_PROVIDER` and `OPENAI_API_BASE` in `.env` — profiles select
+  hardware only and do not set a provider.
+- The `openai` provider requires `OPENAI_API_KEY` in `.env`.
+- The `vllm` provider requires `OPENAI_API_BASE` in `.env`.
+  Deploy the standalone vLLM app first, then start Docint.
+  Docint expects the vLLM router to expose one OpenAI-compatible base URL that
   ends in `/v1`, plus the vLLM sparse routes at `/pooling` and `/tokenize`.
 - For co-deployed stacks on one server, create one shared external Docker
   network, attach both compose projects to it, and set
@@ -67,8 +68,8 @@ and chat. It ships with:
 - `cuda-vllm` needs an NVIDIA GPU and the NVIDIA Container Toolkit.
 - First startup may take a while because model assets are downloaded into the
   shared cache volumes.
-- If you use an outbound proxy, put the proxy variables in `.env.docker` and
-  keep using `--env-file .env.docker` with `docker compose`.
+- If you use an outbound proxy, put the proxy variables in `.env` so Compose,
+  image builds, and containers use the same values.
 - Session persistence uses one SQLite file path. Set `SESSIONS_DB_PATH` for
    the normal case or `SESSION_STORE` if you want to supply a full SQLAlchemy
    database URL.
