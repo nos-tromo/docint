@@ -88,3 +88,4 @@ docker-compose.override.yml
 !**/prompts/*.txt
 !**/required_exts.txt
 !AGENTS.md
+!CLAUDE.md
