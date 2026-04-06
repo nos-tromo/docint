@@ -45,7 +45,7 @@ x-backend-cpu: &backend-cpu
     docint-net:
       aliases:
         - backend-net
-    proxy-net:
+    inference-net:
       aliases:
         - docint-backend
 
@@ -64,7 +64,7 @@ x-backend-cuda: &backend-cuda
     QDRANT_SRC_DIR: /var/lib/docint/sources
     SESSIONS_DB_PATH: /var/lib/docint/sessions/sessions.sqlite3
     USE_DEVICE: ${USE_DEVICE:-auto}
-  env_file: *docker-env-file
+  env_file: *env-file
   volumes: *backend-volumes
   deploy:
     resources:
@@ -113,119 +113,22 @@ x-qdrant-cuda: &qdrant-cuda
 
 services:
   ##########################################################
-  # Backend – CPU + Ollama
+  # Backend – CPU
   ##########################################################
-  backend-cpu-ollama:
+  backend-cpu:
     <<: *backend-cpu
-    profiles: ["cpu-ollama"]
-    depends_on:
-      - ollama-cpu
-      - qdrant
-    environment:
-      <<: *backend-cpu-env
-      INFERENCE_PROVIDER: ollama
-      OPENAI_API_BASE: http://ollama-server:11434/v1
-
-  ##########################################################
-  # Backend – CPU + External OpenAI API
-  ##########################################################
-  backend-cpu-openai:
-    <<: *backend-cpu
-    profiles: ["cpu-openai"]
+    profiles: ["cpu"]
     depends_on:
       - qdrant
-    environment:
-      <<: *backend-cpu-env
-      INFERENCE_PROVIDER: openai
-      OPENAI_API_BASE: https://api.openai.com/v1
 
   ##########################################################
-  # Backend – CUDA + Ollama
+  # Backend – CUDA
   ##########################################################
-  backend-cuda-ollama:
+  backend-cuda:
     <<: *backend-cuda
-    profiles: ["cuda-ollama"]
-    depends_on:
-      - ollama-cuda
-      - qdrant-cuda
-    environment:
-      <<: *backend-cuda-env
-      INFERENCE_PROVIDER: ollama
-      OPENAI_API_BASE: http://ollama-server:11434/v1
-
-  ##########################################################
-  # Backend – CUDA + External OpenAI API
-  ##########################################################
-  backend-cuda-openai:
-    <<: *backend-cuda
-    profiles: ["cuda-openai"]
+    profiles: ["cuda"]
     depends_on:
       - qdrant-cuda
-    environment:
-      <<: *backend-cuda-env
-      INFERENCE_PROVIDER: openai
-      OPENAI_API_BASE: https://api.openai.com/v1
-
-  ##########################################################
-  # Backend – External vLLM
-  ##########################################################
-  backend-cpu-vllm:
-    <<: *backend-cpu
-    profiles: ["cpu-vllm"]
-    depends_on:
-      - qdrant
-    environment:
-      <<: *backend-cpu-env
-      INFERENCE_PROVIDER: vllm
-      OPENAI_API_BASE: ${OPENAI_API_BASE:-}
-
-  backend-cuda-vllm:
-    <<: *backend-cuda
-    profiles: ["cuda-vllm"]
-    depends_on:
-      - qdrant-cuda
-    environment:
-      <<: *backend-cuda-env
-      INFERENCE_PROVIDER: vllm
-      OPENAI_API_BASE: ${OPENAI_API_BASE:-}
-
-  ##########################################################
-  # Ollama (CPU)
-  ##########################################################
-  ollama-cpu:
-    profiles: ["cpu-ollama"]
-    image: ollama/ollama:0.17.7
-    env_file: *docker-env-file
-    environment: &ollama-env
-      OLLAMA_HOST: 0.0.0.0
-    volumes: &ollama-volumes
-      - ollama-cache:/root/.ollama
-    healthcheck: &ollama-healthcheck
-      test: ["CMD", "ollama", "list"]
-      interval: 5s
-      timeout: 10s
-      retries: 5
-    networks: &ollama-net
-      docint-net:
-        aliases:
-          - ollama-server
-
-  ##########################################################
-  # Ollama (CUDA)
-  ##########################################################
-  ollama-cuda:
-    profiles: ["cuda-ollama"]
-    image: ollama/ollama:0.17.7
-    gpus: all
-    env_file: *docker-env-file
-    environment:
-      <<: *ollama-env
-      NVIDIA_VISIBLE_DEVICES: all
-    volumes: *ollama-volumes
-    healthcheck: *ollama-healthcheck
-    deploy: *cuda-deploy
-    restart: unless-stopped
-    networks: *ollama-net
 
   ##########################################################
   # Frontend (Streamlit)
@@ -255,11 +158,11 @@ services:
   ##########################################################
   qdrant:
     <<: *qdrant-cpu
-    profiles: ["cpu-ollama", "cpu-openai", "cpu-vllm"]
+    profiles: ["cpu"]
 
   qdrant-cuda:
     <<: *qdrant-cuda
-    profiles: ["cuda-ollama", "cuda-openai", "cuda-vllm"]
+    profiles: ["cuda"]
 
 ##########################################################
 # Volumes
@@ -284,6 +187,6 @@ volumes:
 ##########################################################
 networks:
   docint-net:
-  proxy-net:
+  inference-net:
     external: true
-    name: ${PROXY_NETWORK:-proxy-net}
+    name: ${INFERENCE_NET:-inference-net}
