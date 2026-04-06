@@ -262,12 +262,14 @@ def test_load_openai_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENAI_ENABLE_THINKING", raising=False)
     monkeypatch.delenv("OPENAI_THINKING_EFFORT", raising=False)
     monkeypatch.delenv("OPENAI_CTX_WINDOW", raising=False)
+    monkeypatch.delenv("OPENAI_NUM_OUTPUT", raising=False)
     monkeypatch.delenv("CHAT_MAX_MODEL_LEN", raising=False)
 
     cfg = load_openai_env()
 
     assert cfg.dimensions is None
     assert cfg.ctx_window == 4096
+    assert cfg.num_output == 256
     assert cfg.thinking_enabled is False
     assert cfg.thinking_effort == "medium"
 
@@ -342,6 +344,20 @@ def test_load_openai_env_clamps_invalid_thinking_effort(
 
     assert cfg.thinking_enabled is True
     assert cfg.thinking_effort == "medium"
+
+
+def test_load_openai_env_reads_num_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OPENAI_NUM_OUTPUT env var should override the default num_output.
+
+    Args:
+        monkeypatch: Fixture to set environment variables.
+    """
+    monkeypatch.delenv("INFERENCE_PROVIDER", raising=False)
+    monkeypatch.setenv("OPENAI_NUM_OUTPUT", "1024")
+
+    cfg = load_openai_env()
+
+    assert cfg.num_output == 1024
 
 
 def test_load_session_env_defaults_to_docint_home(

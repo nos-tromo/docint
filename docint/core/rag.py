@@ -865,6 +865,7 @@ class RAG:
     openai_ctx_window: int = field(default=4096, init=False)
     openai_dimensions: int | None = field(default=None, init=False)
     openai_max_retries: int = field(default=2, init=False)
+    openai_num_output: int = field(default=256, init=False)
     openai_inference_provider: str = field(default="ollama", init=False)
     openai_reuse_client: bool = field(default=True, init=False)
     openai_seed: int = field(default=42, init=False)
@@ -991,6 +992,7 @@ class RAG:
         self.openai_ctx_window = self.openai_config.ctx_window
         self.openai_dimensions = self.openai_config.dimensions
         self.openai_max_retries = self.openai_config.max_retries
+        self.openai_num_output = self.openai_config.num_output
         self.openai_inference_provider = self.openai_config.inference_provider
         self.openai_reuse_client = self.openai_config.reuse_client
         self.openai_seed = self.openai_config.seed
@@ -1500,6 +1502,7 @@ class RAG:
             context_window=self.openai_ctx_window,
             max_retries=self.openai_max_retries,
             model=self.text_model_id,
+            num_output=self.openai_num_output,
             reuse_client=self.openai_reuse_client,
             reasoning_effort=reasoning_effort,
             seed=self.openai_seed,
@@ -4177,7 +4180,22 @@ class RAG:
             raise RuntimeError(
                 "Query engine has not been initialized. Call ingest_docs() first."
             )
-        result = engine.query(prompt)
+        try:
+            result = engine.query(prompt)
+        except ValueError as exc:
+            if "context size" in str(exc):
+                logger.error(
+                    "Context window overflow (configured {}): {}",
+                    self.openai_ctx_window,
+                    exc,
+                )
+                raise ValueError(
+                    f"The query and retrieved context exceed the configured "
+                    f"context window ({self.openai_ctx_window} tokens). "
+                    f"Increase OPENAI_CTX_WINDOW to match your model's "
+                    f"actual context length or reduce the retrieval top-k."
+                ) from exc
+            raise
         if not isinstance(result, Response):
             logger.error("TypeError: Expected Response, got {}.", type(result).__name__)
             raise TypeError(f"Expected Response, got {type(result).__name__}")
@@ -4248,7 +4266,22 @@ class RAG:
             raise RuntimeError(
                 "Query engine has not been initialized. Call ingest_docs()/asingest_docs() first."
             )
-        result = await engine.aquery(prompt)
+        try:
+            result = await engine.aquery(prompt)
+        except ValueError as exc:
+            if "context size" in str(exc):
+                logger.error(
+                    "Context window overflow (configured {}): {}",
+                    self.openai_ctx_window,
+                    exc,
+                )
+                raise ValueError(
+                    f"The query and retrieved context exceed the configured "
+                    f"context window ({self.openai_ctx_window} tokens). "
+                    f"Increase OPENAI_CTX_WINDOW to match your model's "
+                    f"actual context length or reduce the retrieval top-k."
+                ) from exc
+            raise
         if not isinstance(result, Response):
             logger.error("TypeError: Expected Response, got {}.", type(result).__name__)
             raise TypeError(f"Expected Response, got {type(result).__name__}")

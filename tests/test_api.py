@@ -1544,3 +1544,38 @@ def test_ingest_missing_directory(
     response = client.post("/ingest", json={"collection": "abc"})
     assert response.status_code == 500
     assert "Data directory does not exist" in response.json()["detail"]
+
+
+def test_stream_query_context_window_overflow_surfaces_descriptive_error(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Context-window overflow should surface a descriptive error instead of 'Internal server error'.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        client: The TestClient instance.
+    """
+    original_run_query = type(api_module.rag).run_query
+
+    def _exploding_run_query(self: Any, *a: Any, **kw: Any) -> Any:
+        raise ValueError(
+            "The query and retrieved context exceed the configured "
+            "context window (4096 tokens). Increase OPENAI_CTX_WINDOW "
+            "to match your model's actual context length or reduce the "
+            "retrieval top-k."
+        )
+
+    monkeypatch.setattr(type(api_module.rag), "run_query", _exploding_run_query)
+
+    try:
+        with client.stream(
+            "POST",
+            "/stream_query",
+            json={"question": "hello", "retrieval_mode": "stateless"},
+        ) as resp:
+            text = "".join(chunk.decode() for chunk in resp.iter_raw())
+    finally:
+        monkeypatch.setattr(type(api_module.rag), "run_query", original_run_query)
+
+    assert "OPENAI_CTX_WINDOW" in text
+    assert "Internal server error" not in text

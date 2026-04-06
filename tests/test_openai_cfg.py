@@ -10,6 +10,7 @@ import pytest
 
 from docint.utils.env_cfg import OpenAIConfig
 from docint.utils.openai_cfg import (
+    LocalOpenAI,
     OpenAIPipeline,
     TruncatingOpenAIEmbedding,
     get_openai_reasoning_effort,
@@ -24,6 +25,7 @@ def test_get_openai_reasoning_effort_requires_toggle_only() -> None:
         ctx_window=4096,
         dimensions=1024,
         max_retries=2,
+        num_output=256,
         inference_provider="openai",
         reuse_client=False,
         seed=42,
@@ -44,6 +46,7 @@ def test_get_openai_reasoning_effort_requires_toggle_only() -> None:
                 ctx_window=base_config.ctx_window,
                 dimensions=base_config.dimensions,
                 max_retries=base_config.max_retries,
+                num_output=base_config.num_output,
                 inference_provider=base_config.inference_provider,
                 reuse_client=base_config.reuse_client,
                 seed=base_config.seed,
@@ -64,6 +67,7 @@ def test_get_openai_reasoning_effort_requires_toggle_only() -> None:
                 ctx_window=base_config.ctx_window,
                 dimensions=base_config.dimensions,
                 max_retries=base_config.max_retries,
+                num_output=base_config.num_output,
                 inference_provider="ollama",
                 reuse_client=base_config.reuse_client,
                 seed=base_config.seed,
@@ -124,6 +128,7 @@ def test_openai_pipeline_call_chat_passes_reasoning_effort_for_ollama(
             ctx_window=200000,
             dimensions=1024,
             max_retries=2,
+            num_output=256,
             inference_provider="ollama",
             reuse_client=False,
             seed=42,
@@ -193,6 +198,7 @@ def test_openai_pipeline_call_chat_passes_reasoning_effort(
             ctx_window=200000,
             dimensions=1024,
             max_retries=2,
+            num_output=256,
             inference_provider="openai",
             reuse_client=False,
             seed=42,
@@ -264,6 +270,7 @@ def test_openai_pipeline_call_chat_omits_reasoning_effort_when_disabled(
             ctx_window=200000,
             dimensions=1024,
             max_retries=2,
+            num_output=256,
             inference_provider="openai",
             reuse_client=False,
             seed=42,
@@ -516,3 +523,77 @@ def test_truncating_embedding_allows_skipping_irreducible_inputs(
     assert result == [None, [0.75, 0.25]]
     assert warnings
     assert "skipping embedding input" in warnings[-1].lower()
+
+
+# ---------------------------------------------------------------------------
+# LocalOpenAI metadata tests
+# ---------------------------------------------------------------------------
+
+
+def test_local_openai_metadata_overrides_context_window_for_known_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even when llama_index recognises the model, the configured context_window wins.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    from llama_index.core.base.llms.types import LLMMetadata
+    from llama_index.llms.openai import OpenAI as LlamaIndexOpenAI
+
+    base_meta = LLMMetadata(
+        context_window=128000,
+        num_output=4096,
+        is_chat_model=True,
+        is_function_calling_model=True,
+        model_name="gpt-4o",
+    )
+    monkeypatch.setattr(
+        LlamaIndexOpenAI,
+        "metadata",
+        property(lambda self: base_meta),
+    )
+
+    model = LocalOpenAI(
+        context_window=32768,
+        num_output=512,
+        model="gpt-4o",
+        api_key="sk-test",
+        api_base="http://localhost:11434/v1",
+    )
+    meta = model.metadata
+    assert meta.context_window == 32768
+    assert meta.num_output == 512
+    assert meta.model_name == base_meta.model_name
+
+
+def test_local_openai_metadata_fallback_for_unknown_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown model names fall back to configured context_window and defaults.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    from llama_index.llms.openai import OpenAI as LlamaIndexOpenAI
+
+    def _raise(_self: Any) -> None:
+        raise ValueError("Unknown model")
+
+    monkeypatch.setattr(
+        LlamaIndexOpenAI,
+        "metadata",
+        property(_raise),
+    )
+
+    model = LocalOpenAI(
+        context_window=16384,
+        num_output=512,
+        model="Qwen/Qwen3.5-2B",
+        api_key="sk-test",
+        api_base="http://localhost:11434/v1",
+    )
+    meta = model.metadata
+    assert meta.context_window == 16384
+    assert meta.num_output == 512
+    assert meta.model_name == "Qwen/Qwen3.5-2B"
