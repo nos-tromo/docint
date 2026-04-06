@@ -7,13 +7,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_docint_compose_uses_external_vllm_profiles() -> None:
-    """Docint should use external vLLM profiles without bundled services."""
+    """Docint should use provider-agnostic profiles without bundled vLLM services."""
 
     compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
-    assert 'profiles: ["cpu-vllm"]' in compose
-    assert 'profiles: ["cuda-vllm"]' in compose
-    assert "OPENAI_API_BASE: ${OPENAI_API_BASE:-}" in compose
+    assert 'profiles: ["cpu"]' in compose
+    assert 'profiles: ["cuda"]' in compose
     assert "\n  vllm-router:\n" not in compose
     assert "vllm-chat-cuda:" not in compose
     assert "vllm-embed-cuda:" not in compose
@@ -23,13 +22,13 @@ def test_docint_compose_uses_external_vllm_profiles() -> None:
     assert "nginx.vllm.conf" not in compose
 
 
-def test_docint_compose_joins_shared_proxy_network() -> None:
+def test_docint_compose_joins_shared_INFERENCE_NET() -> None:
     """Docint should expose the backend on the shared external proxy network."""
 
     compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
-    assert "proxy-net:" in compose
-    assert "name: ${PROXY_NETWORK:-proxy-net}" in compose
+    assert "inference-net:" in compose
+    assert "name: ${INFERENCE_NET:-inference-net}" in compose
     assert "external: true" in compose
     assert "- docint-backend" in compose
 
