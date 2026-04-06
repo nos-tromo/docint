@@ -577,10 +577,7 @@ class AudioReader(BaseReader):
             local Whisper inference.
         """
 
-        provider = cast(
-            ProviderAudioInference | str,
-            self.inference_provider.strip().lower(),
-        )
+        provider = self.inference_provider.strip().lower()
         return provider in {"openai", "vllm"}
 
     def _load_model(self) -> whisper.Whisper:
