@@ -32,7 +32,7 @@ def test_main_executes_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
     order: list[str] = []
 
     def fake_setup() -> None:
-        """Fake setup_logging function to track execution order."""
+        """Fake init_logger function to track execution order."""
         order.append("setup")
 
     def fake_get_collection() -> str:
@@ -62,7 +62,7 @@ def test_main_executes_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
         order.append("env")
         return FakePathConfig()
 
-    monkeypatch.setattr(ingest, "setup_logging", fake_setup)
+    monkeypatch.setattr(ingest, "init_logger", fake_setup)
     monkeypatch.setattr(ingest, "set_offline_env", lambda: None)
     monkeypatch.setattr(ingest, "load_path_env", fake_load_path_env)
     monkeypatch.setattr(ingest, "get_collection", fake_get_collection)

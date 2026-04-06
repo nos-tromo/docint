@@ -32,9 +32,9 @@ from docint.utils.env_cfg import (
     load_response_validation_env,
 )
 from docint.utils.hashing import compute_file_hash
-from docint.utils.logging_cfg import setup_logging
+from docint.utils.logger_cfg import init_logger
 
-setup_logging()
+init_logger()
 
 # Load allowed origins from environment or default to Streamlit's default ports
 allowed_origins = load_host_env().cors_allowed_origins.split(",")

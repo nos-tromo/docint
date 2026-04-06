@@ -6,7 +6,7 @@ from loguru import logger
 
 from docint.core.rag import RAG
 from docint.utils.env_cfg import load_path_env, set_offline_env
-from docint.utils.logging_cfg import setup_logging
+from docint.utils.logger_cfg import init_logger
 
 
 def get_collection() -> str:
@@ -49,7 +49,7 @@ def ingest_docs(
 
 def main() -> None:
     """Main function for the ingestion CLI."""
-    setup_logging()
+    init_logger()
     set_offline_env()
     data_path = load_path_env().data
     qdrant_col = get_collection()

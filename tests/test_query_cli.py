@@ -524,7 +524,7 @@ def test_main_runs_default_chat_mode(monkeypatch: pytest.MonkeyPatch) -> None:
         sequence.append(f"chat:{kwargs['queries_path']}")
         sequence.append(f"out:{kwargs['output_path']}")
 
-    monkeypatch.setattr(query_cli, "setup_logging", lambda: sequence.append("setup"))
+    monkeypatch.setattr(query_cli, "init_logger", lambda: sequence.append("setup"))
     monkeypatch.setattr(query_cli, "set_offline_env", lambda: None)
     monkeypatch.setattr(query_cli, "time", lambda: 1700000123)
     monkeypatch.setattr(query_cli, "load_path_env", fake_load_path_env)
@@ -581,7 +581,7 @@ def test_main_uses_collection_argument_without_prompt(
         sequence.append(f"pipeline:{col_name}")
         return DummyRAG()
 
-    monkeypatch.setattr(query_cli, "setup_logging", lambda: None)
+    monkeypatch.setattr(query_cli, "init_logger", lambda: None)
     monkeypatch.setattr(query_cli, "set_offline_env", lambda: None)
     monkeypatch.setattr(query_cli, "time", lambda: 1700000123)
     monkeypatch.setattr(query_cli, "load_path_env", lambda: FakePathConfig())
@@ -623,7 +623,7 @@ def test_main_runs_all_requested_actions(monkeypatch: pytest.MonkeyPatch) -> Non
         prompts = Path("/tmp/prompts")
         results = Path("/tmp/results")
 
-    monkeypatch.setattr(query_cli, "setup_logging", lambda: None)
+    monkeypatch.setattr(query_cli, "init_logger", lambda: None)
     monkeypatch.setattr(query_cli, "set_offline_env", lambda: None)
     monkeypatch.setattr(query_cli, "time", lambda: 1700000123)
     monkeypatch.setattr(query_cli, "load_path_env", lambda: FakePathConfig())

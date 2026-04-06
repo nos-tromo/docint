@@ -12,7 +12,7 @@ from loguru import logger
 
 from docint.cli.query import _store_output, get_col_name, rag_pipeline
 from docint.utils.env_cfg import load_path_env, set_offline_env
-from docint.utils.logging_cfg import setup_logging
+from docint.utils.logger_cfg import init_logger
 
 
 class RetrievalEvalRAG(Protocol):
@@ -284,7 +284,7 @@ def evaluate_retrieval(
 
 def main() -> None:
     """Run retrieval evaluation for the active collection."""
-    setup_logging()
+    init_logger()
     set_offline_env()
     col_name = get_col_name()
     rag = rag_pipeline(col_name=col_name)

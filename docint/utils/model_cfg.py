@@ -40,10 +40,10 @@ from huggingface_hub import snapshot_download
 from loguru import logger
 from transformers import AutoProcessor, CLIPModel
 
-from docint.utils.logging_cfg import setup_logging
+from docint.utils.logger_cfg import init_logger
 
 load_dotenv()
-setup_logging()
+init_logger()
 
 
 def load_clip_model(model_id: str, cache_folder: Path) -> None:

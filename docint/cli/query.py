@@ -20,7 +20,7 @@ from docint.utils.env_cfg import (
     load_response_validation_env,
     set_offline_env,
 )
-from docint.utils.logging_cfg import setup_logging
+from docint.utils.logger_cfg import init_logger
 from docint.utils.reference_metadata import REFERENCE_METADATA_FIELDS
 
 DEFAULT_CHAT_SENTINEL = "__default_chat_queries__"
@@ -694,7 +694,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     Args:
         argv: Optional explicit argument sequence for tests.
     """
-    setup_logging()
+    init_logger()
     set_offline_env()
     args = parse_args(argv)
 

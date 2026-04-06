@@ -8,7 +8,7 @@ from loguru import logger
 from docint.utils.env_cfg import load_path_env
 
 
-def setup_logging(
+def init_logger(
     encoding="utf-8",
     rotation: str = "5 MB",
     retention: int = 3,

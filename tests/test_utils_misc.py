@@ -22,7 +22,7 @@ from docint.utils.env_cfg import (
     load_summary_env,
 )
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
-from docint.utils.logging_cfg import setup_logging
+from docint.utils.logger_cfg import init_logger
 from loguru import logger
 
 
@@ -101,10 +101,10 @@ def test_path_config_artifacts_env_override(
     assert cfg.artifacts == custom
 
 
-def test_setup_logging_respects_env_path(
+def test_init_logger_respects_env_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """setup_logging should honor LOG_PATH and create the log file.
+    """init_logger should honor LOG_PATH and create the log file.
 
     Args:
         tmp_path (Path): Temporary directory.
@@ -114,7 +114,7 @@ def test_setup_logging_respects_env_path(
     log_file.parent.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("LOG_PATH", str(log_file))
 
-    resolved = setup_logging(rotation="1 MB", retention=1)
+    resolved = init_logger(rotation="1 MB", retention=1)
     logger.debug("create log entry for file")
 
     assert resolved == log_file

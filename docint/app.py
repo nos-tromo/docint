@@ -40,7 +40,7 @@ from docint.ui.sidebar import render_sidebar
 from docint.ui.state import init_session_state
 from docint.ui.theme import apply_custom_css, configure_page, render_footer
 from docint.utils.env_cfg import set_offline_env
-from docint.utils.logging_cfg import setup_logging
+from docint.utils.logger_cfg import init_logger
 
 # ---------------------------------------------------------------------------
 # Backward-compatible aliases used by tests (e.g. test_app_ner.py)
@@ -70,7 +70,7 @@ def setup_app() -> None:
     Must be the first function called during each script run.
     """
     set_offline_env()
-    setup_logging()
+    init_logger()
     configure_page()
     apply_custom_css()
     init_session_state()
