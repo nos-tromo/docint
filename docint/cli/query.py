@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 import sys
@@ -204,6 +205,28 @@ def _store_text_output(filename: str, data: str, output_path: str | Path) -> Non
     resolved_output_path = _ensure_output_path(output_path)
     target = resolved_output_path / f"{filename}.txt"
     target.write_text(data, encoding="utf-8")
+    logger.info("Results stored in {}", target)
+
+
+def _store_csv_output(
+    filename: str, rows: list[dict[str, Any]], output_path: str | Path
+) -> None:
+    """Store tabular data to a CSV file.
+
+    Args:
+        filename: Output filename without extension.
+        rows: List of dicts; keys of the first row become column headers.
+        output_path: Directory that will receive the file.
+    """
+    if not rows:
+        return
+    resolved_output_path = _ensure_output_path(output_path)
+    target = resolved_output_path / f"{filename}.csv"
+    fieldnames = list(rows[0].keys())
+    with target.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
     logger.info("Results stored in {}", target)
 
 
@@ -453,6 +476,67 @@ def _build_entities_txt(top_entities: list[dict[str, Any]], *, collection: str) 
     return "\n".join(lines).strip() + "\n"
 
 
+def _build_entities_csv(
+    top_entities: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build entity-frequency rows for CSV export.
+
+    Args:
+        top_entities: Ranked entity rows from collection NER stats.
+
+    Returns:
+        List of dicts with keys: rank, entity, type, mentions.
+    """
+    rows = []
+    for index, row in enumerate(top_entities[:DEFAULT_ENTITY_LIMIT], start=1):
+        rows.append(
+            {
+                "rank": index,
+                "entity": str(row.get("text") or "Unknown"),
+                "type": str(row.get("type") or "Unlabeled"),
+                "mentions": int(row.get("mentions", row.get("count", 0)) or 0),
+            }
+        )
+    return rows
+
+
+def _build_hate_speech_csv(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build hate-speech finding rows for CSV export.
+
+    Args:
+        findings: Flagged hate-speech rows.
+
+    Returns:
+        List of dicts covering all finding fields.
+    """
+    rows = []
+    for chunk in findings:
+        ref = chunk.get("reference_metadata") or {}
+        rows.append(
+            {
+                "source": chunk.get("source_ref"),
+                "page": chunk.get("page"),
+                "row": chunk.get("row"),
+                "chunk_id": chunk.get("chunk_id"),
+                "category": chunk.get("category"),
+                "confidence": chunk.get("confidence"),
+                "reason": chunk.get("reason"),
+                "chunk_text": chunk.get("chunk_text") or chunk.get("text"),
+                "network": ref.get("network"),
+                "ref_type": ref.get("type"),
+                "uuid": ref.get("uuid"),
+                "timestamp": ref.get("timestamp"),
+                "author": ref.get("author"),
+                "author_id": ref.get("author_id"),
+                "vanity": ref.get("vanity"),
+                "text_id": ref.get("text_id"),
+                "parent_text": ref.get("parent_text"),
+                "anchor_text": ref.get("anchor_text"),
+            }
+        )
+    return rows
+
+
 def _build_hate_speech_txt(findings: list[dict[str, Any]]) -> str:
     """Build the hate-speech export text using the frontend format.
 
@@ -619,6 +703,9 @@ def export_entities(rag: RAG, *, output_path: Path) -> None:
         _build_entities_txt(top_entities, collection=str(rag.qdrant_collection or "")),
         output_path,
     )
+    _store_csv_output(
+        f"entities_{collection}", _build_entities_csv(top_entities), output_path
+    )
 
 
 def export_hate_speech(rag: RAG, *, output_path: Path) -> None:
@@ -637,6 +724,9 @@ def export_hate_speech(rag: RAG, *, output_path: Path) -> None:
         f"hate_speech_{collection}",
         _build_hate_speech_txt(findings),
         output_path,
+    )
+    _store_csv_output(
+        f"hate_speech_{collection}", _build_hate_speech_csv(findings), output_path
     )
 
 

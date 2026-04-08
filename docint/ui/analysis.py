@@ -1,6 +1,8 @@
 """Analysis page: collection summarisation and NER overview."""
 
+import csv
 import html
+import io
 import json
 import re
 import time
@@ -523,6 +525,121 @@ def _hate_speech_chunks_to_txt(chunks: list[dict[str, Any]]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def _entity_chunks_to_csv(entity: str, chunks: list[dict[str, Any]]) -> str:
+    """Build downloadable CSV payload for entity-linked chunks.
+
+    Args:
+        entity: The selected entity text.
+        chunks: List of source dictionaries containing chunk information.
+
+    Returns:
+        CSV string with one row per chunk.
+    """
+    fieldnames = [
+        "entity",
+        "source",
+        "page",
+        "row",
+        "chunk_id",
+        "chunk_text",
+        "network",
+        "ref_type",
+        "uuid",
+        "timestamp",
+        "author",
+        "author_id",
+        "vanity",
+        "text_id",
+        "parent_text",
+        "anchor_text",
+    ]
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fieldnames)
+    writer.writeheader()
+    for chunk in chunks:
+        ref = chunk.get("reference_metadata") or {}
+        writer.writerow(
+            {
+                "entity": entity,
+                "source": chunk.get("filename") or chunk.get("source_ref"),
+                "page": chunk.get("page"),
+                "row": chunk.get("row"),
+                "chunk_id": chunk.get("chunk_id"),
+                "chunk_text": chunk.get("chunk_text") or chunk.get("text"),
+                "network": ref.get("network"),
+                "ref_type": ref.get("type"),
+                "uuid": ref.get("uuid"),
+                "timestamp": ref.get("timestamp"),
+                "author": ref.get("author"),
+                "author_id": ref.get("author_id"),
+                "vanity": ref.get("vanity"),
+                "text_id": ref.get("text_id"),
+                "parent_text": ref.get("parent_text"),
+                "anchor_text": ref.get("anchor_text"),
+            }
+        )
+    return buf.getvalue()
+
+
+def _hate_speech_chunks_to_csv(chunks: list[dict[str, Any]]) -> str:
+    """Build downloadable CSV payload for hate-speech findings.
+
+    Args:
+        chunks: List of source dictionaries containing hate-speech finding information.
+
+    Returns:
+        CSV string with one row per finding.
+    """
+    fieldnames = [
+        "source",
+        "page",
+        "row",
+        "chunk_id",
+        "category",
+        "confidence",
+        "reason",
+        "chunk_text",
+        "network",
+        "ref_type",
+        "uuid",
+        "timestamp",
+        "author",
+        "author_id",
+        "vanity",
+        "text_id",
+        "parent_text",
+        "anchor_text",
+    ]
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fieldnames)
+    writer.writeheader()
+    for chunk in chunks:
+        ref = chunk.get("reference_metadata") or {}
+        writer.writerow(
+            {
+                "source": chunk.get("filename") or chunk.get("source_ref"),
+                "page": chunk.get("page"),
+                "row": chunk.get("row"),
+                "chunk_id": chunk.get("chunk_id"),
+                "category": chunk.get("category"),
+                "confidence": chunk.get("confidence"),
+                "reason": chunk.get("reason"),
+                "chunk_text": chunk.get("chunk_text") or chunk.get("text"),
+                "network": ref.get("network"),
+                "ref_type": ref.get("type"),
+                "uuid": ref.get("uuid"),
+                "timestamp": ref.get("timestamp"),
+                "author": ref.get("author"),
+                "author_id": ref.get("author_id"),
+                "vanity": ref.get("vanity"),
+                "text_id": ref.get("text_id"),
+                "parent_text": ref.get("parent_text"),
+                "anchor_text": ref.get("anchor_text"),
+            }
+        )
+    return buf.getvalue()
+
+
 def _analysis_chunk_export_block(
     chunk: dict[str, Any],
     *,
@@ -672,14 +789,25 @@ def _render_entities_tab(result: dict[str, Any], collection: str) -> None:
                         )
                     else:
                         st.caption("Chunk text unavailable for this record.")
-            st.download_button(
-                label="Download",
-                data=_entity_chunks_to_txt(selected_entity_text, chunks),
-                file_name=f"entity_{selected_entity_text}_{collection}.txt".replace(
-                    " ", "_"
-                ),
-                mime="text/plain",
-            )
+            dl_col_txt, dl_col_csv = st.columns(2)
+            with dl_col_txt:
+                st.download_button(
+                    label="Download TXT",
+                    data=_entity_chunks_to_txt(selected_entity_text, chunks),
+                    file_name=f"entity_{selected_entity_text}_{collection}.txt".replace(
+                        " ", "_"
+                    ),
+                    mime="text/plain",
+                )
+            with dl_col_csv:
+                st.download_button(
+                    label="Download CSV",
+                    data=_entity_chunks_to_csv(selected_entity_text, chunks),
+                    file_name=f"entity_{selected_entity_text}_{collection}.csv".replace(
+                        " ", "_"
+                    ),
+                    mime="text/csv",
+                )
         else:
             st.caption("No chunks were matched for the selected entity.")
 
@@ -737,12 +865,21 @@ def _render_hate_speech_tab(result: dict[str, Any], collection: str) -> None:
             else:
                 st.caption("Chunk text unavailable for this record.")
 
-    st.download_button(
-        label="Download",
-        data=_hate_speech_chunks_to_txt(findings),
-        file_name=f"hate_speech_{collection}.txt",
-        mime="text/plain",
-    )
+    dl_col_txt, dl_col_csv = st.columns(2)
+    with dl_col_txt:
+        st.download_button(
+            label="Download TXT",
+            data=_hate_speech_chunks_to_txt(findings),
+            file_name=f"hate_speech_{collection}.txt",
+            mime="text/plain",
+        )
+    with dl_col_csv:
+        st.download_button(
+            label="Download CSV",
+            data=_hate_speech_chunks_to_csv(findings),
+            file_name=f"hate_speech_{collection}.csv",
+            mime="text/csv",
+        )
 
 
 def _render_analysis_result(
