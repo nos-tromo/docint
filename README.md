@@ -55,7 +55,7 @@ and chat. It ships with:
   hardware only and do not set a provider.
 - The `openai` provider requires `OPENAI_API_KEY` in `.env`.
 - The `vllm` provider requires `OPENAI_API_BASE` in `.env`.
-  Deploy the standalone vLLM app first, then start Docint.
+  Deploy the standalone vLLM app first, then start Docint. You can use [vllm-service](https://github.com/nos-tromo/vllm-service) to serve text, vision, embedding, reranking and audio endpoints.
   Docint expects the vLLM router to expose one OpenAI-compatible base URL that
   ends in `/v1`, plus the vLLM sparse routes at `/pooling` and `/tokenize`.
 - For co-deployed stacks on one server, create one shared external Docker
