@@ -75,6 +75,7 @@ from llama_index.core.schema import (
     TextNode,
 )
 from llama_index.core.storage.docstore.keyval_docstore import KVDocumentStore
+from llama_index.core.storage.kvstore.types import BaseKVStore
 from llama_index.core.vector_stores.types import (
     FilterCondition,
     FilterOperator,
@@ -108,6 +109,8 @@ from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.retrieval_filters import matches_metadata_filters
 from docint.core.state.session_manager import SessionManager
 from docint.core.storage.docstore import QdrantKVStore
+from docint.core.storage.sqlite_kvstore import SQLiteKVStore
+from docint.core.storage.utils import qdrant_collection_exists
 from docint.core.storage.sources import stage_sources_to_qdrant
 from docint.utils.openai_cfg import (
     LocalOpenAI,
@@ -909,6 +912,7 @@ class RAG:
     docstore_batch_size: int = field(default=100, init=False)
     ingest_benchmark_enabled: bool = field(default=False, init=False)
     docstore_max_retries: int = field(default=3, init=False)
+    kv_store_backend: str = field(default="sqlite", init=False)
     docstore_retry_backoff_seconds: float = field(default=0.25, init=False)
     docstore_retry_backoff_max_seconds: float = field(default=2.0, init=False)
     qdrant_host: str | None = field(default=None, init=False)
@@ -973,6 +977,7 @@ class RAG:
         self.docstore_batch_size = self.ingestion_config.docstore_batch_size
         self.ingest_benchmark_enabled = self.ingestion_config.ingest_benchmark_enabled
         self.docstore_max_retries = self.ingestion_config.docstore_max_retries
+        self.kv_store_backend = self.ingestion_config.kv_store_backend
         self.docstore_retry_backoff_seconds = (
             self.ingestion_config.docstore_retry_backoff_seconds
         )
@@ -1621,15 +1626,7 @@ class RAG:
         Returns:
             StorageContext: The created storage context.
         """
-        kv_collection = f"{self.qdrant_collection}_dockv"
-        kv_store = QdrantKVStore(
-            client=self.qdrant_client,
-            collection_name=kv_collection,
-            max_retries=self.docstore_max_retries,
-            retry_backoff_seconds=self.docstore_retry_backoff_seconds,
-            retry_backoff_max_seconds=self.docstore_retry_backoff_max_seconds,
-        )
-        # Use a reasonable batch size to encourage batch operations
+        kv_store = self._build_kv_store()
         doc_store = KVDocumentStore(
             kvstore=kv_store, batch_size=self.docstore_batch_size
         )
@@ -1637,6 +1634,36 @@ class RAG:
         return StorageContext.from_defaults(
             vector_store=vector_store,
             docstore=doc_store,
+        )
+
+    def _build_kv_store(
+        self,
+        collection: str | None = None,
+    ) -> BaseKVStore:
+        """Build a KV store instance based on the configured backend.
+
+        Args:
+            collection: Optional collection name override.  When *None* the
+                current ``qdrant_collection`` is used.
+
+        Returns:
+            BaseKVStore: A concrete KV store — either :class:`SQLiteKVStore`
+                or :class:`QdrantKVStore` depending on ``kv_store_backend``.
+        """
+        target = str(collection or self.qdrant_collection or "").strip()
+        if self.kv_store_backend == "qdrant":
+            kv_collection = f"{target}_dockv"
+            return QdrantKVStore(
+                client=self.qdrant_client,
+                collection_name=kv_collection,
+                max_retries=self.docstore_max_retries,
+                retry_backoff_seconds=self.docstore_retry_backoff_seconds,
+                retry_backoff_max_seconds=self.docstore_retry_backoff_max_seconds,
+            )
+        db_path = self.qdrant_src_dir / target / f"{target}_kv.db"
+        return SQLiteKVStore(
+            db_path=db_path,
+            batch_size=self.docstore_batch_size,
         )
 
     def _build_ingestion_pipeline(
@@ -1713,7 +1740,7 @@ class RAG:
             )
         except Exception:
             return []
-        if not self._collection_exists(image_collection):
+        if not qdrant_collection_exists(self.qdrant_client, image_collection):
             return []
 
         try:
@@ -1794,39 +1821,6 @@ class RAG:
             results.append(src)
 
         return results
-
-    def _collection_exists(self, collection_name: str) -> bool:
-        """Return whether a Qdrant collection exists.
-
-        Args:
-            collection_name: Collection name to verify.
-
-        Returns:
-            ``True`` if the collection exists, else ``False``.
-        """
-        collection_exists = getattr(self.qdrant_client, "collection_exists", None)
-        if callable(collection_exists):
-            try:
-                return bool(collection_exists(collection_name))
-            except Exception:
-                pass
-        try:
-            self.qdrant_client.get_collection(collection_name)
-            return True
-        except Exception as exc:
-            message = str(exc).lower()
-            if (
-                "not found" in message
-                or "doesn't exist" in message
-                or "missing" in message
-            ):
-                return False
-            logger.warning(
-                "Collection existence check failed for '{}': {}",
-                collection_name,
-                exc,
-            )
-            return False
 
     def _index(self, storage_ctx: StorageContext) -> VectorStoreIndex:
         """Creates the vector store index for document embeddings.
@@ -3721,24 +3715,49 @@ class RAG:
         self._invalidate_ner_cache(target)
         self._bump_summary_revision(target, allow_create=False)
 
-        collections_to_delete = [target]
+        qdrant_collections = [target]
         if not target.endswith("_images") and not target.endswith("_dockv"):
-            collections_to_delete.extend([f"{target}_images", f"{target}_dockv"])
+            qdrant_collections.append(f"{target}_images")
+            if self.kv_store_backend == "qdrant":
+                qdrant_collections.append(f"{target}_dockv")
 
         # 1. Delete from Qdrant API
-        for collection_name in collections_to_delete:
+        errors: list[str] = []
+        for collection_name in qdrant_collections:
             try:
                 self.qdrant_client.delete_collection(collection_name)
                 logger.info("Deleted collection '{}' from Qdrant.", collection_name)
             except Exception as e:
+                errors.append(f"{collection_name}: {e}")
                 logger.error(
                     "Failed to delete collection '{}' via API: {}",
                     collection_name,
                     e,
                 )
 
+        # 1b. Delete SQLite KV database when using the sqlite backend
+        if self.kv_store_backend != "qdrant":
+            kv_db = self.qdrant_src_dir / f"{target}_kv.db"
+            for suffix in ("", "-wal", "-shm"):
+                p = kv_db.parent / (kv_db.name + suffix)
+                if p.exists():
+                    try:
+                        p.unlink()
+                        logger.info("Removed KV database file '{}'.", p)
+                    except Exception as e:
+                        errors.append(f"{p}: {e}")
+                        logger.error("Failed to remove '{}': {}", p, e)
+
+        if errors:
+            logger.warning(
+                "Collection '{}' deletion had {} error(s): {}",
+                target,
+                len(errors),
+                "; ".join(errors),
+            )
+
         # 2. Cleanup source files
-        for collection_name in collections_to_delete:
+        for collection_name in qdrant_collections:
             try:
                 src_path = self.qdrant_src_dir / collection_name
                 if src_path.exists():
@@ -5167,7 +5186,7 @@ class RAG:
         collection: str | None = None,
         *,
         allow_create: bool = True,
-    ) -> QdrantKVStore | None:
+    ) -> BaseKVStore | None:
         """Return the per-collection KV store used by summary cache operations.
 
         Args:
@@ -5175,14 +5194,14 @@ class RAG:
             allow_create: Whether creating the dockv collection is allowed.
 
         Returns:
-            QdrantKVStore | None: A KV store instance when available, else None.
+            BaseKVStore | None: A KV store instance when available, else None.
         """
         target = str(collection or self.qdrant_collection or "").strip()
         if not target:
             return None
 
-        kv_collection = f"{target}_dockv"
-        if not allow_create:
+        if self.kv_store_backend == "qdrant" and not allow_create:
+            kv_collection = f"{target}_dockv"
             try:
                 if not self.qdrant_client.collection_exists(kv_collection):
                     return None
@@ -5195,17 +5214,11 @@ class RAG:
                 return None
 
         try:
-            return QdrantKVStore(
-                client=self.qdrant_client,
-                collection_name=kv_collection,
-                max_retries=self.docstore_max_retries,
-                retry_backoff_seconds=self.docstore_retry_backoff_seconds,
-                retry_backoff_max_seconds=self.docstore_retry_backoff_max_seconds,
-            )
+            return self._build_kv_store(collection=target)
         except Exception as exc:
             logger.warning(
-                "Failed to initialize summary cache KV store '{}': {}",
-                kv_collection,
+                "Failed to initialize summary cache KV store for '{}': {}",
+                target,
                 exc,
             )
             return None

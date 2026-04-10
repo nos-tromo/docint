@@ -2766,6 +2766,7 @@ def test_summary_kv_store_passes_docstore_retry_config(
 
     rag = RAG(qdrant_collection="test")
     rag._qdrant_client = MagicMock()
+    rag.kv_store_backend = "qdrant"
     rag.docstore_max_retries = 8
     rag.docstore_retry_backoff_seconds = 0.6
     rag.docstore_retry_backoff_max_seconds = 4.0
@@ -3327,6 +3328,9 @@ def test_delete_collection_attempts_summary_invalidation(
 ) -> None:
     """delete_collection should attempt summary revision bump before deletion.
 
+    With the default SQLite KV backend, only the main and _images Qdrant
+    collections are deleted (the _dockv collection is no longer used).
+
     Args:
         monkeypatch: The monkeypatch fixture.
     """
@@ -3361,6 +3365,33 @@ def test_delete_collection_attempts_summary_invalidation(
     rag.delete_collection("target")
 
     assert bumps == [("target", False)]
+    deleted = [
+        str(call.args[0])
+        for call in rag._qdrant_client.delete_collection.call_args_list
+    ]
+    assert deleted == ["target", "target_images"]
+
+
+def test_delete_collection_qdrant_kv_backend_deletes_dockv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """delete_collection with qdrant KV backend should also delete _dockv.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    rag.kv_store_backend = "qdrant"
+    monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+    monkeypatch.setattr(
+        RAG,
+        "_bump_summary_revision",
+        lambda self, collection=None, allow_create=True: 1,
+    )
+
+    rag.delete_collection("target")
+
     deleted = [
         str(call.args[0])
         for call in rag._qdrant_client.delete_collection.call_args_list

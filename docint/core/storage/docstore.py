@@ -4,6 +4,7 @@ import time
 import uuid
 from typing import Any, Callable, TypeVar
 
+import httpx
 from llama_index.core.storage.kvstore.types import DEFAULT_COLLECTION, BaseKVStore
 from loguru import logger
 from qdrant_client import QdrantClient
@@ -80,6 +81,9 @@ class QdrantKVStore(BaseKVStore):
     def _is_retryable_exception(exc: Exception) -> bool:
         """Return True when *exc* looks like a transient transport failure.
 
+        Uses the ``qdrant_client`` and ``httpx`` exception hierarchies to
+        classify errors structurally rather than by parsing message strings.
+
         Args:
             exc: Exception raised by Qdrant/http transports.
 
@@ -88,20 +92,14 @@ class QdrantKVStore(BaseKVStore):
         """
         if isinstance(exc, (ConnectionError, ConnectionResetError, TimeoutError)):
             return True
-        if isinstance(exc, ResponseHandlingException) and exc.__cause__ is not None:
-            return QdrantKVStore._is_retryable_exception(exc.__cause__)
-
-        message = str(exc).lower()
-        retryable_markers = (
-            "connection reset",
-            "connection aborted",
-            "connection refused",
-            "broken pipe",
-            "timed out",
-            "readerror",
-            "responsehandlingexception",
-        )
-        return any(marker in message for marker in retryable_markers)
+        if isinstance(exc, (httpx.NetworkError, httpx.TimeoutException)):
+            return True
+        if isinstance(exc, ResponseHandlingException):
+            cause = exc.__cause__
+            if cause is not None:
+                return QdrantKVStore._is_retryable_exception(cause)
+            return True
+        return False
 
     def _execute_with_retry(self, operation: str, fn: Callable[[], T]) -> T:
         """Execute *fn* with bounded retries for transient Qdrant errors.

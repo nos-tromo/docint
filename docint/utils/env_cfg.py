@@ -351,6 +351,7 @@ class IngestionConfig:
     docstore_batch_size: int
     ingest_benchmark_enabled: bool
     docstore_max_retries: int
+    kv_store_backend: str
     docstore_retry_backoff_max_seconds: float
     docstore_retry_backoff_seconds: float
     fine_chunk_overlap: int
@@ -368,6 +369,7 @@ def load_ingestion_env(
     default_docstore_batch_size: int = 100,
     default_ingest_benchmark_enabled: bool = False,
     default_docstore_max_retries: int = 3,
+    default_kv_store_backend: str = "sqlite",
     default_docstore_retry_backoff_seconds: float = 0.25,
     default_docstore_retry_backoff_max_seconds: float = 2.0,
     default_fine_chunk_overlap: int = 0,
@@ -418,6 +420,9 @@ def load_ingestion_env(
             for throughput and batch diagnostics.
         - docstore_max_retries (int): Maximum retries for transient docstore/Qdrant
             transport failures.
+        - kv_store_backend (str): Backend for KV document store. ``"sqlite"``
+            (default) uses a local SQLite database; ``"qdrant"`` uses the legacy
+            Qdrant-backed KV store with dummy vectors.
         - docstore_retry_backoff_seconds (float): Initial retry backoff in seconds
             for docstore/Qdrant operations.
         - docstore_retry_backoff_max_seconds (float): Maximum retry backoff in
@@ -451,6 +456,9 @@ def load_ingestion_env(
             0,
             int(os.getenv("DOCSTORE_MAX_RETRIES", default_docstore_max_retries)),
         ),
+        kv_store_backend=os.getenv(
+            "KV_STORE_BACKEND", default_kv_store_backend
+        ).lower(),
         docstore_retry_backoff_seconds=max(
             0.0,
             float(
