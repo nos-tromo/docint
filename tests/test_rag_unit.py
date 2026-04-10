@@ -2309,6 +2309,11 @@ def test_summarize_collection_reports_coverage_diagnostics(
         "c.pdf": [],
     }
 
+    monkeypatch.setattr(
+        RAG,
+        "_infer_collection_profile",
+        lambda self: {"is_social_table": False, "coverage_unit": "documents"},
+    )
     monkeypatch.setattr(RAG, "_summary_document_targets", lambda self: docs)
     monkeypatch.setattr(
         RAG,
@@ -2455,6 +2460,11 @@ def test_summarize_collection_handles_no_documents(
     rag.summary_coverage_target = 0.7
     rag.summary_max_docs = 30
 
+    monkeypatch.setattr(
+        RAG,
+        "_infer_collection_profile",
+        lambda self: {"is_social_table": False, "coverage_unit": "documents"},
+    )
     monkeypatch.setattr(RAG, "_summary_document_targets", lambda self: [])
     monkeypatch.setattr(
         RAG,

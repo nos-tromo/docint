@@ -190,7 +190,7 @@ class _ConnProxy:
             real (sqlite3.Connection): The real SQLite connection to wrap.
             execute_fn (Callable[..., Any] | None, optional): Override for ``execute``. Defaults to None.
             executemany_fn (Callable[..., Any] | None, optional): Override for ``executemany``. Defaults to None.
-        """    
+        """
         self._real = real
         self._execute_fn = execute_fn
         self._executemany_fn = executemany_fn
@@ -261,7 +261,7 @@ def test_put_retries_locked_db_error(
 
     def flaky_execute(sql: str, *args: Any, **kwargs: Any) -> Any:
         """Raise a locked-DB error once on writes, then delegate.
-        
+
         Args:
             sql: The SQL statement.
             *args: Positional arguments forwarded to the real connection.
@@ -307,12 +307,12 @@ def test_put_raises_non_retryable_sqlite_error(
 
     def broken_execute(*_args: Any, **_kwargs: Any) -> Any:
         """Raise a non-retryable ``OperationalError``.
-        
+
         Args:
             *_args: Ignored.
             **_kwargs: Ignored.
 
-        Returns:        
+        Returns:
             Never returns — always raises an exception.
 
         Raises:

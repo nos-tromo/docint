@@ -67,9 +67,7 @@ def _print_human_report(report: dict) -> None:
     sys.stdout.write(
         f"  expected_coarse_only:  {len(report['expected_coarse_only'])}\n"
     )
-    sys.stdout.write(
-        f"  missing_parent_ids:    {len(report['missing_parent_ids'])}\n"
-    )
+    sys.stdout.write(f"  missing_parent_ids:    {len(report['missing_parent_ids'])}\n")
     sys.stdout.write(f"  repaired_ids:          {len(report['repaired_ids'])}\n")
     if report["kv_orphans"]:
         sys.stdout.write("\nKV orphans (first 20):\n")
@@ -114,9 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         _print_human_report(report)
 
     has_drift = bool(
-        report["kv_orphans"]
-        or report["qdrant_orphans"]
-        or report["missing_parent_ids"]
+        report["kv_orphans"] or report["qdrant_orphans"] or report["missing_parent_ids"]
     )
     return 1 if has_drift else 0
 
