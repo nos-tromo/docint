@@ -61,11 +61,7 @@ def _render_collection_selector() -> None:
             f"{BACKEND_HOST}/collections/list", timeout=COLLECTION_TIMEOUT
         )
         if resp.status_code == 200:
-            cols = [
-                c
-                for c in resp.json()
-                if not c.endswith("_dockv") and not c.endswith("_images")
-            ]
+            cols = [c for c in resp.json() if not c.endswith("_images")]
         else:
             logger.error("Failed to fetch collections: {}", resp.text)
             st.error(f"Failed to fetch collections: {resp.text}")

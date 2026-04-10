@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import types
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -2753,25 +2755,33 @@ def test_summary_kv_store_passes_docstore_retry_config(
 ) -> None:
     """Summary KV store construction should include docstore retry settings.
 
+    Verifies that the SQLite KV store built by ``_summary_kv_store``
+    receives the retry knobs configured on the :class:`RAG` instance.
+
     Args:
         monkeypatch: The monkeypatch fixture.
     """
     captured: dict[str, Any] = {}
 
-    class FakeQdrantKVStore:
-        """Capture kwargs passed to KV store constructor."""
+    class FakeSQLiteKVStore:
+        """Capture kwargs passed to the KV store constructor."""
 
         def __init__(self, **kwargs: Any) -> None:
+            """Record constructor kwargs for later assertion.
+
+            Args:
+                **kwargs: Keyword arguments forwarded to
+                    :class:`SQLiteKVStore`.
+            """
             captured.update(kwargs)
 
     rag = RAG(qdrant_collection="test")
     rag._qdrant_client = MagicMock()
-    rag.kv_store_backend = "qdrant"
     rag.docstore_max_retries = 8
     rag.docstore_retry_backoff_seconds = 0.6
     rag.docstore_retry_backoff_max_seconds = 4.0
 
-    monkeypatch.setattr(rag_module, "QdrantKVStore", FakeQdrantKVStore)
+    monkeypatch.setattr(rag_module, "SQLiteKVStore", FakeSQLiteKVStore)
 
     kv_store = rag._summary_kv_store()
 
@@ -2960,7 +2970,7 @@ def test_persist_node_batches_streams_micro_batches() -> None:
 
     nodes = [types.SimpleNamespace(metadata={}) for _ in range(5)]
     rag._persist_node_batches(cast(list[Any], nodes))
-    index = cast(Any, rag.index)
+    index = rag.index
 
     assert index.docstore.batch_sizes == [2, 2, 1]
     assert index.vector_batch_sizes == [2, 2, 1]
@@ -3086,6 +3096,214 @@ def test_persist_node_batches_skips_unembeddable_chunks() -> None:
     assert index.vector_batches[0] == [ok_node]
     assert ok_node.embedding == [0.1, 0.2]
     assert bad_node.embedding is None
+
+
+def _fake_prepare_vector_nodes_for_insert(
+    _self: RAG, vector_nodes: list[Any]
+) -> tuple[list[Any], set[int]]:
+    """Return vector nodes untouched with no skipped IDs.
+
+    Used as a class-level monkeypatch so that the prepared-vector-nodes
+    helper does not try to load an embedding model during unit tests.
+
+    Args:
+        _self: Unused ``RAG`` instance (bound method signature).
+        vector_nodes: Incoming vector nodes.
+
+    Returns:
+        A ``(prepared_nodes, skipped_ids)`` tuple where no nodes are
+        skipped and ``prepared_nodes`` mirrors the input list.
+    """
+    return (list(vector_nodes), set())
+
+
+def _capture_loguru(caplog: pytest.LogCaptureFixture) -> Callable[[], None]:
+    """Route ``loguru`` logs into pytest's ``caplog`` handler.
+
+    The rag module uses ``loguru``, which does not propagate to the
+    stdlib ``logging`` hierarchy by default.  This helper installs a
+    sink on the loguru logger that forwards every record into caplog's
+    captured handler and returns a cleanup callable.
+
+    Args:
+        caplog: Pytest log capture fixture.
+
+    Returns:
+        A zero-argument cleanup callable that removes the sink.
+    """
+    from loguru import logger as _loguru_logger
+
+    sink_id = _loguru_logger.add(
+        lambda message: caplog.records.append(
+            logging.LogRecord(
+                name="loguru",
+                level=logging.ERROR,
+                pathname="",
+                lineno=0,
+                msg=str(message),
+                args=None,
+                exc_info=None,
+            )
+        ),
+        level="ERROR",
+        format="{message}",
+    )
+
+    def _cleanup() -> None:
+        _loguru_logger.remove(sink_id)
+
+    return _cleanup
+
+
+def test_persist_node_batches_logs_orphaned_kv_nodes_on_vector_failure(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Log node IDs and re-raise when the vector write fails after a KV write.
+
+    Simulates a transient Qdrant failure on ``insert_nodes`` after the
+    docstore write has committed, and asserts that the ``orphaned_kv_nodes``
+    marker appears in the logs with the affected node IDs so operators
+    can diagnose what needs to be re-ingested.
+
+    Args:
+        caplog: Pytest log capture fixture.
+        monkeypatch: Pytest monkeypatch fixture used to stub the
+            embedding-prep helper at the class level (RAG uses
+            ``@dataclass(slots=True)`` so instance-level assignment
+            is not possible).
+    """
+
+    class FakeDocStore:
+        """Record persisted node IDs."""
+
+        def __init__(self) -> None:
+            """Initialise empty capture state."""
+            self.persisted: list[str] = []
+
+        def add_documents(self, nodes: list[Any], allow_update: bool = True) -> None:
+            """Record node IDs for each persisted batch.
+
+            Args:
+                nodes: Nodes being persisted to the docstore.
+                allow_update: Whether overwrites are allowed.
+            """
+            _ = allow_update
+            self.persisted.extend(n.node_id for n in nodes)
+
+    class FakeIndex:
+        """Fail on vector insert to simulate a Qdrant outage."""
+
+        def __init__(self) -> None:
+            """Initialise the fake index state."""
+            self.docstore = FakeDocStore()
+
+        def insert_nodes(self, nodes: list[Any]) -> None:
+            """Raise a transient error on every vector insert.
+
+            Args:
+                nodes: Nodes the caller is trying to insert.
+
+            Raises:
+                RuntimeError: Always, to simulate a vector-store failure.
+            """
+            _ = nodes
+            raise RuntimeError("qdrant down")
+
+    monkeypatch.setattr(
+        RAG,
+        "_prepare_vector_nodes_for_insert",
+        _fake_prepare_vector_nodes_for_insert,
+    )
+
+    rag = RAG(qdrant_collection="active")
+    rag.docstore_batch_size = 10
+    rag.index = cast(Any, FakeIndex())
+
+    node = TextNode(text="hello world", metadata={}, id_="node-1")
+
+    cleanup = _capture_loguru(caplog)
+    try:
+        with pytest.raises(RuntimeError, match="qdrant down"):
+            rag._persist_node_batches([node])
+    finally:
+        cleanup()
+
+    index = cast(Any, rag.index)
+    # The docstore write committed before the vector insert failed.
+    assert index.docstore.persisted == ["node-1"]
+    # The structured marker and node id appear in the logs.
+    combined = "\n".join(str(record.msg) for record in caplog.records)
+    assert "orphaned_kv_nodes" in combined
+    assert "node-1" in combined
+    assert "'active'" in combined
+
+
+def test_persist_node_batches_logs_failed_persist_on_docstore_failure(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Log node IDs and re-raise when the docstore write itself fails.
+
+    Args:
+        caplog: Pytest log capture fixture.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+
+    class FakeDocStore:
+        """Raise on every persistence attempt."""
+
+        def add_documents(self, nodes: list[Any], allow_update: bool = True) -> None:
+            """Raise a disk-full error on every batch.
+
+            Args:
+                nodes: Nodes being persisted.
+                allow_update: Ignored flag.
+
+            Raises:
+                OSError: Always, to simulate a disk-full condition.
+            """
+            _ = (nodes, allow_update)
+            raise OSError("disk full")
+
+    class FakeIndex:
+        """Fake index that should never reach ``insert_nodes``."""
+
+        def __init__(self) -> None:
+            """Initialise the fake index state."""
+            self.docstore = FakeDocStore()
+            self.inserts: list[list[Any]] = []
+
+        def insert_nodes(self, nodes: list[Any]) -> None:
+            """Record any calls — should not be invoked in this test.
+
+            Args:
+                nodes: Vector nodes the caller is trying to insert.
+            """
+            self.inserts.append(nodes)
+
+    monkeypatch.setattr(
+        RAG,
+        "_prepare_vector_nodes_for_insert",
+        _fake_prepare_vector_nodes_for_insert,
+    )
+
+    rag = RAG(qdrant_collection="active")
+    rag.docstore_batch_size = 10
+    rag.index = cast(Any, FakeIndex())
+
+    node = TextNode(text="hello", metadata={}, id_="node-x")
+
+    cleanup = _capture_loguru(caplog)
+    try:
+        with pytest.raises(OSError, match="disk full"):
+            rag._persist_node_batches([node])
+    finally:
+        cleanup()
+
+    # Vector insert must not have been attempted once the KV write failed.
+    assert cast(Any, rag.index).inserts == []
+    combined = "\n".join(str(record.msg) for record in caplog.records)
+    assert "failed_persist_nodes" in combined
+    assert "node-x" in combined
 
 
 def test_apersist_node_batches_skips_unembeddable_chunks() -> None:
@@ -3328,8 +3546,9 @@ def test_delete_collection_attempts_summary_invalidation(
 ) -> None:
     """delete_collection should attempt summary revision bump before deletion.
 
-    With the default SQLite KV backend, only the main and _images Qdrant
-    collections are deleted (the _dockv collection is no longer used).
+    Deletes the main and ``_images`` Qdrant collections (SQLite KV store
+    lives under the source directory and is cleaned up via the source-dir
+    rmtree pass).
 
     Args:
         monkeypatch: The monkeypatch fixture.
@@ -3346,15 +3565,15 @@ def test_delete_collection_attempts_summary_invalidation(
         *,
         allow_create: bool = True,
     ) -> int:
-        """Bump the summary revision.
+        """Capture summary revision bump calls.
 
         Args:
-            self (RAG): The RAG instance.
-            collection (str | None, optional): The collection name. Defaults to None.
-            allow_create (bool, optional): Whether to allow creation of a new store. Defaults to True.
+            self: The RAG instance.
+            collection: The collection name.
+            allow_create: Whether to allow creation of a new store.
 
         Returns:
-            int: The new summary revision.
+            The stub revision number.
         """
         _ = self
         bumps.append((collection, allow_create))
@@ -3372,17 +3591,23 @@ def test_delete_collection_attempts_summary_invalidation(
     assert deleted == ["target", "target_images"]
 
 
-def test_delete_collection_qdrant_kv_backend_deletes_dockv(
-    monkeypatch: pytest.MonkeyPatch,
+def test_delete_collection_fail_fast_on_primary_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """delete_collection with qdrant KV backend should also delete _dockv.
+    """delete_collection must raise before touching KV files on primary failure.
+
+    When the primary Qdrant collection delete raises, the SQLite KV file
+    and source directory for that collection must remain untouched so
+    that the operator can diagnose and retry without losing data.
 
     Args:
         monkeypatch: The monkeypatch fixture.
+        tmp_path: Pytest-provided temporary directory used to place a
+            fake source directory and KV file on disk.
     """
     rag = RAG(qdrant_collection="active")
     rag._qdrant_client = MagicMock()
-    rag.kv_store_backend = "qdrant"
+    rag._qdrant_src_dir = tmp_path
     monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
     monkeypatch.setattr(
         RAG,
@@ -3390,13 +3615,198 @@ def test_delete_collection_qdrant_kv_backend_deletes_dockv(
         lambda self, collection=None, allow_create=True: 1,
     )
 
+    # Simulate the primary delete_collection call raising.
+    rag._qdrant_client.delete_collection.side_effect = RuntimeError("qdrant boom")
+
+    # Place a sentinel KV file under the source dir — it must survive.
+    src_dir = tmp_path / "target"
+    src_dir.mkdir()
+    kv_file = src_dir / "target_kv.db"
+    kv_file.write_bytes(b"SQLITE_SENTINEL")
+
+    with pytest.raises(RuntimeError, match="qdrant boom"):
+        rag.delete_collection("target")
+
+    # Source directory and KV file must still exist.
+    assert kv_file.exists()
+    assert kv_file.read_bytes() == b"SQLITE_SENTINEL"
+    # Only the primary delete was attempted — secondary and source cleanup
+    # must have been skipped.
+    deleted = [
+        str(call.args[0])
+        for call in rag._qdrant_client.delete_collection.call_args_list
+    ]
+    assert deleted == ["target"]
+
+
+def test_verify_collection_reports_drift_and_parents(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """verify_collection surfaces KV/Qdrant drift and broken parents.
+
+    Builds a real on-disk SQLite KV store via :meth:`RAG._build_kv_store`
+    with three node IDs (a fine node, a coarse parent, and a fine node
+    whose parent is missing), mocks out Qdrant to report only one of
+    them plus an extra Qdrant-only id, and asserts the resulting
+    report.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Pytest-provided temporary directory used as the
+            Qdrant source root.
+    """
+    from llama_index.core.schema import TextNode as _TN
+    from llama_index.core.storage.docstore.keyval_docstore import (
+        KVDocumentStore as _KVDocumentStore,
+    )
+
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    rag._qdrant_src_dir = tmp_path
+
+    # Seed the real SQLite KV store with three nodes.
+    kv_store = rag._build_kv_store(collection="active")
+    doc_store = _KVDocumentStore(kvstore=kv_store, batch_size=10)
+    fine_ok = _TN(text="fine ok", metadata={"docint_hier_type": "fine"}, id_="fine-1")
+    coarse = _TN(
+        text="coarse parent",
+        metadata={"docint_hier_type": "coarse"},
+        id_="coarse-1",
+    )
+    dangling = _TN(
+        text="dangling child",
+        metadata={
+            "docint_hier_type": "fine",
+            "hier.parent_id": "coarse-missing",
+        },
+        id_="fine-dangling",
+    )
+    doc_store.add_documents([fine_ok, coarse, dangling])
+
+    # Mock Qdrant: claim the collection exists, report one of the KV ids
+    # plus a phantom id that only lives in Qdrant.
+    rag._qdrant_client.collection_exists.return_value = True
+
+    class _Point:
+        """Tiny stand-in for a Qdrant point returned by scroll."""
+
+        def __init__(self, pid: str) -> None:
+            """Store the point id.
+
+            Args:
+                pid: The point identifier.
+            """
+            self.id = pid
+
+    def _scroll(**_kwargs: Any) -> tuple[list[_Point], Any]:
+        """Return a single page of two points and no continuation offset.
+
+        Args:
+            **_kwargs: Ignored scroll keyword arguments.
+
+        Returns:
+            ``(points, None)`` — one KV-matching and one Qdrant-only id.
+        """
+        return ([_Point("fine-1"), _Point("qdrant-ghost")], None)
+
+    rag._qdrant_client.scroll.side_effect = _scroll
+
+    report = rag.verify_collection("active")
+
+    assert report["collection"] == "active"
+    assert report["qdrant_count"] == 2
+    assert report["kv_count"] == 3
+    # fine-dangling lives in KV only and is not coarse → orphan.
+    assert report["kv_orphans"] == ["fine-dangling"]
+    # The coarse parent is correctly absent from Qdrant — informational.
+    assert report["expected_coarse_only"] == ["coarse-1"]
+    # qdrant-ghost has no KV backing.
+    assert report["qdrant_orphans"] == ["qdrant-ghost"]
+    # fine-dangling references a parent that does not exist in KV.
+    assert report["missing_parent_ids"] == ["coarse-missing"]
+    # Without repair=True, nothing is deleted.
+    assert report["repaired_ids"] == []
+    assert doc_store.get_document("fine-dangling", raise_error=False) is not None
+
+
+def test_verify_collection_repair_deletes_kv_orphans(
+    tmp_path: Path,
+) -> None:
+    """verify_collection(repair=True) removes kv_orphans from the docstore.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory used as the
+            Qdrant source root.
+    """
+    from llama_index.core.schema import TextNode as _TN
+    from llama_index.core.storage.docstore.keyval_docstore import (
+        KVDocumentStore as _KVDocumentStore,
+    )
+
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    rag._qdrant_src_dir = tmp_path
+
+    kv_store = rag._build_kv_store(collection="active")
+    doc_store = _KVDocumentStore(kvstore=kv_store, batch_size=10)
+    orphan = _TN(text="orphan", metadata={"docint_hier_type": "fine"}, id_="orphan-1")
+    doc_store.add_documents([orphan])
+
+    rag._qdrant_client.collection_exists.return_value = True
+    rag._qdrant_client.scroll.return_value = ([], None)
+
+    report = rag.verify_collection("active", repair=True)
+
+    assert report["kv_orphans"] == ["orphan-1"]
+    assert report["repaired_ids"] == ["orphan-1"]
+    # A fresh docstore on the same KV store must no longer see the orphan.
+    post_store = _KVDocumentStore(
+        kvstore=rag._build_kv_store(collection="active"), batch_size=10
+    )
+    assert post_store.get_document("orphan-1", raise_error=False) is None
+
+
+def test_delete_collection_tolerates_secondary_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Failures deleting supplementary collections are swallowed and logged.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Pytest-provided temporary directory.
+    """
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    rag._qdrant_src_dir = tmp_path
+    monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+    monkeypatch.setattr(
+        RAG,
+        "_bump_summary_revision",
+        lambda self, collection=None, allow_create=True: 1,
+    )
+
+    def delete_side_effect(name: str) -> None:
+        """Raise only for the supplementary ``_images`` collection.
+
+        Args:
+            name: The Qdrant collection being deleted.
+
+        Raises:
+            RuntimeError: When ``name`` ends with ``"_images"``.
+        """
+        if name.endswith("_images"):
+            raise RuntimeError("secondary boom")
+
+    rag._qdrant_client.delete_collection.side_effect = delete_side_effect
+
+    # Does not raise: primary delete succeeds, secondary failure is logged.
     rag.delete_collection("target")
 
     deleted = [
         str(call.args[0])
         for call in rag._qdrant_client.delete_collection.call_args_list
     ]
-    assert deleted == ["target", "target_images", "target_dockv"]
+    assert deleted == ["target", "target_images"]
 
 
 def test_delete_collection_companion_name_does_not_expand(

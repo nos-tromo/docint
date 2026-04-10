@@ -136,6 +136,15 @@ Query data:
 uv run query --help
 ```
 
+Verify that a collection's Qdrant vector store and SQLite KV docstore
+are in sync — reports drift (KV-only orphans, Qdrant-only orphans,
+broken hierarchical parents) and optionally repairs KV-only orphans:
+
+```bash
+uv run verify --collection my_collection
+uv run verify --collection my_collection --repair
+```
+
 Run tests and checks:
 
 ```bash

@@ -56,6 +56,7 @@ docint = "docint.app:run"
 ingest = "docint.cli.ingest:main"
 query = "docint.cli.query:main"
 query-eval = "docint.cli.eval:main"
+verify = "docint.cli.verify:main"
 load-models = "docint.utils.model_cfg:main"
 
 [project.optional-dependencies]

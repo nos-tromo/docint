@@ -108,7 +108,6 @@ from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.retrieval_filters import matches_metadata_filters
 from docint.core.state.session_manager import SessionManager
-from docint.core.storage.docstore import QdrantKVStore
 from docint.core.storage.sqlite_kvstore import SQLiteKVStore
 from docint.core.storage.utils import qdrant_collection_exists
 from docint.core.storage.sources import stage_sources_to_qdrant
@@ -912,7 +911,6 @@ class RAG:
     docstore_batch_size: int = field(default=100, init=False)
     ingest_benchmark_enabled: bool = field(default=False, init=False)
     docstore_max_retries: int = field(default=3, init=False)
-    kv_store_backend: str = field(default="sqlite", init=False)
     docstore_retry_backoff_seconds: float = field(default=0.25, init=False)
     docstore_retry_backoff_max_seconds: float = field(default=2.0, init=False)
     qdrant_host: str | None = field(default=None, init=False)
@@ -977,7 +975,6 @@ class RAG:
         self.docstore_batch_size = self.ingestion_config.docstore_batch_size
         self.ingest_benchmark_enabled = self.ingestion_config.ingest_benchmark_enabled
         self.docstore_max_retries = self.ingestion_config.docstore_max_retries
-        self.kv_store_backend = self.ingestion_config.kv_store_backend
         self.docstore_retry_backoff_seconds = (
             self.ingestion_config.docstore_retry_backoff_seconds
         )
@@ -1640,30 +1637,24 @@ class RAG:
         self,
         collection: str | None = None,
     ) -> BaseKVStore:
-        """Build a KV store instance based on the configured backend.
+        """Build a :class:`SQLiteKVStore` for the given collection.
 
         Args:
             collection: Optional collection name override.  When *None* the
                 current ``qdrant_collection`` is used.
 
         Returns:
-            BaseKVStore: A concrete KV store — either :class:`SQLiteKVStore`
-                or :class:`QdrantKVStore` depending on ``kv_store_backend``.
+            BaseKVStore: A :class:`SQLiteKVStore` rooted at
+                ``{qdrant_src_dir}/{collection}/{collection}_kv.db``.
         """
         target = str(collection or self.qdrant_collection or "").strip()
-        if self.kv_store_backend == "qdrant":
-            kv_collection = f"{target}_dockv"
-            return QdrantKVStore(
-                client=self.qdrant_client,
-                collection_name=kv_collection,
-                max_retries=self.docstore_max_retries,
-                retry_backoff_seconds=self.docstore_retry_backoff_seconds,
-                retry_backoff_max_seconds=self.docstore_retry_backoff_max_seconds,
-            )
         db_path = self.qdrant_src_dir / target / f"{target}_kv.db"
         return SQLiteKVStore(
             db_path=db_path,
             batch_size=self.docstore_batch_size,
+            max_retries=self.docstore_max_retries,
+            retry_backoff_seconds=self.docstore_retry_backoff_seconds,
+            retry_backoff_max_seconds=self.docstore_retry_backoff_max_seconds,
         )
 
     def _build_ingestion_pipeline(
@@ -1980,11 +1971,21 @@ class RAG:
     def _persist_node_batches(self, nodes: list[BaseNode]) -> None:
         """Persist nodes in micro-batches to reduce crash-loss windows.
 
+        Each batch is written to the KV docstore first and to the vector
+        store second.  On failure the node IDs in the affected batch are
+        logged under a dedicated marker (``failed_persist_nodes`` for
+        docstore failures, ``orphaned_kv_nodes`` for vector-insert
+        failures) so operators can identify exactly which nodes need
+        re-ingestion after a crash.  The exception is re-raised so
+        ingestion aborts.
+
         Args:
             nodes: Ingestion nodes to persist.
 
         Raises:
             RuntimeError: If the index is not initialized.
+            Exception: Re-raises whatever the underlying KV or vector
+                write raised, after emitting a structured log entry.
         """
         if self.index is None:
             raise RuntimeError("Index is not initialized.")
@@ -2005,12 +2006,36 @@ class RAG:
                 node for node in batch if id(node) not in skipped_node_ids
             ]
             if persisted_batch:
-                self.index.docstore.add_documents(
-                    persisted_batch,
-                    allow_update=True,
-                )
+                try:
+                    self.index.docstore.add_documents(
+                        persisted_batch,
+                        allow_update=True,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "failed_persist_nodes | batch={}/{} collection={!r} "
+                        "error={!r} node_ids={}",
+                        batch_no,
+                        len(batches),
+                        self.qdrant_collection,
+                        exc,
+                        [node.node_id for node in persisted_batch],
+                    )
+                    raise
             if prepared_vector_nodes:
-                self.index.insert_nodes(prepared_vector_nodes)
+                try:
+                    self.index.insert_nodes(prepared_vector_nodes)
+                except Exception as exc:
+                    logger.error(
+                        "orphaned_kv_nodes | batch={}/{} collection={!r} "
+                        "error={!r} node_ids={}",
+                        batch_no,
+                        len(batches),
+                        self.qdrant_collection,
+                        exc,
+                        [node.node_id for node in prepared_vector_nodes],
+                    )
+                    raise
 
     def _log_ingest_benchmark_summary(
         self,
@@ -2063,11 +2088,16 @@ class RAG:
     async def _apersist_node_batches(self, nodes: list[BaseNode]) -> None:
         """Asynchronously persist nodes in micro-batches.
 
+        Mirrors :meth:`_persist_node_batches` — see its docstring for the
+        failure-logging semantics.
+
         Args:
             nodes: Ingestion nodes to persist.
 
         Raises:
             RuntimeError: If the index is not initialized.
+            Exception: Re-raises the underlying KV or vector-write error
+                after emitting a structured log entry.
         """
         if self.index is None:
             raise RuntimeError("Index is not initialized.")
@@ -2089,12 +2119,36 @@ class RAG:
                 node for node in batch if id(node) not in skipped_node_ids
             ]
             if persisted_batch:
-                self.index.docstore.add_documents(
-                    persisted_batch,
-                    allow_update=True,
-                )
+                try:
+                    self.index.docstore.add_documents(
+                        persisted_batch,
+                        allow_update=True,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "failed_persist_nodes | batch={}/{} collection={!r} "
+                        "error={!r} node_ids={}",
+                        batch_no,
+                        len(batches),
+                        self.qdrant_collection,
+                        exc,
+                        [node.node_id for node in persisted_batch],
+                    )
+                    raise
             if prepared_vector_nodes:
-                await self.index.ainsert_nodes(prepared_vector_nodes)
+                try:
+                    await self.index.ainsert_nodes(prepared_vector_nodes)
+                except Exception as exc:
+                    logger.error(
+                        "orphaned_kv_nodes | batch={}/{} collection={!r} "
+                        "error={!r} node_ids={}",
+                        batch_no,
+                        len(batches),
+                        self.qdrant_collection,
+                        exc,
+                        [node.node_id for node in prepared_vector_nodes],
+                    )
+                    raise
 
     @staticmethod
     def _extract_file_hash(data: Any) -> str | None:
@@ -3703,11 +3757,20 @@ class RAG:
     def delete_collection(self, name: str) -> None:
         """Delete a collection by name from Qdrant and clean up source files.
 
+        The primary Qdrant collection is deleted first.  If that delete
+        fails, the method raises immediately — the SQLite KV file
+        (nested under ``{qdrant_src_dir}/{name}/``) and the source
+        directory are **not** touched, so the caller can diagnose and
+        retry without losing ground truth.  Failures deleting the
+        supplementary ``{name}_images`` collection are logged and
+        swallowed because they are not load-bearing.
+
         Args:
-            name (str): Name of the collection to delete.
+            name: Name of the collection to delete.
 
         Raises:
             ValueError: If the name is empty.
+            Exception: If the primary Qdrant collection delete fails.
         """
         if not name or not name.strip():
             raise ValueError("Collection name cannot be empty")
@@ -3715,49 +3778,39 @@ class RAG:
         self._invalidate_ner_cache(target)
         self._bump_summary_revision(target, allow_create=False)
 
-        qdrant_collections = [target]
-        if not target.endswith("_images") and not target.endswith("_dockv"):
-            qdrant_collections.append(f"{target}_images")
-            if self.kv_store_backend == "qdrant":
-                qdrant_collections.append(f"{target}_dockv")
+        # The primary collection is the only one whose failure is fatal.
+        # `{target}_images` is supplementary metadata whose absence is tolerated.
+        secondary_collections: list[str] = []
+        if not target.endswith("_images"):
+            secondary_collections.append(f"{target}_images")
 
-        # 1. Delete from Qdrant API
-        errors: list[str] = []
-        for collection_name in qdrant_collections:
+        # 1. Delete the primary Qdrant collection — fail-fast on error so
+        #    we don't proceed to destroy the SQLite KV file / source dir.
+        try:
+            self.qdrant_client.delete_collection(target)
+            logger.info("Deleted collection '{}' from Qdrant.", target)
+        except Exception:
+            logger.error(
+                "Failed to delete primary Qdrant collection '{}'; aborting "
+                "delete_collection to preserve KV store and source files.",
+                target,
+            )
+            raise
+
+        # 1b. Best-effort delete of supplementary collections.
+        for collection_name in secondary_collections:
             try:
                 self.qdrant_client.delete_collection(collection_name)
                 logger.info("Deleted collection '{}' from Qdrant.", collection_name)
             except Exception as e:
-                errors.append(f"{collection_name}: {e}")
-                logger.error(
-                    "Failed to delete collection '{}' via API: {}",
+                logger.warning(
+                    "Failed to delete supplementary collection '{}': {}",
                     collection_name,
                     e,
                 )
 
-        # 1b. Delete SQLite KV database when using the sqlite backend
-        if self.kv_store_backend != "qdrant":
-            kv_db = self.qdrant_src_dir / f"{target}_kv.db"
-            for suffix in ("", "-wal", "-shm"):
-                p = kv_db.parent / (kv_db.name + suffix)
-                if p.exists():
-                    try:
-                        p.unlink()
-                        logger.info("Removed KV database file '{}'.", p)
-                    except Exception as e:
-                        errors.append(f"{p}: {e}")
-                        logger.error("Failed to remove '{}': {}", p, e)
-
-        if errors:
-            logger.warning(
-                "Collection '{}' deletion had {} error(s): {}",
-                target,
-                len(errors),
-                "; ".join(errors),
-            )
-
-        # 2. Cleanup source files
-        for collection_name in qdrant_collections:
+        # 2. Cleanup source files (this also removes the nested SQLite KV db).
+        for collection_name in [target, *secondary_collections]:
             try:
                 src_path = self.qdrant_src_dir / collection_name
                 if src_path.exists():
@@ -3800,6 +3853,148 @@ class RAG:
                     collection_name,
                     e,
                 )
+
+    def verify_collection(
+        self,
+        collection: str | None = None,
+        *,
+        repair: bool = False,
+    ) -> dict[str, Any]:
+        """Report cross-store consistency between Qdrant and the KV docstore.
+
+        Scans the Qdrant vector collection for node IDs (point IDs are the
+        LlamaIndex node IDs) and the SQLite KV docstore for persisted nodes,
+        then categorises any drift:
+
+        * ``kv_orphans``: non-coarse nodes present in the KV store but
+          missing from Qdrant — unintended drift from a crashed ingestion
+          or an external Qdrant wipe.
+        * ``qdrant_orphans``: points present in Qdrant but missing from
+          the KV store — retrieval will fail to hydrate these nodes.
+        * ``expected_coarse_only``: coarse hierarchical parents correctly
+          absent from Qdrant (informational only, not drift).
+        * ``missing_parent_ids``: ``hier.parent_id`` values referenced by
+          fine nodes that do not resolve in the KV store — broken
+          hierarchical retrieval.
+
+        Args:
+            collection: Collection name (defaults to the active one).
+            repair: When ``True``, delete every id in ``kv_orphans`` from
+                the KV docstore.  ``qdrant_orphans`` and
+                ``missing_parent_ids`` are left untouched — repairing
+                them requires re-ingestion.
+
+        Returns:
+            A dict with keys ``collection``, ``qdrant_count``,
+            ``kv_count``, ``kv_orphans``, ``qdrant_orphans``,
+            ``expected_coarse_only``, ``missing_parent_ids`` and
+            ``repaired_ids``.
+
+        Raises:
+            ValueError: If no collection is specified and none is active.
+        """
+        target = str(collection or self.qdrant_collection or "").strip()
+        if not target:
+            raise ValueError("No collection specified and none active.")
+
+        # 1. Scan Qdrant for node IDs (point IDs are the LI node IDs).
+        qdrant_ids: set[str] = set()
+        if qdrant_collection_exists(self.qdrant_client, target):
+            offset: Any = None
+            while True:
+                try:
+                    points, offset = self.qdrant_client.scroll(
+                        collection_name=target,
+                        offset=offset,
+                        limit=256,
+                        with_vectors=False,
+                        with_payload=False,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "verify_collection: Qdrant scroll failed for '{}': {}",
+                        target,
+                        exc,
+                    )
+                    break
+                for point in points:
+                    pid = str(getattr(point, "id", "") or "")
+                    if pid:
+                        qdrant_ids.add(pid)
+                if offset is None:
+                    break
+        else:
+            logger.warning(
+                "verify_collection: Qdrant collection '{}' does not exist.",
+                target,
+            )
+
+        # 2. Scan the KV docstore for node IDs.  Skip if the SQLite file
+        #    does not exist — constructing the store would create an
+        #    empty one, which would mask the real drift.
+        db_path = self.qdrant_src_dir / target / f"{target}_kv.db"
+        kv_docs: dict[str, Any] = {}
+        doc_store: KVDocumentStore | None = None
+        if db_path.exists():
+            kv_store = self._build_kv_store(collection=target)
+            doc_store = KVDocumentStore(
+                kvstore=kv_store, batch_size=self.docstore_batch_size
+            )
+            kv_docs = doc_store.docs
+        else:
+            logger.warning(
+                "verify_collection: KV store file '{}' does not exist.",
+                db_path,
+            )
+
+        kv_ids: set[str] = set(kv_docs.keys())
+
+        # 3. Partition drift by whether each KV node is coarse.
+        kv_orphans: list[str] = []
+        expected_coarse_only: list[str] = []
+        for node_id in sorted(kv_ids - qdrant_ids):
+            node = kv_docs[node_id]
+            meta = getattr(node, "metadata", {}) or {}
+            if meta.get("docint_hier_type") == "coarse":
+                expected_coarse_only.append(node_id)
+            else:
+                kv_orphans.append(node_id)
+
+        qdrant_orphans = sorted(qdrant_ids - kv_ids)
+
+        # 4. Walk fine nodes and flag any hier.parent_id that does not
+        #    resolve in the KV store.
+        missing_parents: set[str] = set()
+        for node in kv_docs.values():
+            meta = getattr(node, "metadata", {}) or {}
+            parent_id = meta.get("hier.parent_id")
+            if parent_id and parent_id not in kv_ids:
+                missing_parents.add(str(parent_id))
+
+        # 5. Optionally delete kv_orphans.
+        repaired: list[str] = []
+        if repair and kv_orphans and doc_store is not None:
+            for node_id in kv_orphans:
+                try:
+                    doc_store.delete_document(node_id, raise_error=False)
+                    repaired.append(node_id)
+                except Exception as exc:
+                    logger.warning(
+                        "verify_collection: failed to repair orphan '{}': {}",
+                        node_id,
+                        exc,
+                    )
+
+        return {
+            "collection": target,
+            "qdrant_count": len(qdrant_ids),
+            "kv_count": len(kv_ids),
+            "kv_orphans": kv_orphans,
+            "qdrant_orphans": qdrant_orphans,
+            "expected_coarse_only": expected_coarse_only,
+            "missing_parent_ids": sorted(missing_parents),
+            "repaired_ids": repaired,
+        }
 
     def select_collection(self, name: str) -> None:
         """Switch active collection, ensuring it already exists.
@@ -5191,7 +5386,10 @@ class RAG:
 
         Args:
             collection: Optional collection name override.
-            allow_create: Whether creating the dockv collection is allowed.
+            allow_create: When ``False``, return ``None`` unless the
+                collection's SQLite KV database already exists on disk.
+                This prevents summary reads from spuriously creating an
+                empty database for a collection that was never ingested.
 
         Returns:
             BaseKVStore | None: A KV store instance when available, else None.
@@ -5200,17 +5398,9 @@ class RAG:
         if not target:
             return None
 
-        if self.kv_store_backend == "qdrant" and not allow_create:
-            kv_collection = f"{target}_dockv"
-            try:
-                if not self.qdrant_client.collection_exists(kv_collection):
-                    return None
-            except Exception as exc:
-                logger.warning(
-                    "Unable to check summary cache collection '{}': {}",
-                    kv_collection,
-                    exc,
-                )
+        if not allow_create:
+            db_path = self.qdrant_src_dir / target / f"{target}_kv.db"
+            if not db_path.exists():
                 return None
 
         try:
