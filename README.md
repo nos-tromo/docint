@@ -180,9 +180,34 @@ Run that stack separately and configure Docint with:
 - `TEXT_MODEL`, `VISION_MODEL`, `EMBED_MODEL`, `SPARSE_MODEL`,
   `RERANK_MODEL`, and `WHISPER_MODEL` matching the served model IDs
 
+## Documentation
+
+The [`docs/`](docs/README.md) directory contains the in-repo reference
+manual. It complements this README with topic-by-topic deep dives:
+
+- [Getting started](docs/getting-started.md) — install, first ingest,
+  first query
+- [Architecture](docs/architecture.md) — runtime components and request
+  flow
+- [Configuration](docs/configuration.md) — every env var grouped by
+  dataclass, with defaults
+- [API reference](docs/api-reference.md) — every FastAPI route
+- [CLI reference](docs/cli-reference.md) — `docint`, `ingest`, `query`,
+  `query-eval`, `load-models`
+- [Ingestion pipeline](docs/ingestion.md) — readers, chunking, NER,
+  storage
+- [Retrieval and agents](docs/retrieval-and-agents.md) — orchestrator,
+  hybrid retrieval, graph-RAG, validation
+- [UI guide](docs/ui-guide.md) — Streamlit pages and components
+- [Deployment](docs/deployment.md) — Docker profiles, volumes,
+  co-deployment with vLLM / Ollama
+- [Development](docs/development.md) — dev workflow, pre-commit,
+  pytest layout, CI, extension points
+
 ## Repository Shape
 
 - `docint/core`: backend, ingestion, retrieval, storage, session state
 - `docint/agents`: orchestration and tool-using agent flow
 - `docint/ui`: Streamlit pages and components
+- `docs`: in-repo documentation
 - `tests`: unit tests
