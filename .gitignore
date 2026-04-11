@@ -89,3 +89,6 @@ docker-compose.override.yml
 !**/required_exts.txt
 !AGENTS.md
 !CLAUDE.md
+!README.md
+!docs/
+!docs/**/*.md
