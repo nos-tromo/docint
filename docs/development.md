@@ -192,7 +192,7 @@ dependency updates.
 
 - **Imports** — stdlib, third party, local; no wildcard imports.
 - **Docstrings** — Google-style for new or modified functions/classes.
-- **Typing** — full type hints on public functions; use `3.11`
+- **Typing** — full type hints on all functions; use `3.11`
   built-in generics (`list`, `dict`, `tuple`).
 - **Error handling** — prefer specific exceptions; avoid broad
   `except Exception` unless the surrounding code already requires it.
