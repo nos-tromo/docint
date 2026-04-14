@@ -215,13 +215,31 @@ def load_ollama_model(
 
 
 def load_whisper_model(model_id: str) -> None:
-    """Loads and returns the Whisper model.
+    """Download an openai-whisper checkpoint into the local cache.
+
+    The weights are fetched to ``~/.cache/whisper`` (or ``XDG_CACHE_HOME``)
+    via ``whisper._download`` without being instantiated, so preloading
+    large checkpoints avoids the RAM cost of a full ``whisper.load_model``.
 
     Args:
-        model_id (str): The name of the model to load.
+        model_id (str): The name of the model to download.
+
+    Raises:
+        ValueError: If ``model_id`` is not a recognised Whisper model.
     """
-    whisper.load_model(name=model_id)
-    logger.info("Loaded whisper model: {}", model_id)
+    if model_id not in whisper._MODELS:
+        raise ValueError(
+            f"Unknown Whisper model '{model_id}'. Available: {sorted(whisper._MODELS)}."
+        )
+
+    default_cache = os.path.join(os.path.expanduser("~"), ".cache")
+    download_root = os.path.join(os.getenv("XDG_CACHE_HOME", default_cache), "whisper")
+
+    logger.info("Downloading whisper model '{}' to '{}'.", model_id, download_root)
+    checkpoint_path = whisper._download(
+        whisper._MODELS[model_id], download_root, in_memory=False
+    )
+    logger.info("Whisper model '{}' cached at '{}'.", model_id, checkpoint_path)
 
 
 def main() -> None:
