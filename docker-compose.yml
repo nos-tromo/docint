@@ -98,10 +98,10 @@ services:
         <<: *build-args
     ports: &frontend-ports
       - ${DOCINT_HOST_PORT:-8501}:8501
-    environment: &frontend-env
+    environment:
       BACKEND_HOST: http://backend:8000
       BACKEND_PUBLIC_HOST: http://localhost:8000
-      LOG_PATH: /var/log/docint/frontend.log
+      LOG_PATH: /var/log/docint/frontend-cpu.log
       STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
     env_file: *env-file
     volumes: &frontend-volumes
@@ -118,7 +118,11 @@ services:
   frontend-cuda:
     build: *frontend-build
     ports: *frontend-ports
-    environment: *frontend-env
+    environment: 
+      BACKEND_HOST: http://backend:8000
+      BACKEND_PUBLIC_HOST: http://localhost:8000
+      LOG_PATH: /var/log/docint/frontend-cuda.log
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
     env_file: *env-file
     volumes: *frontend-volumes
     networks: *frontend-networks
