@@ -23,8 +23,8 @@ variant and the matching Qdrant image.
 
 | Profile | Services enabled | Qdrant image |
 |---|---|---|
-| `cpu`  | `backend-cpu`, `qdrant`, `frontend`   | `qdrant/qdrant:v1.17.0` |
-| `cuda` | `backend-cuda`, `qdrant-cuda`, `frontend` | `qdrant/qdrant:v1.17.0-gpu-nvidia` |
+| `cpu`  | `backend-cpu`, `qdrant-cpu`, `frontend-cpu`   | `qdrant/qdrant:v1.17.0` |
+| `cuda` | `backend-cuda`, `qdrant-cuda`, `frontend-cuda` | `qdrant/qdrant:v1.17.0-gpu-nvidia` |
 
 Start the stack with:
 
@@ -59,20 +59,22 @@ docker compose --profile cuda up --build
   `inference-net` with the alias `docint-backend` so co-deployed
   services can reach them.
 
-### `frontend`
+### `frontend-cpu` / `frontend-cuda`
 
 - Built from `Dockerfile.frontend` (Streamlit + `loguru`, `pandas`,
   `requests`).
 - Runs `streamlit run docint/app.py --server.address 0.0.0.0` on
-  port `8501`.
+  port `8501` (host port configurable via `DOCINT_HOST_PORT`).
 - Environment: `BACKEND_HOST=http://backend:8000`,
   `BACKEND_PUBLIC_HOST=http://localhost:8000`,
   `STREAMLIT_BROWSER_GATHER_USAGE_STATS=false`,
   `LOG_PATH=/var/log/docint/frontend.log`.
 - Mounts the `docint-logs` volume.
 - Attaches to `docint-net` only.
+- `depends_on` the matching backend (`backend-cpu` / `backend-cuda`),
+  so Compose starts the backend container first.
 
-### `qdrant` / `qdrant-cuda`
+### `qdrant-cpu` / `qdrant-cuda`
 
 - Publishes ports `6333` (REST) and `6334` (gRPC).
 - Persists data to the `qdrant-storage` and `qdrant-snapshots` volumes.
@@ -101,7 +103,7 @@ survive container rebuilds. The helper script
 ## Networks
 
 - `docint-net` — internal bridge network shared by `backend-*`,
-  `frontend`, and the Qdrant service.
+  `frontend-*`, and the Qdrant service.
 - `inference-net` — **external** network declared with
   `name: ${INFERENCE_NET:-inference-net}`. The backend attaches to it
   with the alias `docint-backend`. Create the network first if you
