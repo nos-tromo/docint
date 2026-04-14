@@ -96,7 +96,6 @@ services:
       dockerfile: Dockerfile.frontend
       args:
         <<: *build-args
-    command: &frontend-command streamlit run docint/app.py --server.address 0.0.0.0
     ports: &frontend-ports
       - ${DOCINT_HOST_PORT:-8501}:8501
     environment: &frontend-env
@@ -118,7 +117,6 @@ services:
   ##########################################################
   frontend-cuda:
     build: *frontend-build
-    command: *frontend-command
     ports: *frontend-ports
     environment: *frontend-env
     env_file: *env-file
