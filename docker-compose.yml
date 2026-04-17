@@ -40,6 +40,7 @@ x-backend-cpu: &backend-cpu
     - huggingface-cache:/root/.cache/huggingface/hub
     - qdrant-sources:/var/lib/docint/sources
     - sessions-storage:/var/lib/docint/sessions
+    - torch-cache:/root/.cache/torch
     - whisper-cache:/root/.cache/whisper
   networks: &backend
     docint-net:
@@ -179,6 +180,8 @@ volumes:
   qdrant-sources:
   qdrant-storage:
   sessions-storage:
+  torch-cache:
+    external: true
   whisper-cache:
     external: true
 

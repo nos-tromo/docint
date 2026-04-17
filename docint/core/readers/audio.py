@@ -6,7 +6,9 @@ import subprocess
 import tempfile
 from typing import Any, Generator, Literal, Sequence, cast
 
-import whisper
+import numpy as np
+import torch
+import whisper  # type: ignore[import]
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from llama_index.core.schema import MediaResource
@@ -52,11 +54,124 @@ _LIBSNDFILE_EXTENSIONS = {
     ".wavex",
     ".xi",
 }
+NO_SPEECH_THRESHOLD: float = 0.6
+SILENCE_RMS_THRESHOLD: float = 0.01
+SILERO_VAD_REPO: str = "snakers4/silero-vad"
+_vad_cache: tuple[Any, Any] | None | bool = False
+
 _WORKER_MODEL: whisper.Whisper | None = None
 _WORKER_MODEL_ID: str | None = None
 _WORKER_DEVICE: str | None = None
 _WORKER_SRC_LANGUAGE: str | None = None
 _WORKER_TASK: WhisperTask = "transcribe"
+
+
+def _get_vad() -> tuple[Any, Any] | None:
+    """Lazily load the Silero VAD model via ``torch.hub``.
+
+    Returns:
+        tuple[Any, Any] | None: A ``(model, get_speech_timestamps)`` tuple, or
+        ``None`` when the model could not be loaded (network error, missing
+        cache, etc.). Failure is cached so ``torch.hub.load`` is not retried
+        on every file.
+    """
+    global _vad_cache
+    if _vad_cache is not False:
+        return cast(tuple[Any, Any] | None, _vad_cache)
+    try:
+        model, utils = torch.hub.load(
+            SILERO_VAD_REPO,
+            model="silero_vad",
+            trust_repo=True,
+        )
+        _vad_cache = (model, utils[0])
+        logger.info("Silero VAD model loaded.")
+    except Exception as exc:
+        logger.warning("Could not load Silero VAD ({}). Falling back to RMS-only.", exc)
+        _vad_cache = None
+    return cast(tuple[Any, Any] | None, _vad_cache)
+
+
+def _detect_speech_vad(
+    audio: NDArray[floating[Any]], sample_rate: int = 16000
+) -> bool | None:
+    """Check whether *audio* contains human speech using Silero VAD.
+
+    Args:
+        audio (NDArray[floating[Any]]): Float32 waveform (mono, 16 kHz).
+        sample_rate (int): Sample rate of *audio*.
+
+    Returns:
+        bool | None: ``True`` if speech is found, ``False`` if no speech is
+        detected, or ``None`` when the VAD model is unavailable (graceful
+        fallback).
+    """
+    vad = _get_vad()
+    if vad is None:
+        return None
+    model, get_speech_timestamps = vad
+    tensor = torch.from_numpy(np.asarray(audio)).float()
+    timestamps = get_speech_timestamps(tensor, model, sampling_rate=sample_rate)
+    return len(timestamps) > 0
+
+
+def _audio_has_speech(
+    audio: NDArray[floating[Any]],
+) -> tuple[bool, str | None]:
+    """Decide whether an audio sample should be sent to Whisper.
+
+    Applies two pre-transcription guards:
+
+    1. RMS energy check — waveforms below :data:`SILENCE_RMS_THRESHOLD` are
+       treated as digital silence.
+    2. Silero VAD — waveforms that carry energy but contain no detectable
+       human speech are rejected.
+
+    Args:
+        audio (NDArray[floating[Any]]): Float32 mono waveform sampled at
+            16 kHz (the format returned by ``whisper.load_audio``).
+
+    Returns:
+        tuple[bool, str | None]: ``(True, None)`` when the audio passes the
+        guard (including the graceful-fallback case where VAD is
+        unavailable); ``(False, reason)`` when the audio should be skipped.
+    """
+    rms = float(np.sqrt(np.mean(np.asarray(audio) ** 2)))
+    if rms < SILENCE_RMS_THRESHOLD:
+        return False, "Audio RMS below silence threshold"
+    has_speech = _detect_speech_vad(audio)
+    if has_speech is False:
+        return False, "VAD detected no speech"
+    return True, None
+
+
+def _filter_no_speech_segments(
+    segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop segments whose ``no_speech_prob`` exceeds the threshold.
+
+    Args:
+        segments (list[dict[str, Any]]): The raw Whisper segment list.
+
+    Returns:
+        list[dict[str, Any]]: The filtered segment list. When no segment is
+        dropped the original list object is returned unchanged.
+    """
+    filtered = [
+        seg
+        for seg in segments
+        if float(seg.get("no_speech_prob", 0.0)) <= NO_SPEECH_THRESHOLD
+    ]
+    dropped = len(segments) - len(filtered)
+    if dropped:
+        logger.info(
+            "[AudioReader] Dropped {}/{} segments with no_speech_prob > {}.",
+            dropped,
+            len(segments),
+            NO_SPEECH_THRESHOLD,
+        )
+        return filtered
+    return segments
 
 
 def _normalize_language_code(language: str | None) -> str | None:
@@ -266,6 +381,24 @@ def _transcribe_audio_job(job: tuple[str, str | None]) -> dict[str, Any]:
     try:
         model = _get_worker_model()
         audio = whisper.load_audio(file=file_path_str)
+        has_speech, skip_reason = _audio_has_speech(audio)
+        if not has_speech:
+            logger.warning(
+                "[AudioReader] {} for {}; skipping ingestion.",
+                skip_reason,
+                file_path_str,
+            )
+            return {
+                "detected_language": None,
+                "error": None,
+                "file_hash": file_hash,
+                "file_path": file_path_str,
+                "result": {"segments": []},
+                "selected_task": "transcribe",
+                "skipped": True,
+                "skip_reason": skip_reason,
+            }
+
         detected_language: str | None = _WORKER_SRC_LANGUAGE
         if detected_language is None and _WORKER_TASK == "translate":
             detected_language = _detect_language_with_model(
@@ -281,6 +414,8 @@ def _transcribe_audio_job(job: tuple[str, str | None]) -> dict[str, Any]:
             task=selected_task,
             language=detected_language or _WORKER_SRC_LANGUAGE,
         )
+        if isinstance(result, dict) and isinstance(result.get("segments"), list):
+            result["segments"] = _filter_no_speech_segments(result["segments"])
         return {
             "detected_language": detected_language,
             "error": None,
@@ -936,17 +1071,57 @@ class AudioReader(BaseReader):
             result and selected Whisper metadata.
         """
         if self._provider_backend is not None:
+            audio_probe = self._load_audio(file_path)
+            has_speech, skip_reason = _audio_has_speech(audio_probe)
+            if not has_speech:
+                logger.warning(
+                    "[AudioReader] {} for {}; skipping ingestion.",
+                    skip_reason,
+                    file_path,
+                )
+                return {
+                    "detected_language": None,
+                    "file_hash": file_hash,
+                    "file_path": str(file_path),
+                    "result": {"segments": []},
+                    "selected_task": "transcribe",
+                    "skipped": True,
+                    "skip_reason": skip_reason,
+                }
             payload = self._provider_backend.transcribe_file(
                 file_path,
                 configured_task=self.task,
                 src_language=self.src_language,
             )
+            provider_result = payload.get("result")
+            if isinstance(provider_result, dict) and isinstance(
+                provider_result.get("segments"), list
+            ):
+                provider_result["segments"] = _filter_no_speech_segments(
+                    provider_result["segments"]
+                )
             payload["file_hash"] = file_hash
             payload["file_path"] = str(file_path)
             return payload
 
         model = self._load_model()
         audio = self._load_audio(file_path)
+        has_speech, skip_reason = _audio_has_speech(audio)
+        if not has_speech:
+            logger.warning(
+                "[AudioReader] {} for {}; skipping ingestion.",
+                skip_reason,
+                file_path,
+            )
+            return {
+                "detected_language": None,
+                "file_hash": file_hash,
+                "file_path": str(file_path),
+                "result": {"segments": []},
+                "selected_task": "transcribe",
+                "skipped": True,
+                "skip_reason": skip_reason,
+            }
         selected_task, detected_language = self._resolve_task_for_audio(audio, model)
         result = self._transcribe_audio(
             audio,
@@ -954,6 +1129,8 @@ class AudioReader(BaseReader):
             task=selected_task,
             language=detected_language,
         )
+        if isinstance(result, dict) and isinstance(result.get("segments"), list):
+            result["segments"] = _filter_no_speech_segments(result["segments"])
         return {
             "detected_language": detected_language,
             "file_hash": file_hash,

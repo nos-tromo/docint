@@ -13,7 +13,41 @@ from numpy.typing import NDArray
 
 import docint.core.readers.audio as audio_module
 from docint.core.readers.audio import AudioReader
+from docint.core.readers.audio import _audio_has_speech as _real_audio_has_speech
 from docint.utils.env_cfg import load_whisper_env
+
+
+@pytest.fixture(autouse=True)
+def _bypass_vad_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Short-circuit the VAD/RMS pre-filter for every test in this module.
+
+    ``AudioReader._transcribe_file_payload`` calls
+    :func:`docint.core.readers.audio._audio_has_speech` before any Whisper
+    inference runs. In production that guard loads the audio into a NumPy
+    array and consults Silero VAD. The existing transcription tests stub
+    ``_load_audio`` to return ``None`` (and the conftest-level whisper stub
+    returns an opaque string) — neither of which is a valid input to the
+    real guard, so without this fixture the guard would crash every test
+    in the suite.
+
+    The fixture therefore forces :func:`_audio_has_speech` to report
+    ``(True, None)`` for every test. Tests that need to exercise the guard
+    (the block below this fixture) re-monkeypatch
+    ``audio_module._audio_has_speech`` explicitly, and the unit tests on
+    the guard itself invoke the original implementation via the
+    module-level :data:`_real_audio_has_speech` reference bound at import
+    time (before this fixture runs).
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Provided by pytest; the attribute
+            replacement is undone automatically at test teardown.
+    """
+
+    monkeypatch.setattr(
+        audio_module,
+        "_audio_has_speech",
+        lambda _audio: (True, None),
+    )
 
 
 def _make_audio_reader(
@@ -770,3 +804,447 @@ def test_src_language_worker_init_sets_global(
     # Reset
     audio_module._init_whisper_worker("turbo", "cpu", "transcribe")
     assert audio_module._WORKER_SRC_LANGUAGE is None
+
+
+# ---------------------------------------------------------------------------
+# VAD guard + no_speech_prob filter
+# ---------------------------------------------------------------------------
+
+
+class _CapturingLogger:
+    """In-memory stand-in for :mod:`loguru.logger` used by the VAD tests.
+
+    Production code in ``docint.core.readers.audio`` formats messages with
+    loguru's ``{}`` placeholder style (e.g. ``logger.warning("[x] {}",
+    reason)``). Tests substitute this class for ``audio_module.logger`` so
+    they can assert on the fully-formatted messages that would reach the
+    log sink without needing a real loguru handler.
+
+    ``info``/``debug`` writes and ``warning``/``error`` writes are kept in
+    separate buckets so tests can assert that a particular message arrived
+    at the correct severity.
+
+    Attributes:
+        info_logs (list[str]): Fully-formatted messages received by
+            :meth:`info` and :meth:`debug`, in call order.
+        warning_logs (list[str]): Fully-formatted messages received by
+            :meth:`warning` and :meth:`error`, in call order.
+    """
+
+    def __init__(self) -> None:
+        """Initialize empty capture buckets."""
+
+        self.info_logs: list[str] = []
+        self.warning_logs: list[str] = []
+
+    def info(self, message: str, *args: Any) -> None:
+        """Capture an ``info``-level log line.
+
+        Args:
+            message (str): Loguru-style template string (``{}`` placeholders).
+            *args (Any): Positional arguments interpolated into *message*.
+        """
+
+        self.info_logs.append(message.format(*args))
+
+    def warning(self, message: str, *args: Any) -> None:
+        """Capture a ``warning``-level log line.
+
+        Args:
+            message (str): Loguru-style template string (``{}`` placeholders).
+            *args (Any): Positional arguments interpolated into *message*.
+        """
+
+        self.warning_logs.append(message.format(*args))
+
+    def error(self, message: str, *args: Any) -> None:
+        """Capture an ``error``-level log line into :attr:`warning_logs`.
+
+        Errors are grouped with warnings because the VAD-related call sites
+        only emit ``warning`` in production; this method exists purely so
+        that accidental ``logger.error`` calls do not raise ``AttributeError``
+        during a test.
+
+        Args:
+            message (str): Loguru-style template string (``{}`` placeholders).
+            *args (Any): Positional arguments interpolated into *message*.
+        """
+
+        self.warning_logs.append(message.format(*args))
+
+    def debug(self, message: str, *args: Any) -> None:
+        """Capture a ``debug``-level log line into :attr:`info_logs`.
+
+        Args:
+            message (str): Loguru-style template string (``{}`` placeholders).
+            *args (Any): Positional arguments interpolated into *message*.
+        """
+
+        self.info_logs.append(message.format(*args))
+
+
+def test_load_data_skips_silent_audio_with_warning(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """RMS-silent audio must short-circuit ingestion with a warning.
+
+    End-to-end check for the first layer of the pre-Whisper guard. The
+    guard is monkeypatched to report ``(False, "Audio RMS below silence
+    threshold")``, simulating a digitally silent file (which in production
+    would produce Whisper hallucinations). The test asserts that:
+
+    * :meth:`AudioReader.load_data` returns ``[]`` — ingestion skipped, no
+      documents emitted downstream;
+    * a ``logger.warning`` is issued whose formatted message contains both
+      the skip reason and the input file path, so operators can identify
+      which file was rejected and why.
+
+    The fake segment handed to ``_make_audio_reader`` is intentionally
+    non-empty — if the guard silently failed, the reader would happily
+    transcribe that segment and the ``docs == []`` assertion would catch
+    it.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Overrides ``_audio_has_speech``
+            and ``logger`` on ``audio_module`` for this test only.
+        tmp_path (Path): Per-test temporary directory used to synthesize a
+            sentinel audio path; no real audio is read.
+    """
+
+    reader = _make_audio_reader(
+        monkeypatch, segments=[{"start": 0.0, "end": 1.0, "text": "unused"}]
+    )
+    monkeypatch.setattr(
+        audio_module,
+        "_audio_has_speech",
+        lambda _audio: (False, "Audio RMS below silence threshold"),
+    )
+    fake_logger = _CapturingLogger()
+    monkeypatch.setattr(audio_module, "logger", fake_logger)
+
+    audio_path = tmp_path / "silent.wav"
+    audio_path.write_bytes(b"fake")
+
+    docs = reader.load_data(audio_path)
+
+    assert docs == []
+    assert any(
+        "Audio RMS below silence threshold" in msg and str(audio_path) in msg
+        for msg in fake_logger.warning_logs
+    ), fake_logger.warning_logs
+
+
+def test_load_data_skips_non_speech_audio_with_warning(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Noise-only audio (VAD negative) must be skipped with a warning.
+
+    Companion to
+    :func:`test_load_data_skips_silent_audio_with_warning` that covers the
+    second layer of the pre-Whisper guard: audio which carries energy but
+    does not contain detectable human speech (background music, traffic,
+    white noise, tape hiss, etc.). ``_audio_has_speech`` is stubbed to
+    report ``(False, "VAD detected no speech")``; the test asserts the
+    reader returns ``[]`` and a warning mentioning both the VAD reason and
+    the input path is logged.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Overrides ``_audio_has_speech``
+            and ``logger`` on ``audio_module`` for this test only.
+        tmp_path (Path): Per-test temporary directory used to synthesize a
+            sentinel audio path.
+    """
+
+    reader = _make_audio_reader(
+        monkeypatch, segments=[{"start": 0.0, "end": 1.0, "text": "unused"}]
+    )
+    monkeypatch.setattr(
+        audio_module,
+        "_audio_has_speech",
+        lambda _audio: (False, "VAD detected no speech"),
+    )
+    fake_logger = _CapturingLogger()
+    monkeypatch.setattr(audio_module, "logger", fake_logger)
+
+    audio_path = tmp_path / "noise.wav"
+    audio_path.write_bytes(b"fake")
+
+    docs = reader.load_data(audio_path)
+
+    assert docs == []
+    assert any(
+        "VAD detected no speech" in msg and str(audio_path) in msg
+        for msg in fake_logger.warning_logs
+    ), fake_logger.warning_logs
+
+
+def test_filter_no_speech_segments_drops_high_prob_entries() -> None:
+    """Verify the post-transcription ``no_speech_prob`` filter contract.
+
+    Exercises every branch of
+    :func:`docint.core.readers.audio._filter_no_speech_segments`:
+
+    * ``no_speech_prob = 0.1`` — well below threshold, kept.
+    * ``no_speech_prob = 0.9`` — well above threshold, dropped.
+    * ``no_speech_prob`` missing — treated as ``0.0`` per :meth:`dict.get`
+      default, kept.
+    * ``no_speech_prob = 0.61`` — strictly above the 0.6 threshold, dropped.
+    * ``no_speech_prob = 0.6`` — equal to the threshold, kept (the check
+      is ``<=`` so the threshold itself is inclusive).
+
+    The test relies on list ordering being preserved so the remaining
+    segments can be checked by text.
+    """
+
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "keep low", "no_speech_prob": 0.1},
+        {"start": 1.0, "end": 2.0, "text": "drop high", "no_speech_prob": 0.9},
+        {"start": 2.0, "end": 3.0, "text": "keep missing"},
+        {"start": 3.0, "end": 4.0, "text": "drop boundary", "no_speech_prob": 0.61},
+        {"start": 4.0, "end": 5.0, "text": "keep boundary", "no_speech_prob": 0.6},
+    ]
+
+    filtered = audio_module._filter_no_speech_segments(segments)
+
+    assert [seg["text"] for seg in filtered] == [
+        "keep low",
+        "keep missing",
+        "keep boundary",
+    ]
+
+
+def test_filter_no_speech_segments_returns_input_when_nothing_dropped() -> None:
+    """Identity optimization must hold when no segment exceeds the threshold.
+
+    To avoid needless allocation on the common happy path (nothing
+    hallucinated), :func:`_filter_no_speech_segments` is expected to return
+    the *same* list object it received when every segment passes. The
+    assertion uses ``is`` — pointer identity, not value equality — to pin
+    that contract down so a future refactor cannot silently regress it.
+    """
+
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "a", "no_speech_prob": 0.1},
+        {"start": 1.0, "end": 2.0, "text": "b"},
+    ]
+
+    assert audio_module._filter_no_speech_segments(segments) is segments
+
+
+def test_load_data_applies_no_speech_filter_end_to_end(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The ``no_speech_prob`` filter must be wired into the full read path.
+
+    A unit test on :func:`_filter_no_speech_segments` alone is not enough:
+    a future refactor could easily drop the call site inside
+    ``_transcribe_file_payload`` without any unit test failing. This test
+    feeds a mixed segment list — two clean segments bracketing one
+    hallucinated segment with ``no_speech_prob=0.95`` — through
+    :meth:`AudioReader.load_data` and asserts that the emitted documents
+    contain the clean text but not the hallucinated text.
+
+    The assertion is deliberately loose (substring checks over the
+    concatenated document text) so it is robust against changes in the
+    segment→sentence merging logic.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Standard pytest fixture; used
+            only via :func:`_make_audio_reader` helper.
+        tmp_path (Path): Per-test temporary directory used to synthesize a
+            sentinel audio path; no real audio is read.
+    """
+
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "Hello", "no_speech_prob": 0.1},
+        {
+            "start": 1.0,
+            "end": 2.0,
+            "text": "hallucinated.",
+            "no_speech_prob": 0.95,
+        },
+        {"start": 2.0, "end": 3.0, "text": "world.", "no_speech_prob": 0.2},
+    ]
+    reader = _make_audio_reader(monkeypatch, segments)
+    audio_path = tmp_path / "clip.wav"
+    audio_path.write_bytes(b"fake")
+
+    docs = reader.load_data(audio_path)
+
+    combined_text = " ".join(doc.text for doc in docs)
+    assert "Hello" in combined_text
+    assert "world." in combined_text
+    assert "hallucinated" not in combined_text
+
+
+def test_audio_has_speech_flags_digital_silence() -> None:
+    """Digital silence must fail the RMS layer before VAD is consulted.
+
+    The first layer of :func:`_audio_has_speech` is a cheap RMS energy
+    check that rejects waveforms whose root-mean-square is below
+    :data:`SILENCE_RMS_THRESHOLD` (0.01). The motivation is twofold:
+
+    * it runs in microseconds, making silent files free to reject; and
+    * Silero VAD is not loaded — useful when the model cache is cold and
+      ``torch.hub.load`` would otherwise hit the network.
+
+    This test uses one second (16 000 samples) of ``0.0`` float32 samples,
+    which has an RMS of exactly zero — squarely below the threshold. The
+    call goes through :data:`_real_audio_has_speech` (the import-time
+    reference) to bypass the autouse fixture that otherwise short-circuits
+    the guard.
+    """
+
+    import numpy as np
+
+    silent = np.zeros(16000, dtype=np.float32)
+    ok, reason = _real_audio_has_speech(silent)
+    assert ok is False
+    assert reason == "Audio RMS below silence threshold"
+
+
+def test_audio_has_speech_skips_when_vad_reports_no_speech(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """High-energy non-speech audio must be rejected by the VAD layer.
+
+    Exercises the second layer of :func:`_audio_has_speech`. The waveform
+    is one second of ``0.5`` float32 samples — RMS = 0.5, which easily
+    clears the 0.01 silence threshold and forces control to fall through
+    to :func:`_detect_speech_vad`. That helper is monkeypatched to return
+    ``False`` (simulating "no speech detected" from Silero), so the guard
+    must report ``(False, "VAD detected no speech")``.
+
+    In production this branch catches audio that carries energy (noise,
+    music, tone) but has no human voice — the class of files most prone
+    to Whisper hallucinations.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Used to stub
+            ``audio_module._detect_speech_vad``. The stub is undone at
+            teardown so the surrounding suite is unaffected.
+    """
+
+    import numpy as np
+
+    monkeypatch.setattr(audio_module, "_detect_speech_vad", lambda _audio: False)
+    loud = np.ones(16000, dtype=np.float32) * 0.5
+    ok, reason = _real_audio_has_speech(loud)
+    assert ok is False
+    assert reason == "VAD detected no speech"
+
+
+def test_audio_has_speech_passes_when_vad_reports_speech(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audio that passes both guard layers must yield ``(True, None)``.
+
+    The happy path: the waveform has enough energy to clear the RMS
+    threshold *and* Silero VAD confirms speech. This is the case on every
+    legitimate audio file and must result in ``(True, None)`` so the
+    caller knows to proceed with transcription and that no skip reason
+    needs to be logged.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Used to stub
+            ``audio_module._detect_speech_vad`` to the positive response.
+    """
+
+    import numpy as np
+
+    monkeypatch.setattr(audio_module, "_detect_speech_vad", lambda _audio: True)
+    loud = np.ones(16000, dtype=np.float32) * 0.5
+    ok, reason = _real_audio_has_speech(loud)
+    assert ok is True
+    assert reason is None
+
+
+def test_audio_has_speech_passes_when_vad_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing Silero VAD model must degrade gracefully, not block ingestion.
+
+    ``_detect_speech_vad`` returns ``None`` when the Silero model could
+    not be loaded (offline with a cold cache, corrupted download, etc.).
+    In that scenario the guard must trust the RMS layer and let the file
+    through — the alternative would be silent, hard-to-debug ingestion
+    failures on operator machines that never ran ``uv run load-models``.
+
+    The test stubs :func:`_detect_speech_vad` to return ``None`` and
+    supplies a waveform with an RMS comfortably above the silence
+    threshold; the guard must therefore report ``(True, None)``.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Used to stub
+            ``audio_module._detect_speech_vad`` to simulate a VAD load
+            failure.
+    """
+
+    import numpy as np
+
+    monkeypatch.setattr(audio_module, "_detect_speech_vad", lambda _audio: None)
+    loud = np.ones(16000, dtype=np.float32) * 0.5
+    ok, reason = _real_audio_has_speech(loud)
+    assert ok is True
+    assert reason is None
+
+
+def test_transcribe_audio_job_skips_non_speech_audio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The multiprocessing worker must honor the same guard as the main path.
+
+    ``AudioReader.load_batch_data`` can dispatch to a
+    :class:`concurrent.futures.ProcessPoolExecutor` where each file is
+    transcribed inside :func:`_transcribe_audio_job` — a separate code
+    path from :meth:`_transcribe_file_payload`. Without an explicit check
+    here, a future refactor could easily leave the worker path
+    un-guarded, silently letting every noise-only file through when batch
+    mode is on.
+
+    The test invokes the worker directly (not via the reader) with the
+    guard stubbed to reject, then asserts on the payload schema used by
+    ``_payload_to_documents``:
+
+    * ``skipped=True`` + ``skip_reason`` is the structured signal callers
+      use to distinguish "skipped on purpose" from "crashed";
+    * ``result={"segments": []}`` yields zero documents downstream;
+    * ``error=None`` — skips are not failures, so the error field must be
+      cleared;
+    * a formatted warning naming both the skip reason and the file path
+      reached the logger.
+
+    ``_get_worker_model`` is additionally stubbed as a safety net: the
+    guard runs *before* the model would be consulted, so this stub should
+    be unused, but stubbing it guarantees the test cannot accidentally
+    call real Whisper even if the guard ever regresses.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Overrides
+            ``_audio_has_speech``, ``logger``, and ``_get_worker_model``
+            on ``audio_module``; the worker globals are reset implicitly
+            by the subsequent call to ``_init_whisper_worker``.
+    """
+
+    monkeypatch.setattr(
+        audio_module,
+        "_audio_has_speech",
+        lambda _audio: (False, "VAD detected no speech"),
+    )
+    fake_logger = _CapturingLogger()
+    monkeypatch.setattr(audio_module, "logger", fake_logger)
+    audio_module._init_whisper_worker("turbo", "cpu", "transcribe")
+    # _get_worker_model should never run because the guard trips first, but
+    # stub it anyway so the test never touches real Whisper.
+    monkeypatch.setattr(audio_module, "_get_worker_model", lambda: object())
+
+    payload = audio_module._transcribe_audio_job(("/tmp/fake.wav", "abc123"))
+
+    assert payload["skipped"] is True
+    assert payload["skip_reason"] == "VAD detected no speech"
+    assert payload["result"] == {"segments": []}
+    assert payload["error"] is None
+    assert any(
+        "VAD detected no speech" in msg and "/tmp/fake.wav" in msg
+        for msg in fake_logger.warning_logs
+    ), fake_logger.warning_logs

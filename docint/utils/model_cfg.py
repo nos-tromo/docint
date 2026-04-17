@@ -20,6 +20,7 @@ from docint.utils.env_cfg import (
 # isort: on
 
 import ollama
+import torch
 import whisper
 from docling.models.stages.code_formula.code_formula_model import CodeFormulaModel
 from docling.models.stages.layout.layout_model import LayoutModel
@@ -44,6 +45,8 @@ from docint.utils.logger_cfg import init_logger
 
 load_dotenv()
 init_logger()
+
+SILERO_VAD_REPO: str = "snakers4/silero-vad"
 
 
 def load_clip_model(model_id: str, cache_folder: Path) -> None:
@@ -242,6 +245,35 @@ def load_whisper_model(model_id: str) -> None:
     logger.info("Whisper model '{}' cached at '{}'.", model_id, checkpoint_path)
 
 
+def load_silero_vad_model() -> None:
+    """Download and cache the Silero VAD model via ``torch.hub``.
+
+    The audio reader's pre-Whisper guard
+    (:func:`docint.core.readers.audio._detect_speech_vad`) loads this
+    model on first use through ``torch.hub.load``. Pre-caching it here
+    means operators running ``uv run load-models`` can take the machine
+    offline afterwards (``DOCINT_OFFLINE=1``) without the guard silently
+    degrading to RMS-only.
+
+    Failures are logged and swallowed: Silero VAD is a graceful-degrade
+    dependency, so a broken network connection here should not abort the
+    rest of the preload pipeline.
+    """
+
+    logger.info("Downloading Silero VAD model from '{}'.", SILERO_VAD_REPO)
+    try:
+        torch.hub.load(SILERO_VAD_REPO, model="silero_vad", trust_repo=True)
+    except Exception as exc:
+        logger.warning(
+            "Failed to preload Silero VAD from '{}': {}. The audio reader will "
+            "fall back to RMS-only guarding at runtime.",
+            SILERO_VAD_REPO,
+            exc,
+        )
+        return
+    logger.info("Silero VAD model cached.")
+
+
 def main() -> None:
     """Main function to verify configuration loading."""
     # Load configurations
@@ -315,6 +347,10 @@ def main() -> None:
         )
     else:
         load_whisper_model(model_id=model_config.whisper_model)
+
+    # Silero VAD — used by the audio reader's pre-Whisper guard regardless
+    # of the inference provider, so it is preloaded unconditionally.
+    load_silero_vad_model()
 
 
 if __name__ == "__main__":
