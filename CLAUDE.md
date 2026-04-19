@@ -43,13 +43,15 @@ docker compose --profile cpu-ollama up --build
 Document Intelligence is a RAG stack: FastAPI backend + Streamlit UI + Qdrant vector DB + pluggable inference (Ollama, OpenAI-compatible APIs, or external vLLM).
 
 **Request flow:**
-```
+
+```text
 Streamlit UI (docint/ui/) → FastAPI (docint/core/api.py) → AgentOrchestrator (docint/agents/)
     → understanding → clarification → retrieval → generation
     → RAG engine (docint/core/rag.py) ↔ Qdrant vector store
 ```
 
 **Key modules:**
+
 - `docint/core/rag.py` — Core RAG engine: ingestion, retrieval, postprocessing (reranking, parent context, source diversity), collection management
 - `docint/core/api.py` — FastAPI app with endpoints for chat, ingestion, collections, citations; streams responses
 - `docint/agents/orchestrator.py` — Coordinates understanding, clarification, retrieval, and generation agents
