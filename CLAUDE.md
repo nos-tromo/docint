@@ -32,6 +32,12 @@ uv run load-models          # pre-download model assets
 docker compose --profile cpu-ollama up --build
 ```
 
+## Testing
+
+- Always run the full test suite (`pytest`) after making changes and report pass/fail counts.
+- When tests fail, fix the root cause rather than patching tests to match stale/removed code.
+- Verify with `pre-commit run --all-files` (mypy, lint, docstrings) before declaring work complete.
+
 ## Architecture
 
 Document Intelligence is a RAG stack: FastAPI backend + Streamlit UI + Qdrant vector DB + pluggable inference (Ollama, OpenAI-compatible APIs, or external vLLM).
@@ -55,6 +61,12 @@ Streamlit UI (docint/ui/) → FastAPI (docint/core/api.py) → AgentOrchestrator
 - `docint/core/ner.py` — Named entity recognition (GLiNER), entity clustering, graph building
 - `docint/utils/env_cfg.py` — **All** environment-backed configuration dataclasses live here (see below)
 
+## Project Context
+
+- WhisperX has been removed from this project; use openai-whisper + pyannote.
+- Target torch install is split by extras (cpu/cuda) via conflicts in pyproject.toml.
+- Docker base image is pinned to `python:3.11.12-slim-bookworm` across all Dockerfiles.
+
 ## Key Conventions
 
 - **Python ≥3.11, <3.12**. Use `uv` for dependency management (`uv add`/`uv remove` to keep `pyproject.toml` and `uv.lock` in sync).
@@ -64,3 +76,13 @@ Streamlit UI (docint/ui/) → FastAPI (docint/core/api.py) → AgentOrchestrator
 - **Pre-commit is mandatory**: always run `uv run pre-commit run --all-files` before finishing work (ruff check, ruff format, mypy).
 - Prefer incremental, focused commits. When changes affect both API and UI, update `README.md`.
 - Streamlit UI pages live in `docint/ui/`; keep business logic in the API/agents layer, not in UI code.
+
+## Docstrings & Style
+
+- All new/modified Python functions must have Google-style docstrings.
+- Python 3.11 is the target; prefer explicit types and distinct variable names across branches to satisfy mypy.
+
+## Commits
+
+- Prefer multiple small topical commits over a single catch-all commit.
+- Each commit message should describe a single logical change (refactor, fix, feat, docs, test).
