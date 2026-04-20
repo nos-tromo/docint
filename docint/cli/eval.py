@@ -26,7 +26,9 @@ class RetrievalEvalRAG(Protocol):
         prompt: str,
         *,
         retrieval_options: dict[str, Any] | None = None,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        """Execute ``prompt`` against the RAG pipeline and return the response payload."""
+        ...
 
 
 def load_eval_queries(queries_path: Path, prompts_path: Path) -> list[dict[str, Any]]:
@@ -41,11 +43,11 @@ def load_eval_queries(queries_path: Path, prompts_path: Path) -> list[dict[str, 
     ``expected_filenames``, ``expected_file_hashes``, and ``expected_text_ids``.
 
     Args:
-        queries_path: Path to the queries file.
-        prompts_path: Path to the prompts directory (used for default query if no file is found
+        queries_path (Path): Path to the queries file.
+        prompts_path (Path): Path to the prompts directory (used for default query if no file is found
 
     Returns:
-        List of normalized query specifications, each with a mandatory 'query' key and optional expectation keys
+        list[dict[str, Any]]: List of normalized query specifications, each with a mandatory 'query' key and optional expectation keys
     """
     if queries_path.exists():
         suffix = queries_path.suffix.lower()
@@ -78,10 +80,10 @@ def _normalize_query_spec(raw: Any) -> dict[str, Any]:
     """Normalize one eval-query record into a plain dictionary.
 
     Args:
-        raw: The raw query record, which may be a string or a dictionary.
+        raw (Any): The raw query record, which may be a string or a dictionary.
 
     Returns:
-        A normalized query specification dictionary with a mandatory 'query' key.
+        dict[str, Any]: A normalized query specification dictionary with a mandatory 'query' key.
     """
     if isinstance(raw, str):
         return {"query": raw}
@@ -104,13 +106,13 @@ def _match_expectations(
     Checks whether any retrieved source matches any of the expected filenames, file hashes, or text IDs specified in the query spec.
 
     Args:
-        sources: The list of retrieved source documents, each as a dictionary with optional 'filename',
+        sources (list[dict[str, Any]]): The list of retrieved source documents, each as a dictionary with optional 'filename',
             'file_hash', and 'reference_metadata.text_id' fields.
-        query_spec: The query specification dictionary, which may include 'expected_filenames',
+        query_spec (dict[str, Any]): The query specification dictionary, which may include 'expected_filenames',
             'expected_file_hashes', and 'expected_text_ids' as lists of expected values.
 
     Returns:
-        A dictionary containing the sets of expected values and boolean flags indicating whether any hits were found.
+        dict[str, Any]: A dictionary containing the sets of expected values and boolean flags indicating whether any hits were found.
     """
     filenames = {
         str(source.get("filename") or "").strip()
@@ -167,12 +169,12 @@ def evaluate_retrieval(
     publication: it preserves answers, sources, timing, and optional expectation hits.
 
     Args:
-        rag: The RAG pipeline instance to use for running queries.
-        query_specs: A list of query specifications, each as a dictionary with a mandatory 'query' key and optional expectation keys.
-        modes: An optional list of retrieval modes to test. If None, defaults to ["default", "hybrid", "sparse"] if hybrid retrieval is enabled, otherwise ["default"].
+        rag (RetrievalEvalRAG): The RAG pipeline instance to use for running queries.
+        query_specs (list[dict[str, Any]]): A list of query specifications, each as a dictionary with a mandatory 'query' key and optional expectation keys.
+        modes (list[str] | None): An optional list of retrieval modes to test. If None, defaults to ["default", "hybrid", "sparse"] if hybrid retrieval is enabled, otherwise ["default"].
 
     Returns:
-        A dictionary containing the collection name, tested modes, query count, a summary of results by mode, and the detailed results for each query and mode.
+        dict[str, Any]: A dictionary containing the collection name, tested modes, query count, a summary of results by mode, and the detailed results for each query and mode.
     """
     selected_modes = modes or (
         ["default", "hybrid", "sparse"] if rag.enable_hybrid else ["default"]

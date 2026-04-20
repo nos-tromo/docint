@@ -1,3 +1,5 @@
+"""Image reader that delegates to the shared image ingestion service."""
+
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -83,7 +85,7 @@ class ImageReader(BaseReader):
 
         Args:
             file (str | Path): The path to the image file.
-            **kwargs: Additional keyword arguments.
+            **kwargs (Any): Additional keyword arguments forwarded to the reader.
 
         Returns:
             list[Document]: A list containing a single Document object with the processed image data.

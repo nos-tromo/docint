@@ -1,3 +1,5 @@
+"""Citation ORM model linking retrieved source chunks to conversation turns."""
+
 from sqlalchemy import (
     Column,
     Float,

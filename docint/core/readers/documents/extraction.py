@@ -28,10 +28,10 @@ def extract_tables(
     provides them; otherwise only the text is stored (best-effort).
 
     Args:
-        layout: Mapping of page index → list of ``LayoutBlock``.
+        layout (dict[int, list[LayoutBlock]]): Mapping of page index → list of ``LayoutBlock``.
 
     Returns:
-        List of ``TableResult`` items.
+        list[TableResult]: List of ``TableResult`` items.
     """
     tables: list[TableResult] = []
     for page_idx, blocks in layout.items():
@@ -64,12 +64,12 @@ def extract_images(
     and saved as PNGs.
 
     Args:
-        layout: Mapping of page index → list of ``LayoutBlock``.
-        file_path: Path to the PDF (used for embedded image extraction).
-        output_dir: Directory to write extracted images.
+        layout (dict[int, list[LayoutBlock]]): Mapping of page index → list of ``LayoutBlock``.
+        file_path (str | Path | None): Path to the PDF (used for embedded image extraction).
+        output_dir (str | Path | None): Directory to write extracted images.
 
     Returns:
-        List of ``ImageResult`` items.
+        list[ImageResult]: List of ``ImageResult`` items.
     """
     images: list[ImageResult] = []
     for page_idx, blocks in layout.items():
@@ -110,13 +110,13 @@ def _try_extract_embedded_image(
     inspection when the higher-level API is unavailable.
 
     Args:
-        file_path: Source PDF.
-        page_index: Page to inspect.
-        image_id: Identifier for naming the output file.
-        output_dir: Where to write the image.
+        file_path (Path): Source PDF.
+        page_index (int): Page to inspect.
+        image_id (str): Identifier for naming the output file.
+        output_dir (Path): Where to write the image.
 
     Returns:
-        Path string to the written image, or ``None`` on failure.
+        str | None: Path string to the written image, or ``None`` on failure.
     """
     try:
         reader = pypdf.PdfReader(file_path)
@@ -147,12 +147,12 @@ def _try_extract_xobject_image(
     """Attempt to extract an image from page XObjects using Pillow.
 
     Args:
-        page: A ``pypdf`` page object.
-        image_id: Identifier for naming the output file.
-        output_dir: Where to write the PNG.
+        page (object): A ``pypdf`` page object.
+        image_id (str): Identifier for naming the output file.
+        output_dir (Path): Where to write the PNG.
 
     Returns:
-        Path string to the written image, or ``None`` on failure.
+        str | None: Path string to the written image, or ``None`` on failure.
     """
     try:
         import io
@@ -208,9 +208,9 @@ def _bbox_to_dict(bbox: BBox) -> dict[str, float]:
     """Serialise a ``BBox`` to a plain dict.
 
     Args:
-        bbox: The bounding box to serialise.
+        bbox (BBox): The bounding box to serialise.
 
     Returns:
-        A dictionary with keys "x0", "y0", "x1", "y1" representing the bounding box coordinates.
+        dict[str, float]: A dictionary with keys "x0", "y0", "x1", "y1" representing the bounding box coordinates.
     """
     return {"x0": bbox.x0, "y0": bbox.y0, "x1": bbox.x1, "y1": bbox.y1}

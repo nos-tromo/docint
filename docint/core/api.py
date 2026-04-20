@@ -1,3 +1,5 @@
+"""FastAPI app exposing chat, ingestion, collection, and citation endpoints."""
+
 import asyncio
 import json
 from pathlib import Path
@@ -146,13 +148,13 @@ def _validation_payload(
     """Validate a response against retrieved sources and return metadata.
 
     Args:
-        question: The user query or summarize prompt.
-        answer: The generated answer text.
-        sources: Retrieved source payloads.
-        summary_diagnostics: Optional summary coverage diagnostics.
+        question (str): The user query or summarize prompt.
+        answer (str | None): The generated answer text.
+        sources (list[dict[str, Any]]): Retrieved source payloads.
+        summary_diagnostics (dict[str, Any] | None): Optional summary coverage diagnostics.
 
     Returns:
-        Validation metadata dictionary suitable for API responses.
+        dict[str, bool | str | None]: Validation metadata dictionary suitable for API responses.
     """
     validation_cfg = load_response_validation_env()
     validation_llm = None
@@ -183,7 +185,7 @@ def _iter_text_tokens(text: str) -> list[str]:
     """Split text into whitespace-preserving token chunks for SSE streaming.
 
     Args:
-        text: The text to chunk.
+        text (str): The text to chunk.
 
     Returns:
         list[str]: Token chunks suitable for incremental UI rendering.
@@ -197,7 +199,7 @@ async def _stream_simulated_text(answer_text: str) -> AsyncIterator[str]:
     """Yield SSE token events for already-generated answers with visible pacing.
 
     Args:
-        answer_text: Full answer text that must be replayed as a token stream.
+        answer_text (str): Full answer text that must be replayed as a token stream.
 
     Yields:
         SSE ``data:`` lines for each token-sized chunk.
@@ -211,15 +213,21 @@ async def _stream_simulated_text(answer_text: str) -> AsyncIterator[str]:
 
 
 class SelectCollectionIn(BaseModel):
+    """Request payload selecting the active Qdrant collection for a session."""
+
     name: str
 
 
 class SelectCollectionOut(BaseModel):
+    """Response confirming the active collection selection."""
+
     ok: bool
     name: str
 
 
 class MetadataFilterIn(BaseModel):
+    """Single metadata filter applied to retrieval queries."""
+
     field: str
     operator: Literal[
         "eq",
@@ -241,6 +249,8 @@ class MetadataFilterIn(BaseModel):
 
 
 class QueryIn(BaseModel):
+    """Request payload for a single RAG query."""
+
     question: str
     session_id: str | None = None
     metadata_filters: list[MetadataFilterIn] = Field(default_factory=list)
@@ -251,6 +261,8 @@ class QueryIn(BaseModel):
 
 
 class QueryOut(BaseModel):
+    """Grounded answer plus retrieval provenance for a RAG query."""
+
     answer: str
     sources: list[dict] = []
     session_id: str
@@ -266,6 +278,8 @@ class QueryOut(BaseModel):
 
 
 class SummaryDiagnosticsOut(BaseModel):
+    """Diagnostics describing coverage and sampling for a summary response."""
+
     total_documents: int
     covered_documents: int
     coverage_ratio: float
@@ -278,6 +292,8 @@ class SummaryDiagnosticsOut(BaseModel):
 
 
 class SummarizeOut(BaseModel):
+    """Response payload for a collection-level summary request."""
+
     summary: str
     sources: list[dict] = []
     summary_diagnostics: SummaryDiagnosticsOut | None = None
@@ -287,11 +303,15 @@ class SummarizeOut(BaseModel):
 
 
 class IngestIn(BaseModel):
+    """Request payload triggering ingestion into a named collection."""
+
     collection: str
     hybrid: bool | None = True
 
 
 class IngestOut(BaseModel):
+    """Response confirming ingestion and reporting its configuration."""
+
     ok: bool
     collection: str
     data_dir: str
@@ -300,14 +320,20 @@ class IngestOut(BaseModel):
 
 
 class SessionListOut(BaseModel):
+    """List of sessions visible to the caller."""
+
     sessions: list[dict]
 
 
 class SessionHistoryOut(BaseModel):
+    """Ordered history of messages for a single session."""
+
     messages: list[dict]
 
 
 class NERStatsOut(BaseModel):
+    """Aggregate statistics over extracted entities and relations."""
+
     totals: dict[str, int]
     top_entities: list[dict] = []
     entity_types: list[dict] = []
@@ -316,19 +342,27 @@ class NERStatsOut(BaseModel):
 
 
 class NERSearchOut(BaseModel):
+    """Matching entities returned from a NER search query."""
+
     results: list[dict] = []
 
 
 class HateSpeechOut(BaseModel):
+    """Hate-speech classification results for a document or collection."""
+
     results: list[dict] = []
 
 
 class AgentChatIn(BaseModel):
+    """Request payload for a single agent chat turn."""
+
     message: str
     session_id: str | None = None
 
 
 class AgentChatOut(BaseModel):
+    """Response payload for an agent chat turn; either a clarification or answer."""
+
     status: Literal["clarification", "answer"]
     message: str | None = None
     answer: str | None = None
@@ -738,7 +772,7 @@ def summarize(refresh: bool = Query(False)) -> dict[str, Any]:
     """Generate a summary for the currently selected collection.
 
     Args:
-        refresh: If ``True``, bypass cached collection summaries.
+        refresh (bool): If ``True``, bypass cached collection summaries.
 
     Returns:
         dict[str, list[dict] | str]: A dictionary containing the summary and sources.
@@ -785,7 +819,7 @@ async def summarize_stream(refresh: bool = Query(False)) -> StreamingResponse:
     """Generate a streaming summary for the currently selected collection.
 
     Args:
-        refresh: If ``True``, bypass cached collection summaries.
+        refresh (bool): If ``True``, bypass cached collection summaries.
 
     Returns:
         StreamingResponse: A streaming response that yields SSE events during summarization.
@@ -845,7 +879,7 @@ def get_collection_ner(refresh: bool = False) -> dict[str, list[dict]]:
     """Get all NER data (entities and relations) for the currently selected collection.
 
     Args:
-        refresh: If ``True``, bypass in-memory cache and re-fetch from storage.
+        refresh (bool): If ``True``, bypass in-memory cache and re-fetch from storage.
 
     Returns:
         dict[str, list[dict]]: A dictionary containing the list of NER sources.
@@ -890,13 +924,13 @@ def get_collection_ner_stats(
     """Get collection-wide NER statistics.
 
     Args:
-        top_k: Maximum number of top entities/relations to include.
-        min_mentions: Minimum mention count for ranked outputs.
-        entity_type: Optional case-insensitive entity type filter.
-        include_relations: Whether relation aggregates are included.
+        top_k (int): Maximum number of top entities/relations to include.
+        min_mentions (int): Minimum mention count for ranked outputs.
+        entity_type (str | None): Optional case-insensitive entity type filter.
+        include_relations (bool): Whether relation aggregates are included.
 
     Returns:
-        A dashboard-friendly NER stats payload.
+        dict[str, Any]: A dashboard-friendly NER stats payload.
 
     Raises:
         HTTPException: If no collection is selected or an internal error occurs.
@@ -926,12 +960,12 @@ def search_collection_ner_entities(
     """Search entities across the selected collection.
 
     Args:
-        q: Substring query applied to entity text.
-        entity_type: Optional case-insensitive type filter.
-        limit: Maximum number of rows to return.
+        q (str): Substring query applied to entity text.
+        entity_type (str | None): Optional case-insensitive type filter.
+        limit (int): Maximum number of rows to return.
 
     Returns:
-        Dictionary containing matched entities.
+        dict[str, list[dict]]: Dictionary containing matched entities.
 
     Raises:
         HTTPException: If no collection is selected or an internal error occurs.

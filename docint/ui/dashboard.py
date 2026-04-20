@@ -249,10 +249,10 @@ def _fetch_documents(collection: str) -> list[dict[str, Any]]:
     """Fetch documents for *collection* from the backend.
 
     Args:
-        collection: Collection name.
+        collection (str): Collection name.
 
     Returns:
-        List of document dicts, or empty list on failure.
+        list[dict[str, Any]]: List of document dicts, or empty list on failure.
     """
     try:
         resp = requests.get(
@@ -275,13 +275,13 @@ def _fetch_ie_stats(
     """Fetch NER statistics for *collection*.
 
     Args:
-        collection: Collection name (used for UI cache keying).
-        top_k: Maximum number of top entities/relations.
-        min_mentions: Mention threshold for ranked rows.
-        entity_type: Optional entity type filter.
+        collection (str): Collection name (used for UI cache keying).
+        top_k (int): Maximum number of top entities/relations.
+        min_mentions (int): Mention threshold for ranked rows.
+        entity_type (str | None): Optional entity type filter.
 
     Returns:
-        Stats payload, or ``None`` when unavailable.
+        dict[str, Any] | None: Stats payload, or ``None`` when unavailable.
     """
     _ = collection
     params: dict[str, Any] = {
@@ -306,7 +306,7 @@ def _render_welcome(sessions: list[dict[str, Any]]) -> None:
     """Render the first-visit / no-collection welcome block.
 
     Args:
-        sessions: List of existing sessions (may be empty).
+        sessions (list[dict[str, Any]]): List of existing sessions (may be empty).
     """
     col_left, col_right = st.columns([3, 2], gap="large")
 
@@ -333,7 +333,7 @@ def _render_recent_sessions(sessions: list[dict[str, Any]]) -> None:
     """Show the five most-recent chat sessions.
 
     Args:
-        sessions: Full sessions list (will be sliced to five).
+        sessions (list[dict[str, Any]]): Full sessions list (will be sliced to five).
     """
     st.subheader("Recent Sessions")
     if not sessions:

@@ -22,10 +22,10 @@ def _ensure_dir(path: Path) -> Path:
     """Create *path* if it does not exist and return it.
 
     Args:
-        path: The directory path to ensure exists.
+        path (Path): The directory path to ensure exists.
 
     Returns:
-        The same path that was ensured to exist.
+        Path: The same path that was ensured to exist.
     """
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -35,11 +35,11 @@ def save_manifest(manifest: DocumentManifest, artifacts_dir: Path) -> Path:
     """Write ``manifest.json`` to the document's artifact directory.
 
     Args:
-        manifest: The document manifest to persist.
-        artifacts_dir: Root artifacts directory.
+        manifest (DocumentManifest): The document manifest to persist.
+        artifacts_dir (Path): Root artifacts directory.
 
     Returns:
-        Path to the written file.
+        Path: Path to the written file.
     """
     doc_dir = _ensure_dir(artifacts_dir / manifest.doc_id)
     out = doc_dir / "manifest.json"
@@ -54,13 +54,13 @@ def save_layout(
     """Write ``layout.json`` for a single page.
 
     Args:
-        doc_id: Document identifier.
-        page_index: Page index.
-        blocks: Layout blocks for the page.
-        artifacts_dir: Root artifacts directory.
+        doc_id (str): Document identifier.
+        page_index (int): Page index.
+        blocks (list[LayoutBlock]): Layout blocks for the page.
+        artifacts_dir (Path): Root artifacts directory.
 
     Returns:
-        Path to the written file.
+        Path: Path to the written file.
     """
     page_dir = _ensure_dir(artifacts_dir / doc_id / "pages" / str(page_index))
     out = page_dir / "layout.json"
@@ -73,12 +73,12 @@ def save_page_text(doc_id: str, page_text: PageText, artifacts_dir: Path) -> Pat
     """Write ``text.json`` for a single page.
 
     Args:
-        doc_id: Document identifier.
-        page_text: Page text extraction result.
-        artifacts_dir: Root artifacts directory.
+        doc_id (str): Document identifier.
+        page_text (PageText): Page text extraction result.
+        artifacts_dir (Path): Root artifacts directory.
 
     Returns:
-        Path to the written file.
+        Path: Path to the written file.
     """
     page_dir = _ensure_dir(artifacts_dir / doc_id / "pages" / str(page_text.page_index))
     out = page_dir / "text.json"
@@ -91,12 +91,12 @@ def save_table(doc_id: str, table: TableResult, artifacts_dir: Path) -> Path:
     """Write ``{table_id}.json`` to the tables directory.
 
     Args:
-        doc_id: Document identifier.
-        table: Table extraction result.
-        artifacts_dir: Root artifacts directory.
+        doc_id (str): Document identifier.
+        table (TableResult): Table extraction result.
+        artifacts_dir (Path): Root artifacts directory.
 
     Returns:
-        Path to the written file.
+        Path: Path to the written file.
     """
     tables_dir = _ensure_dir(artifacts_dir / doc_id / "tables")
     out = tables_dir / f"{table.table_id}.json"
@@ -117,12 +117,12 @@ def save_image_metadata(doc_id: str, image: ImageResult, artifacts_dir: Path) ->
     """Write ``{image_id}.json`` to the images directory.
 
     Args:
-        doc_id: Document identifier.
-        image: Image extraction result.
-        artifacts_dir: Root artifacts directory.
+        doc_id (str): Document identifier.
+        image (ImageResult): Image extraction result.
+        artifacts_dir (Path): Root artifacts directory.
 
     Returns:
-        Path to the written file.
+        Path: Path to the written file.
     """
     images_dir = _ensure_dir(artifacts_dir / doc_id / "images")
     out = images_dir / f"{image.image_id}.json"
@@ -135,12 +135,12 @@ def save_chunks(doc_id: str, chunks: list[ChunkResult], artifacts_dir: Path) -> 
     """Write ``chunks.jsonl`` to the document's artifact directory.
 
     Args:
-        doc_id: Document identifier.
-        chunks: Chunk results to persist.
-        artifacts_dir: Root artifacts directory.
+        doc_id (str): Document identifier.
+        chunks (list[ChunkResult]): Chunk results to persist.
+        artifacts_dir (Path): Root artifacts directory.
 
     Returns:
-        Path to the written file.
+        Path: Path to the written file.
     """
     doc_dir = _ensure_dir(artifacts_dir / doc_id)
     out = doc_dir / "chunks.jsonl"
@@ -155,11 +155,11 @@ def load_manifest(doc_id: str, artifacts_dir: Path) -> DocumentManifest | None:
     """Load an existing manifest if present.
 
     Args:
-        doc_id: Document identifier.
-        artifacts_dir: Root artifacts directory.
+        doc_id (str): Document identifier.
+        artifacts_dir (Path): Root artifacts directory.
 
     Returns:
-        A ``DocumentManifest`` or ``None`` if not found.
+        DocumentManifest | None: A ``DocumentManifest`` or ``None`` if not found.
     """
     manifest_path = artifacts_dir / doc_id / "manifest.json"
     if not manifest_path.exists():

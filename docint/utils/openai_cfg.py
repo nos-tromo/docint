@@ -35,8 +35,8 @@ class LocalOpenAI(LlamaIndexOpenAI):
         """Initialize the LocalOpenAI instance.
 
         Args:
-            context_window: The context window size for the model. Defaults to 4096.
-            num_output: Tokens reserved for the model response in prompt-helper
+            context_window (int): The context window size for the model. Defaults to 4096.
+            num_output (int): Tokens reserved for the model response in prompt-helper
                 calculations.  Defaults to 256 (llama_index default).
         """
         super().__init__(**kwargs)
@@ -94,10 +94,10 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
         """Initialize the embedding client with context-window-aware truncation.
 
         Args:
-            *args: Positional arguments forwarded to ``OpenAIEmbedding``.
-            context_window: Configured context window for the embedding model.
-            warning_callback: Optional callback for truncation warnings.
-            **kwargs: Keyword arguments forwarded to ``OpenAIEmbedding``.
+            *args (Any): Positional arguments forwarded to ``OpenAIEmbedding``.
+            context_window (int): Configured context window for the embedding model.
+            warning_callback (Callable[[str], None] | None): Optional callback for truncation warnings.
+            **kwargs (Any): Keyword arguments forwarded to ``OpenAIEmbedding``.
         """
         super().__init__(*args, **kwargs)
         self._context_window = max(1, int(context_window))
@@ -107,7 +107,7 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
         """Register a callback that receives truncation warnings.
 
         Args:
-            callback: Callable invoked for each truncation warning, or ``None``.
+            callback (Callable[[str], None] | None): Callable invoked for each truncation warning, or ``None``.
         """
         self._warning_callback = callback
 
@@ -116,7 +116,7 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
         """Parse context-limit details from a provider error message.
 
         Args:
-            message: Provider error message.
+            message (str): Provider error message.
 
         Returns:
             tuple[int | None, int | None]: Parsed model limit and input token count.
@@ -153,7 +153,7 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
         """Return whether an exception indicates an oversized embedding request.
 
         Args:
-            exc: Raised exception.
+            exc (Exception): Raised exception.
 
         Returns:
             bool: ``True`` when the exception is a context-limit failure.
@@ -182,10 +182,10 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
         """Log and forward a truncation warning.
 
         Args:
-            original_chars: Original payload size in characters.
-            truncated_chars: Truncated payload size in characters.
-            model_limit: Parsed model limit in tokens, when available.
-            input_tokens: Parsed input token count, when available.
+            original_chars (int): Original payload size in characters.
+            truncated_chars (int): Truncated payload size in characters.
+            model_limit (int | None): Parsed model limit in tokens, when available.
+            input_tokens (int | None): Parsed input token count, when available.
         """
         detail = ""
         if model_limit is not None and input_tokens is not None:
@@ -215,11 +215,11 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
         """Log and forward a warning for an input that must be skipped.
 
         Args:
-            original_chars: Original payload size in characters.
-            truncated_chars: Final candidate size in characters.
-            retries: Number of truncation retries attempted.
-            model_limit: Parsed model limit in tokens, when available.
-            input_tokens: Parsed input token count, when available.
+            original_chars (int): Original payload size in characters.
+            truncated_chars (int): Final candidate size in characters.
+            retries (int): Number of truncation retries attempted.
+            model_limit (int | None): Parsed model limit in tokens, when available.
+            input_tokens (int | None): Parsed input token count, when available.
 
         Returns:
             str: The emitted warning message.
@@ -251,8 +251,8 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
         """Return a smaller text candidate after a context-limit failure.
 
         Args:
-            text: Current embedding payload.
-            exc: Exception raised for the current payload.
+            text (str): Current embedding payload.
+            exc (Exception): Exception raised for the current payload.
 
         Returns:
             str: A shorter candidate string.
@@ -287,8 +287,8 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
         """Embed a single text, truncating and retrying on context-limit errors.
 
         Args:
-            text: Input text to embed.
-            n_retries: Maximum number of truncation attempts before giving up.
+            text (str): Input text to embed.
+            n_retries (int): Maximum number of truncation attempts before giving up.
 
         Returns:
             list[float]: The embedding vector.
@@ -363,8 +363,8 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
         """Async variant of ``_embed_text_with_truncation``.
 
         Args:
-            text: Input text to embed.
-            n_retries: Maximum number of truncation attempts before giving up.
+            text (str): Input text to embed.
+            n_retries (int): Maximum number of truncation attempts before giving up.
 
         Returns:
             list[float]: The embedding vector.
@@ -439,7 +439,7 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
         """Embed a batch of texts while allowing irreducible inputs to skip.
 
         Args:
-            texts: Text batch to embed.
+            texts (list[str]): Text batch to embed.
 
         Returns:
             list[list[float] | None]: Embeddings aligned to the input order.
@@ -466,7 +466,7 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
         """Async batch embedding that allows irreducible inputs to skip.
 
         Args:
-            texts: Text batch to embed.
+            texts (list[str]): Text batch to embed.
 
         Returns:
             list[list[float] | None]: Embeddings aligned to the input order.
@@ -494,7 +494,7 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
         """Embed a batch of texts, falling back to per-item truncation on overflow.
 
         Args:
-            texts: Text batch.
+            texts (list[str]): Text batch.
 
         Returns:
             list[list[float]]: Embedding vectors in input order.
@@ -510,7 +510,7 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
         """Async batch embedding with truncation fallback.
 
         Args:
-            texts: Text batch.
+            texts (list[str]): Text batch.
 
         Returns:
             list[list[float]]: Embedding vectors in input order.
@@ -534,12 +534,12 @@ def get_openai_reasoning_effort(
     which OpenAI-compatible provider is serving the model.
 
     Args:
-        openai_config: Parsed OpenAI environment configuration.
-        enabled: Optional per-request override for whether reasoning should be
+        openai_config (OpenAIConfig): Parsed OpenAI environment configuration.
+        enabled (bool | None): Optional per-request override for whether reasoning should be
             requested. When omitted, the config default is used.
 
     Returns:
-        The configured reasoning effort string when enabled, otherwise ``None``.
+        str | None: The configured reasoning effort string when enabled, otherwise ``None``.
     """
     if enabled is None:
         enabled = openai_config.thinking_enabled

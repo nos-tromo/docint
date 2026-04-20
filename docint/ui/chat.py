@@ -87,10 +87,10 @@ class ChatStreamState:
         """Apply one streamed payload and return any newly emitted text chunk.
 
         Args:
-            payload: Parsed SSE payload from the backend.
+            payload (Mapping[str, Any]): Parsed SSE payload from the backend.
 
         Returns:
-            New text to render immediately, if present.
+            str | None: New text to render immediately, if present.
         """
         if "validation_checked" in payload:
             self.validation_checked = payload.get("validation_checked")
@@ -151,10 +151,10 @@ def _parse_sse_payload(line: bytes | str) -> dict[str, Any] | None:
     """Parse one SSE data line into a JSON payload.
 
     Args:
-        line: Raw line yielded from ``requests.Response.iter_lines``.
+        line (bytes | str): Raw line yielded from ``requests.Response.iter_lines``.
 
     Returns:
-        Parsed payload dictionary or ``None`` when the line is not usable.
+        dict[str, Any] | None: Parsed payload dictionary or ``None`` when the line is not usable.
     """
     if not line:
         return None
@@ -177,9 +177,9 @@ def _iter_chat_stream_text(
     """Yield streamed text chunks while accumulating chat metadata.
 
     Args:
-        lines: Streaming response lines from the backend.
-        stream_state: Accumulator for streamed response metadata.
-        on_update: Optional callback invoked after each processed payload.
+        lines (Iterable[bytes | str]): Streaming response lines from the backend.
+        stream_state (ChatStreamState): Accumulator for streamed response metadata.
+        on_update (Callable[[ChatStreamState], None] | None): Optional callback invoked after each processed payload.
 
     Yields:
         Text chunks to render incrementally in the Streamlit chat body.
@@ -206,12 +206,12 @@ def _prime_chat_stream(
     """Consume stream lines until the first renderable text chunk is available.
 
     Args:
-        lines: Streaming response lines from the backend.
-        stream_state: Accumulator for streamed response metadata.
-        on_update: Optional callback invoked after each processed payload.
+        lines (Iterable[bytes | str]): Streaming response lines from the backend.
+        stream_state (ChatStreamState): Accumulator for streamed response metadata.
+        on_update (Callable[[ChatStreamState], None] | None): Optional callback invoked after each processed payload.
 
     Returns:
-        A tuple of the first renderable text chunk, if any, and the remaining
+        tuple[str | None, Iterator[bytes | str]]: A tuple of the first renderable text chunk, if any, and the remaining
         stream iterator.
     """
     iterator = iter(lines)
@@ -233,7 +233,7 @@ def _retrieval_mode_badge_label(mode: str | None) -> str:
     """Return a compact badge label for the selected retrieval mode.
 
     Args:
-        mode: Raw retrieval mode value from session state.
+        mode (str | None): Raw retrieval mode value from session state.
 
     Returns:
         str: Human-readable badge label.
@@ -321,10 +321,10 @@ def _format_graph_debug_summary(graph_debug: dict[str, Any] | None) -> str | Non
     """Build a compact text line for GraphRAG debug metadata.
 
     Args:
-        graph_debug: Optional GraphRAG debug payload.
+        graph_debug (dict[str, Any] | None): Optional GraphRAG debug payload.
 
     Returns:
-        A compact summary string or ``None`` when unavailable.
+        str | None: A compact summary string or ``None`` when unavailable.
     """
     if not isinstance(graph_debug, dict):
         return None
@@ -343,10 +343,10 @@ def _build_custom_metadata_rules(count: int) -> list[dict[str, Any]]:
     """Build request payloads for user-defined custom metadata rules.
 
     Args:
-        count: Number of custom rules to process, as specified by the user in the UI.
+        count (int): Number of custom rules to process, as specified by the user in the UI.
 
     Returns:
-        A list of metadata filter rules derived from the UI state.
+        list[dict[str, Any]]: A list of metadata filter rules derived from the UI state.
     """
     rules: list[dict[str, Any]] = []
     for index in range(count):
@@ -384,11 +384,11 @@ def build_chat_metadata_filters(
     """Translate chat filter state into the backend request payload.
 
     Args:
-        filter_state: Mapping of chat filter UI state keys to their current values.
-        custom_rules: Optional sequence of additional custom filter rules to include.
+        filter_state (Mapping[str, Any]): Mapping of chat filter UI state keys to their current values.
+        custom_rules (Sequence[Mapping[str, Any]] | None): Optional sequence of additional custom filter rules to include.
 
     Returns:
-        A list of metadata filter rules to apply to the next chat retrieval request.
+        list[dict[str, Any]]: A list of metadata filter rules to apply to the next chat retrieval request.
     """
     if not bool(filter_state.get("enabled")):
         return []
@@ -473,8 +473,8 @@ def _render_sources_panel(
     """Render chat source details in a stable-height popover.
 
     Args:
-        sources: Source rows associated with a chat answer.
-        collection: Active collection name for source downloads.
+        sources (Sequence[Mapping[str, Any]]): Source rows associated with a chat answer.
+        collection (str): Active collection name for source downloads.
     """
     if not sources:
         return
@@ -491,7 +491,7 @@ def _render_graph_debug_panel(graph_debug: Mapping[str, Any]) -> None:
     """Render GraphRAG debug details in a popover.
 
     Args:
-        graph_debug: GraphRAG debug payload for the current answer.
+        graph_debug (Mapping[str, Any]): GraphRAG debug payload for the current answer.
     """
     with st.popover("GraphRAG Debug"):
         with st.container(height=CHAT_DEBUG_CONTAINER_HEIGHT):
@@ -527,9 +527,9 @@ def _render_answer_tool_panels(
     """Render optional chat detail controls in one horizontal row.
 
     Args:
-        graph_debug: Optional GraphRAG debug payload.
-        sources: Optional source rows associated with a chat answer.
-        collection: Active collection name for source downloads.
+        graph_debug (Mapping[str, Any] | None): Optional GraphRAG debug payload.
+        sources (Sequence[Mapping[str, Any]] | None): Optional source rows associated with a chat answer.
+        collection (str): Active collection name for source downloads.
     """
     tool_count = (
         int(bool(sources))

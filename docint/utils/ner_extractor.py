@@ -1,3 +1,5 @@
+"""Named-entity recognition and relation extraction via LLM and GLiNER backends."""
+
 import hashlib
 import json
 import os
@@ -227,9 +229,9 @@ def _get_or_load_gliner_runtime(
     """Load or reuse a GLiNER runtime for the requested model/device pair.
 
     Args:
-        model_id: Configured GLiNER model identifier.
-        cache_dir: Hugging Face cache directory.
-        device: Preferred execution device.
+        model_id (str): Configured GLiNER model identifier.
+        cache_dir (Path): Hugging Face cache directory.
+        device (str | None): Preferred execution device.
 
     Returns:
         _GLiNERRuntime: Cached runtime bundle for inference.
@@ -273,10 +275,10 @@ def _load_gliner_config(model_dir: Path) -> dict[str, Any]:
     """Load the GLiNER config for a local model directory.
 
     Args:
-        model_dir: Directory containing ``gliner_config.json``.
+        model_dir (Path): Directory containing ``gliner_config.json``.
 
     Returns:
-        Parsed GLiNER configuration payload.
+        dict[str, Any]: Parsed GLiNER configuration payload.
 
     Raises:
         FileNotFoundError: If the config file does not exist.
@@ -292,8 +294,8 @@ def _link_or_copy_path(source: Path, destination: Path) -> None:
     """Materialize a file or directory at ``destination`` from ``source``.
 
     Args:
-        source: Existing source path.
-        destination: Target path to create.
+        source (Path): Existing source path.
+        destination (Path): Target path to create.
     """
     if destination.exists():
         return
@@ -311,11 +313,11 @@ def _resolve_local_gliner_dependency(cache_dir: Path, dependency: str) -> Path:
     """Resolve a GLiNER dependency path without allowing network access.
 
     Args:
-        cache_dir: Hugging Face hub cache directory.
-        dependency: Repo ID or local filesystem path referenced by GLiNER config.
+        cache_dir (Path): Hugging Face hub cache directory.
+        dependency (str): Repo ID or local filesystem path referenced by GLiNER config.
 
     Returns:
-        Local filesystem path for the dependency.
+        Path: Local filesystem path for the dependency.
 
     Raises:
         FileNotFoundError: If the dependency is unavailable locally.
@@ -338,11 +340,11 @@ def _materialize_offline_gliner_dir(model_dir: Path, config: dict[str, Any]) -> 
     """Create a local-only GLiNER directory with patched config references.
 
     Args:
-        model_dir: Original local GLiNER model directory.
-        config: GLiNER config payload to write into the offline runtime directory.
+        model_dir (Path): Original local GLiNER model directory.
+        config (dict[str, Any]): GLiNER config payload to write into the offline runtime directory.
 
     Returns:
-        Local runtime directory that contains the patched config and links to the
+        Path: Local runtime directory that contains the patched config and links to the
         original model assets.
     """
     digest = hashlib.sha256(
@@ -373,11 +375,11 @@ def _prepare_local_gliner_model_dir(model_dir: Path, cache_dir: Path) -> Path:
     helper rewrites those config references to local snapshot paths only.
 
     Args:
-        model_dir: Local GLiNER model directory or snapshot path.
-        cache_dir: Hugging Face hub cache directory.
+        model_dir (Path): Local GLiNER model directory or snapshot path.
+        cache_dir (Path): Hugging Face hub cache directory.
 
     Returns:
-        A local model directory that is safe to hand to ``GLiNER.from_pretrained``.
+        Path: A local model directory that is safe to hand to ``GLiNER.from_pretrained``.
     """
     config = _load_gliner_config(model_dir)
     patched = False
@@ -407,11 +409,11 @@ def _resolve_gliner_load_target(model_id: str, cache_dir: Path) -> tuple[str, bo
     """Resolve the load target for GLiNER without allowing accidental hub access.
 
     Args:
-        model_id: GLiNER repo ID or local filesystem path.
-        cache_dir: Hugging Face hub cache directory.
+        model_id (str): GLiNER repo ID or local filesystem path.
+        cache_dir (Path): Hugging Face hub cache directory.
 
     Returns:
-        Tuple of ``(load_target, local_only)`` suitable for ``from_pretrained``.
+        tuple[str, bool]: Tuple of ``(load_target, local_only)`` suitable for ``from_pretrained``.
 
     Raises:
         FileNotFoundError: If offline mode is enabled and the model is not cached
@@ -445,10 +447,10 @@ def _resolve_gliner_context_window(model: Any) -> int:
     """Return the usable GLiNER context window in tokens.
 
     Args:
-        model: Loaded GLiNER model instance.
+        model (Any): Loaded GLiNER model instance.
 
     Returns:
-        Maximum number of non-special tokens to send in a single request.
+        int: Maximum number of non-special tokens to send in a single request.
 
     Raises:
         TypeError, ValueError: If the model config contains an invalid max_len value.
@@ -466,10 +468,10 @@ def _get_gliner_tokenizer(model: Any) -> Any | None:
     """Return the GLiNER backbone tokenizer when available.
 
     Args:
-        model: Loaded GLiNER model instance.
+        model (Any): Loaded GLiNER model instance.
 
     Returns:
-        Tokenizer object or ``None`` when unavailable.
+        Any | None: Tokenizer object or ``None`` when unavailable.
     """
     data_processor = getattr(model, "data_processor", None)
     return getattr(data_processor, "transformer_tokenizer", None)
@@ -479,14 +481,12 @@ def _count_text_tokens(text: str, tokenizer: Any | None) -> int:
     """Count tokens for a text span using the model tokenizer when possible.
 
     Args:
-        text: Input text span.
-        tokenizer: Tokenizer associated with the loaded GLiNER model.
+        text (str): Input text span.
+        tokenizer (Any | None): Tokenizer associated with the loaded GLiNER model.
 
     Returns:
-        Estimated token count for the input text.
-
-    Raises:
-        Any exceptions raised by the tokenizer are caught and logged, with a fallback to whitespace token counting.
+        int: Estimated token count for the input text. Tokenizer errors are caught and logged,
+        with a fallback to whitespace token counting.
     """
     stripped = text.strip()
     if not stripped:
@@ -516,10 +516,10 @@ def _split_text_into_sentences(text: str) -> list[str]:
     """Split text into sentence-like spans while preserving readable boundaries.
 
     Args:
-        text: Raw text to split.
+        text (str): Raw text to split.
 
     Returns:
-        Sentence-like spans. Falls back to the full text when no sentence
+        list[str]: Sentence-like spans. Falls back to the full text when no sentence
         boundary is detected.
     """
     stripped = text.strip()
@@ -535,10 +535,10 @@ def _split_text_into_words(text: str) -> list[str]:
     """Split text into word-like spans for fallback chunking.
 
     Args:
-        text: Raw text to split.
+        text (str): Raw text to split.
 
     Returns:
-        Word-like spans. Punctuation stays attached to its word.
+        list[str]: Word-like spans. Punctuation stays attached to its word.
     """
     return re.findall(r"\S+", text)
 
@@ -551,12 +551,12 @@ def _split_oversized_token(
     """Split a single oversized token as a last-resort fallback.
 
     Args:
-        token: Single token-like span that still exceeds the model budget.
-        max_tokens: Maximum token budget per chunk.
-        tokenizer: Tokenizer associated with the loaded GLiNER model.
+        token (str): Single token-like span that still exceeds the model budget.
+        max_tokens (int): Maximum token budget per chunk.
+        tokenizer (Any | None): Tokenizer associated with the loaded GLiNER model.
 
     Returns:
-        Smaller character-based chunks guaranteed to fit the budget.
+        list[str]: Smaller character-based chunks guaranteed to fit the budget.
     """
     pieces: list[str] = []
     start = 0
@@ -585,12 +585,12 @@ def _pack_text_segments(
     """Pack sentence or word segments into GLiNER-sized chunks.
 
     Args:
-        segments: Ordered text segments to pack.
-        max_tokens: Maximum token budget per chunk.
-        tokenizer: Tokenizer associated with the loaded GLiNER model.
+        segments (list[str]): Ordered text segments to pack.
+        max_tokens (int): Maximum token budget per chunk.
+        tokenizer (Any | None): Tokenizer associated with the loaded GLiNER model.
 
     Returns:
-        Packed chunks whose token counts fit the requested budget.
+        list[str]: Packed chunks whose token counts fit the requested budget.
     """
     chunks: list[str] = []
     current = ""
@@ -646,12 +646,12 @@ def _chunk_text_for_gliner(
     """Split text into GLiNER-safe chunks with sentence-first packing.
 
     Args:
-        text: Raw input text.
-        max_tokens: Maximum token budget per chunk.
-        tokenizer: Tokenizer associated with the loaded GLiNER model.
+        text (str): Raw input text.
+        max_tokens (int): Maximum token budget per chunk.
+        tokenizer (Any | None): Tokenizer associated with the loaded GLiNER model.
 
     Returns:
-        Ordered list of chunks suitable for repeated GLiNER inference.
+        list[str]: Ordered list of chunks suitable for repeated GLiNER inference.
     """
     sentences = _split_text_into_sentences(text)
     return _pack_text_segments(

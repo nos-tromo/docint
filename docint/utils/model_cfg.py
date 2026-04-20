@@ -1,3 +1,5 @@
+"""Model asset download and cache-residency orchestration for offline deployments."""
+
 import os
 import shutil
 import sys
@@ -168,8 +170,8 @@ def _link_or_copy_model_file(source: Path, destination: Path) -> None:
     """Materialize a model file at ``destination`` from ``source``.
 
     Args:
-        source: Existing source file path.
-        destination: Target file path to create.
+        source (Path): Existing source file path.
+        destination (Path): Target file path to create.
     """
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():

@@ -72,7 +72,7 @@ def navigate_to(page: str) -> None:
     """Set the active page and trigger a rerun.
 
     Args:
-        page: Target page name (must be one of ``PAGES``).
+        page (str): Target page name (must be one of ``PAGES``).
     """
     st.session_state.current_page = page
     st.rerun()

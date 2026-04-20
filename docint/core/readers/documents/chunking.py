@@ -21,10 +21,10 @@ def _sentence_split(text: str) -> list[str]:
     """Split text into sentences using a simple regex heuristic.
 
     Args:
-        text: The input text to split into sentences.
+        text (str): The input text to split into sentences.
 
     Returns:
-        A list of sentence strings extracted from the input text.
+        list[str]: A list of sentence strings extracted from the input text.
     """
     if not text.strip():
         return []
@@ -36,13 +36,13 @@ def _stable_chunk_id(doc_id: str, page_index: int, block_id: str, idx: int) -> s
     """Produce a deterministic chunk ID from the given inputs.
 
     Args:
-        doc_id: The unique identifier for the document (e.g., sha256 of file bytes).
-        page_index: The index of the page the chunk is derived from.
-        block_id: The identifier of the layout block the chunk is derived from.
-        idx: The index of the chunk within the block (for multiple chunks from the same block
+        doc_id (str): The unique identifier for the document (e.g., sha256 of file bytes).
+        page_index (int): The index of the page the chunk is derived from.
+        block_id (str): The identifier of the layout block the chunk is derived from.
+        idx (int): The index of the chunk within the block (for multiple chunks from the same block
 
     Returns:
-        A deterministic chunk ID string.
+        str: A deterministic chunk ID string.
     """
     raw = f"{doc_id}:{page_index}:{block_id}:{idx}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
@@ -64,16 +64,16 @@ def chunk_document(
     splits text at the sentence level inside each block.
 
     Args:
-        doc_id: Deterministic document identifier (sha256 of file bytes).
-        layout: Mapping of page_index → layout blocks.
-        page_texts: Mapping of page_index → ``PageText``.
-        tables: Extracted tables.
-        images: Extracted images.
-        chunk_size: Maximum characters per chunk.
-        chunk_overlap: Overlap characters between consecutive chunks.
+        doc_id (str): Deterministic document identifier (sha256 of file bytes).
+        layout (dict[int, list[LayoutBlock]]): Mapping of page_index → layout blocks.
+        page_texts (dict[int, PageText]): Mapping of page_index → ``PageText``.
+        tables (list[TableResult]): Extracted tables.
+        images (list[ImageResult]): Extracted images.
+        chunk_size (int): Maximum characters per chunk.
+        chunk_overlap (int): Overlap characters between consecutive chunks.
 
     Returns:
-        List of ``ChunkResult`` items.
+        list[ChunkResult]: List of ``ChunkResult`` items.
     """
     table_by_page: dict[int, list[TableResult]] = {}
     for t in tables:
@@ -194,18 +194,18 @@ def _make_chunk(
     """Create a single ``ChunkResult``.
 
     Args:
-        doc_id: The unique identifier for the document (e.g., sha256 of file bytes).
-        page_idx: The index of the page the chunk is derived from.
-        block: The layout block the chunk is derived from.
-        text: The text content of the chunk.
-        chunk_idx: The index of the chunk within the block (for multiple chunks from the same block).
-        section_path: The hierarchical section path derived from heading/title blocks.
-        source_mix: The source of the text (e.g., "pdf_text", "ocr_text").
-        table_ids: List of related table identifiers that overlap with the block.
-        image_ids: List of related image identifiers that overlap with the block.
+        doc_id (str): The unique identifier for the document (e.g., sha256 of file bytes).
+        page_idx (int): The index of the page the chunk is derived from.
+        block (LayoutBlock): The layout block the chunk is derived from.
+        text (str): The text content of the chunk.
+        chunk_idx (int): The index of the chunk within the block (for multiple chunks from the same block).
+        section_path (list[str]): The hierarchical section path derived from heading/title blocks.
+        source_mix (str): The source of the text (e.g., "pdf_text", "ocr_text").
+        table_ids (list[str]): List of related table identifiers that overlap with the block.
+        image_ids (list[str]): List of related image identifiers that overlap with the block.
 
     Returns:
-        A ``ChunkResult`` instance representing the chunked text and its metadata.
+        ChunkResult: A ``ChunkResult`` instance representing the chunked text and its metadata.
     """
     chunk_id = _stable_chunk_id(doc_id, page_idx, block.block_id, chunk_idx)
     return ChunkResult(
@@ -240,12 +240,12 @@ def _update_section_path(
     than string length.
 
     Args:
-        current_path: The current section path.
-        new_heading: The text of the new heading to add to the path.
-        block_type: The type of the block (TITLE or HEADER) to determine how to update
+        current_path (list[str]): The current section path.
+        new_heading (str): The text of the new heading to add to the path.
+        block_type (BlockType): The type of the block (TITLE or HEADER) to determine how to update
 
     Returns:
-        The updated section path list.
+        list[str]: The updated section path list.
     """
     if not current_path:
         return [new_heading]
