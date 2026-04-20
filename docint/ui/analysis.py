@@ -62,8 +62,8 @@ def _update_summary_metadata(result: dict[str, Any], data: dict[str, Any]) -> No
     """Update summary-related metadata fields in analysis state.
 
     Args:
-        result: Mutable analysis-result state.
-        data: Parsed SSE event payload.
+        result (dict[str, Any]): Mutable analysis-result state.
+        data (dict[str, Any]): Parsed SSE event payload.
     """
     if "validation_checked" in data:
         result["validation_checked"] = data.get("validation_checked")
@@ -81,10 +81,10 @@ def _empty_ner_result(collection: str) -> dict[str, Any]:
     """Build default NER analysis state for a collection.
 
     Args:
-        collection: Currently selected collection name.
+        collection (str): Currently selected collection name.
 
     Returns:
-        Default state payload for NER analysis data and metadata.
+        dict[str, Any]: Default state payload for NER analysis data and metadata.
     """
     return {
         "collection": collection,
@@ -101,10 +101,10 @@ def _empty_summary_result(collection: str) -> dict[str, Any]:
     """Build default summary state for a collection.
 
     Args:
-        collection: Currently selected collection name.
+        collection (str): Currently selected collection name.
 
     Returns:
-        Default state payload for optional summary output.
+        dict[str, Any]: Default state payload for optional summary output.
     """
     return {
         "collection": collection,
@@ -123,7 +123,7 @@ def _get_ner_cache() -> dict[str, dict[str, Any]]:
     """Return mutable NER cache map keyed by collection.
 
     Returns:
-        Mutable dictionary representing the NER cache.
+        dict[str, dict[str, Any]]: Mutable dictionary representing the NER cache.
     """
     cache = st.session_state.get("analysis_ner_by_collection")
     if not isinstance(cache, dict):
@@ -136,7 +136,7 @@ def _get_summary_cache() -> dict[str, dict[str, Any]]:
     """Return mutable summary cache map keyed by collection.
 
     Returns:
-        Mutable dictionary representing the summary cache.
+        dict[str, dict[str, Any]]: Mutable dictionary representing the summary cache.
     """
     cache = st.session_state.get("analysis_summary_by_collection")
     if not isinstance(cache, dict):
@@ -149,11 +149,11 @@ def _fetch_ner_analysis(collection: str, *, refresh: bool = False) -> dict[str, 
     """Fetch NER + hate-speech payloads for a collection.
 
     Args:
-        collection: Currently selected collection name.
-        refresh: Whether to bypass backend NER cache.
+        collection (str): Currently selected collection name.
+        refresh (bool): Whether to bypass backend NER cache.
 
     Returns:
-        NER payload with load/error metadata.
+        dict[str, Any]: NER payload with load/error metadata.
     """
     _ = collection
     result = _empty_ner_result(collection)
@@ -206,11 +206,11 @@ def _load_ner_analysis(collection: str, *, refresh: bool) -> dict[str, Any]:
     """Load NER analysis data and persist it in session cache.
 
     Args:
-        collection: Currently selected collection name.
-        refresh: Whether to bypass backend NER cache.
+        collection (str): Currently selected collection name.
+        refresh (bool): Whether to bypass backend NER cache.
 
     Returns:
-        Loaded NER analysis payload.
+        dict[str, Any]: Loaded NER analysis payload.
     """
     with st.spinner("Loading entity and hate-speech analysis…"):
         result = _fetch_ner_analysis(collection, refresh=refresh)
@@ -222,7 +222,7 @@ def _generate_summary(collection: str) -> None:
     """Generate summary for the selected collection and store it in cache.
 
     Args:
-        collection: Currently selected collection name.
+        collection (str): Currently selected collection name.
     """
     summary_placeholder = st.empty()
     full_summary = ""
@@ -268,10 +268,10 @@ def _render_summary_section(collection: str) -> dict[str, Any]:
     """Render manual summary controls and current summary output.
 
     Args:
-        collection: Currently selected collection name.
+        collection (str): Currently selected collection name.
 
     Returns:
-        Summary state for the selected collection.
+        dict[str, Any]: Summary state for the selected collection.
     """
     summary_cache = _get_summary_cache()
     summary_state = summary_cache.setdefault(
@@ -316,10 +316,10 @@ def _entity_option_label(entity: dict[str, Any]) -> str:
     """Build a compact selectbox label for an aggregated entity row.
 
     Args:
-        entity: The aggregated entity dictionary containing text, type, and mention count.
+        entity (dict[str, Any]): The aggregated entity dictionary containing text, type, and mention count.
 
     Returns:
-        A formatted string label for the entity selectbox option.
+        str: A formatted string label for the entity selectbox option.
     """
     text = str(entity.get("text") or "Unknown")
     entity_type = str(entity.get("type") or "Unlabeled")
@@ -331,10 +331,10 @@ def _entity_highlight_terms(entity: str | dict[str, Any]) -> list[str]:
     """Return unique entity terms that should be highlighted in chunk text.
 
     Args:
-        entity: The selected entity, either as a string or an aggregated entity dictionary.
+        entity (str | dict[str, Any]): The selected entity, either as a string or an aggregated entity dictionary.
 
     Returns:
-        A list of unique entity terms to highlight, sorted by length and deduplicated case-insensitively.
+        list[str]: A list of unique entity terms to highlight, sorted by length and deduplicated case-insensitively.
     """
     terms: list[str] = []
     if isinstance(entity, dict):
@@ -365,11 +365,11 @@ def _highlight_entity_text(chunk_text: str, entity: str | dict[str, Any]) -> str
     """Return HTML with matching entity variants highlighted.
 
     Args:
-        chunk_text: The original text of the chunk to process.
-        entity: The selected entity, either as a string or an aggregated entity dictionary.
+        chunk_text (str): The original text of the chunk to process.
+        entity (str | dict[str, Any]): The selected entity, either as a string or an aggregated entity dictionary.
 
     Returns:
-        An HTML string with entity terms highlighted and non-matching text escaped.
+        str: An HTML string with entity terms highlighted and non-matching text escaped.
     """
     text = str(chunk_text or "")
     terms = _entity_highlight_terms(entity)
@@ -412,11 +412,11 @@ def _entity_related_chunks(
     """Return source chunks that mention a selected entity.
 
     Args:
-        entity: The selected entity text or aggregated entity row to match.
-        sources: List of source dictionaries containing chunk and entity information.
+        entity (str | dict[str, Any]): The selected entity text or aggregated entity row to match.
+        sources (list[dict[str, Any]]): List of source dictionaries containing chunk and entity information.
 
     Returns:
-        A list of source dictionaries that contain the selected entity.
+        list[dict[str, Any]]: A list of source dictionaries that contain the selected entity.
     """
     selected_text = str(entity or "").strip()
     selected_key = ""
@@ -488,11 +488,11 @@ def _entity_chunks_to_txt(entity: str, chunks: list[dict[str, Any]]) -> str:
     """Build downloadable text payload for entity-linked chunks.
 
     Args:
-        entity: The selected entity text.
-        chunks: List of source dictionaries containing chunk information.
+        entity (str): The selected entity text.
+        chunks (list[dict[str, Any]]): List of source dictionaries containing chunk information.
 
     Returns:
-        A formatted string containing metadata and text of chunks related to the entity.
+        str: A formatted string containing metadata and text of chunks related to the entity.
     """
     lines = [f"Entity Findings: {entity}", ""]
     for idx, chunk in enumerate(chunks, start=1):
@@ -504,10 +504,10 @@ def _hate_speech_chunks_to_txt(chunks: list[dict[str, Any]]) -> str:
     """Build downloadable text payload for hate-speech findings.
 
     Args:
-        chunks: List of source dictionaries containing hate-speech finding information.
+        chunks (list[dict[str, Any]]): List of source dictionaries containing hate-speech finding information.
 
     Returns:
-        A formatted string containing metadata and text of chunks flagged for hate-speech.
+        str: A formatted string containing metadata and text of chunks flagged for hate-speech.
     """
     lines = ["Hate-Speech Findings", ""]
     for idx, chunk in enumerate(chunks, start=1):
@@ -529,11 +529,11 @@ def _entity_chunks_to_csv(entity: str, chunks: list[dict[str, Any]]) -> str:
     """Build downloadable CSV payload for entity-linked chunks.
 
     Args:
-        entity: The selected entity text.
-        chunks: List of source dictionaries containing chunk information.
+        entity (str): The selected entity text.
+        chunks (list[dict[str, Any]]): List of source dictionaries containing chunk information.
 
     Returns:
-        CSV string with one row per chunk.
+        str: CSV string with one row per chunk.
     """
     fieldnames = [
         "entity",
@@ -585,10 +585,10 @@ def _hate_speech_chunks_to_csv(chunks: list[dict[str, Any]]) -> str:
     """Build downloadable CSV payload for hate-speech findings.
 
     Args:
-        chunks: List of source dictionaries containing hate-speech finding information.
+        chunks (list[dict[str, Any]]): List of source dictionaries containing hate-speech finding information.
 
     Returns:
-        CSV string with one row per finding.
+        str: CSV string with one row per finding.
     """
     fieldnames = [
         "source",
@@ -710,8 +710,8 @@ def _render_entities_tab(result: dict[str, Any], collection: str) -> None:
     """Render entity drill-down UI.
 
     Args:
-        result: The analysis result dictionary containing NER data.
-        collection: The name of the currently selected collection.
+        result (dict[str, Any]): The analysis result dictionary containing NER data.
+        collection (str): The name of the currently selected collection.
     """
     ner_sources = result.get("ner") or []
     if not ner_sources:
@@ -820,8 +820,8 @@ def _render_hate_speech_tab(result: dict[str, Any], collection: str) -> None:
     findings easily.
 
     Args:
-        result: The analysis result dictionary containing hate-speech findings.
-        collection: The name of the currently selected collection.
+        result (dict[str, Any]): The analysis result dictionary containing hate-speech findings.
+        collection (str): The name of the currently selected collection.
     """
     findings = list(result.get("hate_speech") or [])
     st.markdown("#### Hate speech findings")
@@ -891,9 +891,9 @@ def _render_analysis_result(
     """Render NER analysis output for a collection.
 
     Args:
-        result: NER analysis result dictionary.
-        collection: The name of the currently selected collection.
-        summary_state: Optional summary state used when composing downloadable text.
+        result (dict[str, Any]): NER analysis result dictionary.
+        collection (str): The name of the currently selected collection.
+        summary_state (dict[str, Any] | None): Optional summary state used when composing downloadable text.
     """
     st.markdown("---")
     tabs = st.tabs(["Entities", "Hate Speech"])

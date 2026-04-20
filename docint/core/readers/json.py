@@ -1,3 +1,5 @@
+"""JSON reader that normalizes records into Document objects with metadata."""
+
 import json
 import random
 from pathlib import Path
@@ -140,7 +142,7 @@ class CustomJSONReader(BaseReader):
 
         Args:
             file (str | Path): The path to the JSON file.
-            **kwargs: Additional keyword arguments.
+            **kwargs (Any): Additional keyword arguments forwarded to the reader.
 
         Returns:
             list[Document]: A list of Document objects.

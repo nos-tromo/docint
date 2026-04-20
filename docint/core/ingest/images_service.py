@@ -163,10 +163,10 @@ class CLIPImageEmbeddingBackend:
         """Embed image bytes with CLIP image tower.
 
         Args:
-            image_bytes: Raw bytes of the image to embed.
+            image_bytes (bytes): Raw bytes of the image to embed.
 
         Returns:
-            A list of floats representing the normalized image embedding vector.
+            list[float]: A list of floats representing the normalized image embedding vector.
         """
         image = Image.open(BytesIO(image_bytes)).convert("RGB")
         inputs = self.processor(images=image, return_tensors="pt")
@@ -180,10 +180,10 @@ class CLIPImageEmbeddingBackend:
         """Embed query text with CLIP text tower.
 
         Args:
-            text: The input text to embed.
+            text (str): The input text to embed.
 
         Returns:
-            A list of floats representing the normalized text embedding vector.
+            list[float]: A list of floats representing the normalized text embedding vector.
         """
         inputs = self.processor(
             text=[text], return_tensors="pt", padding=True, truncation=True
@@ -224,10 +224,10 @@ class VisionJSONTagger:
         """Parse a raw vision response into ``(description, tags)``.
 
         Args:
-            raw: Raw model output string.
+            raw (str): Raw model output string.
 
         Returns:
-            A tuple of cleaned description and tags.
+            tuple[str, list[str]]: A tuple of cleaned description and tags.
         """
         payload: dict[str, Any] = {}
         try:
@@ -289,11 +289,11 @@ class VisionJSONTagger:
         to reduce the payload size and inference time.
 
         Args:
-            image_bytes: Raw bytes of the image to describe and tag.
-            mime_type: The MIME type of the image (e.g., "image/png").
+            image_bytes (bytes): Raw bytes of the image to describe and tag.
+            mime_type (str): The MIME type of the image (e.g., "image/png").
 
         Returns:
-            A tuple of (description, tags) generated for the image.
+            tuple[str, list[str]]: A tuple of (description, tags) generated for the image.
         """
         image_bytes, mime_type = self._normalize_image(image_bytes, mime_type)
         image_bytes, mime_type = self._cap_image_size(image_bytes, mime_type)
@@ -313,11 +313,11 @@ class VisionJSONTagger:
         process it.
 
         Args:
-            image_bytes: Raw image data.
-            mime_type: Original MIME type.
+            image_bytes (bytes): Raw image data.
+            mime_type (str): Original MIME type.
 
         Returns:
-            A tuple of ``(possibly converted bytes, mime_type)``.
+            tuple[bytes, str]: A tuple of ``(possibly converted bytes, mime_type)``.
         """
         if mime_type in self._SUPPORTED_MIME_TYPES:
             return image_bytes, mime_type
@@ -344,11 +344,11 @@ class VisionJSONTagger:
         The image is re-encoded as JPEG to keep the payload small.
 
         Args:
-            image_bytes: Raw image data.
-            mime_type: Current MIME type.
+            image_bytes (bytes): Raw image data.
+            mime_type (str): Current MIME type.
 
         Returns:
-            A tuple of ``(possibly resized bytes, mime_type)``.
+            tuple[bytes, str]: A tuple of ``(possibly resized bytes, mime_type)``.
         """
         try:
             with Image.open(BytesIO(image_bytes)) as img_file:
@@ -403,10 +403,10 @@ class ImageIngestionService:
         """Resolve target image collection name from configured template.
 
         Args:
-            source_collection: The source collection name to interpolate into the template.
+            source_collection (str | None): The source collection name to interpolate into the template.
 
         Returns:
-            The resolved collection name for storing the image.
+            str: The resolved collection name for storing the image.
         """
         template = (self.img_ingestion_config.collection_name or "").strip()
         if not template:
@@ -424,10 +424,10 @@ class ImageIngestionService:
         """Resolve the image vector store lazily for a collection.
 
         Args:
-            collection_name: The name of the collection for which to get the vector store.
+            collection_name (str): The name of the collection for which to get the vector store.
 
         Returns:
-            The QdrantVectorStore instance for the specified collection.
+            QdrantVectorStore: The QdrantVectorStore instance for the specified collection.
         """
         if self.vector_store is not None:
             return self.vector_store
@@ -449,10 +449,10 @@ class ImageIngestionService:
         """Return whether a collection exists in Qdrant.
 
         Args:
-            collection_name: Name of the collection to verify.
+            collection_name (str): Name of the collection to verify.
 
         Returns:
-            ``True`` when the collection exists, else ``False``.
+            bool: ``True`` when the collection exists, else ``False``.
         """
         if self.qdrant_client is None:
             return False
@@ -486,7 +486,7 @@ class ImageIngestionService:
         """Resolve the configured embedding backend lazily.
 
         Returns:
-            The ImageEmbeddingBackend instance if available and enabled, otherwise None.
+            ImageEmbeddingBackend | None: The ImageEmbeddingBackend instance if available and enabled, otherwise None.
         """
         if self.embedding_backend is not None:
             return self.embedding_backend
@@ -516,7 +516,7 @@ class ImageIngestionService:
         """Resolve the configured image-tagging backend lazily.
 
         Returns:
-            The ImageTaggingBackend instance if available and enabled, otherwise None.
+            ImageTaggingBackend | None: The ImageTaggingBackend instance if available and enabled, otherwise None.
         """
         if self.tagging_backend is not None:
             return self.tagging_backend
@@ -544,10 +544,10 @@ class ImageIngestionService:
         """Return SHA-256 digest for image bytes.
 
         Args:
-            image_bytes: The raw bytes of the image to hash.
+            image_bytes (bytes): The raw bytes of the image to hash.
 
         Returns:
-            A hexadecimal string representing the SHA-256 hash of the image bytes.
+            str: A hexadecimal string representing the SHA-256 hash of the image bytes.
         """
         return sha256(image_bytes).hexdigest()
 
@@ -556,10 +556,10 @@ class ImageIngestionService:
         """Return deterministic UUID point id derived from ``image_id``.
 
         Args:
-            image_id: The unique identifier for the image (e.g., a hash).
+            image_id (str): The unique identifier for the image (e.g., a hash).
 
         Returns:
-            A string representing the UUID derived from the image ID, suitable for use as a Qdrant point ID.
+            str: A string representing the UUID derived from the image ID, suitable for use as a Qdrant point ID.
         """
         return str(uuid.uuid5(uuid.NAMESPACE_URL, f"docint:image:{image_id}"))
 
@@ -567,10 +567,10 @@ class ImageIngestionService:
         """Resolve image bytes and MIME type from an asset.
 
         Args:
-            asset: The ImageAsset containing either raw bytes or a file path to the image.
+            asset (ImageAsset): The ImageAsset containing either raw bytes or a file path to the image.
 
         Returns:
-            A tuple of (image_bytes, mime_type) extracted from the asset.
+            tuple[bytes, str]: A tuple of (image_bytes, mime_type) extracted from the asset.
         """
         if asset.image_bytes is not None:
             if asset.mime_type:
@@ -589,10 +589,10 @@ class ImageIngestionService:
         """Return ``(width, height)`` for image bytes, best effort.
 
         Args:
-            image_bytes: The raw bytes of the image to analyze.
+            image_bytes (bytes): The raw bytes of the image to analyze.
 
         Returns:
-            A tuple of (width, height) in pixels if determinable, otherwise (None, None).
+            tuple[int | None, int | None]: A tuple of (width, height) in pixels if determinable, otherwise (None, None).
         """
         try:
             with Image.open(BytesIO(image_bytes)) as image:
@@ -609,11 +609,11 @@ class ImageIngestionService:
         """Fetch an existing point by ``image_id`` from the image collection.
 
         Args:
-            image_id: The unique identifier for the image (e.g., a hash).
-            collection_name: The name of the collection to search for the image.
+            image_id (str): The unique identifier for the image (e.g., a hash).
+            collection_name (str): The name of the collection to search for the image.
 
         Returns:
-            A tuple of (point_id, payload) if the image exists, otherwise None.
+            tuple[str, dict[str, Any]] | None: A tuple of (point_id, payload) if the image exists, otherwise None.
         """
         if self.qdrant_client is None:
             return None
@@ -646,11 +646,11 @@ class ImageIngestionService:
         """Build a source occurrence payload for deduped images.
 
         Args:
-            asset: The ImageAsset for which to build the occurrence.
-            context: The IngestContext providing additional context for the occurrence.
+            asset (ImageAsset): The ImageAsset for which to build the occurrence.
+            context (IngestContext): The IngestContext providing additional context for the occurrence.
 
         Returns:
-            A dictionary representing the occurrence metadata to append to existing points
+            dict[str, Any]: A dictionary representing the occurrence metadata to append to existing points
             when an image is deduplicated.
         """
         return {
@@ -676,10 +676,10 @@ class ImageIngestionService:
         references for a deduplicated image.
 
         Args:
-            collection_name: The name of the collection containing the point.
-            point_id: The ID of the point to update.
-            payload: The existing payload of the point, which may contain an "occurrences" list.
-            occurrence: The new occurrence metadata to append to the point's "occurrences" list.
+            collection_name (str): The name of the collection containing the point.
+            point_id (str): The ID of the point to update.
+            payload (dict[str, Any]): The existing payload of the point, which may contain an "occurrences" list.
+            occurrence (dict[str, Any]): The new occurrence metadata to append to the point's "occurrences" list.
         """
         if self.qdrant_client is None:
             return
@@ -698,8 +698,8 @@ class ImageIngestionService:
         """Create or validate the image collection and vector schema.
 
         Args:
-            collection_name: The name of the collection to create or validate.
-            vector_dim: The expected dimensionality of the image embedding vectors.
+            collection_name (str): The name of the collection to create or validate.
+            vector_dim (int): The expected dimensionality of the image embedding vectors.
         """
         if self.qdrant_client is None:
             return
@@ -756,11 +756,11 @@ class ImageIngestionService:
         """Run backend inference with bounded retries.
 
         Args:
-            fn: A callable that performs the inference and returns a result.
-            attempts: The maximum number of attempts to run the callable before giving up.
+            fn (Callable[[], T]): A callable that performs the inference and returns a result.
+            attempts (int): The maximum number of attempts to run the callable before giving up.
 
         Returns:
-            The result returned by the callable if successful.
+            T: The result returned by the callable if successful.
         """
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
@@ -784,11 +784,11 @@ class ImageIngestionService:
         """Ingest one image into the shared image vector collection.
 
         Args:
-            asset: Image asset from standalone or extracted document source.
-            context: Collection-specific ingestion context.
+            asset (ImageAsset): Image asset from standalone or extracted document source.
+            context (IngestContext): Collection-specific ingestion context.
 
         Returns:
-            A ``StoredImageRecord`` describing the result.
+            StoredImageRecord: A ``StoredImageRecord`` describing the result.
         """
         if not self.img_ingestion_config.enabled:
             return StoredImageRecord(
@@ -985,11 +985,11 @@ class ImageIngestionService:
         """Return image records similar to the provided image.
 
         Args:
-            image: Query image path or bytes.
-            source_collection: Optional source collection to resolve the target collection.
+            image (Path | bytes): Query image path or bytes.
+            source_collection (str | None): Optional source collection to resolve the target collection.
 
         Returns:
-            A list of payload dictionaries with similarity scores.
+            list[dict[str, Any]]: A list of payload dictionaries with similarity scores.
         """
         embedding_backend = self._get_embedding_backend()
         if embedding_backend is None:
@@ -1045,12 +1045,12 @@ class ImageIngestionService:
         the text query.
 
         Args:
-            query_text: The input text query to find similar images for.
-            top_k: The number of similar images to return.
-            source_collection: Optional source collection to resolve the target collection.
+            query_text (str): The input text query to find similar images for.
+            top_k (int): The number of similar images to return.
+            source_collection (str | None): Optional source collection to resolve the target collection.
 
         Returns:
-            A list of payload dictionaries for the similar images, each including a similarity score.
+            list[dict[str, Any]]: A list of payload dictionaries for the similar images, each including a similarity score.
         """
         if not query_text.strip():
             return []

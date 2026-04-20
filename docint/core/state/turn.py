@@ -1,3 +1,5 @@
+"""Turn ORM model capturing a single user/assistant exchange within a conversation."""
+
 from datetime import datetime, timezone
 from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship

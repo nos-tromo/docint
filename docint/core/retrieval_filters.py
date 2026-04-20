@@ -41,11 +41,11 @@ def build_metadata_filters(
     """Build LlamaIndex metadata filters from API/UI payloads.
 
     Args:
-        raw_rules: Sequence of filter-like mappings or objects exposing ``field``,
+        raw_rules (Sequence[Any] | None): Sequence of filter-like mappings or objects exposing ``field``,
             ``operator``, ``value``, and optional ``values`` attributes.
 
     Returns:
-        A combined ``MetadataFilters`` instance, or ``None`` when no valid rules
+        MetadataFilters | None: A combined ``MetadataFilters`` instance, or ``None`` when no valid rules
         were supplied.
     """
     compiled: list[MetadataFilter | MetadataFilters] = []
@@ -66,11 +66,11 @@ def build_qdrant_filter(raw_rules: Sequence[Any] | None) -> models.Filter | None
     """Build a native Qdrant filter for request-scoped retrieval.
 
     Args:
-        raw_rules: Sequence of filter-like mappings or objects exposing ``field``,
+        raw_rules (Sequence[Any] | None): Sequence of filter-like mappings or objects exposing ``field``,
             ``operator``, ``value``, and optional ``values`` attributes.
 
     Returns:
-        A Qdrant ``models.Filter`` instance, or ``None`` when no valid rules were supplied.
+        models.Filter | None: A Qdrant ``models.Filter`` instance, or ``None`` when no valid rules were supplied.
     """
     must: list[_QdrantCondition] = []
     must_not: list[_QdrantCondition] = []
@@ -103,12 +103,12 @@ def matches_metadata_filters(
     matches from the dedicated image collection.
 
     Args:
-        metadata: Metadata payload to test.
-        raw_rules: Sequence of filter-like mappings or objects exposing
+        metadata (Mapping[str, Any]): Metadata payload to test.
+        raw_rules (Sequence[Any] | None): Sequence of filter-like mappings or objects exposing
             ``field``, ``operator``, ``value``, and optional ``values``.
 
     Returns:
-        ``True`` when every valid rule matches the metadata payload, otherwise
+        bool: ``True`` when every valid rule matches the metadata payload, otherwise
         ``False``.
     """
     for raw_rule in raw_rules or []:
@@ -128,7 +128,7 @@ def _coerce_rule(raw_rule: Any) -> dict[str, Any] | None:
         ``value``, and optional ``values`` attributes.
 
     Returns:
-        A normalized dictionary with string keys and scalar or list values, or
+        dict[str, Any] | None: A normalized dictionary with string keys and scalar or list values, or
             ``None`` if the input cannot be coerced into a valid rule.
     """
     if isinstance(raw_rule, Mapping):
@@ -162,11 +162,11 @@ def _matches_rule(metadata: Mapping[str, Any], rule: dict[str, Any]) -> bool:
     """Return whether a normalized rule matches an in-memory metadata payload.
 
     Args:
-        metadata: The metadata payload to test.
-        rule: A normalized rule dictionary.
+        metadata (Mapping[str, Any]): The metadata payload to test.
+        rule (dict[str, Any]): A normalized rule dictionary.
 
     Returns:
-        True if the rule matches the metadata, False otherwise.
+        bool: True if the rule matches the metadata, False otherwise.
     """
     operator = rule["operator"]
     values = _extract_field_values(metadata, rule["field"])
@@ -262,11 +262,11 @@ def _extract_field_values(metadata: Mapping[str, Any], field: str) -> list[Any]:
     """Return one or more values for a dotted metadata field path.
 
     Args:
-        metadata: The metadata payload to extract values from.
-        field: The dotted path to the desired field, e.g. ``author.name``.
+        metadata (Mapping[str, Any]): The metadata payload to extract values from.
+        field (str): The dotted path to the desired field, e.g. ``author.name``.
 
     Returns:
-        A list of values found at the specified field path. If the path does not exist,
+        list[Any]: A list of values found at the specified field path. If the path does not exist,
         an empty list is returned.
     """
     parts = [part for part in field.split(".") if part]
@@ -328,12 +328,12 @@ def _compile_rule(rule: dict[str, Any]) -> MetadataFilter | MetadataFilters | No
     """Translate a normalized rule dictionary into a vector-store filter.
 
     Args:
-        rule: A dictionary with keys ``field``, ``operator``, ``value``, and optional
+        rule (dict[str, Any]): A dictionary with keys ``field``, ``operator``, ``value``, and optional
             ``values``, where ``field`` is the metadata key to filter on, and
             ``operator`` is one of the supported filter operations.
 
     Returns:
-        A ``MetadataFilter`` or ``MetadataFilters`` instance, or ``None`` if the rule
+        MetadataFilter | MetadataFilters | None: A ``MetadataFilter`` or ``MetadataFilters`` instance, or ``None`` if the rule
         cannot be compiled.
     """
     field = rule["field"]
@@ -389,11 +389,11 @@ def _compile_mime_rule(
     """Compile MIME filters, including simple ``type/*`` wildcard patterns.
 
     Args:
-        field: The metadata field to filter on, typically ``mimetype``.
-        raw_value: The raw MIME pattern value, which may include a ``/*`` suffix for wildcard matching.
+        field (str): The metadata field to filter on, typically ``mimetype``.
+        raw_value (Any): The raw MIME pattern value, which may include a ``/*`` suffix for wildcard matching.
 
     Returns:
-        A ``MetadataFilter`` instance with the appropriate operator, or ``None`` if the value is invalid.
+        MetadataFilter | None: A ``MetadataFilter`` instance with the appropriate operator, or ``None`` if the value is invalid.
     """
     value = str(raw_value or "").strip().lower()
     if not value:
@@ -416,14 +416,14 @@ def _compile_date_rule(
     """Compile date operators into ISO-8601 string comparisons.
 
     Args:
-        field: The metadata field to filter on, e.g. ``reference_metadata.timestamp``.
-        operator: The date comparison operator, one of ``date_after``, ``date_on_or_after``,
+        field (str): The metadata field to filter on, e.g. ``reference_metadata.timestamp``.
+        operator (str): The date comparison operator, one of ``date_after``, ``date_on_or_after``,
             ``date_before``, or ``date_on_or_before``.
-        raw_value: The raw date or datetime value, which may be a string, date/datetime object,
+        raw_value (Any): The raw date or datetime value, which may be a string, date/datetime object,
             or other type coercible to a date.
 
     Returns:
-        A ``MetadataFilter`` instance with the appropriate operator and ISO-8601 value, or ``None`` if the value is invalid.
+        MetadataFilter | None: A ``MetadataFilter`` instance with the appropriate operator and ISO-8601 value, or ``None`` if the value is invalid.
     """
     boundary = _normalize_date_value(raw_value, upper_bound=operator.endswith("before"))
     if boundary is None:
@@ -449,12 +449,12 @@ def _compile_qdrant_rule(
     """Translate a normalized rule into a native Qdrant condition.
 
     Args:
-        rule: A dictionary with keys ``field``, ``operator``, ``value``, and optional ``values``,
+        rule (dict[str, Any]): A dictionary with keys ``field``, ``operator``, ``value``, and optional ``values``,
             where ``field`` is the metadata key to filter on, and ``operator`` is one of the
             supported filter operations.
 
     Returns:
-        A tuple of (compiled_condition, negate), where ``compiled_condition`` is a Qdrant-compatible
+        tuple[_QdrantCondition | None, bool]: A tuple of (compiled_condition, negate), where ``compiled_condition`` is a Qdrant-compatible
             condition or filter, and ``negate`` is a boolean indicating whether the condition should be
             negated (i.e., added to the ``must_not`` list instead of ``must``).
     """
@@ -557,10 +557,10 @@ def _normalize_scalar(value: Any) -> str | int | float | bool | None:
     """Return a vector-store-safe scalar, skipping empty values.
 
     Args:
-        value: The raw input value to normalize, which may be of any type.
+        value (Any): The raw input value to normalize, which may be of any type.
 
     Returns:
-        A normalized scalar value (string, number, or boolean), or ``None`` if the
+        str | int | float | bool | None: A normalized scalar value (string, number, or boolean), or ``None`` if the
             value is empty or cannot be coerced into a valid scalar.
     """
     if isinstance(value, bool):
@@ -577,11 +577,11 @@ def _normalize_values(values: Any) -> list[str | int | float | bool]:
     """Normalize a sequence of scalar values for ``IN`` filters.
 
     Args:
-        values: The raw input value to normalize, which may be a list, tuple, or
+        values (Any): The raw input value to normalize, which may be a list, tuple, or
             other iterable of scalar values.
 
     Returns:
-        A list of normalized scalar values. Empty or invalid entries will be skipped,
+        list[str | int | float | bool]: A list of normalized scalar values. Empty or invalid entries will be skipped,
             and non-list inputs will return an empty list.
     """
     if not isinstance(values, list):
@@ -598,13 +598,13 @@ def _normalize_date_value(value: Any, *, upper_bound: bool) -> str | None:
     """Normalize a date or datetime input into a UTC ISO-8601 string.
 
     Args:
-        value: The raw date or datetime value, which may be a string, date/datetime object,
+        value (Any): The raw date or datetime value, which may be a string, date/datetime object,
             or other type coercible to a date.
-        upper_bound: Whether the value represents an upper bound (i.e., "before" operator)
+        upper_bound (bool): Whether the value represents an upper bound (i.e., "before" operator)
             that should be normalized.
 
     Returns:
-        A normalized UTC ISO-8601 string, or ``None`` if the value is invalid.
+        str | None: A normalized UTC ISO-8601 string, or ``None`` if the value is invalid.
     """
     dt = _parse_date_value(value, upper_bound=upper_bound)
     if dt is None:
@@ -616,13 +616,13 @@ def _parse_date_value(value: Any, *, upper_bound: bool) -> datetime | None:
     """Parse a date or datetime input into a UTC datetime.
 
     Args:
-        value: The raw date or datetime value, which may be a string, date/datetime
+        value (Any): The raw date or datetime value, which may be a string, date/datetime
             object, or other type coercible to a date.
-        upper_bound: Whether the value represents an upper bound (i.e., "before" operator)
+        upper_bound (bool): Whether the value represents an upper bound (i.e., "before" operator)
             that should be normalized with time.max.
 
     Returns:
-        A UTC datetime object, or ``None`` if the value is invalid.
+        datetime | None: A UTC datetime object, or ``None`` if the value is invalid.
     """
     if isinstance(value, datetime):
         dt = value

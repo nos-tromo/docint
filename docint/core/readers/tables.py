@@ -1,3 +1,5 @@
+"""Tabular reader: CSV/TSV/Parquet/Excel with optional social-schema detection."""
+
 from __future__ import annotations
 
 import csv
@@ -336,7 +338,6 @@ class TableReader(BaseReader):
         """Return the matching specialized schema profile for a table, if any.
 
         Args:
-            cls: The TableReader class.
             columns (list[str] | pd.Index): The list of column names to match against known
                 schema profiles.
 
@@ -390,7 +391,7 @@ class TableReader(BaseReader):
 
         Args:
             file (str | Path): The path to the file to load.
-            **kwargs: Additional keyword arguments.
+            **kwargs (Any): Additional keyword arguments forwarded to the reader.
 
         Returns:
             list[Document]: A list of Document objects representing the loaded data.

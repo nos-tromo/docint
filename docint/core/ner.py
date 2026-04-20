@@ -66,10 +66,10 @@ def _safe_float(value: Any) -> float | None:
     """Return a float when possible, otherwise ``None``.
 
     Args:
-        value: Candidate numeric value.
+        value (Any): Candidate numeric value.
 
     Returns:
-        Parsed float or ``None``.
+        float | None: Parsed float or ``None``.
     """
     try:
         if value is None:
@@ -83,10 +83,10 @@ def _normalize_type(value: Any) -> str:
     """Normalize entity type labels.
 
     Args:
-        value: Raw type/label value.
+        value (Any): Raw type/label value.
 
     Returns:
-        Sanitized type label.
+        str: Sanitized type label.
     """
     txt = str(value or "").strip()
     return txt if txt else "Unlabeled"
@@ -96,10 +96,10 @@ def normalize_entity_merge_mode(value: Any) -> EntityMergeMode:
     """Normalize entity-merge mode inputs.
 
     Args:
-        value: Requested merge mode.
+        value (Any): Requested merge mode.
 
     Returns:
-        Supported merge mode, defaulting to ``"orthographic"``.
+        EntityMergeMode: Supported merge mode, defaulting to ``"orthographic"``.
     """
     return "exact" if str(value or "").strip().lower() == "exact" else "orthographic"
 
@@ -108,11 +108,11 @@ def _entity_key(text: str, entity_type: str) -> str:
     """Build an exact canonical entity key.
 
     Args:
-        text: Entity text.
-        entity_type: Entity type/label.
+        text (str): Entity text.
+        entity_type (str): Entity type/label.
 
     Returns:
-        Stable cluster key for entity aggregation.
+        str: Stable cluster key for entity aggregation.
     """
     return f"{text.lower()}::{entity_type.lower()}"
 
@@ -121,10 +121,10 @@ def _tokenize_lookup(text: str) -> list[str]:
     """Split text into alphanumeric lookup tokens.
 
     Args:
-        text: Raw text to tokenize.
+        text (str): Raw text to tokenize.
 
     Returns:
-        Lower-noise lookup tokens.
+        list[str]: Lower-noise lookup tokens.
     """
     return _LOOKUP_TOKEN_RE.findall(str(text or ""))
 
@@ -133,10 +133,10 @@ def _compact_lookup(text: str) -> str:
     """Return an alphanumeric-only lowercase lookup string.
 
     Args:
-        text: Raw text to compact.
+        text (str): Raw text to compact.
 
     Returns:
-        Lowercase compact lookup form.
+        str: Lowercase compact lookup form.
     """
     return "".join(token.lower() for token in _tokenize_lookup(text))
 
@@ -150,12 +150,12 @@ def entity_cluster_key(
     """Build an entity cluster key for the configured merge mode.
 
     Args:
-        text: Entity text.
-        entity_type: Entity type/label.
-        entity_merge_mode: Merge mode used for canonicalization.
+        text (str): Entity text.
+        entity_type (str): Entity type/label.
+        entity_merge_mode (EntityMergeMode): Merge mode used for canonicalization.
 
     Returns:
-        Stable cluster key for entity aggregation.
+        str: Stable cluster key for entity aggregation.
     """
     merge_mode = normalize_entity_merge_mode(entity_merge_mode)
     if merge_mode == "exact":
@@ -169,10 +169,10 @@ def _entity_aliases(text: str) -> set[str]:
     """Build query-time aliases for an entity label.
 
     Args:
-        text: Canonical entity text.
+        text (str): Canonical entity text.
 
     Returns:
-        Alias set including compact and acronym forms.
+        set[str]: Alias set including compact and acronym forms.
     """
     entity_text = str(text or "").strip()
     if not entity_text:
@@ -201,11 +201,11 @@ def match_entity_text(entity_text: str, query: str) -> tuple[int, str] | None:
     ``European Union``.
 
     Args:
-        entity_text: Canonical entity text.
-        query: Raw user query or search input.
+        entity_text (str): Canonical entity text.
+        query (str): Raw user query or search input.
 
     Returns:
-        Tuple of ``(rank, matched_alias)`` or ``None`` when unmatched.
+        tuple[int, str] | None: Tuple of ``(rank, matched_alias)`` or ``None`` when unmatched.
     """
     text = str(entity_text or "").strip()
     query_text = str(query or "").strip()
@@ -251,10 +251,10 @@ def normalize_entities(entities: list[Any] | None) -> list[dict[str, Any]]:
     """Normalize entity payloads.
 
     Args:
-        entities: Raw entity list from source metadata.
+        entities (list[Any] | None): Raw entity list from source metadata.
 
     Returns:
-        Sanitized entity dictionaries.
+        list[dict[str, Any]]: Sanitized entity dictionaries.
     """
     normalized: list[dict[str, Any]] = []
     for ent in entities or []:
@@ -278,10 +278,10 @@ def normalize_relations(relations: list[Any] | None) -> list[dict[str, Any]]:
     """Normalize relation payloads.
 
     Args:
-        relations: Raw relation list from source metadata.
+        relations (list[Any] | None): Raw relation list from source metadata.
 
     Returns:
-        Sanitized relation dictionaries.
+        list[dict[str, Any]]: Sanitized relation dictionaries.
     """
     normalized: list[dict[str, Any]] = []
     for rel in relations or []:
@@ -307,10 +307,10 @@ def _variant_rows(row: dict[str, Any]) -> list[dict[str, Any]]:
     """Return sorted variant payloads for an entity row.
 
     Args:
-        row: Entity cluster row containing a ``variant_map``.
+        row (dict[str, Any]): Entity cluster row containing a ``variant_map``.
 
     Returns:
-        List of variant dictionaries sorted by mention count and score.
+        list[dict[str, Any]]: List of variant dictionaries sorted by mention count and score.
     """
     variants: list[dict[str, Any]] = []
     for variant in row["variant_map"].values():
@@ -340,10 +340,10 @@ def _canonical_variant_text(row: dict[str, Any]) -> str:
     """Choose the canonical display text for a merged entity row.
 
     Args:
-        row: Entity cluster row containing a ``variant_map``.
+        row (dict[str, Any]): Entity cluster row containing a ``variant_map``.
 
     Returns:
-        Canonical display text for the entity row.
+        str: Canonical display text for the entity row.
     """
     winner = min(
         row["variant_map"].values(),
@@ -364,9 +364,9 @@ def _add_lookup_key(index: dict[str, list[str]], lookup: str, key: str) -> None:
     """Append a cluster key to a lookup map without duplicates.
 
     Args:
-        index: Lookup map to update.
-        lookup: Lookup key.
-        key: Cluster key to append.
+        index (dict[str, list[str]]): Lookup map to update.
+        lookup (str): Lookup key.
+        key (str): Cluster key to append.
     """
     if not lookup:
         return
@@ -387,15 +387,15 @@ def _resolve_entity_reference(
     """Resolve a relation endpoint to a canonical entity when unambiguous.
 
     Args:
-        text: Raw relation endpoint text.
-        local_text_to_keys: Local lookup map for exact text matches.
-        local_compact_to_keys: Local lookup map for compacted text matches.
-        global_text_to_keys: Global lookup map for exact text matches.
-        global_compact_to_keys: Global lookup map for compacted text matches.
-        canonical_text_by_key: Mapping of cluster keys to canonical text.
+        text (str): Raw relation endpoint text.
+        local_text_to_keys (dict[str, list[str]]): Local lookup map for exact text matches.
+        local_compact_to_keys (dict[str, list[str]]): Local lookup map for compacted text matches.
+        global_text_to_keys (dict[str, list[str]]): Global lookup map for exact text matches.
+        global_compact_to_keys (dict[str, list[str]]): Global lookup map for compacted text matches.
+        canonical_text_by_key (dict[str, str]): Mapping of cluster keys to canonical text.
 
     Returns:
-        Tuple containing the resolved cluster key (or None) and the canonical text.
+        tuple[str | None, str]: Tuple containing the resolved cluster key (or None) and the canonical text.
     """
     raw = str(text or "").strip()
     if not raw:
@@ -424,11 +424,11 @@ def aggregate_ner_sources(
     """Aggregate NER payloads across source rows.
 
     Args:
-        sources: Source metadata rows containing optional ``entities`` and ``relations``.
-        entity_merge_mode: Entity clustering mode used for aggregation.
+        sources (list[dict[str, Any]] | None): Source metadata rows containing optional ``entities`` and ``relations``.
+        entity_merge_mode (EntityMergeMode): Entity clustering mode used for aggregation.
 
     Returns:
-        Aggregation dictionary used by stats/search/graph helpers.
+        dict[str, Any]: Aggregation dictionary used by stats/search/graph helpers.
     """
     merge_mode = normalize_entity_merge_mode(entity_merge_mode)
     entity_index: dict[str, dict[str, Any]] = {}
@@ -678,14 +678,14 @@ def build_ner_stats(
     """Build dashboard-friendly NER statistics from an aggregate payload.
 
     Args:
-        aggregate: Aggregated NER payload from ``aggregate_ner_sources``.
-        top_k: Maximum number of entities and relations to include in the output.
-        min_mentions: Minimum number of mentions for entities and relations to be included.
-        entity_type: Optional filter to include only entities of a specific type/label.
-        include_relations: Whether to include relation statistics in the output.
+        aggregate (dict[str, Any]): Aggregated NER payload from ``aggregate_ner_sources``.
+        top_k (int): Maximum number of entities and relations to include in the output.
+        min_mentions (int): Minimum number of mentions for entities and relations to be included.
+        entity_type (str | None): Optional filter to include only entities of a specific type/label.
+        include_relations (bool): Whether to include relation statistics in the output.
 
     Returns:
-        Dictionary containing totals, top entities, entity type rollups, top relations, and document stats
+        dict[str, Any]: Dictionary containing totals, top entities, entity type rollups, top relations, and document stats
     """
     entities_all = list(aggregate.get("entities") or [])
     relations_all = list(aggregate.get("relations") or [])
@@ -824,13 +824,13 @@ def search_entities(
     """Search canonicalized entities in aggregated NER payloads.
 
     Args:
-        aggregate: Aggregated NER payload from ``aggregate_ner_sources``.
-        q: Search query string to match against entity texts.
-        entity_type: Optional filter to include only entities of a specific type/label.
-        limit: Maximum number of search results to return.
+        aggregate (dict[str, Any]): Aggregated NER payload from ``aggregate_ner_sources``.
+        q (str): Search query string to match against entity texts.
+        entity_type (str | None): Optional filter to include only entities of a specific type/label.
+        limit (int): Maximum number of search results to return.
 
     Returns:
-        List of matching entities sorted by relevance and mention count.
+        list[dict[str, Any]]: List of matching entities sorted by relevance and mention count.
     """
     entities = list(aggregate.get("entities") or [])
     query = str(q or "").strip().lower()
@@ -888,12 +888,12 @@ def build_entity_graph(
     """Build a lightweight graph from aggregated entities and relations.
 
     Args:
-        aggregate: Aggregated NER payload from ``aggregate_ner_sources``.
-        top_k_nodes: Maximum number of nodes to include in the graph.
-        min_edge_weight: Minimum weight for edges to be included in the graph.
+        aggregate (dict[str, Any]): Aggregated NER payload from ``aggregate_ner_sources``.
+        top_k_nodes (int): Maximum number of nodes to include in the graph.
+        min_edge_weight (int): Minimum weight for edges to be included in the graph.
 
     Returns:
-        Dictionary containing nodes, edges, and metadata about the graph.
+        dict[str, Any]: Dictionary containing nodes, edges, and metadata about the graph.
     """
     entities = list(aggregate.get("entities") or [])
     relations = list(aggregate.get("relations") or [])
@@ -1014,12 +1014,12 @@ def graph_neighbors(
     """Return graph neighborhood around an entity (by id or text).
 
     Args:
-        graph: Graph payload containing nodes and edges.
-        entity: Entity identifier (node id or text) to find the neighborhood for.
-        hops: Number of hops to include in the neighborhood.
+        graph (dict[str, Any]): Graph payload containing nodes and edges.
+        entity (str): Entity identifier (node id or text) to find the neighborhood for.
+        hops (int): Number of hops to include in the neighborhood.
 
     Returns:
-        Dictionary containing the center node, its neighbors with scores and depths, the nodes and edges in the neighborhood, and metadata about the neighborhood.
+        dict[str, Any]: Dictionary containing the center node, its neighbors with scores and depths, the nodes and edges in the neighborhood, and metadata about the neighborhood.
     """
     nodes = list(graph.get("nodes") or [])
     edges = list(graph.get("edges") or [])

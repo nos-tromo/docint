@@ -324,7 +324,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
         This is used to determine whether a cached postprocessor can be reused for a given pipeline configuration.
 
         Returns:
-            A string identifier for this postprocessor class.
+            str: A string identifier for this postprocessor class.
         """
         return "ParentContextPostprocessor"
 
@@ -420,11 +420,8 @@ class VLLMRerankPostprocessor(BaseNodePostprocessor):
     def class_name(cls) -> str:
         """Return a stable class identifier.
 
-        Args:
-            cls: The class for which to return the identifier.
-
         Returns:
-            A string identifier for this postprocessor class.
+            str: A string identifier for this postprocessor class.
         """
         return "VLLMRerankPostprocessor"
 
@@ -546,10 +543,10 @@ def _vllm_service_root(api_base: str) -> str:
     """Normalize an OpenAI-compatible base URL to the vLLM service root.
 
     Args:
-        api_base: OpenAI-compatible API base URL, typically ending in ``/v1``.
+        api_base (str): OpenAI-compatible API base URL, typically ending in ``/v1``.
 
     Returns:
-        The vLLM service root without the trailing ``/v1`` suffix.
+        str: The vLLM service root without the trailing ``/v1`` suffix.
     """
 
     normalized = api_base.rstrip("/")
@@ -569,10 +566,10 @@ class VLLMSparseEncoder:
         """Encode texts as sparse vectors using the configured vLLM service.
 
         Args:
-            texts: Input texts to encode.
+            texts (list[str]): Input texts to encode.
 
         Returns:
-            Sparse indices and values aligned with the input order.
+            BatchSparseEncoding: Sparse indices and values aligned with the input order.
         """
 
         if not texts:
@@ -606,11 +603,11 @@ class VLLMSparseEncoder:
         """POST JSON to a vLLM endpoint and decode the JSON response.
 
         Args:
-            url: The full URL of the vLLM endpoint to which the request should be sent.
-            payload: A dictionary representing the JSON payload to be sent in the POST request.
+            url (str): The full URL of the vLLM endpoint to which the request should be sent.
+            payload (dict[str, Any]): A dictionary representing the JSON payload to be sent in the POST request.
 
         Returns:
-            The decoded JSON response from the vLLM service, which may be a dictionary, list, or other JSON structure depending on the endpoint.
+            Any: The decoded JSON response from the vLLM service, which may be a dictionary, list, or other JSON structure depending on the endpoint.
         """
 
         request = urllib.request.Request(
@@ -626,10 +623,10 @@ class VLLMSparseEncoder:
         """Fetch token-level sparse scores for a batch of texts.
 
         Args:
-            texts: A list of input texts for which to pool token scores.
+            texts (list[str]): A list of input texts for which to pool token scores.
 
         Returns:
-            A list of token score lists, where each inner list corresponds to the token scores for the respective input text. The length of the outer list matches the length of the input texts, and each inner list contains float scores aligned with the tokens of the corresponding text.
+            list[list[float]]: A list of token score lists, where each inner list corresponds to the token scores for the respective input text. The length of the outer list matches the length of the input texts, and each inner list contains float scores aligned with the tokens of the corresponding text.
         """
 
         request_url = f"{_vllm_service_root(self.api_base)}/pooling"
@@ -663,10 +660,10 @@ class VLLMSparseEncoder:
         """Tokenize a single text through the vLLM tokenizer endpoint.
 
         Args:
-            text: The input text to be tokenized.
+            text (str): The input text to be tokenized.
 
         Returns:
-            A list of token IDs corresponding to the input text.
+            list[int]: A list of token IDs corresponding to the input text.
         """
 
         request_url = f"{_vllm_service_root(self.api_base)}/tokenize"
@@ -687,10 +684,10 @@ class VLLMSparseEncoder:
         """Extract token ids from a vLLM tokenize response payload.
 
         Args:
-            payload: The JSON-decoded response from the vLLM tokenize endpoint, which may have various structures but is expected to contain token ID information in one of several possible locations.
+            payload (Any): The JSON-decoded response from the vLLM tokenize endpoint, which may have various structures but is expected to contain token ID information in one of several possible locations.
 
         Returns:
-            A list of token IDs extracted from the payload. If no valid token IDs can be found, an empty list is returned.
+            list[int]: A list of token IDs extracted from the payload. If no valid token IDs can be found, an empty list is returned.
         """
 
         candidates: list[Any] = []
@@ -728,10 +725,10 @@ class VLLMSparseEncoder:
         """Normalize pooled token outputs into one float score per token.
 
         Args:
-            raw_scores: The raw token scores from the vLLM sparse pooling response.
+            raw_scores (Any): The raw token scores from the vLLM sparse pooling response.
 
         Returns:
-            A list of float scores corresponding to each token.
+            list[float]: A list of float scores corresponding to each token.
         """
 
         if not isinstance(raw_scores, list):
@@ -767,11 +764,11 @@ class VLLMSparseEncoder:
         """Aggregate token ids and scores into a Qdrant sparse vector.
 
         Args:
-            token_ids: A list of token IDs corresponding to the input text.
-            token_scores: A list of token scores corresponding to the input text, aligned with the token IDs.
+            token_ids (list[int]): A list of token IDs corresponding to the input text.
+            token_scores (list[float]): A list of token scores corresponding to the input text, aligned with the token IDs.
 
         Returns:
-            A tuple containing two lists: the first list is the aggregated token IDs for the sparse
+            tuple[list[int], list[float]]: A tuple containing two lists: the first list is the aggregated token IDs for the sparse
                 vector, and the second list is the corresponding aggregated scores for those token
                 IDs. The aggregation process involves merging duplicate token IDs by taking the maximum
                 score for each unique token ID, and filtering out any token IDs that are negative or
@@ -1096,12 +1093,12 @@ class RAG:
         """Load prompt text from disk, falling back to a bundled default.
 
         Args:
-            path: Optional filesystem path to the prompt template.
-            default: Fallback prompt text when the file is absent.
-            required: Whether a missing prompt should raise an error.
+            path (Path | None): Optional filesystem path to the prompt template.
+            default (str): Fallback prompt text when the file is absent.
+            required (bool): Whether a missing prompt should raise an error.
 
         Returns:
-            Prompt text for downstream model calls.
+            str: Prompt text for downstream model calls.
 
         Raises:
             ValueError: If ``required`` is true and no prompt path is available.
@@ -1182,7 +1179,7 @@ class RAG:
         Priority: explicit field -> env var -> platform default under home.
 
         Returns:
-            The Path representing the Qdrant source host directory.
+            Path: The Path representing the Qdrant source host directory.
 
         Raises:
             ValueError: If the path configuration or the Qdrant source host directory is not set.
@@ -1341,7 +1338,7 @@ class RAG:
         """Attach or clear the embedding warning callback on the active model.
 
         Args:
-            callback: Warning callback used during ingestion, or ``None``.
+            callback (Callable[[str], None] | None): Warning callback used during ingestion, or ``None``.
         """
         if self._embed_model is None:
             return
@@ -1475,7 +1472,7 @@ class RAG:
         """Helper to create an OpenAI (or compatible) model instance.
 
         Args:
-            enable_reasoning: Whether this model instance should request the
+            enable_reasoning (bool): Whether this model instance should request the
                 provider reasoning/thinking mode.
 
         Returns:
@@ -1799,10 +1796,10 @@ class RAG:
         """Return whether a Qdrant collection exists.
 
         Args:
-            collection_name: Collection name to verify.
+            collection_name (str): Collection name to verify.
 
         Returns:
-            ``True`` if the collection exists, else ``False``.
+            bool: ``True`` if the collection exists, else ``False``.
         """
         collection_exists = getattr(self.qdrant_client, "collection_exists", None)
         if callable(collection_exists):
@@ -1848,10 +1845,10 @@ class RAG:
         """Select nodes that should be inserted into the vector store.
 
         Args:
-            nodes: Parsed nodes for an ingestion batch.
+            nodes (list[BaseNode]): Parsed nodes for an ingestion batch.
 
         Returns:
-            The subset of nodes suitable for vector indexing.
+            list[BaseNode]: The subset of nodes suitable for vector indexing.
         """
         is_hierarchical = any("docint_hier_type" in n.metadata for n in nodes)
         if is_hierarchical:
@@ -1865,7 +1862,7 @@ class RAG:
         """Attach embeddings and identify vector nodes that must be skipped.
 
         Args:
-            nodes: Vector-indexable nodes for the current persistence batch.
+            nodes (list[BaseNode]): Vector-indexable nodes for the current persistence batch.
 
         Returns:
             tuple[list[BaseNode], set[int]]: The embeddable nodes and the
@@ -1918,7 +1915,7 @@ class RAG:
         """Async variant of ``_prepare_vector_nodes_for_insert``.
 
         Args:
-            nodes: Vector-indexable nodes for the current persistence batch.
+            nodes (list[BaseNode]): Vector-indexable nodes for the current persistence batch.
 
         Returns:
             tuple[list[BaseNode], set[int]]: The embeddable nodes and the
@@ -1969,8 +1966,8 @@ class RAG:
         """Split nodes into non-empty batches.
 
         Args:
-            nodes: Nodes to split.
-            batch_size: Preferred maximum batch size.
+            nodes (list[BaseNode]): Nodes to split.
+            batch_size (int): Preferred maximum batch size.
 
         Returns:
             list[list[BaseNode]]: Node batches in input order.
@@ -1987,7 +1984,7 @@ class RAG:
         """Persist nodes in micro-batches to reduce crash-loss windows.
 
         Args:
-            nodes: Ingestion nodes to persist.
+            nodes (list[BaseNode]): Ingestion nodes to persist.
 
         Raises:
             RuntimeError: If the index is not initialized.
@@ -2033,14 +2030,14 @@ class RAG:
         """Log ingest benchmark counters for runtime tuning.
 
         Args:
-            mode: Ingest mode label (``sync`` or ``async``).
-            started_at: Monotonic timestamp when ingestion started.
-            core_docs: Number of document records emitted by core PDF pipeline.
-            core_nodes: Number of nodes persisted from core PDF pipeline.
-            streaming_docs: Number of docs emitted by legacy streaming pipeline.
-            streaming_nodes: Number of nodes persisted from legacy streaming pipeline.
-            enrich_batches: Number of streaming enrichment batches processed.
-            persist_batches: Number of docstore/vector persistence micro-batches.
+            mode (str): Ingest mode label (``sync`` or ``async``).
+            started_at (float): Monotonic timestamp when ingestion started.
+            core_docs (int): Number of document records emitted by core PDF pipeline.
+            core_nodes (int): Number of nodes persisted from core PDF pipeline.
+            streaming_docs (int): Number of docs emitted by legacy streaming pipeline.
+            streaming_nodes (int): Number of nodes persisted from legacy streaming pipeline.
+            enrich_batches (int): Number of streaming enrichment batches processed.
+            persist_batches (int): Number of docstore/vector persistence micro-batches.
         """
         elapsed_s = max(0.001, time.monotonic() - started_at)
         total_nodes = core_nodes + streaming_nodes
@@ -2070,7 +2067,7 @@ class RAG:
         """Asynchronously persist nodes in micro-batches.
 
         Args:
-            nodes: Ingestion nodes to persist.
+            nodes (list[BaseNode]): Ingestion nodes to persist.
 
         Raises:
             RuntimeError: If the index is not initialized.
@@ -2151,10 +2148,10 @@ class RAG:
         """Best-effort extraction of node text from a Qdrant payload.
 
         Args:
-            payload: Raw point payload returned by Qdrant.
+            payload (dict[str, Any]): Raw point payload returned by Qdrant.
 
         Returns:
-            Extracted text content, or an empty string if unavailable.
+            str: Extracted text content, or an empty string if unavailable.
         """
         for key in ("text", "chunk_text", "chunk", "content"):
             candidate = payload.get(key)
@@ -2231,13 +2228,13 @@ class RAG:
         """Normalize a raw metadata/payload dictionary into a source dictionary.
 
         Args:
-            collection: The Qdrant collection name associated with the payload.
-            payload: The raw point payload returned by Qdrant.
-            score: Optional similarity score to include in the source.
-            text_value: Optional pre-extracted text value to use instead of extracting from payload.
+            collection (str): The Qdrant collection name associated with the payload.
+            payload (dict[str, Any]): The raw point payload returned by Qdrant.
+            score (float | None): Optional similarity score to include in the source.
+            text_value (str | None): Optional pre-extracted text value to use instead of extracting from payload.
 
         Returns:
-            A normalized source dictionary containing standardized fields for downstream processing.
+            dict[str, Any]: A normalized source dictionary containing standardized fields for downstream processing.
         """
         origin = payload.get("origin") or {}
         filename = (
@@ -2520,11 +2517,11 @@ class RAG:
         """Rewrite the latest user message into a standalone retrieval query.
 
         Args:
-            user_msg: The latest user question.
-            conversation_context: Compact prior-turn context used only for rewrite.
+            user_msg (str): The latest user question.
+            conversation_context (str): Compact prior-turn context used only for rewrite.
 
         Returns:
-            Standalone retrieval query text.
+            str: Standalone retrieval query text.
         """
         if not conversation_context.strip():
             return user_msg.strip()
@@ -2718,11 +2715,11 @@ class RAG:
         """Merge request-scoped filters with internal retrieval filters.
 
         Args:
-            base_filters: The original filters provided at the query engine level, or None if no filters were provided.
-            extra_filters: Additional filters that must be applied for retrieval, such as parent-context scoping.
+            base_filters (MetadataFilters | None): The original filters provided at the query engine level, or None if no filters were provided.
+            extra_filters (list[MetadataFilter]): Additional filters that must be applied for retrieval, such as parent-context scoping.
 
         Returns:
-            A new MetadataFilters object that combines the base filters and extra filters with an AND condition, or None if there are no filters to apply.
+            MetadataFilters | None: A new MetadataFilters object that combines the base filters and extra filters with an AND condition, or None if there are no filters to apply.
         """
         if not extra_filters:
             return base_filters
@@ -2743,7 +2740,7 @@ class RAG:
         """Resolve runtime retrieval mode for the vector index retriever.
 
         Args:
-            raw_mode: An optional retrieval mode string provided at call time, which takes precedence over config settings. Expected values
+            raw_mode (str | None): An optional retrieval mode string provided at call time, which takes precedence over config settings. Expected values
                 are "auto", "default", "sparse", "hybrid", or "mmr".
 
         Returns:
@@ -2782,8 +2779,8 @@ class RAG:
         """Resolve retrieval settings from config plus optional call-site overrides.
 
         Args:
-            similarity_top_k: An optional override for the number of top similar results to retrieve, which takes precedence over config settings.
-            retrieval_options: An optional dictionary of runtime retrieval overrides, which may include "vector_store_query_mode", "alpha",
+            similarity_top_k (int | None): An optional override for the number of top similar results to retrieve, which takes precedence over config settings.
+            retrieval_options (dict[str, Any] | None): An optional dictionary of runtime retrieval overrides, which may include "vector_store_query_mode", "alpha",
                 "sparse_top_k", "hybrid_top_k", and "parent_context_enabled". These options take precedence over config settings and are used to
                 dynamically adjust retrieval behavior on a per-query basis.
 
@@ -2838,7 +2835,7 @@ class RAG:
         """Return the grounded QA prompt template for answer synthesis.
 
         Args:
-            social_table: Whether the active collection appears to be social/table heavy, which may require special
+            social_table (bool): Whether the active collection appears to be social/table heavy, which may require special
                 instructions to preserve post-level distinctions during synthesis.
 
         Returns:
@@ -2857,7 +2854,7 @@ class RAG:
         """Return the grounded refine prompt template for answer synthesis.
 
         Args:
-            social_table: Whether the active collection appears to be social/table heavy, which may require special
+            social_table (bool): Whether the active collection appears to be social/table heavy, which may require special
                 instructions to preserve post-level distinctions during synthesis.
 
         Returns:
@@ -2883,10 +2880,10 @@ class RAG:
         """Build a retriever, optionally scoped by metadata filters.
 
         Args:
-            metadata_filters: Optional request-scoped metadata filters.
-            similarity_top_k: Optional override for retrieval depth.
-            vector_store_kwargs: Optional native vector-store query kwargs.
-            retrieval_options: Optional runtime overrides for retrieval mode,
+            metadata_filters (MetadataFilters | None): Optional request-scoped metadata filters.
+            similarity_top_k (int | None): Optional override for retrieval depth.
+            vector_store_kwargs (dict[str, Any] | None): Optional native vector-store query kwargs.
+            retrieval_options (dict[str, Any] | None): Optional runtime overrides for retrieval mode,
                 hybrid fusion, and parent-context expansion.
         """
         if self.index is None:
@@ -2940,10 +2937,10 @@ class RAG:
         """Construct a query engine for the current index.
 
         Args:
-            metadata_filters: Optional request-scoped metadata filters.
-            streaming: Whether the query engine should stream token output.
-            vector_store_kwargs: Optional native vector-store query kwargs.
-            retrieval_options: Optional runtime overrides for retrieval mode,
+            metadata_filters (MetadataFilters | None): Optional request-scoped metadata filters.
+            streaming (bool): Whether the query engine should stream token output.
+            vector_store_kwargs (dict[str, Any] | None): Optional native vector-store query kwargs.
+            retrieval_options (dict[str, Any] | None): Optional runtime overrides for retrieval mode,
                 hybrid fusion, and parent-context expansion.
         """
         if self.index is None:
@@ -3189,7 +3186,7 @@ class RAG:
         """Load NER-bearing source rows from Qdrant.
 
         Args:
-            qdrant_filter: Optional native Qdrant filter applied during scroll.
+            qdrant_filter (qdrant_models.Filter | None): Optional native Qdrant filter applied during scroll.
 
         Returns:
             list[dict[str, Any]]: Normalized NER source rows.
@@ -3249,7 +3246,7 @@ class RAG:
         """Build a stable key for source-level deduplication.
 
         Args:
-            source: A normalized source dictionary.
+            source (dict[str, Any]): A normalized source dictionary.
 
         Returns:
             str: A string key that can be used to identify duplicate sources.
@@ -3283,8 +3280,8 @@ class RAG:
         """Collect sorted entity matches for an occurrence lookup query.
 
         Args:
-            aggregate: Collection-wide NER aggregate payload.
-            query: Raw user query string.
+            aggregate (dict[str, Any]): Collection-wide NER aggregate payload.
+            query (str): Raw user query string.
 
         Returns:
             list[dict[str, Any]]: Candidate entity matches sorted by rank and mentions.
@@ -3374,9 +3371,9 @@ class RAG:
         """Build grouped occurrence results for one matched entity.
 
         Args:
-            sources: Candidate NER-bearing source rows.
-            matched_entity: Selected entity match metadata.
-            limit: Maximum number of source rows retained for the entity.
+            sources (list[dict[str, Any]]): Candidate NER-bearing source rows.
+            matched_entity (dict[str, Any]): Selected entity match metadata.
+            limit (int): Maximum number of source rows retained for the entity.
 
         Returns:
             dict[str, Any]: Group payload containing entity metadata and sources.
@@ -3491,10 +3488,10 @@ class RAG:
         """Return mention-level source rows for the best matching entity.
 
         Args:
-            prompt: Raw user query used to identify the target entity.
-            qdrant_filter: Optional native Qdrant filter to constrain candidate rows.
-            limit: Maximum number of occurrence rows to return.
-            refresh: Whether to bypass cached NER rows when no native filter is used.
+            prompt (str): Raw user query used to identify the target entity.
+            qdrant_filter (qdrant_models.Filter | None): Optional native Qdrant filter to constrain candidate rows.
+            limit (int): Maximum number of occurrence rows to return.
+            refresh (bool): Whether to bypass cached NER rows when no native filter is used.
 
         Returns:
             dict[str, Any]: A response payload aligned with the normal query path.
@@ -3599,10 +3596,10 @@ class RAG:
         """Return grouped occurrence results for all strong entity matches.
 
         Args:
-            prompt: Raw user query used to identify the target entities.
-            qdrant_filter: Optional native Qdrant filter to constrain candidate rows.
-            limit: Maximum number of source rows retained across all groups.
-            refresh: Whether to bypass cached NER rows when no native filter is used.
+            prompt (str): Raw user query used to identify the target entities.
+            qdrant_filter (qdrant_models.Filter | None): Optional native Qdrant filter to constrain candidate rows.
+            limit (int): Maximum number of source rows retained across all groups.
+            refresh (bool): Whether to bypass cached NER rows when no native filter is used.
 
         Returns:
             dict[str, Any]: Grouped occurrence payload.
@@ -3786,7 +3783,7 @@ class RAG:
         """Switch active collection, ensuring it already exists.
 
         Args:
-            name: Name of the collection to select.
+            name (str): Name of the collection to select.
 
         Raises:
             ValueError: If the name is empty or the collection does not exist.
@@ -4325,7 +4322,7 @@ class RAG:
         """Invalidate cached NER payloads for one or all collections.
 
         Args:
-            collection: Optional collection name. If omitted, clears all NER caches.
+            collection (str | None): Optional collection name. If omitted, clears all NER caches.
         """
         if collection is None:
             self.ner_sources = []
@@ -4453,10 +4450,10 @@ class RAG:
         """Optionally expand a query and return GraphRAG debug metadata.
 
         Args:
-            query: Original retrieval query.
+            query (str): Original retrieval query.
 
         Returns:
-            A tuple of ``(expanded_query, debug_payload)``.
+            tuple[str, dict[str, Any]]: A tuple of ``(expanded_query, debug_payload)``.
         """
         debug: dict[str, Any] = {
             "enabled": bool(self.graphrag_enabled),
@@ -4549,10 +4546,10 @@ class RAG:
         """Optionally expand a query using graph-neighbor entities.
 
         Args:
-            query: Original retrieval query.
+            query (str): Original retrieval query.
 
         Returns:
-            Expanded query when graph expansion is enabled and applicable,
+            str: Expanded query when graph expansion is enabled and applicable,
             otherwise the original query.
         """
         expanded_query, _ = self.expand_query_with_graph_with_debug(query)
@@ -4618,8 +4615,8 @@ class RAG:
         can still proceed when the embedding backend returns invalid values.
 
         Args:
-            filename: Target document filename.
-            file_hash: Optional file hash for precise scoping.
+            filename (str): Target document filename.
+            file_hash (str | None): Optional file hash for precise scoping.
 
         Returns:
             list[NodeWithScore]: Synthetic node hits derived from stored payloads.
@@ -4759,10 +4756,10 @@ class RAG:
         """Build a deterministic deduplication key for summary sources.
 
         Args:
-            source: A normalized source dictionary.
+            source (dict[str, Any]): A normalized source dictionary.
 
         Returns:
-            A string key that uniquely identifies the source for deduplication purposes.
+            str: A string key that uniquely identifies the source for deduplication purposes.
         """
         reference_metadata = source.get("reference_metadata")
         text_id = ""
@@ -4786,11 +4783,11 @@ class RAG:
         """Build one compact, evidence-first brief for a document.
 
         Args:
-            filename: The name of the document.
-            sources: A list of normalized source dictionaries associated with the document.
+            filename (str): The name of the document.
+            sources (list[dict[str, Any]]): A list of normalized source dictionaries associated with the document.
 
         Returns:
-            A formatted string brief that includes key points and evidence snippets from the sources.
+            str: A formatted string brief that includes key points and evidence snippets from the sources.
         """
         snippets: list[str] = []
         for source in sources:
@@ -4820,10 +4817,10 @@ class RAG:
         """Merge per-document evidence and guarantee broad document coverage.
 
         Args:
-            per_doc_sources: A dictionary mapping document identifiers to lists of source dictionaries.
+            per_doc_sources (dict[str, list[dict[str, Any]]]): A dictionary mapping document identifiers to lists of source dictionaries.
 
         Returns:
-            A merged list of source dictionaries that prioritizes at least one source per document and fills remaining slots with additional evidence.
+            list[dict[str, Any]]: A merged list of source dictionaries that prioritizes at least one source per document and fills remaining slots with additional evidence.
         """
         merged: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -4862,11 +4859,11 @@ class RAG:
         """Build the final synthesis prompt from per-document evidence briefs.
 
         Args:
-            briefs: A list of evidence briefs for each document.
-            diagnostics: A dictionary containing diagnostic information such as coverage ratio and uncovered documents.
+            briefs (list[str]): A list of evidence briefs for each document.
+            diagnostics (dict[str, Any]): A dictionary containing diagnostic information such as coverage ratio and uncovered documents.
 
         Returns:
-            A formatted string representing the final synthesis prompt.
+            str: A formatted string representing the final synthesis prompt.
         """
         coverage_ratio = float(diagnostics.get("coverage_ratio", 0.0) or 0.0)
         coverage_target = float(diagnostics.get("coverage_target", 0.0) or 0.0)
@@ -5171,8 +5168,8 @@ class RAG:
         """Return the per-collection KV store used by summary cache operations.
 
         Args:
-            collection: Optional collection name override.
-            allow_create: Whether creating the dockv collection is allowed.
+            collection (str | None): Optional collection name override.
+            allow_create (bool): Whether creating the dockv collection is allowed.
 
         Returns:
             QdrantKVStore | None: A KV store instance when available, else None.
@@ -5244,8 +5241,8 @@ class RAG:
         """Load the current summary revision for a collection.
 
         Args:
-            collection: Optional collection name override.
-            allow_create: Whether creating the dockv collection is allowed.
+            collection (str | None): Optional collection name override.
+            allow_create (bool): Whether creating the dockv collection is allowed.
 
         Returns:
             int: Monotonic revision value; defaults to 0 when unavailable.
@@ -5282,8 +5279,8 @@ class RAG:
         """Increment and persist summary revision for a collection.
 
         Args:
-            collection: Optional collection name override.
-            allow_create: Whether creating the dockv collection is allowed.
+            collection (str | None): Optional collection name override.
+            allow_create (bool): Whether creating the dockv collection is allowed.
 
         Returns:
             int: The updated revision.
@@ -5316,7 +5313,7 @@ class RAG:
         """Load a cached summary if revision and prompt fingerprint still match.
 
         Args:
-            refresh: If ``True``, bypass cache lookup.
+            refresh (bool): If ``True``, bypass cache lookup.
 
         Returns:
             dict[str, Any] | None: Cached summary payload or None when stale/missing.
@@ -5372,7 +5369,7 @@ class RAG:
         """Persist a collection summary payload in the dockv summary namespace.
 
         Args:
-            payload: Summary payload to cache.
+            payload (dict[str, Any]): Summary payload to cache.
         """
         kv_store = self._summary_kv_store()
         if kv_store is None:
@@ -5413,7 +5410,7 @@ class RAG:
         """Generate a coverage-aware summary for the selected collection.
 
         Args:
-            refresh: If ``True``, bypass cached summary payloads.
+            refresh (bool): If ``True``, bypass cached summary payloads.
 
         Returns:
             dict[str, Any]: Summary payload with normalized sources and diagnostics.
@@ -5459,7 +5456,7 @@ class RAG:
         """Generate a streaming summary of the currently selected collection.
 
         Args:
-            refresh: If ``True``, bypass cached summary payloads.
+            refresh (bool): If ``True``, bypass cached summary payloads.
 
         Yields:
             str | dict: Chunks of text, followed by a dict with metadata.
@@ -5682,7 +5679,7 @@ class RAG:
         """Fetch all nodes from the current collection and return their NER metadata.
 
         Args:
-            refresh: If ``True``, bypass in-memory NER cache and re-fetch from Qdrant.
+            refresh (bool): If ``True``, bypass in-memory NER cache and re-fetch from Qdrant.
 
         Returns:
             list[dict[str, Any]]: A list of source metadata dictionaries containing NER data.
@@ -5785,11 +5782,11 @@ class RAG:
         """Return cached aggregate NER payload for the active collection.
 
         Args:
-            refresh: If ``True``, recompute aggregate from fresh collection NER rows.
-            entity_merge_mode: Entity clustering mode used for derived views.
+            refresh (bool): If ``True``, recompute aggregate from fresh collection NER rows.
+            entity_merge_mode (EntityMergeMode): Entity clustering mode used for derived views.
 
         Returns:
-            Aggregation dictionary for stats/search/graph operations.
+            dict[str, Any]: Aggregation dictionary for stats/search/graph operations.
         """
         merge_mode = normalize_entity_merge_mode(entity_merge_mode)
         if not self.qdrant_collection:
@@ -5820,14 +5817,14 @@ class RAG:
         """Return collection-wide NER statistics for dashboard and analysis views.
 
         Args:
-            top_k: Maximum number of top entities/relations to include.
-            min_mentions: Minimum mention count for ranked outputs.
-            entity_type: Optional case-insensitive entity-type filter.
-            include_relations: Whether relation aggregates are included.
-            refresh: If ``True``, recompute from fresh collection data.
+            top_k (int): Maximum number of top entities/relations to include.
+            min_mentions (int): Minimum mention count for ranked outputs.
+            entity_type (str | None): Optional case-insensitive entity-type filter.
+            include_relations (bool): Whether relation aggregates are included.
+            refresh (bool): If ``True``, recompute from fresh collection data.
 
         Returns:
-            NER stats payload.
+            dict[str, Any]: NER stats payload.
         """
         aggregate = self._get_collection_ner_aggregate(
             refresh=refresh,
@@ -5853,13 +5850,13 @@ class RAG:
         """Search canonicalized entities across the selected collection.
 
         Args:
-            q: Case-insensitive text query applied to entity names.
-            entity_type: Optional case-insensitive type filter.
-            limit: Maximum number of entities to return.
-            refresh: If ``True``, recompute from fresh collection data.
+            q (str): Case-insensitive text query applied to entity names.
+            entity_type (str | None): Optional case-insensitive type filter.
+            limit (int): Maximum number of entities to return.
+            refresh (bool): If ``True``, recompute from fresh collection data.
 
         Returns:
-            Search result rows sorted by mention frequency.
+            list[dict[str, Any]]: Search result rows sorted by mention frequency.
         """
         aggregate = self._get_collection_ner_aggregate(
             refresh=refresh,
@@ -5883,12 +5880,12 @@ class RAG:
         """Build a derived NER graph for the selected collection.
 
         Args:
-            top_k_nodes: Maximum number of highest-mention entity nodes to include.
-            min_edge_weight: Minimum edge weight threshold.
-            refresh: If ``True``, recompute graph from fresh collection data.
+            top_k_nodes (int): Maximum number of highest-mention entity nodes to include.
+            min_edge_weight (int): Minimum edge weight threshold.
+            refresh (bool): If ``True``, recompute graph from fresh collection data.
 
         Returns:
-            Graph payload containing ``nodes``, ``edges``, and ``meta``.
+            dict[str, Any]: Graph payload containing ``nodes``, ``edges``, and ``meta``.
         """
         if not self.qdrant_collection:
             return {
@@ -5934,14 +5931,14 @@ class RAG:
         """Return a local graph neighborhood around a specific entity.
 
         Args:
-            entity: Entity text or canonical node id.
-            hops: Number of graph hops to traverse.
-            top_k_nodes: Graph node cap used to build the base graph.
-            min_edge_weight: Graph edge threshold used to build the base graph.
-            refresh: If ``True``, recompute graph from fresh collection data.
+            entity (str): Entity text or canonical node id.
+            hops (int): Number of graph hops to traverse.
+            top_k_nodes (int): Graph node cap used to build the base graph.
+            min_edge_weight (int): Graph edge threshold used to build the base graph.
+            refresh (bool): If ``True``, recompute graph from fresh collection data.
 
         Returns:
-            Neighborhood payload with ``center`` and ``neighbors``.
+            dict[str, Any]: Neighborhood payload with ``center`` and ``neighbors``.
         """
         graph = self.get_collection_ner_graph(
             top_k_nodes=top_k_nodes,

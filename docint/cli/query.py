@@ -32,7 +32,7 @@ def get_col_name() -> str:
     """Prompt the user to enter a collection name.
 
     Returns:
-        The entered collection name.
+        str: The entered collection name.
     """
     return input("Enter collection name: ")
 
@@ -41,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the command-line parser for the query CLI.
 
     Returns:
-        Configured argument parser.
+        argparse.ArgumentParser: Configured argument parser.
     """
     parser = argparse.ArgumentParser(
         description="Run batch chat queries and collection analysis exports.",
@@ -95,10 +95,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse CLI arguments.
 
     Args:
-        argv: Optional explicit argument sequence for tests.
+        argv (Sequence[str] | None): Optional explicit argument sequence for tests.
 
     Returns:
-        Parsed CLI namespace.
+        argparse.Namespace: Parsed CLI namespace.
     """
     return build_parser().parse_args(list(argv) if argv is not None else None)
 
@@ -107,10 +107,10 @@ def rag_pipeline(col_name: str) -> RAG:
     """Initialize a Retrieval-Augmented Generation session.
 
     Args:
-        col_name: The collection to query.
+        col_name (str): The collection to query.
 
     Returns:
-        Initialized RAG instance.
+        RAG: Initialized RAG instance.
     """
     logger.info("Initializing RAG pipeline...")
     rag = RAG(qdrant_collection=col_name)
@@ -126,11 +126,11 @@ def load_queries(
     """Load query strings from a text file.
 
     Args:
-        queries_path: Path to the query text file.
-        prompts_path: Unused compatibility argument retained for callers/tests.
+        queries_path (Path): Path to the query text file.
+        prompts_path (Path | None): Unused compatibility argument retained for callers/tests.
 
     Returns:
-        Non-empty query strings loaded from the file, or an empty list when the
+        list[str]: Non-empty query strings loaded from the file, or an empty list when the
         file does not exist.
     """
     _ = prompts_path
@@ -150,10 +150,10 @@ def _ensure_output_path(output_path: str | Path) -> Path:
     """Ensure the output directory exists and return it.
 
     Args:
-        output_path: Output directory path.
+        output_path (str | Path): Output directory path.
 
     Returns:
-        Resolved output directory path.
+        Path: Resolved output directory path.
     """
     if not isinstance(output_path, Path):
         output_path = Path(output_path).expanduser()
@@ -168,9 +168,9 @@ def _store_output(filename: str, data: dict | list, output_path: str | Path) -> 
     """Store structured output data to a JSON file.
 
     Args:
-        filename: Output filename without extension.
-        data: Data payload to serialize.
-        output_path: Directory that will receive the file.
+        filename (str): Output filename without extension.
+        data (dict | list): Data payload to serialize.
+        output_path (str | Path): Directory that will receive the file.
     """
     resolved_output_path = _ensure_output_path(output_path)
 
@@ -198,9 +198,9 @@ def _store_text_output(filename: str, data: str, output_path: str | Path) -> Non
     """Store plain-text output data to a text file.
 
     Args:
-        filename: Output filename without extension.
-        data: Text payload to write.
-        output_path: Directory that will receive the file.
+        filename (str): Output filename without extension.
+        data (str): Text payload to write.
+        output_path (str | Path): Directory that will receive the file.
     """
     resolved_output_path = _ensure_output_path(output_path)
     target = resolved_output_path / f"{filename}.txt"
@@ -214,9 +214,9 @@ def _store_csv_output(
     """Store tabular data to a CSV file.
 
     Args:
-        filename: Output filename without extension.
-        rows: List of dicts; keys of the first row become column headers.
-        output_path: Directory that will receive the file.
+        filename (str): Output filename without extension.
+        rows (list[dict[str, Any]]): List of dicts; keys of the first row become column headers.
+        output_path (str | Path): Directory that will receive the file.
     """
     if not rows:
         return
@@ -241,14 +241,14 @@ def _get_validation_payload(
     """Validate an answer against sources using the same logic as API/frontend flows.
 
     Args:
-        rag: Active RAG instance.
-        question: Question or summarize prompt.
-        answer: Generated answer text.
-        sources: Retrieved or summary sources.
-        summary_diagnostics: Optional summary diagnostics payload.
+        rag (RAG): Active RAG instance.
+        question (str): Question or summarize prompt.
+        answer (str | None): Generated answer text.
+        sources (list[dict[str, Any]]): Retrieved or summary sources.
+        summary_diagnostics (dict[str, Any] | None): Optional summary diagnostics payload.
 
     Returns:
-        Validation metadata dictionary.
+        dict[str, bool | str | None]: Validation metadata dictionary.
     """
     validation_cfg = load_response_validation_env()
     validation_llm = None
@@ -279,10 +279,10 @@ def _sanitize_filename_fragment(value: str) -> str:
     """Convert an arbitrary string into a filesystem-friendly filename fragment.
 
     Args:
-        value: Raw string value.
+        value (str): Raw string value.
 
     Returns:
-        Sanitized filename fragment.
+        str: Sanitized filename fragment.
     """
     normalized = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value).strip())
     return normalized.strip("_") or "collection"
@@ -292,11 +292,11 @@ def _build_run_output_path(base_output_path: Path, *, collection_name: str) -> P
     """Build the per-run results directory path.
 
     Args:
-        base_output_path: Root results directory.
-        collection_name: Active collection name.
+        base_output_path (Path): Root results directory.
+        collection_name (str): Active collection name.
 
     Returns:
-        Per-run output directory in the form
+        Path: Per-run output directory in the form
         ``{base_output_path}/{unix_timestamp}_{collection_name}``.
     """
     timestamp = str(int(time()))
@@ -312,11 +312,11 @@ def _reference_metadata_text_block(
     """Return a multi-line text block for reference metadata.
 
     Args:
-        src: Source dictionary containing optional reference metadata.
-        include_text: Whether to include the raw ``text`` field.
+        src (dict[str, Any]): Source dictionary containing optional reference metadata.
+        include_text (bool): Whether to include the raw ``text`` field.
 
     Returns:
-        Text block suitable for exports, or an empty string.
+        str: Text block suitable for exports, or an empty string.
     """
     raw = src.get("reference_metadata")
     if not isinstance(raw, dict):
@@ -340,10 +340,10 @@ def _build_sources_txt(sources: list[dict[str, Any]]) -> str:
     """Build a text block for retrieved or summary sources.
 
     Args:
-        sources: Source dictionaries attached to a query or summary result.
+        sources (list[dict[str, Any]]): Source dictionaries attached to a query or summary result.
 
     Returns:
-        Formatted text block for source details.
+        str: Formatted text block for source details.
     """
     if not sources:
         return "No sources available.\n"
@@ -380,11 +380,11 @@ def _build_query_result_txt(query: str, result: dict[str, Any]) -> str:
     """Build the text export for one query result.
 
     Args:
-        query: Original user query.
-        result: Query result payload.
+        query (str): Original user query.
+        result (dict[str, Any]): Query result payload.
 
     Returns:
-        Text payload for the query export.
+        str: Text payload for the query export.
     """
     answer = str(result.get("response") or result.get("answer") or "").strip()
     validation_reason = result.get("validation_reason")
@@ -417,11 +417,11 @@ def _build_summary_txt(collection: str, payload: dict[str, Any]) -> str:
     """Build the text export for a collection summary.
 
     Args:
-        collection: Active collection name.
-        payload: Summary payload with validation and diagnostics.
+        collection (str): Active collection name.
+        payload (dict[str, Any]): Summary payload with validation and diagnostics.
 
     Returns:
-        Text payload for the summary export.
+        str: Text payload for the summary export.
     """
     summary = str(payload.get("summary") or payload.get("response") or "").strip()
     validation_reason = payload.get("validation_reason")
@@ -454,11 +454,11 @@ def _build_entities_txt(top_entities: list[dict[str, Any]], *, collection: str) 
     """Build the entity-frequency export text.
 
     Args:
-        top_entities: Ranked entity rows from collection NER stats.
-        collection: Active collection name.
+        top_entities (list[dict[str, Any]]): Ranked entity rows from collection NER stats.
+        collection (str): Active collection name.
 
     Returns:
-        Text payload for the entity export.
+        str: Text payload for the entity export.
     """
     lines = [
         f"Top {DEFAULT_ENTITY_LIMIT} entities for collection: {collection}",
@@ -482,10 +482,10 @@ def _build_entities_csv(
     """Build entity-frequency rows for CSV export.
 
     Args:
-        top_entities: Ranked entity rows from collection NER stats.
+        top_entities (list[dict[str, Any]]): Ranked entity rows from collection NER stats.
 
     Returns:
-        List of dicts with keys: rank, entity, type, mentions.
+        list[dict[str, Any]]: List of dicts with keys: rank, entity, type, mentions.
     """
     rows = []
     for index, row in enumerate(top_entities[:DEFAULT_ENTITY_LIMIT], start=1):
@@ -504,10 +504,10 @@ def _build_hate_speech_csv(findings: list[dict[str, Any]]) -> list[dict[str, Any
     """Build hate-speech finding rows for CSV export.
 
     Args:
-        findings: Flagged hate-speech rows.
+        findings (list[dict[str, Any]]): Flagged hate-speech rows.
 
     Returns:
-        List of dicts covering all finding fields.
+        list[dict[str, Any]]: List of dicts covering all finding fields.
     """
     rows = []
     for chunk in findings:
@@ -541,10 +541,10 @@ def _build_hate_speech_txt(findings: list[dict[str, Any]]) -> str:
     """Build the hate-speech export text using the frontend format.
 
     Args:
-        findings: Flagged hate-speech rows.
+        findings (list[dict[str, Any]]): Flagged hate-speech rows.
 
     Returns:
-        Text payload for the export.
+        str: Text payload for the export.
     """
     if not findings:
         return "No hate speech flags detected for this collection.\n"
@@ -577,10 +577,10 @@ def run_query(rag: RAG, query: str, index: int, output_path: str | Path) -> None
     """Run one query against the RAG instance and store the result.
 
     Args:
-        rag: Active RAG instance.
-        query: Query string.
-        index: Query index for naming.
-        output_path: Directory where results are stored.
+        rag (RAG): Active RAG instance.
+        query (str): Query string.
+        index (int): Query index for naming.
+        output_path (str | Path): Directory where results are stored.
     """
     logger.info("Running query {}: {}", index, query)
 
@@ -632,10 +632,10 @@ def export_chat_queries(
     """Run batch chat queries from a text file.
 
     Args:
-        rag: Active RAG instance.
-        queries_path: Query file path.
-        prompts_path: Prompts directory, kept for compatibility with load_queries.
-        output_path: Results directory.
+        rag (RAG): Active RAG instance.
+        queries_path (Path): Query file path.
+        prompts_path (Path): Prompts directory, kept for compatibility with load_queries.
+        output_path (Path): Results directory.
     """
     queries = load_queries(queries_path=queries_path, prompts_path=prompts_path)
     if not queries:
@@ -650,8 +650,8 @@ def export_summary(rag: RAG, *, output_path: Path) -> None:
     """Generate and store a collection summary payload.
 
     Args:
-        rag: Active RAG instance.
-        output_path: Results directory.
+        rag (RAG): Active RAG instance.
+        output_path (Path): Results directory.
     """
     logger.info("Generating collection summary...")
     data = rag.summarize_collection()
@@ -684,8 +684,8 @@ def export_entities(rag: RAG, *, output_path: Path) -> None:
     """Export the top collection entities and their mention counts as text.
 
     Args:
-        rag: Active RAG instance.
-        output_path: Results directory.
+        rag (RAG): Active RAG instance.
+        output_path (Path): Results directory.
     """
     logger.info("Exporting top entities...")
     stats = rag.get_collection_ner_stats(
@@ -712,8 +712,8 @@ def export_hate_speech(rag: RAG, *, output_path: Path) -> None:
     """Export flagged hate-speech findings as text.
 
     Args:
-        rag: Active RAG instance.
-        output_path: Results directory.
+        rag (RAG): Active RAG instance.
+        output_path (Path): Results directory.
     """
     logger.info("Exporting hate-speech findings...")
     findings = [
@@ -734,10 +734,10 @@ def _should_run_chat(args: argparse.Namespace) -> bool:
     """Return whether chat-query mode is active.
 
     Args:
-        args: Parsed CLI arguments.
+        args (argparse.Namespace): Parsed CLI arguments.
 
     Returns:
-        Whether chat mode should run.
+        bool: Whether chat mode should run.
     """
     if args.all or args.query is not None:
         return True
@@ -752,11 +752,11 @@ def _resolve_chat_queries_path(
     """Resolve the queries file path for chat mode.
 
     Args:
-        args: Parsed CLI arguments.
-        default_queries_path: Default configured queries file path.
+        args (argparse.Namespace): Parsed CLI arguments.
+        default_queries_path (Path): Default configured queries file path.
 
     Returns:
-        Resolved queries file path.
+        Path: Resolved queries file path.
     """
     if args.query in {None, DEFAULT_CHAT_SENTINEL}:
         return default_queries_path
@@ -767,10 +767,10 @@ def _resolve_collection_name(args: argparse.Namespace) -> str:
     """Resolve the target collection name from arguments or interactive input.
 
     Args:
-        args: Parsed CLI arguments.
+        args (argparse.Namespace): Parsed CLI arguments.
 
     Returns:
-        Selected collection name.
+        str: Selected collection name.
     """
     collection_name = str(getattr(args, "collection", "") or "").strip()
     if collection_name:
@@ -782,7 +782,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     """Run the query CLI workflow.
 
     Args:
-        argv: Optional explicit argument sequence for tests.
+        argv (Sequence[str] | None): Optional explicit argument sequence for tests.
     """
     init_logger()
     set_offline_env()

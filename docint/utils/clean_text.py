@@ -1,3 +1,5 @@
+"""Lightweight text normalization helpers shared across readers and retrieval."""
+
 import re
 
 

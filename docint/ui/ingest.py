@@ -17,10 +17,10 @@ def _normalize_file_status(raw: str | None) -> str:
     """Normalize raw stage/status text to user-facing labels.
 
     Args:
-        raw: Raw stage or status text.
+        raw (str | None): Raw stage or status text.
 
     Returns:
-        Normalized status label.
+        str: Normalized status label.
     """
     txt = str(raw or "").strip().lower()
     if not txt:
@@ -40,10 +40,10 @@ def _prettify_progress_message(message: str) -> str:
     """Convert backend progress strings into concise, readable text.
 
     Args:
-        message: Raw progress message from backend ingestion callback.
+        message (str): Raw progress message from backend ingestion callback.
 
     Returns:
-        Human-friendly progress message.
+        str: Human-friendly progress message.
     """
     text = str(message or "").strip()
     if not text:
@@ -83,10 +83,10 @@ def _coerce_event_entries(events_raw: list[Any] | None) -> list[dict[str, str]]:
     """Normalize event payloads to a common dict shape.
 
     Args:
-        events_raw: List of raw events (dicts or legacy strings).
+        events_raw (list[Any] | None): List of raw events (dicts or legacy strings).
 
     Returns:
-        Normalized list of event dictionaries.
+        list[dict[str, str]]: Normalized list of event dictionaries.
     """
     entries: list[dict[str, str]] = []
     for raw in events_raw or []:
@@ -111,11 +111,11 @@ def _render_event_list(events_raw: list[Any] | None, *, limit: int = 8) -> str:
     """Build markdown for a compact ingestion event timeline.
 
     Args:
-        events_raw: Raw events list.
-        limit: Number of last events to render.
+        events_raw (list[Any] | None): Raw events list.
+        limit (int): Number of last events to render.
 
     Returns:
-        Markdown bullet list.
+        str: Markdown bullet list.
     """
     entries = _coerce_event_entries(events_raw)
     if not entries:
@@ -156,10 +156,10 @@ def _append_event(
     """Append an event with de-noising for repetitive progress updates.
 
     Args:
-        events: Mutable event list.
-        stage: Event stage/event-name.
-        filename: Optional file scope.
-        message: Optional event detail text.
+        events (list[dict[str, str]]): Mutable event list.
+        stage (str): Event stage/event-name.
+        filename (str): Optional file scope.
+        message (str): Optional event detail text.
     """
     entry = {
         "stage": stage,
@@ -183,10 +183,10 @@ def _infer_done_filename_from_message(message: str) -> str | None:
     """Infer filename from a pipeline indexed message.
 
     Args:
-        message: Progress message.
+        message (str): Progress message.
 
     Returns:
-        Filename if present in message, otherwise ``None``.
+        str | None: Filename if present in message, otherwise ``None``.
     """
     match = re.search(
         r"Core pipeline indexed\s*\d+\s*chunks:\s*(.+)$",
@@ -252,7 +252,7 @@ def _render_ingest_summary(summary: dict[str, Any] | None) -> None:
     """Render the last-ingestion summary card.
 
     Args:
-        summary: Ingestion summary dict (may be ``None``).
+        summary (dict[str, Any] | None): Ingestion summary dict (may be ``None``).
     """
     if not summary:
         return
@@ -285,8 +285,8 @@ def _run_ingestion(target_col: str, uploaded_files: list) -> None:
     """Execute the upload-and-ingest workflow with streaming progress.
 
     Args:
-        target_col: Name of the collection to ingest into.
-        uploaded_files: List of uploaded Streamlit file objects.
+        target_col (str): Name of the collection to ingest into.
+        uploaded_files (list): List of uploaded Streamlit file objects.
     """
     files = [("files", (f.name, f, f.type)) for f in uploaded_files]
     data = {"collection": target_col, "hybrid": "True"}
@@ -304,7 +304,7 @@ def _run_ingestion(target_col: str, uploaded_files: list) -> None:
         """Render the main progress board with file statuses and overall progress.
 
         Args:
-            current_stage: Description of the current stage.
+            current_stage (str): Description of the current stage.
         """
         total = len(file_status) or 1
         done = sum(1 for s in file_status.values() if s in {"Processed", "Done"})

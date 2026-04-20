@@ -1,3 +1,5 @@
+"""Qdrant-backed key/value document store implementing the llama-index KV interface."""
+
 from __future__ import annotations
 
 import time
@@ -81,7 +83,7 @@ class QdrantKVStore(BaseKVStore):
         """Return True when *exc* looks like a transient transport failure.
 
         Args:
-            exc: Exception raised by Qdrant/http transports.
+            exc (Exception): Exception raised by Qdrant/http transports.
 
         Returns:
             bool: Whether this exception should be retried.
@@ -107,8 +109,8 @@ class QdrantKVStore(BaseKVStore):
         """Execute *fn* with bounded retries for transient Qdrant errors.
 
         Args:
-            operation: Human-readable operation name for logs.
-            fn: Callable that performs the underlying operation.
+            operation (str): Human-readable operation name for logs.
+            fn (Callable[[], T]): Callable that performs the underlying operation.
 
         Returns:
             T: Result from *fn*.
@@ -221,6 +223,7 @@ class QdrantKVStore(BaseKVStore):
             )
 
             def _upsert_batch() -> Any:
+                """Upsert ``batch`` to the Qdrant collection with synchronous confirmation."""
                 return self.client.upsert(
                     collection_name=self.collection_name,
                     points=batch,
@@ -284,6 +287,7 @@ class QdrantKVStore(BaseKVStore):
         while True:
 
             def _scroll_once() -> Any:
+                """Fetch one scroll page from the Qdrant collection."""
                 return self.client.scroll(
                     collection_name=self.collection_name,
                     scroll_filter=filter_,
@@ -362,10 +366,13 @@ class QdrantKVStore(BaseKVStore):
         key: str,
         collection: str = DEFAULT_COLLECTION,
     ) -> dict | None:
+        """Async counterpart to :meth:`get` executing the synchronous client directly."""
         return self.get(key, collection)
 
     async def aget_all(self, collection: str = DEFAULT_COLLECTION) -> dict[str, Any]:
+        """Async counterpart to :meth:`get_all`."""
         return self.get_all(collection)
 
     async def adelete(self, key: str, collection: str = DEFAULT_COLLECTION) -> bool:
+        """Async counterpart to :meth:`delete`."""
         return self.delete(key, collection)

@@ -1,3 +1,5 @@
+"""CLI entry point for ingesting documents into a collection."""
+
 import sys
 from pathlib import Path
 from typing import Callable

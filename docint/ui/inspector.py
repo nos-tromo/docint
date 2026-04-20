@@ -108,10 +108,10 @@ def _format_duration(seconds: float | int) -> str:
     """Format a duration in seconds to a human-readable string.
 
     Args:
-        seconds: Duration in seconds.
+        seconds (float | int): Duration in seconds.
 
     Returns:
-        Formatted duration string.
+        str: Formatted duration string.
     """
     total = int(seconds)
     hours = total // 3600
@@ -126,10 +126,10 @@ def _build_display_data(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Build a table-ready list of dicts from raw document payloads.
 
     Args:
-        docs: Raw document dicts from the backend.
+        docs (list[dict[str, Any]]): Raw document dicts from the backend.
 
     Returns:
-        List of dicts suitable for ``st.dataframe``.
+        list[dict[str, Any]]: List of dicts suitable for ``st.dataframe``.
     """
     display: list[dict[str, Any]] = []
     for d in docs:
@@ -154,7 +154,7 @@ def _render_session_source_exports(collection: str) -> None:
     """Render ZIP export controls for session-referenced source files.
 
     Args:
-        collection: Active collection name.
+        collection (str): Active collection name.
     """
     summary_by_collection = st.session_state.get("analysis_summary_by_collection") or {}
     summary_state = summary_by_collection.get(collection) or {}

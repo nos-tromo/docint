@@ -1,3 +1,5 @@
+"""Source artifact staging: move ingested originals alongside their Qdrant payloads."""
+
 from __future__ import annotations
 
 import shutil
