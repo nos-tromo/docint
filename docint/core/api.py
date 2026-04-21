@@ -1336,7 +1336,7 @@ async def ingest_upload(
         yield _format_sse("ingestion_started", {"collection": name})
         try:
             queue: asyncio.Queue[str | None | Exception] = asyncio.Queue()
-            loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
+            loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
 
             def _safe_put(item: str | None | Exception) -> None:
                 """Enqueue a message, tolerating a closed loop after disconnect.
@@ -1353,10 +1353,15 @@ async def ingest_upload(
                 """
                 try:
                     loop.call_soon_threadsafe(queue.put_nowait, item)
-                except RuntimeError as exc:
+                except Exception as exc:
+                    # CPython raises RuntimeError("Event loop is closed");
+                    # uvloop or an OS-level SIGPIPE/EBADF during teardown
+                    # can surface OSError / BrokenPipeError. Catch broadly
+                    # so an exception from the worker thread still lands
+                    # in the log rather than vanishing after disconnect.
                     logger.warning(
                         "Could not enqueue ingest message for collection "
-                        "'{}' (event loop closed): {}",
+                        "'{}' (loop unavailable after disconnect): {}",
                         name,
                         exc,
                     )

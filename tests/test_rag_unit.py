@@ -432,6 +432,10 @@ def test_unload_models_releases_audio_reader_and_dir_reader() -> None:
     # unload_models's original behaviour).
     assert rag._embed_model is None
     assert rag._text_model is None
+    assert rag._post_retrieval_text_model is None, (
+        "unload_models must null _post_retrieval_text_model; on OpenAI-compatible "
+        "backends it holds a separate client that can pin memory/connections."
+    )
     assert rag._reranker is None
     assert rag._image_ingestion_service is None
 
