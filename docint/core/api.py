@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Literal, cast
 
 from anyio import to_thread
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -50,6 +50,11 @@ app.add_middleware(
 
 rag = RAG(qdrant_collection="")
 SIMULATED_STREAM_TOKEN_DELAY_SECONDS = 0.03
+# Interval (seconds) between checks for client disconnect while the SSE
+# ingestion stream is otherwise idle. Shorter values notice disconnects
+# faster at a tiny CPU cost; longer values are cheaper. 1 s is a
+# compromise. Tests may monkeypatch this to a smaller value.
+INGEST_DISCONNECT_POLL_INTERVAL_S = 1.0
 
 # Agent components (kept lightweight; swap with richer agents as needed)
 _understanding_agent = SimpleUnderstandingAgent()
@@ -1233,6 +1238,7 @@ async def agent_chat_stream(payload: AgentChatIn) -> StreamingResponse:
 
 @app.post("/ingest/upload", tags=["Ingestion"])
 async def ingest_upload(
+    request: Request,
     collection: str = Form(...),
     files: list[UploadFile] = File(...),
     hybrid: bool | None = Form(True),
@@ -1240,6 +1246,8 @@ async def ingest_upload(
     """Upload files for ingestion and stream progress as SSE events.
 
     Args:
+        request (Request): The incoming request, used to detect client
+            disconnect so the awaiter can be cancelled promptly.
         collection (str): The name of the collection to ingest into.
         files (list[UploadFile]): The list of files to upload.
         hybrid (bool | None): Whether to enable hybrid search (default: True).
@@ -1326,16 +1334,47 @@ async def ingest_upload(
             queue: asyncio.Queue[str | None | Exception] = asyncio.Queue()
             loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
 
+            def _safe_put(item: str | None | Exception) -> None:
+                """Enqueue a message, tolerating a closed loop after disconnect.
+
+                If the event loop has already been torn down (e.g., the
+                coroutine was cancelled and the loop is gone by the time
+                the worker thread finishes), we log rather than silently
+                dropping the message.
+
+                Args:
+                    item (str | None | Exception): The message or sentinel
+                        to enqueue. ``None`` signals normal completion;
+                        ``Exception`` signals failure.
+                """
+                try:
+                    loop.call_soon_threadsafe(queue.put_nowait, item)
+                except RuntimeError as exc:
+                    logger.warning(
+                        "Could not enqueue ingest message for collection "
+                        "'{}' (event loop closed): {}",
+                        name,
+                        exc,
+                    )
+
             def progress_callback(msg: str) -> None:
                 """Callback function to report progress during ingestion.
 
                 Args:
                     msg (str): Progress message to be reported.
                 """
-                loop.call_soon_threadsafe(queue.put_nowait, msg)
+                _safe_put(msg)
 
             async def run_ingestion() -> None:
-                """Run the ingestion process in a separate thread."""
+                """Run the ingestion process in a separate thread.
+
+                Logs cancellation and worker-thread exceptions explicitly
+                so a disconnected client does not cause silent data loss.
+                The underlying worker thread cannot be killed (Python has
+                no safe thread-kill primitive), so on cancellation we
+                only release the awaiting coroutine; the thread runs to
+                completion and its output is discarded.
+                """
                 try:
                     await to_thread.run_sync(
                         ingest_module.ingest_docs,
@@ -1344,14 +1383,44 @@ async def ingest_upload(
                         hybrid if hybrid is not None else True,
                         progress_callback,
                     )
-                    loop.call_soon_threadsafe(queue.put_nowait, None)
+                    _safe_put(None)
+                except asyncio.CancelledError:
+                    logger.warning(
+                        "Ingestion task for collection '{}' cancelled; the "
+                        "worker thread will continue until ingest_docs "
+                        "returns and its output will be discarded.",
+                        name,
+                    )
+                    raise
                 except Exception as e:
-                    loop.call_soon_threadsafe(queue.put_nowait, e)
+                    logger.error(
+                        "Ingestion of collection '{}' failed: {}", name, e
+                    )
+                    _safe_put(e)
 
-            asyncio.create_task(run_ingestion())
+            ingestion_task = asyncio.create_task(run_ingestion())
 
+            # Poll periodically so client disconnects are noticed even when
+            # the worker is quiet (long Whisper transcription, embedding
+            # batches, etc.). The interval is a module-level constant so
+            # tests can override it.
             while True:
-                msg = await queue.get()
+                try:
+                    msg = await asyncio.wait_for(
+                        queue.get(),
+                        timeout=INGEST_DISCONNECT_POLL_INTERVAL_S,
+                    )
+                except TimeoutError:
+                    if await request.is_disconnected():
+                        ingestion_task.cancel()
+                        logger.warning(
+                            "Client disconnected during /ingest/upload for "
+                            "collection '{}'; cancelled the awaiter. Worker "
+                            "thread continues to completion.",
+                            name,
+                        )
+                        return
+                    continue
                 if msg is None:
                     break
                 if isinstance(msg, EmptyIngestionError):

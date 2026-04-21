@@ -1712,6 +1712,91 @@ def test_ingest_upload_success_does_not_warm_query_engine(
     )
 
 
+def test_ingest_upload_cancels_awaiter_on_client_disconnect(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """Client disconnect mid-ingest cancels the awaiter and exits cleanly.
+
+    The SSE ``/ingest/upload`` endpoint now polls
+    ``request.is_disconnected()`` while waiting on the worker queue so
+    that a disconnected client doesn't leave an orphan coroutine
+    blocked on a queue no one will read. On disconnect, the awaiter is
+    cancelled, a warning is logged, and the generator returns without
+    emitting ``ingestion_complete``. The worker thread itself runs to
+    completion (Python has no safe thread kill), but its output is
+    safely discarded.
+
+    Implementation detail: we monkeypatch
+    ``INGEST_DISCONNECT_POLL_INTERVAL_S`` to a tiny value so the test
+    finishes in well under a second, and override ``is_disconnected``
+    on the Starlette ``Request`` class to simulate an immediate
+    disconnect. A brief ``time.sleep`` in ``fake_ingest`` guarantees
+    the poll path is reached before the worker enqueues the success
+    sentinel.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture, used as the uploads dir.
+    """
+    import time
+
+    from starlette.requests import Request as StarletteRequest
+
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+    monkeypatch.setattr(api_module, "INGEST_DISCONNECT_POLL_INTERVAL_S", 0.05)
+
+    def blocking_fake_ingest(
+        collection: str,
+        path: Path,
+        hybrid: bool = True,
+        progress_callback: Any = None,
+    ) -> None:
+        """Block long enough for the disconnect poll to fire first.
+
+        Args:
+            collection (str): Collection name (ignored).
+            path (Path): Source directory path (ignored).
+            hybrid (bool): Whether hybrid retrieval was requested (ignored).
+            progress_callback (Any): Optional progress callback (ignored).
+        """
+        _ = (collection, path, hybrid, progress_callback)
+        time.sleep(0.3)
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", blocking_fake_ingest)
+
+    async def always_disconnected(_self: StarletteRequest) -> bool:
+        """Simulate an immediate client disconnect.
+
+        Args:
+            _self (StarletteRequest): The Request instance (ignored).
+
+        Returns:
+            bool: Always ``True``.
+        """
+        return True
+
+    monkeypatch.setattr(StarletteRequest, "is_disconnected", always_disconnected)
+
+    response = client.post(
+        "/ingest/upload",
+        data={"collection": "disconnect-guard", "hybrid": "true"},
+        files={"files": ("hello.txt", b"hello world", "text/plain")},
+    )
+
+    # Connection opened successfully (SSE headers sent)...
+    assert response.status_code == 200
+    body = response.text
+    # ... but the stream was cut short — no completion event, no error event.
+    assert "event: ingestion_complete" not in body, (
+        "ingestion_complete must NOT be emitted when the awaiter is cancelled; "
+        "the worker thread still runs but its output is discarded."
+    )
+    assert "Ingestion failed" not in body, (
+        "Cancellation must not be surfaced as a generic ingestion failure."
+    )
+
+
 def test_ingest_sync_empty_returns_empty_flag(
     monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
 ) -> None:
