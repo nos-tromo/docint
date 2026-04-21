@@ -291,6 +291,7 @@ class IngestOut(BaseModel):
     collection: str
     data_dir: str
     hybrid: bool
+    empty: bool = False
 
 
 class SessionListOut(BaseModel):
@@ -1135,11 +1136,24 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
                 detail=f"Data directory does not exist: {data_dir}",
             )
 
-        ingest_module.ingest_docs(
-            name,
-            data_dir,
-            hybrid=payload.hybrid if payload.hybrid is not None else True,
-        )
+        try:
+            ingest_module.ingest_docs(
+                name,
+                data_dir,
+                hybrid=payload.hybrid if payload.hybrid is not None else True,
+            )
+        except EmptyIngestionError as exc:
+            logger.warning(
+                "Ingestion produced no content for '{}'; returning empty response.",
+                exc.collection_name,
+            )
+            return {
+                "ok": True,
+                "collection": name,
+                "data_dir": str(data_dir),
+                "hybrid": payload.hybrid if payload.hybrid is not None else True,
+                "empty": True,
+            }
 
         return {
             "ok": True,

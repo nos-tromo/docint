@@ -1517,6 +1517,7 @@ def test_ingest_success(
         "collection": "docs",
         "data_dir": str(data_dir),
         "hybrid": False,
+        "empty": False,
     }
     assert called.args[0:3] == ("docs", data_dir, False)
 
@@ -1709,6 +1710,63 @@ def test_ingest_upload_success_does_not_warm_query_engine(
         "rag.create_index() must NOT be called from the ingest success "
         "path either; the next chat query will build the index lazily."
     )
+
+
+def test_ingest_sync_empty_returns_empty_flag(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """Empty ingestion via sync ``POST /ingest`` returns 200 with ``empty=true``.
+
+    Matches the SSE ``/ingest/upload`` behaviour: ``EmptyIngestionError``
+    is a soft-empty outcome (no content parsed), not a server error. The
+    sync endpoint previously let the exception propagate to FastAPI's
+    default handler, yielding an HTTP 500 which forced SDK/REST/CLI
+    consumers to parse tracebacks to distinguish an empty upload from a
+    real failure. The endpoint now catches the exception and returns
+    ``{"ok": true, "empty": true, ...}``.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture, used as the data dir.
+    """
+    monkeypatch.setattr(api_module, "_resolve_data_dir", lambda: tmp_path)
+
+    def fake_ingest(
+        collection: str,
+        path: Path,
+        hybrid: bool = True,
+        progress_callback: Any = None,
+    ) -> None:
+        """Simulate an ingestion run that produced no documents.
+
+        Args:
+            collection (str): Collection name.
+            path (Path): Source directory path (ignored).
+            hybrid (bool): Whether hybrid retrieval was requested (ignored).
+            progress_callback (Any): Optional progress callback (ignored).
+        """
+        _ = (path, hybrid, progress_callback)
+        raise api_module.EmptyIngestionError(collection)
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", fake_ingest)
+
+    response = client.post(
+        "/ingest",
+        json={"collection": "silence-sync-test", "hybrid": True},
+    )
+
+    # Empty ingestion must NOT surface as a 500; the SSE path already
+    # handles this gracefully, and the sync path now mirrors it.
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["empty"] is True
+    assert body["collection"] == "silence-sync-test"
+    assert body["data_dir"] == str(tmp_path)
+
+    # Collection was never created, so no select_collection should have fired.
+    assert api_module.rag.selected == []
 
 
 def test_ingest_sync_success_does_not_warm_query_engine(
