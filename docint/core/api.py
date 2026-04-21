@@ -381,22 +381,6 @@ def collections_select(payload: SelectCollectionIn) -> dict[str, bool | str]:
             raise HTTPException(status_code=400, detail="Collection name required")
         rag.select_collection(name)
 
-        if getattr(rag, "index", None) is None:
-            try:
-                rag.create_index()
-                rag.create_query_engine()
-            except Exception:
-                pass
-
-        # Pre-warm NER cache if enabled
-        if getattr(rag, "enable_ner", False):
-            try:
-                rag.get_collection_ner(refresh=True)
-            except Exception:
-                logger.warning(
-                    "Could not pre-warm NER cache for collection '{}'.", name
-                )
-
         return {"ok": True, "name": name}
     except HTTPException as e:
         logger.error("HTTPException: Error selecting collection: {}", e)

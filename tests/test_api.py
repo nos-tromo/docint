@@ -588,23 +588,41 @@ def test_collections_list_failure(
 def test_collections_select_success(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """Test the successful selection of a collection.
+    """Selecting a collection must succeed without warming the query engine.
+
+    Regression guard for the same OOM pattern that commit 18a47a6 removed
+    from ``/ingest`` and ``/ingest/upload``: ``/collections/select``
+    previously called ``rag.create_index`` + ``rag.create_query_engine`` +
+    ``rag.get_collection_ner(refresh=True)`` immediately after
+    ``rag.select_collection``. That chain loads bge-m3 (~2 GB),
+    bge-reranker-v2-m3 (~1 GB), and GLiNER on every collection switch,
+    causing OOM-kill on CPU Docker. The query engine is now built lazily
+    on the first chat query.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         client (TestClient): The TestClient instance.
     """
-    # Force lazy creation paths
-    api_module.rag.index = None
-    api_module.rag.query_engine = None
     response = client.post("/collections/select", json={"name": " gamma "})
     assert response.status_code == 200
     payload = response.json()
     assert payload == {"ok": True, "name": "gamma"}
     rag = cast(Any, api_module.rag)
     assert rag.qdrant_collection == "gamma"
-    assert rag.created_index == 1
-    assert rag.created_query_engine == 1
+    # Neither the index nor the query engine may be built eagerly on select.
+    assert rag.created_index == 0, (
+        "rag.create_index() must NOT be called from /collections/select; "
+        "it triggers bge-m3 load and OOM-kills CPU Docker on collection switch."
+    )
+    assert rag.created_query_engine == 0, (
+        "rag.create_query_engine() must NOT be called from /collections/select; "
+        "it triggers reranker + embedding loads and OOM-kills CPU Docker."
+    )
+    # NER pre-warm must also be skipped — it previously triggered GLiNER on select.
+    assert rag.ner_refresh_calls == [], (
+        "get_collection_ner() must NOT be called from /collections/select; "
+        "it triggers GLiNER load and compounds warmup memory pressure."
+    )
 
 
 def test_collections_select_blank_name(client: TestClient) -> None:
