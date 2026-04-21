@@ -636,6 +636,44 @@ def test_collections_select_blank_name(client: TestClient) -> None:
     assert "Collection name required" in response.json()["detail"]
 
 
+def test_collections_select_raises_on_nonexistent_collection(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Non-``HTTPException`` errors from ``select_collection`` surface as 500.
+
+    ``/collections/select`` only catches ``HTTPException`` in its outer
+    handler. If ``rag.select_collection`` raises ``ValueError`` (collection
+    missing) or any other non-HTTP exception, it propagates to FastAPI's
+    default handler and becomes an HTTP 500. This test locks that contract
+    so any future refactor that silently swallows the error (or wraps it
+    as a 200) fails this assertion.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+
+    def raise_missing(name: str) -> None:
+        """Simulate the production-code ``ValueError`` path.
+
+        Args:
+            name (str): The collection name (ignored).
+
+        Raises:
+            ValueError: Always, to mimic a missing-collection scenario.
+        """
+        raise ValueError(f"Collection '{name}' does not exist")
+
+    monkeypatch.setattr(api_module.rag, "select_collection", raise_missing)
+    # TestClient's default raise_server_exceptions=True re-raises uncaught
+    # server-side exceptions to the caller. In production (uvicorn), FastAPI's
+    # default handler would turn this into an HTTP 500 response. Asserting the
+    # exception propagates captures the same contract — the endpoint does not
+    # silently swallow or coerce the error.
+    with pytest.raises(ValueError, match="does not exist"):
+        client.post("/collections/select", json={"name": "ghost"})
+
+
 def test_collections_ner_success(client: TestClient) -> None:
     """Test the successful retrieval of information extraction data.
 
@@ -1565,6 +1603,56 @@ def test_ingest_missing_directory(
     assert "Data directory does not exist" in response.json()["detail"]
 
 
+def test_ingest_sync_generic_exception_propagates_as_500(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """Non-``EmptyIngestionError`` failures in sync ``/ingest`` surface as 500.
+
+    Commit e1060fd added an explicit ``except EmptyIngestionError`` around
+    the ``ingest_docs`` call that returns 200 with ``empty=true``. Generic
+    runtime errors (Qdrant unreachable, disk full, OOM) must still
+    propagate to FastAPI's default handler as an HTTP 500. This test
+    guards against an over-broad exception catch accidentally swallowing
+    real failures into the soft-empty response.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture, used as the data dir.
+    """
+    monkeypatch.setattr(api_module, "_resolve_data_dir", lambda: tmp_path)
+
+    def exploding_ingest(
+        collection: str,
+        path: Path,
+        hybrid: bool = True,
+        progress_callback: Any = None,
+    ) -> None:
+        """Simulate a hard runtime failure during ingestion.
+
+        Args:
+            collection (str): Collection name (ignored).
+            path (Path): Source directory path (ignored).
+            hybrid (bool): Whether hybrid retrieval was requested (ignored).
+            progress_callback (Any): Optional progress callback (ignored).
+
+        Raises:
+            RuntimeError: Always, to mimic an infrastructure failure.
+        """
+        _ = (collection, path, hybrid, progress_callback)
+        raise RuntimeError("Qdrant unreachable")
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", exploding_ingest)
+
+    # TestClient's default re-raises to the caller — in production, FastAPI's
+    # default handler turns an uncaught ``RuntimeError`` into HTTP 500. The
+    # assertion captures the same contract: the endpoint does NOT silently
+    # swallow or coerce a generic runtime failure into the soft-empty 200
+    # response that only ``EmptyIngestionError`` maps to.
+    with pytest.raises(RuntimeError, match="Qdrant unreachable"):
+        client.post("/ingest", json={"collection": "col", "hybrid": True})
+
+
 def test_ingest_upload_empty_emits_warning_and_completes(
     monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
 ) -> None:
@@ -1794,6 +1882,88 @@ def test_ingest_upload_cancels_awaiter_on_client_disconnect(
     )
     assert "Ingestion failed" not in body, (
         "Cancellation must not be surfaced as a generic ingestion failure."
+    )
+
+
+def test_ingest_upload_poll_continues_when_still_connected(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """Poll timeouts without disconnect must not prematurely exit the stream.
+
+    The ``asyncio.wait_for(queue.get())`` timeout branch has two outcomes:
+    ``is_disconnected() -> True`` (cancel & return) and
+    ``is_disconnected() -> False`` (continue polling).
+    ``test_ingest_upload_cancels_awaiter_on_client_disconnect`` exercises
+    the first branch. This test exercises the "still connected → continue"
+    branch: the fake worker blocks longer than a single poll interval so
+    the timeout fires at least once, but ``is_disconnected`` always
+    returns ``False`` — the stream must keep draining until the worker's
+    completion sentinel arrives, and ``ingestion_complete`` must still be
+    emitted.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture, used as the uploads dir.
+    """
+    import time
+
+    from starlette.requests import Request as StarletteRequest
+
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+    monkeypatch.setattr(api_module, "INGEST_DISCONNECT_POLL_INTERVAL_S", 0.05)
+
+    def slow_fake_ingest(
+        collection: str,
+        path: Path,
+        hybrid: bool = True,
+        progress_callback: Any = None,
+    ) -> None:
+        """Block long enough for the poll to fire at least once.
+
+        Args:
+            collection (str): Collection name (ignored).
+            path (Path): Source directory path (ignored).
+            hybrid (bool): Whether hybrid retrieval was requested (ignored).
+            progress_callback (Any): Optional progress callback (ignored).
+        """
+        _ = (collection, path, hybrid, progress_callback)
+        time.sleep(0.15)  # ~3× poll interval
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", slow_fake_ingest)
+
+    poll_count: dict[str, int] = {"n": 0}
+
+    async def always_connected(_self: StarletteRequest) -> bool:
+        """Simulate a stable connection — client stays the full duration.
+
+        Args:
+            _self (StarletteRequest): The Request instance (ignored).
+
+        Returns:
+            bool: Always ``False``.
+        """
+        poll_count["n"] += 1
+        return False
+
+    monkeypatch.setattr(StarletteRequest, "is_disconnected", always_connected)
+
+    response = client.post(
+        "/ingest/upload",
+        data={"collection": "connected-guard", "hybrid": "true"},
+        files={"files": ("hello.txt", b"hello world", "text/plain")},
+    )
+
+    assert response.status_code == 200
+    body = response.text
+    assert "event: ingestion_complete" in body, (
+        "With is_disconnected always False, the poll must not cancel the "
+        "awaiter — the worker's completion sentinel must reach the client."
+    )
+    assert "Ingestion failed" not in body
+    assert poll_count["n"] >= 1, (
+        "Poll interval (0.05 s) is shorter than fake_ingest's sleep (0.15 s), "
+        "so is_disconnected must have been consulted at least once."
     )
 
 

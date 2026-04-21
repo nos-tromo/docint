@@ -440,6 +440,53 @@ def test_unload_models_releases_audio_reader_and_dir_reader() -> None:
     assert rag._image_ingestion_service is None
 
 
+def test_unload_models_is_idempotent() -> None:
+    """Calling ``unload_models`` twice in a row must not raise.
+
+    The ``self.audio_reader._model = None`` write is guarded by
+    ``if self.audio_reader is not None``. A future refactor that drops
+    the guard would blow up on the second call (AttributeError on
+    ``None._model``). This test pins the idempotence contract so the
+    guard is not silently removed.
+    """
+    rag = RAG(qdrant_collection="test")
+
+    class DummyAudioReader:
+        """Minimal stand-in for ``AudioReader`` with a Whisper-like slot."""
+
+        def __init__(self) -> None:
+            """Initialize with a non-None model reference."""
+            self._model: Any = object()
+
+    rag.audio_reader = cast(Any, DummyAudioReader())
+    rag.dir_reader = cast(Any, object())
+
+    rag.unload_models()
+    rag.unload_models()  # must not raise
+
+    assert rag.audio_reader is None
+    assert rag.dir_reader is None
+
+
+def test_unload_models_on_fresh_rag_does_not_raise() -> None:
+    """``unload_models`` on a never-ingested RAG must be a safe no-op.
+
+    A freshly constructed ``RAG`` has ``audio_reader = None`` and
+    ``dir_reader = None`` by dataclass default. The guard
+    ``if self.audio_reader is not None`` protects the ``_model = None``
+    line in this case. Lock the semantics so any regression on the
+    guard fails here rather than in production.
+    """
+    rag = RAG(qdrant_collection="test")
+    assert rag.audio_reader is None
+    assert rag.dir_reader is None
+
+    rag.unload_models()  # must not raise
+
+    assert rag.audio_reader is None
+    assert rag.dir_reader is None
+
+
 def test_lazy_reranker_postprocessor_delegates_on_call() -> None:
     """``LazyRerankerPostprocessor`` materializes and delegates lazily.
 
@@ -494,6 +541,119 @@ def test_lazy_reranker_postprocessor_delegates_on_call() -> None:
     assert forwarded["nodes"] is sentinel_nodes
     assert forwarded["query_bundle"] is sentinel_bundle
     assert result is sentinel_nodes
+
+
+def test_lazy_reranker_postprocessor_delegates_on_repeated_calls() -> None:
+    """The wrapper re-reads ``rag.reranker`` on every call (no local cache).
+
+    The wrapper is deliberately stateless — each ``_postprocess_nodes``
+    call goes through ``self.rag.reranker`` fresh. The RAG property
+    itself caches on ``rag._reranker``, so the delegation target is
+    cheap after the first query. A future refactor that accidentally
+    cached the reranker inside the wrapper would prevent
+    ``unload_models`` (which only nulls ``rag._reranker``) from
+    resetting the reranker for subsequent sessions. This test pins the
+    re-read contract by using a ``FakeRAG`` whose ``reranker`` property
+    fabricates a new stub on every access and asserting the access
+    counter advances per call.
+    """
+    accesses: list[str] = []
+
+    class FakeReranker:
+        """Minimal reranker stub that short-circuits the delegation."""
+
+        def _postprocess_nodes(self, nodes: list[Any], query_bundle: Any) -> list[Any]:
+            """Return nodes unchanged.
+
+            Args:
+                nodes (list[Any]): Nodes forwarded from the wrapper.
+                query_bundle (Any): Query bundle forwarded from the wrapper.
+
+            Returns:
+                list[Any]: The ``nodes`` argument unchanged.
+            """
+            return nodes
+
+    class FakeRAG:
+        """Stub RAG whose reranker property increments an access counter."""
+
+        @property
+        def reranker(self) -> FakeReranker:
+            """Record an access and return a fresh stub.
+
+            Returns:
+                FakeReranker: A fresh stub on every call.
+            """
+            accesses.append("reranker")
+            return FakeReranker()
+
+    wrapper = LazyRerankerPostprocessor(rag=FakeRAG())
+    wrapper._postprocess_nodes([object()], object())
+    wrapper._postprocess_nodes([object()], object())
+    wrapper._postprocess_nodes([object()], object())
+
+    assert len(accesses) == 3, (
+        "Wrapper must re-read rag.reranker on every call — caching is the "
+        "RAG property's responsibility, so unload_models can reset it cleanly."
+    )
+
+
+def test_lazy_reranker_postprocessor_passes_none_query_bundle() -> None:
+    """The wrapper forwards ``query_bundle=None`` unchanged.
+
+    LlamaIndex retrieval pipelines can call postprocessors with
+    ``query_bundle=None`` in contexts where the query isn't available
+    (e.g., bare-retrieve paths). The wrapper must forward ``None``
+    without substituting a default — otherwise the delegated reranker
+    would see wrong metadata.
+    """
+    forwarded: dict[str, Any] = {}
+
+    class FakeReranker:
+        """Reranker stub that records the forwarded query_bundle."""
+
+        def _postprocess_nodes(self, nodes: list[Any], query_bundle: Any) -> list[Any]:
+            """Record ``query_bundle`` and return nodes unchanged.
+
+            Args:
+                nodes (list[Any]): Nodes forwarded from the wrapper.
+                query_bundle (Any): Query bundle to record.
+
+            Returns:
+                list[Any]: The ``nodes`` argument unchanged.
+            """
+            forwarded["query_bundle"] = query_bundle
+            return nodes
+
+    class FakeRAG:
+        """Stub RAG with a single-use reranker property."""
+
+        @property
+        def reranker(self) -> FakeReranker:
+            """Return a fresh stub.
+
+            Returns:
+                FakeReranker: A stub reranker.
+            """
+            return FakeReranker()
+
+    wrapper = LazyRerankerPostprocessor(rag=FakeRAG())
+    wrapper._postprocess_nodes([object()], None)
+
+    assert forwarded["query_bundle"] is None, (
+        "LazyRerankerPostprocessor must forward query_bundle=None unchanged; "
+        "substituting a default would mis-report query context to the reranker."
+    )
+
+
+def test_lazy_reranker_class_name_is_stable() -> None:
+    """``class_name()`` is used by LlamaIndex for postprocessor cache matching.
+
+    Renaming the class without updating the ``class_name()`` return
+    value would silently break cache-key equality between reloads, so
+    this one-line pin catches accidental drift.
+    """
+    assert LazyRerankerPostprocessor.class_name() == "LazyRerankerPostprocessor"
 
 
 def test_normalize_response_data_appends_image_sources(
