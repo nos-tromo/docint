@@ -2915,6 +2915,13 @@ class _FakeCorePDFReader:
 def _patch_ingest_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch heavy ingest dependencies with minimal in-memory stubs.
 
+    Treats the active collection as already existing in Qdrant so that the
+    empty-ingestion guard (which fires only when nothing was produced *and*
+    the main collection does not yet exist) does not short-circuit tests
+    that exercise the post-ingest success bookkeeping path. Tests that
+    intentionally exercise the empty-ingestion cleanup path should
+    re-stub ``qdrant_collection_exists`` to return ``False``.
+
     Args:
         monkeypatch: The monkeypatch fixture used to stub RAG methods
             and module-level classes.
@@ -2932,6 +2939,11 @@ def _patch_ingest_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rag_module, "CorePDFPipelineReader", _FakeCorePDFReader)
     monkeypatch.setattr(RAG, "reset_session_state", lambda self: None)
     monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+    monkeypatch.setattr(
+        rag_module,
+        "qdrant_collection_exists",
+        lambda client, collection_name: True,
+    )
 
 
 def test_persist_node_batches_streams_micro_batches() -> None:
@@ -3549,6 +3561,229 @@ def test_asingest_docs_bumps_summary_revision(
     asyncio.run(rag.asingest_docs(tmp_path, build_query_engine=False))
 
     assert bumps == [("test", True)]
+
+
+def _setup_empty_ingest_rag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    main_collection_exists: bool,
+) -> tuple[RAG, MagicMock, list[tuple[str | None, bool]]]:
+    """Build a ``RAG`` wired for empty-ingestion tests.
+
+    The shared ingest stubs are installed, the embed model is replaced
+    with a benign sentinel, the Qdrant client is mocked, and
+    ``qdrant_collection_exists`` is overridden to control whether the
+    main collection appears to exist on Qdrant. The summary-revision and
+    NER-cache hooks capture call counts so callers can assert the empty
+    branch skipped them.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The temporary path used as the Qdrant source root.
+        main_collection_exists: Whether ``qdrant_collection_exists``
+            should return ``True`` for the main collection (re-ingest
+            scenario) or ``False`` (fresh empty ingestion).
+
+    Returns:
+        Tuple of ``(rag, qdrant_mock, bumps)`` where ``qdrant_mock`` is
+        the ``MagicMock`` substituted for ``rag._qdrant_client`` (returned
+        explicitly so that mypy keeps the ``MagicMock`` typing across the
+        call boundary instead of widening to ``QdrantClient | None``),
+        and ``bumps`` records each ``_bump_summary_revision`` call as
+        ``(collection, allow_create)``.
+    """
+    rag = RAG(qdrant_collection="silence-test")
+    rag._embed_model = cast(Any, object())
+    qdrant_mock = MagicMock()
+    rag._qdrant_client = qdrant_mock
+    rag._qdrant_src_dir = tmp_path
+    _patch_ingest_dependencies(monkeypatch)
+    monkeypatch.setattr(
+        rag_module,
+        "qdrant_collection_exists",
+        lambda client, collection_name: main_collection_exists,
+    )
+
+    bumps: list[tuple[str | None, bool]] = []
+
+    def _bump_summary_revision(
+        self: RAG,
+        collection: str | None = None,
+        *,
+        allow_create: bool = True,
+    ) -> int:
+        """Capture summary-revision bump arguments without doing real work.
+
+        Args:
+            self: The RAG instance.
+            collection: Collection passed to the bump call.
+            allow_create: ``allow_create`` kwarg passed to the bump call.
+
+        Returns:
+            The 1-based call count.
+        """
+        _ = self
+        bumps.append((collection, allow_create))
+        return len(bumps)
+
+    monkeypatch.setattr(RAG, "_bump_summary_revision", _bump_summary_revision)
+    return rag, qdrant_mock, bumps
+
+
+def test_ingest_docs_empty_raises_and_cleans_kv_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Empty fresh ingestion should raise EmptyIngestionError and unlink the KV file.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The Qdrant source root.
+    """
+    rag, qdrant_mock, bumps = _setup_empty_ingest_rag(
+        monkeypatch, tmp_path, main_collection_exists=False
+    )
+
+    # Pre-create the KV file the way SQLiteKVStore.__init__ would.
+    kv_dir = tmp_path / "silence-test"
+    kv_dir.mkdir(parents=True, exist_ok=True)
+    kv_file = kv_dir / "silence-test_kv.db"
+    kv_file.write_bytes(b"SQLITE_SENTINEL")
+
+    qdrant_mock.collection_exists.return_value = False
+
+    with pytest.raises(rag_module.EmptyIngestionError) as excinfo:
+        rag.ingest_docs(tmp_path, build_query_engine=False)
+
+    assert excinfo.value.collection_name == "silence-test"
+    assert not kv_file.exists()
+    # Source directory itself must be retained (uploaded files would live here).
+    assert kv_dir.exists()
+    # Empty branch must skip the summary-revision bump.
+    assert bumps == []
+    # No companion images collection delete attempted (the existence guard
+    # short-circuits because the mocked qdrant_collection_exists returns False).
+    assert qdrant_mock.delete_collection.call_count == 0
+
+
+def test_ingest_docs_empty_skips_cleanup_when_main_collection_exists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Re-ingest yielding zero new content must not destroy the prior KV store.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The Qdrant source root.
+    """
+    rag, qdrant_mock, bumps = _setup_empty_ingest_rag(
+        monkeypatch, tmp_path, main_collection_exists=True
+    )
+
+    kv_dir = tmp_path / "silence-test"
+    kv_dir.mkdir(parents=True, exist_ok=True)
+    kv_file = kv_dir / "silence-test_kv.db"
+    kv_file.write_bytes(b"PRIOR_DATA")
+
+    # Should NOT raise; should NOT delete the prior KV file.
+    rag.ingest_docs(tmp_path, build_query_engine=False)
+
+    assert kv_file.exists()
+    assert kv_file.read_bytes() == b"PRIOR_DATA"
+    # Standard post-success path was followed: summary revision was bumped.
+    assert bumps == [("silence-test", True)]
+    # No deletes performed via the Qdrant client.
+    assert qdrant_mock.delete_collection.call_count == 0
+
+
+def test_ingest_docs_empty_removes_wal_and_shm_siblings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Empty cleanup must remove the SQLite WAL/SHM sidecar files too.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The Qdrant source root.
+    """
+    rag, qdrant_mock, _bumps = _setup_empty_ingest_rag(
+        monkeypatch, tmp_path, main_collection_exists=False
+    )
+
+    kv_dir = tmp_path / "silence-test"
+    kv_dir.mkdir(parents=True, exist_ok=True)
+    kv_file = kv_dir / "silence-test_kv.db"
+    wal_file = kv_dir / "silence-test_kv.db-wal"
+    shm_file = kv_dir / "silence-test_kv.db-shm"
+    for f in (kv_file, wal_file, shm_file):
+        f.write_bytes(b"x")
+
+    qdrant_mock.collection_exists.return_value = False
+
+    with pytest.raises(rag_module.EmptyIngestionError):
+        rag.ingest_docs(tmp_path, build_query_engine=False)
+
+    assert not kv_file.exists()
+    assert not wal_file.exists()
+    assert not shm_file.exists()
+
+
+def test_ingest_docs_empty_emits_warning_progress_message(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Empty cleanup must emit a ``warning:``-prefixed progress callback message.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The Qdrant source root.
+    """
+    rag, qdrant_mock, _bumps = _setup_empty_ingest_rag(
+        monkeypatch, tmp_path, main_collection_exists=False
+    )
+    qdrant_mock.collection_exists.return_value = False
+
+    captured: list[str] = []
+
+    def _progress(message: str) -> None:
+        """Capture progress messages for assertion.
+
+        Args:
+            message: The progress message.
+        """
+        captured.append(message)
+
+    with pytest.raises(rag_module.EmptyIngestionError):
+        rag.ingest_docs(tmp_path, build_query_engine=False, progress_callback=_progress)
+
+    warning_messages = [m for m in captured if m.lower().startswith("warning:")]
+    assert warning_messages, f"expected warning: prefix in {captured!r}"
+    assert "silence-test" in warning_messages[0]
+
+
+def test_asingest_docs_empty_raises_and_cleans_kv_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Async empty fresh ingestion must raise and clean the orphan KV file.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The Qdrant source root.
+    """
+    rag, qdrant_mock, bumps = _setup_empty_ingest_rag(
+        monkeypatch, tmp_path, main_collection_exists=False
+    )
+
+    kv_dir = tmp_path / "silence-test"
+    kv_dir.mkdir(parents=True, exist_ok=True)
+    kv_file = kv_dir / "silence-test_kv.db"
+    kv_file.write_bytes(b"SQLITE_SENTINEL")
+
+    qdrant_mock.collection_exists.return_value = False
+
+    with pytest.raises(rag_module.EmptyIngestionError) as excinfo:
+        asyncio.run(rag.asingest_docs(tmp_path, build_query_engine=False))
+
+    assert excinfo.value.collection_name == "silence-test"
+    assert not kv_file.exists()
+    assert bumps == []
 
 
 def test_delete_collection_attempts_summary_invalidation(

@@ -24,7 +24,7 @@ from docint.agents import (
     Turn,
 )
 from docint.cli import ingest as ingest_module
-from docint.core.rag import RAG
+from docint.core.rag import RAG, EmptyIngestionError
 from docint.core.retrieval_filters import build_metadata_filters, build_qdrant_filter
 from docint.utils.env_cfg import (
     load_host_env,
@@ -1379,6 +1379,23 @@ async def ingest_upload(
                 msg = await queue.get()
                 if msg is None:
                     break
+                if isinstance(msg, EmptyIngestionError):
+                    yield _format_sse(
+                        "warning",
+                        {
+                            "message": str(msg),
+                            "collection": msg.collection_name,
+                        },
+                    )
+                    yield _format_sse(
+                        "ingestion_complete",
+                        {
+                            "collection": name,
+                            "data_dir": str(batch_dir),
+                            "empty": True,
+                        },
+                    )
+                    return
                 if isinstance(msg, Exception):
                     raise msg
                 event_name = (

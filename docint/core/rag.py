@@ -184,6 +184,34 @@ DEFAULT_GROUNDED_REFINE_PROMPT = (
 )
 
 
+class EmptyIngestionError(Exception):
+    """Raised when an ingestion run produced zero documents/nodes for a fresh collection.
+
+    Carries the collection name so callers (CLI, API) can short-circuit
+    gracefully — skip ``select_collection``, emit a warning to the UI,
+    avoid leaving a confusing "Ingestion failed" banner behind — instead
+    of treating a soft-empty outcome as a hard failure.
+
+    Attributes:
+        collection_name (str): The name of the collection whose ingestion
+            produced no content.
+    """
+
+    def __init__(self, collection_name: str, message: str | None = None) -> None:
+        """Initialize the error.
+
+        Args:
+            collection_name (str): Name of the collection whose ingestion
+                produced no content.
+            message (str | None): Optional human-readable message; a sensible
+                default referencing ``collection_name`` is used when omitted.
+        """
+        self.collection_name = collection_name
+        super().__init__(
+            message or f"No content was ingested into '{collection_name}'."
+        )
+
+
 class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
     """Deduplicate and diversify row-level social/table retrieval results."""
 
@@ -4047,6 +4075,74 @@ class RAG:
             data_dir, self.qdrant_collection, self.qdrant_src_dir
         )
 
+    def _finalize_empty_ingestion(
+        self,
+        collection: str,
+        progress_callback: Callable[[str], None] | None,
+    ) -> None:
+        """Clean up after an ingestion that produced no content.
+
+        Removes the orphan SQLite KV files for *collection* (the main
+        ``<collection>_kv.db`` plus its ``-wal`` / ``-shm`` siblings) and
+        best-effort deletes the ``<collection>_images`` companion Qdrant
+        collection if it happens to exist. The user's uploaded source
+        files under ``qdrant_src_dir / collection`` are intentionally
+        retained so they can be inspected or retried.
+
+        Emits a ``"warning:"``-prefixed progress message which the API SSE
+        layer maps to a ``warning`` event, and a ``loguru`` warning log line.
+
+        Args:
+            collection (str): Name of the collection that produced no
+                content.
+            progress_callback (Callable[[str], None] | None): Optional
+                callback for surfacing the warning to the UI.
+        """
+        warning_msg = (
+            f"warning: No content was ingested for collection "
+            f"'{collection}'. All source files were empty or contained "
+            "no usable data (e.g., silent audio). Source files are kept "
+            "on disk for inspection."
+        )
+        if progress_callback is not None:
+            try:
+                progress_callback(warning_msg)
+            except Exception as exc:
+                logger.warning("Empty-ingestion progress callback failed: {}", exc)
+        logger.warning(
+            "No documents produced during ingestion of '{}'; cleaning up "
+            "empty KV store and companion collections.",
+            collection,
+        )
+
+        db_path = self.qdrant_src_dir / collection / f"{collection}_kv.db"
+        for suffix in ("", "-wal", "-shm"):
+            candidate = db_path.with_name(db_path.name + suffix) if suffix else db_path
+            if candidate.exists():
+                try:
+                    candidate.unlink()
+                except OSError as exc:
+                    logger.warning(
+                        "Failed to remove orphan KV file '{}': {}",
+                        candidate,
+                        exc,
+                    )
+
+        images_collection = f"{collection}_images"
+        if qdrant_collection_exists(self.qdrant_client, images_collection):
+            try:
+                self.qdrant_client.delete_collection(images_collection)
+                logger.info(
+                    "Deleted empty companion collection '{}' from Qdrant.",
+                    images_collection,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to delete companion collection '{}': {}",
+                    images_collection,
+                    exc,
+                )
+
     # --- Public API ---
     def ingest_docs(
         self,
@@ -4064,6 +4160,11 @@ class RAG:
                 loading large reranker/generation models. Defaults to True.
             progress_callback (Callable[[str], None] | None): Optional callback for
                 reporting ingestion progress.
+
+        Raises:
+            EmptyIngestionError: When no documents/nodes were produced and the
+                target collection did not previously exist. Triggers cleanup of
+                the orphan SQLite KV files; uploaded source files are kept.
         """
         prepared_dir = self._prepare_sources_dir(
             Path(data_dir) if isinstance(data_dir, str) else data_dir
@@ -4151,6 +4252,31 @@ class RAG:
                             self._chunk_nodes(nodes, self.docstore_batch_size)
                         )
 
+            total_docs = core_docs + streaming_docs
+            total_nodes = core_nodes + streaming_nodes
+            if (
+                total_docs == 0
+                and total_nodes == 0
+                and not qdrant_collection_exists(
+                    self.qdrant_client, self.qdrant_collection
+                )
+            ):
+                if self.ingest_benchmark_enabled:
+                    self._log_ingest_benchmark_summary(
+                        mode="sync",
+                        started_at=ingest_started_at,
+                        core_docs=core_docs,
+                        core_nodes=core_nodes,
+                        streaming_docs=streaming_docs,
+                        streaming_nodes=streaming_nodes,
+                        enrich_batches=enrich_batches,
+                        persist_batches=persist_batches,
+                    )
+                self._finalize_empty_ingestion(
+                    self.qdrant_collection, progress_callback
+                )
+                raise EmptyIngestionError(self.qdrant_collection)
+
             self.dir_reader = pipeline.dir_reader
             # Clear memory-heavy lists as they are persisted in the vector store
             self.docs = []
@@ -4218,6 +4344,9 @@ class RAG:
 
         Raises:
             RuntimeError: If the index is not initialized for async ingestion.
+            EmptyIngestionError: When no documents/nodes were produced and the
+                target collection did not previously exist. Triggers cleanup of
+                the orphan SQLite KV files; uploaded source files are kept.
         """
         prepared_dir = self._prepare_sources_dir(
             Path(data_dir) if isinstance(data_dir, str) else data_dir
@@ -4299,6 +4428,31 @@ class RAG:
                         persist_batches += len(
                             self._chunk_nodes(nodes, self.docstore_batch_size)
                         )
+
+            total_docs = core_docs + streaming_docs
+            total_nodes = core_nodes + streaming_nodes
+            if (
+                total_docs == 0
+                and total_nodes == 0
+                and not qdrant_collection_exists(
+                    self.qdrant_client, self.qdrant_collection
+                )
+            ):
+                if self.ingest_benchmark_enabled:
+                    self._log_ingest_benchmark_summary(
+                        mode="async",
+                        started_at=ingest_started_at,
+                        core_docs=core_docs,
+                        core_nodes=core_nodes,
+                        streaming_docs=streaming_docs,
+                        streaming_nodes=streaming_nodes,
+                        enrich_batches=enrich_batches,
+                        persist_batches=persist_batches,
+                    )
+                self._finalize_empty_ingestion(
+                    self.qdrant_collection, progress_callback
+                )
+                raise EmptyIngestionError(self.qdrant_collection)
 
             self.dir_reader = pipeline.dir_reader
             self.docs = []

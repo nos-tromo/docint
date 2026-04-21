@@ -1546,6 +1546,65 @@ def test_ingest_missing_directory(
     assert "Data directory does not exist" in response.json()["detail"]
 
 
+def test_ingest_upload_empty_emits_warning_and_completes(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """Empty ingestion via /ingest/upload yields a warning + empty completion event.
+
+    Verifies the API translates :class:`EmptyIngestionError` into an SSE
+    ``warning`` event followed by an ``ingestion_complete`` event with
+    ``"empty": true`` and skips ``rag.select_collection`` (which would
+    otherwise raise ``ValueError`` because the collection was never
+    created), instead of surfacing a generic ``"Ingestion failed"``.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture.
+    """
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+
+    def fake_ingest(
+        collection: str,
+        path: Path,
+        hybrid: bool = True,
+        progress_callback: Any = None,
+    ) -> None:
+        """Simulate an ingestion run that produced no documents.
+
+        Args:
+            collection (str): Collection name.
+            path (Path): Source directory path (ignored).
+            hybrid (bool): Whether hybrid retrieval was requested (ignored).
+            progress_callback (Any): Optional progress callback (ignored).
+        """
+        _ = (path, hybrid, progress_callback)
+        raise api_module.EmptyIngestionError(collection)
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", fake_ingest)
+
+    response = client.post(
+        "/ingest/upload",
+        data={"collection": "silence-test", "hybrid": "false"},
+        files={"files": ("silence.m4a", b"\x00" * 32, "audio/mp4")},
+    )
+
+    assert response.status_code == 200
+    body = response.text
+
+    # The SSE payload should contain a warning event referencing the collection
+    # and an ingestion_complete event flagged as empty=true. It should NOT
+    # contain a generic "Ingestion failed" error event.
+    assert "event: warning" in body
+    assert "silence-test" in body
+    assert "event: ingestion_complete" in body
+    assert '"empty": true' in body
+    assert "Ingestion failed" not in body
+
+    # select_collection must NOT have been called — DummyRAG.selected stays empty.
+    assert api_module.rag.selected == []
+
+
 def test_stream_query_context_window_overflow_surfaces_descriptive_error(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:

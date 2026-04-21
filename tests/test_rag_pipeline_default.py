@@ -291,6 +291,13 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(
         "embed_model",
         property(lambda self: object()),
     )
+    # Treat the active collection as already existing so the empty-ingestion
+    # guard does not fire for this hash-handoff test.
+    monkeypatch.setattr(
+        rag_module,
+        "qdrant_collection_exists",
+        lambda client, collection_name: True,
+    )
 
     rag = RAG(qdrant_collection="test")
     rag.ingest_docs(tmp_path, build_query_engine=False)
