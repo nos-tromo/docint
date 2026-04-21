@@ -1605,6 +1605,168 @@ def test_ingest_upload_empty_emits_warning_and_completes(
     assert api_module.rag.selected == []
 
 
+def test_ingest_upload_success_does_not_warm_query_engine(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """Successful ``/ingest/upload`` must not eagerly warm the query engine.
+
+    Regression guard for an OOM-kill observed on CPU Docker containers with
+    the default 8 GB limit: the ingest SSE handler previously called
+    ``rag.create_index()`` and ``rag.create_query_engine()`` on the
+    module-level ``api.rag`` singleton immediately after a successful
+    ingestion. That warmup triggered the reranker (bge-reranker-v2-m3,
+    roughly 1 GB) and the embedding model (bge-m3, roughly 2 GB) to load
+    on top of the PyTorch allocator memory still held by the just-finished
+    ingest pipeline, blowing past the container memory cap and producing
+    exit 137.
+
+    The query engine is still built lazily on the next chat query, so the
+    only user-visible effect of removing the warmup is a slower first-query
+    TTFB. There is no correctness regression. This test pins down the
+    behavioral defect (eager warmup) that reproduces the OOM, so that
+    deleting the warmup block keeps the test green while any future
+    reintroduction would fail it.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture, used as the uploads dir.
+    """
+    # Route uploads into a temp dir so the endpoint does not touch real state.
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+
+    def fake_ingest(
+        collection: str,
+        path: Path,
+        hybrid: bool = True,
+        progress_callback: Any = None,
+    ) -> None:
+        """Simulate a successful, no-op ingestion run.
+
+        Returning cleanly causes the SSE handler to enqueue a ``None``
+        sentinel and break out of the progress loop, which is exactly the
+        code path that previously reached the eager warmup block.
+
+        Args:
+            collection (str): Collection name (ignored).
+            path (Path): Source directory path (ignored).
+            hybrid (bool): Whether hybrid retrieval was requested (ignored).
+            progress_callback (Any): Optional progress callback (ignored).
+        """
+        _ = (collection, path, hybrid, progress_callback)
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", fake_ingest)
+
+    # Sanity: the autouse _patch_rag fixture installs a fresh DummyRAG whose
+    # create_index / create_query_engine counters start at zero.
+    dummy_rag = cast(DummyRAG, api_module.rag)
+    assert dummy_rag.created_index == 0
+    assert dummy_rag.created_query_engine == 0
+
+    response = client.post(
+        "/ingest/upload",
+        data={"collection": "warmup-guard", "hybrid": "true"},
+        files={"files": ("hello.txt", b"hello world", "text/plain")},
+    )
+
+    # The ingest itself must still succeed and emit the completion event —
+    # we are not regressing success signalling, only removing the warmup.
+    assert response.status_code == 200
+    body = response.text
+    assert "event: ingestion_complete" in body
+    assert "Ingestion failed" not in body
+
+    # Core assertion: neither the index nor the query engine may be built
+    # eagerly during a successful ingest. Both counters must remain zero.
+    # Under the buggy code path (now removed), the ingest SSE success path
+    # called rag.create_index() and rag.create_query_engine() immediately
+    # after the progress loop, loading reranker + embedding and OOM-killing
+    # the backend on CPU Docker with default 8 GB limit.
+    assert dummy_rag.created_query_engine == 0, (
+        "rag.create_query_engine() must NOT be called from the ingest "
+        "success path; it triggers reranker + embedding model loads that "
+        "OOM-kill the backend on CPU Docker with default 8 GB limit."
+    )
+    assert dummy_rag.created_index == 0, (
+        "rag.create_index() must NOT be called from the ingest success "
+        "path either; the next chat query will build the index lazily."
+    )
+
+
+def test_ingest_sync_success_does_not_warm_query_engine(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """Successful synchronous ``POST /ingest`` must not eagerly warm the query engine.
+
+    Companion guard to :func:`test_ingest_upload_success_does_not_warm_query_engine`:
+    the synchronous ``/ingest`` endpoint contained the same warmup pattern
+    (``rag.select_collection`` + ``create_index`` + ``create_query_engine``
+    + NER pre-warm) and had the same OOM-kill potential on CPU Docker
+    containers. This test pins down the behavioral defect so that any
+    future reintroduction of a post-ingest warmup on the sync route fails
+    the suite.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture, used as the data dir.
+    """
+    # Point the endpoint at a real, empty temp directory so _resolve_data_dir
+    # does not blow up the request before the warmup would have fired.
+    monkeypatch.setattr(api_module, "_resolve_data_dir", lambda: tmp_path)
+
+    def fake_ingest(
+        collection: str,
+        path: Path,
+        hybrid: bool = True,
+        progress_callback: Any = None,
+    ) -> None:
+        """Simulate a successful, no-op synchronous ingestion run.
+
+        Returning cleanly is exactly the code path that previously fell
+        through to the warmup block on the ``/ingest`` endpoint.
+
+        Args:
+            collection (str): Collection name (ignored).
+            path (Path): Source directory path (ignored).
+            hybrid (bool): Whether hybrid retrieval was requested (ignored).
+            progress_callback (Any): Optional progress callback (ignored).
+        """
+        _ = (collection, path, hybrid, progress_callback)
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", fake_ingest)
+
+    dummy_rag = cast(DummyRAG, api_module.rag)
+    assert dummy_rag.created_index == 0
+    assert dummy_rag.created_query_engine == 0
+
+    response = client.post(
+        "/ingest",
+        json={"collection": "warmup-guard-sync", "hybrid": True},
+    )
+
+    # The sync endpoint must still return a successful payload.
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["collection"] == "warmup-guard-sync"
+
+    # Core assertion: neither the index nor the query engine may be built
+    # eagerly during a successful sync ingest. Both counters must remain zero.
+    assert dummy_rag.created_query_engine == 0, (
+        "rag.create_query_engine() must NOT be called from the sync "
+        "/ingest success path; it triggers reranker + embedding model "
+        "loads that OOM-kill the backend on CPU Docker."
+    )
+    assert dummy_rag.created_index == 0, (
+        "rag.create_index() must NOT be called from the sync /ingest "
+        "success path either; the next chat query will build the index "
+        "lazily."
+    )
+    # select_collection must also not run eagerly — DummyRAG.selected stays empty.
+    assert api_module.rag.selected == []
+
+
 def test_stream_query_context_window_overflow_surfaces_descriptive_error(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:

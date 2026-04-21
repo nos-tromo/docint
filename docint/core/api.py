@@ -1157,29 +1157,6 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
             hybrid=payload.hybrid if payload.hybrid is not None else True,
         )
 
-        # After ingestion, prepare the in-memory RAG instance for immediate querying.
-        rag.select_collection(name)
-        try:
-            if getattr(rag, "index", None) is None:
-                rag.create_index()
-            rag.create_query_engine()
-
-            # Pre-warm NER cache if enabled
-            if getattr(rag, "enable_ner", False):
-                try:
-                    rag.get_collection_ner(refresh=True)
-                except Exception:
-                    logger.warning(
-                        "Exception: Failed to pre-warm NER cache for collection: {}",
-                        name,
-                    )
-        except Exception:
-            # If eager preparation fails, queries will lazily prepare the engine.
-            logger.warning(
-                "Exception: Failed to create query engine for collection: {}", name
-            )
-            pass
-
         return {
             "ok": True,
             "collection": name,
@@ -1406,16 +1383,6 @@ async def ingest_upload(
                 )
                 yield _format_sse(event_name, {"message": msg})
 
-            rag.select_collection(name)
-            try:
-                if getattr(rag, "index", None) is None:
-                    rag.create_index()
-                rag.create_query_engine()
-            except Exception:
-                logger.warning(
-                    "Exception: Failed to create query engine for collection: {}",
-                    name,
-                )
             yield _format_sse(
                 "ingestion_complete",
                 {"collection": name, "data_dir": str(batch_dir)},
