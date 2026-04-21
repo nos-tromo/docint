@@ -386,6 +386,56 @@ def test_build_query_engine_does_not_materialize_reranker(
     )
 
 
+def test_unload_models_releases_audio_reader_and_dir_reader() -> None:
+    """``unload_models`` must release the Whisper reference held on the audio reader.
+
+    On CPU-only deployments ``torch.cuda.empty_cache`` is a no-op, so the
+    only way Whisper weights (hundreds of MB to ~1.5 GB) return to the
+    allocator is via Python ref-count drop. Previously
+    ``RAG.unload_models`` nulled the embed / text / reranker / image
+    services but left ``self.audio_reader`` and ``self.dir_reader``
+    holding captured ingestion-pipeline state. This test locks in the
+    new behaviour: the Whisper model field is nulled explicitly, and
+    both reader handles are dropped so refcounting can reclaim them.
+
+    Uses a throwaway dummy reader so no real Whisper binary is loaded.
+    """
+    rag = RAG(qdrant_collection="test")
+
+    class DummyAudioReader:
+        """Stand-in for an ``AudioReader`` with a Whisper-like model field."""
+
+        def __init__(self) -> None:
+            """Initialize with a non-None ``_model`` to exercise the null path."""
+            self._model: Any = object()
+
+    dummy_audio = DummyAudioReader()
+    rag.audio_reader = cast(Any, dummy_audio)
+    rag.dir_reader = cast(Any, object())
+
+    rag.unload_models()
+
+    # The Whisper reference on the captured reader must be cleared so the
+    # underlying weights are GC-eligible even if something else outside
+    # RAG is still holding the reader instance.
+    assert dummy_audio._model is None, (
+        "unload_models must null audio_reader._model so the Whisper weights "
+        "become ref-count-zero on CPU-only deployments."
+    )
+    assert rag.audio_reader is None, (
+        "unload_models must drop the audio_reader handle itself."
+    )
+    assert rag.dir_reader is None, (
+        "unload_models must drop the dir_reader handle as well."
+    )
+    # Existing fields remain nulled (guards against regressions to
+    # unload_models's original behaviour).
+    assert rag._embed_model is None
+    assert rag._text_model is None
+    assert rag._reranker is None
+    assert rag._image_ingestion_service is None
+
+
 def test_lazy_reranker_postprocessor_delegates_on_call() -> None:
     """``LazyRerankerPostprocessor`` materializes and delegates lazily.
 
@@ -399,9 +449,7 @@ def test_lazy_reranker_postprocessor_delegates_on_call() -> None:
     class FakeReranker:
         """Minimal reranker stub recording delegated arguments."""
 
-        def _postprocess_nodes(
-            self, nodes: list[Any], query_bundle: Any
-        ) -> list[Any]:
+        def _postprocess_nodes(self, nodes: list[Any], query_bundle: Any) -> list[Any]:
             """Record the forwarded arguments and return nodes unchanged.
 
             Args:

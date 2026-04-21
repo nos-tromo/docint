@@ -1393,9 +1393,7 @@ async def ingest_upload(
                     )
                     raise
                 except Exception as e:
-                    logger.error(
-                        "Ingestion of collection '{}' failed: {}", name, e
-                    )
+                    logger.error("Ingestion of collection '{}' failed: {}", name, e)
                     _safe_put(e)
 
             ingestion_task = asyncio.create_task(run_ingestion())

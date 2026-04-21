@@ -105,6 +105,7 @@ from docint.core.ner import (
 )
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
+from docint.core.readers.audio import AudioReader
 from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.retrieval_filters import matches_metadata_filters
 from docint.core.state.session_manager import SessionManager
@@ -1037,6 +1038,10 @@ class RAG:
 
     # -- Ingested data ---
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
+    # Captured from the ingestion pipeline so ``unload_models`` can proactively
+    # release the Whisper model held on ``audio_reader._model`` on CPU-only
+    # deployments (where ``torch.cuda.empty_cache`` is a no-op).
+    audio_reader: AudioReader | None = field(default=None, init=False)
     docs: list[Document] = field(default_factory=list, init=False)
     nodes: list[BaseNode] = field(default_factory=list, init=False)
 
@@ -4335,6 +4340,9 @@ class RAG:
                 raise EmptyIngestionError(self.qdrant_collection)
 
             self.dir_reader = pipeline.dir_reader
+            # Defensive getattr: some older pipeline stubs (mostly in tests)
+            # predate the audio_reader field.
+            self.audio_reader = getattr(pipeline, "audio_reader", None)
             # Clear memory-heavy lists as they are persisted in the vector store
             self.docs = []
             self.nodes = []
@@ -6366,13 +6374,31 @@ class RAG:
         return graph_neighbors(graph, entity=entity, hops=max(1, int(hops)))
 
     def unload_models(self) -> None:
-        """Unload models to free up memory."""
+        """Unload models to free up memory.
+
+        Releases the lazily-loaded embed / text / post-retrieval-text /
+        reranker / image-ingestion services, invalidates the NER cache,
+        and — important for CPU-only deployments where
+        ``torch.cuda.empty_cache`` is a no-op — proactively drops the
+        Whisper model held on ``self.audio_reader._model`` plus the
+        ``dir_reader`` and ``audio_reader`` references themselves so
+        Python's ref-count collector can reclaim them immediately
+        instead of waiting for a later cycle. Pure null-and-``gc.collect``
+        semantics; no platform-specific allocator tricks are invoked.
+        """
         self._embed_model = None
         self._text_model = None
         self._post_retrieval_text_model = None
         self._reranker = None
         self._image_ingestion_service = None
         self._invalidate_ner_cache()
+
+        if self.audio_reader is not None:
+            # Drop the Whisper reference explicitly so this cleanup runs
+            # even if some other code path is still holding the reader.
+            self.audio_reader._model = None
+        self.audio_reader = None
+        self.dir_reader = None
 
         gc.collect()
         if torch.cuda.is_available():
