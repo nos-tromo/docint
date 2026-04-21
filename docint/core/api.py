@@ -1121,10 +1121,14 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
         payload (IngestIn): The ingestion payload containing the collection name and hybrid flag.
 
     Returns:
-        dict[str, bool | str]: A dictionary indicating success, collection name, data directory, and hybrid flag.
+        dict[str, bool | str]: A dictionary with keys ``ok``, ``collection``, ``data_dir``,
+            ``hybrid``, and ``empty``. The ``empty`` field is ``True`` if ingestion produced
+            no documents; ``False`` otherwise. Soft-empty outcomes (where the file set contained
+            no parseable content) return HTTP 200 with ``empty=true`` instead of an error.
 
     Raises:
-        HTTPException: If the collection name is missing, data directory does not exist, or an error occurs during ingestion.
+        HTTPException: If the collection name is missing or data directory does not exist.
+        HTTPException: If an unrecoverable error occurs during ingestion.
     """
 
     try:
