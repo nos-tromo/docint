@@ -572,6 +572,61 @@ class VLLMRerankPostprocessor(BaseNodePostprocessor):
             return self._fallback_nodes(nodes)
 
 
+class LazyRerankerPostprocessor(BaseNodePostprocessor):
+    """Defer reranker materialization until the first postprocessing call.
+
+    Accessing ``rag.reranker`` triggers the lazy-init property that loads
+    bge-reranker-v2-m3 (~1 GB) or spins up the vLLM rerank client and runs
+    a healthcheck. Plugging the bare ``rag.reranker`` into
+    ``node_postprocessors`` at query-engine construction pays that cost
+    up-front, even when the caller never intends to execute a query
+    (warmup / introspection / preflight patterns). That was the root
+    cause of the OOM regression chain — see commits 18a47a6 and 72e299e.
+
+    This wrapper holds a reference to the RAG instance and delegates
+    each ``_postprocess_nodes`` call through ``rag.reranker``. The real
+    reranker is cached on ``rag._reranker`` by the property itself, so
+    only the first query pays the load cost; construction of the query
+    engine stays cheap.
+
+    Attributes:
+        rag (Any): The owning ``RAG`` instance. Typed ``Any`` because
+            ``RAG`` is defined later in this module and Pydantic's
+            field validation would otherwise trip on the forward
+            reference.
+    """
+
+    rag: Any
+
+    @classmethod
+    def class_name(cls) -> str:
+        """Return a stable class identifier.
+
+        Returns:
+            str: A string identifier for this postprocessor class, used
+                by LlamaIndex when matching cached configurations.
+        """
+        return "LazyRerankerPostprocessor"
+
+    def _postprocess_nodes(
+        self,
+        nodes: list[NodeWithScore],
+        query_bundle: QueryBundle | None = None,
+    ) -> list[NodeWithScore]:
+        """Delegate to the real reranker, materializing it on first call.
+
+        Args:
+            nodes (list[NodeWithScore]): Retrieved nodes awaiting rerank.
+            query_bundle (QueryBundle | None): The original query bundle
+                forwarded to the underlying reranker unchanged.
+
+        Returns:
+            list[NodeWithScore]: Reranked (and typically top-n trimmed)
+                nodes as produced by the underlying postprocessor.
+        """
+        return self.rag.reranker._postprocess_nodes(nodes, query_bundle)
+
+
 def _vllm_service_root(api_base: str) -> str:
     """Normalize an OpenAI-compatible base URL to the vLLM service root.
 
@@ -3033,7 +3088,9 @@ class RAG:
             retrieval_options=retrieval_options,
         )
         response_mode = self._resolve_chat_response_mode()
-        node_postprocessors: list[BaseNodePostprocessor] = [self.reranker]
+        node_postprocessors: list[BaseNodePostprocessor] = [
+            LazyRerankerPostprocessor(rag=self)
+        ]
         if retrieval_settings["parent_context_enabled"] and self.index is not None:
             node_postprocessors.append(
                 ParentContextPostprocessor(docstore=self.index.docstore)

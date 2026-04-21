@@ -24,7 +24,7 @@ from llama_index.core import Document
 from llama_index.core.schema import NodeWithScore, TextNode
 
 from docint.core import rag as rag_module
-from docint.core.rag import RAG
+from docint.core.rag import RAG, LazyRerankerPostprocessor
 from docint.core.retrieval_filters import (
     build_metadata_filters,
     build_qdrant_filter,
@@ -303,6 +303,145 @@ def test_build_query_engine_uses_post_retrieval_text_model(
     rag.build_query_engine()
 
     assert captured["llm"] is rag._post_retrieval_text_model
+
+
+def test_build_query_engine_does_not_materialize_reranker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``build_query_engine`` must not dereference ``self.reranker``.
+
+    The reranker property lazily loads bge-reranker-v2-m3 (~1 GB on CPU)
+    and runs a healthcheck ``compute_score`` on first access. Plugging
+    the bare property value into ``node_postprocessors`` at construction
+    forced that cost even when the caller never intended to execute a
+    query — the root cause of the OOM regression chain addressed by
+    commits 18a47a6, 72e299e, and this commit. The ``LazyRerankerPostprocessor``
+    wrapper must defer the dereference until first ``_postprocess_nodes``.
+    This test defends against future reintroduction of an eager attach.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag.openai_config = OpenAIConfig(
+        api_base="https://api.openai.com/v1",
+        api_key="sk-test",
+        ctx_window=200000,
+        dimensions=1024,
+        max_retries=2,
+        num_output=256,
+        inference_provider="openai",
+        reuse_client=False,
+        seed=42,
+        temperature=0.0,
+        thinking_effort="high",
+        thinking_enabled=True,
+        timeout=300.0,
+        top_p=0.0,
+    )
+    rag._post_retrieval_text_model = cast(Any, object())
+    # Intentionally leave rag._reranker unset — if build_query_engine reads
+    # the property, the tripwire below fires.
+    rag.index = cast(
+        Any,
+        types.SimpleNamespace(
+            docstore=object(),
+            as_retriever=lambda **kwargs: {"retriever_kwargs": kwargs},
+        ),
+    )
+    monkeypatch.setattr(RAG, "list_documents", lambda self: [])
+    monkeypatch.setattr(RAG, "_sample_collection_payloads", lambda self, limit=128: [])
+
+    def _forbidden_reranker(_self: RAG) -> Any:
+        """Tripwire property — must NOT be reached during query engine construction.
+
+        Args:
+            _self (RAG): The RAG instance (ignored).
+
+        Raises:
+            AssertionError: Always, indicating an illegal eager access.
+        """
+        raise AssertionError(
+            "rag.reranker must NOT be accessed during build_query_engine; "
+            "LazyRerankerPostprocessor should defer the load until first "
+            "_postprocess_nodes call."
+        )
+
+    monkeypatch.setattr(RAG, "reranker", property(_forbidden_reranker))
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        rag_module.RetrieverQueryEngine,
+        "from_args",
+        staticmethod(lambda **kwargs: captured.update(kwargs) or kwargs),
+    )
+
+    # Would raise under the pre-refactor code path.
+    rag.build_query_engine()
+
+    postprocessors = captured["node_postprocessors"]
+    assert any(isinstance(p, LazyRerankerPostprocessor) for p in postprocessors), (
+        "LazyRerankerPostprocessor must be installed in node_postprocessors "
+        "so the reranker load is deferred to query time."
+    )
+
+
+def test_lazy_reranker_postprocessor_delegates_on_call() -> None:
+    """``LazyRerankerPostprocessor`` materializes and delegates lazily.
+
+    Construction of the wrapper must NOT read ``rag.reranker``; the first
+    ``_postprocess_nodes`` call must read the property exactly once and
+    forward the ``nodes`` and ``query_bundle`` arguments unchanged.
+    """
+    accesses: list[str] = []
+    forwarded: dict[str, Any] = {}
+
+    class FakeReranker:
+        """Minimal reranker stub recording delegated arguments."""
+
+        def _postprocess_nodes(
+            self, nodes: list[Any], query_bundle: Any
+        ) -> list[Any]:
+            """Record the forwarded arguments and return nodes unchanged.
+
+            Args:
+                nodes (list[Any]): Nodes forwarded from the wrapper.
+                query_bundle (Any): Query bundle forwarded from the wrapper.
+
+            Returns:
+                list[Any]: The input ``nodes`` unchanged.
+            """
+            forwarded["nodes"] = nodes
+            forwarded["query_bundle"] = query_bundle
+            return nodes
+
+    class FakeRAG:
+        """Minimal RAG stub with a reranker property access counter."""
+
+        @property
+        def reranker(self) -> FakeReranker:
+            """Track access to the reranker property.
+
+            Returns:
+                FakeReranker: A fresh stub reranker each call.
+            """
+            accesses.append("reranker")
+            return FakeReranker()
+
+    rag = FakeRAG()
+    wrapper = LazyRerankerPostprocessor(rag=rag)
+    assert accesses == [], "construction must not touch rag.reranker"
+
+    sentinel_nodes: list[Any] = [object(), object()]
+    sentinel_bundle = object()
+    result = wrapper._postprocess_nodes(sentinel_nodes, sentinel_bundle)
+
+    assert accesses == ["reranker"], (
+        "rag.reranker must be read exactly once on first delegated call"
+    )
+    assert forwarded["nodes"] is sentinel_nodes
+    assert forwarded["query_bundle"] is sentinel_bundle
+    assert result is sentinel_nodes
 
 
 def test_normalize_response_data_appends_image_sources(
