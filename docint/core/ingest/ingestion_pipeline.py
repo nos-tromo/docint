@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import gc
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, NotRequired, TypedDict
+
+import torch
 
 from llama_index.core import Document, SimpleDirectoryReader
 from llama_index.core.node_parser import (
@@ -382,6 +385,76 @@ class DocumentIngestionPipeline:
             ".wmv",
         }
 
+    def _release_pre_audio_heavy_state(self) -> None:
+        """Drop non-audio model residents right before Whisper loads.
+
+        On CPU single-worker deployments ``AudioReader.load_batch_data``
+        loads Whisper (``openai/whisper-large-v3-turbo`` ≈ 1.6 GB RSS) in
+        this same process. Any pre-existing image embedding backend
+        (CLIP, ~600 MB–1.5 GB) or tagging backend held on
+        ``self.image_ingestion_service`` stays pinned until something
+        explicitly drops it — so Whisper's allocation piles on top and
+        can cross the Docker cgroup limit, manifesting as SIGKILL
+        (exit 137) during a mixed-type batch ingest.
+
+        This hook nulls the image embedding / tagging backends (they are
+        lazily re-created on the next image query) and forces a GC so
+        Python's allocator can actually hand the pages back before
+        Whisper asks for fresh ones.
+        """
+
+        service = self.image_ingestion_service
+        if service is not None:
+            if getattr(service, "embedding_backend", None) is not None:
+                service.embedding_backend = None
+            if getattr(service, "tagging_backend", None) is not None:
+                service.tagging_backend = None
+            # Intentionally do NOT clear ``_embedding_backend_error`` /
+            # ``_tagging_backend_error``: if a prior image batch in the
+            # same ingest failed to load CLIP (e.g. a borderline-memory
+            # OOM the cgroup absorbed), the sentinel MUST stay set so
+            # ``_get_embedding_backend`` fast-returns ``None`` instead
+            # of retrying the failing load right after we freed memory
+            # for Whisper and risking a second OOM cycle. The sentinel
+            # naturally resets at the next ``ImageIngestionService``
+            # construction (i.e. the next RAG ingest call).
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def _release_post_audio_heavy_state(self) -> None:
+        """Drop the Whisper model reference right after an audio batch.
+
+        Same memory-budget reasoning as ``_release_pre_audio_heavy_state``
+        but in the opposite direction: once the audio batch finishes,
+        hold onto Whisper only if another reader is guaranteed not to
+        need headroom next. In practice a mixed-type ingest can schedule
+        an image file immediately after audio, and that image will need
+        to reload CLIP — so keep the Whisper weights pinned is exactly
+        the wrong trade-off on CPU. The next audio batch (rare in the
+        same ingest) will lazily reload Whisper in
+        ``AudioReader._load_model``.
+
+        Note:
+            When the audio reader is configured to use an OpenAI-compatible
+            provider backend (``INFERENCE_PROVIDER`` of ``openai`` or
+            ``vllm``), ``AudioReader._model`` is never populated because
+            transcription is delegated to the remote API. The null-guard
+            below makes this path a safe no-op.
+        """
+
+        audio_reader = self.audio_reader
+        if (
+            audio_reader is not None
+            and getattr(audio_reader, "_model", None) is not None
+        ):
+            audio_reader._model = None
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def _audio_stream_window_size(self) -> int:
         """Return the bounded audio window size used for streaming ingestion.
 
@@ -427,12 +500,24 @@ class DocumentIngestionPipeline:
             if self.audio_reader is None:
                 raise RuntimeError("Audio reader is not initialized.")
 
+            # Release large non-audio reader state (CLIP / tagging) BEFORE
+            # Whisper loads. On CPU single-worker the Whisper weights are
+            # loaded in this same process and pile on top of any resident
+            # image-embedding backend, which crossed the Docker memory
+            # ceiling in OOM exit-137 reports.
+            self._release_pre_audio_heavy_state()
+
             loaded_batches = self.audio_reader.load_batch_data(
                 pending_audio_paths,
                 extra_info=pending_audio_metadata,
             )
             pending_audio_paths.clear()
             pending_audio_metadata.clear()
+
+            # Release Whisper NOW so any downstream reader scheduled after
+            # audio (e.g. CLIP for a trailing image file) has headroom to
+            # allocate without re-OOMing on top of resident Whisper weights.
+            self._release_post_audio_heavy_state()
 
             yielded_batches: list[list[Document]] = []
             for docs in loaded_batches:

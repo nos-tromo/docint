@@ -900,3 +900,266 @@ def test_build_streaming_yields_enrichment_batches_and_completion_hashes(
         (2, 2, 5),
         (1, 4, 5),
     ]
+
+
+def _install_flush_audio_pipeline_stubs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, audio_reader: Any
+) -> DocumentIngestionPipeline:
+    """Build a pipeline wired for ``_flush_audio_batch`` behaviour tests.
+
+    Mocks just enough config and collaborators to trigger an audio flush:
+    one pending audio file followed by a non-audio file so the flush fires
+    before the non-audio file is loaded.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+        audio_reader: The ``AudioReader`` stub to install on the pipeline.
+
+    Returns:
+        DocumentIngestionPipeline: A pipeline with stubbed readers and
+            configuration ready to exercise the audio flush path.
+    """
+
+    audio_file = tmp_path / "clip.wav"
+    text_file = tmp_path / "notes.txt"
+    audio_file.write_bytes(b"a")
+    text_file.write_text("plain text", encoding="utf-8")
+
+    class FakeNERConfig:
+        enabled = False
+        max_chars = 256
+        max_workers = 1
+
+    class FakeIngestionConfig:
+        ingestion_batch_size = 5
+        sentence_splitter_chunk_size = 512
+        sentence_splitter_chunk_overlap = 64
+        supported_filetypes = [".wav", ".txt"]
+        hierarchical_chunking_enabled = False
+        coarse_chunk_size = 1024
+        fine_chunk_size = 256
+        fine_chunk_overlap = 32
+
+    monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
+    monkeypatch.setattr(
+        pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig()
+    )
+    monkeypatch.setattr(
+        DocumentIngestionPipeline, "_load_doc_readers", lambda self: None
+    )
+    monkeypatch.setattr(
+        DocumentIngestionPipeline, "_load_node_parsers", lambda self: None
+    )
+    monkeypatch.setattr(
+        pipeline_module.SimpleDirectoryReader,
+        "load_file",
+        staticmethod(
+            lambda **kwargs: [
+                Document(
+                    text=f"text:{Path(kwargs['input_file']).name}",
+                    metadata={
+                        "file_path": str(kwargs["input_file"]),
+                        "file_hash": "text-hash",
+                    },
+                )
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        DocumentIngestionPipeline,
+        "_process_batch",
+        lambda self, docs, existing_hashes: (docs, []),
+    )
+
+    pipeline = DocumentIngestionPipeline(
+        data_dir=tmp_path,
+        device="cpu",
+        ner_model=None,
+        progress_callback=None,
+    )
+
+    fake_dir_reader = SimpleNamespace(
+        input_files=[audio_file, text_file],
+        file_metadata=lambda file_path: {
+            "file_path": file_path,
+            "file_name": Path(file_path).name,
+            "filename": Path(file_path).name,
+            "file_hash": f"hash:{Path(file_path).name}",
+        },
+        file_extractor={},
+        filename_as_id=False,
+        encoding="utf-8",
+        errors="ignore",
+        raise_on_error=False,
+        fs=None,
+        _exclude_metadata=lambda docs: docs,
+    )
+
+    pipeline.audio_reader = cast(Any, audio_reader)
+    pipeline.dir_reader = cast(Any, fake_dir_reader)
+    return pipeline
+
+
+def test_flush_audio_batch_releases_image_embedding_backend_before_whisper_load(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """CLIP (and any tagging backend) must be released BEFORE Whisper loads.
+
+    In CPU single-worker mode the Whisper model is loaded in-process by
+    ``AudioReader`` when ``load_batch_data`` runs. Any pre-existing image
+    embedding backend (CLIP, ~600 MB–1.5 GB resident) stays pinned until
+    something explicitly drops it, which piles Whisper on top of CLIP and
+    overflows the Docker CPU memory ceiling (OOM exit 137 observed on a
+    mixed batch of 2 PDFs, 2 audio files, 1 image, and 2 CSVs).
+
+    This test locks in the contract: by the time ``audio_reader.load_batch_data``
+    is invoked, ``pipeline.image_ingestion_service.embedding_backend`` (and
+    any ``_tagging_backend`` field) must already be ``None`` so Python's
+    ref-count collector can reclaim the CLIP weights before Whisper's
+    allocation request crosses the cgroup limit.
+    """
+
+    observed_embedding_backend: list[Any] = []
+    observed_tagging_backend: list[Any] = []
+
+    class RecordingAudioReader:
+        max_workers = 1
+        _model: Any = object()  # pretend Whisper is already cached
+
+        def __init__(self, image_service: Any) -> None:
+            self._image_service = image_service
+
+        def load_batch_data(
+            self,
+            files: list[Path],
+            *,
+            extra_info: list[dict[str, Any] | None] | None = None,
+        ) -> list[list[Document]]:
+            observed_embedding_backend.append(
+                getattr(self._image_service, "embedding_backend", "missing")
+            )
+            observed_tagging_backend.append(
+                getattr(self._image_service, "tagging_backend", "missing")
+            )
+            return [
+                [
+                    Document(
+                        text=f"audio:{path.name}",
+                        metadata={
+                            "file_path": str(path),
+                            "file_hash": f"hash:{path.name}",
+                        },
+                    )
+                ]
+                for path in files
+            ]
+
+    image_service = SimpleNamespace(
+        embedding_backend=object(),  # pretend CLIP is loaded
+        tagging_backend=object(),
+        _embedding_backend_error=None,
+        _tagging_backend_error=None,
+    )
+    pipeline = _install_flush_audio_pipeline_stubs(
+        monkeypatch, tmp_path, RecordingAudioReader(image_service)
+    )
+    pipeline.image_ingestion_service = cast(Any, image_service)
+
+    list(pipeline.build())
+
+    assert observed_embedding_backend == [None], (
+        "When _flush_audio_batch runs, image_ingestion_service.embedding_backend "
+        "must already be None so the CLIP weights are GC-eligible before "
+        "AudioReader.load_batch_data triggers the in-process Whisper load. "
+        f"Observed: {observed_embedding_backend!r}"
+    )
+    assert observed_tagging_backend == [None], (
+        "Any image tagging backend held on the image ingestion service must "
+        "also be released before Whisper loads, for the same reason. "
+        f"Observed: {observed_tagging_backend!r}"
+    )
+
+
+def test_flush_audio_batch_releases_whisper_model_after_transcription(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Whisper must be released after the audio batch so later readers (e.g.
+    CLIP for an image file scheduled after audio in the same ingest) have
+    room to load. Without this, a mixed batch of audio + image on CPU
+    stacks Whisper (~1.6 GB) under CLIP's allocation request and OOMs.
+
+    The contract: after ``audio_reader.load_batch_data`` returns,
+    ``audio_reader._model`` is ``None`` so the ref-count collector can
+    reclaim the Whisper weights immediately.
+    """
+
+    class FakeAudioReader:
+        max_workers = 1
+
+        def __init__(self) -> None:
+            self._model: Any = object()  # pretend Whisper is cached
+
+        def load_batch_data(
+            self,
+            files: list[Path],
+            *,
+            extra_info: list[dict[str, Any] | None] | None = None,
+        ) -> list[list[Document]]:
+            return [
+                [
+                    Document(
+                        text=f"audio:{path.name}",
+                        metadata={
+                            "file_path": str(path),
+                            "file_hash": f"hash:{path.name}",
+                        },
+                    )
+                ]
+                for path in files
+            ]
+
+    audio_reader = FakeAudioReader()
+    pipeline = _install_flush_audio_pipeline_stubs(monkeypatch, tmp_path, audio_reader)
+
+    list(pipeline.build())
+
+    assert audio_reader._model is None, (
+        "After _flush_audio_batch completes, audio_reader._model must be None "
+        "so Whisper's ~1.6 GB weights become ref-count-zero before any "
+        "downstream readers (CLIP, Docling) allocate."
+    )
+
+
+def test_flush_audio_batch_release_is_safe_without_image_ingestion_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The pre-audio release must be a no-op when no image service is attached.
+
+    Some callers construct a pipeline without passing an image ingestion
+    service (e.g. test harnesses or audio-only CLI flows). The release
+    hook must therefore handle ``pipeline.image_ingestion_service is None``
+    without raising.
+    """
+
+    class FakeAudioReader:
+        max_workers = 1
+
+        def __init__(self) -> None:
+            self._model: Any = object()
+
+        def load_batch_data(
+            self,
+            files: list[Path],
+            *,
+            extra_info: list[dict[str, Any] | None] | None = None,
+        ) -> list[list[Document]]:
+            return [[] for _ in files]
+
+    pipeline = _install_flush_audio_pipeline_stubs(
+        monkeypatch, tmp_path, FakeAudioReader()
+    )
+    assert pipeline.image_ingestion_service is None
+
+    # Must not raise.
+    list(pipeline.build())
