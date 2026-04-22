@@ -1,3 +1,5 @@
+"""SQLAlchemy declarative base and session factory for state persistence."""
+
 from pathlib import Path
 
 from sqlalchemy import create_engine
@@ -12,7 +14,7 @@ def _ensure_sqlite_parent_dir(db_url: str) -> None:
     """Create the parent directory for file-backed SQLite URLs.
 
     Args:
-        db_url: SQLAlchemy database URL.
+        db_url (str): SQLAlchemy database URL.
     """
     sqlite_prefix = "sqlite:///"
     if not db_url.startswith(sqlite_prefix):

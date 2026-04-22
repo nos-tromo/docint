@@ -47,8 +47,8 @@ class CorePDFPipelineReader:
         """Attach entity/relation metadata to nodes in-place.
 
         Args:
-            nodes: Nodes to enrich.
-            progress_callback: Optional callback for progress updates.
+            nodes (list[BaseNode]): Nodes to enrich.
+            progress_callback (Callable[[str], None] | None): Optional callback for progress updates.
         """
         if not self.entity_extractor or not nodes:
             return
@@ -56,6 +56,7 @@ class CorePDFPipelineReader:
         total_nodes = len(nodes)
 
         def _process_node(idx: int, node: BaseNode) -> None:
+            """Run NER extraction on ``node`` and merge entities/relations into metadata."""
             text_value = getattr(node, "text", "") or ""
             if not text_value.strip():
                 return
@@ -96,10 +97,10 @@ class CorePDFPipelineReader:
         """Return sorted PDF files under *data_dir*.
 
         Args:
-            data_dir: Root ingestion path, which may be a directory or file.
+            data_dir (Path): Root ingestion path, which may be a directory or file.
 
         Returns:
-            Sorted list of PDF file paths.
+            list[Path]: Sorted list of PDF file paths.
         """
         if data_dir.is_file():
             return [data_dir] if data_dir.suffix.lower() == ".pdf" else []
@@ -114,11 +115,11 @@ class CorePDFPipelineReader:
         """Load chunk records produced by the core PDF pipeline.
 
         Args:
-            doc_id: Document hash identifier.
-            artifacts_dir: Root artifacts directory.
+            doc_id (str): Document hash identifier.
+            artifacts_dir (Path): Root artifacts directory.
 
         Returns:
-            Parsed list of chunk dictionaries from ``chunks.jsonl``.
+            list[dict[str, Any]]: Parsed list of chunk dictionaries from ``chunks.jsonl``.
         """
         chunks_path = artifacts_dir / doc_id / "chunks.jsonl"
         if not chunks_path.exists():
@@ -292,13 +293,13 @@ class CorePDFPipelineReader:
         """Convert pipeline chunks into LlamaIndex documents and nodes.
 
         Args:
-            file_path: Source PDF path.
-            doc_id: Deterministic document hash.
-            pipeline_version: Version reported by the pipeline manifest.
-            chunks: Raw chunk payloads loaded from artifacts.
+            file_path (Path): Source PDF path.
+            doc_id (str): Deterministic document hash.
+            pipeline_version (str): Version reported by the pipeline manifest.
+            chunks (list[dict[str, Any]]): Raw chunk payloads loaded from artifacts.
 
         Returns:
-            Tuple of generated documents and nodes.
+            tuple[list[Document], list[BaseNode]]: Tuple of generated documents and nodes.
         """
         mimetype = get_mimetype(file_path)
         docs: list[Document] = []
@@ -372,8 +373,8 @@ class CorePDFPipelineReader:
         """Yield batches produced by the core PDF ingestion pipeline.
 
         Args:
-            existing_hashes: Hashes already present in the destination collection.
-            progress_callback: Optional callback for ingestion progress events.
+            existing_hashes (set[str]): Hashes already present in the destination collection.
+            progress_callback (Callable[[str], None] | None): Optional callback for ingestion progress events.
 
         Yields:
             Tuples of ``(docs, nodes, file_hash)`` for each successfully-processed PDF.

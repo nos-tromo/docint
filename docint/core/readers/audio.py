@@ -1,3 +1,5 @@
+"""Audio transcription reader backed by Whisper and pyannote diarization."""
+
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -316,7 +318,7 @@ class OpenAICompatibleAudioBackend:
         call can decode it.
 
         Args:
-            file_path: Source audio file.
+            file_path (Path): Source audio file.
 
         Yields:
             Path to a WAV file (either the original or a temporary copy).
@@ -367,11 +369,11 @@ class OpenAICompatibleAudioBackend:
         """Initialize the provider-backed audio client.
 
         Args:
-            api_base: OpenAI-compatible base URL.
-            api_key: API key used for authorization.
-            max_retries: Maximum request retries.
-            model_id: Served ASR model identifier.
-            timeout: Request timeout in seconds.
+            api_base (str): OpenAI-compatible base URL.
+            api_key (str): API key used for authorization.
+            max_retries (int): Maximum request retries.
+            model_id (str): Served ASR model identifier.
+            timeout (float): Request timeout in seconds.
         """
 
         self.model_id = model_id
@@ -387,7 +389,7 @@ class OpenAICompatibleAudioBackend:
         """Normalize OpenAI client responses into plain dictionaries.
 
         Args:
-            response: The raw response object from the OpenAI client.
+            response (Any): The raw response object from the OpenAI client.
 
         Returns:
             dict[str, Any]: A normalized dictionary representation of the response.
@@ -407,7 +409,7 @@ class OpenAICompatibleAudioBackend:
         """Return whether the configured ASR model should support translation.
 
         Args:
-            model_id: The ASR model identifier to evaluate.
+            model_id (str): The ASR model identifier to evaluate.
 
         Returns:
             bool: True when the model is expected to support translation, otherwise False.
@@ -422,8 +424,8 @@ class OpenAICompatibleAudioBackend:
         """Call the provider transcriptions endpoint with verbose segments.
 
         Args:
-            file_path: The path to the audio file to transcribe.
-            language: Optional source language override.
+            file_path (Path): The path to the audio file to transcribe.
+            language (str | None): Optional source language override.
 
         Returns:
             dict[str, Any]: The normalized transcription result from the provider.
@@ -450,7 +452,7 @@ class OpenAICompatibleAudioBackend:
         """Call the provider translations endpoint with verbose output.
 
         Args:
-            file_path: The path to the audio file to translate.
+            file_path (Path): The path to the audio file to translate.
 
         Returns:
             dict[str, Any]: The normalized translation result from the provider.
@@ -477,12 +479,12 @@ class OpenAICompatibleAudioBackend:
         """Transcribe or translate a file through the provider backend.
 
         Args:
-            file_path: Source audio file.
-            configured_task: Requested task from configuration.
-            src_language: Optional source language override.
+            file_path (Path): Source audio file.
+            configured_task (WhisperTask): Requested task from configuration.
+            src_language (str | None): Optional source language override.
 
         Returns:
-            A normalized transcription payload.
+            dict[str, Any]: A normalized transcription payload.
         """
 
         transcription = self._transcribe_via_provider(file_path, language=src_language)
@@ -1198,6 +1200,7 @@ class AudioReader(BaseReader):
                 next_submit_index = 0
 
                 def _submit_next_job() -> None:
+                    """Submit the next queued file to the worker pool, if any remain."""
                     nonlocal next_submit_index
                     if next_submit_index >= len(file_paths):
                         return
@@ -1338,7 +1341,7 @@ class AudioReader(BaseReader):
 
         Args:
             file (str | Path): The path to the audio file.
-            **kwargs: Additional keyword arguments.
+            **kwargs (Any): Additional keyword arguments forwarded to the reader.
 
         Returns:
             list[Document]: The segmented transcription documents for the file.

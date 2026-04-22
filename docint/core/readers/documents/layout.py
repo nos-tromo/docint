@@ -24,11 +24,11 @@ class LayoutAnalyzer(ABC):
         """Detect layout blocks on a single page.
 
         Args:
-            page_index: Zero-based page number.
-            file_path: Path to the source PDF (used by some backends).
+            page_index (int): Zero-based page number.
+            file_path (Path | None): Path to the source PDF (used by some backends).
 
         Returns:
-            List of ``LayoutBlock`` items sorted by ``reading_order``.
+            list[LayoutBlock]: List of ``LayoutBlock`` items sorted by ``reading_order``.
         """
 
 
@@ -64,11 +64,11 @@ class PypdfLayoutAnalyzer(LayoutAnalyzer):
         order.
 
         Args:
-            page_index: Zero-based page number.
-            file_path: Ignored (present for interface compatibility).
+            page_index (int): Zero-based page number.
+            file_path (Path | None): Ignored (present for interface compatibility).
 
         Returns:
-            List of ``LayoutBlock`` items sorted by ``reading_order``.
+            list[LayoutBlock]: List of ``LayoutBlock`` items sorted by ``reading_order``.
         """
         blocks: list[LayoutBlock] = []
         try:
@@ -152,12 +152,12 @@ class PypdfLayoutAnalyzer(LayoutAnalyzer):
         dimensions when placement cannot be determined.
 
         Args:
-            page: A ``pypdf`` page object.
-            page_index: Zero-based page number.
-            page_bbox: Full page bounding box (used as fallback).
+            page (Any): A ``pypdf`` page object.
+            page_index (int): Zero-based page number.
+            page_bbox (BBox): Full page bounding box (used as fallback).
 
         Returns:
-            A list of ``LayoutBlock`` items with ``type=FIGURE``.
+            list[LayoutBlock]: A list of ``LayoutBlock`` items with ``type=FIGURE``.
         """
         blocks: list[LayoutBlock] = []
         try:
@@ -191,10 +191,10 @@ class PypdfLayoutAnalyzer(LayoutAnalyzer):
         """Return names of ``/Image`` XObjects on *page*.
 
         Args:
-            page: A ``pypdf`` page object.
+            page (Any): A ``pypdf`` page object.
 
         Returns:
-            A list of XObject name strings (e.g. ``"/Im1"``).
+            list[str]: A list of XObject name strings (e.g. ``"/Im1"``).
         """
         names: list[str] = []
         try:
@@ -226,11 +226,11 @@ class PypdfLayoutAnalyzer(LayoutAnalyzer):
         matrices to derive the on-page bounding box.
 
         Args:
-            page: A ``pypdf`` page object.
-            image_names: Names to look for in ``Do`` operands.
+            page (Any): A ``pypdf`` page object.
+            image_names (list[str]): Names to look for in ``Do`` operands.
 
         Returns:
-            Mapping of image name → ``BBox``.
+            dict[str, BBox]: Mapping of image name → ``BBox``.
         """
         placements: dict[str, BBox] = {}
         try:
@@ -291,14 +291,14 @@ class PypdfLayoutAnalyzer(LayoutAnalyzer):
         the remaining text is returned separately.
 
         Args:
-            text: Full extracted text from the page.
-            page_index: Zero-based page number.
-            page_bbox: Page bounding box (used for the table bbox).
-            page_width: Page width in points.
-            page_height: Page height in points.
+            text (str): Full extracted text from the page.
+            page_index (int): Zero-based page number.
+            page_bbox (BBox): Page bounding box (used for the table bbox).
+            page_width (float): Page width in points.
+            page_height (float): Page height in points.
 
         Returns:
-            A 2-tuple ``(table_blocks, remaining_text)``.
+            tuple[list[LayoutBlock], str]: A 2-tuple ``(table_blocks, remaining_text)``.
         """
         table_blocks: list[LayoutBlock] = []
         if not text.strip():
@@ -369,11 +369,11 @@ def _extract_image_bboxes_from_stream(
     bounding box.
 
     Args:
-        stream_text: Decoded content-stream data.
-        image_names: Set of XObject names to look for (e.g. ``{"/Im1"}``).
+        stream_text (str): Decoded content-stream data.
+        image_names (set[str]): Set of XObject names to look for (e.g. ``{"/Im1"}``).
 
     Returns:
-        Mapping of image name → ``BBox``.
+        dict[str, BBox]: Mapping of image name → ``BBox``.
     """
     placements: dict[str, BBox] = {}
     tokens = stream_text.split()
@@ -430,11 +430,11 @@ def _multiply_matrices(current: list[float], new: list[float]) -> list[float]:
         | e  f  1 |
 
     Args:
-        current: Current transformation matrix.
-        new: New matrix to concatenate.
+        current (list[float]): Current transformation matrix.
+        new (list[float]): New matrix to concatenate.
 
     Returns:
-        The resulting 6-element matrix list.
+        list[float]: The resulting 6-element matrix list.
     """
     a1, b1, c1, d1, e1, f1 = current
     a2, b2, c2, d2, e2, f2 = new
@@ -458,11 +458,11 @@ def _find_table_end(lines: list[str], start: int) -> int:
     heading-like line is encountered.
 
     Args:
-        lines: All lines of the page text.
-        start: Index of the table caption line.
+        lines (list[str]): All lines of the page text.
+        start (int): Index of the table caption line.
 
     Returns:
-        Index of the last line belonging to the table.
+        int: Index of the last line belonging to the table.
     """
     end = start
     saw_blank = False
@@ -503,11 +503,11 @@ def analyze_document(
     """Run layout analysis on every page of *file_path*.
 
     Args:
-        file_path: Path to the PDF.
-        pages: Page triage results (used for page indices).
+        file_path (str | Path): Path to the PDF.
+        pages (list[PageInfo]): Page triage results (used for page indices).
 
     Returns:
-        Mapping of ``page_index`` → list of ``LayoutBlock``.
+        dict[int, list[LayoutBlock]]: Mapping of ``page_index`` → list of ``LayoutBlock``.
     """
     file_path = Path(file_path)
     analyzer = PypdfLayoutAnalyzer(file_path)

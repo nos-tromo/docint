@@ -36,11 +36,11 @@ class OCREngine(ABC):
         """Run OCR on a single page and return text spans.
 
         Args:
-            page_index: Zero-based page number.
-            file_path: Path to the source PDF.
+            page_index (int): Zero-based page number.
+            file_path (Path | None): Path to the source PDF.
 
         Returns:
-            List of ``OCRSpan`` items.
+            list[OCRSpan]: List of ``OCRSpan`` items.
         """
 
 
@@ -68,11 +68,11 @@ class PypdfTextEngine(OCREngine):
         without performing any OCR.
 
         Args:
-            page_index: Zero-based page number.
-            file_path: Ignored (present for interface compatibility).
+            page_index (int): Zero-based page number.
+            file_path (Path | None): Ignored (present for interface compatibility).
 
         Returns:
-            List of ``OCRSpan`` items containing the extracted text and its bounding box.
+            list[OCRSpan]: List of ``OCRSpan`` items containing the extracted text and its bounding box.
         """
         spans: list[OCRSpan] = []
         try:
@@ -147,15 +147,15 @@ class VisionOCREngine(OCREngine):
         """Initialize the vision OCR engine.
 
         Args:
-            file_path: Path to the source PDF.
-            timeout: Per-request timeout in seconds for vision API calls.
+            file_path (str | Path): Path to the source PDF.
+            timeout (float | None): Per-request timeout in seconds for vision API calls.
                 Defaults to ``60`` seconds.
-            max_retries: Maximum retries for a single vision API call.
+            max_retries (int | None): Maximum retries for a single vision API call.
                 Defaults to ``1``.
-            max_image_dimension: Maximum pixel width or height for the
+            max_image_dimension (int | None): Maximum pixel width or height for the
                 rendered page image.  Larger renders are proportionally
                 down-scaled before being sent to the API.  Defaults to ``1024``.
-            max_tokens: Maximum number of tokens the vision LLM may generate
+            max_tokens (int | None): Maximum number of tokens the vision LLM may generate
                 per request.  Defaults to ``4096``.
 
         Raises:
@@ -203,11 +203,11 @@ class VisionOCREngine(OCREngine):
         at half resolution.
 
         Args:
-            page_index: Zero-based page number.
-            file_path: Ignored (present for interface compatibility).
+            page_index (int): Zero-based page number.
+            file_path (Path | None): Ignored (present for interface compatibility).
 
         Returns:
-            List of ``OCRSpan`` items with the extracted text.
+            list[OCRSpan]: List of ``OCRSpan`` items with the extracted text.
         """
         spans: list[OCRSpan] = []
         try:
@@ -325,12 +325,12 @@ class VisionOCREngine(OCREngine):
         """Down-scale *pil_image* so neither axis exceeds *max_dim*.
 
         Args:
-            pil_image: The PIL image to be down-scaled.
-            max_dim: The maximum allowed dimension for the image.
-            page_index: The index of the page being processed.
+            pil_image (PILImage.Image): The PIL image to be down-scaled.
+            max_dim (int): The maximum allowed dimension for the image.
+            page_index (int): The index of the page being processed.
 
         Returns:
-            The down-scaled PIL image.
+            PILImage.Image: The down-scaled PIL image.
         """
         cur_max = max(pil_image.width, pil_image.height)
         if cur_max > max_dim:
@@ -351,10 +351,10 @@ class VisionOCREngine(OCREngine):
         """Encode a PIL image as JPEG and return its base64 representation.
 
         Args:
-            pil_image: The PIL image to be encoded.
+            pil_image (PILImage.Image): The PIL image to be encoded.
 
         Returns:
-            Base64-encoded string of the JPEG image.
+            str: Base64-encoded string of the JPEG image.
         """
         buf = BytesIO()
         # Convert RGBA → RGB before JPEG encoding.
@@ -374,11 +374,11 @@ class VisionOCREngine(OCREngine):
         unresponsive endpoints.
 
         Args:
-            img_b64: Base64-encoded JPEG image data.
-            prompt_override: Optional prompt text for this specific OCR call.
+            img_b64 (str): Base64-encoded JPEG image data.
+            prompt_override (str | None): Optional prompt text for this specific OCR call.
 
         Returns:
-            Extracted text string (may be empty).
+            str: Extracted text string (may be empty).
 
         Raises:
             RuntimeError: If the vision inference fails.
@@ -425,10 +425,10 @@ class VisionOCREngine(OCREngine):
         single-message responses that match common refusal phrases.
 
         Args:
-            text: OCR model output.
+            text (str): OCR model output.
 
         Returns:
-            True when the text appears to be a refusal message.
+            bool: True when the text appears to be a refusal message.
         """
         normalized = " ".join(text.strip().lower().split())
         if not normalized:
@@ -456,12 +456,12 @@ def build_page_text(
     """Aggregate text sources for a page into a ``PageText`` result.
 
     Args:
-        page_info: Triage info for the page.
-        layout_blocks: Layout blocks detected on the page.
-        ocr_spans: OCR spans for pages that needed OCR.
+        page_info (PageInfo): Triage info for the page.
+        layout_blocks (list[LayoutBlock]): Layout blocks detected on the page.
+        ocr_spans (list[OCRSpan]): OCR spans for pages that needed OCR.
 
     Returns:
-        A ``PageText`` combining all sources.
+        PageText: A ``PageText`` combining all sources.
     """
     pdf_spans: list[OCRSpan] = []
     for block in layout_blocks:
@@ -515,14 +515,14 @@ def extract_text_for_pages(
     tried as a secondary fallback.
 
     Args:
-        file_path: Path to the PDF.
-        pages: Page triage results.
-        layout: Layout blocks per page.
-        vision_engine: Optional secondary OCR engine (e.g. ``VisionOCREngine``)
+        file_path (str | Path): Path to the PDF.
+        pages (list[PageInfo]): Page triage results.
+        layout (dict[int, list[LayoutBlock]]): Layout blocks per page.
+        vision_engine (OCREngine | None): Optional secondary OCR engine (e.g. ``VisionOCREngine``)
             used when the primary pypdf extraction returns nothing.
 
     Returns:
-        Mapping of ``page_index`` → ``PageText``.
+        dict[int, PageText]: Mapping of ``page_index`` → ``PageText``.
     """
     file_path = Path(file_path)
     engine = PypdfTextEngine(file_path)

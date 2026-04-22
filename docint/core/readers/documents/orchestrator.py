@@ -66,10 +66,10 @@ class DocumentPipelineOrchestrator:
         """Run the full pipeline on *file_path* and return the manifest.
 
         Args:
-            file_path: Path to a PDF file.
+            file_path (str | Path): Path to a PDF file.
 
         Returns:
-            A ``DocumentManifest`` summarising the processing outcome.
+            DocumentManifest: A ``DocumentManifest`` summarising the processing outcome.
         """
         file_path = Path(file_path)
         doc_id = compute_file_hash(file_path)
@@ -121,6 +121,7 @@ class DocumentPipelineOrchestrator:
                 continue
 
             def _analyze_layout(pi=page_info) -> dict[int, list[LayoutBlock]]:
+                """Run layout analysis for a single page and return its block map."""
                 result = analyze_document(file_path, [pi])
                 return result if result is not None else {}
 
@@ -162,6 +163,7 @@ class DocumentPipelineOrchestrator:
                 continue
 
             def _extract_text(pi=page_info) -> dict[int, PageText]:
+                """Extract text for a single page via OCR or native extractors."""
                 return (
                     extract_text_for_pages(
                         file_path,
@@ -273,12 +275,12 @@ class DocumentPipelineOrchestrator:
         """Execute *fn* with retry logic, returning ``None`` on exhaustion.
 
         Args:
-            stage: Human-readable stage name for logging.
-            fn: Callable to execute.
-            retries: Override for ``config.max_retries``.
+            stage (str): Human-readable stage name for logging.
+            fn (Callable[[], Any]): Callable to execute.
+            retries (int | None): Override for ``config.max_retries``.
 
         Returns:
-            The result of *fn* or ``None`` if all retries failed.
+            Any: The result of *fn* or ``None`` if all retries failed.
         """
         max_tries = (retries or self.config.max_retries) + 1
         for attempt in range(1, max_tries + 1):
@@ -305,9 +307,9 @@ class DocumentPipelineOrchestrator:
         """Emit a structured summary log for the processed document.
 
         Args:
-            manifest: The document manifest containing processing details.
-            duration_ms: Total processing time in milliseconds.
-            chunks_count: Total number of chunks produced.
+            manifest (DocumentManifest): The document manifest containing processing details.
+            duration_ms (int): Total processing time in milliseconds.
+            chunks_count (int): Total number of chunks produced.
         """
         logger.info(
             "Pipeline complete | doc_id={} file={} duration_ms={} "

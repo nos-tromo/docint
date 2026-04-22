@@ -1,3 +1,5 @@
+"""File-hashing helpers for deduplication and provenance tracking."""
+
 from __future__ import annotations
 
 import hashlib
@@ -15,12 +17,12 @@ def compute_file_hash(
     """Compute the hexadecimal digest for a file.
 
     Args:
-        path: File system path to hash.
-        algorithm: Hash algorithm supported by :mod:`hashlib`.
-        chunk_size: Size of the read buffer when streaming the file. Defaults to 1 MB.
+        path (str | Path): File system path to hash.
+        algorithm (str): Hash algorithm supported by :mod:`hashlib`.
+        chunk_size (int): Size of the read buffer when streaming the file. Defaults to 1 MB.
 
     Returns:
-        Hexadecimal string representing the digest.
+        str: Hexadecimal string representing the digest.
 
     Raises:
         FileNotFoundError: If the file does not exist.
@@ -53,13 +55,13 @@ def ensure_file_hash(
     """Attach a ``file_hash`` field to metadata.
 
     Args:
-        metadata: Metadata dictionary to mutate in place.
-        path: Optional file path to hash when ``file_hash`` is not supplied.
-        file_hash: Optional pre-computed hash digest to reuse.
-        algorithm: Hash algorithm to use when computing from ``path``.
+        metadata (dict[str, Any] | None): Metadata dictionary to mutate in place.
+        path (str | Path | None): Optional file path to hash when ``file_hash`` is not supplied.
+        file_hash (str | None): Optional pre-computed hash digest to reuse.
+        algorithm (str): Hash algorithm to use when computing from ``path``.
 
     Returns:
-        The hex digest stored in the metadata.
+        str: The hex digest stored in the metadata.
 
     Raises:
         ValueError: If neither ``file_hash`` nor ``path`` is provided.

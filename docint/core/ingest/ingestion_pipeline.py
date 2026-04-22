@@ -1,3 +1,5 @@
+"""Document ingestion pipeline: chunking, metadata extraction, audio batching."""
+
 from __future__ import annotations
 
 import gc
@@ -252,7 +254,7 @@ class DocumentIngestionPipeline:
         """Execute ingestion and yield node batches as enrichment progresses.
 
         Args:
-            existing_hashes: Optional set of already ingested file hashes.
+            existing_hashes (set[str] | None): Optional set of already ingested file hashes.
 
         Yields:
             tuple[list[Document], list[BaseNode], set[str]]:
@@ -291,8 +293,8 @@ class DocumentIngestionPipeline:
         """Split nodes into non-empty batches.
 
         Args:
-            nodes: Nodes to split.
-            batch_size: Maximum number of nodes per batch.
+            nodes (list[BaseNode]): Nodes to split.
+            batch_size (int): Maximum number of nodes per batch.
 
         Returns:
             list[list[BaseNode]]: Batched nodes preserving input order.
@@ -310,7 +312,7 @@ class DocumentIngestionPipeline:
         """Collect unique file hashes from processed documents.
 
         Args:
-            docs: Processed document batch.
+            docs (list[Document]): Processed document batch.
 
         Returns:
             set[str]: Extracted file hashes.
@@ -495,6 +497,7 @@ class DocumentIngestionPipeline:
         pending_audio_metadata: list[dict[str, Any]] = []
 
         def _flush_audio_batch() -> Iterable[list[Document]]:
+            """Transcribe the pending audio batch and clear the buffers."""
             if not pending_audio_paths:
                 return []
             if self.audio_reader is None:
@@ -588,9 +591,9 @@ class DocumentIngestionPipeline:
         """Apply NER and hate-speech enrichment to *nodes* in-place.
 
         Args:
-            nodes: Nodes to enrich.
-            progress_offset: Processed node count offset for cumulative progress.
-            progress_total: Total node count for progress display.
+            nodes (list[BaseNode]): Nodes to enrich.
+            progress_offset (int): Processed node count offset for cumulative progress.
+            progress_total (int | None): Total node count for progress display.
         """
         if not nodes:
             return
@@ -600,6 +603,7 @@ class DocumentIngestionPipeline:
         if self.entity_extractor:
 
             def _process_node(idx: int, node: BaseNode) -> None:
+                """Run NER extraction on ``node`` and merge entities/relations into metadata."""
                 text_value = getattr(node, "text", "") or ""
                 if not text_value.strip():
                     return
@@ -644,6 +648,7 @@ class DocumentIngestionPipeline:
         ):
 
             def _process_hate_speech(idx: int, node: BaseNode) -> None:
+                """Run hate-speech detection on ``node`` and annotate metadata when positive."""
                 text_value = getattr(node, "text", "") or ""
                 if not text_value.strip():
                     return
@@ -704,7 +709,7 @@ class DocumentIngestionPipeline:
         """Create nodes from documents without applying enrichment stages.
 
         Args:
-            docs: Documents to parse.
+            docs (list[Document]): Documents to parse.
 
         Returns:
             list[BaseNode]: Parsed nodes before NER/hate-speech enrichment.
@@ -786,6 +791,7 @@ class DocumentIngestionPipeline:
         if document_docs:
 
             def _is_docling_json(doc: Document) -> bool:
+                """Return True when ``doc`` text is a JSON-encoded Docling payload."""
                 try:
                     json.loads(getattr(doc, "text", "") or "")
                     return True

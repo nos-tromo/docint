@@ -1,3 +1,5 @@
+"""MIME-type detection combining libmagic sniffing with filename heuristics."""
+
 import mimetypes
 from pathlib import Path
 

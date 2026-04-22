@@ -1,3 +1,5 @@
+"""Hierarchical node storage maintaining parent/child relationships in Qdrant."""
+
 from __future__ import annotations
 
 import uuid

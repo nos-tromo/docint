@@ -146,8 +146,8 @@ class ResultValidationResponseAgent(ResponseAgent):
         """Mark validation as unavailable with a user-facing reason.
 
         Args:
-            result: Retrieval result to annotate.
-            reason: Explanation why validation was not completed.
+            result (RetrievalResult): Retrieval result to annotate.
+            reason (str): Explanation why validation was not completed.
         """
         result.validation_checked = False
         result.validation_mismatch = None

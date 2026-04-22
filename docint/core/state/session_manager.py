@@ -1,3 +1,5 @@
+"""SQLite-backed session manager coordinating conversations, turns, and citations."""
+
 from __future__ import annotations
 
 import hashlib

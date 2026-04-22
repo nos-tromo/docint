@@ -32,10 +32,10 @@ def format_score(score: Any) -> str:
     """Format score values for display.
 
     Args:
-        score: The score value to format.
+        score (Any): The score value to format.
 
     Returns:
-        Formatted score string.
+        str: Formatted score string.
     """
     try:
         return f"{float(score):.2f}"
@@ -47,10 +47,10 @@ def normalize_entities(entities: Iterable[Any] | None) -> list[dict[str, Any]]:
     """Return sanitised entity payloads.
 
     Args:
-        entities: Iterable of entity dicts or ``None``.
+        entities (Iterable[Any] | None): Iterable of entity dicts or ``None``.
 
     Returns:
-        List of normalised entity dicts.
+        list[dict[str, Any]]: List of normalised entity dicts.
     """
     normalized: list[dict[str, Any]] = []
     for ent in entities or []:
@@ -73,10 +73,10 @@ def normalize_relations(relations: Iterable[Any] | None) -> list[dict[str, Any]]
     """Return sanitised relation payloads.
 
     Args:
-        relations: Iterable of relation dicts or ``None``.
+        relations (Iterable[Any] | None): Iterable of relation dicts or ``None``.
 
     Returns:
-        List of normalised relation dicts.
+        list[dict[str, Any]]: List of normalised relation dicts.
     """
     normalized: list[dict[str, Any]] = []
     for rel in relations or []:
@@ -101,11 +101,11 @@ def source_label(src: dict) -> str:
     """Build a compact label for a source row.
 
     Args:
-        src: Source dictionary with possible keys ``filename``, ``file_path``,
+        src (dict): Source dictionary with possible keys ``filename``, ``file_path``,
             ``page``, ``row``.
 
     Returns:
-        A human-readable string label.
+        str: A human-readable string label.
     """
     filename_val = src.get("filename") or src.get("file_path") or "Unknown"
     filename = str(filename_val).strip() or "Unknown"
@@ -125,11 +125,11 @@ def reference_metadata_items(
     """Return ordered reference-metadata label/value pairs for display/export.
 
     Args:
-        src: Source dictionary containing a possible ``reference_metadata`` dict.
-        include_text: Whether to include the raw ``text`` field in the results.
+        src (dict[str, Any]): Source dictionary containing a possible ``reference_metadata`` dict.
+        include_text (bool): Whether to include the raw ``text`` field in the results.
 
     Returns:
-        List of label/value pairs for known reference metadata keys, in display order.
+        list[tuple[str, str]]: List of label/value pairs for known reference metadata keys, in display order.
     """
     raw = src.get("reference_metadata")
     if not isinstance(raw, dict):
@@ -153,10 +153,10 @@ def reference_metadata_inline(src: dict[str, Any]) -> str | None:
     """Return a compact inline summary for source reference metadata.
 
     Args:
-        src: Source dictionary containing a possible ``reference_metadata`` dict.
+        src (dict[str, Any]): Source dictionary containing a possible ``reference_metadata`` dict.
 
     Returns:
-        A single-line string summarising available reference metadata, or ``None``
+        str | None: A single-line string summarising available reference metadata, or ``None``
     """
     items = reference_metadata_items(src, include_text=False)
     if not items:
@@ -172,11 +172,11 @@ def reference_metadata_text_block(
     """Return a multiline text block for source reference metadata exports.
 
     Args:
-        src: Source dictionary containing a possible ``reference_metadata`` dict.
-        include_text: Whether to include the raw ``text`` field in the results.
+        src (dict[str, Any]): Source dictionary containing a possible ``reference_metadata`` dict.
+        include_text (bool): Whether to include the raw ``text`` field in the results.
 
     Returns:
-        A multiline string summarising available reference metadata, or
+        str: A multiline string summarising available reference metadata, or
         an empty string if none is available.
     """
     items = reference_metadata_items(src, include_text=include_text)
@@ -195,11 +195,11 @@ def aggregate_ner(
     originating source files.
 
     Args:
-        sources: Iterable of source dictionaries containing ``entities``
+        sources (Iterable[dict] | None): Iterable of source dictionaries containing ``entities``
             and ``relations``.
 
     Returns:
-        A tuple ``(entities_sorted, relations_sorted)`` where each list
+        tuple[list[dict[str, Any]], list[dict[str, Any]]]: A tuple ``(entities_sorted, relations_sorted)`` where each list
         item carries ``text``, ``type``, ``best_score``, ``count``,
         ``files``, and ``occurrences``.
     """
@@ -225,6 +225,7 @@ def aggregate_ner(
     compact_to_keys = dict(aggregate.get("compact_to_keys") or {})
 
     def _resolve_entity(text: str) -> tuple[str | None, str]:
+        """Map raw ``text`` to a canonical entity key and display form, if unambiguous."""
         lowered = str(text or "").strip().lower()
         compact = "".join(ch for ch in lowered if ch.isalnum())
         for candidates in (
@@ -314,11 +315,11 @@ def build_entity_histogram_data(
     """Return a label->mention mapping for top entities.
 
     Args:
-        entities: Aggregated entity rows.
-        top_k: Maximum number of bars to emit.
+        entities (Iterable[dict[str, Any]] | None): Aggregated entity rows.
+        top_k (int): Maximum number of bars to emit.
 
     Returns:
-        Mapping suitable for ``st.bar_chart``.
+        dict[str, int]: Mapping suitable for ``st.bar_chart``.
     """
     rows = list(entities or [])
     rows.sort(
@@ -355,14 +356,14 @@ def filter_entities(
     """Filter and sort aggregated entity rows.
 
     Args:
-        entities: Aggregated entity rows.
-        query: Case-insensitive substring applied to entity text.
-        entity_type: Optional type filter (case-insensitive).
-        min_mentions: Minimum mention count.
-        sort_by: ``mentions`` or ``score``.
+        entities (Iterable[dict[str, Any]] | None): Aggregated entity rows.
+        query (str): Case-insensitive substring applied to entity text.
+        entity_type (str | None): Optional type filter (case-insensitive).
+        min_mentions (int): Minimum mention count.
+        sort_by (str): ``mentions`` or ``score``.
 
     Returns:
-        Filtered and sorted entity rows.
+        list[dict[str, Any]]: Filtered and sorted entity rows.
     """
     query_l = str(query or "").strip().lower()
     type_l = str(entity_type or "").strip().lower()
@@ -405,10 +406,10 @@ def entity_density_by_document(
     """Compute entity mention density per document.
 
     Args:
-        sources: Source rows with optional ``filename`` and ``entities`` keys.
+        sources (Iterable[dict[str, Any]] | None): Source rows with optional ``filename`` and ``entities`` keys.
 
     Returns:
-        Rows sorted by entity mentions desc.
+        list[dict[str, Any]]: Rows sorted by entity mentions desc.
     """
     docs: dict[str, dict[str, Any]] = {}
     for src in sources or []:
@@ -462,12 +463,12 @@ def response_validation_summary(
     """Build a user-facing response-validation summary.
 
     Args:
-        validation_checked: Whether validation executed.
-        validation_mismatch: Whether validation found a mismatch.
-        validation_reason: Optional validator reason.
+        validation_checked (bool | None): Whether validation executed.
+        validation_mismatch (bool | None): Whether validation found a mismatch.
+        validation_reason (str | None): Optional validator reason.
 
     Returns:
-        Optional tuple ``(level, title, detail)`` where ``level`` is one of
+        tuple[str, str, str | None] | None: Optional tuple ``(level, title, detail)`` where ``level`` is one of
         ``success``, ``warning``, or ``info``.
     """
     if (
@@ -503,10 +504,10 @@ def summary_diagnostics_summary(
     """Build a user-facing summary-coverage diagnostics message.
 
     Args:
-        summary_diagnostics: Optional summary diagnostics payload from backend.
+        summary_diagnostics (dict[str, Any] | None): Optional summary diagnostics payload from backend.
 
     Returns:
-        Optional tuple ``(title, detail)``.
+        tuple[str, str | None] | None: Optional tuple ``(title, detail)``.
     """
     if not isinstance(summary_diagnostics, dict):
         return None
@@ -539,11 +540,11 @@ def collect_session_referenced_sources(
     """Collect referenced source rows from the current session context.
 
     Args:
-        messages: Current chat-session messages.
-        analysis_sources: Current analysis/summary source rows.
+        messages (Iterable[dict[str, Any]] | None): Current chat-session messages.
+        analysis_sources (Iterable[dict[str, Any]] | None): Current analysis/summary source rows.
 
     Returns:
-        Combined source rows tagged with ``context`` set to ``chat`` or
+        list[dict[str, Any]]: Combined source rows tagged with ``context`` set to ``chat`` or
         ``analysis``.
     """
     collected: list[dict[str, Any]] = []
@@ -570,12 +571,12 @@ def unique_referenced_sources(
     """Deduplicate source rows while preserving first-seen ordering.
 
     Args:
-        sources: Source rows from chat and/or analysis contexts. Each row may
+        sources (Iterable[dict[str, Any]] | None): Source rows from chat and/or analysis contexts. Each row may
             include ``file_hash``, ``file_path``, ``filename``, and ``context``
             keys.
 
     Returns:
-        Unique source rows keyed by file hash when available, else by file path
+        list[dict[str, Any]]: Unique source rows keyed by file hash when available, else by file path
         or filename.
     """
     unique: dict[tuple[str, str], dict[str, Any]] = {}
@@ -613,14 +614,14 @@ def build_source_files_zip(
     """Build a ZIP archive for unique referenced source files.
 
     Args:
-        collection: Active collection name used for backend download requests.
-        sources: Source rows from the current session context. Each row may
+        collection (str): Active collection name used for backend download requests.
+        sources (Iterable[dict[str, Any]] | None): Source rows from the current session context. Each row may
             include ``file_hash``, ``file_path``, ``filename``, and ``context``
             keys.
-        fetch_source: Optional file-fetching callback for tests.
+        fetch_source (Callable[[str, str], bytes] | None): Optional file-fetching callback for tests.
 
     Returns:
-        Tuple ``(zip_bytes, warnings)``. ``zip_bytes`` is ``None`` when no files
+        tuple[bytes | None, list[str]]: Tuple ``(zip_bytes, warnings)``. ``zip_bytes`` is ``None`` when no files
         could be archived successfully.
     """
     collection_name = str(collection or "").strip()
@@ -674,7 +675,7 @@ def render_entities_relations(src: dict[str, Any]) -> None:
     """Render entities and relations for a single source.
 
     Args:
-        src: Source dictionary containing ``entities`` and ``relations``.
+        src (dict[str, Any]): Source dictionary containing ``entities`` and ``relations``.
     """
     entities = normalize_entities(src.get("entities"))
     relations = normalize_relations(src.get("relations"))
@@ -706,7 +707,7 @@ def render_ner_overview(sources: list[dict[str, Any]]) -> None:
     """Show aggregated NER results for a set of sources.
 
     Args:
-        sources: List of source dicts with ``entities`` and ``relations``.
+        sources (list[dict[str, Any]]): List of source dicts with ``entities`` and ``relations``.
     """
     entities, relations = aggregate_ner(sources)
 
@@ -778,8 +779,8 @@ def render_source_item(src: dict[str, Any], collection: str) -> None:
     Used by the Chat and Analysis pages to display retrieval sources.
 
     Args:
-        src: Source dictionary from the backend.
-        collection: Currently selected collection name.
+        src (dict[str, Any]): Source dictionary from the backend.
+        collection (str): Currently selected collection name.
     """
     loc = ""
     if src.get("page") is not None:
@@ -820,9 +821,9 @@ def render_response_validation(
     """Render response-validation status and reason when available.
 
     Args:
-        validation_checked: Whether validation executed.
-        validation_mismatch: Whether validation found a mismatch.
-        validation_reason: Optional validator reason.
+        validation_checked (bool | None): Whether validation executed.
+        validation_mismatch (bool | None): Whether validation found a mismatch.
+        validation_reason (str | None): Optional validator reason.
     """
     summary = response_validation_summary(
         validation_checked=validation_checked,
@@ -848,7 +849,7 @@ def render_summary_diagnostics(summary_diagnostics: dict[str, Any] | None) -> No
     """Render summary coverage diagnostics when available.
 
     Args:
-        summary_diagnostics: Optional summary diagnostics payload.
+        summary_diagnostics (dict[str, Any] | None): Optional summary diagnostics payload.
     """
     summary = summary_diagnostics_summary(summary_diagnostics)
     if summary is None:

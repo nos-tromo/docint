@@ -1,3 +1,5 @@
+"""Centralized environment-variable loaders and configuration dataclasses."""
+
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,14 +74,14 @@ def resolve_hf_cache_path(
         {cache_dir}/models--{org}--{repo}/snapshots/{commit_hash}/
 
     Args:
-        cache_dir: The HF hub cache directory (e.g. ~/.cache/huggingface/hub).
-        repo_id: The HuggingFace repository ID (e.g. "BAAI/bge-m3").
-        filename: Optional file name within the snapshot directory. If provided,
+        cache_dir (Path): The HF hub cache directory (e.g. ~/.cache/huggingface/hub).
+        repo_id (str): The HuggingFace repository ID (e.g. "BAAI/bge-m3").
+        filename (str | None): Optional file name within the snapshot directory. If provided,
                   return the path to that specific file; otherwise return the
                   snapshot directory itself.
 
     Returns:
-        The resolved Path if found, otherwise None.
+        Path | None: The resolved Path if found, otherwise None.
     """
     model_dir_name = f"models--{repo_id.replace('/', '--')}"
     model_cache_dir = cache_dir / model_dir_name
@@ -148,11 +150,11 @@ def load_graphrag_env(
     """Load GraphRAG configuration from environment variables.
 
     Args:
-        default_enabled: Whether graph-assisted retrieval is enabled by default.
-        default_neighbor_hops: Number of graph hops used for query expansion.
-        default_top_k_nodes: Maximum number of graph nodes kept in memory.
-        default_min_edge_weight: Minimum edge weight used for graph filtering.
-        default_max_neighbors: Maximum number of neighbor entities appended to a query.
+        default_enabled (bool): Whether graph-assisted retrieval is enabled by default.
+        default_neighbor_hops (int): Number of graph hops used for query expansion.
+        default_top_k_nodes (int): Maximum number of graph nodes kept in memory.
+        default_min_edge_weight (int): Minimum edge weight used for graph filtering.
+        default_max_neighbors (int): Maximum number of neighbor entities appended to a query.
 
     Returns:
         GraphRAGConfig: Parsed graph retrieval settings.
@@ -190,9 +192,9 @@ def load_hate_speech_env(
     """Load hate-speech detection settings from environment variables.
 
     Args:
-        default_enabled: Whether hate-speech detection runs during ingestion.
-        default_max_chars: Maximum characters from each chunk sent to the detector.
-        default_max_workers: Maximum worker threads for parallel hate-speech detection.
+        default_enabled (bool): Whether hate-speech detection runs during ingestion.
+        default_max_chars (int): Maximum characters from each chunk sent to the detector.
+        default_max_workers (int): Maximum worker threads for parallel hate-speech detection.
 
     Returns:
         HateSpeechConfig: Parsed hate-speech detection configuration.
@@ -660,13 +662,13 @@ def load_openai_env(
         default_num_output (int): Default number of tokens reserved for the
             model response by the prompt helper.  Matches the llama_index
             ``LLMMetadata`` default (256).
-        default_inference_provider: Default inference server type (e.g. "ollama", "openai", "vllm"). Default is "ollama".
+        default_inference_provider (Literal['ollama', 'openai', 'vllm']): Default inference server type (e.g. "ollama", "openai", "vllm"). Default is "ollama".
         default_reuse_client (bool): Whether to reuse the OpenAI client across calls. Default is False.
         default_seed (int): Default random seed for reproducibility.
         default_temperature (float): Default temperature for text generation.
-        default_thinking_effort: Default reasoning effort to request when
+        default_thinking_effort (Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh']): Default reasoning effort to request when
             thinking is enabled.
-        default_thinking_enabled: Whether OpenAI reasoning/thinking is enabled.
+        default_thinking_enabled (bool): Whether OpenAI reasoning/thinking is enabled.
         default_timeout (float): Default timeout in seconds.
         default_top_p (float): Default top_p for nucleus sampling.
 
@@ -865,20 +867,20 @@ def load_pipeline_config(
     """Build a ``PipelineConfig`` from environment variables with sensible defaults.
 
     Args:
-        default_text_coverage_threshold: Default characters-per-area threshold for OCR classification.
-        default_pipeline_version: Default pipeline version string.
-        default_artifacts_dir: Default root directory for artifacts. If None, uses the value from ``load_path_env().artifacts``.
-        default_max_retries: Default maximum retry attempts per page stage.
-        default_force_reprocess: Default flag to force reprocessing of pages.
-        default_max_workers: Default maximum number of parallel workers for document processing.
-        default_enable_vision_ocr: Default flag to enable vision OCR fallback for scanned pages.
-        default_vision_ocr_timeout: Default per-request timeout in seconds for vision OCR API calls.
-        default_vision_ocr_max_retries: Default maximum retries for a single vision OCR API call.
-        default_vision_ocr_max_image_dimension: Default maximum pixel dimension for images sent to the vision OCR endpoint.
-        default_vision_ocr_max_tokens: Default maximum number of tokens the vision LLM may generate per OCR request.
+        default_text_coverage_threshold (float): Default characters-per-area threshold for OCR classification.
+        default_pipeline_version (str): Default pipeline version string.
+        default_artifacts_dir (str | None): Default root directory for artifacts. If None, uses the value from ``load_path_env().artifacts``.
+        default_max_retries (int): Default maximum retry attempts per page stage.
+        default_force_reprocess (bool): Default flag to force reprocessing of pages.
+        default_max_workers (int): Default maximum number of parallel workers for document processing.
+        default_enable_vision_ocr (bool): Default flag to enable vision OCR fallback for scanned pages.
+        default_vision_ocr_timeout (float): Default per-request timeout in seconds for vision OCR API calls.
+        default_vision_ocr_max_retries (int): Default maximum retries for a single vision OCR API call.
+        default_vision_ocr_max_image_dimension (int): Default maximum pixel dimension for images sent to the vision OCR endpoint.
+        default_vision_ocr_max_tokens (int): Default maximum number of tokens the vision LLM may generate per OCR request.
 
     Returns:
-        A fully-initialised ``PipelineConfig``.
+        PipelineConfig: A fully-initialised ``PipelineConfig``.
         - text_coverage_threshold (float): Characters-per-area threshold for OCR classification.
         - pipeline_version (str): Semver string identifying the pipeline logic version.
         - artifacts_dir (str): Root directory for artifact output.
@@ -1230,11 +1232,12 @@ def load_whisper_env(
     """Load Whisper runtime settings from environment variables.
 
     Args:
-        default_max_workers: Default number of file-level Whisper workers.
-        src_language: Optional source language code to pass to Whisper for improved transcription accuracy.
-            Should be an ISO 639-1 code (e.g. "en" for English, "fr" for French, etc.).  If not set, Whisper
-            will attempt to auto-detect the source language.
-        default_task: Default Whisper task selector.
+        default_max_workers (int): Default number of file-level Whisper workers.
+        default_src_language (str | None): Optional source language code to pass to Whisper for
+            improved transcription accuracy. Should be an ISO 639-1 code (e.g. "en" for English,
+            "fr" for French, etc.). If not set, Whisper will attempt to auto-detect the source
+            language.
+        default_task (Literal['transcribe', 'translate']): Default Whisper task selector.
 
     Returns:
         WhisperConfig: Parsed Whisper runtime configuration.

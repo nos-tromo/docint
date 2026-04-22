@@ -19,11 +19,11 @@ def triage_pdf(file_path: str | Path, config: PipelineConfig) -> list[PageInfo]:
     below ``config.text_coverage_threshold`` are flagged ``needs_ocr``.
 
     Args:
-        file_path: Path to the PDF file.
-        config: Pipeline configuration (supplies the threshold).
+        file_path (str | Path): Path to the PDF file.
+        config (PipelineConfig): Pipeline configuration (supplies the threshold).
 
     Returns:
-        A list of ``PageInfo`` — one per page.
+        list[PageInfo]: A list of ``PageInfo`` — one per page.
     """
     file_path = Path(file_path)
     pages: list[PageInfo] = []
