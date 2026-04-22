@@ -384,6 +384,7 @@ def load_ingestion_env(
         ".gif",
         ".jpeg",
         ".jpg",
+        ".json",
         ".jsonl",
         ".md",
         ".mkv",
