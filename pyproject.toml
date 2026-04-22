@@ -31,7 +31,6 @@ dependencies = [
   "numpy>=2.3.5,<2.4",
   "ollama>=0.6.1",
   "openai>=2.31.0",
-  "openai-whisper>=20250625",
   "opencv-python-headless>=4.13.0.92",
   "pandas>=3.0.2",
   "pillow>=11.3.0,<12.0.0",

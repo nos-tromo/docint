@@ -47,9 +47,9 @@ def test_list_documents() -> None:
     point5 = MagicMock()
     point5.payload = {
         "origin": {
-            "filename": "audio.mp3",
+            "filename": "transcript.jsonl",
             "file_hash": "hash4",
-            "mimetype": "audio/mpeg",
+            "mimetype": "application/x-ndjson",
         },
         "end_seconds": 125.5,
     }
@@ -73,30 +73,31 @@ def test_list_documents() -> None:
 
     docs = rag.list_documents()
 
-    # Sort order is by filename ['audio.mp3', 'complex.json', 'data.csv', 'file1.pdf', 'file2.txt']
+    # Sort order is by filename ['complex.json', 'data.csv', 'file1.pdf',
+    # 'file2.txt', 'transcript.jsonl']
     assert len(docs) == 5
 
-    doc_audio = docs[0]
-    assert doc_audio["filename"] == "audio.mp3"
-    assert doc_audio["mimetype"] == "audio/mpeg"
-    assert doc_audio["max_duration"] == 125.5
-
-    doc_complex = docs[1]
+    doc_complex = docs[0]
     assert doc_complex["filename"] == "complex.json"
     assert doc_complex["page_count"] == 1
     assert "LOC" in doc_complex["entity_types"]
     assert "ORG" in doc_complex["entity_types"]
 
-    doc_csv = docs[2]
+    doc_csv = docs[1]
     assert doc_csv["filename"] == "data.csv"
     assert doc_csv["mimetype"] == "text/csv"
     assert doc_csv["max_rows"] == 150
 
-    doc_pdf = docs[3]
+    doc_pdf = docs[2]
     assert doc_pdf["filename"] == "file1.pdf"
     assert doc_pdf["page_count"] == 2
     assert doc_pdf["mimetype"] == "application/pdf"
 
-    doc_txt = docs[4]
+    doc_txt = docs[3]
     assert doc_txt["filename"] == "file2.txt"
     assert doc_txt["page_count"] == 0
+
+    doc_transcript = docs[4]
+    assert doc_transcript["filename"] == "transcript.jsonl"
+    assert doc_transcript["mimetype"] == "application/x-ndjson"
+    assert doc_transcript["max_duration"] == 125.5

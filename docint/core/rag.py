@@ -6071,7 +6071,7 @@ class RAG:
                     if isinstance(rows, (int, float)):
                         entry["max_rows"] = max(entry["max_rows"], int(rows))
 
-                # Audio duration logic
+                # Transcript duration logic (Nextext segment end timestamps).
                 end_sec = payload.get("end_seconds") or (
                     payload.get("extra_metadata") or {}
                 ).get("end_seconds")

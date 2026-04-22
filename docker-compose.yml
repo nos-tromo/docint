@@ -44,7 +44,6 @@ services:
       - huggingface-cache:/root/.cache/huggingface/hub
       - qdrant-sources:/var/lib/docint/sources
       - sessions-storage:/var/lib/docint/sessions
-      - whisper-cache:/root/.cache/whisper
     networks: &backend-networks
       docint-net:
         aliases:
@@ -191,8 +190,6 @@ volumes:
   qdrant-sources:
   qdrant-storage:
   sessions-storage:
-  whisper-cache:
-    external: true
 
 ##########################################################
 # Networks

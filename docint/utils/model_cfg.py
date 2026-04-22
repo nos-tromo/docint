@@ -1,7 +1,6 @@
 """Model asset download and cache-residency orchestration for offline deployments."""
 
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -22,7 +21,6 @@ from docint.utils.env_cfg import (
 # isort: on
 
 import ollama
-import whisper
 from docling.models.stages.code_formula.code_formula_model import CodeFormulaModel
 from docling.models.stages.layout.layout_model import LayoutModel
 from docling.models.stages.ocr.rapid_ocr_model import RapidOcrModel
@@ -166,22 +164,6 @@ def load_hf_model(
     logger.info("Loaded {} model: {}", kw, model_id)
 
 
-def _link_or_copy_model_file(source: Path, destination: Path) -> None:
-    """Materialize a model file at ``destination`` from ``source``.
-
-    Args:
-        source (Path): Existing source file path.
-        destination (Path): Target file path to create.
-    """
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        return
-    try:
-        destination.symlink_to(source)
-    except Exception:
-        shutil.copy2(source, destination)
-
-
 def load_ollama_model(
     model_id: str, kw: str, host: str = "http://localhost:11434"
 ) -> None:
@@ -214,34 +196,6 @@ def load_ollama_model(
                 logger.debug("Pulling {}: {:.1f}%", model_id, percent)
 
     logger.info("Successfully pulled model '{}'.", model_id)
-
-
-def load_whisper_model(model_id: str) -> None:
-    """Download an openai-whisper checkpoint into the local cache.
-
-    The weights are fetched to ``~/.cache/whisper`` (or ``XDG_CACHE_HOME``)
-    via ``whisper._download`` without being instantiated, so preloading
-    large checkpoints avoids the RAM cost of a full ``whisper.load_model``.
-
-    Args:
-        model_id (str): The name of the model to download.
-
-    Raises:
-        ValueError: If ``model_id`` is not a recognised Whisper model.
-    """
-    if model_id not in whisper._MODELS:
-        raise ValueError(
-            f"Unknown Whisper model '{model_id}'. Available: {sorted(whisper._MODELS)}."
-        )
-
-    default_cache = os.path.join(os.path.expanduser("~"), ".cache")
-    download_root = os.path.join(os.getenv("XDG_CACHE_HOME", default_cache), "whisper")
-
-    logger.info("Downloading whisper model '{}' to '{}'.", model_id, download_root)
-    checkpoint_path = whisper._download(
-        whisper._MODELS[model_id], download_root, in_memory=False
-    )
-    logger.info("Whisper model '{}' cached at '{}'.", model_id, checkpoint_path)
 
 
 def main() -> None:
@@ -298,25 +252,14 @@ def main() -> None:
                 kw=kw,
             )
 
-    # ASR / Whisper
-    # Remote OpenAI-compatible APIs
+    # Remote OpenAI-compatible APIs provision text/embedding/vision
+    # endpoints themselves; only the app-local auxiliary assets above are
+    # prepared here.
     if openai_config.inference_provider == "openai":
-        # For remote OpenAI-compatible APIs, the serving stack provisions the
-        # text, embedding, and vision endpoints. Only the app-local auxiliary
-        # models above are prepared here.
         logger.info(
             "Using {} as inference server. No local text/embedding/vision model loading required.",
             openai_config.inference_provider,
         )
-    # Whisper / ASR
-    elif openai_config.inference_provider == "vllm":
-        load_hf_model(
-            model_id=model_config.whisper_model,
-            cache_folder=path_config.hf_hub_cache,
-            kw="whisper",
-        )
-    else:
-        load_whisper_model(model_id=model_config.whisper_model)
 
 
 if __name__ == "__main__":

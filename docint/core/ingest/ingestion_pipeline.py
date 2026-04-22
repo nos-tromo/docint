@@ -1,15 +1,12 @@
-"""Document ingestion pipeline: chunking, metadata extraction, audio batching."""
+"""Document ingestion pipeline: chunking and metadata extraction."""
 
 from __future__ import annotations
 
-import gc
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, NotRequired, TypedDict
-
-import torch
 
 from llama_index.core import Document, SimpleDirectoryReader
 from llama_index.core.node_parser import (
@@ -23,7 +20,6 @@ from llama_index.node_parser.docling import DoclingNodeParser
 from loguru import logger
 
 from docint.core.ingest.images_service import ImageIngestionService
-from docint.core.readers.audio import AudioReader
 from docint.core.readers.images import ImageReader
 from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.tables import TableReader
@@ -144,7 +140,6 @@ class DocumentIngestionPipeline:
     hate_speech_max_workers: int = field(default=1, init=False)
     hate_speech_prompt: str | None = field(default=None, init=False)
 
-    audio_reader: AudioReader | None = field(default=None, init=False)
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
     md_node_parser: MarkdownNodeParser | None = field(default=None, init=False)
     docling_node_parser: DoclingNodeParser | None = field(default=None, init=False)
@@ -359,188 +354,27 @@ class DocumentIngestionPipeline:
             )
             yield docs if batch_idx == 0 else [], node_batch, completed_hashes
 
-    @staticmethod
-    def _is_audio_input_file(file_path: Path | PurePosixPath) -> bool:
-        """Return True when the input path should use the audio reader.
-
-        Args:
-            file_path (Path | PurePosixPath): The input file path to classify.
-
-        Returns:
-            bool: True when the path should be routed through ``AudioReader``.
-        """
-
-        return file_path.suffix.lower() in {
-            ".avi",
-            ".flv",
-            ".m4a",
-            ".m4v",
-            ".mkv",
-            ".mov",
-            ".mp3",
-            ".mp4",
-            ".mpeg",
-            ".mpg",
-            ".ogg",
-            ".wav",
-            ".webm",
-            ".wmv",
-        }
-
-    def _release_pre_audio_heavy_state(self) -> None:
-        """Drop non-audio model residents right before Whisper loads.
-
-        On CPU single-worker deployments ``AudioReader.load_batch_data``
-        loads Whisper (``openai/whisper-large-v3-turbo`` ≈ 1.6 GB RSS) in
-        this same process. Any pre-existing image embedding backend
-        (CLIP, ~600 MB–1.5 GB) or tagging backend held on
-        ``self.image_ingestion_service`` stays pinned until something
-        explicitly drops it — so Whisper's allocation piles on top and
-        can cross the Docker cgroup limit, manifesting as SIGKILL
-        (exit 137) during a mixed-type batch ingest.
-
-        This hook nulls the image embedding / tagging backends (they are
-        lazily re-created on the next image query) and forces a GC so
-        Python's allocator can actually hand the pages back before
-        Whisper asks for fresh ones.
-        """
-
-        service = self.image_ingestion_service
-        if service is not None:
-            if getattr(service, "embedding_backend", None) is not None:
-                service.embedding_backend = None
-            if getattr(service, "tagging_backend", None) is not None:
-                service.tagging_backend = None
-            # Intentionally do NOT clear ``_embedding_backend_error`` /
-            # ``_tagging_backend_error``: if a prior image batch in the
-            # same ingest failed to load CLIP (e.g. a borderline-memory
-            # OOM the cgroup absorbed), the sentinel MUST stay set so
-            # ``_get_embedding_backend`` fast-returns ``None`` instead
-            # of retrying the failing load right after we freed memory
-            # for Whisper and risking a second OOM cycle. The sentinel
-            # naturally resets at the next ``ImageIngestionService``
-            # construction (i.e. the next RAG ingest call).
-
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    def _release_post_audio_heavy_state(self) -> None:
-        """Drop the Whisper model reference right after an audio batch.
-
-        Same memory-budget reasoning as ``_release_pre_audio_heavy_state``
-        but in the opposite direction: once the audio batch finishes,
-        hold onto Whisper only if another reader is guaranteed not to
-        need headroom next. In practice a mixed-type ingest can schedule
-        an image file immediately after audio, and that image will need
-        to reload CLIP — so keep the Whisper weights pinned is exactly
-        the wrong trade-off on CPU. The next audio batch (rare in the
-        same ingest) will lazily reload Whisper in
-        ``AudioReader._load_model``.
-
-        Note:
-            When the audio reader is configured to use an OpenAI-compatible
-            provider backend (``INFERENCE_PROVIDER`` of ``openai`` or
-            ``vllm``), ``AudioReader._model`` is never populated because
-            transcription is delegated to the remote API. The null-guard
-            below makes this path a safe no-op.
-        """
-
-        audio_reader = self.audio_reader
-        if (
-            audio_reader is not None
-            and getattr(audio_reader, "_model", None) is not None
-        ):
-            audio_reader._model = None
-
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    def _audio_stream_window_size(self) -> int:
-        """Return the bounded audio window size used for streaming ingestion.
-
-        The window is intentionally larger than the worker count so the audio
-        reader can keep workers busy without forcing the pipeline to accumulate
-        an unbounded number of audio paths in memory.
-
-        Returns:
-            int: The maximum number of audio files buffered before dispatch.
-
-        Raises:
-            RuntimeError: If the audio reader has not been initialized.
-        """
-
-        if self.audio_reader is None:
-            raise RuntimeError("Audio reader is not initialized.")
-
-        return max(1, self.ingestion_batch_size, self.audio_reader.max_workers * 2)
-
     def _iter_loaded_documents(self) -> Iterable[list[Document]]:
-        """Yield loaded documents, batching audio files when configured.
+        """Yield loaded documents from the configured directory reader.
+
+        The ``required_exts`` whitelist configured on
+        :class:`SimpleDirectoryReader` already filters out audio/video files
+        upstream (docint no longer transcribes media locally — Nextext
+        produces the ``.jsonl`` transcripts consumed here instead), so this
+        method simply iterates the reader's accepted input files.
 
         Yields:
-            list[Document]: The loaded documents for each processed file or
-            flushed audio batch entry.
+            list[Document]: The loaded documents for each processed file.
 
         Raises:
-            RuntimeError: If the directory reader or audio reader is not
-                initialized.
+            RuntimeError: If the directory reader is not initialized.
         """
 
         if self.dir_reader is None:
             raise RuntimeError("Directory reader failed to initialize.")
         dir_reader = self.dir_reader
-        audio_window_size = self._audio_stream_window_size()
-
-        pending_audio_paths: list[Path] = []
-        pending_audio_metadata: list[dict[str, Any]] = []
-
-        def _flush_audio_batch() -> Iterable[list[Document]]:
-            """Transcribe the pending audio batch and clear the buffers."""
-            if not pending_audio_paths:
-                return []
-            if self.audio_reader is None:
-                raise RuntimeError("Audio reader is not initialized.")
-
-            # Release large non-audio reader state (CLIP / tagging) BEFORE
-            # Whisper loads. On CPU single-worker the Whisper weights are
-            # loaded in this same process and pile on top of any resident
-            # image-embedding backend, which crossed the Docker memory
-            # ceiling in OOM exit-137 reports.
-            self._release_pre_audio_heavy_state()
-
-            loaded_batches = self.audio_reader.load_batch_data(
-                pending_audio_paths,
-                extra_info=pending_audio_metadata,
-            )
-            pending_audio_paths.clear()
-            pending_audio_metadata.clear()
-
-            # Release Whisper NOW so any downstream reader scheduled after
-            # audio (e.g. CLIP for a trailing image file) has headroom to
-            # allocate without re-OOMing on top of resident Whisper weights.
-            self._release_post_audio_heavy_state()
-
-            yielded_batches: list[list[Document]] = []
-            for docs in loaded_batches:
-                if not docs:
-                    continue
-                yielded_batches.append(dir_reader._exclude_metadata(docs))
-            return yielded_batches
 
         for input_file in dir_reader.input_files:
-            if self._is_audio_input_file(input_file):
-                pending_audio_paths.append(Path(input_file))
-                pending_audio_metadata.append(dir_reader.file_metadata(str(input_file)))
-                if len(pending_audio_paths) >= audio_window_size:
-                    for audio_docs in _flush_audio_batch():
-                        yield audio_docs
-                continue
-
-            for audio_docs in _flush_audio_batch():
-                yield audio_docs
-
             docs = SimpleDirectoryReader.load_file(
                 input_file=input_file,
                 file_metadata=dir_reader.file_metadata,
@@ -553,9 +387,6 @@ class DocumentIngestionPipeline:
             )
             if docs:
                 yield dir_reader._exclude_metadata(docs)
-
-        for audio_docs in _flush_audio_batch():
-            yield audio_docs
 
     def _process_batch(
         self, docs: list[Document], existing_hashes: set[str] | None
@@ -720,7 +551,7 @@ class DocumentIngestionPipeline:
         if self.md_node_parser is None or self.docling_node_parser is None:
             raise RuntimeError("Node parsers are not initialized.")
 
-        audio_docs, document_docs, img_docs, json_docs, table_docs, text_docs = [
+        document_docs, img_docs, json_docs, table_docs, text_docs, transcript_docs = [
             [] for _ in range(6)
         ]
         for d in docs:
@@ -730,22 +561,10 @@ class DocumentIngestionPipeline:
             file_path = str(meta.get("file_path") or meta.get("file_name") or "")
             ext = file_path.lower().rsplit(".", 1)[-1] if "." in file_path else ""
 
-            if source_kind in {"audio", "video"} or ext in {
-                "avi",
-                "flv",
-                "mkv",
-                "mov",
-                "mpeg",
-                "mpg",
-                "mp3",
-                "mp4",
-                "m4v",
-                "ogg",
-                "wav",
-                "webm",
-                "wmv",
-            }:
-                audio_docs.append(d)
+            # Dispatcher: check the per-segment key first so generic JSON/JSONL
+            # documents continue to flow through the normal JSON path below.
+            if meta.get("docint_doc_kind") == "transcript_segment":
+                transcript_docs.append(d)
             elif source_kind == "image" or ext in {"gif", "jpeg", "jpg", "png"}:
                 img_docs.append(d)
             elif source_kind == "table" or ext in {"csv", "tsv"}:
@@ -757,22 +576,13 @@ class DocumentIngestionPipeline:
             elif file_type.startswith("text/") or ext in {"txt", "md", "rst"}:
                 text_docs.append(d)
             else:
-                if file_type.startswith("text/") or ext in {"txt", "md", "rst"}:
-                    text_docs.append(d)
-                else:
-                    logger.warning(
-                        "Unrecognized document type for file '{}'; treating as plain text.",
-                        file_path,
-                    )
-                    text_docs.append(d)
+                logger.warning(
+                    "Unrecognized document type for file '{}'; treating as plain text.",
+                    file_path,
+                )
+                text_docs.append(d)
 
         nodes: list[BaseNode] = []
-        if audio_docs:
-            logger.info(
-                "Parsing {} audio documents with SentenceSplitter",
-                len(audio_docs),
-            )
-            nodes.extend(self._process_docs_hierarchical(audio_docs))
 
         if img_docs:
             logger.info(
@@ -827,6 +637,16 @@ class DocumentIngestionPipeline:
             )
             table_splitter = SentenceSplitter(chunk_size=10_000_000, chunk_overlap=0)
             nodes.extend(table_splitter.get_nodes_from_documents(table_docs))
+
+        if transcript_docs:
+            logger.info(
+                "Parsing {} transcript segment documents with SentenceSplitter (one node per segment)",
+                len(transcript_docs),
+            )
+            transcript_splitter = SentenceSplitter(
+                chunk_size=10_000_000, chunk_overlap=0
+            )
+            nodes.extend(transcript_splitter.get_nodes_from_documents(transcript_docs))
 
         if text_docs:
             markdown_docs = [
@@ -969,7 +789,6 @@ class DocumentIngestionPipeline:
 
     def _load_doc_readers(self) -> None:
         """Load document readers for various file types."""
-        self.audio_reader = AudioReader(device=self.device)
         image_reader = ImageReader(
             image_ingestion_service=(
                 self.image_ingestion_service or ImageIngestionService()
@@ -1019,21 +838,9 @@ class DocumentIngestionPipeline:
             required_exts=self.reader_required_exts,
             file_metadata=_metadata,
             file_extractor={
-                ".mpeg": self.audio_reader,
-                ".mp3": self.audio_reader,
-                ".m4a": self.audio_reader,
-                ".ogg": self.audio_reader,
-                ".wav": self.audio_reader,
-                ".webm": self.audio_reader,
-                ".avi": self.audio_reader,
-                ".flv": self.audio_reader,
-                ".mkv": self.audio_reader,
-                ".mov": self.audio_reader,
-                ".mpg": self.audio_reader,
-                ".mp4": self.audio_reader,
-                ".m4v": self.audio_reader,
-                ".wmv": self.audio_reader,
                 ".json": CustomJSONReader(),
+                ".jsonl": CustomJSONReader(is_jsonl=True),
+                ".ndjson": CustomJSONReader(is_jsonl=True),
                 ".gif": image_reader,
                 ".jpeg": image_reader,
                 ".jpg": image_reader,

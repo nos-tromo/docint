@@ -234,36 +234,221 @@ def test_entity_extractor_handles_exceptions(tmp_path: Path) -> None:
     assert nodes[0].metadata == {}
 
 
-def test_audio_extension_classified_as_audio(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure webm files route through the audio branch rather than plain text.
+def test_whitelist_filters_audio_extensions_silently(tmp_path: Path) -> None:
+    """SimpleDirectoryReader with ``required_exts`` silently excludes audio files.
+
+    Creates ``.wav``, ``.mp3``, and ``.txt`` files in a temp directory, then
+    instantiates a ``SimpleDirectoryReader`` with the same ``required_exts``
+    list that the pipeline uses. Only the ``.txt`` path should appear in
+    ``input_files``.
+
+    This documents the invariant that makes the audio blacklist dead code:
+    the whitelist upstream already prevents audio from reaching the pipeline.
 
     Args:
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+    """
+    from llama_index.core import SimpleDirectoryReader
+
+    from docint.utils.env_cfg import load_ingestion_env
+
+    default_exts = load_ingestion_env().supported_filetypes
+
+    wav_file = tmp_path / "clip.wav"
+    mp3_file = tmp_path / "song.mp3"
+    txt_file = tmp_path / "notes.txt"
+
+    wav_file.write_bytes(b"RIFF fake wav")
+    mp3_file.write_bytes(b"ID3 fake mp3")
+    txt_file.write_text("Hello world.", encoding="utf-8")
+
+    dir_reader = SimpleDirectoryReader(
+        input_dir=str(tmp_path),
+        required_exts=default_exts,
+    )
+
+    assert txt_file in dir_reader.input_files
+    assert wav_file not in dir_reader.input_files
+    assert mp3_file not in dir_reader.input_files
+
+
+def _install_transcript_pipeline_stubs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> DocumentIngestionPipeline:
+    """Create a ``DocumentIngestionPipeline`` with all heavy loaders stubbed out.
+
+    Stubs out ``_load_doc_readers`` and ``_load_node_parsers`` to avoid
+    downloading models. Attaches minimal parser stubs so that
+    ``_create_nodes_without_enrichment`` can be called safely.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory for the pipeline's ``data_dir``.
+
+    Returns:
+        A fully-constructed ``DocumentIngestionPipeline`` ready for routing tests.
     """
 
-    pipeline = DocumentIngestionPipeline(
-        data_dir=Path("/tmp"),
+    class FakeNERConfig:
+        """NER config stub with extraction disabled."""
+
+        enabled = False
+        max_chars = 256
+        max_workers = 1
+
+    class FakeIngestionConfig:
+        """Ingestion config stub that disables hierarchical chunking."""
+
+        ingestion_batch_size = 5
+        sentence_splitter_chunk_size = 512
+        sentence_splitter_chunk_overlap = 64
+        supported_filetypes: list[str] = []
+        hierarchical_chunking_enabled = False
+        coarse_chunk_size = 1024
+        fine_chunk_size = 256
+        fine_chunk_overlap = 32
+
+    monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
+    monkeypatch.setattr(
+        pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig()
+    )
+    monkeypatch.setattr(
+        DocumentIngestionPipeline, "_load_doc_readers", lambda self: None
+    )
+    monkeypatch.setattr(
+        DocumentIngestionPipeline, "_load_node_parsers", lambda self: None
+    )
+
+    pl = DocumentIngestionPipeline(
+        data_dir=tmp_path,
         device="cpu",
         ner_model=None,
         progress_callback=None,
     )
+    pl.entity_extractor = None
 
-    # Stub parsers to satisfy _create_nodes preconditions
-    dummy_nodes: list = []
-    pipeline.md_node_parser = cast(
-        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
+    # Stub parsers that would require model downloads.  For the transcript
+    # routing test we rely on the real SentenceSplitter (no model) so only
+    # the non-transcript paths need stubbing.
+    pl.md_node_parser = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: [])
     )
-    pipeline.docling_node_parser = cast(
-        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
+    pl.docling_node_parser = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: [])
     )
+    pl.sentence_splitter = cast(
+        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: [])
+    )
+    pl.hierarchical_node_parser = None
+    return pl
 
-    doc = Document(
-        text="hi",
-        metadata={"file_path": "foo.webm", "source": "audio", "file_hash": "x"},
-    )
-    nodes = pipeline._create_nodes([doc])
 
-    assert isinstance(nodes, list)
+def test_nextext_transcript_routed_to_per_segment_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Transcript-segment Documents produce exactly one node per segment (no concatenation).
+
+    Injects 3 ``Document`` instances whose metadata contains
+    ``docint_doc_kind = "transcript_segment"`` and ``source = "transcript"``.
+    Runs them through ``_create_nodes_without_enrichment`` and asserts that
+    exactly 3 nodes emerge, each preserving the original segment prose.
+
+    This pins the new contract: transcript docs are routed to the
+    ``SentenceSplitter(chunk_size=10_000_000)`` splitter — not the
+    ``HierarchicalNodeParser`` — so each segment remains a distinct node.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+    """
+    pl = _install_transcript_pipeline_stubs(monkeypatch, tmp_path)
+
+    segment_texts = [
+        "First spoken phrase.",
+        "Second spoken phrase.",
+        "Third spoken phrase.",
+    ]
+    docs = [
+        Document(
+            text=text,
+            metadata={
+                "file_path": "transcript.jsonl",
+                "source": "transcript",
+                "docint_doc_kind": "transcript_segment",
+                "sentence_index": idx,
+            },
+        )
+        for idx, text in enumerate(segment_texts)
+    ]
+
+    nodes = pl._create_nodes_without_enrichment(docs)
+
+    assert len(nodes) == 3, f"Expected 3 nodes (one per segment), got {len(nodes)}"
+    node_texts = [n.text for n in nodes]
+    for text in segment_texts:
+        assert text in node_texts, (
+            f"Segment text {text!r} missing from nodes — concatenation occurred"
+        )
+
+
+def test_nextext_transcript_kind_wins_over_json_extension(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Documents with ``docint_doc_kind='transcript_segment'`` beat ``.jsonl`` routing.
+
+    Even when the ``file_path`` has a ``.jsonl`` extension — which would
+    otherwise route a document through the generic JSON / hierarchical path —
+    the presence of ``docint_doc_kind='transcript_segment'`` in metadata must
+    route it to the per-segment ``SentenceSplitter`` (one node per document).
+    Pins the dispatcher priority invariant described at the top of
+    ``DocumentIngestionPipeline._create_nodes_without_enrichment``.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+    """
+    pl = _install_transcript_pipeline_stubs(monkeypatch, tmp_path)
+
+    # If transcript_segment docs were mis-routed to json_docs, they would go
+    # through the stubbed sentence_splitter (returns []) or a now-None
+    # hierarchical_node_parser, producing 0 nodes.  The transcript path uses
+    # a locally-constructed real SentenceSplitter, so a correct dispatch
+    # yields 3 nodes with the original prose preserved.
+    segment_texts = [
+        "First transcript segment with a .jsonl path.",
+        "Second transcript segment with a .jsonl path.",
+        "Third transcript segment with a .jsonl path.",
+    ]
+    docs = [
+        Document(
+            text=text,
+            metadata={
+                "file_path": str(tmp_path / "interview.jsonl"),
+                "file_name": "interview.jsonl",
+                "file_type": "application/jsonl",
+                "source": "transcript",
+                "docint_doc_kind": "transcript_segment",
+                "sentence_index": idx,
+            },
+        )
+        for idx, text in enumerate(segment_texts)
+    ]
+
+    nodes = pl._create_nodes_without_enrichment(docs)
+
+    assert len(nodes) == 3, (
+        f"Expected 3 per-segment nodes; got {len(nodes)} — dispatcher likely "
+        "routed transcript_segment docs through the JSON path."
+    )
+    node_texts = [n.text for n in nodes]
+    for text in segment_texts:
+        assert text in node_texts, (
+            f"Segment text {text!r} missing from nodes — transcript path was "
+            "not used (likely mis-routed to json_docs)."
+        )
 
 
 def test_hate_speech_detection_attaches_flagged_metadata(
@@ -523,276 +708,6 @@ def test_hate_speech_detection_parallel_workers(
         detection = node.metadata.get("hate_speech")
         assert isinstance(detection, dict)
         assert detection["hate_speech"] is True
-
-
-def test_pipeline_batches_audio_files_with_audio_reader(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The ingestion pipeline should batch audio files through AudioReader.
-
-    Args:
-        monkeypatch: The pytest monkeypatch fixture.
-        tmp_path: Temporary directory provided by pytest.
-    """
-
-    first_audio = tmp_path / "first.wav"
-    second_audio = tmp_path / "second.mp3"
-    text_file = tmp_path / "notes.txt"
-    first_audio.write_bytes(b"a")
-    second_audio.write_bytes(b"b")
-    text_file.write_text("plain text", encoding="utf-8")
-
-    class FakeNERConfig:
-        """NER config stub with extraction disabled."""
-
-        enabled = False
-        max_chars = 256
-        max_workers = 1
-
-    class FakeIngestionConfig:
-        """Ingestion config stub with small batch size for testing."""
-
-        ingestion_batch_size = 5
-        sentence_splitter_chunk_size = 512
-        sentence_splitter_chunk_overlap = 64
-        supported_filetypes = [".wav", ".mp3", ".txt"]
-        hierarchical_chunking_enabled = False
-        coarse_chunk_size = 1024
-        fine_chunk_size = 256
-        fine_chunk_overlap = 32
-
-    monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
-    monkeypatch.setattr(
-        pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig()
-    )
-
-    pipeline = DocumentIngestionPipeline(
-        data_dir=tmp_path,
-        device="cpu",
-        ner_model=None,
-        progress_callback=None,
-    )
-
-    captured_batches: list[list[str]] = []
-
-    class FakeAudioReader:
-        """Fake AudioReader that captures batch file paths and returns dummy documents."""
-
-        max_workers = 2
-
-        def load_batch_data(
-            self,
-            files: list[Path],
-            *,
-            extra_info: list[dict[str, Any] | None] | None = None,
-        ) -> list[list[Document]]:
-            """Load a batch of audio files and return dummy documents.
-
-            Args:
-                files (list[Path]): List of audio file paths.
-                extra_info (list[dict[str, Any]  |  None] | None, optional): Additional information for each file. Defaults to None.
-
-            Returns:
-                list[list[Document]]: List of lists of dummy Document objects.
-            """
-            captured_batches.append([str(path) for path in files])
-            return [
-                [
-                    Document(
-                        text=f"audio:{Path(path).name}",
-                        metadata={"file_path": str(path), "file_hash": "audio-hash"},
-                    )
-                ]
-                for path in files
-            ]
-
-    fake_dir_reader = SimpleNamespace(
-        input_files=[first_audio, second_audio, text_file],
-        file_metadata=lambda file_path: {
-            "file_path": file_path,
-            "file_name": Path(file_path).name,
-            "filename": Path(file_path).name,
-            "file_hash": f"hash:{Path(file_path).name}",
-        },
-        file_extractor={},
-        filename_as_id=False,
-        encoding="utf-8",
-        errors="ignore",
-        raise_on_error=False,
-        fs=None,
-        _exclude_metadata=lambda docs: docs,
-    )
-
-    monkeypatch.setattr(
-        DocumentIngestionPipeline, "_load_doc_readers", lambda self: None
-    )
-    monkeypatch.setattr(
-        DocumentIngestionPipeline, "_load_node_parsers", lambda self: None
-    )
-    monkeypatch.setattr(
-        pipeline_module.SimpleDirectoryReader,
-        "load_file",
-        staticmethod(
-            lambda **kwargs: [
-                Document(
-                    text=f"text:{Path(kwargs['input_file']).name}",
-                    metadata={
-                        "file_path": str(kwargs["input_file"]),
-                        "file_hash": "text-hash",
-                    },
-                )
-            ]
-        ),
-    )
-    monkeypatch.setattr(
-        DocumentIngestionPipeline,
-        "_process_batch",
-        lambda self, docs, existing_hashes: (docs, []),
-    )
-
-    pipeline.audio_reader = cast(Any, FakeAudioReader())
-    pipeline.dir_reader = cast(Any, fake_dir_reader)
-
-    batches = list(pipeline.build())
-
-    assert captured_batches == [[str(first_audio), str(second_audio)]]
-    assert len(batches) == 1
-    docs, nodes = batches[0]
-    assert nodes == []
-    assert [doc.text for doc in docs] == [
-        "audio:first.wav",
-        "audio:second.mp3",
-        "text:notes.txt",
-    ]
-
-
-def test_pipeline_streams_large_audio_runs_in_windows(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Large contiguous audio runs should be flushed in bounded windows.
-
-    Args:
-        monkeypatch: The pytest monkeypatch fixture.
-        tmp_path: Temporary directory provided by pytest.
-    """
-
-    audio_files: list[Path] = []
-    for idx in range(5):
-        file_path = tmp_path / f"clip-{idx}.wav"
-        file_path.write_bytes(f"{idx}".encode("utf-8"))
-        audio_files.append(file_path)
-
-    class FakeNERConfig:
-        """NER config stub with extraction disabled."""
-
-        enabled = False
-        max_chars = 256
-        max_workers = 1
-
-    class FakeIngestionConfig:
-        """Ingestion config stub with a bounded batch size for streaming tests."""
-
-        ingestion_batch_size = 3
-        sentence_splitter_chunk_size = 512
-        sentence_splitter_chunk_overlap = 64
-        supported_filetypes = [".wav"]
-        hierarchical_chunking_enabled = False
-        coarse_chunk_size = 1024
-        fine_chunk_size = 256
-        fine_chunk_overlap = 32
-
-    monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
-    monkeypatch.setattr(
-        pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig()
-    )
-
-    pipeline = DocumentIngestionPipeline(
-        data_dir=tmp_path,
-        device="cpu",
-        ner_model=None,
-        progress_callback=None,
-    )
-
-    captured_batches: list[list[str]] = []
-
-    class FakeAudioReader:
-        """Fake AudioReader that exposes a worker count and captures streamed windows."""
-
-        max_workers = 2
-
-        def load_batch_data(
-            self,
-            files: list[Path],
-            *,
-            extra_info: list[dict[str, Any] | None] | None = None,
-        ) -> list[list[Document]]:
-            """Return dummy documents for a streamed batch of audio files.
-
-            Args:
-                files: The audio files in the streamed window.
-                extra_info: Additional file metadata entries.
-
-            Returns:
-                list[list[Document]]: Dummy documents keyed by file name.
-            """
-
-            captured_batches.append([str(path) for path in files])
-            return [
-                [
-                    Document(
-                        text=f"audio:{path.name}",
-                        metadata={
-                            "file_path": str(path),
-                            "file_hash": f"hash:{path.name}",
-                        },
-                    )
-                ]
-                for path in files
-            ]
-
-    fake_dir_reader = SimpleNamespace(
-        input_files=audio_files,
-        file_metadata=lambda file_path: {
-            "file_path": file_path,
-            "file_name": Path(file_path).name,
-            "filename": Path(file_path).name,
-            "file_hash": f"hash:{Path(file_path).name}",
-        },
-        file_extractor={},
-        filename_as_id=False,
-        encoding="utf-8",
-        errors="ignore",
-        raise_on_error=False,
-        fs=None,
-        _exclude_metadata=lambda docs: docs,
-    )
-
-    monkeypatch.setattr(
-        DocumentIngestionPipeline, "_load_doc_readers", lambda self: None
-    )
-    monkeypatch.setattr(
-        DocumentIngestionPipeline, "_load_node_parsers", lambda self: None
-    )
-    monkeypatch.setattr(
-        DocumentIngestionPipeline,
-        "_process_batch",
-        lambda self, docs, existing_hashes: (docs, []),
-    )
-
-    pipeline.audio_reader = cast(Any, FakeAudioReader())
-    pipeline.dir_reader = cast(Any, fake_dir_reader)
-
-    list(pipeline.build())
-
-    assert captured_batches == [
-        [
-            str(audio_files[0]),
-            str(audio_files[1]),
-            str(audio_files[2]),
-            str(audio_files[3]),
-        ],
-        [str(audio_files[4])],
-    ]
 
 
 def test_build_streaming_yields_enrichment_batches_and_completion_hashes(

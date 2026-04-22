@@ -135,9 +135,9 @@ uv run load-models
 
 Source: `docint/utils/model_cfg.py:main`. Downloads the Docling models
 (RapidOCR, layout, table structure, picture classifier, code/formula),
-the CLIP image encoder, GLiNER weights, the selected Whisper model, and
-any Hugging Face models referenced by `ModelConfig`. Only the assets that
-are actually needed by the current `INFERENCE_PROVIDER` are fetched.
+the CLIP image encoder, GLiNER weights, and any Hugging Face models
+referenced by `ModelConfig`. Only the assets that are actually needed by
+the current `INFERENCE_PROVIDER` are fetched.
 
 Run this once on a fresh machine (or a new cache volume) to avoid
 blocking the first backend startup on network downloads. It is also used

@@ -55,7 +55,6 @@ identifiers, with provider-specific fallbacks.
 | `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | Cross-encoder reranker. |
 | `NER_MODEL` | `gliner-community/gliner_large-v2.5` | GLiNER NER model. |
 | `IMAGE_EMBED_MODEL` | `openai/clip-vit-base-patch32` | Image embedding model (CLIP). |
-| `WHISPER_MODEL` | `turbo` (ollama) / `openai/whisper-large-v3-turbo` (vllm) / `whisper-1` (openai) | ASR model. |
 
 ## Host endpoints — `HostConfig`
 
@@ -191,16 +190,6 @@ Loaded by `load_summary_env()` (`env_cfg.py:1145`).
 | `SUMMARY_SOCIAL_CHUNKING_ENABLED` | `true` | Use row-level summarisation for social/table collections. |
 | `SUMMARY_SOCIAL_CANDIDATE_POOL` | `48` | Candidate retrieval depth for social summaries. |
 | `SUMMARY_SOCIAL_DIVERSITY_LIMIT` | `2` | Max sources retained per diversity bucket. |
-
-## Whisper / ASR — `WhisperConfig`
-
-Loaded by `load_whisper_env()` (`env_cfg.py:1223`).
-
-| Variable | Default | Description |
-|---|---|---|
-| `WHISPER_MAX_WORKERS` | `1` | Parallel file-level Whisper workers. |
-| `WHISPER_TASK` | `transcribe` | `transcribe` or `translate`. |
-| `WHISPER_SRC_LANGUAGE` | *unset* | Optional ISO 639-1 source language. |
 
 ## Sessions — `SessionConfig`
 

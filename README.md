@@ -78,7 +78,6 @@ container recreation:
 - `docling-cache`
 - `huggingface-cache`
 - `ollama-cache`
-- `whisper-cache`
 
 The helper script creates them with `docker volume create`.
 
@@ -186,8 +185,8 @@ Run that stack separately and configure Docint with:
 - `INFERENCE_PROVIDER=vllm`
 - `OPENAI_API_BASE=https://<router-host>/v1`
 - `OPENAI_API_KEY=<token>`
-- `TEXT_MODEL`, `VISION_MODEL`, `EMBED_MODEL`, `SPARSE_MODEL`,
-  `RERANK_MODEL`, and `WHISPER_MODEL` matching the served model IDs
+- `TEXT_MODEL`, `VISION_MODEL`, `EMBED_MODEL`, `SPARSE_MODEL`, and
+  `RERANK_MODEL` matching the served model IDs
 
 ## Documentation
 
