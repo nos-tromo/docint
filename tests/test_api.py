@@ -588,23 +588,41 @@ def test_collections_list_failure(
 def test_collections_select_success(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """Test the successful selection of a collection.
+    """Selecting a collection must succeed without warming the query engine.
+
+    Regression guard for the same OOM pattern that commit 18a47a6 removed
+    from ``/ingest`` and ``/ingest/upload``: ``/collections/select``
+    previously called ``rag.create_index`` + ``rag.create_query_engine`` +
+    ``rag.get_collection_ner(refresh=True)`` immediately after
+    ``rag.select_collection``. That chain loads bge-m3 (~2 GB),
+    bge-reranker-v2-m3 (~1 GB), and GLiNER on every collection switch,
+    causing OOM-kill on CPU Docker. The query engine is now built lazily
+    on the first chat query.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         client (TestClient): The TestClient instance.
     """
-    # Force lazy creation paths
-    api_module.rag.index = None
-    api_module.rag.query_engine = None
     response = client.post("/collections/select", json={"name": " gamma "})
     assert response.status_code == 200
     payload = response.json()
     assert payload == {"ok": True, "name": "gamma"}
     rag = cast(Any, api_module.rag)
     assert rag.qdrant_collection == "gamma"
-    assert rag.created_index == 1
-    assert rag.created_query_engine == 1
+    # Neither the index nor the query engine may be built eagerly on select.
+    assert rag.created_index == 0, (
+        "rag.create_index() must NOT be called from /collections/select; "
+        "it triggers bge-m3 load and OOM-kills CPU Docker on collection switch."
+    )
+    assert rag.created_query_engine == 0, (
+        "rag.create_query_engine() must NOT be called from /collections/select; "
+        "it triggers reranker + embedding loads and OOM-kills CPU Docker."
+    )
+    # NER pre-warm must also be skipped — it previously triggered GLiNER on select.
+    assert rag.ner_refresh_calls == [], (
+        "get_collection_ner() must NOT be called from /collections/select; "
+        "it triggers GLiNER load and compounds warmup memory pressure."
+    )
 
 
 def test_collections_select_blank_name(client: TestClient) -> None:
@@ -616,6 +634,44 @@ def test_collections_select_blank_name(client: TestClient) -> None:
     response = client.post("/collections/select", json={"name": "   "})
     assert response.status_code == 500
     assert "Collection name required" in response.json()["detail"]
+
+
+def test_collections_select_raises_on_nonexistent_collection(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Non-``HTTPException`` errors from ``select_collection`` surface as 500.
+
+    ``/collections/select`` only catches ``HTTPException`` in its outer
+    handler. If ``rag.select_collection`` raises ``ValueError`` (collection
+    missing) or any other non-HTTP exception, it propagates to FastAPI's
+    default handler and becomes an HTTP 500. This test locks that contract
+    so any future refactor that silently swallows the error (or wraps it
+    as a 200) fails this assertion.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+
+    def raise_missing(name: str) -> None:
+        """Simulate the production-code ``ValueError`` path.
+
+        Args:
+            name (str): The collection name (ignored).
+
+        Raises:
+            ValueError: Always, to mimic a missing-collection scenario.
+        """
+        raise ValueError(f"Collection '{name}' does not exist")
+
+    monkeypatch.setattr(api_module.rag, "select_collection", raise_missing)
+    # TestClient's default raise_server_exceptions=True re-raises uncaught
+    # server-side exceptions to the caller. In production (uvicorn), FastAPI's
+    # default handler would turn this into an HTTP 500 response. Asserting the
+    # exception propagates captures the same contract — the endpoint does not
+    # silently swallow or coerce the error.
+    with pytest.raises(ValueError, match="does not exist"):
+        client.post("/collections/select", json={"name": "ghost"})
 
 
 def test_collections_ner_success(client: TestClient) -> None:
@@ -1499,6 +1555,7 @@ def test_ingest_success(
         "collection": "docs",
         "data_dir": str(data_dir),
         "hybrid": False,
+        "empty": False,
     }
     assert called.args[0:3] == ("docs", data_dir, False)
 
@@ -1544,6 +1601,501 @@ def test_ingest_missing_directory(
     response = client.post("/ingest", json={"collection": "abc"})
     assert response.status_code == 500
     assert "Data directory does not exist" in response.json()["detail"]
+
+
+def test_ingest_sync_generic_exception_propagates_as_500(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """Non-``EmptyIngestionError`` failures in sync ``/ingest`` surface as 500.
+
+    Commit e1060fd added an explicit ``except EmptyIngestionError`` around
+    the ``ingest_docs`` call that returns 200 with ``empty=true``. Generic
+    runtime errors (Qdrant unreachable, disk full, OOM) must still
+    propagate to FastAPI's default handler as an HTTP 500. This test
+    guards against an over-broad exception catch accidentally swallowing
+    real failures into the soft-empty response.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture, used as the data dir.
+    """
+    monkeypatch.setattr(api_module, "_resolve_data_dir", lambda: tmp_path)
+
+    def exploding_ingest(
+        collection: str,
+        path: Path,
+        hybrid: bool = True,
+        progress_callback: Any = None,
+    ) -> None:
+        """Simulate a hard runtime failure during ingestion.
+
+        Args:
+            collection (str): Collection name (ignored).
+            path (Path): Source directory path (ignored).
+            hybrid (bool): Whether hybrid retrieval was requested (ignored).
+            progress_callback (Any): Optional progress callback (ignored).
+
+        Raises:
+            RuntimeError: Always, to mimic an infrastructure failure.
+        """
+        _ = (collection, path, hybrid, progress_callback)
+        raise RuntimeError("Qdrant unreachable")
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", exploding_ingest)
+
+    # TestClient's default re-raises to the caller — in production, FastAPI's
+    # default handler turns an uncaught ``RuntimeError`` into HTTP 500. The
+    # assertion captures the same contract: the endpoint does NOT silently
+    # swallow or coerce a generic runtime failure into the soft-empty 200
+    # response that only ``EmptyIngestionError`` maps to.
+    with pytest.raises(RuntimeError, match="Qdrant unreachable"):
+        client.post("/ingest", json={"collection": "col", "hybrid": True})
+
+
+def test_ingest_upload_empty_emits_warning_and_completes(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """Empty ingestion via /ingest/upload yields a warning + empty completion event.
+
+    Verifies the API translates :class:`EmptyIngestionError` into an SSE
+    ``warning`` event followed by an ``ingestion_complete`` event with
+    ``"empty": true`` and skips ``rag.select_collection`` (which would
+    otherwise raise ``ValueError`` because the collection was never
+    created), instead of surfacing a generic ``"Ingestion failed"``.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture.
+    """
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+
+    def fake_ingest(
+        collection: str,
+        path: Path,
+        hybrid: bool = True,
+        progress_callback: Any = None,
+    ) -> None:
+        """Simulate an ingestion run that produced no documents.
+
+        Args:
+            collection (str): Collection name.
+            path (Path): Source directory path (ignored).
+            hybrid (bool): Whether hybrid retrieval was requested (ignored).
+            progress_callback (Any): Optional progress callback (ignored).
+        """
+        _ = (path, hybrid, progress_callback)
+        raise api_module.EmptyIngestionError(collection)
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", fake_ingest)
+
+    response = client.post(
+        "/ingest/upload",
+        data={"collection": "silence-test", "hybrid": "false"},
+        files={"files": ("silence.m4a", b"\x00" * 32, "audio/mp4")},
+    )
+
+    assert response.status_code == 200
+    body = response.text
+
+    # The SSE payload should contain a warning event referencing the collection
+    # and an ingestion_complete event flagged as empty=true. It should NOT
+    # contain a generic "Ingestion failed" error event.
+    assert "event: warning" in body
+    assert "silence-test" in body
+    assert "event: ingestion_complete" in body
+    assert '"empty": true' in body
+    assert "Ingestion failed" not in body
+
+    # select_collection must NOT have been called — DummyRAG.selected stays empty.
+    assert api_module.rag.selected == []
+
+
+def test_ingest_upload_success_does_not_warm_query_engine(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """Successful ``/ingest/upload`` must not eagerly warm the query engine.
+
+    Regression guard for an OOM-kill observed on CPU Docker containers with
+    the default 8 GB limit: the ingest SSE handler previously called
+    ``rag.create_index()`` and ``rag.create_query_engine()`` on the
+    module-level ``api.rag`` singleton immediately after a successful
+    ingestion. That warmup triggered the reranker (bge-reranker-v2-m3,
+    roughly 1 GB) and the embedding model (bge-m3, roughly 2 GB) to load
+    on top of the PyTorch allocator memory still held by the just-finished
+    ingest pipeline, blowing past the container memory cap and producing
+    exit 137.
+
+    The query engine is still built lazily on the next chat query, so the
+    only user-visible effect of removing the warmup is a slower first-query
+    TTFB. There is no correctness regression. This test pins down the
+    behavioral defect (eager warmup) that reproduces the OOM, so that
+    deleting the warmup block keeps the test green while any future
+    reintroduction would fail it.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture, used as the uploads dir.
+    """
+    # Route uploads into a temp dir so the endpoint does not touch real state.
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+
+    def fake_ingest(
+        collection: str,
+        path: Path,
+        hybrid: bool = True,
+        progress_callback: Any = None,
+    ) -> None:
+        """Simulate a successful, no-op ingestion run.
+
+        Returning cleanly causes the SSE handler to enqueue a ``None``
+        sentinel and break out of the progress loop, which is exactly the
+        code path that previously reached the eager warmup block.
+
+        Args:
+            collection (str): Collection name (ignored).
+            path (Path): Source directory path (ignored).
+            hybrid (bool): Whether hybrid retrieval was requested (ignored).
+            progress_callback (Any): Optional progress callback (ignored).
+        """
+        _ = (collection, path, hybrid, progress_callback)
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", fake_ingest)
+
+    # Sanity: the autouse _patch_rag fixture installs a fresh DummyRAG whose
+    # create_index / create_query_engine counters start at zero.
+    dummy_rag = cast(DummyRAG, api_module.rag)
+    assert dummy_rag.created_index == 0
+    assert dummy_rag.created_query_engine == 0
+
+    response = client.post(
+        "/ingest/upload",
+        data={"collection": "warmup-guard", "hybrid": "true"},
+        files={"files": ("hello.txt", b"hello world", "text/plain")},
+    )
+
+    # The ingest itself must still succeed and emit the completion event —
+    # we are not regressing success signalling, only removing the warmup.
+    assert response.status_code == 200
+    body = response.text
+    assert "event: ingestion_complete" in body
+    assert "Ingestion failed" not in body
+
+    # Core assertion: neither the index nor the query engine may be built
+    # eagerly during a successful ingest. Both counters must remain zero.
+    # Under the buggy code path (now removed), the ingest SSE success path
+    # called rag.create_index() and rag.create_query_engine() immediately
+    # after the progress loop, loading reranker + embedding and OOM-killing
+    # the backend on CPU Docker with default 8 GB limit.
+    assert dummy_rag.created_query_engine == 0, (
+        "rag.create_query_engine() must NOT be called from the ingest "
+        "success path; it triggers reranker + embedding model loads that "
+        "OOM-kill the backend on CPU Docker with default 8 GB limit."
+    )
+    assert dummy_rag.created_index == 0, (
+        "rag.create_index() must NOT be called from the ingest success "
+        "path either; the next chat query will build the index lazily."
+    )
+
+
+def test_ingest_upload_cancels_awaiter_on_client_disconnect(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """Client disconnect mid-ingest cancels the awaiter and exits cleanly.
+
+    The SSE ``/ingest/upload`` endpoint now polls
+    ``request.is_disconnected()`` while waiting on the worker queue so
+    that a disconnected client doesn't leave an orphan coroutine
+    blocked on a queue no one will read. On disconnect, the awaiter is
+    cancelled, a warning is logged, and the generator returns without
+    emitting ``ingestion_complete``. The worker thread itself runs to
+    completion (Python has no safe thread kill), but its output is
+    safely discarded.
+
+    Implementation detail: we monkeypatch
+    ``INGEST_DISCONNECT_POLL_INTERVAL_S`` to a tiny value so the test
+    finishes in well under a second, and override ``is_disconnected``
+    on the Starlette ``Request`` class to simulate an immediate
+    disconnect. A brief ``time.sleep`` in ``fake_ingest`` guarantees
+    the poll path is reached before the worker enqueues the success
+    sentinel.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture, used as the uploads dir.
+    """
+    import time
+
+    from starlette.requests import Request as StarletteRequest
+
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+    monkeypatch.setattr(api_module, "INGEST_DISCONNECT_POLL_INTERVAL_S", 0.05)
+
+    def blocking_fake_ingest(
+        collection: str,
+        path: Path,
+        hybrid: bool = True,
+        progress_callback: Any = None,
+    ) -> None:
+        """Block long enough for the disconnect poll to fire first.
+
+        Args:
+            collection (str): Collection name (ignored).
+            path (Path): Source directory path (ignored).
+            hybrid (bool): Whether hybrid retrieval was requested (ignored).
+            progress_callback (Any): Optional progress callback (ignored).
+        """
+        _ = (collection, path, hybrid, progress_callback)
+        time.sleep(0.3)
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", blocking_fake_ingest)
+
+    async def always_disconnected(_self: StarletteRequest) -> bool:
+        """Simulate an immediate client disconnect.
+
+        Args:
+            _self (StarletteRequest): The Request instance (ignored).
+
+        Returns:
+            bool: Always ``True``.
+        """
+        return True
+
+    monkeypatch.setattr(StarletteRequest, "is_disconnected", always_disconnected)
+
+    response = client.post(
+        "/ingest/upload",
+        data={"collection": "disconnect-guard", "hybrid": "true"},
+        files={"files": ("hello.txt", b"hello world", "text/plain")},
+    )
+
+    # Connection opened successfully (SSE headers sent)...
+    assert response.status_code == 200
+    body = response.text
+    # ... but the stream was cut short — no completion event, no error event.
+    assert "event: ingestion_complete" not in body, (
+        "ingestion_complete must NOT be emitted when the awaiter is cancelled; "
+        "the worker thread still runs but its output is discarded."
+    )
+    assert "Ingestion failed" not in body, (
+        "Cancellation must not be surfaced as a generic ingestion failure."
+    )
+
+
+def test_ingest_upload_poll_continues_when_still_connected(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """Poll timeouts without disconnect must not prematurely exit the stream.
+
+    The ``asyncio.wait_for(queue.get())`` timeout branch has two outcomes:
+    ``is_disconnected() -> True`` (cancel & return) and
+    ``is_disconnected() -> False`` (continue polling).
+    ``test_ingest_upload_cancels_awaiter_on_client_disconnect`` exercises
+    the first branch. This test exercises the "still connected → continue"
+    branch: the fake worker blocks longer than a single poll interval so
+    the timeout fires at least once, but ``is_disconnected`` always
+    returns ``False`` — the stream must keep draining until the worker's
+    completion sentinel arrives, and ``ingestion_complete`` must still be
+    emitted.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture, used as the uploads dir.
+    """
+    import time
+
+    from starlette.requests import Request as StarletteRequest
+
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+    monkeypatch.setattr(api_module, "INGEST_DISCONNECT_POLL_INTERVAL_S", 0.05)
+
+    def slow_fake_ingest(
+        collection: str,
+        path: Path,
+        hybrid: bool = True,
+        progress_callback: Any = None,
+    ) -> None:
+        """Block long enough for the poll to fire at least once.
+
+        Args:
+            collection (str): Collection name (ignored).
+            path (Path): Source directory path (ignored).
+            hybrid (bool): Whether hybrid retrieval was requested (ignored).
+            progress_callback (Any): Optional progress callback (ignored).
+        """
+        _ = (collection, path, hybrid, progress_callback)
+        time.sleep(0.15)  # ~3× poll interval
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", slow_fake_ingest)
+
+    poll_count: dict[str, int] = {"n": 0}
+
+    async def always_connected(_self: StarletteRequest) -> bool:
+        """Simulate a stable connection — client stays the full duration.
+
+        Args:
+            _self (StarletteRequest): The Request instance (ignored).
+
+        Returns:
+            bool: Always ``False``.
+        """
+        poll_count["n"] += 1
+        return False
+
+    monkeypatch.setattr(StarletteRequest, "is_disconnected", always_connected)
+
+    response = client.post(
+        "/ingest/upload",
+        data={"collection": "connected-guard", "hybrid": "true"},
+        files={"files": ("hello.txt", b"hello world", "text/plain")},
+    )
+
+    assert response.status_code == 200
+    body = response.text
+    assert "event: ingestion_complete" in body, (
+        "With is_disconnected always False, the poll must not cancel the "
+        "awaiter — the worker's completion sentinel must reach the client."
+    )
+    assert "Ingestion failed" not in body
+    assert poll_count["n"] >= 1, (
+        "Poll interval (0.05 s) is shorter than fake_ingest's sleep (0.15 s), "
+        "so is_disconnected must have been consulted at least once."
+    )
+
+
+def test_ingest_sync_empty_returns_empty_flag(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """Empty ingestion via sync ``POST /ingest`` returns 200 with ``empty=true``.
+
+    Matches the SSE ``/ingest/upload`` behaviour: ``EmptyIngestionError``
+    is a soft-empty outcome (no content parsed), not a server error. The
+    sync endpoint previously let the exception propagate to FastAPI's
+    default handler, yielding an HTTP 500 which forced SDK/REST/CLI
+    consumers to parse tracebacks to distinguish an empty upload from a
+    real failure. The endpoint now catches the exception and returns
+    ``{"ok": true, "empty": true, ...}``.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture, used as the data dir.
+    """
+    monkeypatch.setattr(api_module, "_resolve_data_dir", lambda: tmp_path)
+
+    def fake_ingest(
+        collection: str,
+        path: Path,
+        hybrid: bool = True,
+        progress_callback: Any = None,
+    ) -> None:
+        """Simulate an ingestion run that produced no documents.
+
+        Args:
+            collection (str): Collection name.
+            path (Path): Source directory path (ignored).
+            hybrid (bool): Whether hybrid retrieval was requested (ignored).
+            progress_callback (Any): Optional progress callback (ignored).
+        """
+        _ = (path, hybrid, progress_callback)
+        raise api_module.EmptyIngestionError(collection)
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", fake_ingest)
+
+    response = client.post(
+        "/ingest",
+        json={"collection": "silence-sync-test", "hybrid": True},
+    )
+
+    # Empty ingestion must NOT surface as a 500; the SSE path already
+    # handles this gracefully, and the sync path now mirrors it.
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["empty"] is True
+    assert body["collection"] == "silence-sync-test"
+    assert body["data_dir"] == str(tmp_path)
+
+    # Collection was never created, so no select_collection should have fired.
+    assert api_module.rag.selected == []
+
+
+def test_ingest_sync_success_does_not_warm_query_engine(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """Successful synchronous ``POST /ingest`` must not eagerly warm the query engine.
+
+    Companion guard to :func:`test_ingest_upload_success_does_not_warm_query_engine`:
+    the synchronous ``/ingest`` endpoint contained the same warmup pattern
+    (``rag.select_collection`` + ``create_index`` + ``create_query_engine``
+    + NER pre-warm) and had the same OOM-kill potential on CPU Docker
+    containers. This test pins down the behavioral defect so that any
+    future reintroduction of a post-ingest warmup on the sync route fails
+    the suite.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture, used as the data dir.
+    """
+    # Point the endpoint at a real, empty temp directory so _resolve_data_dir
+    # does not blow up the request before the warmup would have fired.
+    monkeypatch.setattr(api_module, "_resolve_data_dir", lambda: tmp_path)
+
+    def fake_ingest(
+        collection: str,
+        path: Path,
+        hybrid: bool = True,
+        progress_callback: Any = None,
+    ) -> None:
+        """Simulate a successful, no-op synchronous ingestion run.
+
+        Returning cleanly is exactly the code path that previously fell
+        through to the warmup block on the ``/ingest`` endpoint.
+
+        Args:
+            collection (str): Collection name (ignored).
+            path (Path): Source directory path (ignored).
+            hybrid (bool): Whether hybrid retrieval was requested (ignored).
+            progress_callback (Any): Optional progress callback (ignored).
+        """
+        _ = (collection, path, hybrid, progress_callback)
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", fake_ingest)
+
+    dummy_rag = cast(DummyRAG, api_module.rag)
+    assert dummy_rag.created_index == 0
+    assert dummy_rag.created_query_engine == 0
+
+    response = client.post(
+        "/ingest",
+        json={"collection": "warmup-guard-sync", "hybrid": True},
+    )
+
+    # The sync endpoint must still return a successful payload.
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["collection"] == "warmup-guard-sync"
+
+    # Core assertion: neither the index nor the query engine may be built
+    # eagerly during a successful sync ingest. Both counters must remain zero.
+    assert dummy_rag.created_query_engine == 0, (
+        "rag.create_query_engine() must NOT be called from the sync "
+        "/ingest success path; it triggers reranker + embedding model "
+        "loads that OOM-kill the backend on CPU Docker."
+    )
+    assert dummy_rag.created_index == 0, (
+        "rag.create_index() must NOT be called from the sync /ingest "
+        "success path either; the next chat query will build the index "
+        "lazily."
+    )
+    # select_collection must also not run eagerly — DummyRAG.selected stays empty.
+    assert api_module.rag.selected == []
 
 
 def test_stream_query_context_window_overflow_surfaces_descriptive_error(

@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import types
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -22,7 +24,7 @@ from llama_index.core import Document
 from llama_index.core.schema import NodeWithScore, TextNode
 
 from docint.core import rag as rag_module
-from docint.core.rag import RAG
+from docint.core.rag import RAG, LazyRerankerPostprocessor
 from docint.core.retrieval_filters import (
     build_metadata_filters,
     build_qdrant_filter,
@@ -301,6 +303,357 @@ def test_build_query_engine_uses_post_retrieval_text_model(
     rag.build_query_engine()
 
     assert captured["llm"] is rag._post_retrieval_text_model
+
+
+def test_build_query_engine_does_not_materialize_reranker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``build_query_engine`` must not dereference ``self.reranker``.
+
+    The reranker property lazily loads bge-reranker-v2-m3 (~1 GB on CPU)
+    and runs a healthcheck ``compute_score`` on first access. Plugging
+    the bare property value into ``node_postprocessors`` at construction
+    forced that cost even when the caller never intended to execute a
+    query — the root cause of the OOM regression chain addressed by
+    commits 18a47a6, 72e299e, and this commit. The ``LazyRerankerPostprocessor``
+    wrapper must defer the dereference until first ``_postprocess_nodes``.
+    This test defends against future reintroduction of an eager attach.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag.openai_config = OpenAIConfig(
+        api_base="https://api.openai.com/v1",
+        api_key="sk-test",
+        ctx_window=200000,
+        dimensions=1024,
+        max_retries=2,
+        num_output=256,
+        inference_provider="openai",
+        reuse_client=False,
+        seed=42,
+        temperature=0.0,
+        thinking_effort="high",
+        thinking_enabled=True,
+        timeout=300.0,
+        top_p=0.0,
+    )
+    rag._post_retrieval_text_model = cast(Any, object())
+    # Intentionally leave rag._reranker unset — if build_query_engine reads
+    # the property, the tripwire below fires.
+    rag.index = cast(
+        Any,
+        types.SimpleNamespace(
+            docstore=object(),
+            as_retriever=lambda **kwargs: {"retriever_kwargs": kwargs},
+        ),
+    )
+    monkeypatch.setattr(RAG, "list_documents", lambda self: [])
+    monkeypatch.setattr(RAG, "_sample_collection_payloads", lambda self, limit=128: [])
+
+    def _forbidden_reranker(_self: RAG) -> Any:
+        """Tripwire property — must NOT be reached during query engine construction.
+
+        Args:
+            _self (RAG): The RAG instance (ignored).
+
+        Raises:
+            AssertionError: Always, indicating an illegal eager access.
+        """
+        raise AssertionError(
+            "rag.reranker must NOT be accessed during build_query_engine; "
+            "LazyRerankerPostprocessor should defer the load until first "
+            "_postprocess_nodes call."
+        )
+
+    monkeypatch.setattr(RAG, "reranker", property(_forbidden_reranker))
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        rag_module.RetrieverQueryEngine,
+        "from_args",
+        staticmethod(lambda **kwargs: captured.update(kwargs) or kwargs),
+    )
+
+    # Would raise under the pre-refactor code path.
+    rag.build_query_engine()
+
+    postprocessors = captured["node_postprocessors"]
+    assert any(isinstance(p, LazyRerankerPostprocessor) for p in postprocessors), (
+        "LazyRerankerPostprocessor must be installed in node_postprocessors "
+        "so the reranker load is deferred to query time."
+    )
+
+
+def test_unload_models_releases_audio_reader_and_dir_reader() -> None:
+    """``unload_models`` must release the Whisper reference held on the audio reader.
+
+    On CPU-only deployments ``torch.cuda.empty_cache`` is a no-op, so the
+    only way Whisper weights (hundreds of MB to ~1.5 GB) return to the
+    allocator is via Python ref-count drop. Previously
+    ``RAG.unload_models`` nulled the embed / text / reranker / image
+    services but left ``self.audio_reader`` and ``self.dir_reader``
+    holding captured ingestion-pipeline state. This test locks in the
+    new behaviour: the Whisper model field is nulled explicitly, and
+    both reader handles are dropped so refcounting can reclaim them.
+
+    Uses a throwaway dummy reader so no real Whisper binary is loaded.
+    """
+    rag = RAG(qdrant_collection="test")
+
+    class DummyAudioReader:
+        """Stand-in for an ``AudioReader`` with a Whisper-like model field."""
+
+        def __init__(self) -> None:
+            """Initialize with a non-None ``_model`` to exercise the null path."""
+            self._model: Any = object()
+
+    dummy_audio = DummyAudioReader()
+    rag.audio_reader = cast(Any, dummy_audio)
+    rag.dir_reader = cast(Any, object())
+
+    rag.unload_models()
+
+    # The Whisper reference on the captured reader must be cleared so the
+    # underlying weights are GC-eligible even if something else outside
+    # RAG is still holding the reader instance.
+    assert dummy_audio._model is None, (
+        "unload_models must null audio_reader._model so the Whisper weights "
+        "become ref-count-zero on CPU-only deployments."
+    )
+    assert rag.audio_reader is None, (
+        "unload_models must drop the audio_reader handle itself."
+    )
+    assert rag.dir_reader is None, (
+        "unload_models must drop the dir_reader handle as well."
+    )
+    # Existing fields remain nulled (guards against regressions to
+    # unload_models's original behaviour).
+    assert rag._embed_model is None
+    assert rag._text_model is None
+    assert rag._post_retrieval_text_model is None, (
+        "unload_models must null _post_retrieval_text_model; on OpenAI-compatible "
+        "backends it holds a separate client that can pin memory/connections."
+    )
+    assert rag._reranker is None
+    assert rag._image_ingestion_service is None
+
+
+def test_unload_models_is_idempotent() -> None:
+    """Calling ``unload_models`` twice in a row must not raise.
+
+    The ``self.audio_reader._model = None`` write is guarded by
+    ``if self.audio_reader is not None``. A future refactor that drops
+    the guard would blow up on the second call (AttributeError on
+    ``None._model``). This test pins the idempotence contract so the
+    guard is not silently removed.
+    """
+    rag = RAG(qdrant_collection="test")
+
+    class DummyAudioReader:
+        """Minimal stand-in for ``AudioReader`` with a Whisper-like slot."""
+
+        def __init__(self) -> None:
+            """Initialize with a non-None model reference."""
+            self._model: Any = object()
+
+    rag.audio_reader = cast(Any, DummyAudioReader())
+    rag.dir_reader = cast(Any, object())
+
+    rag.unload_models()
+    rag.unload_models()  # must not raise
+
+    assert rag.audio_reader is None
+    assert rag.dir_reader is None
+
+
+def test_unload_models_on_fresh_rag_does_not_raise() -> None:
+    """``unload_models`` on a never-ingested RAG must be a safe no-op.
+
+    A freshly constructed ``RAG`` has ``audio_reader = None`` and
+    ``dir_reader = None`` by dataclass default. The guard
+    ``if self.audio_reader is not None`` protects the ``_model = None``
+    line in this case. Lock the semantics so any regression on the
+    guard fails here rather than in production.
+    """
+    rag = RAG(qdrant_collection="test")
+    assert rag.audio_reader is None
+    assert rag.dir_reader is None
+
+    rag.unload_models()  # must not raise
+
+    assert rag.audio_reader is None
+    assert rag.dir_reader is None
+
+
+def test_lazy_reranker_postprocessor_delegates_on_call() -> None:
+    """``LazyRerankerPostprocessor`` materializes and delegates lazily.
+
+    Construction of the wrapper must NOT read ``rag.reranker``; the first
+    ``_postprocess_nodes`` call must read the property exactly once and
+    forward the ``nodes`` and ``query_bundle`` arguments unchanged.
+    """
+    accesses: list[str] = []
+    forwarded: dict[str, Any] = {}
+
+    class FakeReranker:
+        """Minimal reranker stub recording delegated arguments."""
+
+        def _postprocess_nodes(self, nodes: list[Any], query_bundle: Any) -> list[Any]:
+            """Record the forwarded arguments and return nodes unchanged.
+
+            Args:
+                nodes (list[Any]): Nodes forwarded from the wrapper.
+                query_bundle (Any): Query bundle forwarded from the wrapper.
+
+            Returns:
+                list[Any]: The input ``nodes`` unchanged.
+            """
+            forwarded["nodes"] = nodes
+            forwarded["query_bundle"] = query_bundle
+            return nodes
+
+    class FakeRAG:
+        """Minimal RAG stub with a reranker property access counter."""
+
+        @property
+        def reranker(self) -> FakeReranker:
+            """Track access to the reranker property.
+
+            Returns:
+                FakeReranker: A fresh stub reranker each call.
+            """
+            accesses.append("reranker")
+            return FakeReranker()
+
+    rag = FakeRAG()
+    wrapper = LazyRerankerPostprocessor(rag=rag)
+    assert accesses == [], "construction must not touch rag.reranker"
+
+    sentinel_nodes: list[Any] = [object(), object()]
+    sentinel_bundle = object()
+    result = wrapper._postprocess_nodes(sentinel_nodes, sentinel_bundle)
+
+    assert accesses == ["reranker"], (
+        "rag.reranker must be read exactly once on first delegated call"
+    )
+    assert forwarded["nodes"] is sentinel_nodes
+    assert forwarded["query_bundle"] is sentinel_bundle
+    assert result is sentinel_nodes
+
+
+def test_lazy_reranker_postprocessor_delegates_on_repeated_calls() -> None:
+    """The wrapper re-reads ``rag.reranker`` on every call (no local cache).
+
+    The wrapper is deliberately stateless — each ``_postprocess_nodes``
+    call goes through ``self.rag.reranker`` fresh. The RAG property
+    itself caches on ``rag._reranker``, so the delegation target is
+    cheap after the first query. A future refactor that accidentally
+    cached the reranker inside the wrapper would prevent
+    ``unload_models`` (which only nulls ``rag._reranker``) from
+    resetting the reranker for subsequent sessions. This test pins the
+    re-read contract by using a ``FakeRAG`` whose ``reranker`` property
+    fabricates a new stub on every access and asserting the access
+    counter advances per call.
+    """
+    accesses: list[str] = []
+
+    class FakeReranker:
+        """Minimal reranker stub that short-circuits the delegation."""
+
+        def _postprocess_nodes(self, nodes: list[Any], query_bundle: Any) -> list[Any]:
+            """Return nodes unchanged.
+
+            Args:
+                nodes (list[Any]): Nodes forwarded from the wrapper.
+                query_bundle (Any): Query bundle forwarded from the wrapper.
+
+            Returns:
+                list[Any]: The ``nodes`` argument unchanged.
+            """
+            return nodes
+
+    class FakeRAG:
+        """Stub RAG whose reranker property increments an access counter."""
+
+        @property
+        def reranker(self) -> FakeReranker:
+            """Record an access and return a fresh stub.
+
+            Returns:
+                FakeReranker: A fresh stub on every call.
+            """
+            accesses.append("reranker")
+            return FakeReranker()
+
+    wrapper = LazyRerankerPostprocessor(rag=FakeRAG())
+    wrapper._postprocess_nodes([object()], object())
+    wrapper._postprocess_nodes([object()], object())
+    wrapper._postprocess_nodes([object()], object())
+
+    assert len(accesses) == 3, (
+        "Wrapper must re-read rag.reranker on every call — caching is the "
+        "RAG property's responsibility, so unload_models can reset it cleanly."
+    )
+
+
+def test_lazy_reranker_postprocessor_passes_none_query_bundle() -> None:
+    """The wrapper forwards ``query_bundle=None`` unchanged.
+
+    LlamaIndex retrieval pipelines can call postprocessors with
+    ``query_bundle=None`` in contexts where the query isn't available
+    (e.g., bare-retrieve paths). The wrapper must forward ``None``
+    without substituting a default — otherwise the delegated reranker
+    would see wrong metadata.
+    """
+    forwarded: dict[str, Any] = {}
+
+    class FakeReranker:
+        """Reranker stub that records the forwarded query_bundle."""
+
+        def _postprocess_nodes(self, nodes: list[Any], query_bundle: Any) -> list[Any]:
+            """Record ``query_bundle`` and return nodes unchanged.
+
+            Args:
+                nodes (list[Any]): Nodes forwarded from the wrapper.
+                query_bundle (Any): Query bundle to record.
+
+            Returns:
+                list[Any]: The ``nodes`` argument unchanged.
+            """
+            forwarded["query_bundle"] = query_bundle
+            return nodes
+
+    class FakeRAG:
+        """Stub RAG with a single-use reranker property."""
+
+        @property
+        def reranker(self) -> FakeReranker:
+            """Return a fresh stub.
+
+            Returns:
+                FakeReranker: A stub reranker.
+            """
+            return FakeReranker()
+
+    wrapper = LazyRerankerPostprocessor(rag=FakeRAG())
+    wrapper._postprocess_nodes([object()], None)
+
+    assert forwarded["query_bundle"] is None, (
+        "LazyRerankerPostprocessor must forward query_bundle=None unchanged; "
+        "substituting a default would mis-report query context to the reranker."
+    )
+
+
+def test_lazy_reranker_class_name_is_stable() -> None:
+    """``class_name()`` is used by LlamaIndex for postprocessor cache matching.
+
+    Renaming the class without updating the ``class_name()`` return
+    value would silently break cache-key equality between reloads, so
+    this one-line pin catches accidental drift.
+    """
+    assert LazyRerankerPostprocessor.class_name() == "LazyRerankerPostprocessor"
 
 
 def test_normalize_response_data_appends_image_sources(
@@ -2307,6 +2660,11 @@ def test_summarize_collection_reports_coverage_diagnostics(
         "c.pdf": [],
     }
 
+    monkeypatch.setattr(
+        RAG,
+        "_infer_collection_profile",
+        lambda self: {"is_social_table": False, "coverage_unit": "documents"},
+    )
     monkeypatch.setattr(RAG, "_summary_document_targets", lambda self: docs)
     monkeypatch.setattr(
         RAG,
@@ -2453,6 +2811,11 @@ def test_summarize_collection_handles_no_documents(
     rag.summary_coverage_target = 0.7
     rag.summary_max_docs = 30
 
+    monkeypatch.setattr(
+        RAG,
+        "_infer_collection_profile",
+        lambda self: {"is_social_table": False, "coverage_unit": "documents"},
+    )
     monkeypatch.setattr(RAG, "_summary_document_targets", lambda self: [])
     monkeypatch.setattr(
         RAG,
@@ -2753,15 +3116,24 @@ def test_summary_kv_store_passes_docstore_retry_config(
 ) -> None:
     """Summary KV store construction should include docstore retry settings.
 
+    Verifies that the SQLite KV store built by ``_summary_kv_store``
+    receives the retry knobs configured on the :class:`RAG` instance.
+
     Args:
         monkeypatch: The monkeypatch fixture.
     """
     captured: dict[str, Any] = {}
 
-    class FakeQdrantKVStore:
-        """Capture kwargs passed to KV store constructor."""
+    class FakeSQLiteKVStore:
+        """Capture kwargs passed to the KV store constructor."""
 
         def __init__(self, **kwargs: Any) -> None:
+            """Record constructor kwargs for later assertion.
+
+            Args:
+                **kwargs: Keyword arguments forwarded to
+                    :class:`SQLiteKVStore`.
+            """
             captured.update(kwargs)
 
     rag = RAG(qdrant_collection="test")
@@ -2770,7 +3142,7 @@ def test_summary_kv_store_passes_docstore_retry_config(
     rag.docstore_retry_backoff_seconds = 0.6
     rag.docstore_retry_backoff_max_seconds = 4.0
 
-    monkeypatch.setattr(rag_module, "QdrantKVStore", FakeQdrantKVStore)
+    monkeypatch.setattr(rag_module, "SQLiteKVStore", FakeSQLiteKVStore)
 
     kv_store = rag._summary_kv_store()
 
@@ -2894,6 +3266,13 @@ class _FakeCorePDFReader:
 def _patch_ingest_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch heavy ingest dependencies with minimal in-memory stubs.
 
+    Treats the active collection as already existing in Qdrant so that the
+    empty-ingestion guard (which fires only when nothing was produced *and*
+    the main collection does not yet exist) does not short-circuit tests
+    that exercise the post-ingest success bookkeeping path. Tests that
+    intentionally exercise the empty-ingestion cleanup path should
+    re-stub ``qdrant_collection_exists`` to return ``False``.
+
     Args:
         monkeypatch: The monkeypatch fixture used to stub RAG methods
             and module-level classes.
@@ -2911,6 +3290,11 @@ def _patch_ingest_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rag_module, "CorePDFPipelineReader", _FakeCorePDFReader)
     monkeypatch.setattr(RAG, "reset_session_state", lambda self: None)
     monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+    monkeypatch.setattr(
+        rag_module,
+        "qdrant_collection_exists",
+        lambda client, collection_name: True,
+    )
 
 
 def test_persist_node_batches_streams_micro_batches() -> None:
@@ -2959,7 +3343,7 @@ def test_persist_node_batches_streams_micro_batches() -> None:
 
     nodes = [types.SimpleNamespace(metadata={}) for _ in range(5)]
     rag._persist_node_batches(cast(list[Any], nodes))
-    index = cast(Any, rag.index)
+    index = rag.index
 
     assert index.docstore.batch_sizes == [2, 2, 1]
     assert index.vector_batch_sizes == [2, 2, 1]
@@ -3085,6 +3469,214 @@ def test_persist_node_batches_skips_unembeddable_chunks() -> None:
     assert index.vector_batches[0] == [ok_node]
     assert ok_node.embedding == [0.1, 0.2]
     assert bad_node.embedding is None
+
+
+def _fake_prepare_vector_nodes_for_insert(
+    _self: RAG, vector_nodes: list[Any]
+) -> tuple[list[Any], set[int]]:
+    """Return vector nodes untouched with no skipped IDs.
+
+    Used as a class-level monkeypatch so that the prepared-vector-nodes
+    helper does not try to load an embedding model during unit tests.
+
+    Args:
+        _self: Unused ``RAG`` instance (bound method signature).
+        vector_nodes: Incoming vector nodes.
+
+    Returns:
+        A ``(prepared_nodes, skipped_ids)`` tuple where no nodes are
+        skipped and ``prepared_nodes`` mirrors the input list.
+    """
+    return (list(vector_nodes), set())
+
+
+def _capture_loguru(caplog: pytest.LogCaptureFixture) -> Callable[[], None]:
+    """Route ``loguru`` logs into pytest's ``caplog`` handler.
+
+    The rag module uses ``loguru``, which does not propagate to the
+    stdlib ``logging`` hierarchy by default.  This helper installs a
+    sink on the loguru logger that forwards every record into caplog's
+    captured handler and returns a cleanup callable.
+
+    Args:
+        caplog: Pytest log capture fixture.
+
+    Returns:
+        A zero-argument cleanup callable that removes the sink.
+    """
+    from loguru import logger as _loguru_logger
+
+    sink_id = _loguru_logger.add(
+        lambda message: caplog.records.append(
+            logging.LogRecord(
+                name="loguru",
+                level=logging.ERROR,
+                pathname="",
+                lineno=0,
+                msg=str(message),
+                args=None,
+                exc_info=None,
+            )
+        ),
+        level="ERROR",
+        format="{message}",
+    )
+
+    def _cleanup() -> None:
+        _loguru_logger.remove(sink_id)
+
+    return _cleanup
+
+
+def test_persist_node_batches_logs_orphaned_kv_nodes_on_vector_failure(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Log node IDs and re-raise when the vector write fails after a KV write.
+
+    Simulates a transient Qdrant failure on ``insert_nodes`` after the
+    docstore write has committed, and asserts that the ``orphaned_kv_nodes``
+    marker appears in the logs with the affected node IDs so operators
+    can diagnose what needs to be re-ingested.
+
+    Args:
+        caplog: Pytest log capture fixture.
+        monkeypatch: Pytest monkeypatch fixture used to stub the
+            embedding-prep helper at the class level (RAG uses
+            ``@dataclass(slots=True)`` so instance-level assignment
+            is not possible).
+    """
+
+    class FakeDocStore:
+        """Record persisted node IDs."""
+
+        def __init__(self) -> None:
+            """Initialise empty capture state."""
+            self.persisted: list[str] = []
+
+        def add_documents(self, nodes: list[Any], allow_update: bool = True) -> None:
+            """Record node IDs for each persisted batch.
+
+            Args:
+                nodes: Nodes being persisted to the docstore.
+                allow_update: Whether overwrites are allowed.
+            """
+            _ = allow_update
+            self.persisted.extend(n.node_id for n in nodes)
+
+    class FakeIndex:
+        """Fail on vector insert to simulate a Qdrant outage."""
+
+        def __init__(self) -> None:
+            """Initialise the fake index state."""
+            self.docstore = FakeDocStore()
+
+        def insert_nodes(self, nodes: list[Any]) -> None:
+            """Raise a transient error on every vector insert.
+
+            Args:
+                nodes: Nodes the caller is trying to insert.
+
+            Raises:
+                RuntimeError: Always, to simulate a vector-store failure.
+            """
+            _ = nodes
+            raise RuntimeError("qdrant down")
+
+    monkeypatch.setattr(
+        RAG,
+        "_prepare_vector_nodes_for_insert",
+        _fake_prepare_vector_nodes_for_insert,
+    )
+
+    rag = RAG(qdrant_collection="active")
+    rag.docstore_batch_size = 10
+    rag.index = cast(Any, FakeIndex())
+
+    node = TextNode(text="hello world", metadata={}, id_="node-1")
+
+    cleanup = _capture_loguru(caplog)
+    try:
+        with pytest.raises(RuntimeError, match="qdrant down"):
+            rag._persist_node_batches([node])
+    finally:
+        cleanup()
+
+    index = cast(Any, rag.index)
+    # The docstore write committed before the vector insert failed.
+    assert index.docstore.persisted == ["node-1"]
+    # The structured marker and node id appear in the logs.
+    combined = "\n".join(str(record.msg) for record in caplog.records)
+    assert "orphaned_kv_nodes" in combined
+    assert "node-1" in combined
+    assert "'active'" in combined
+
+
+def test_persist_node_batches_logs_failed_persist_on_docstore_failure(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Log node IDs and re-raise when the docstore write itself fails.
+
+    Args:
+        caplog: Pytest log capture fixture.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+
+    class FakeDocStore:
+        """Raise on every persistence attempt."""
+
+        def add_documents(self, nodes: list[Any], allow_update: bool = True) -> None:
+            """Raise a disk-full error on every batch.
+
+            Args:
+                nodes: Nodes being persisted.
+                allow_update: Ignored flag.
+
+            Raises:
+                OSError: Always, to simulate a disk-full condition.
+            """
+            _ = (nodes, allow_update)
+            raise OSError("disk full")
+
+    class FakeIndex:
+        """Fake index that should never reach ``insert_nodes``."""
+
+        def __init__(self) -> None:
+            """Initialise the fake index state."""
+            self.docstore = FakeDocStore()
+            self.inserts: list[list[Any]] = []
+
+        def insert_nodes(self, nodes: list[Any]) -> None:
+            """Record any calls — should not be invoked in this test.
+
+            Args:
+                nodes: Vector nodes the caller is trying to insert.
+            """
+            self.inserts.append(nodes)
+
+    monkeypatch.setattr(
+        RAG,
+        "_prepare_vector_nodes_for_insert",
+        _fake_prepare_vector_nodes_for_insert,
+    )
+
+    rag = RAG(qdrant_collection="active")
+    rag.docstore_batch_size = 10
+    rag.index = cast(Any, FakeIndex())
+
+    node = TextNode(text="hello", metadata={}, id_="node-x")
+
+    cleanup = _capture_loguru(caplog)
+    try:
+        with pytest.raises(OSError, match="disk full"):
+            rag._persist_node_batches([node])
+    finally:
+        cleanup()
+
+    # Vector insert must not have been attempted once the KV write failed.
+    assert cast(Any, rag.index).inserts == []
+    combined = "\n".join(str(record.msg) for record in caplog.records)
+    assert "failed_persist_nodes" in combined
+    assert "node-x" in combined
 
 
 def test_apersist_node_batches_skips_unembeddable_chunks() -> None:
@@ -3322,10 +3914,237 @@ def test_asingest_docs_bumps_summary_revision(
     assert bumps == [("test", True)]
 
 
+def _setup_empty_ingest_rag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    main_collection_exists: bool,
+) -> tuple[RAG, MagicMock, list[tuple[str | None, bool]]]:
+    """Build a ``RAG`` wired for empty-ingestion tests.
+
+    The shared ingest stubs are installed, the embed model is replaced
+    with a benign sentinel, the Qdrant client is mocked, and
+    ``qdrant_collection_exists`` is overridden to control whether the
+    main collection appears to exist on Qdrant. The summary-revision and
+    NER-cache hooks capture call counts so callers can assert the empty
+    branch skipped them.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The temporary path used as the Qdrant source root.
+        main_collection_exists: Whether ``qdrant_collection_exists``
+            should return ``True`` for the main collection (re-ingest
+            scenario) or ``False`` (fresh empty ingestion).
+
+    Returns:
+        Tuple of ``(rag, qdrant_mock, bumps)`` where ``qdrant_mock`` is
+        the ``MagicMock`` substituted for ``rag._qdrant_client`` (returned
+        explicitly so that mypy keeps the ``MagicMock`` typing across the
+        call boundary instead of widening to ``QdrantClient | None``),
+        and ``bumps`` records each ``_bump_summary_revision`` call as
+        ``(collection, allow_create)``.
+    """
+    rag = RAG(qdrant_collection="silence-test")
+    rag._embed_model = cast(Any, object())
+    qdrant_mock = MagicMock()
+    rag._qdrant_client = qdrant_mock
+    rag._qdrant_src_dir = tmp_path
+    _patch_ingest_dependencies(monkeypatch)
+    monkeypatch.setattr(
+        rag_module,
+        "qdrant_collection_exists",
+        lambda client, collection_name: main_collection_exists,
+    )
+
+    bumps: list[tuple[str | None, bool]] = []
+
+    def _bump_summary_revision(
+        self: RAG,
+        collection: str | None = None,
+        *,
+        allow_create: bool = True,
+    ) -> int:
+        """Capture summary-revision bump arguments without doing real work.
+
+        Args:
+            self: The RAG instance.
+            collection: Collection passed to the bump call.
+            allow_create: ``allow_create`` kwarg passed to the bump call.
+
+        Returns:
+            The 1-based call count.
+        """
+        _ = self
+        bumps.append((collection, allow_create))
+        return len(bumps)
+
+    monkeypatch.setattr(RAG, "_bump_summary_revision", _bump_summary_revision)
+    return rag, qdrant_mock, bumps
+
+
+def test_ingest_docs_empty_raises_and_cleans_kv_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Empty fresh ingestion should raise EmptyIngestionError and unlink the KV file.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The Qdrant source root.
+    """
+    rag, qdrant_mock, bumps = _setup_empty_ingest_rag(
+        monkeypatch, tmp_path, main_collection_exists=False
+    )
+
+    # Pre-create the KV file the way SQLiteKVStore.__init__ would.
+    kv_dir = tmp_path / "silence-test"
+    kv_dir.mkdir(parents=True, exist_ok=True)
+    kv_file = kv_dir / "silence-test_kv.db"
+    kv_file.write_bytes(b"SQLITE_SENTINEL")
+
+    qdrant_mock.collection_exists.return_value = False
+
+    with pytest.raises(rag_module.EmptyIngestionError) as excinfo:
+        rag.ingest_docs(tmp_path, build_query_engine=False)
+
+    assert excinfo.value.collection_name == "silence-test"
+    assert not kv_file.exists()
+    # Source directory itself must be retained (uploaded files would live here).
+    assert kv_dir.exists()
+    # Empty branch must skip the summary-revision bump.
+    assert bumps == []
+    # No companion images collection delete attempted (the existence guard
+    # short-circuits because the mocked qdrant_collection_exists returns False).
+    assert qdrant_mock.delete_collection.call_count == 0
+
+
+def test_ingest_docs_empty_skips_cleanup_when_main_collection_exists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Re-ingest yielding zero new content must not destroy the prior KV store.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The Qdrant source root.
+    """
+    rag, qdrant_mock, bumps = _setup_empty_ingest_rag(
+        monkeypatch, tmp_path, main_collection_exists=True
+    )
+
+    kv_dir = tmp_path / "silence-test"
+    kv_dir.mkdir(parents=True, exist_ok=True)
+    kv_file = kv_dir / "silence-test_kv.db"
+    kv_file.write_bytes(b"PRIOR_DATA")
+
+    # Should NOT raise; should NOT delete the prior KV file.
+    rag.ingest_docs(tmp_path, build_query_engine=False)
+
+    assert kv_file.exists()
+    assert kv_file.read_bytes() == b"PRIOR_DATA"
+    # Standard post-success path was followed: summary revision was bumped.
+    assert bumps == [("silence-test", True)]
+    # No deletes performed via the Qdrant client.
+    assert qdrant_mock.delete_collection.call_count == 0
+
+
+def test_ingest_docs_empty_removes_wal_and_shm_siblings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Empty cleanup must remove the SQLite WAL/SHM sidecar files too.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The Qdrant source root.
+    """
+    rag, qdrant_mock, _bumps = _setup_empty_ingest_rag(
+        monkeypatch, tmp_path, main_collection_exists=False
+    )
+
+    kv_dir = tmp_path / "silence-test"
+    kv_dir.mkdir(parents=True, exist_ok=True)
+    kv_file = kv_dir / "silence-test_kv.db"
+    wal_file = kv_dir / "silence-test_kv.db-wal"
+    shm_file = kv_dir / "silence-test_kv.db-shm"
+    for f in (kv_file, wal_file, shm_file):
+        f.write_bytes(b"x")
+
+    qdrant_mock.collection_exists.return_value = False
+
+    with pytest.raises(rag_module.EmptyIngestionError):
+        rag.ingest_docs(tmp_path, build_query_engine=False)
+
+    assert not kv_file.exists()
+    assert not wal_file.exists()
+    assert not shm_file.exists()
+
+
+def test_ingest_docs_empty_emits_warning_progress_message(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Empty cleanup must emit a ``warning:``-prefixed progress callback message.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The Qdrant source root.
+    """
+    rag, qdrant_mock, _bumps = _setup_empty_ingest_rag(
+        monkeypatch, tmp_path, main_collection_exists=False
+    )
+    qdrant_mock.collection_exists.return_value = False
+
+    captured: list[str] = []
+
+    def _progress(message: str) -> None:
+        """Capture progress messages for assertion.
+
+        Args:
+            message: The progress message.
+        """
+        captured.append(message)
+
+    with pytest.raises(rag_module.EmptyIngestionError):
+        rag.ingest_docs(tmp_path, build_query_engine=False, progress_callback=_progress)
+
+    warning_messages = [m for m in captured if m.lower().startswith("warning:")]
+    assert warning_messages, f"expected warning: prefix in {captured!r}"
+    assert "silence-test" in warning_messages[0]
+
+
+def test_asingest_docs_empty_raises_and_cleans_kv_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Async empty fresh ingestion must raise and clean the orphan KV file.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The Qdrant source root.
+    """
+    rag, qdrant_mock, bumps = _setup_empty_ingest_rag(
+        monkeypatch, tmp_path, main_collection_exists=False
+    )
+
+    kv_dir = tmp_path / "silence-test"
+    kv_dir.mkdir(parents=True, exist_ok=True)
+    kv_file = kv_dir / "silence-test_kv.db"
+    kv_file.write_bytes(b"SQLITE_SENTINEL")
+
+    qdrant_mock.collection_exists.return_value = False
+
+    with pytest.raises(rag_module.EmptyIngestionError) as excinfo:
+        asyncio.run(rag.asingest_docs(tmp_path, build_query_engine=False))
+
+    assert excinfo.value.collection_name == "silence-test"
+    assert not kv_file.exists()
+    assert bumps == []
+
+
 def test_delete_collection_attempts_summary_invalidation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """delete_collection should attempt summary revision bump before deletion.
+
+    Deletes the main and ``_images`` Qdrant collections (SQLite KV store
+    lives under the source directory and is cleaned up via the source-dir
+    rmtree pass).
 
     Args:
         monkeypatch: The monkeypatch fixture.
@@ -3342,15 +4161,15 @@ def test_delete_collection_attempts_summary_invalidation(
         *,
         allow_create: bool = True,
     ) -> int:
-        """Bump the summary revision.
+        """Capture summary revision bump calls.
 
         Args:
-            self (RAG): The RAG instance.
-            collection (str | None, optional): The collection name. Defaults to None.
-            allow_create (bool, optional): Whether to allow creation of a new store. Defaults to True.
+            self: The RAG instance.
+            collection: The collection name.
+            allow_create: Whether to allow creation of a new store.
 
         Returns:
-            int: The new summary revision.
+            The stub revision number.
         """
         _ = self
         bumps.append((collection, allow_create))
@@ -3365,7 +4184,225 @@ def test_delete_collection_attempts_summary_invalidation(
         str(call.args[0])
         for call in rag._qdrant_client.delete_collection.call_args_list
     ]
-    assert deleted == ["target", "target_images", "target_dockv"]
+    assert deleted == ["target", "target_images"]
+
+
+def test_delete_collection_fail_fast_on_primary_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """delete_collection must raise before touching KV files on primary failure.
+
+    When the primary Qdrant collection delete raises, the SQLite KV file
+    and source directory for that collection must remain untouched so
+    that the operator can diagnose and retry without losing data.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Pytest-provided temporary directory used to place a
+            fake source directory and KV file on disk.
+    """
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    rag._qdrant_src_dir = tmp_path
+    monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+    monkeypatch.setattr(
+        RAG,
+        "_bump_summary_revision",
+        lambda self, collection=None, allow_create=True: 1,
+    )
+
+    # Simulate the primary delete_collection call raising.
+    rag._qdrant_client.delete_collection.side_effect = RuntimeError("qdrant boom")
+
+    # Place a sentinel KV file under the source dir — it must survive.
+    src_dir = tmp_path / "target"
+    src_dir.mkdir()
+    kv_file = src_dir / "target_kv.db"
+    kv_file.write_bytes(b"SQLITE_SENTINEL")
+
+    with pytest.raises(RuntimeError, match="qdrant boom"):
+        rag.delete_collection("target")
+
+    # Source directory and KV file must still exist.
+    assert kv_file.exists()
+    assert kv_file.read_bytes() == b"SQLITE_SENTINEL"
+    # Only the primary delete was attempted — secondary and source cleanup
+    # must have been skipped.
+    deleted = [
+        str(call.args[0])
+        for call in rag._qdrant_client.delete_collection.call_args_list
+    ]
+    assert deleted == ["target"]
+
+
+def test_verify_collection_reports_drift_and_parents(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """verify_collection surfaces KV/Qdrant drift and broken parents.
+
+    Builds a real on-disk SQLite KV store via :meth:`RAG._build_kv_store`
+    with three node IDs (a fine node, a coarse parent, and a fine node
+    whose parent is missing), mocks out Qdrant to report only one of
+    them plus an extra Qdrant-only id, and asserts the resulting
+    report.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Pytest-provided temporary directory used as the
+            Qdrant source root.
+    """
+    from llama_index.core.schema import TextNode as _TN
+    from llama_index.core.storage.docstore.keyval_docstore import (
+        KVDocumentStore as _KVDocumentStore,
+    )
+
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    rag._qdrant_src_dir = tmp_path
+
+    # Seed the real SQLite KV store with three nodes.
+    kv_store = rag._build_kv_store(collection="active")
+    doc_store = _KVDocumentStore(kvstore=kv_store, batch_size=10)
+    fine_ok = _TN(text="fine ok", metadata={"docint_hier_type": "fine"}, id_="fine-1")
+    coarse = _TN(
+        text="coarse parent",
+        metadata={"docint_hier_type": "coarse"},
+        id_="coarse-1",
+    )
+    dangling = _TN(
+        text="dangling child",
+        metadata={
+            "docint_hier_type": "fine",
+            "hier.parent_id": "coarse-missing",
+        },
+        id_="fine-dangling",
+    )
+    doc_store.add_documents([fine_ok, coarse, dangling])
+
+    # Mock Qdrant: claim the collection exists, report one of the KV ids
+    # plus a phantom id that only lives in Qdrant.
+    rag._qdrant_client.collection_exists.return_value = True
+
+    class _Point:
+        """Tiny stand-in for a Qdrant point returned by scroll."""
+
+        def __init__(self, pid: str) -> None:
+            """Store the point id.
+
+            Args:
+                pid: The point identifier.
+            """
+            self.id = pid
+
+    def _scroll(**_kwargs: Any) -> tuple[list[_Point], Any]:
+        """Return a single page of two points and no continuation offset.
+
+        Args:
+            **_kwargs: Ignored scroll keyword arguments.
+
+        Returns:
+            ``(points, None)`` — one KV-matching and one Qdrant-only id.
+        """
+        return ([_Point("fine-1"), _Point("qdrant-ghost")], None)
+
+    rag._qdrant_client.scroll.side_effect = _scroll
+
+    report = rag.verify_collection("active")
+
+    assert report["collection"] == "active"
+    assert report["qdrant_count"] == 2
+    assert report["kv_count"] == 3
+    # fine-dangling lives in KV only and is not coarse → orphan.
+    assert report["kv_orphans"] == ["fine-dangling"]
+    # The coarse parent is correctly absent from Qdrant — informational.
+    assert report["expected_coarse_only"] == ["coarse-1"]
+    # qdrant-ghost has no KV backing.
+    assert report["qdrant_orphans"] == ["qdrant-ghost"]
+    # fine-dangling references a parent that does not exist in KV.
+    assert report["missing_parent_ids"] == ["coarse-missing"]
+    # Without repair=True, nothing is deleted.
+    assert report["repaired_ids"] == []
+    assert doc_store.get_document("fine-dangling", raise_error=False) is not None
+
+
+def test_verify_collection_repair_deletes_kv_orphans(
+    tmp_path: Path,
+) -> None:
+    """verify_collection(repair=True) removes kv_orphans from the docstore.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory used as the
+            Qdrant source root.
+    """
+    from llama_index.core.schema import TextNode as _TN
+    from llama_index.core.storage.docstore.keyval_docstore import (
+        KVDocumentStore as _KVDocumentStore,
+    )
+
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    rag._qdrant_src_dir = tmp_path
+
+    kv_store = rag._build_kv_store(collection="active")
+    doc_store = _KVDocumentStore(kvstore=kv_store, batch_size=10)
+    orphan = _TN(text="orphan", metadata={"docint_hier_type": "fine"}, id_="orphan-1")
+    doc_store.add_documents([orphan])
+
+    rag._qdrant_client.collection_exists.return_value = True
+    rag._qdrant_client.scroll.return_value = ([], None)
+
+    report = rag.verify_collection("active", repair=True)
+
+    assert report["kv_orphans"] == ["orphan-1"]
+    assert report["repaired_ids"] == ["orphan-1"]
+    # A fresh docstore on the same KV store must no longer see the orphan.
+    post_store = _KVDocumentStore(
+        kvstore=rag._build_kv_store(collection="active"), batch_size=10
+    )
+    assert post_store.get_document("orphan-1", raise_error=False) is None
+
+
+def test_delete_collection_tolerates_secondary_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Failures deleting supplementary collections are swallowed and logged.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: Pytest-provided temporary directory.
+    """
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    rag._qdrant_src_dir = tmp_path
+    monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+    monkeypatch.setattr(
+        RAG,
+        "_bump_summary_revision",
+        lambda self, collection=None, allow_create=True: 1,
+    )
+
+    def delete_side_effect(name: str) -> None:
+        """Raise only for the supplementary ``_images`` collection.
+
+        Args:
+            name: The Qdrant collection being deleted.
+
+        Raises:
+            RuntimeError: When ``name`` ends with ``"_images"``.
+        """
+        if name.endswith("_images"):
+            raise RuntimeError("secondary boom")
+
+    rag._qdrant_client.delete_collection.side_effect = delete_side_effect
+
+    # Does not raise: primary delete succeeds, secondary failure is logged.
+    rag.delete_collection("target")
+
+    deleted = [
+        str(call.args[0])
+        for call in rag._qdrant_client.delete_collection.call_args_list
+    ]
+    assert deleted == ["target", "target_images"]
 
 
 def test_delete_collection_companion_name_does_not_expand(

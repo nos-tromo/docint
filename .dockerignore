@@ -1,14 +1,14 @@
-# Ignore Git and local metadata
-.git
-.vscode
-.idea
+# Local metadata
 *.code-workspace
 .DS_Store
 
 # Backend build artifacts and caches
 **/__pycache__/
 **/*.egg-info/
+**/.claude/
+**/.git/
 **/.github/
+**/.idea/
 **/.logs/
 **/.mypy_cache/
 **/.pre-commit-cache/
@@ -16,6 +16,7 @@
 **/.ruff_cache/
 **/.uv-cache/
 **/.venv/
+**/.vscode/
 **/build/
 **/data/
 **/dist/
@@ -40,6 +41,7 @@
 .env*
 .pre-commit-config.yaml
 AGENTS.md
+CLAUDE.md
 docker-compose.yml
 Dockerfile*
 LICENSE

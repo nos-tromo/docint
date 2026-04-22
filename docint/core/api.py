@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Literal, cast
 
 from anyio import to_thread
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -24,7 +24,7 @@ from docint.agents import (
     Turn,
 )
 from docint.cli import ingest as ingest_module
-from docint.core.rag import RAG
+from docint.core.rag import RAG, EmptyIngestionError
 from docint.core.retrieval_filters import build_metadata_filters, build_qdrant_filter
 from docint.utils.env_cfg import (
     load_host_env,
@@ -50,6 +50,11 @@ app.add_middleware(
 
 rag = RAG(qdrant_collection="")
 SIMULATED_STREAM_TOKEN_DELAY_SECONDS = 0.03
+# Interval (seconds) between checks for client disconnect while the SSE
+# ingestion stream is otherwise idle. Shorter values notice disconnects
+# faster at a tiny CPU cost; longer values are cheaper. 1 s is a
+# compromise. Tests may monkeypatch this to a smaller value.
+INGEST_DISCONNECT_POLL_INTERVAL_S = 1.0
 
 # Agent components (kept lightweight; swap with richer agents as needed)
 _understanding_agent = SimpleUnderstandingAgent()
@@ -291,6 +296,7 @@ class IngestOut(BaseModel):
     collection: str
     data_dir: str
     hybrid: bool
+    empty: bool = False
 
 
 class SessionListOut(BaseModel):
@@ -380,22 +386,6 @@ def collections_select(payload: SelectCollectionIn) -> dict[str, bool | str]:
             logger.error("HTTPException: Collection name required")
             raise HTTPException(status_code=400, detail="Collection name required")
         rag.select_collection(name)
-
-        if getattr(rag, "index", None) is None:
-            try:
-                rag.create_index()
-                rag.create_query_engine()
-            except Exception:
-                pass
-
-        # Pre-warm NER cache if enabled
-        if getattr(rag, "enable_ner", False):
-            try:
-                rag.get_collection_ner(refresh=True)
-            except Exception:
-                logger.warning(
-                    "Could not pre-warm NER cache for collection '{}'.", name
-                )
 
         return {"ok": True, "name": name}
     except HTTPException as e:
@@ -1131,10 +1121,14 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
         payload (IngestIn): The ingestion payload containing the collection name and hybrid flag.
 
     Returns:
-        dict[str, bool | str]: A dictionary indicating success, collection name, data directory, and hybrid flag.
+        dict[str, bool | str]: A dictionary with keys ``ok``, ``collection``, ``data_dir``,
+            ``hybrid``, and ``empty``. The ``empty`` field is ``True`` if ingestion produced
+            no documents; ``False`` otherwise. Soft-empty outcomes (where the file set contained
+            no parseable content) return HTTP 200 with ``empty=true`` instead of an error.
 
     Raises:
-        HTTPException: If the collection name is missing, data directory does not exist, or an error occurs during ingestion.
+        HTTPException: If the collection name is missing or data directory does not exist.
+        HTTPException: If an unrecoverable error occurs during ingestion.
     """
 
     try:
@@ -1151,34 +1145,24 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
                 detail=f"Data directory does not exist: {data_dir}",
             )
 
-        ingest_module.ingest_docs(
-            name,
-            data_dir,
-            hybrid=payload.hybrid if payload.hybrid is not None else True,
-        )
-
-        # After ingestion, prepare the in-memory RAG instance for immediate querying.
-        rag.select_collection(name)
         try:
-            if getattr(rag, "index", None) is None:
-                rag.create_index()
-            rag.create_query_engine()
-
-            # Pre-warm NER cache if enabled
-            if getattr(rag, "enable_ner", False):
-                try:
-                    rag.get_collection_ner(refresh=True)
-                except Exception:
-                    logger.warning(
-                        "Exception: Failed to pre-warm NER cache for collection: {}",
-                        name,
-                    )
-        except Exception:
-            # If eager preparation fails, queries will lazily prepare the engine.
-            logger.warning(
-                "Exception: Failed to create query engine for collection: {}", name
+            ingest_module.ingest_docs(
+                name,
+                data_dir,
+                hybrid=payload.hybrid if payload.hybrid is not None else True,
             )
-            pass
+        except EmptyIngestionError as exc:
+            logger.warning(
+                "Ingestion produced no content for '{}'; returning empty response.",
+                exc.collection_name,
+            )
+            return {
+                "ok": True,
+                "collection": name,
+                "data_dir": str(data_dir),
+                "hybrid": payload.hybrid if payload.hybrid is not None else True,
+                "empty": True,
+            }
 
         return {
             "ok": True,
@@ -1258,6 +1242,7 @@ async def agent_chat_stream(payload: AgentChatIn) -> StreamingResponse:
 
 @app.post("/ingest/upload", tags=["Ingestion"])
 async def ingest_upload(
+    request: Request,
     collection: str = Form(...),
     files: list[UploadFile] = File(...),
     hybrid: bool | None = Form(True),
@@ -1265,6 +1250,8 @@ async def ingest_upload(
     """Upload files for ingestion and stream progress as SSE events.
 
     Args:
+        request (Request): The incoming request, used to detect client
+            disconnect so the awaiter can be cancelled promptly.
         collection (str): The name of the collection to ingest into.
         files (list[UploadFile]): The list of files to upload.
         hybrid (bool | None): Whether to enable hybrid search (default: True).
@@ -1349,7 +1336,35 @@ async def ingest_upload(
         yield _format_sse("ingestion_started", {"collection": name})
         try:
             queue: asyncio.Queue[str | None | Exception] = asyncio.Queue()
-            loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
+            loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
+
+            def _safe_put(item: str | None | Exception) -> None:
+                """Enqueue a message, tolerating a closed loop after disconnect.
+
+                If the event loop has already been torn down (e.g., the
+                coroutine was cancelled and the loop is gone by the time
+                the worker thread finishes), we log rather than silently
+                dropping the message.
+
+                Args:
+                    item (str | None | Exception): The message or sentinel
+                        to enqueue. ``None`` signals normal completion;
+                        ``Exception`` signals failure.
+                """
+                try:
+                    loop.call_soon_threadsafe(queue.put_nowait, item)
+                except Exception as exc:
+                    # CPython raises RuntimeError("Event loop is closed");
+                    # uvloop or an OS-level SIGPIPE/EBADF during teardown
+                    # can surface OSError / BrokenPipeError. Catch broadly
+                    # so an exception from the worker thread still lands
+                    # in the log rather than vanishing after disconnect.
+                    logger.warning(
+                        "Could not enqueue ingest message for collection "
+                        "'{}' (loop unavailable after disconnect): {}",
+                        name,
+                        exc,
+                    )
 
             def progress_callback(msg: str) -> None:
                 """Callback function to report progress during ingestion.
@@ -1357,10 +1372,18 @@ async def ingest_upload(
                 Args:
                     msg (str): Progress message to be reported.
                 """
-                loop.call_soon_threadsafe(queue.put_nowait, msg)
+                _safe_put(msg)
 
             async def run_ingestion() -> None:
-                """Run the ingestion process in a separate thread."""
+                """Run the ingestion process in a separate thread.
+
+                Logs cancellation and worker-thread exceptions explicitly
+                so a disconnected client does not cause silent data loss.
+                The underlying worker thread cannot be killed (Python has
+                no safe thread-kill primitive), so on cancellation we
+                only release the awaiting coroutine; the thread runs to
+                completion and its output is discarded.
+                """
                 try:
                     await to_thread.run_sync(
                         ingest_module.ingest_docs,
@@ -1369,16 +1392,61 @@ async def ingest_upload(
                         hybrid if hybrid is not None else True,
                         progress_callback,
                     )
-                    loop.call_soon_threadsafe(queue.put_nowait, None)
+                    _safe_put(None)
+                except asyncio.CancelledError:
+                    logger.warning(
+                        "Ingestion task for collection '{}' cancelled; the "
+                        "worker thread will continue until ingest_docs "
+                        "returns and its output will be discarded.",
+                        name,
+                    )
+                    raise
                 except Exception as e:
-                    loop.call_soon_threadsafe(queue.put_nowait, e)
+                    logger.error("Ingestion of collection '{}' failed: {}", name, e)
+                    _safe_put(e)
 
-            asyncio.create_task(run_ingestion())
+            ingestion_task = asyncio.create_task(run_ingestion())
 
+            # Poll periodically so client disconnects are noticed even when
+            # the worker is quiet (long Whisper transcription, embedding
+            # batches, etc.). The interval is a module-level constant so
+            # tests can override it.
             while True:
-                msg = await queue.get()
+                try:
+                    msg = await asyncio.wait_for(
+                        queue.get(),
+                        timeout=INGEST_DISCONNECT_POLL_INTERVAL_S,
+                    )
+                except TimeoutError:
+                    if await request.is_disconnected():
+                        ingestion_task.cancel()
+                        logger.warning(
+                            "Client disconnected during /ingest/upload for "
+                            "collection '{}'; cancelled the awaiter. Worker "
+                            "thread continues to completion.",
+                            name,
+                        )
+                        return
+                    continue
                 if msg is None:
                     break
+                if isinstance(msg, EmptyIngestionError):
+                    yield _format_sse(
+                        "warning",
+                        {
+                            "message": str(msg),
+                            "collection": msg.collection_name,
+                        },
+                    )
+                    yield _format_sse(
+                        "ingestion_complete",
+                        {
+                            "collection": name,
+                            "data_dir": str(batch_dir),
+                            "empty": True,
+                        },
+                    )
+                    return
                 if isinstance(msg, Exception):
                     raise msg
                 event_name = (
@@ -1389,16 +1457,6 @@ async def ingest_upload(
                 )
                 yield _format_sse(event_name, {"message": msg})
 
-            rag.select_collection(name)
-            try:
-                if getattr(rag, "index", None) is None:
-                    rag.create_index()
-                rag.create_query_engine()
-            except Exception:
-                logger.warning(
-                    "Exception: Failed to create query engine for collection: {}",
-                    name,
-                )
             yield _format_sse(
                 "ingestion_complete",
                 {"collection": name, "data_dir": str(batch_dir)},

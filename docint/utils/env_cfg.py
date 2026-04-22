@@ -384,6 +384,7 @@ def load_ingestion_env(
         ".gif",
         ".jpeg",
         ".jpg",
+        ".json",
         ".jsonl",
         ".md",
         ".mkv",
@@ -416,10 +417,11 @@ def load_ingestion_env(
         - docstore_batch_size (int): The batch size for document store operations.
         - ingest_benchmark_enabled (bool): Emit ingestion benchmark summary logs
             for throughput and batch diagnostics.
-        - docstore_max_retries (int): Maximum retries for transient docstore/Qdrant
-            transport failures.
+        - docstore_max_retries (int): Maximum retries for transient docstore
+            transport failures (Qdrant vector writes) and SQLite locked-DB
+            errors in :class:`SQLiteKVStore`.
         - docstore_retry_backoff_seconds (float): Initial retry backoff in seconds
-            for docstore/Qdrant operations.
+            for docstore operations.
         - docstore_retry_backoff_max_seconds (float): Maximum retry backoff in
             seconds for docstore/Qdrant operations.
         - fine_chunk_overlap (int): The fine chunk overlap size for hierarchical chunking.
