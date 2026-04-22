@@ -105,7 +105,6 @@ from docint.core.ner import (
 )
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
-from docint.core.readers.audio import AudioReader
 from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.retrieval_filters import matches_metadata_filters
 from docint.core.state.session_manager import SessionManager
@@ -1035,10 +1034,6 @@ class RAG:
 
     # -- Ingested data ---
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
-    # Captured from the ingestion pipeline so ``unload_models`` can proactively
-    # release the Whisper model held on ``audio_reader._model`` on CPU-only
-    # deployments (where ``torch.cuda.empty_cache`` is a no-op).
-    audio_reader: AudioReader | None = field(default=None, init=False)
     docs: list[Document] = field(default_factory=list, init=False)
     nodes: list[BaseNode] = field(default_factory=list, init=False)
 
@@ -4337,9 +4332,6 @@ class RAG:
                 raise EmptyIngestionError(self.qdrant_collection)
 
             self.dir_reader = pipeline.dir_reader
-            # Defensive getattr: some older pipeline stubs (mostly in tests)
-            # predate the audio_reader field.
-            self.audio_reader = getattr(pipeline, "audio_reader", None)
             # Clear memory-heavy lists as they are persisted in the vector store
             self.docs = []
             self.nodes = []
@@ -4606,10 +4598,15 @@ class RAG:
             else self.query_engine
         )
         if engine is None:
-            logger.error("RuntimeError: Query engine has not been initialized.")
-            raise RuntimeError(
-                "Query engine has not been initialized. Call ingest_docs() first."
-            )
+            # Post-ingest eager warmup was intentionally removed to avoid
+            # OOM on CPU (see commits 18a47a6 / 72e299e), so the default
+            # query engine can legitimately still be None here after an
+            # ingest + collection-select sequence. Build it lazily.
+            # ``build_query_engine`` is typed non-Optional and raises on
+            # its own failure modes, so no second None guard is needed.
+            logger.debug("Query engine not initialized; building lazily for run_query.")
+            self.query_engine = self.build_query_engine()
+            engine = self.query_engine
         try:
             result = engine.query(prompt)
         except ValueError as exc:
@@ -4692,10 +4689,15 @@ class RAG:
             else self.query_engine
         )
         if engine is None:
-            logger.error("RuntimeError: Query engine has not been initialized.")
-            raise RuntimeError(
-                "Query engine has not been initialized. Call ingest_docs()/asingest_docs() first."
+            # See run_query for rationale: post-ingest warmup was
+            # removed, so the default engine can be None on first use.
+            # ``build_query_engine`` raises on its own failure modes;
+            # no second None guard is needed here.
+            logger.debug(
+                "Query engine not initialized; building lazily for run_query_async."
             )
+            self.query_engine = self.build_query_engine()
+            engine = self.query_engine
         try:
             result = await engine.aquery(prompt)
         except ValueError as exc:
@@ -6375,12 +6377,9 @@ class RAG:
 
         Releases the lazily-loaded embed / text / post-retrieval-text /
         reranker / image-ingestion services, invalidates the NER cache,
-        and — important for CPU-only deployments where
-        ``torch.cuda.empty_cache`` is a no-op — proactively drops the
-        Whisper model held on ``self.audio_reader._model`` plus the
-        ``dir_reader`` and ``audio_reader`` references themselves so
-        Python's ref-count collector can reclaim them immediately
-        instead of waiting for a later cycle. Pure null-and-``gc.collect``
+        and drops the captured ``dir_reader`` handle so Python's
+        ref-count collector can reclaim it immediately instead of
+        waiting for a later cycle. Pure null-and-``gc.collect``
         semantics; no platform-specific allocator tricks are invoked.
         """
         self._embed_model = None
@@ -6390,11 +6389,6 @@ class RAG:
         self._image_ingestion_service = None
         self._invalidate_ner_cache()
 
-        if self.audio_reader is not None:
-            # Drop the Whisper reference explicitly so this cleanup runs
-            # even if some other code path is still holding the reader.
-            self.audio_reader._model = None
-        self.audio_reader = None
         self.dir_reader = None
 
         gc.collect()
