@@ -448,6 +448,107 @@ def test_truncating_embedding_retries_vllm_oversized_inputs(
     assert "8193 input tokens" in warnings[0]
 
 
+def test_is_context_limit_error_recognizes_ollama_input_length_phrasing() -> None:
+    """Ollama's "input length exceeds context length" wording is a context-limit signal.
+
+    Regression guard: ollama (routing to a generic OpenAI-compatible model such as
+    gemma4) reports overflow with the phrase ``"the input length exceeds the context
+    length"``. None of the previously recognised phrasings match this wording, so
+    ``_is_context_limit_error`` used to return ``False`` and the batch ingest crashed
+    instead of falling back to the truncation retry loop.
+    """
+
+    exc = RuntimeError(
+        "Error code: 400 - {'error': {'message': 'the input length exceeds the "
+        "context length', 'type': 'invalid_request_error', 'param': None, "
+        "'code': None}}"
+    )
+
+    assert TruncatingOpenAIEmbedding._is_context_limit_error(exc) is True
+
+
+def test_is_context_limit_error_rejects_unrelated_errors() -> None:
+    """Unrelated transport/throttling errors must not be treated as context-limit overflows.
+
+    Regression guard: broadening the context-limit detection to cover the ollama
+    phrasing must not accidentally sweep up connection errors or rate limits,
+    which should continue to propagate so higher layers can retry or surface them.
+    """
+
+    connection_exc = RuntimeError("Connection refused by http://localhost:11434")
+    rate_limit_exc = RuntimeError(
+        "Error code: 429 - {'error': {'message': 'rate limit exceeded'}}"
+    )
+
+    assert TruncatingOpenAIEmbedding._is_context_limit_error(connection_exc) is False
+    assert TruncatingOpenAIEmbedding._is_context_limit_error(rate_limit_exc) is False
+
+
+def test_embed_text_with_truncation_retries_on_ollama_phrasing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ollama-phrased context-limit errors should trigger the truncation retry loop.
+
+    Regression guard for the end-to-end behaviour: when the first embedding call
+    raises a 400 with the ollama wording, ``_embed_text_with_truncation`` must
+    recognise the error, shrink the input, and succeed on the retry, emitting a
+    truncation warning rather than letting the exception escape and kill the batch.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+
+    error = RuntimeError(
+        "Error code: 400 - {'error': {'message': 'the input length exceeds the "
+        "context length', 'type': 'invalid_request_error', 'param': None, "
+        "'code': None}}"
+    )
+    single_inputs: list[str] = []
+    warnings: list[str] = []
+    original_text = "x" * 12000
+
+    def fake_get_text_embedding(self: Any, text: str) -> list[float]:
+        """Fail once with the ollama phrasing, then succeed after truncation.
+
+        Args:
+            self: Embedding instance.
+            text: Text to embed.
+
+        Returns:
+            list[float]: A fake embedding vector on the retry call.
+
+        Raises:
+            RuntimeError: On the first call, with the ollama phrasing.
+        """
+        _ = self
+        single_inputs.append(text)
+        if len(text) >= len(original_text):
+            raise error
+        return [0.42, 0.17]
+
+    monkeypatch.setattr(
+        "llama_index.embeddings.openai.base.OpenAIEmbedding._get_text_embedding",
+        fake_get_text_embedding,
+    )
+
+    embedding = TruncatingOpenAIEmbedding(
+        model_name="BAAI/bge-m3",
+        api_key="sk-test",
+        api_base="http://localhost:11434/v1",
+        reuse_client=False,
+        context_window=8192,
+    )
+    embedding.set_warning_callback(warnings.append)
+
+    result = embedding._embed_text_with_truncation(original_text)
+
+    assert result == [0.42, 0.17]
+    assert len(single_inputs) >= 2
+    assert len(single_inputs[-1]) < len(original_text)
+    assert warnings
+    assert "truncated oversized embedding input" in warnings[0].lower()
+
+
 def test_truncating_embedding_allows_skipping_irreducible_inputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
