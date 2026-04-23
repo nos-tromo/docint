@@ -12,7 +12,6 @@ from docint.utils.env_cfg import OpenAIConfig
 from docint.utils.openai_cfg import (
     LocalOpenAI,
     OpenAIPipeline,
-    TruncatingOpenAIEmbedding,
     get_openai_reasoning_effort,
 )
 
@@ -293,91 +292,78 @@ def test_openai_pipeline_call_chat_omits_reasoning_effort_when_disabled(
     assert "reasoning_effort" not in captured
 
 
-def test_truncating_embedding_retries_oversized_inputs(
+def test_budgeted_embedding_raises_on_oversize(
     monkeypatch,
 ) -> None:
-    """Oversized embedding inputs should be retried with truncated text.
+    """Oversized embedding inputs must raise loudly — no retry, no truncation.
+
+    The pre-embed re-splitter is the only supported path for oversize
+    inputs. If an oversize text reaches the embedding call anyway, the
+    wrapper must surface the context-limit error by raising
+    ``EmbeddingInputTooLongError`` so ingestion aborts and the operator
+    can diagnose why the re-splitter missed the input.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
     """
+    from docint.utils.openai_cfg import (
+        BudgetedOpenAIEmbedding,
+        EmbeddingInputTooLongError,
+    )
 
     error = RuntimeError(
         "This model's maximum context length is 8192 tokens. However, you requested 0 output tokens "
         "and your prompt contains at least 8193 input tokens, for a total of at least 8193 tokens."
     )
-    single_inputs: list[str] = []
-    warnings: list[str] = []
     original_text = "x" * 12000
 
     def fake_get_text_embeddings(self: Any, texts: list[str]) -> list[list[float]]:
-        """Simulate the batch text embeddings method, raising an error for oversized inputs.
+        """Always raise the OpenAI-style oversized-input error.
 
         Args:
-            self (Any): The embedding instance.
-            texts (list[str]): The list of texts to embed.
+            self: Embedding instance.
+            texts: Texts the caller is trying to embed.
 
         Raises:
-            error: If the input text exceeds the model's context length.
-
-        Returns:
-            list[list[float]]: A list of embedding vectors.
+            RuntimeError: Always, with the OpenAI phrasing.
         """
+        _ = (self, texts)
         raise error
-
-    def fake_get_text_embedding(self: Any, text: str) -> list[float]:
-        """Simulate the single text embedding method, capturing the input and raising an error for oversized text.
-
-        Args:
-            self (Any): The embedding instance.
-            text (str): The text to embed.
-
-        Raises:
-            error: If the input text exceeds the model's context length.
-
-        Returns:
-            list[float]: A list of embedding vectors.
-        """
-        single_inputs.append(text)
-        if len(text) >= len(original_text):
-            raise error
-        return [0.25, 0.5]
 
     monkeypatch.setattr(
         "llama_index.embeddings.openai.base.OpenAIEmbedding._get_text_embeddings",
         fake_get_text_embeddings,
     )
-    monkeypatch.setattr(
-        "llama_index.embeddings.openai.base.OpenAIEmbedding._get_text_embedding",
-        fake_get_text_embedding,
-    )
 
-    embedding = TruncatingOpenAIEmbedding(
+    embedding = BudgetedOpenAIEmbedding(
         model_name="BAAI/bge-m3",
         api_key="sk-test",
         api_base="http://localhost:8000/v1",
         reuse_client=False,
         context_window=8192,
     )
-    embedding.set_warning_callback(warnings.append)
 
-    result = embedding._get_text_embeddings([original_text])
-
-    assert result == [[0.25, 0.5]]
-    assert single_inputs
-    assert len(single_inputs[-1]) < len(original_text)
-    assert warnings
-    assert "truncated oversized embedding input" in warnings[0].lower()
+    with pytest.raises(EmbeddingInputTooLongError):
+        embedding.get_text_embeddings_strict([original_text])
 
 
-def test_truncating_embedding_retries_vllm_oversized_inputs(
+def test_budgeted_embedding_raises_on_vllm_oversize(
     monkeypatch,
 ) -> None:
-    """vLLM-style embedding overflows should also trigger truncation retries.
+    """vLLM-style context overflows must raise loudly — no retry, no truncation.
+
+    Same loud-failure contract as for OpenAI phrasing: the wrapper does
+    not silently shrink the input; instead it raises
+    ``EmbeddingInputTooLongError`` so the caller knows the pre-embed
+    re-splitter failed to bound the request.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
     """
+    from docint.utils.openai_cfg import (
+        BudgetedOpenAIEmbedding,
+        EmbeddingInputTooLongError,
+    )
 
     error = RuntimeError(
         "You passed 8193 input tokens and requested 0 output tokens. However, "
@@ -385,67 +371,36 @@ def test_truncating_embedding_retries_vllm_oversized_inputs(
         "input length of 8192 tokens. Please reduce the length of the input prompt. "
         "(parameter=input_tokens, value=8193)"
     )
-    single_inputs: list[str] = []
-    warnings: list[str] = []
     original_text = "x" * 12000
 
     def fake_get_text_embeddings(self: Any, texts: list[str]) -> list[list[float]]:
-        """Simulate a batch embedding failure for oversized inputs.
+        """Always raise the vLLM-style oversized-input error.
 
         Args:
             self: Embedding instance.
             texts: Texts to embed.
 
         Raises:
-            RuntimeError: Always, to force the fallback path.
+            RuntimeError: Always, with the vLLM phrasing.
         """
-
+        _ = (self, texts)
         raise error
-
-    def fake_get_text_embedding(self: Any, text: str) -> list[float]:
-        """Simulate retry success after truncation.
-
-        Args:
-            self: Embedding instance.
-            text: Text to embed.
-
-        Raises:
-            RuntimeError: When the input is still oversized.
-
-        Returns:
-            list[float]: A fake embedding vector.
-        """
-
-        single_inputs.append(text)
-        if len(text) >= len(original_text):
-            raise error
-        return [0.1, 0.2, 0.3]
 
     monkeypatch.setattr(
         "llama_index.embeddings.openai.base.OpenAIEmbedding._get_text_embeddings",
         fake_get_text_embeddings,
     )
-    monkeypatch.setattr(
-        "llama_index.embeddings.openai.base.OpenAIEmbedding._get_text_embedding",
-        fake_get_text_embedding,
-    )
 
-    embedding = TruncatingOpenAIEmbedding(
+    embedding = BudgetedOpenAIEmbedding(
         model_name="BAAI/bge-m3",
         api_key="sk-test",
         api_base="http://localhost:8000/v1",
         reuse_client=False,
         context_window=8192,
     )
-    embedding.set_warning_callback(warnings.append)
 
-    result = embedding._get_text_embeddings([original_text])
-
-    assert result == [[0.1, 0.2, 0.3]]
-    assert single_inputs
-    assert len(single_inputs[-1]) < len(original_text)
-    assert warnings
-    assert "8193 input tokens" in warnings[0]
+    with pytest.raises(EmbeddingInputTooLongError):
+        embedding.get_text_embeddings_strict([original_text])
 
 
 def test_is_context_limit_error_recognizes_ollama_input_length_phrasing() -> None:
@@ -464,7 +419,9 @@ def test_is_context_limit_error_recognizes_ollama_input_length_phrasing() -> Non
         "'code': None}}"
     )
 
-    assert TruncatingOpenAIEmbedding._is_context_limit_error(exc) is True
+    from docint.utils.openai_cfg import BudgetedOpenAIEmbedding
+
+    assert BudgetedOpenAIEmbedding._is_context_limit_error(exc) is True
 
 
 def test_is_context_limit_error_rejects_unrelated_errors() -> None:
@@ -480,150 +437,68 @@ def test_is_context_limit_error_rejects_unrelated_errors() -> None:
         "Error code: 429 - {'error': {'message': 'rate limit exceeded'}}"
     )
 
-    assert TruncatingOpenAIEmbedding._is_context_limit_error(connection_exc) is False
-    assert TruncatingOpenAIEmbedding._is_context_limit_error(rate_limit_exc) is False
+    from docint.utils.openai_cfg import BudgetedOpenAIEmbedding
+
+    assert BudgetedOpenAIEmbedding._is_context_limit_error(connection_exc) is False
+    assert BudgetedOpenAIEmbedding._is_context_limit_error(rate_limit_exc) is False
 
 
-def test_embed_text_with_truncation_retries_on_ollama_phrasing(
+def test_budgeted_embedding_raises_on_ollama_phrasing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ollama-phrased context-limit errors should trigger the truncation retry loop.
+    """Ollama-phrased context-limit errors must raise loudly — no retry.
 
-    Regression guard for the end-to-end behaviour: when the first embedding call
-    raises a 400 with the ollama wording, ``_embed_text_with_truncation`` must
-    recognise the error, shrink the input, and succeed on the retry, emitting a
-    truncation warning rather than letting the exception escape and kill the batch.
+    Regression guard preserved from commit ``761ea72``: the ollama 400
+    phrasing ``"the input length exceeds the context length"`` is the
+    signal that the pre-embed re-splitter failed to bound the request.
+    The wrapper must NOT retry with a truncated input; it must raise
+    ``EmbeddingInputTooLongError`` so the operator sees the failure
+    rather than silently corrupting the vector store with a prefix-only
+    embedding.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
     """
+    from docint.utils.openai_cfg import (
+        BudgetedOpenAIEmbedding,
+        EmbeddingInputTooLongError,
+    )
 
     error = RuntimeError(
         "Error code: 400 - {'error': {'message': 'the input length exceeds the "
         "context length', 'type': 'invalid_request_error', 'param': None, "
         "'code': None}}"
     )
-    single_inputs: list[str] = []
-    warnings: list[str] = []
-    original_text = "x" * 12000
-
-    def fake_get_text_embedding(self: Any, text: str) -> list[float]:
-        """Fail once with the ollama phrasing, then succeed after truncation.
-
-        Args:
-            self: Embedding instance.
-            text: Text to embed.
-
-        Returns:
-            list[float]: A fake embedding vector on the retry call.
-
-        Raises:
-            RuntimeError: On the first call, with the ollama phrasing.
-        """
-        _ = self
-        single_inputs.append(text)
-        if len(text) >= len(original_text):
-            raise error
-        return [0.42, 0.17]
-
-    monkeypatch.setattr(
-        "llama_index.embeddings.openai.base.OpenAIEmbedding._get_text_embedding",
-        fake_get_text_embedding,
-    )
-
-    embedding = TruncatingOpenAIEmbedding(
-        model_name="BAAI/bge-m3",
-        api_key="sk-test",
-        api_base="http://localhost:11434/v1",
-        reuse_client=False,
-        context_window=8192,
-    )
-    embedding.set_warning_callback(warnings.append)
-
-    result = embedding._embed_text_with_truncation(original_text)
-
-    assert result == [0.42, 0.17]
-    assert len(single_inputs) >= 2
-    assert len(single_inputs[-1]) < len(original_text)
-    assert warnings
-    assert "truncated oversized embedding input" in warnings[0].lower()
-
-
-def test_truncating_embedding_allows_skipping_irreducible_inputs(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Irreducible oversized texts should return ``None`` in skip mode.
-
-    Args:
-        monkeypatch: Pytest monkeypatch fixture.
-    """
-
-    error = RuntimeError(
-        "This model's maximum context length is 8192 tokens, however you "
-        "requested 9000 tokens (9000 in your prompt; 0 for the completion). "
-        "Please reduce your prompt; your prompt contains at least 9000 input "
-        "tokens."
-    )
-    warnings: list[str] = []
     original_text = "x" * 12000
 
     def fake_get_text_embeddings(self: Any, texts: list[str]) -> list[list[float]]:
-        """Force the wrapper down the per-item fallback path.
+        """Always raise with the ollama 400 phrasing.
 
         Args:
             self: Embedding instance.
             texts: Texts to embed.
 
-        Returns:
-            list[list[float]]: Never returns successfully.
-
         Raises:
-            RuntimeError: Always, to trigger per-item handling.
+            RuntimeError: Always, with the ollama phrasing.
         """
         _ = (self, texts)
-        raise error
-
-    def fake_get_text_embedding(self: Any, text: str) -> list[float]:
-        """Keep failing only for the oversized text.
-
-        Args:
-            self: Embedding instance.
-            text: Text to embed.
-
-        Returns:
-            list[float]: A fake embedding vector for embeddable text.
-
-        Raises:
-            RuntimeError: When the input remains oversized.
-        """
-        _ = self
-        if text.startswith("ok"):
-            return [0.75, 0.25]
         raise error
 
     monkeypatch.setattr(
         "llama_index.embeddings.openai.base.OpenAIEmbedding._get_text_embeddings",
         fake_get_text_embeddings,
     )
-    monkeypatch.setattr(
-        "llama_index.embeddings.openai.base.OpenAIEmbedding._get_text_embedding",
-        fake_get_text_embedding,
-    )
 
-    embedding = TruncatingOpenAIEmbedding(
+    embedding = BudgetedOpenAIEmbedding(
         model_name="BAAI/bge-m3",
         api_key="sk-test",
-        api_base="http://localhost:8000/v1",
+        api_base="http://localhost:11434/v1",
         reuse_client=False,
         context_window=8192,
     )
-    embedding.set_warning_callback(warnings.append)
 
-    result = embedding.get_text_embeddings_with_skips([original_text, "ok text"])
-
-    assert result == [None, [0.75, 0.25]]
-    assert warnings
-    assert "skipping embedding input" in warnings[-1].lower()
+    with pytest.raises(EmbeddingInputTooLongError):
+        embedding.get_text_embeddings_strict([original_text])
 
 
 # ---------------------------------------------------------------------------

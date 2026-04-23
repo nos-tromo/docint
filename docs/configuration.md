@@ -41,6 +41,25 @@ OpenAI-compatible client used for chat, embeddings, and vision.
 | `OPENAI_ENABLE_THINKING` | `false` | Opt into reasoning/"thinking" mode. |
 | `OPENAI_THINKING_EFFORT` | `medium` | One of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`. |
 
+## Embedding — `EmbeddingConfig`
+
+Loaded by `load_embedding_env()` in `env_cfg.py`. Bounds the text
+payload sent to the embedding endpoint so oversize chunks are
+re-chunked by `docint/utils/embed_chunking.py` before the API call
+instead of being silently truncated.
+
+| Variable | Default | Description |
+|---|---|---|
+| `EMBED_CTX_TOKENS` | `8192` (ollama / fallback) / `8191` (openai + `text-embedding-3-*`) / `CHAT_MAX_MODEL_LEN` (vllm) | Embedding context window in tokens. Must be between `256` and `32768`. |
+| `EMBED_CHAR_TOKEN_RATIO` | `3.5` | Characters-per-token estimator for mixed-language content. Under-counts tokens intentionally. |
+| `EMBED_CTX_SAFETY_MARGIN` | `0.95` | Fraction of `EMBED_CTX_TOKENS` left for the payload after reserving BOS/EOS and estimator slack. Must lie in `(0, 1]`. |
+
+> **Not the same as `OPENAI_CTX_WINDOW`.** `OPENAI_CTX_WINDOW` controls
+> the chat LLM only. It does **not** affect the embedding pipeline.
+> Use `EMBED_CTX_TOKENS` for that. The two limits are disjoint because
+> embedding models and chat models almost never share a context
+> window, even when served from the same provider.
+
 ## Models — `ModelConfig`
 
 Loaded by `load_model_env()` (`env_cfg.py:512`). Resolves model

@@ -53,6 +53,7 @@ Streamlit UI (docint/ui/) → FastAPI (docint/core/api.py) → AgentOrchestrator
 - `docint/core/storage/` — Qdrant-backed document store, hierarchical node storage, source tracking
 - `docint/core/state/` — Session management (SQLite-backed) and citation handling
 - `docint/core/ner.py` — Named entity recognition (GLiNER), entity clustering, graph building
+- `docint/utils/embed_chunking.py` — Pre-embed re-chunker: bounds oversize chunks to the embedding budget and links sub-nodes back to their parent via `hier.parent_id`
 - `docint/utils/env_cfg.py` — **All** environment-backed configuration dataclasses live here (see below)
 
 ## Key Conventions

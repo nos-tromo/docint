@@ -752,6 +752,136 @@ def load_openai_env(
 
 
 @dataclass(frozen=True)
+class EmbeddingConfig:
+    """Dataclass for embedding-pipeline context limits.
+
+    Separate from :class:`OpenAIConfig` so the chat LLM context window
+    (``OPENAI_CTX_WINDOW``) and the embedding context window
+    (``EMBED_CTX_TOKENS``) can vary independently — they almost always
+    do, since embedding models rarely share a context window with the
+    chat LLM served from the same provider.
+    """
+
+    ctx_tokens: int
+    char_token_ratio: float
+    ctx_safety_margin: float
+
+
+def load_embedding_env(
+    default_ctx_tokens: int = 8192,
+    default_char_token_ratio: float = 3.5,
+    default_ctx_safety_margin: float = 0.95,
+) -> EmbeddingConfig:
+    """Load embedding-pipeline configuration from environment variables.
+
+    Provider-aware defaults:
+
+    - ``openai`` + ``EMBED_MODEL`` starting with ``text-embedding-3-``:
+      defaults ``ctx_tokens`` to ``8191`` (OpenAI's documented limit).
+    - ``vllm`` with ``CHAT_MAX_MODEL_LEN`` set: uses that value as the
+      default (operators keep the vLLM chat and embed servers in sync
+      via the same env var).
+    - Ollama and everything else: defaults to ``8192``.
+
+    Operators always win — any explicit ``EMBED_CTX_TOKENS`` value
+    overrides the provider default.
+
+    Args:
+        default_ctx_tokens: Base default when no provider-specific
+            hint applies.
+        default_char_token_ratio: Characters per token estimator for
+            budget checks (see
+            :func:`docint.utils.embed_chunking.estimate_tokens`).
+        default_ctx_safety_margin: Fraction of ``ctx_tokens`` that
+            remains for the user payload after the provider reserves
+            BOS/EOS slots. Must lie in ``(0, 1]``.
+
+    Returns:
+        EmbeddingConfig: Parsed embedding configuration.
+        - ctx_tokens (int): Embedding context window in tokens.
+        - char_token_ratio (float): Characters per token estimator.
+        - ctx_safety_margin (float): Safety margin fraction.
+
+    Raises:
+        ValueError: When ``EMBED_CTX_TOKENS`` falls outside
+            ``[256, 32768]``, ``EMBED_CHAR_TOKEN_RATIO`` is
+            non-positive, or ``EMBED_CTX_SAFETY_MARGIN`` is outside
+            ``(0, 1]``.
+    """
+    inference_provider = os.getenv("INFERENCE_PROVIDER", "ollama").strip().lower()
+    embed_model = os.getenv("EMBED_MODEL", "").strip()
+
+    provider_default_ctx = default_ctx_tokens
+    if inference_provider == "openai" and embed_model.startswith("text-embedding-3-"):
+        provider_default_ctx = 8191
+    elif inference_provider == "vllm":
+        raw_chat_max_model_len = os.getenv("CHAT_MAX_MODEL_LEN")
+        if raw_chat_max_model_len is not None and raw_chat_max_model_len.strip():
+            try:
+                provider_default_ctx = int(raw_chat_max_model_len)
+            except ValueError as exc:
+                raise ValueError(
+                    f"CHAT_MAX_MODEL_LEN must be an integer, "
+                    f"got {raw_chat_max_model_len!r}"
+                ) from exc
+
+    raw_ctx_tokens = os.getenv("EMBED_CTX_TOKENS")
+    if raw_ctx_tokens is not None and raw_ctx_tokens.strip():
+        try:
+            ctx_tokens = int(raw_ctx_tokens)
+        except ValueError as exc:
+            raise ValueError(
+                f"EMBED_CTX_TOKENS must be an integer, got {raw_ctx_tokens!r}"
+            ) from exc
+    else:
+        ctx_tokens = provider_default_ctx
+    if not (256 <= ctx_tokens <= 32768):
+        raise ValueError(
+            f"EMBED_CTX_TOKENS={ctx_tokens!r} is out of range — "
+            f"must be between 256 and 32768 tokens."
+        )
+
+    raw_char_token_ratio = os.getenv("EMBED_CHAR_TOKEN_RATIO")
+    if raw_char_token_ratio is not None and raw_char_token_ratio.strip():
+        try:
+            char_token_ratio = float(raw_char_token_ratio)
+        except ValueError as exc:
+            raise ValueError(
+                f"EMBED_CHAR_TOKEN_RATIO must be a float, got {raw_char_token_ratio!r}"
+            ) from exc
+    else:
+        char_token_ratio = float(default_char_token_ratio)
+    if char_token_ratio <= 0:
+        raise ValueError(
+            f"EMBED_CHAR_TOKEN_RATIO={char_token_ratio!r} is out of range — "
+            f"must be positive."
+        )
+
+    raw_ctx_safety_margin = os.getenv("EMBED_CTX_SAFETY_MARGIN")
+    if raw_ctx_safety_margin is not None and raw_ctx_safety_margin.strip():
+        try:
+            ctx_safety_margin = float(raw_ctx_safety_margin)
+        except ValueError as exc:
+            raise ValueError(
+                f"EMBED_CTX_SAFETY_MARGIN must be a float, "
+                f"got {raw_ctx_safety_margin!r}"
+            ) from exc
+    else:
+        ctx_safety_margin = float(default_ctx_safety_margin)
+    if not (0.0 < ctx_safety_margin <= 1.0):
+        raise ValueError(
+            f"EMBED_CTX_SAFETY_MARGIN={ctx_safety_margin!r} is out of range — "
+            f"must be within (0, 1]."
+        )
+
+    return EmbeddingConfig(
+        ctx_tokens=ctx_tokens,
+        char_token_ratio=char_token_ratio,
+        ctx_safety_margin=ctx_safety_margin,
+    )
+
+
+@dataclass(frozen=True)
 class PathConfig:
     """Dataclass for path configuration."""
 

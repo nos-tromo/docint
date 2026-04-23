@@ -2306,7 +2306,7 @@ def test_embed_model_uses_ollama_embedding_backend(
         def __init__(self, **kwargs: object) -> None:
             captured.update(kwargs)
 
-    monkeypatch.setattr(rag_module, "TruncatingOpenAIEmbedding", FakeOpenAIEmbedding)
+    monkeypatch.setattr(rag_module, "BudgetedOpenAIEmbedding", FakeOpenAIEmbedding)
     monkeypatch.delenv("OPENAI_DIMENSIONS", raising=False)
 
     rag = RAG(qdrant_collection="test")
@@ -2333,7 +2333,7 @@ def test_embed_model_forwards_explicit_dimensions_override(
         def __init__(self, **kwargs: object) -> None:
             captured.update(kwargs)
 
-    monkeypatch.setattr(rag_module, "TruncatingOpenAIEmbedding", FakeOpenAIEmbedding)
+    monkeypatch.setattr(rag_module, "BudgetedOpenAIEmbedding", FakeOpenAIEmbedding)
 
     rag = RAG(qdrant_collection="test")
     rag.embed_model_id = "text-embedding-3-small"
@@ -3446,84 +3446,288 @@ def test_apersist_node_batches_streams_micro_batches() -> None:
     assert index.vector_batch_sizes == [3, 3, 1]
 
 
-def test_persist_node_batches_skips_unembeddable_chunks() -> None:
-    """Persistence should drop chunks whose embeddings must be skipped."""
+def test_prepare_vector_nodes_resplits_oversize_before_embed() -> None:
+    """Oversize nodes must be re-split BEFORE the embed model is called.
 
-    class FakeDocStore:
-        """Capture persisted nodes for verification."""
+    The pre-embed re-splitter bounds every text handed to the embedding
+    model to ``effective_budget(embed_ctx_tokens)``. This test records
+    every text the embed model actually sees and asserts none exceeds
+    that budget — proving the re-split step runs before embedding.
+    """
+    from docint.utils.embed_chunking import effective_budget, estimate_tokens
 
-        def __init__(self) -> None:
-            """Initialise an empty capture list."""
-            self.persisted_nodes: list[list[TextNode]] = []
-
-        def add_documents(
-            self, nodes: list[TextNode], allow_update: bool = True
-        ) -> None:
-            """Record persisted nodes for each batch.
-
-            Args:
-                nodes: Nodes persisted to the docstore.
-                allow_update: Whether overwrites are allowed.
-            """
-            _ = allow_update
-            self.persisted_nodes.append(nodes)
-
-    class FakeIndex:
-        """Capture vector inserts for verification."""
-
-        def __init__(self) -> None:
-            """Initialise the fake index state."""
-            self.docstore = FakeDocStore()
-            self.vector_batches: list[list[TextNode]] = []
-
-        def insert_nodes(self, nodes: list[TextNode]) -> None:
-            """Record vector nodes for each batch.
-
-            Args:
-                nodes: Nodes inserted into the vector store.
-            """
-            self.vector_batches.append(nodes)
+    captured_texts: list[str] = []
 
     class FakeEmbedModel:
-        """Return one embedding and one skipped result."""
+        """Record every text handed to the embedding call."""
 
-        def get_text_embeddings_with_skips(
-            self, texts: list[str]
-        ) -> list[list[float] | None]:
-            """Return aligned embeddings with one skipped entry.
+        def get_text_embeddings_strict(self, texts: list[str]) -> list[list[float]]:
+            """Record inputs and return fake embeddings.
+
+            Args:
+                texts: Texts handed to the embedding model.
+
+            Returns:
+                list[list[float]]: One fake vector per input text.
+            """
+            captured_texts.extend(texts)
+            return [[0.1, 0.2] for _ in texts]
+
+    rag = RAG(qdrant_collection="test")
+    rag._embed_model = cast(Any, FakeEmbedModel())
+
+    oversize = TextNode(text="x " * 40000, metadata={"chunk_id": "over-1"})
+    small = TextNode(text="hello", metadata={"chunk_id": "small-1"})
+
+    prepared_vector, _prepared_docstore = rag._prepare_vector_nodes_for_insert(
+        [oversize, small]
+    )
+    assert prepared_vector, "re-split must produce vector nodes for embedding"
+
+    assert captured_texts, "embed model must be called at least once"
+    budget = effective_budget(rag.embed_ctx_tokens)
+    for text in captured_texts:
+        assert estimate_tokens(text) <= budget
+
+
+def test_prepare_vector_nodes_writes_original_to_docstore() -> None:
+    """Oversize originals must be persisted to the docstore, not to the vector store.
+
+    Sub-nodes go into both lists (vector + docstore); the oversize
+    parent is docstore-only. This is the contract the parent-context
+    postprocessor relies on to reconstruct the full parent text at
+    query time.
+    """
+
+    class FakeEmbedModel:
+        """Return fake embeddings for every input text."""
+
+        def get_text_embeddings_strict(self, texts: list[str]) -> list[list[float]]:
+            """Return one fake vector per text.
 
             Args:
                 texts: Texts to embed.
 
             Returns:
-                list[list[float] | None]: Embeddings aligned to ``texts``.
+                list[list[float]]: Fake vectors aligned to ``texts``.
             """
-            assert len(texts) == 2
-            return [[0.1, 0.2], None]
+            return [[0.5, 0.5] for _ in texts]
+
+    class FakeDocStore:
+        """Capture persisted nodes."""
+
+        def __init__(self) -> None:
+            """Initialise an empty capture list."""
+            self.persisted: list[list[TextNode]] = []
+
+        def add_documents(
+            self, nodes: list[TextNode], allow_update: bool = True
+        ) -> None:
+            """Record each batch of persisted nodes.
+
+            Args:
+                nodes: Nodes persisted to the docstore.
+                allow_update: Whether to allow overwrites.
+            """
+            _ = allow_update
+            self.persisted.append(list(nodes))
+
+    class FakeIndex:
+        """Capture vector inserts."""
+
+        def __init__(self) -> None:
+            """Initialise the fake index."""
+            self.docstore = FakeDocStore()
+            self.vector_batches: list[list[TextNode]] = []
+
+        def insert_nodes(self, nodes: list[TextNode]) -> None:
+            """Record the vector-insert batch.
+
+            Args:
+                nodes: Vector nodes being inserted.
+            """
+            self.vector_batches.append(list(nodes))
 
     rag = RAG(qdrant_collection="test")
-    rag.docstore_batch_size = 10
+    rag.docstore_batch_size = 100
+    rag._embed_model = cast(Any, FakeEmbedModel())
     rag.index = cast(Any, FakeIndex())
+
+    oversize = TextNode(
+        text="x " * 40000, id_="parent-over", metadata={"chunk_id": "over-1"}
+    )
+    rag._persist_node_batches([oversize])
+
+    index = cast(Any, rag.index)
+    docstore_ids: set[str] = set()
+    for batch in index.docstore.persisted:
+        docstore_ids.update(n.node_id for n in batch)
+    vector_ids: set[str] = set()
+    for batch in index.vector_batches:
+        vector_ids.update(n.node_id for n in batch)
+
+    assert "parent-over" in docstore_ids
+    assert "parent-over" not in vector_ids
+    assert vector_ids  # sub-nodes were inserted
+    # every vector-side id also sits in the docstore (sub-nodes written to both)
+    assert vector_ids.issubset(docstore_ids)
+
+
+def test_parent_context_attachment_reconstructs_original_content() -> None:
+    """The parent-context postprocessor must return the full parent text.
+
+    When retrieval surfaces a sub-node hit, the ``hier.parent_id``
+    pointer lets the postprocessor fetch the original oversize node
+    from the docstore and return its full content — which is the
+    whole point of keeping the parent in the docstore.
+    """
+    parent = TextNode(
+        text="Full parent content spanning the whole oversize chunk.",
+        id_="parent-reconstruct",
+        metadata={"filename": "doc.pdf"},
+    )
+    sub = TextNode(
+        text="parent content spanning",
+        id_="sub-1",
+        metadata={
+            "hier.parent_id": "parent-reconstruct",
+            "embedding_split": True,
+            "docint_hier_type": "fine",
+        },
+    )
+    hit = NodeWithScore(node=sub, score=0.9)
+
+    postprocessor = rag_module.ParentContextPostprocessor(
+        docstore=types.SimpleNamespace(
+            get_node=lambda node_id, raise_error=False: (
+                parent if node_id == "parent-reconstruct" else None
+            )
+        )
+    )
+
+    result = postprocessor._postprocess_nodes([hit])
+
+    assert len(result) == 1
+    assert result[0].node.get_content() == (
+        "Full parent content spanning the whole oversize chunk."
+    )
+
+
+def test_parent_context_support_cache_detects_resplit_subnodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The parent-context detector must recognise resplit sub-node payloads.
+
+    Collections ingested via the pre-embed re-splitter contain only
+    sub-node-shaped payloads (``embedding_split=True``,
+    ``hier.parent_id=<uuid>``). The detector must treat those as
+    parent-context-capable even though the parents themselves are not
+    in the vector collection.
+    """
+    rag = RAG(qdrant_collection="embed-split-collection")
+    monkeypatch.setattr(
+        RAG,
+        "_sample_collection_payloads",
+        lambda self, limit=128: [
+            {
+                "embedding_split": True,
+                "hier.parent_id": "parent-xyz",
+                "docint_hier_type": "fine",
+            }
+        ],
+    )
+
+    assert rag._collection_supports_parent_context() is True
+
+
+def test_prepare_vector_nodes_small_nodes_pass_through() -> None:
+    """Nodes already within the budget must reach the embed call unchanged.
+
+    No splitting, no metadata mutation — the embed model receives the
+    original text exactly once.
+    """
+    captured: list[str] = []
+
+    class FakeEmbedModel:
+        """Capture the exact inputs handed to the embedding call."""
+
+        def get_text_embeddings_strict(self, texts: list[str]) -> list[list[float]]:
+            """Record inputs and return fake vectors.
+
+            Args:
+                texts: Texts to embed.
+
+            Returns:
+                list[list[float]]: One fake vector per text.
+            """
+            captured.extend(texts)
+            return [[0.1, 0.2] for _ in texts]
+
+    rag = RAG(qdrant_collection="test")
     rag._embed_model = cast(Any, FakeEmbedModel())
 
-    ok_node = TextNode(text="ok text", metadata={"chunk_id": "chunk-ok"})
-    bad_node = TextNode(text="bad text", metadata={"chunk_id": "chunk-bad"})
+    tiny = TextNode(text="tiny content", id_="tiny-1", metadata={})
+    prepared_vector, prepared_docstore = rag._prepare_vector_nodes_for_insert([tiny])
 
-    rag._persist_node_batches([ok_node, bad_node])
-    index = cast(Any, rag.index)
+    assert prepared_vector == [tiny]
+    assert prepared_docstore == [tiny]
+    assert captured == ["tiny content"]
+    assert "embedding_split" not in tiny.metadata
 
-    assert len(index.docstore.persisted_nodes) == 1
-    assert index.docstore.persisted_nodes[0] == [ok_node]
-    assert len(index.vector_batches) == 1
-    assert index.vector_batches[0] == [ok_node]
-    assert ok_node.embedding == [0.1, 0.2]
-    assert bad_node.embedding is None
+
+def test_budgeted_embedding_raises_on_context_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ollama 400 context-overflow must propagate as ``EmbeddingInputTooLongError``.
+
+    No retry, no silent truncation. The pre-embed re-splitter is the
+    only supported defense; a request that still overflows must kill
+    the batch loudly.
+    """
+    from docint.utils.openai_cfg import (
+        BudgetedOpenAIEmbedding,
+        EmbeddingInputTooLongError,
+    )
+
+    error = RuntimeError(
+        "Error code: 400 - {'error': {'message': 'the input length exceeds the "
+        "context length'}}"
+    )
+
+    def fake_batch(self: Any, texts: list[str]) -> list[list[float]]:
+        """Always raise the ollama context-overflow error.
+
+        Args:
+            self: Embedding instance.
+            texts: Batch the caller tried to embed.
+
+        Raises:
+            RuntimeError: Always, with the ollama phrasing.
+        """
+        _ = (self, texts)
+        raise error
+
+    monkeypatch.setattr(
+        "llama_index.embeddings.openai.base.OpenAIEmbedding._get_text_embeddings",
+        fake_batch,
+    )
+
+    embedding = BudgetedOpenAIEmbedding(
+        model_name="BAAI/bge-m3",
+        api_key="sk-test",
+        api_base="http://localhost:11434/v1",
+        reuse_client=False,
+        context_window=8192,
+    )
+
+    with pytest.raises(EmbeddingInputTooLongError):
+        embedding.get_text_embeddings_strict(["oversize text " * 1000])
 
 
 def _fake_prepare_vector_nodes_for_insert(
     _self: RAG, vector_nodes: list[Any]
-) -> tuple[list[Any], set[int]]:
-    """Return vector nodes untouched with no skipped IDs.
+) -> tuple[list[Any], list[Any]]:
+    """Return vector and docstore views that mirror the input untouched.
 
     Used as a class-level monkeypatch so that the prepared-vector-nodes
     helper does not try to load an embedding model during unit tests.
@@ -3533,10 +3737,11 @@ def _fake_prepare_vector_nodes_for_insert(
         vector_nodes: Incoming vector nodes.
 
     Returns:
-        A ``(prepared_nodes, skipped_ids)`` tuple where no nodes are
-        skipped and ``prepared_nodes`` mirrors the input list.
+        A ``(prepared_vector_nodes, prepared_docstore_nodes)`` tuple
+        where both views simply mirror the input list — no re-splitting,
+        no embeddings attached.
     """
-    return (list(vector_nodes), set())
+    return (list(vector_nodes), list(vector_nodes))
 
 
 def _capture_loguru(caplog: pytest.LogCaptureFixture) -> Callable[[], None]:
@@ -3728,80 +3933,6 @@ def test_persist_node_batches_logs_failed_persist_on_docstore_failure(
     assert "node-x" in combined
 
 
-def test_apersist_node_batches_skips_unembeddable_chunks() -> None:
-    """Async persistence should drop chunks whose embeddings must be skipped."""
-
-    class FakeDocStore:
-        """Capture persisted nodes for verification."""
-
-        def __init__(self) -> None:
-            """Initialise an empty capture list."""
-            self.persisted_nodes: list[list[TextNode]] = []
-
-        def add_documents(
-            self, nodes: list[TextNode], allow_update: bool = True
-        ) -> None:
-            """Record persisted nodes for each batch.
-
-            Args:
-                nodes: Nodes persisted to the docstore.
-                allow_update: Whether overwrites are allowed.
-            """
-            _ = allow_update
-            self.persisted_nodes.append(nodes)
-
-    class FakeIndex:
-        """Capture async vector inserts for verification."""
-
-        def __init__(self) -> None:
-            """Initialise the fake index state."""
-            self.docstore = FakeDocStore()
-            self.vector_batches: list[list[TextNode]] = []
-
-        async def ainsert_nodes(self, nodes: list[TextNode]) -> None:
-            """Record vector nodes for each batch.
-
-            Args:
-                nodes: Nodes inserted into the vector store.
-            """
-            self.vector_batches.append(nodes)
-
-    class FakeEmbedModel:
-        """Return one embedding and one skipped result asynchronously."""
-
-        async def aget_text_embeddings_with_skips(
-            self, texts: list[str]
-        ) -> list[list[float] | None]:
-            """Return aligned embeddings with one skipped entry.
-
-            Args:
-                texts: Texts to embed.
-
-            Returns:
-                list[list[float] | None]: Embeddings aligned to ``texts``.
-            """
-            assert len(texts) == 2
-            return [[0.3, 0.4], None]
-
-    rag = RAG(qdrant_collection="test")
-    rag.docstore_batch_size = 10
-    rag.index = cast(Any, FakeIndex())
-    rag._embed_model = cast(Any, FakeEmbedModel())
-
-    ok_node = TextNode(text="ok text", metadata={"chunk_id": "chunk-ok"})
-    bad_node = TextNode(text="bad text", metadata={"chunk_id": "chunk-bad"})
-
-    asyncio.run(rag._apersist_node_batches([ok_node, bad_node]))
-    index = rag.index
-
-    assert len(index.docstore.persisted_nodes) == 1
-    assert index.docstore.persisted_nodes[0] == [ok_node]
-    assert len(index.vector_batches) == 1
-    assert index.vector_batches[0] == [ok_node]
-    assert ok_node.embedding == [0.3, 0.4]
-    assert bad_node.embedding is None
-
-
 def test_log_ingest_benchmark_summary_emits_metrics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3877,48 +4008,6 @@ def test_ingest_docs_bumps_summary_revision(
     rag.ingest_docs(tmp_path, build_query_engine=False)
 
     assert bumps == [("test", True)]
-
-
-def test_ingest_docs_sets_and_clears_embedding_warning_callback(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Ingestion should attach and then clear embedding warning callbacks.
-
-    Args:
-        monkeypatch: The monkeypatch fixture.
-        tmp_path: The temporary path fixture.
-    """
-    rag = RAG(qdrant_collection="test")
-    _patch_ingest_dependencies(monkeypatch)
-
-    captured_callbacks: list[Any] = []
-
-    class FakeEmbedModel:
-        """Capture warning callback changes."""
-
-        def set_warning_callback(self, callback: Any) -> None:
-            """Record callback updates.
-
-            Args:
-                callback: Callback being registered or cleared.
-            """
-            captured_callbacks.append(callback)
-
-    rag._embed_model = cast(Any, FakeEmbedModel())
-
-    def progress_callback(message: str) -> None:
-        """Handle progress updates during ingestion.
-
-        Args:
-            message (str): The progress message.
-        """
-        del message
-
-    rag.ingest_docs(
-        tmp_path, build_query_engine=False, progress_callback=progress_callback
-    )
-
-    assert captured_callbacks == [progress_callback, None]
 
 
 def test_asingest_docs_bumps_summary_revision(

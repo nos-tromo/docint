@@ -25,6 +25,7 @@ from typing import Any, Callable, Sequence, cast
 # Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
 # TRANSFORMERS_OFFLINE env vars are set before huggingface_hub caches them.
 from docint.utils.env_cfg import (
+    EmbeddingConfig,
     GraphRAGConfig,
     HostConfig,
     IngestionConfig,
@@ -36,6 +37,7 @@ from docint.utils.env_cfg import (
     RuntimeConfig,
     SessionConfig,
     SummaryConfig,
+    load_embedding_env,
     load_graphrag_env,
     load_hate_speech_env,
     load_host_env,
@@ -111,9 +113,10 @@ from docint.core.state.session_manager import SessionManager
 from docint.core.storage.sqlite_kvstore import SQLiteKVStore
 from docint.core.storage.utils import qdrant_collection_exists
 from docint.core.storage.sources import stage_sources_to_qdrant
+from docint.utils.embed_chunking import resplit_nodes_for_embedding
 from docint.utils.openai_cfg import (
+    BudgetedOpenAIEmbedding,
     LocalOpenAI,
-    TruncatingOpenAIEmbedding,
     get_openai_reasoning_effort,
 )
 from docint.utils.reference_metadata import REFERENCE_METADATA_FIELDS
@@ -906,6 +909,9 @@ class RAG:
     openai_config: OpenAIConfig = field(
         default_factory=load_openai_env, init=False, repr=False
     )
+    embedding_config: EmbeddingConfig = field(
+        default_factory=load_embedding_env, init=False, repr=False
+    )
     path_config: PathConfig = field(
         default_factory=load_path_env, init=False, repr=False
     )
@@ -956,6 +962,11 @@ class RAG:
     openai_thinking_enabled: bool = field(default=False, init=False)
     openai_timeout: float = field(default=300.0, init=False)
     openai_top_p: float = field(default=0.0, init=False)
+
+    # --- Embedding context budget (separate from chat LLM) ---
+    embed_ctx_tokens: int = field(default=8192, init=False)
+    embed_char_token_ratio: float = field(default=3.5, init=False)
+    embed_ctx_safety_margin: float = field(default=0.95, init=False)
 
     # --- Path setup ---
     data_dir: Path | None = field(default=None, init=False)
@@ -1083,6 +1094,17 @@ class RAG:
         self.openai_thinking_enabled = self.openai_config.thinking_enabled
         self.openai_timeout = self.openai_config.timeout
         self.openai_top_p = self.openai_config.top_p
+
+        # --- Embedding context budget (separate from chat LLM) ---
+        self.embed_ctx_tokens = self.embedding_config.ctx_tokens
+        self.embed_char_token_ratio = self.embedding_config.char_token_ratio
+        self.embed_ctx_safety_margin = self.embedding_config.ctx_safety_margin
+        logger.info(
+            "Embedding context budget: {} tokens (ratio={}, margin={})",
+            self.embed_ctx_tokens,
+            self.embed_char_token_ratio,
+            self.embed_ctx_safety_margin,
+        )
 
         # --- Named Entity Recognition (NER) config ---
         self.ner_enabled = self.ner_config.enabled
@@ -1410,26 +1432,12 @@ class RAG:
             if self.openai_dimensions is not None:
                 embedding_kwargs["dimensions"] = self.openai_dimensions
 
-            self._embed_model = TruncatingOpenAIEmbedding(
+            self._embed_model = BudgetedOpenAIEmbedding(
                 **embedding_kwargs,
-                context_window=self.openai_ctx_window,
+                context_window=self.embed_ctx_tokens,
             )
 
         return self._embed_model
-
-    def _set_embedding_warning_callback(
-        self, callback: Callable[[str], None] | None
-    ) -> None:
-        """Attach or clear the embedding warning callback on the active model.
-
-        Args:
-            callback (Callable[[str], None] | None): Warning callback used during ingestion, or ``None``.
-        """
-        if self._embed_model is None:
-            return
-        setter = getattr(self._embed_model, "set_warning_callback", None)
-        if callable(setter):
-            setter(callback)
 
     @property
     def sparse_model(self) -> str | None:
@@ -1923,111 +1931,130 @@ class RAG:
             return [n for n in nodes if n.metadata.get("docint_hier_type") != "coarse"]
         return nodes
 
+    def _resplit_vector_nodes(
+        self, nodes: list[BaseNode]
+    ) -> tuple[list[BaseNode], list[BaseNode]]:
+        """Apply the pre-embed re-splitter to the vector-indexable nodes.
+
+        Args:
+            nodes (list[BaseNode]): Vector-indexable nodes for the current
+                persistence batch.
+
+        Returns:
+            tuple[list[BaseNode], list[BaseNode]]:
+                ``(vector_nodes, docstore_nodes)`` — see
+                :func:`docint.utils.embed_chunking.resplit_nodes_for_embedding`.
+        """
+        return resplit_nodes_for_embedding(
+            nodes,
+            budget_tokens=self.embed_ctx_tokens,
+            char_token_ratio=self.embed_char_token_ratio,
+            safety_margin=self.embed_ctx_safety_margin,
+        )
+
     def _prepare_vector_nodes_for_insert(
         self,
         nodes: list[BaseNode],
-    ) -> tuple[list[BaseNode], set[int]]:
-        """Attach embeddings and identify vector nodes that must be skipped.
+    ) -> tuple[list[BaseNode], list[BaseNode]]:
+        """Re-split oversize nodes and attach embeddings for the vector store.
+
+        The re-split step produces two aligned views of the input batch:
+        a vector view (what the embedding call and vector store see) and
+        a docstore view (what the KV store sees, including the oversize
+        parent kept for retrieval-time parent-context reconstruction).
+        Returning both views eliminates the previous hidden coupling
+        with :meth:`_persist_node_batches`, which otherwise had to
+        re-derive the docstore view by diffing the vector view against
+        the caller's batch.
+
+        Oversize inputs that cannot be reduced below the embedding
+        budget raise
+        :class:`docint.utils.openai_cfg.EmbeddingInputTooLongError` —
+        there is no silent skip.
 
         Args:
-            nodes (list[BaseNode]): Vector-indexable nodes for the current persistence batch.
+            nodes (list[BaseNode]): Vector-indexable nodes for the
+                current persistence batch.
 
         Returns:
-            tuple[list[BaseNode], set[int]]: The embeddable nodes and the
-                ``id()`` values of skipped nodes.
+            tuple[list[BaseNode], list[BaseNode]]:
+                ``(vector_nodes, docstore_nodes)`` — the first list
+                goes to the vector store (oversize parents replaced by
+                sub-nodes, each with an attached embedding); the second
+                goes to the docstore (oversize parents retained plus
+                their sub-nodes, and every within-budget vector node).
         """
         embed_model = self._embed_model
-        get_embeddings_with_skips = getattr(
-            embed_model,
-            "get_text_embeddings_with_skips",
-            None,
-        )
-        if embed_model is None or not callable(get_embeddings_with_skips):
-            return nodes, set()
+        get_embeddings = getattr(embed_model, "get_text_embeddings_strict", None)
+        if embed_model is None or not callable(get_embeddings):
+            return nodes, list(nodes)
+
+        vector_nodes, docstore_nodes = self._resplit_vector_nodes(nodes)
 
         nodes_to_embed: list[BaseNode] = []
         texts_to_embed: list[str] = []
-        for node in nodes:
+        for node in vector_nodes:
             if node.embedding is not None:
                 continue
             nodes_to_embed.append(node)
             texts_to_embed.append(node.get_content(metadata_mode=MetadataMode.EMBED))
 
         if not nodes_to_embed:
-            return nodes, set()
+            return vector_nodes, docstore_nodes
 
         embeddings = cast(
-            list[list[float] | None],
-            get_embeddings_with_skips(texts_to_embed),
+            list[list[float]],
+            get_embeddings(texts_to_embed),
         )
-        skipped_node_ids: set[int] = set()
         for node, embedding in zip(nodes_to_embed, embeddings):
-            if embedding is None:
-                skipped_node_ids.add(id(node))
-                chunk_id = str(node.metadata.get("chunk_id") or node.node_id)
-                logger.warning(
-                    "Skipping chunk '{}' because its embedding input still "
-                    "exceeded the context window after truncation retries.",
-                    chunk_id,
-                )
-                continue
             node.embedding = embedding
 
-        prepared_nodes = [node for node in nodes if id(node) not in skipped_node_ids]
-        return prepared_nodes, skipped_node_ids
+        return vector_nodes, docstore_nodes
 
     async def _aprepare_vector_nodes_for_insert(
         self,
         nodes: list[BaseNode],
-    ) -> tuple[list[BaseNode], set[int]]:
-        """Async variant of ``_prepare_vector_nodes_for_insert``.
+    ) -> tuple[list[BaseNode], list[BaseNode]]:
+        """Async variant of :meth:`_prepare_vector_nodes_for_insert`.
 
         Args:
-            nodes (list[BaseNode]): Vector-indexable nodes for the current persistence batch.
+            nodes (list[BaseNode]): Vector-indexable nodes for the
+                current persistence batch.
 
         Returns:
-            tuple[list[BaseNode], set[int]]: The embeddable nodes and the
-                ``id()`` values of skipped nodes.
+            tuple[list[BaseNode], list[BaseNode]]:
+                ``(vector_nodes, docstore_nodes)`` — the first list
+                goes to the vector store (oversize parents replaced by
+                sub-nodes, each with an attached embedding); the second
+                goes to the docstore (oversize parents retained plus
+                their sub-nodes, and every within-budget vector node).
         """
         embed_model = self._embed_model
-        aget_embeddings_with_skips = getattr(
-            embed_model,
-            "aget_text_embeddings_with_skips",
-            None,
-        )
-        if embed_model is None or not callable(aget_embeddings_with_skips):
-            return nodes, set()
+        aget_embeddings = getattr(embed_model, "aget_text_embeddings_strict", None)
+        if embed_model is None or not callable(aget_embeddings):
+            return nodes, list(nodes)
+
+        vector_nodes, docstore_nodes = self._resplit_vector_nodes(nodes)
 
         nodes_to_embed: list[BaseNode] = []
         texts_to_embed: list[str] = []
-        for node in nodes:
+        for node in vector_nodes:
             if node.embedding is not None:
                 continue
             nodes_to_embed.append(node)
             texts_to_embed.append(node.get_content(metadata_mode=MetadataMode.EMBED))
 
         if not nodes_to_embed:
-            return nodes, set()
+            return vector_nodes, docstore_nodes
 
         embeddings = cast(
-            list[list[float] | None],
-            await aget_embeddings_with_skips(texts_to_embed),
+            list[list[float]],
+            await aget_embeddings(texts_to_embed),
         )
-        skipped_node_ids: set[int] = set()
         for node, embedding in zip(nodes_to_embed, embeddings):
-            if embedding is None:
-                skipped_node_ids.add(id(node))
-                chunk_id = str(node.metadata.get("chunk_id") or node.node_id)
-                logger.warning(
-                    "Skipping chunk '{}' because its embedding input still "
-                    "exceeded the context window after truncation retries.",
-                    chunk_id,
-                )
-                continue
             node.embedding = embedding
 
-        prepared_nodes = [node for node in nodes if id(node) not in skipped_node_ids]
-        return prepared_nodes, skipped_node_ids
+        return vector_nodes, docstore_nodes
 
     @staticmethod
     def _chunk_nodes(nodes: list[BaseNode], batch_size: int) -> list[list[BaseNode]]:
@@ -2047,6 +2074,42 @@ class RAG:
             nodes[i : i + effective_batch_size]
             for i in range(0, len(nodes), effective_batch_size)
         ]
+
+    def _docstore_batch_for_persist(
+        self,
+        batch: list[BaseNode],
+        vector_candidates: list[BaseNode],
+        docstore_nodes: list[BaseNode],
+    ) -> list[BaseNode]:
+        """Compose the docstore batch so sub-nodes and oversize parents both land.
+
+        The re-split step produces a dedicated ``docstore_nodes`` view
+        that already contains every vector-candidate (including oversize
+        parents kept for parent-context reconstruction) and every
+        newly-created sub-node. The docstore batch additionally needs
+        every *non*-vector-candidate node from the original batch —
+        e.g. coarse parents in hierarchical collections, which never
+        reach the vector store yet still belong in the KV store.
+
+        Args:
+            batch (list[BaseNode]): Original nodes for this persistence batch.
+            vector_candidates (list[BaseNode]): Nodes the vector store would
+                normally embed (the pre-resplit selection).
+            docstore_nodes (list[BaseNode]): Docstore view returned by
+                :meth:`_prepare_vector_nodes_for_insert`. Contains
+                oversize parents, their sub-nodes, and every
+                within-budget vector-candidate.
+
+        Returns:
+            list[BaseNode]: Docstore batch containing non-vector-candidate
+                nodes from the original batch followed by the docstore
+                view from the re-split step.
+        """
+        candidate_ids = {id(node) for node in vector_candidates}
+        non_vector_candidates = [
+            node for node in batch if id(node) not in candidate_ids
+        ]
+        return non_vector_candidates + list(docstore_nodes)
 
     def _persist_node_batches(self, nodes: list[BaseNode]) -> None:
         """Persist nodes in micro-batches to reduce crash-loss windows.
@@ -2078,13 +2141,14 @@ class RAG:
                 len(batches),
                 len(batch),
             )
-            vector_nodes = self._select_vector_nodes(batch)
-            prepared_vector_nodes, skipped_node_ids = (
-                self._prepare_vector_nodes_for_insert(vector_nodes)
+            vector_candidates = self._select_vector_nodes(batch)
+            (
+                prepared_vector_nodes,
+                prepared_docstore_nodes,
+            ) = self._prepare_vector_nodes_for_insert(vector_candidates)
+            persisted_batch = self._docstore_batch_for_persist(
+                batch, vector_candidates, prepared_docstore_nodes
             )
-            persisted_batch = [
-                node for node in batch if id(node) not in skipped_node_ids
-            ]
             if persisted_batch:
                 try:
                     self.index.docstore.add_documents(
@@ -2190,14 +2254,14 @@ class RAG:
                 len(batches),
                 len(batch),
             )
-            vector_nodes = self._select_vector_nodes(batch)
+            vector_candidates = self._select_vector_nodes(batch)
             (
                 prepared_vector_nodes,
-                skipped_node_ids,
-            ) = await self._aprepare_vector_nodes_for_insert(vector_nodes)
-            persisted_batch = [
-                node for node in batch if id(node) not in skipped_node_ids
-            ]
+                prepared_docstore_nodes,
+            ) = await self._aprepare_vector_nodes_for_insert(vector_candidates)
+            persisted_batch = self._docstore_batch_for_persist(
+                batch, vector_candidates, prepared_docstore_nodes
+            )
             if persisted_batch:
                 try:
                     self.index.docstore.add_documents(
@@ -4238,132 +4302,77 @@ class RAG:
 
         # Build index with explicit storage_context so it uses the persistent docstore.
         embed_model = self.embed_model
-        self._set_embedding_warning_callback(progress_callback)
-        try:
-            self.index = VectorStoreIndex(
-                nodes=[],
-                embed_model=embed_model,
-                storage_context=storage_ctx,
-            )
+        self.index = VectorStoreIndex(
+            nodes=[],
+            embed_model=embed_model,
+            storage_context=storage_ctx,
+        )
 
-            pipeline = self._build_ingestion_pipeline(
-                progress_callback=progress_callback
-            )
-            existing_hashes = self._get_existing_file_hashes()
-            processed_hashes = set(existing_hashes)
-            image_ingestion_service = getattr(pipeline, "image_ingestion_service", None)
-            core_pdf_reader = CorePDFPipelineReader(
-                data_dir=prepared_dir,
-                entity_extractor=pipeline.entity_extractor,
-                ner_max_workers=pipeline.ner_max_workers,
-                source_collection=self.qdrant_collection,
-                image_ingestion_service=image_ingestion_service,
-            )
+        pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
+        existing_hashes = self._get_existing_file_hashes()
+        processed_hashes = set(existing_hashes)
+        image_ingestion_service = getattr(pipeline, "image_ingestion_service", None)
+        core_pdf_reader = CorePDFPipelineReader(
+            data_dir=prepared_dir,
+            entity_extractor=pipeline.entity_extractor,
+            ner_max_workers=pipeline.ner_max_workers,
+            source_collection=self.qdrant_collection,
+            image_ingestion_service=image_ingestion_service,
+        )
 
-            for docs, nodes, file_hash in core_pdf_reader.build(
-                existing_hashes=processed_hashes, progress_callback=progress_callback
+        for docs, nodes, file_hash in core_pdf_reader.build(
+            existing_hashes=processed_hashes, progress_callback=progress_callback
+        ):
+            core_docs += len(docs)
+            if nodes:
+                self._persist_node_batches(nodes)
+                core_nodes += len(nodes)
+                persist_batches += len(
+                    self._chunk_nodes(nodes, self.docstore_batch_size)
+                )
+                processed_hashes.add(file_hash)
+
+        # PDFs are owned by the core pipeline reader and should not be
+        # re-processed by the legacy ingestion path.
+        processed_hashes.update(core_pdf_reader.discovered_hashes)
+
+        # Process batches from the pipeline generator, persisting nodes as soon
+        # as each enrichment micro-batch completes when supported.
+        if hasattr(pipeline, "build_streaming") and callable(
+            getattr(pipeline, "build_streaming")
+        ):
+            for docs, nodes, completed_hashes in pipeline.build_streaming(
+                processed_hashes
             ):
-                core_docs += len(docs)
+                if docs:
+                    streaming_docs += len(docs)
                 if nodes:
                     self._persist_node_batches(nodes)
-                    core_nodes += len(nodes)
+                    streaming_nodes += len(nodes)
                     persist_batches += len(
                         self._chunk_nodes(nodes, self.docstore_batch_size)
                     )
-                    processed_hashes.add(file_hash)
-
-            # PDFs are owned by the core pipeline reader and should not be
-            # re-processed by the legacy ingestion path.
-            processed_hashes.update(core_pdf_reader.discovered_hashes)
-
-            # Process batches from the pipeline generator, persisting nodes as soon
-            # as each enrichment micro-batch completes when supported.
-            if hasattr(pipeline, "build_streaming") and callable(
-                getattr(pipeline, "build_streaming")
-            ):
-                for docs, nodes, completed_hashes in pipeline.build_streaming(
-                    processed_hashes
-                ):
-                    if docs:
-                        streaming_docs += len(docs)
-                    if nodes:
-                        self._persist_node_batches(nodes)
-                        streaming_nodes += len(nodes)
-                        persist_batches += len(
-                            self._chunk_nodes(nodes, self.docstore_batch_size)
-                        )
-                        enrich_batches += 1
-                    if completed_hashes:
-                        processed_hashes.update(completed_hashes)
-            else:
-                for docs, nodes in pipeline.build(processed_hashes):
-                    if docs:
-                        streaming_docs += len(docs)
-                    if nodes:
-                        self._persist_node_batches(nodes)
-                        streaming_nodes += len(nodes)
-                        persist_batches += len(
-                            self._chunk_nodes(nodes, self.docstore_batch_size)
-                        )
-
-            total_docs = core_docs + streaming_docs
-            total_nodes = core_nodes + streaming_nodes
-            if (
-                total_docs == 0
-                and total_nodes == 0
-                and not qdrant_collection_exists(
-                    self.qdrant_client, self.qdrant_collection
-                )
-            ):
-                if self.ingest_benchmark_enabled:
-                    self._log_ingest_benchmark_summary(
-                        mode="sync",
-                        started_at=ingest_started_at,
-                        core_docs=core_docs,
-                        core_nodes=core_nodes,
-                        streaming_docs=streaming_docs,
-                        streaming_nodes=streaming_nodes,
-                        enrich_batches=enrich_batches,
-                        persist_batches=persist_batches,
+                    enrich_batches += 1
+                if completed_hashes:
+                    processed_hashes.update(completed_hashes)
+        else:
+            for docs, nodes in pipeline.build(processed_hashes):
+                if docs:
+                    streaming_docs += len(docs)
+                if nodes:
+                    self._persist_node_batches(nodes)
+                    streaming_nodes += len(nodes)
+                    persist_batches += len(
+                        self._chunk_nodes(nodes, self.docstore_batch_size)
                     )
-                self._finalize_empty_ingestion(
-                    self.qdrant_collection, progress_callback
-                )
-                raise EmptyIngestionError(self.qdrant_collection)
 
-            self.dir_reader = pipeline.dir_reader
-            # Clear memory-heavy lists as they are persisted in the vector store
-            self.docs = []
-            self.nodes = []
-
-            if build_query_engine:
-                self.create_query_engine()
-            else:
-                # Ensure downstream callers recreate a fresh query engine as needed.
-                self.query_engine = None
-
-            self.reset_session_state()
-            self._invalidate_ner_cache(self.qdrant_collection)
-
-            eff_k = None
-            if self.query_engine is not None and hasattr(
-                self.query_engine, "retriever"
-            ):
-                try:
-                    eff_k = getattr(
-                        self.query_engine.retriever, "similarity_top_k", None
-                    )
-                except Exception:
-                    eff_k = None
-
-            if self.query_engine is not None:
-                logger.info(
-                    "Effective retrieval k={} | top_n={} | embed_device={} | rerank_device={}",
-                    eff_k,
-                    self.rerank_top_n,
-                    self.device,
-                    self.device,
-                )
+        total_docs = core_docs + streaming_docs
+        total_nodes = core_nodes + streaming_nodes
+        if (
+            total_docs == 0
+            and total_nodes == 0
+            and not qdrant_collection_exists(self.qdrant_client, self.qdrant_collection)
+        ):
             if self.ingest_benchmark_enabled:
                 self._log_ingest_benchmark_summary(
                     mode="sync",
@@ -4375,10 +4384,51 @@ class RAG:
                     enrich_batches=enrich_batches,
                     persist_batches=persist_batches,
                 )
-            self._bump_summary_revision(self.qdrant_collection)
-            logger.info("Documents ingested successfully.")
-        finally:
-            self._set_embedding_warning_callback(None)
+            self._finalize_empty_ingestion(self.qdrant_collection, progress_callback)
+            raise EmptyIngestionError(self.qdrant_collection)
+
+        self.dir_reader = pipeline.dir_reader
+        # Clear memory-heavy lists as they are persisted in the vector store
+        self.docs = []
+        self.nodes = []
+
+        if build_query_engine:
+            self.create_query_engine()
+        else:
+            # Ensure downstream callers recreate a fresh query engine as needed.
+            self.query_engine = None
+
+        self.reset_session_state()
+        self._invalidate_ner_cache(self.qdrant_collection)
+
+        eff_k = None
+        if self.query_engine is not None and hasattr(self.query_engine, "retriever"):
+            try:
+                eff_k = getattr(self.query_engine.retriever, "similarity_top_k", None)
+            except Exception:
+                eff_k = None
+
+        if self.query_engine is not None:
+            logger.info(
+                "Effective retrieval k={} | top_n={} | embed_device={} | rerank_device={}",
+                eff_k,
+                self.rerank_top_n,
+                self.device,
+                self.device,
+            )
+        if self.ingest_benchmark_enabled:
+            self._log_ingest_benchmark_summary(
+                mode="sync",
+                started_at=ingest_started_at,
+                core_docs=core_docs,
+                core_nodes=core_nodes,
+                streaming_docs=streaming_docs,
+                streaming_nodes=streaming_nodes,
+                enrich_batches=enrich_batches,
+                persist_batches=persist_batches,
+            )
+        self._bump_summary_revision(self.qdrant_collection)
+        logger.info("Documents ingested successfully.")
 
     async def asingest_docs(
         self,
@@ -4417,128 +4467,75 @@ class RAG:
         vector_store = self._vector_store()
         storage_ctx = self._storage_context(vector_store)
         embed_model = self.embed_model
-        self._set_embedding_warning_callback(progress_callback)
-        try:
-            self.index = VectorStoreIndex(
-                nodes=[],
-                embed_model=embed_model,
-                storage_context=storage_ctx,
-            )
+        self.index = VectorStoreIndex(
+            nodes=[],
+            embed_model=embed_model,
+            storage_context=storage_ctx,
+        )
 
-            pipeline = self._build_ingestion_pipeline(
-                progress_callback=progress_callback
-            )
-            existing_hashes = self._get_existing_file_hashes()
-            processed_hashes = set(existing_hashes)
-            image_ingestion_service = getattr(pipeline, "image_ingestion_service", None)
-            core_pdf_reader = CorePDFPipelineReader(
-                data_dir=prepared_dir,
-                entity_extractor=pipeline.entity_extractor,
-                ner_max_workers=pipeline.ner_max_workers,
-                source_collection=self.qdrant_collection,
-                image_ingestion_service=image_ingestion_service,
-            )
+        pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
+        existing_hashes = self._get_existing_file_hashes()
+        processed_hashes = set(existing_hashes)
+        image_ingestion_service = getattr(pipeline, "image_ingestion_service", None)
+        core_pdf_reader = CorePDFPipelineReader(
+            data_dir=prepared_dir,
+            entity_extractor=pipeline.entity_extractor,
+            ner_max_workers=pipeline.ner_max_workers,
+            source_collection=self.qdrant_collection,
+            image_ingestion_service=image_ingestion_service,
+        )
 
-            for docs, nodes, file_hash in core_pdf_reader.build(
-                existing_hashes=processed_hashes, progress_callback=progress_callback
+        for docs, nodes, file_hash in core_pdf_reader.build(
+            existing_hashes=processed_hashes, progress_callback=progress_callback
+        ):
+            core_docs += len(docs)
+            if nodes:
+                await self._apersist_node_batches(nodes)
+                core_nodes += len(nodes)
+                persist_batches += len(
+                    self._chunk_nodes(nodes, self.docstore_batch_size)
+                )
+                processed_hashes.add(file_hash)
+
+        processed_hashes.update(core_pdf_reader.discovered_hashes)
+
+        # Process batches, persisting nodes as soon as each enrichment
+        # micro-batch completes when supported.
+        if hasattr(pipeline, "build_streaming") and callable(
+            getattr(pipeline, "build_streaming")
+        ):
+            for docs, nodes, completed_hashes in pipeline.build_streaming(
+                processed_hashes
             ):
-                core_docs += len(docs)
+                if docs:
+                    streaming_docs += len(docs)
                 if nodes:
                     await self._apersist_node_batches(nodes)
-                    core_nodes += len(nodes)
+                    streaming_nodes += len(nodes)
                     persist_batches += len(
                         self._chunk_nodes(nodes, self.docstore_batch_size)
                     )
-                    processed_hashes.add(file_hash)
-
-            processed_hashes.update(core_pdf_reader.discovered_hashes)
-
-            # Process batches, persisting nodes as soon as each enrichment
-            # micro-batch completes when supported.
-            if hasattr(pipeline, "build_streaming") and callable(
-                getattr(pipeline, "build_streaming")
-            ):
-                for docs, nodes, completed_hashes in pipeline.build_streaming(
-                    processed_hashes
-                ):
-                    if docs:
-                        streaming_docs += len(docs)
-                    if nodes:
-                        await self._apersist_node_batches(nodes)
-                        streaming_nodes += len(nodes)
-                        persist_batches += len(
-                            self._chunk_nodes(nodes, self.docstore_batch_size)
-                        )
-                        enrich_batches += 1
-                    if completed_hashes:
-                        processed_hashes.update(completed_hashes)
-            else:
-                for docs, nodes in pipeline.build(processed_hashes):
-                    if docs:
-                        streaming_docs += len(docs)
-                    if nodes:
-                        await self._apersist_node_batches(nodes)
-                        streaming_nodes += len(nodes)
-                        persist_batches += len(
-                            self._chunk_nodes(nodes, self.docstore_batch_size)
-                        )
-
-            total_docs = core_docs + streaming_docs
-            total_nodes = core_nodes + streaming_nodes
-            if (
-                total_docs == 0
-                and total_nodes == 0
-                and not qdrant_collection_exists(
-                    self.qdrant_client, self.qdrant_collection
-                )
-            ):
-                if self.ingest_benchmark_enabled:
-                    self._log_ingest_benchmark_summary(
-                        mode="async",
-                        started_at=ingest_started_at,
-                        core_docs=core_docs,
-                        core_nodes=core_nodes,
-                        streaming_docs=streaming_docs,
-                        streaming_nodes=streaming_nodes,
-                        enrich_batches=enrich_batches,
-                        persist_batches=persist_batches,
+                    enrich_batches += 1
+                if completed_hashes:
+                    processed_hashes.update(completed_hashes)
+        else:
+            for docs, nodes in pipeline.build(processed_hashes):
+                if docs:
+                    streaming_docs += len(docs)
+                if nodes:
+                    await self._apersist_node_batches(nodes)
+                    streaming_nodes += len(nodes)
+                    persist_batches += len(
+                        self._chunk_nodes(nodes, self.docstore_batch_size)
                     )
-                self._finalize_empty_ingestion(
-                    self.qdrant_collection, progress_callback
-                )
-                raise EmptyIngestionError(self.qdrant_collection)
 
-            self.dir_reader = pipeline.dir_reader
-            self.docs = []
-            self.nodes = []
-
-            if build_query_engine:
-                self.create_query_engine()
-            else:
-                self.query_engine = None
-
-            self.reset_session_state()
-            self._invalidate_ner_cache(self.qdrant_collection)
-
-            eff_k = None
-            if self.query_engine is not None and hasattr(
-                self.query_engine, "retriever"
-            ):
-                try:
-                    eff_k = getattr(
-                        self.query_engine.retriever, "similarity_top_k", None
-                    )
-                except Exception:
-                    eff_k = None
-
-            if self.query_engine is not None:
-                logger.info(
-                    "Effective retrieval k={} | top_n={} | embed_device={} | rerank_device={}",
-                    eff_k,
-                    self.rerank_top_n,
-                    self.device,
-                    self.device,
-                )
+        total_docs = core_docs + streaming_docs
+        total_nodes = core_nodes + streaming_nodes
+        if (
+            total_docs == 0
+            and total_nodes == 0
+            and not qdrant_collection_exists(self.qdrant_client, self.qdrant_collection)
+        ):
             if self.ingest_benchmark_enabled:
                 self._log_ingest_benchmark_summary(
                     mode="async",
@@ -4550,10 +4547,49 @@ class RAG:
                     enrich_batches=enrich_batches,
                     persist_batches=persist_batches,
                 )
-            self._bump_summary_revision(self.qdrant_collection)
-            logger.info("Documents ingested successfully.")
-        finally:
-            self._set_embedding_warning_callback(None)
+            self._finalize_empty_ingestion(self.qdrant_collection, progress_callback)
+            raise EmptyIngestionError(self.qdrant_collection)
+
+        self.dir_reader = pipeline.dir_reader
+        self.docs = []
+        self.nodes = []
+
+        if build_query_engine:
+            self.create_query_engine()
+        else:
+            self.query_engine = None
+
+        self.reset_session_state()
+        self._invalidate_ner_cache(self.qdrant_collection)
+
+        eff_k = None
+        if self.query_engine is not None and hasattr(self.query_engine, "retriever"):
+            try:
+                eff_k = getattr(self.query_engine.retriever, "similarity_top_k", None)
+            except Exception:
+                eff_k = None
+
+        if self.query_engine is not None:
+            logger.info(
+                "Effective retrieval k={} | top_n={} | embed_device={} | rerank_device={}",
+                eff_k,
+                self.rerank_top_n,
+                self.device,
+                self.device,
+            )
+        if self.ingest_benchmark_enabled:
+            self._log_ingest_benchmark_summary(
+                mode="async",
+                started_at=ingest_started_at,
+                core_docs=core_docs,
+                core_nodes=core_nodes,
+                streaming_docs=streaming_docs,
+                streaming_nodes=streaming_nodes,
+                enrich_batches=enrich_batches,
+                persist_batches=persist_batches,
+            )
+        self._bump_summary_revision(self.qdrant_collection)
+        logger.info("Documents ingested successfully.")
 
     def run_query(
         self,
