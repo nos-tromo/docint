@@ -22,8 +22,14 @@ from unittest.mock import MagicMock
 import pytest
 from llama_index.core import Document
 from llama_index.core.base.response.schema import Response
-from llama_index.core.schema import NodeWithScore, TextNode
+from llama_index.core.schema import MetadataMode, NodeWithScore, TextNode
+from llama_index.core.schema import TextNode as _TN
+from llama_index.core.storage.docstore.keyval_docstore import (
+    KVDocumentStore as _KVDocumentStore,
+)
+from loguru import logger as _loguru_logger
 
+import docint.core.ingest.ingestion_pipeline as pipeline_module
 from docint.core import rag as rag_module
 from docint.core.rag import RAG, LazyRerankerPostprocessor
 from docint.core.retrieval_filters import (
@@ -31,8 +37,13 @@ from docint.core.retrieval_filters import (
     build_qdrant_filter,
     matches_metadata_filters,
 )
+from docint.utils.embed_chunking import effective_budget, estimate_tokens
 from docint.utils.env_cfg import OpenAIConfig
 from docint.utils.hashing import compute_file_hash
+from docint.utils.openai_cfg import (
+    BudgetedOpenAIEmbedding,
+    EmbeddingInputTooLongError,
+)
 
 
 class DummyNode:
@@ -1129,6 +1140,59 @@ def test_select_collection_invalidates_ner_cache(
     assert ("alpha", "orthographic", 100, 1) not in rag.ner_graph_cache
 
 
+def test_list_collections_filters_hidden_suffixes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`list_collections` should hide auxiliary `_images` / `_dockv` companions.
+
+    These are internal to the storage layer (image-embedding companions and
+    upstream llama-index docstore side-effects) and must never appear in the
+    user-facing collection selector.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="alpha")
+    fake_collections = types.SimpleNamespace(
+        collections=[
+            types.SimpleNamespace(name="alpha"),
+            types.SimpleNamespace(name="alpha_images"),
+            types.SimpleNamespace(name="alpha_dockv"),
+            types.SimpleNamespace(name="beta"),
+            types.SimpleNamespace(name="beta_dockv"),
+        ]
+    )
+    fake_client = types.SimpleNamespace(
+        get_collections=lambda: fake_collections,
+    )
+    monkeypatch.setattr(rag, "_qdrant_client", fake_client, raising=False)
+
+    assert rag.list_collections() == ["alpha", "beta"]
+
+
+def test_list_collections_returns_empty_when_all_hidden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If every collection matches a hidden suffix, the result should be empty.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="alpha")
+    fake_collections = types.SimpleNamespace(
+        collections=[
+            types.SimpleNamespace(name="x_images"),
+            types.SimpleNamespace(name="y_dockv"),
+        ]
+    )
+    fake_client = types.SimpleNamespace(
+        get_collections=lambda: fake_collections,
+    )
+    monkeypatch.setattr(rag, "_qdrant_client", fake_client, raising=False)
+
+    assert rag.list_collections() == []
+
+
 def test_get_collection_ner_refresh_bypasses_cache() -> None:
     """Refreshing collection NER should re-fetch data instead of returning stale cache."""
     rag = RAG(qdrant_collection="test")
@@ -1952,8 +2016,6 @@ def test_build_ingestion_pipeline_passes_configured_device_to_gliner(
         monkeypatch: The monkeypatch fixture.
         tmp_path: The temporary path fixture.
     """
-    import docint.core.ingest.ingestion_pipeline as pipeline_module
-
     monkeypatch.setenv("USE_DEVICE", "cpu")
     monkeypatch.setenv("NER_ENABLED", "true")
 
@@ -3454,8 +3516,6 @@ def test_prepare_vector_nodes_resplits_oversize_before_embed() -> None:
     every text the embed model actually sees and asserts none exceeds
     that budget — proving the re-split step runs before embedding.
     """
-    from docint.utils.embed_chunking import effective_budget, estimate_tokens
-
     captured_texts: list[str] = []
 
     class FakeEmbedModel:
@@ -3573,6 +3633,204 @@ def test_prepare_vector_nodes_writes_original_to_docstore() -> None:
     assert vector_ids.issubset(docstore_ids)
 
 
+def test_prepare_vector_nodes_embeds_only_budget_conforming_metadata_payloads() -> None:
+    """Heavy-metadata nodes MUST be split so the embed call sees only budget-conforming MetadataMode.EMBED payloads.
+
+    Pins the bug where ``RAG._prepare_vector_nodes_for_insert`` calls
+    ``node.get_content(metadata_mode=MetadataMode.EMBED)`` on the embed
+    side while the upstream pre-embed re-splitter measures
+    ``node.get_content()`` (raw text only). Heavy-metadata nodes —
+    table rows or transcript segments — short-circuit the splitter on
+    raw size, then get embedded whole, blowing past the provider's
+    context limit. This test records every text the embed model
+    actually receives and asserts each one's estimated token count is
+    within ``effective_budget(rag.embed_ctx_tokens,
+    rag.embed_ctx_safety_margin)``.
+    """
+    captured_texts: list[str] = []
+
+    class FakeEmbedModel:
+        """Record every text handed to the embedding call."""
+
+        def get_text_embeddings_strict(self, texts: list[str]) -> list[list[float]]:
+            """Record inputs and return fake embeddings.
+
+            Args:
+                texts: Texts handed to the embedding model.
+
+            Returns:
+                list[list[float]]: One fake vector per input text.
+            """
+            captured_texts.extend(texts)
+            return [[0.1, 0.2] for _ in texts]
+
+    rag = RAG(qdrant_collection="test")
+    rag._embed_model = cast(Any, FakeEmbedModel())
+
+    # Heavy-metadata parent: raw text comfortably fits the budget but
+    # the EMBED-mode payload (text + rendered metadata block) overflows.
+    reference_metadata: dict[str, str] = {
+        f"colvalue_long_name_{i}": "V" * 600 for i in range(40)
+    }
+    heavy_metadata: dict[str, object] = {"reference_metadata": reference_metadata}
+    for i in range(15):
+        heavy_metadata[f"col_long_name_{i}"] = "V" * 400
+    heavy_node = TextNode(
+        text="word " * 1000,
+        id_="heavy-meta-rag-1",
+        metadata=heavy_metadata,
+    )
+
+    # Fixture invariants: confirm the bug shape really is in this node.
+    raw_payload = heavy_node.get_content()
+    embed_payload = heavy_node.get_content(metadata_mode=MetadataMode.EMBED)
+    budget = effective_budget(rag.embed_ctx_tokens, rag.embed_ctx_safety_margin)
+    assert estimate_tokens(raw_payload, rag.embed_char_token_ratio) <= budget, (
+        "fixture invariant: raw text must fit so the bug's fits-check passes"
+    )
+    assert estimate_tokens(embed_payload, rag.embed_char_token_ratio) > budget, (
+        "fixture invariant: embed payload must overflow so the bug bites"
+    )
+
+    prepared_vector, _prepared_docstore = rag._prepare_vector_nodes_for_insert(
+        [heavy_node]
+    )
+    assert prepared_vector, "re-split must produce vector nodes for embedding"
+    assert captured_texts, "embed model must be called at least once"
+
+    for text in captured_texts:
+        assert estimate_tokens(text, rag.embed_char_token_ratio) <= budget, (
+            f"embed call received a {estimate_tokens(text, rag.embed_char_token_ratio)}-token "
+            f"payload that exceeds the {budget}-token budget"
+        )
+
+
+def test_prepare_vector_nodes_uses_embedding_token_counter_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The embed path must split when the tokenizer counter rejects a node.
+
+    Pins the contract that ``RAG._prepare_vector_nodes_for_insert``
+    forwards ``self._embed_token_counter`` to the pre-embed
+    re-splitter and the post-split fit guard. Fixture: a
+    metadata-heavy node whose char-ratio estimate admits (raw text
+    ~24_000 chars, metadata also modest) but a strict 2-chars-per-token
+    counter flags as ~12_000 tokens — well over the 7782-token
+    effective budget. With the counter attached, the re-splitter must
+    produce multiple sub-nodes and every text handed to the embed
+    stub must satisfy ``len(counter(text)) <= effective_budget``.
+
+    ``EMBED_CTX_TOKENS=8192`` is set so the fixture's 24_000-char
+    payload exercises the char-admits-but-counter-rejects boundary that
+    motivated the original test — the ollama-default 2048 budget would
+    have the char-ratio rejecting the payload on its own, which would
+    defeat the test's intent.
+
+    Args:
+        monkeypatch: Fixture to set ``EMBED_CTX_TOKENS``.
+    """
+    monkeypatch.setenv("EMBED_CTX_TOKENS", "8192")
+
+    captured_texts: list[str] = []
+
+    class FakeEmbedModel:
+        """Record every text handed to the embedding call."""
+
+        def get_text_embeddings_strict(self, texts: list[str]) -> list[list[float]]:
+            """Record inputs and return fake embeddings.
+
+            Args:
+                texts: Texts handed to the embedding model.
+
+            Returns:
+                list[list[float]]: One fake vector per input text.
+            """
+            captured_texts.extend(texts)
+            return [[0.1, 0.2] for _ in texts]
+
+    rag = RAG(qdrant_collection="test")
+    rag._embed_model = cast(Any, FakeEmbedModel())
+
+    strict_counter = lambda text: [0] * (len(text) // 2)  # noqa: E731
+    rag._embed_token_counter = strict_counter  # type: ignore[attr-defined]
+
+    heavy_node = TextNode(
+        text="word " * 4800,  # ~24_000 chars -- char-ratio admits, counter rejects
+        id_="ctr-heavy-1",
+        metadata={"chunk_id": "ctr-1"},
+    )
+
+    # Fixture invariants: the char-ratio admits, the counter rejects.
+    raw_payload = heavy_node.get_content()
+    budget = effective_budget(rag.embed_ctx_tokens, rag.embed_ctx_safety_margin)
+    assert estimate_tokens(raw_payload, rag.embed_char_token_ratio) <= budget, (
+        "fixture invariant: char-ratio estimator must admit the raw payload"
+    )
+    assert len(strict_counter(raw_payload)) > budget, (
+        "fixture invariant: the strict counter must reject the raw payload"
+    )
+
+    prepared_vector, _prepared_docstore = rag._prepare_vector_nodes_for_insert(
+        [heavy_node]
+    )
+
+    assert len(prepared_vector) >= 2, (
+        "strict token counter must trigger a split into multiple sub-nodes"
+    )
+    assert captured_texts, "embed model must be called at least once"
+    for text in captured_texts:
+        assert len(strict_counter(text)) <= budget, (
+            f"embed call received a {len(strict_counter(text))}-token payload "
+            f"that exceeds the {budget}-token counter-measured budget"
+        )
+
+
+def test_prepare_vector_nodes_falls_back_to_char_ratio_when_tokenizer_unavailable() -> (
+    None
+):
+    """Counter=None must preserve the char-ratio fallback behaviour.
+
+    When no tokenizer snapshot is available (offline / missing cache),
+    ``rag._embed_token_counter`` is ``None`` and the ingestion path
+    must keep working using the char-ratio estimator. A within-budget
+    node must pass through unchanged: present in the vector-side
+    output, never split, and no exception raised.
+    """
+
+    class FakeEmbedModel:
+        """Return fake embeddings for every input text."""
+
+        def get_text_embeddings_strict(self, texts: list[str]) -> list[list[float]]:
+            """Return one fake vector per text.
+
+            Args:
+                texts: Texts to embed.
+
+            Returns:
+                list[list[float]]: Fake vectors aligned to ``texts``.
+            """
+            return [[0.5, 0.5] for _ in texts]
+
+    rag = RAG(qdrant_collection="test")
+    rag._embed_model = cast(Any, FakeEmbedModel())
+    rag._embed_token_counter = None  # type: ignore[attr-defined]
+
+    small_node = TextNode(
+        text="short text body",
+        id_="fallback-small-1",
+        metadata={"chunk_id": "cid"},
+    )
+
+    prepared_vector, _prepared_docstore = rag._prepare_vector_nodes_for_insert(
+        [small_node]
+    )
+
+    assert small_node in prepared_vector, (
+        "within-budget node must pass through unchanged when counter is None"
+    )
+    assert len(prepared_vector) == 1
+
+
 def test_parent_context_attachment_reconstructs_original_content() -> None:
     """The parent-context postprocessor must return the full parent text.
 
@@ -3684,11 +3942,6 @@ def test_budgeted_embedding_raises_on_context_overflow(
     only supported defense; a request that still overflows must kill
     the batch loudly.
     """
-    from docint.utils.openai_cfg import (
-        BudgetedOpenAIEmbedding,
-        EmbeddingInputTooLongError,
-    )
-
     error = RuntimeError(
         "Error code: 400 - {'error': {'message': 'the input length exceeds the "
         "context length'}}"
@@ -3758,8 +4011,6 @@ def _capture_loguru(caplog: pytest.LogCaptureFixture) -> Callable[[], None]:
     Returns:
         A zero-argument cleanup callable that removes the sink.
     """
-    from loguru import logger as _loguru_logger
-
     sink_id = _loguru_logger.add(
         lambda message: caplog.records.append(
             logging.LogRecord(
@@ -4389,11 +4640,6 @@ def test_verify_collection_reports_drift_and_parents(
         tmp_path: Pytest-provided temporary directory used as the
             Qdrant source root.
     """
-    from llama_index.core.schema import TextNode as _TN
-    from llama_index.core.storage.docstore.keyval_docstore import (
-        KVDocumentStore as _KVDocumentStore,
-    )
-
     rag = RAG(qdrant_collection="active")
     rag._qdrant_client = MagicMock()
     rag._qdrant_src_dir = tmp_path
@@ -4472,11 +4718,6 @@ def test_verify_collection_repair_deletes_kv_orphans(
         tmp_path: Pytest-provided temporary directory used as the
             Qdrant source root.
     """
-    from llama_index.core.schema import TextNode as _TN
-    from llama_index.core.storage.docstore.keyval_docstore import (
-        KVDocumentStore as _KVDocumentStore,
-    )
-
     rag = RAG(qdrant_collection="active")
     rag._qdrant_client = MagicMock()
     rag._qdrant_src_dir = tmp_path
@@ -4700,3 +4941,323 @@ def test_run_query_async_wraps_context_window_overflow() -> None:
 
     with pytest.raises(ValueError, match="OPENAI_CTX_WINDOW"):
         asyncio.run(rag.run_query_async("What is the summary?"))
+
+
+def test_rag_init_uses_embedding_config_for_embed_client_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedding client must get its envelope from ``EmbeddingConfig``, not ``OpenAIConfig``.
+
+    Regression guard for the 15-minute ingest timeout on the CPU-ollama
+    profile: the embed client used to inherit ``OpenAIConfig.timeout``
+    (300 s) and ``OpenAIConfig.max_retries`` (2), giving a 900 s total
+    envelope that a bge-m3 CPU batch would routinely blow through. The
+    fix splits the embed envelope into its own ``EmbeddingConfig``
+    fields (``timeout_seconds`` / ``max_retries`` / ``batch_size``) so
+    the long-lived embed batch can have a much longer timeout than the
+    chat client without slowing down chat calls.
+
+    This test pins that the ``BudgetedOpenAIEmbedding`` kwargs come
+    from ``EmbeddingConfig`` — specifically, when the operator sets
+    ``OPENAI_TIMEOUT=10`` and ``OPENAI_MAX_RETRIES=0`` but also sets
+    ``EMBED_TIMEOUT_SECONDS=1800`` / ``EMBED_MAX_RETRIES=1`` /
+    ``EMBED_BATCH_SIZE=16``, the embed client MUST use the embed
+    values, never the chat values.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    monkeypatch.setenv("INFERENCE_PROVIDER", "ollama")
+    monkeypatch.setenv("OPENAI_TIMEOUT", "10")
+    monkeypatch.setenv("OPENAI_MAX_RETRIES", "0")
+    monkeypatch.setenv("EMBED_TIMEOUT_SECONDS", "1800")
+    monkeypatch.setenv("EMBED_BATCH_SIZE", "16")
+    monkeypatch.setenv("EMBED_MAX_RETRIES", "1")
+    monkeypatch.delenv("OPENAI_DIMENSIONS", raising=False)
+
+    captured: dict[str, object] = {}
+
+    class FakeEmbedding:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(rag_module, "BudgetedOpenAIEmbedding", FakeEmbedding)
+
+    rag = RAG(qdrant_collection="test")
+    rag.embed_model_id = "bge-m3"
+
+    _ = rag.embed_model
+
+    assert captured["timeout"] == 1800.0
+    assert captured["max_retries"] == 1
+    assert captured["embed_batch_size"] == 16
+
+
+def test_rag_init_warns_when_embed_worst_case_wait_exceeds_one_hour(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``RAG.__post_init__`` must WARN when ``timeout × (1 + retries) > 3600``.
+
+    The original 15-minute stall bug was silent — the operator saw
+    nothing until the ingest failed after 900 s. The safety-net at
+    ``RAG.__post_init__`` flags configurations that could produce an
+    even longer silent wait (more than one hour) so operators catch
+    the mis-configuration at startup rather than during ingestion.
+
+    This test pins: ``timeout=2000, max_retries=1`` (worst-case 4000 s
+    > 3600) triggers the WARNING; the boundary case
+    ``timeout=1800, max_retries=1`` (exactly 3600 s) does NOT.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        caplog: Captures emitted log records via the loguru-to-stdlib
+            bridge installed in ``conftest.py``.
+    """
+    import logging
+
+    from loguru import logger
+
+    handler_id = logger.add(
+        caplog.handler,
+        level="WARNING",
+        format="{message}",
+    )
+    caplog.set_level(logging.WARNING)
+    try:
+        monkeypatch.setenv("INFERENCE_PROVIDER", "ollama")
+        monkeypatch.setenv("EMBED_TIMEOUT_SECONDS", "2000")
+        monkeypatch.setenv("EMBED_MAX_RETRIES", "1")
+        monkeypatch.setenv("EMBED_BATCH_SIZE", "16")
+
+        caplog.clear()
+        RAG(qdrant_collection="warn-test-over")
+
+        messages = "\n".join(str(r.getMessage()) for r in caplog.records)
+        assert "worst-case wait" in messages.lower(), (
+            f"Expected worst-case-wait WARNING, got: {messages!r}"
+        )
+
+        monkeypatch.setenv("EMBED_TIMEOUT_SECONDS", "1800")
+        caplog.clear()
+        RAG(qdrant_collection="warn-test-boundary")
+
+        messages = "\n".join(str(r.getMessage()) for r in caplog.records)
+        assert "worst-case wait" not in messages.lower(), (
+            f"Exactly-3600s boundary must not WARN, got: {messages!r}"
+        )
+    finally:
+        logger.remove(handler_id)
+
+
+# ---------------------------------------------------------------------------
+# per-chunk embed batching (defect pinned below)
+# ---------------------------------------------------------------------------
+#
+# Regression guard for the CPU-ollama ingestion defect where
+# ``EMBED_BATCH_SIZE`` was silently ignored:
+# ``BudgetedOpenAIEmbedding.get_text_embeddings_strict`` calls
+# ``super()._get_text_embeddings(texts)`` directly, bypassing the
+# ``BaseEmbedding.get_text_embedding_batch`` slicing path. The RAG
+# layer therefore has to do the chunking itself. The tests below
+# pin that ``_prepare_vector_nodes_for_insert`` slices by
+# ``self.embed_batch_size`` and that the safety-net runs per-chunk so
+# an oversize payload never rides along on a later slice.
+
+
+def test_prepare_vector_nodes_chunks_by_embed_batch_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_prepare_vector_nodes_for_insert`` must slice by ``embed_batch_size``.
+
+    Pins the fix for the silent ``EMBED_BATCH_SIZE`` defect. Before
+    the fix every text in the batch shipped in a single HTTP POST
+    because ``BudgetedOpenAIEmbedding.get_text_embeddings_strict``
+    calls ``super()._get_text_embeddings`` directly — bypassing
+    llama_index's ``embed_batch_size`` slicing inside
+    ``BaseEmbedding.get_text_embedding_batch``. The RAG layer must
+    therefore do the chunking itself: 10 inputs with
+    ``embed_batch_size=4`` must produce three calls sized
+    ``[4, 4, 2]`` in input order, with each returned node receiving
+    the embedding from its matching chunk.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    monkeypatch.setenv("EMBED_BATCH_SIZE", "4")
+
+    chunk_sizes: list[int] = []
+    chunk_texts: list[list[str]] = []
+
+    class FakeEmbedModel:
+        """Record chunk sizes and return deterministic fake vectors."""
+
+        def get_text_embeddings_strict(self, texts: list[str]) -> list[list[float]]:
+            """Return one fake vector per input.
+
+            Args:
+                texts: Texts handed to the embedding model.
+
+            Returns:
+                A list of fake vectors aligned with ``texts``. Each
+                vector's first coordinate is the input's position in
+                this chunk so the caller can verify alignment.
+            """
+            chunk_sizes.append(len(texts))
+            chunk_texts.append(list(texts))
+            return [[float(i), 0.0] for i, _ in enumerate(texts)]
+
+    rag = RAG(qdrant_collection="batch-size-test")
+    rag._embed_model = cast(Any, FakeEmbedModel())
+    # Bypass the re-splitter so the batch flows through verbatim; this
+    # test is strictly about slicing before the embed call. Patching
+    # at class level because ``RAG`` is a slots dataclass.
+    monkeypatch.setattr(
+        RAG,
+        "_resplit_vector_nodes",
+        lambda self, nodes: (list(nodes), list(nodes)),
+    )
+
+    assert rag.embed_batch_size == 4, (
+        "fixture invariant: EMBED_BATCH_SIZE=4 must propagate to the RAG"
+    )
+
+    test_nodes = [
+        TextNode(text=f"payload-{i}", id_=f"n-{i}", metadata={"chunk_id": f"c{i}"})
+        for i in range(10)
+    ]
+
+    prepared_vector, _prepared_docstore = rag._prepare_vector_nodes_for_insert(
+        test_nodes
+    )
+
+    assert chunk_sizes == [4, 4, 2], (
+        f"expected chunk sizes [4, 4, 2] in input order, got {chunk_sizes!r}"
+    )
+    # Input-order preservation: the texts in each chunk must be the
+    # EMBED-mode renderings of the input nodes at the matching offsets.
+    flattened = [text for chunk in chunk_texts for text in chunk]
+    expected_texts = [
+        node.get_content(metadata_mode=MetadataMode.EMBED) for node in test_nodes
+    ]
+    assert flattened == expected_texts, (
+        "slice order must preserve input order across chunks"
+    )
+    # Each node must have received the embedding from its matching slice:
+    # vector[0] is first in chunk 1 -> [0.0, 0.0]
+    # vector[4] is first in chunk 2 -> [0.0, 0.0]
+    # vector[5] is second in chunk 2 -> [1.0, 0.0]
+    # vector[9] is second in chunk 3 -> [1.0, 0.0]
+    assert prepared_vector[0].embedding == [0.0, 0.0]
+    assert prepared_vector[4].embedding == [0.0, 0.0]
+    assert prepared_vector[5].embedding == [1.0, 0.0]
+    assert prepared_vector[9].embedding == [1.0, 0.0]
+
+
+def test_prepare_vector_nodes_safety_net_runs_per_chunk_and_stops_on_oversize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The safety-net must run per-chunk and short-circuit on an oversize payload.
+
+    Pins the second half of the ``EMBED_BATCH_SIZE`` fix: when the
+    RAG layer slices the batch, the per-payload fit check must run
+    immediately before each chunk's embed call, not once at the top
+    of the method. Without per-chunk safety-net placement an oversize
+    payload slipping through the re-splitter would still travel in
+    a late chunk and hit the provider with a cryptic 400.
+
+    Fixture: 10 nodes, ``EMBED_BATCH_SIZE=4``. Node index 5 carries a
+    marker in its text that a token counter maps to a huge count
+    (> budget). The re-splitter is bypassed so the safety-net is the
+    only gate. Node 5 sits in chunk 2 (indices [4, 5, 6, 7]). The
+    safety-net in chunk 1 admits every payload and one embed call
+    fires; the safety-net in chunk 2 detects the oversize payload and
+    raises BEFORE chunk 2's embed call — so the embed spy sees
+    ``<= 1`` calls total.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    monkeypatch.setenv("EMBED_BATCH_SIZE", "4")
+
+    embed_calls: list[list[str]] = []
+
+    class FakeEmbedModel:
+        """Record per-call texts and return trivially small vectors."""
+
+        def get_text_embeddings_strict(self, texts: list[str]) -> list[list[float]]:
+            """Record the call and return benign vectors.
+
+            Args:
+                texts: Texts handed to the embedding model.
+
+            Returns:
+                A list of benign fake vectors aligned with ``texts``.
+            """
+            embed_calls.append(list(texts))
+            return [[0.0, 0.0] for _ in texts]
+
+    rag = RAG(qdrant_collection="safety-net-per-chunk-test")
+    rag._embed_model = cast(Any, FakeEmbedModel())
+
+    # Bypass the re-splitter so the safety-net is the only gate and we
+    # can deterministically place the oversize node inside a specific
+    # chunk (index 5 -> chunk 2). Patching at class level because ``RAG``
+    # is a slots dataclass.
+    monkeypatch.setattr(
+        RAG,
+        "_resplit_vector_nodes",
+        lambda self, nodes: (list(nodes), list(nodes)),
+    )
+
+    oversize_marker = "OVERSIZE_PAYLOAD_MARKER"
+    budget = effective_budget(rag.embed_ctx_tokens, rag.embed_ctx_safety_margin)
+
+    def _marker_aware_counter(text: str) -> list[int]:
+        """Report a huge token count when the marker is present, else trivial.
+
+        Args:
+            text: The text whose token count is requested.
+
+        Returns:
+            A list whose length is ``budget * 10`` when ``text``
+            contains the oversize marker, and ``1`` otherwise.
+        """
+        if oversize_marker in text:
+            return [0] * (budget * 10)
+        return [0]
+
+    rag._embed_token_counter = _marker_aware_counter  # type: ignore[attr-defined]
+
+    test_nodes = [
+        TextNode(
+            text=f"safe-payload-{i}" if i != 5 else f"{oversize_marker} body-{i}",
+            id_=f"n-{i}",
+            metadata={"chunk_id": f"c{i}"},
+        )
+        for i in range(10)
+    ]
+
+    with pytest.raises(EmbeddingInputTooLongError):
+        rag._prepare_vector_nodes_for_insert(test_nodes)
+
+    # Per-chunk safety-net contract:
+    #   - Chunk 1 (nodes 0..3) has no marker => safety-net admits =>
+    #     one embed call of size 4 fires.
+    #   - Chunk 2 (nodes 4..7) contains node 5 with the oversize marker
+    #     => safety-net raises BEFORE chunk 2's embed call.
+    # The defective code runs the safety-net ONCE over the whole 10-node
+    # batch upfront and raises immediately — the spy sees zero calls and
+    # the first chunk's embeddings never fire. The fixed code MUST fire
+    # exactly one embed call for chunk 1 before raising on chunk 2.
+    call_sizes = [len(call) for call in embed_calls]
+    assert call_sizes == [4], (
+        f"expected exactly one embed call of size 4 (chunk 1) before the "
+        f"safety-net aborts chunk 2, got call sizes {call_sizes!r}"
+    )
+    expected_chunk1 = [
+        node.get_content(metadata_mode=MetadataMode.EMBED) for node in test_nodes[:4]
+    ]
+    assert embed_calls[0] == expected_chunk1, (
+        "chunk 1 must contain the first four nodes in input order"
+    )

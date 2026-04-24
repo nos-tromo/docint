@@ -113,9 +113,16 @@ from docint.core.state.session_manager import SessionManager
 from docint.core.storage.sqlite_kvstore import SQLiteKVStore
 from docint.core.storage.utils import qdrant_collection_exists
 from docint.core.storage.sources import stage_sources_to_qdrant
-from docint.utils.embed_chunking import resplit_nodes_for_embedding
+from docint.utils.embed_chunking import (
+    effective_budget,
+    estimate_tokens,
+    fits_budget,
+    resplit_nodes_for_embedding,
+)
+from docint.utils.embedding_tokenizer import build_embedding_token_counter
 from docint.utils.openai_cfg import (
     BudgetedOpenAIEmbedding,
+    EmbeddingInputTooLongError,
     LocalOpenAI,
     get_openai_reasoning_effort,
 )
@@ -125,6 +132,7 @@ from docint.utils.reference_metadata import REFERENCE_METADATA_FIELDS
 SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
 SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
 SUMMARY_CACHE_REVISION_KEY = "summary_revision"
+HIDDEN_COLLECTION_SUFFIXES: tuple[str, ...] = ("_images", "_dockv")
 BatchSparseEncoding = tuple[list[list[int]], list[list[float]]]
 EMPTY_RESPONSE_FALLBACK = (
     "I couldn't generate a grounded answer from the retrieved context. "
@@ -967,6 +975,12 @@ class RAG:
     embed_ctx_tokens: int = field(default=8192, init=False)
     embed_char_token_ratio: float = field(default=3.5, init=False)
     embed_ctx_safety_margin: float = field(default=0.95, init=False)
+    embed_timeout_seconds: float = field(default=1800.0, init=False)
+    embed_batch_size: int = field(default=16, init=False)
+    embed_max_retries: int = field(default=1, init=False)
+    _embed_token_counter: Callable[[str], list[int]] | None = field(
+        default=None, init=False, repr=False
+    )
 
     # --- Path setup ---
     data_dir: Path | None = field(default=None, init=False)
@@ -1099,12 +1113,59 @@ class RAG:
         self.embed_ctx_tokens = self.embedding_config.ctx_tokens
         self.embed_char_token_ratio = self.embedding_config.char_token_ratio
         self.embed_ctx_safety_margin = self.embedding_config.ctx_safety_margin
+        self.embed_timeout_seconds = self.embedding_config.timeout_seconds
+        self.embed_batch_size = self.embedding_config.batch_size
+        self.embed_max_retries = self.embedding_config.max_retries
         logger.info(
-            "Embedding context budget: {} tokens (ratio={}, margin={})",
+            "Embedding context budget: {} tokens (ratio={}, margin={}); "
+            "HTTP envelope: timeout={}s, batch_size={}, max_retries={}",
             self.embed_ctx_tokens,
             self.embed_char_token_ratio,
             self.embed_ctx_safety_margin,
+            self.embed_timeout_seconds,
+            self.embed_batch_size,
+            self.embed_max_retries,
         )
+        worst_case_wait = self.embed_timeout_seconds * (1 + self.embed_max_retries)
+        if worst_case_wait > 3600:
+            logger.warning(
+                "Embedding worst-case wait is {:.0f}s (timeout={}s × (1 + "
+                "max_retries={})); a single stalled batch can hang ingest for "
+                "over an hour. Lower EMBED_TIMEOUT_SECONDS or EMBED_MAX_RETRIES "
+                "if that is too lenient for your deployment.",
+                worst_case_wait,
+                self.embed_timeout_seconds,
+                self.embed_max_retries,
+            )
+
+        # --- Offline embedding tokenizer (authoritative token counts) ---
+        # Loaded once per RAG instance from the HF cache populated by
+        # `uv run load-models`. When the snapshot is missing the counter
+        # is None and the char-ratio estimator takes over; that degraded
+        # state is logged loudly so operators see it in every session.
+        self._embed_token_counter = build_embedding_token_counter(
+            self.model_config.embed_tokenizer_repo,
+            self.path_config.hf_hub_cache,
+        )
+        if self._embed_token_counter is None:
+            logger.warning(
+                "No embedding tokenizer loaded (repo={!r}, cache={}) — "
+                "falling back to char/token ratio {} on a {}-token window "
+                "with safety margin {}. Multilingual corpora may overflow the "
+                "provider budget; run `uv run load-models` to populate the cache.",
+                self.model_config.embed_tokenizer_repo,
+                self.path_config.hf_hub_cache,
+                self.embed_char_token_ratio,
+                self.embed_ctx_tokens,
+                self.embed_ctx_safety_margin,
+            )
+        else:
+            logger.info(
+                "Embedding tokenizer loaded from {} (repo={!r}) — using "
+                "exact token counts for pre-embed fit checks.",
+                self.path_config.hf_hub_cache,
+                self.model_config.embed_tokenizer_repo,
+            )
 
         # --- Named Entity Recognition (NER) config ---
         self.ner_enabled = self.ner_config.enabled
@@ -1424,10 +1485,11 @@ class RAG:
             embedding_kwargs: dict[str, Any] = {
                 "api_base": self.openai_api_base,
                 "api_key": self.openai_api_key,
-                "max_retries": self.openai_max_retries,
+                "embed_batch_size": self.embed_batch_size,
+                "max_retries": self.embed_max_retries,
                 "model_name": self.embed_model_id,
                 "reuse_client": False,
-                "timeout": self.openai_timeout,
+                "timeout": self.embed_timeout_seconds,
             }
             if self.openai_dimensions is not None:
                 embedding_kwargs["dimensions"] = self.openai_dimensions
@@ -1950,7 +2012,64 @@ class RAG:
             budget_tokens=self.embed_ctx_tokens,
             char_token_ratio=self.embed_char_token_ratio,
             safety_margin=self.embed_ctx_safety_margin,
+            token_counter=self._embed_token_counter,
         )
+
+    def _assert_embed_payloads_fit_budget(
+        self,
+        nodes_to_embed: list[BaseNode],
+        texts_to_embed: list[str],
+    ) -> None:
+        """Guard against any embed payload slipping past the re-splitter.
+
+        Called immediately before handing the batch to the embedding
+        client. If the pre-embed re-splitter missed an input — for
+        example a downstream path constructed nodes whose
+        ``MetadataMode.EMBED`` rendering was not bounded — this check
+        raises :class:`EmbeddingInputTooLongError` with the offending
+        ``node_id`` and payload statistics instead of letting the
+        provider reject the request with a cryptic 400. The detection
+        is cheap (O(payload length)) and pays for itself the first time
+        it surfaces a regression.
+
+        Args:
+            nodes_to_embed: Nodes whose embeddings are about to be
+                requested, aligned with ``texts_to_embed``.
+            texts_to_embed: The ``MetadataMode.EMBED`` rendering each
+                node will be embedded as.
+
+        Raises:
+            EmbeddingInputTooLongError: When any payload exceeds the
+                configured embedding budget.
+        """
+        budget = effective_budget(self.embed_ctx_tokens, self.embed_ctx_safety_margin)
+        for node, text in zip(nodes_to_embed, texts_to_embed):
+            if fits_budget(
+                text,
+                budget_tokens=self.embed_ctx_tokens,
+                char_token_ratio=self.embed_char_token_ratio,
+                safety_margin=self.embed_ctx_safety_margin,
+                token_counter=self._embed_token_counter,
+            ):
+                continue
+            payload_tokens = estimate_tokens(
+                text,
+                self.embed_char_token_ratio,
+                token_counter=self._embed_token_counter,
+            )
+            counter_state = (
+                "tokenizer" if self._embed_token_counter is not None else "char-ratio"
+            )
+            raise EmbeddingInputTooLongError(
+                "Pre-embed safety net caught an oversize payload: "
+                f"node_id={node.node_id} embed_payload_chars={len(text)} "
+                f"estimated_tokens={payload_tokens} ({counter_state}) "
+                f"budget={budget} "
+                f"configured_ctx_tokens={self.embed_ctx_tokens} "
+                f"safety_margin={self.embed_ctx_safety_margin} — the "
+                "re-splitter missed this node; check node metadata size or "
+                "raise EMBED_CTX_TOKENS."
+            )
 
     def _prepare_vector_nodes_for_insert(
         self,
@@ -2002,12 +2121,28 @@ class RAG:
         if not nodes_to_embed:
             return vector_nodes, docstore_nodes
 
-        embeddings = cast(
-            list[list[float]],
-            get_embeddings(texts_to_embed),
-        )
-        for node, embedding in zip(nodes_to_embed, embeddings):
-            node.embedding = embedding
+        # Slice by ``embed_batch_size`` so each HTTP POST respects the
+        # operator's per-request ceiling. The llama_index
+        # ``embed_batch_size`` knob only fires inside
+        # ``get_text_embedding_batch``; our strict wrapper bypasses it,
+        # so the RAG layer must chunk explicitly. The safety net runs
+        # per chunk — an oversize payload slipping through the
+        # re-splitter raises BEFORE its chunk hits the provider, not
+        # after 4 minutes of stalled batch processing. Mirrors the
+        # slice idiom in :meth:`_chunk_nodes`; kept inline because we
+        # need parallel slicing of ``nodes_to_embed`` and
+        # ``texts_to_embed`` in lockstep.
+        batch_size = max(1, self.embed_batch_size)
+        for start in range(0, len(nodes_to_embed), batch_size):
+            chunk_nodes = nodes_to_embed[start : start + batch_size]
+            chunk_texts = texts_to_embed[start : start + batch_size]
+            self._assert_embed_payloads_fit_budget(chunk_nodes, chunk_texts)
+            chunk_embeddings = cast(
+                list[list[float]],
+                get_embeddings(chunk_texts),
+            )
+            for node, embedding in zip(chunk_nodes, chunk_embeddings):
+                node.embedding = embedding
 
         return vector_nodes, docstore_nodes
 
@@ -2047,12 +2182,19 @@ class RAG:
         if not nodes_to_embed:
             return vector_nodes, docstore_nodes
 
-        embeddings = cast(
-            list[list[float]],
-            await aget_embeddings(texts_to_embed),
-        )
-        for node, embedding in zip(nodes_to_embed, embeddings):
-            node.embedding = embedding
+        # See the sync twin for why this chunking lives in the RAG
+        # layer and not inside ``aget_text_embeddings_strict``.
+        batch_size = max(1, self.embed_batch_size)
+        for start in range(0, len(nodes_to_embed), batch_size):
+            chunk_nodes = nodes_to_embed[start : start + batch_size]
+            chunk_texts = texts_to_embed[start : start + batch_size]
+            self._assert_embed_payloads_fit_budget(chunk_nodes, chunk_texts)
+            chunk_embeddings = cast(
+                list[list[float]],
+                await aget_embeddings(chunk_texts),
+            )
+            for node, embedding in zip(chunk_nodes, chunk_embeddings):
+                node.embedding = embedding
 
         return vector_nodes, docstore_nodes
 
@@ -3882,14 +4024,24 @@ class RAG:
 
     # --- Collection discovery / selection ---
     def list_collections(self) -> list[str]:
-        """Return a list of collection names via the Qdrant API.
+        """Return user-selectable collection names via the Qdrant API.
+
+        Collections whose names end with any suffix in
+        :data:`HIDDEN_COLLECTION_SUFFIXES` are auxiliary / internal
+        (e.g. ``_images`` image-embedding companions, ``_dockv``
+        docstore side-effects) and are excluded so they never surface
+        in the UI selector or pass :meth:`select_collection` validation.
 
         Returns:
-            list[str]: A list of collection names.
+            list[str]: Sorted list of user-selectable collection names.
         """
         try:
             resp = self.qdrant_client.get_collections()
-            names = [c.name for c in getattr(resp, "collections", []) or []]
+            names = [
+                c.name
+                for c in getattr(resp, "collections", []) or []
+                if not c.name.endswith(HIDDEN_COLLECTION_SUFFIXES)
+            ]
             if names:
                 return sorted(names)
             return []

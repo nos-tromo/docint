@@ -573,3 +573,37 @@ def test_local_openai_metadata_fallback_for_unknown_model(
     assert meta.context_window == 16384
     assert meta.num_output == 512
     assert meta.model_name == "Qwen/Qwen3.5-2B"
+
+
+# ---------------------------------------------------------------------------
+# BudgetedOpenAIEmbedding envelope forwarding
+# ---------------------------------------------------------------------------
+
+
+def test_budgeted_embedding_forwards_timeout_max_retries_and_embed_batch_size() -> None:
+    """The embed wrapper must forward envelope kwargs to its parent.
+
+    ``timeout``, ``max_retries``, and ``embed_batch_size`` are the three
+    fields that control the embed client's request envelope (how long
+    it waits, how many times it retries, how many inputs it packs per
+    call). They must land on the parent ``OpenAIEmbedding`` model so
+    the HTTP client honors them at call time — otherwise the new
+    ``EmbeddingConfig`` values would be ignored and the wrapper would
+    keep using the llama_index defaults.
+    """
+    from docint.utils.openai_cfg import BudgetedOpenAIEmbedding
+
+    embedding = BudgetedOpenAIEmbedding(
+        model_name="BAAI/bge-m3",
+        api_key="sk-test",
+        api_base="http://localhost:11434/v1",
+        reuse_client=False,
+        context_window=8192,
+        timeout=1800.0,
+        max_retries=1,
+        embed_batch_size=16,
+    )
+
+    assert embedding.timeout == 1800.0
+    assert embedding.max_retries == 1
+    assert embedding.embed_batch_size == 16

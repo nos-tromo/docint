@@ -178,6 +178,13 @@ limit, or when a source document has a single very long paragraph.
 (`resplit_nodes_for_embedding`) right before the embedding API is
 called:
 
+Token counting uses the embedding model's authoritative tokenizer when
+available. The tokenizer snapshot is fetched from the HF cache by
+`docint/utils/embedding_tokenizer.py::build_embedding_token_counter()`
+during RAG initialization. When the snapshot is missing or the
+tokenizer repo is empty (e.g. OpenAI provider), a WARNING is logged and
+the code falls back to the `EMBED_CHAR_TOKEN_RATIO` heuristic.
+
 - Within-budget chunks pass through unchanged.
 - Oversize chunks are split into sub-nodes via llama_index's
   `SentenceSplitter` at `chunk_size = EMBED_CTX_TOKENS *
@@ -194,8 +201,8 @@ called:
   operator can diagnose the source rather than store a lossy
   prefix-only vector.
 
-Tune the pass via `EMBED_CTX_TOKENS`, `EMBED_CHAR_TOKEN_RATIO`, and
-`EMBED_CTX_SAFETY_MARGIN` — see
+Tune the pass via `EMBED_TOKENIZER_REPO`, `EMBED_CTX_TOKENS`,
+`EMBED_CHAR_TOKEN_RATIO`, and `EMBED_CTX_SAFETY_MARGIN` — see
 [configuration.md](configuration.md#embedding--embeddingconfig).
 
 ### Stale embeddings

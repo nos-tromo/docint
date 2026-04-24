@@ -54,6 +54,7 @@ Streamlit UI (docint/ui/) → FastAPI (docint/core/api.py) → AgentOrchestrator
 - `docint/core/state/` — Session management (SQLite-backed) and citation handling
 - `docint/core/ner.py` — Named entity recognition (GLiNER), entity clustering, graph building
 - `docint/utils/embed_chunking.py` — Pre-embed re-chunker: bounds oversize chunks to the embedding budget and links sub-nodes back to their parent via `hier.parent_id`
+- `docint/utils/embedding_tokenizer.py` — Loads the embedding model's tokenizer from the HF cache for accurate token counting during pre-embed re-chunking; falls back to char-ratio when unavailable
 - `docint/utils/env_cfg.py` — **All** environment-backed configuration dataclasses live here (see below)
 
 ## Key Conventions
@@ -65,3 +66,4 @@ Streamlit UI (docint/ui/) → FastAPI (docint/core/api.py) → AgentOrchestrator
 - **Pre-commit is mandatory**: always run `uv run pre-commit run --all-files` before finishing work (ruff check, ruff format, mypy).
 - Prefer incremental, focused commits. When changes affect both API and UI, update `README.md`.
 - Streamlit UI pages live in `docint/ui/`; keep business logic in the API/agents layer, not in UI code.
+- **Hidden collection suffixes**: `docint/core/rag.py` defines `HIDDEN_COLLECTION_SUFFIXES` (currently `("_images", "_dockv")`). `RAG.list_collections()` filters these out, which transitively hides them from `/collections/list` and makes `select_collection()` reject them. Extend the tuple rather than adding filters at the UI layer.

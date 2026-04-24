@@ -9,50 +9,84 @@ the embedding call. The sub-nodes link back to their parent via
 ``hier.parent_id`` so the existing query-time parent-context-attachment
 postprocessor can reconstruct the original content for answer synthesis.
 
-Design constraints:
+Token counting:
 
-- **Centralize ML workloads at the provider**: we deliberately avoid
-  loading a tokenizer in the worker to count tokens exactly. Instead,
-  a conservative character/token ratio (``3.5`` chars/token by default)
-  under-counts tokens for mixed-language text, and a configurable
-  safety margin reserves slop for BOS/EOS and estimator error.
-- **Loud-on-failure**: a node that cannot be reduced below the budget
-  raises :class:`docint.utils.openai_cfg.EmbeddingInputTooLongError`
-  with the offending ``node_id`` and estimated token count so operators
-  can diagnose the source rather than quietly drop data.
+- **Primary (authoritative)**: a ``token_counter: Callable[[str], list[int]]``
+  built from the embedding model's real tokenizer (see
+  :func:`docint.utils.embedding_tokenizer.build_embedding_token_counter`).
+  When supplied, this counter is used end-to-end: for parent fit checks,
+  for sub-node fit checks, and as the ``tokenizer`` kwarg of the inner
+  :class:`~llama_index.core.node_parser.SentenceSplitter` so chunk
+  sizing and fit checking share one definition of a token. The counter
+  is loaded from the local HF cache populated by ``uv run load-models``
+  and never reaches the network.
+- **Fallback**: when no counter is supplied (e.g. the cache is empty or
+  the operator runs without ``MODEL_EMBED``), a char/token ratio
+  (default ``3.5``) with a configurable safety margin acts as a
+  last-resort estimator. It is inherently language-biased and should
+  not be relied on for multilingual corpora.
+
+Loud-on-failure: a node that cannot be reduced below the budget raises
+:class:`docint.utils.openai_cfg.EmbeddingInputTooLongError` with the
+offending ``node_id`` and estimated token count so operators can
+diagnose the source rather than quietly drop data.
 """
 
 from __future__ import annotations
 
 import math
 import uuid
+from collections.abc import Callable
 from typing import cast
 
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.core.schema import BaseNode, NodeRelationship, TextNode
+from llama_index.core.schema import BaseNode, MetadataMode, NodeRelationship, TextNode
 
 from docint.utils.openai_cfg import EmbeddingInputTooLongError
 
+TokenCounter = Callable[[str], list[int]]
 
-def estimate_tokens(text: str, char_token_ratio: float = 3.5) -> int:
-    """Conservatively estimate the number of tokens in *text*.
 
-    The default ratio of ``3.5`` characters/token under-counts tokens
-    for English-only text (which typically averages ~4 chars/token)
-    but stays close to the realistic upper bound for mixed-language
-    content including CJK scripts where a single character can be
-    multiple tokens. Under-counting is safer here: every downstream
-    budget check treats the estimate as the true token count, so an
-    under-count lowers the effective cap and never admits an oversize
-    payload by accident.
+def estimate_tokens(
+    text: str,
+    char_token_ratio: float = 3.5,
+    *,
+    token_counter: TokenCounter | None = None,
+) -> int:
+    """Return the estimated number of tokens in *text*.
+
+    When *token_counter* is supplied it is authoritative: the function
+    returns ``len(token_counter(text))``, matching what the embedding
+    provider will see on the wire (BOS/EOS included when the counter
+    encodes with special tokens). This is the correct path for
+    multilingual content where no char/token ratio is accurate.
+
+    When *token_counter* is ``None`` the function falls back to a
+    conservative char/token ratio (default ``3.5``) with a safer
+    intent: every downstream budget check treats the estimate as the
+    true token count, so the ratio is only reliable for English-like
+    text. Operators should treat the fallback as a degraded state and
+    populate the HF tokenizer cache via ``uv run load-models``.
 
     Args:
         text: Input string to measure.
-        char_token_ratio: Characters per token. Must be positive.
+        char_token_ratio: Characters per token for the fallback
+            estimator. Must be positive.
+        token_counter: Optional callable that returns the list of token
+            ids for *text* (e.g. the bge-m3 ``AutoTokenizer`` adapter
+            from :mod:`docint.utils.embedding_tokenizer`). When
+            supplied, overrides *char_token_ratio*.
 
     Returns:
-        Upper-bound estimated token count (ceiling of ``len(text) / char_token_ratio``).
+        Estimated token count — authoritative when *token_counter* is
+        supplied, char-ratio upper-bound otherwise.
+
+    Raises:
+        ValueError: When *token_counter* is ``None`` and
+            *char_token_ratio* is non-positive.
     """
+    if token_counter is not None:
+        return len(token_counter(text))
     if char_token_ratio <= 0:
         raise ValueError("char_token_ratio must be positive")
     return math.ceil(len(text) / char_token_ratio)
@@ -83,6 +117,7 @@ def fits_budget(
     budget_tokens: int,
     char_token_ratio: float = 3.5,
     safety_margin: float = 0.95,
+    token_counter: TokenCounter | None = None,
 ) -> bool:
     """Return whether *text* fits within the effective embedding budget.
 
@@ -93,13 +128,136 @@ def fits_budget(
             :func:`estimate_tokens`).
         safety_margin: Budget reservation fraction (see
             :func:`effective_budget`).
+        token_counter: Optional authoritative token counter (see
+            :func:`estimate_tokens`). When supplied it is used instead
+            of the char-ratio estimator.
 
     Returns:
         ``True`` when the estimated token count is at or below the
         effective budget, ``False`` otherwise.
     """
-    return estimate_tokens(text, char_token_ratio) <= effective_budget(
-        budget_tokens, safety_margin
+    return estimate_tokens(
+        text, char_token_ratio, token_counter=token_counter
+    ) <= effective_budget(budget_tokens, safety_margin)
+
+
+def _build_probe_sub_metadata(parent: BaseNode) -> dict[str, object]:
+    """Build the metadata dict a prospective sub-node will carry.
+
+    Mirrors the shape produced by :func:`_build_sub_node` so callers can
+    estimate the per-sub-node ``MetadataMode.EMBED`` overhead (which is
+    dominated by the serialized metadata block, not the text payload).
+    ``split_part_index`` and ``split_total_parts`` are set to pessimistic
+    stand-ins so the rendered key/value widths match the real sub-node
+    to within a character or two.
+
+    Args:
+        parent: The oversize parent whose metadata will be inherited by
+            every sub-node.
+
+    Returns:
+        A metadata dict with the parent's metadata merged with the
+        split-tracking markers every sub-node receives.
+    """
+    parent_level = int(parent.metadata.get("hier.level", 2))
+    probe: dict[str, object] = dict(parent.metadata)
+    probe.update(
+        {
+            "hier.parent_id": parent.node_id,
+            "hier.level": parent_level + 1,
+            "docint_hier_type": "fine",
+            "embedding_split": True,
+            "split_part_index": 0,
+            "split_total_parts": 9999,
+        }
+    )
+    return probe
+
+
+def _estimate_sub_node_metadata_tokens(
+    parent: BaseNode,
+    *,
+    char_token_ratio: float,
+    token_counter: TokenCounter | None = None,
+) -> int:
+    """Estimate the ``MetadataMode.EMBED`` token overhead of a prospective sub-node.
+
+    Real sub-nodes built by :func:`_build_sub_node` set
+    ``excluded_embed_metadata_keys`` to every inherited metadata key, so
+    their ``MetadataMode.EMBED`` rendering contains only the chunk text
+    with no metadata block. This probe mirrors that exclusion, and in
+    practice the returned overhead is ~0 tokens (llama_index may still
+    add a few template separators).
+
+    The function is retained as a forward-compatible guard: if a future
+    sub-node construction path re-enables metadata in embed mode, this
+    measurement starts returning a non-zero value and the caller's
+    ``metadata_overhead_tokens >= effective`` short-circuit in
+    :func:`_split_parent_text` catches the case where metadata alone
+    exhausts the budget.
+
+    Args:
+        parent: The oversize parent node.
+        char_token_ratio: Characters per token estimator (matches
+            :func:`estimate_tokens`).
+
+    Returns:
+        Estimated metadata overhead in tokens (≈0 under the current
+        exclusion contract).
+    """
+    probe_metadata = _build_probe_sub_metadata(parent)
+    probe = TextNode(
+        text="",
+        metadata=probe_metadata,
+        excluded_embed_metadata_keys=list(probe_metadata.keys()),
+    )
+    return estimate_tokens(
+        probe.get_content(metadata_mode=MetadataMode.EMBED),
+        char_token_ratio,
+        token_counter=token_counter,
+    )
+
+
+def _sub_node_fits_budget(
+    chunk: str,
+    parent: BaseNode,
+    *,
+    budget_tokens: int,
+    char_token_ratio: float,
+    safety_margin: float,
+    token_counter: TokenCounter | None = None,
+) -> bool:
+    """Return whether a prospective sub-node's embed payload fits the budget.
+
+    Builds a probe :class:`TextNode` with the same metadata shape a real
+    sub-node will carry and measures its ``MetadataMode.EMBED`` rendering
+    — the same payload the embedding client sends to the provider — so
+    the fit check matches what the provider will see rather than the raw
+    chunk text alone.
+
+    Args:
+        chunk: Sub-chunk text payload.
+        parent: The oversize parent node being split.
+        budget_tokens: Raw context window size in tokens.
+        char_token_ratio: Characters per token estimator.
+        safety_margin: Budget reservation fraction.
+
+    Returns:
+        ``True`` when the rendered embed payload fits the effective
+        budget, ``False`` otherwise.
+    """
+    probe_metadata = _build_probe_sub_metadata(parent)
+    probe = TextNode(
+        text=chunk,
+        metadata=probe_metadata,
+        excluded_embed_metadata_keys=list(probe_metadata.keys()),
+    )
+    return fits_budget(
+        probe.get_content(metadata_mode=MetadataMode.EMBED),
+        budget_tokens=budget_tokens,
+        char_token_ratio=char_token_ratio,
+        safety_margin=safety_margin,
+        token_counter=token_counter,
     )
 
 
@@ -142,6 +300,7 @@ def _build_sub_node(
         id_=str(uuid.uuid4()),
         text=text,
         metadata=sub_metadata,
+        excluded_embed_metadata_keys=list(sub_metadata.keys()),
     )
     sub_node.relationships[NodeRelationship.PARENT] = parent.as_related_node_info()
     return sub_node
@@ -189,6 +348,7 @@ def _split_parent_text(
     char_token_ratio: float,
     safety_margin: float,
     sentence_splitter: SentenceSplitter | None,
+    token_counter: TokenCounter | None = None,
 ) -> list[str]:
     """Split *parent*'s text into chunks that each fit the embedding budget.
 
@@ -220,6 +380,12 @@ def _split_parent_text(
         sentence_splitter: Optional fallback splitter used only when a
             fresh :class:`SentenceSplitter` cannot be constructed for
             the pass. Never mutated.
+        token_counter: Optional authoritative token counter (see
+            :func:`estimate_tokens`). When supplied, it is used in
+            place of *char_token_ratio* for every fit check and is
+            passed as ``tokenizer`` to the inner
+            :class:`SentenceSplitter` so chunk sizing and fit checking
+            share one token definition.
 
     Returns:
         A list of text chunks that each fit the effective budget.
@@ -230,40 +396,65 @@ def _split_parent_text(
             stream longer than the budget).
     """
     effective = effective_budget(budget_tokens, safety_margin)
-    parent_text = parent.get_content()
-    parent_token_estimate = estimate_tokens(parent_text, char_token_ratio)
+    parent_raw_text = parent.get_content()
+    parent_embed_text = parent.get_content(metadata_mode=MetadataMode.EMBED)
+    parent_token_estimate = estimate_tokens(
+        parent_embed_text, char_token_ratio, token_counter=token_counter
+    )
 
-    if not _has_word_boundaries(parent_text):
+    if not _has_word_boundaries(parent_raw_text):
+        # Use the raw-text estimate (not the embed-mode one) so the
+        # diagnostic reflects the stream the whitespace guard actually
+        # inspected. The embed-mode estimate can be an order of magnitude
+        # larger for heavy-metadata nodes, which would mislead operators.
+        raw_token_estimate = estimate_tokens(
+            parent_raw_text, char_token_ratio, token_counter=token_counter
+        )
         raise EmbeddingInputTooLongError(
-            f"node_id={parent.node_id} estimated_tokens={parent_token_estimate} "
+            f"node_id={parent.node_id} estimated_tokens={raw_token_estimate} "
             f"budget={effective} — content is a single token stream larger than "
             f"the embedding budget; chunk your input further or raise EMBED_CTX_TOKENS."
         )
 
-    candidate_sizes = [effective, max(1, effective // 2)]
-    last_chunks: list[str] = [parent_text]
+    metadata_overhead_tokens = _estimate_sub_node_metadata_tokens(
+        parent,
+        char_token_ratio=char_token_ratio,
+        token_counter=token_counter,
+    )
+    if metadata_overhead_tokens >= effective:
+        raise EmbeddingInputTooLongError(
+            f"node_id={parent.node_id} metadata_tokens={metadata_overhead_tokens} "
+            f"budget={effective} — parent metadata alone exceeds the embedding "
+            f"budget; reduce node metadata or raise EMBED_CTX_TOKENS."
+        )
+    chunk_budget_tokens = max(1, effective - metadata_overhead_tokens)
+    candidate_sizes = [chunk_budget_tokens, max(1, chunk_budget_tokens // 2)]
+    last_chunks: list[str] = [parent_raw_text]
     for chunk_size in candidate_sizes:
+        splitter_kwargs: dict[str, object] = {
+            "chunk_size": chunk_size,
+            "chunk_overlap": 0,
+        }
+        if token_counter is not None:
+            splitter_kwargs["tokenizer"] = token_counter
         try:
-            splitter = SentenceSplitter(
-                chunk_size=chunk_size,
-                chunk_overlap=0,
-            )
+            splitter = SentenceSplitter(**splitter_kwargs)
         except Exception:
-            # Fall back to the caller-supplied splitter only if fresh
-            # construction fails; do not mutate the caller's instance.
             if sentence_splitter is None:
                 raise
             splitter = sentence_splitter
-        chunks = splitter.split_text(parent_text)
+        chunks = splitter.split_text(parent_raw_text)
         last_chunks = chunks
         if not chunks:
             continue
         if all(
-            fits_budget(
+            _sub_node_fits_budget(
                 chunk,
+                parent,
                 budget_tokens=budget_tokens,
                 char_token_ratio=char_token_ratio,
                 safety_margin=safety_margin,
+                token_counter=token_counter,
             )
             for chunk in chunks
         ):
@@ -271,8 +462,9 @@ def _split_parent_text(
 
     raise EmbeddingInputTooLongError(
         f"node_id={parent.node_id} estimated_tokens={parent_token_estimate} "
-        f"budget={effective} — content is a single token stream larger than "
-        f"the embedding budget; chunk your input further or raise EMBED_CTX_TOKENS "
+        f"budget={effective} metadata_tokens={metadata_overhead_tokens} — "
+        f"content is a single token stream larger than the embedding budget; "
+        f"chunk your input further or raise EMBED_CTX_TOKENS "
         f"(last_pass_chunks={len(last_chunks)})."
     )
 
@@ -284,6 +476,7 @@ def resplit_nodes_for_embedding(
     char_token_ratio: float = 3.5,
     safety_margin: float = 0.95,
     sentence_splitter: SentenceSplitter | None = None,
+    token_counter: TokenCounter | None = None,
 ) -> tuple[list[BaseNode], list[BaseNode]]:
     """Split oversize nodes into sub-nodes that fit the embedding budget.
 
@@ -322,12 +515,13 @@ def resplit_nodes_for_embedding(
     vector_nodes: list[BaseNode] = []
     docstore_nodes: list[BaseNode] = []
     for node in nodes:
-        text = node.get_content()
+        embed_payload = node.get_content(metadata_mode=MetadataMode.EMBED)
         if fits_budget(
-            text,
+            embed_payload,
             budget_tokens=budget_tokens,
             char_token_ratio=char_token_ratio,
             safety_margin=safety_margin,
+            token_counter=token_counter,
         ):
             vector_nodes.append(node)
             docstore_nodes.append(node)
@@ -339,6 +533,7 @@ def resplit_nodes_for_embedding(
             char_token_ratio=char_token_ratio,
             safety_margin=safety_margin,
             sentence_splitter=sentence_splitter,
+            token_counter=token_counter,
         )
         total_parts = len(chunks)
         sub_nodes: list[BaseNode] = []

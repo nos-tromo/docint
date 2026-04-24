@@ -48,11 +48,20 @@ payload sent to the embedding endpoint so oversize chunks are
 re-chunked by `docint/utils/embed_chunking.py` before the API call
 instead of being silently truncated.
 
+### Token counting strategy
+
+When `EMBED_TOKENIZER_REPO` is non-empty and the tokenizer snapshot exists in the HF cache (via `uv run load-models`), the pre-embed re-chunker uses the embedding model's authoritative tokenizer to count tokens. This is accurate across languages and domains (e.g. CJK, German compounds, transcripts with timestamps).
+
+When the snapshot is missing or `EMBED_TOKENIZER_REPO` is empty (e.g. OpenAI provider), the re-chunker falls back to the `EMBED_CHAR_TOKEN_RATIO` heuristic and emits a WARNING at RAG init. The char-ratio approach is inherently biased toward English and significantly under-counts token budgets for multilingual or token-dense content.
+
 | Variable | Default | Description |
 |---|---|---|
-| `EMBED_CTX_TOKENS` | `8192` (ollama / fallback) / `8191` (openai + `text-embedding-3-*`) / `CHAT_MAX_MODEL_LEN` (vllm) | Embedding context window in tokens. Must be between `256` and `32768`. |
-| `EMBED_CHAR_TOKEN_RATIO` | `3.5` | Characters-per-token estimator for mixed-language content. Under-counts tokens intentionally. |
+| `EMBED_CTX_TOKENS` | `2048` (ollama) / `8191` (openai + `text-embedding-3-*`) / `CHAT_MAX_MODEL_LEN` (vllm) / `8192` (fallback) | Embedding context window in tokens. Must match the provider's serving ceiling. Ollama's default is `num_ctx=2048`; operators who bake a custom Modelfile with `PARAMETER num_ctx 8192` can set this to `8192` to reclaim the full bge-m3 window — see `docs/deployment.md` for the `deploy/Modelfile.bge-m3` recipe. Must be between `256` and `32768`. |
+| `EMBED_CHAR_TOKEN_RATIO` | `3.5` | Characters-per-token estimator for mixed-language content (fallback when tokenizer is unavailable). Under-counts tokens intentionally to stay under budget. |
 | `EMBED_CTX_SAFETY_MARGIN` | `0.95` | Fraction of `EMBED_CTX_TOKENS` left for the payload after reserving BOS/EOS and estimator slack. Must lie in `(0, 1]`. |
+| `EMBED_TIMEOUT_SECONDS` | `1800` (ollama) / `600` (vllm) / `60` (openai) | HTTP request timeout in seconds for the embedding endpoint. Must be positive. Init-time warning logged if `timeout × (1 + max_retries) > 3600` (potential multi-hour stall). |
+| `EMBED_BATCH_SIZE` | `16` (ollama) / `64` (vllm) / `100` (openai) | Maximum number of texts sent per embedding API batch. Must be between `1` and `1024`. |
+| `EMBED_MAX_RETRIES` | `1` (ollama / vllm) / `2` (openai) | Maximum retries for transient HTTP failures on embedding requests. Must be between `0` and `10`. |
 
 > **Not the same as `OPENAI_CTX_WINDOW`.** `OPENAI_CTX_WINDOW` controls
 > the chat LLM only. It does **not** affect the embedding pipeline.
@@ -68,6 +77,7 @@ identifiers, with provider-specific fallbacks.
 | Variable | Default (by provider) | Description |
 |---|---|---|
 | `EMBED_MODEL` | `bge-m3` (ollama) / `BAAI/bge-m3` (vllm) / `text-embedding-3-small` (openai) | Dense text embedding model. |
+| `EMBED_TOKENIZER_REPO` | `BAAI/bge-m3` (ollama / vllm) / `""` (openai) | Hugging Face repository ID of the tokenizer used for offline token counting at ingestion time. Empty string for providers (e.g. `openai`) where the embedding endpoint handles tokenization. Snapshot must be in the HF cache; run `uv run load-models` to populate it. |
 | `SPARSE_MODEL` | `Qdrant/all_miniLM_L6_v2_with_attentions` (ollama) / `BAAI/bge-m3` (vllm) | Sparse retrieval model. |
 | `TEXT_MODEL` | `gpt-oss:20b` (ollama) / `Qwen/Qwen3.5-2B` (vllm) / `gpt-4o` (openai) | Chat / generation model. |
 | `VISION_MODEL` | `qwen3.5:9b` (ollama) / `Qwen/Qwen3.5-2B` (vllm) / `gpt-4o` (openai) | Vision-OCR model. |

@@ -226,10 +226,19 @@ def main() -> None:
     )
 
     # Hugging Face
-    for model_id, kw in [
+    hf_assets: list[tuple[str, str]] = [
         (model_config.sparse_model, "sparse"),
         (model_config.rerank_model, "rerank"),
-    ]:
+    ]
+    # Worker-side embedding tokenizer (ships with docint regardless of
+    # inference provider — used for offline token counting before the
+    # provider sees the request). Skipped when the provider tokenizes
+    # server-side (e.g. openai) and the repo default is therefore empty.
+    embed_tokenizer_repo = getattr(model_config, "embed_tokenizer_repo", "")
+    if embed_tokenizer_repo:
+        hf_assets.append((embed_tokenizer_repo, "embed-tokenizer"))
+
+    for model_id, kw in hf_assets:
         load_hf_model(
             model_id=model_id,
             cache_folder=path_config.hf_hub_cache,

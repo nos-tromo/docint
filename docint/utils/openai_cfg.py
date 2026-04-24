@@ -178,24 +178,49 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
             or ("input length exceeds" in message and "context length" in message)
         )
 
-    def _raise_budget_overflow(self, exc: Exception) -> EmbeddingInputTooLongError:
+    def _raise_budget_overflow(
+        self,
+        exc: Exception,
+        *,
+        texts: list[str] | None = None,
+    ) -> EmbeddingInputTooLongError:
         """Build a diagnostic ``EmbeddingInputTooLongError`` from *exc*.
+
+        Ollama reports context overflow without token counts (so
+        ``provider_input_tokens`` ends up ``None``), which makes the raw
+        exception difficult to correlate with the offending batch. When
+        the caller supplies the embed-batch texts, this helper records
+        the batch size, the longest payload, and the total character
+        count so operators can pinpoint the slipped input without
+        re-deriving the batch.
 
         Args:
             exc (Exception): Provider exception that tripped the
                 context-limit detector.
+            texts (list[str] | None): Embed-batch texts the caller was
+                trying to embed. Optional — when omitted, the error
+                message falls back to the provider-level detail only.
 
         Returns:
             EmbeddingInputTooLongError: Ready to be raised by the caller.
         """
         model_limit, input_tokens = self._extract_context_limit_details(str(exc))
+        batch_stats = ""
+        if texts:
+            lens = [len(t) for t in texts]
+            batch_stats = (
+                f", batch_size={len(texts)}"
+                f", max_text_chars={max(lens)}"
+                f", total_chars={sum(lens)}"
+            )
         return EmbeddingInputTooLongError(
             "Embedding input exceeded context budget: "
             f"configured={self._context_window}, "
             f"provider_limit={model_limit}, "
-            f"provider_input_tokens={input_tokens}. "
-            "The pre-embed re-splitter missed this input — check "
-            "EMBED_CTX_TOKENS vs your ollama num_ctx."
+            f"provider_input_tokens={input_tokens}{batch_stats}. "
+            "Lower EMBED_CTX_TOKENS to match the provider's serving "
+            "ceiling, or raise ollama's num_ctx via a Modelfile "
+            "(PARAMETER num_ctx N) — see docs/deployment.md."
         )
 
     def get_text_embeddings_strict(self, texts: list[str]) -> list[list[float]]:
@@ -216,7 +241,7 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
         except Exception as exc:
             if not self._is_context_limit_error(exc):
                 raise
-            raise self._raise_budget_overflow(exc) from exc
+            raise self._raise_budget_overflow(exc, texts=texts) from exc
 
     async def aget_text_embeddings_strict(self, texts: list[str]) -> list[list[float]]:
         """Async variant of :meth:`get_text_embeddings_strict`.
@@ -236,7 +261,7 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
         except Exception as exc:
             if not self._is_context_limit_error(exc):
                 raise
-            raise self._raise_budget_overflow(exc) from exc
+            raise self._raise_budget_overflow(exc, texts=texts) from exc
 
     def _get_text_embeddings(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts, raising loudly on context overflow.
@@ -256,7 +281,7 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
         except Exception as exc:
             if not self._is_context_limit_error(exc):
                 raise
-            raise self._raise_budget_overflow(exc) from exc
+            raise self._raise_budget_overflow(exc, texts=texts) from exc
 
     async def _aget_text_embeddings(self, texts: list[str]) -> list[list[float]]:
         """Async batch embedding that raises loudly on context overflow.
@@ -276,7 +301,7 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
         except Exception as exc:
             if not self._is_context_limit_error(exc):
                 raise
-            raise self._raise_budget_overflow(exc) from exc
+            raise self._raise_budget_overflow(exc, texts=texts) from exc
 
 
 def get_openai_reasoning_effort(
