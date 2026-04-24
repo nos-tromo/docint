@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import sqlite3
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -10,6 +11,7 @@ from typing import Any
 
 import pytest
 
+import docint.core.storage.sqlite_kvstore as sqlite_kvstore
 from docint.core.storage.sqlite_kvstore import SQLiteKVStore
 
 
@@ -47,6 +49,57 @@ def test_get_missing_key(store: SQLiteKVStore) -> None:
         store: A fresh ``SQLiteKVStore`` fixture instance.
     """
     assert store.get("nonexistent") is None
+
+
+def test_put_coerces_datetime_time_value(
+    store: SQLiteKVStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise the sink-side ``_json_default`` fallback for ``put``.
+
+    The primary fix lives in :mod:`docint.core.readers.tables` where
+    ``sanitize_for_json`` scrubs metadata before ``Document``
+    construction. This test covers the defense-in-depth safety net at
+    the storage sink: a caller that somehow bypasses the source-side
+    sanitizer and hands a raw ``datetime.time`` to ``put`` must still
+    succeed, with the value coerced to an ISO string at JSON-dump time.
+
+    Args:
+        store: A fresh ``SQLiteKVStore`` fixture instance.
+        monkeypatch: Pytest monkeypatch fixture, used to reset the
+            one-shot warning guard so repeated test runs in the same
+            process still exercise the warning emission path.
+    """
+    monkeypatch.setattr(sqlite_kvstore, "_WARNED_COERCED_TYPES", set())
+    store.put("k1", {"t": datetime.time(8, 30)})
+    assert store.get("k1") == {"t": "08:30:00"}
+
+
+def test_put_all_coerces_datetime_time_value(
+    store: SQLiteKVStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise the sink-side ``_json_default`` fallback for ``put_all``.
+
+    Mirrors :func:`test_put_coerces_datetime_time_value` for the batch
+    path that :meth:`docint.core.rag.RAGEngine._persist_nodes` actually
+    calls during ingestion. Like its sibling, this test guards the sink
+    safety net, not the source-side sanitizer applied by the tables
+    reader.
+
+    Args:
+        store: A fresh ``SQLiteKVStore`` fixture instance.
+        monkeypatch: Pytest monkeypatch fixture, used to reset the
+            one-shot warning guard.
+    """
+    monkeypatch.setattr(sqlite_kvstore, "_WARNED_COERCED_TYPES", set())
+    pairs = [
+        ("a", {"t": datetime.time(9, 0)}),
+        ("b", {"t": datetime.time(10, 15, 30)}),
+    ]
+    store.put_all(pairs)
+    assert store.get_all() == {
+        "a": {"t": "09:00:00"},
+        "b": {"t": "10:15:30"},
+    }
 
 
 def test_put_overwrites(store: SQLiteKVStore) -> None:

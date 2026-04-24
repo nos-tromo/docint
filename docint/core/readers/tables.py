@@ -13,6 +13,7 @@ from llama_index.core.readers.base import BaseReader
 from loguru import logger
 
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
+from docint.utils.metadata_sanitize import sanitize_for_json
 from docint.utils.mimetype import get_mimetype
 
 RowFilter = Callable[[dict], bool]
@@ -542,6 +543,13 @@ class TableReader(BaseReader):
                 metadata[k] = row_dict.get(k, "")
 
             ensure_file_hash(metadata, file_hash=file_hash)
+            # Pandas emits non-JSON-serializable scalars (e.g. datetime.time
+            # from Excel time cells, pd.Timestamp, Decimal, numpy scalars)
+            # which would later crash DocStore persistence inside
+            # ``json.dumps``. Sanitize once before Document construction so
+            # every downstream consumer — node parsers, embedding clients,
+            # and the SQLiteKVStore sink — sees only JSON-safe leaves.
+            metadata = sanitize_for_json(metadata)
 
             # Only set doc_id if present; passing None triggers Pydantic validation in some versions
             if effective_id_col and row_dict.get(effective_id_col) is not None:

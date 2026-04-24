@@ -16,7 +16,11 @@ from typing import Any, Callable, TypeVar
 from llama_index.core.storage.kvstore.types import DEFAULT_COLLECTION, BaseKVStore
 from loguru import logger
 
+from docint.utils.metadata_sanitize import sanitize_for_json
+
 T = TypeVar("T")
+
+_WARNED_COERCED_TYPES: set[str] = set()
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS kv_data (
@@ -26,6 +30,45 @@ CREATE TABLE IF NOT EXISTS kv_data (
     PRIMARY KEY (collection, key)
 );
 """
+
+
+def _json_default(value: Any) -> Any:
+    """JSON encoder fallback for metadata leaves that slip past source sanitation.
+
+    Source readers (notably :mod:`docint.core.readers.tables`) already call
+    :func:`~docint.utils.metadata_sanitize.sanitize_for_json` on every
+    ``Document.metadata`` before emission. This callable is the last line of
+    defense for non-JSON-safe leaves emitted by a future reader or third-
+    party code path that forgets to sanitize. It coerces the offending
+    value to a JSON-compatible primitive and warns **once per unseen type**
+    so operators can trace the leak back to its source without flooding
+    the logs on every row.
+
+    Args:
+        value: A leaf that :class:`json.JSONEncoder` could not natively
+            serialize.
+
+    Returns:
+        A JSON-compatible replacement produced by
+        :func:`sanitize_for_json`.
+    """
+    # check-then-add is intentionally racy under concurrent first-contact on
+    # the same novel type — worst case is a duplicate warning line, never a
+    # crash or a corrupted stored value.
+    #
+    # Re-entry safety: ``sanitize_for_json``'s terminal fallback is
+    # ``str(value)``, so this callable always returns JSON-safe leaves (or
+    # containers whose leaves are already JSON-safe), and the JSON encoder
+    # never re-invokes ``default`` on the result.
+    type_name = type(value).__name__
+    if type_name not in _WARNED_COERCED_TYPES:
+        _WARNED_COERCED_TYPES.add(type_name)
+        logger.warning(
+            "SQLiteKVStore coerced non-JSON metadata type {} via sanitize_for_json — "
+            "fix the source reader to pre-sanitize metadata.",
+            type_name,
+        )
+    return sanitize_for_json(value)
 
 
 def _is_locked_db_error(exc: sqlite3.OperationalError) -> bool:
@@ -166,7 +209,7 @@ class SQLiteKVStore(BaseKVStore):
         def _do_put() -> None:
             self._conn.execute(
                 "INSERT OR REPLACE INTO kv_data (collection, key, val) VALUES (?, ?, ?)",
-                (collection, key, json.dumps(val)),
+                (collection, key, json.dumps(val, default=_json_default)),
             )
             self._conn.commit()
 
@@ -186,7 +229,9 @@ class SQLiteKVStore(BaseKVStore):
             batch_size: Batch size override.
         """
         effective_batch_size = batch_size or self.batch_size
-        rows = [(collection, k, json.dumps(v)) for k, v in kv_pairs]
+        rows = [
+            (collection, k, json.dumps(v, default=_json_default)) for k, v in kv_pairs
+        ]
 
         def _do_put_all() -> None:
             for i in range(0, len(rows), effective_batch_size):
