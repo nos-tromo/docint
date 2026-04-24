@@ -110,6 +110,75 @@ Loaded by `load_retrieval_env()` (`env_cfg.py:967`).
 | `CHAT_RESPONSE_MODE` | `auto` | Response-synthesiser mode: `auto`, `compact`, `refine`. |
 | `RERANK_USE_FP16` | `false` | Use FP16 for the reranker. |
 | `PARENT_CONTEXT_RETRIEVAL_ENABLED` | `true` | Expand fine chunks to their hierarchical parent context when available. |
+| `PARENT_CONTEXT_SAFETY_MARGIN` | `0.95` | Fraction of `OPENAI_CTX_WINDOW` the parent-context packer may consume before windowing. Clamped to `(0, 1]`; values outside that range fall back to `0.95` with a warning. |
+
+### Parent-context windowing
+
+`PARENT_CONTEXT_RETRIEVAL_ENABLED=true` expands every reranked fine
+sub-node hit to its coarse parent (kept intact in the docstore by the
+pre-embed re-splitter in `docint/utils/embed_chunking.py`). To keep
+arbitrarily large parents from overflowing the chat context, the
+postprocessor packs hits greedily against a budget derived from
+`OPENAI_CTX_WINDOW × PARENT_CONTEXT_SAFETY_MARGIN` minus the rendered
+prompt template and `OPENAI_NUM_OUTPUT`. Parents that fit are emitted
+verbatim; parents that do not fit are emitted as a **windowed slice**
+centred on the matched sub-node, tagged with
+`parent_context_windowed=True`, `parent_full_chars=<N>`, and
+`window_chars=<M>` in metadata. The parent's `node_id` is preserved so
+citations still resolve to the original source. `grep
+parent_context_windowed` in the logs surfaces when windowing fires and
+at what ratio.
+
+If windowing fires frequently and you want the full parent back,
+raise the chat context window at the provider. For Ollama, a
+Modelfile override is the cleanest path — mirror the
+`deploy/Modelfile.bge-m3` pattern already used for embeddings:
+
+```text
+FROM gemma4:31b-cloud
+PARAMETER num_ctx 32768
+```
+
+`ollama create docint-gemma4 -f deploy/Modelfile.gemma4.example`, set
+`OPENAI_MODEL=docint-gemma4` and `OPENAI_CTX_WINDOW=32768`, and the
+packer automatically scales up.
+
+#### What metadata reaches the chat LLM
+
+The postprocessor adds every non-whitelisted metadata key to each
+emitted node's `excluded_llm_metadata_keys`, so the chat prompt only
+carries a tight set of locator fields: `filename`, `origin`, `page` /
+`page_number`, `start_ts` / `end_ts` / `speaker` / `sentence_index`,
+`table` (containing `row_index`), `reference_metadata`, and
+`docint_doc_kind`. Everything else (`entities`, `relations`,
+`llm_description`, `file_hash`, per-column row dumps, internal
+hierarchical / ingest markers) stays in `node.metadata` on the
+docstore-side parent but is hidden from the LLM prompt.
+
+Whitelisted values are additionally clamped to
+1024 characters and stripped of `\n` / `\r` / `\t` runs before
+emission. This bounds a single bulky field (e.g. a social-table
+`reference_mapping` column that happens to carry long prose) and
+neutralises ingested-content prompt-injection attempts that use
+newline-heavy formatting to forge chat-role markers inside
+`{metadata_str}\n\n{content}`. The clamped copy is visible in
+`response.source_nodes`; the full original value remains on the
+docstore parent for graph-building and entity analysis consumers that
+read it directly.
+
+The `origin` sub-dict is additionally filtered to `filename`,
+`mimetype`, `filetype`, and `page_number` only — deployment-internal
+keys (absolute `file_path`, tenant IDs) that a future reader might
+add cannot silently leak into the LLM prompt or upstream
+provider-retained logs.
+
+**Trust boundary**: ingested document content (the `node.text` itself,
+plus whitelisted metadata values that copy through from source rows)
+is treated as untrusted input to the chat LLM. Prompt-injection
+payloads embedded in ingested CSVs / transcripts will reach the
+model. The clamp + control-char scrub closes a narrow set of forged-
+formatting vectors but is not a substitute for reviewing ingest
+sources you do not control.
 
 ## Pipeline — `PipelineConfig`
 

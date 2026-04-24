@@ -143,7 +143,5 @@ def sanitize_for_json(value: Any) -> Any:
     type_name = type(value).__name__
     if type_name not in _LOGGED_UNKNOWN_TYPES:
         _LOGGED_UNKNOWN_TYPES.add(type_name)
-        logger.debug(
-            "sanitize_for_json: coerced unknown type {} via str()", type_name
-        )
+        logger.debug("sanitize_for_json: coerced unknown type {} via str()", type_name)
     return str(value)

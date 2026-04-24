@@ -61,9 +61,7 @@ def test_float_nan_and_inf_become_none() -> None:
 def test_datetime_time_uses_isoformat() -> None:
     """``datetime.time`` becomes its ``isoformat`` string (HH:MM:SS)."""
     assert sanitize_for_json(datetime.time(8, 30)) == "08:30:00"
-    assert (
-        sanitize_for_json(datetime.time(23, 59, 59, 500000)) == "23:59:59.500000"
-    )
+    assert sanitize_for_json(datetime.time(23, 59, 59, 500000)) == "23:59:59.500000"
 
 
 def test_datetime_date_uses_isoformat() -> None:

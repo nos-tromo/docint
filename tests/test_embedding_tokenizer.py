@@ -91,9 +91,7 @@ class _StubTokenizer:
         )
         self.calls: list[dict[str, Any]] = []
 
-    def encode(
-        self, text: str, add_special_tokens: bool = True
-    ) -> list[int]:
+    def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
         """Record the call and return the configured id list.
 
         Args:
@@ -103,9 +101,7 @@ class _StubTokenizer:
         Returns:
             The configured id list for the requested mode.
         """
-        self.calls.append(
-            {"text": text, "add_special_tokens": add_special_tokens}
-        )
+        self.calls.append({"text": text, "add_special_tokens": add_special_tokens})
         if add_special_tokens:
             return list(self.ids_with_special)
         return list(self.ids_without_special)
@@ -221,9 +217,9 @@ def test_build_token_counter_returns_none_when_autotokenizer_raises(
     )
 
     assert result is None
-    assert any(
-        record.levelno >= logging.WARNING for record in loguru_caplog.records
-    ), "expected at least one warning record"
+    assert any(record.levelno >= logging.WARNING for record in loguru_caplog.records), (
+        "expected at least one warning record"
+    )
 
 
 def test_token_counter_includes_special_tokens(
@@ -260,9 +256,7 @@ def test_token_counter_includes_special_tokens(
     assert counter is not None
     ids = counter("any text")
 
-    assert len(ids) == 5, (
-        "token counter must return the add_special_tokens=True length"
-    )
+    assert len(ids) == 5, "token counter must return the add_special_tokens=True length"
     assert stub.calls, "tokenizer.encode was never called"
     assert stub.calls[-1]["add_special_tokens"] is True, (
         f"expected add_special_tokens=True, got {stub.calls[-1]!r}"

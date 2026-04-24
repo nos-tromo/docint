@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import gc
 import hashlib
 import json
@@ -133,6 +134,114 @@ SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
 SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
 SUMMARY_CACHE_REVISION_KEY = "summary_revision"
 HIDDEN_COLLECTION_SUFFIXES: tuple[str, ...] = ("_images", "_dockv")
+
+# Metadata keys that stay visible to the chat LLM when the synthesizer
+# renders ``node.get_content(MetadataMode.LLM)``. Everything *not* in this
+# set is added to each emitted node's ``excluded_llm_metadata_keys`` so
+# the prompt only carries the matched text plus a tiny set of grounding
+# hints. Downstream consumers — citation rendering
+# (``_source_from_node_with_score``), the UI analysis section, and
+# graph-building — read ``node.metadata`` directly as a dict and are
+# unaffected; this whitelist only gates prompt assembly.
+#
+# Each key is kept because it provides a *locator* the LLM cannot infer
+# from ``node.text`` alone. Mapping by source type:
+#
+# * PDFs / page-level pipeline: ``filename``, ``origin``, ``page``,
+#   ``page_number``.
+# * Markdown / plain text: ``filename``, ``origin``.
+# * Nextext transcripts: ``start_ts``, ``end_ts``, ``speaker``,
+#   ``sentence_index`` (position within the transcript).
+# * CSV / XLSX / Parquet tables: ``table`` (nested dict holding
+#   ``row_index`` / ``original_row_index``, along with a short list of
+#   column names — bounded to ~hundreds of characters per hit).
+# * Social / reference-mapped tables: ``reference_metadata`` (compact
+#   structured locator: ``type``, ``uuid``, ``author``, ``network``, etc.
+#   Designed to be prompt-friendly by construction).
+# * All readers: ``docint_doc_kind`` — labels the source shape
+#   (``transcript_segment``, ``table_row``, ...) so the LLM frames
+#   citations correctly.
+#
+# Explicitly excluded via absence: ``entities`` / ``relations`` (NER
+# output, can exceed 60 KB), per-column row dumps in ``tables.py``
+# (``metadata[col] = row_dict.get(col, "")`` — redundant with
+# ``node.text``), ``file_hash``, ``hier.*``, ``embedding_split``,
+# ``split_part_*``, ``whisper_task``, ``source_file_hash``,
+# ``llm_description`` / ``llm_tags`` (image caption / tagging output —
+# bulky), pipeline artefacts, and our own
+# ``parent_context_windowed`` / ``parent_full_chars`` / ``window_chars``
+# debug markers. Any new metadata key added by a future reader defaults
+# to excluded — safer than accidentally reintroducing the overflow.
+LLM_VISIBLE_METADATA_KEYS: frozenset[str] = frozenset(
+    {
+        "filename",
+        "origin",
+        "page",
+        "page_number",
+        "start_ts",
+        "end_ts",
+        "speaker",
+        "sentence_index",
+        "table",
+        "reference_metadata",
+        "docint_doc_kind",
+    }
+)
+
+# Sub-keys permitted inside the whitelisted ``origin`` dict when it
+# reaches the chat LLM. Readers today only populate ``filename`` /
+# ``mimetype`` / ``filetype`` / ``page_number`` / ``file_hash`` here,
+# but a future reader could add deployment-internal identifiers such as
+# absolute ``file_path`` strings with usernames or tenant IDs. Filtering
+# on emission means such additions cannot silently leak into the LLM
+# prompt (or, via the provider, into external log storage).
+LLM_VISIBLE_ORIGIN_SUBKEYS: frozenset[str] = frozenset(
+    {"filename", "mimetype", "filetype", "page_number"}
+)
+
+# Hard ceiling for any single metadata string that reaches the LLM.
+# Legitimate locators (filenames, timestamps, speaker names, ISO
+# timestamps, short IDs) fit well under 1 KB; anything larger is almost
+# certainly a bulky payload that slipped past the whitelist (e.g. a
+# column named ``description`` that was added to ``reference_mapping``
+# by a social-table profile and carries row prose) or an attacker-
+# controlled prompt-injection payload embedded in an ingested document
+# field. Clamping plus control-character stripping reduces both risks.
+LLM_METADATA_VALUE_MAX_CHARS: int = 1024
+
+
+def _sanitize_metadata_value_for_llm(value: Any) -> Any:
+    """Clamp length and strip control characters from a metadata leaf.
+
+    Recurses through ``dict`` / ``list`` / ``tuple`` so nested locators
+    (``origin``, ``table``, ``reference_metadata``) are scrubbed in
+    place. Non-string leaves (int, float, bool, None) pass through
+    unchanged. Strings longer than :data:`LLM_METADATA_VALUE_MAX_CHARS`
+    are truncated with a visible ``… [truncated]`` marker so the LLM
+    does not silently see fabricated context; newline / carriage-return
+    / tab runs collapse to a single space so attacker-controlled
+    formatting cannot forge "```", headers, or fake chat-role lines
+    inside ``{metadata_str}\\n\\n{content}``.
+
+    Args:
+        value: A metadata value of any JSON-compatible type.
+
+    Returns:
+        The scrubbed value. Containers are rebuilt as plain ``dict`` /
+        ``list`` instances; strings may be shortened.
+    """
+    if isinstance(value, str):
+        cleaned = re.sub(r"[\r\n\t]+", " ", value)
+        if len(cleaned) > LLM_METADATA_VALUE_MAX_CHARS:
+            cleaned = cleaned[:LLM_METADATA_VALUE_MAX_CHARS] + "… [truncated]"
+        return cleaned
+    if isinstance(value, dict):
+        return {k: _sanitize_metadata_value_for_llm(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_metadata_value_for_llm(item) for item in value]
+    return value
+
+
 BatchSparseEncoding = tuple[list[list[int]], list[list[float]]]
 EMPTY_RESPONSE_FALLBACK = (
     "I couldn't generate a grounded answer from the retrieved context. "
@@ -354,9 +463,48 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
 
 
 class ParentContextPostprocessor(BaseNodePostprocessor):
-    """Promote fine-grained retrieval hits to their hierarchical parent context."""
+    """Promote fine-grained retrieval hits to their hierarchical parent context.
+
+    When the :class:`~docint.utils.embed_chunking.resplit_nodes_for_embedding`
+    path keeps an oversize coarse parent in the docstore, a naive expansion
+    would splice the full parent into the chat prompt and can overflow the
+    chat context budget. This postprocessor enforces a budget at query time
+    via a greedy packer:
+
+    - Hits are iterated in score order (already sorted by the reranker).
+    - A parent that fits the remaining budget is emitted verbatim (status quo).
+    - A parent that does not fit is emitted as a **windowed slice** centred
+      on the matched sub-node text, keeping the parent ``node_id`` so
+      citations (keyed on ``node_id``) still resolve.
+    - If the sub-node text cannot be located in the parent (e.g.
+      whitespace normalization drifted between ingest and query), the
+      postprocessor falls back to emitting the sub-node itself rather than
+      guessing.
+
+    Legacy callers that construct the postprocessor without the new
+    ``usable_tokens`` budget get the pre-budget behavior (emit the full
+    parent, no bound) so existing call sites continue to work.
+
+    Attributes:
+        docstore: Any docstore object exposing ``get_node(node_id,
+            raise_error=False)`` (or ``get_document`` as fallback).
+        usable_tokens: Total chat-budget tokens available across all hits
+            in a single query. ``0`` disables the packer / windowing
+            entirely (legacy behavior).
+        per_hit_floor: Minimum window size in tokens when the packer has
+            to truncate the last hit. Guards against emitting a
+            near-empty window at the tail of the budget.
+        char_token_ratio: Characters per token used by the
+            :func:`~docint.utils.embed_chunking.estimate_tokens` fallback
+            estimator. Matches the embed-side default so the chat-side
+            estimate stays consistent.
+    """
 
     docstore: Any
+    usable_tokens: int = 0
+    per_hit_floor: int = 256
+    char_token_ratio: float = 3.5
+    budget_enforced: bool = False
 
     @classmethod
     def class_name(cls) -> str:
@@ -411,39 +559,390 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             )
             return None
 
+    @staticmethod
+    def _find_match_offset(parent_text: str, sub_text: str) -> int:
+        """Return the offset of *sub_text* inside *parent_text*, or ``-1``.
+
+        First tries an exact substring search. On miss, whitespace-
+        normalizes both strings (``\\s+`` → single space, stripped) while
+        tracking each normalized character's original parent offset, so a
+        normalized hit can be mapped back to the original parent for
+        accurate slicing. Returns ``-1`` if even the normalized search
+        misses — callers treat that as a signal to fall back to the
+        sub-node rather than guessing.
+
+        Args:
+            parent_text: The full parent text loaded from the docstore.
+            sub_text: The matched sub-node text whose position inside
+                *parent_text* anchors the window.
+
+        Returns:
+            The character offset in *parent_text* where *sub_text* (or
+            its normalized equivalent) begins, or ``-1`` when the
+            sub-node cannot be located.
+        """
+        if not sub_text or not parent_text:
+            return -1
+        offset = parent_text.find(sub_text)
+        if offset >= 0:
+            return offset
+
+        norm_sub = re.sub(r"\s+", " ", sub_text).strip()
+        if not norm_sub:
+            return -1
+
+        # Build a parallel normalized parent + index map back to the
+        # original offsets so we return an accurate slice boundary.
+        norm_chars: list[str] = []
+        idx_map: list[int] = []
+        prev_space = True
+        for i, ch in enumerate(parent_text):
+            if ch.isspace():
+                if not prev_space:
+                    norm_chars.append(" ")
+                    idx_map.append(i)
+                    prev_space = True
+            else:
+                norm_chars.append(ch)
+                idx_map.append(i)
+                prev_space = False
+        if norm_chars and norm_chars[-1] == " ":
+            norm_chars.pop()
+            idx_map.pop()
+        norm_parent = "".join(norm_chars)
+
+        norm_offset = norm_parent.find(norm_sub)
+        if norm_offset < 0:
+            return -1
+        return idx_map[norm_offset]
+
+    @staticmethod
+    def _snap_to_whitespace(
+        text: str, start: int, end: int, scan: int = 80
+    ) -> tuple[int, int]:
+        """Expand or shrink a window's edges to the nearest whitespace boundary.
+
+        Readable slices should not split words mid-token. The scan is
+        bounded so a window that lands deep inside a space-less stretch
+        (e.g. base64 blob) still returns in reasonable time.
+
+        Args:
+            text: The text the window is being sliced from.
+            start: Current start offset (inclusive).
+            end: Current end offset (exclusive).
+            scan: Maximum characters to scan forward / backward when
+                hunting for whitespace.
+
+        Returns:
+            A ``(start, end)`` pair snapped to whitespace boundaries.
+        """
+        if start > 0:
+            scan_end = min(len(text), start + scan)
+            for i in range(start, scan_end):
+                if text[i].isspace():
+                    start = i + 1
+                    break
+        if end < len(text):
+            scan_start = max(0, end - scan)
+            for i in range(end, scan_start, -1):
+                if text[i - 1].isspace():
+                    end = i - 1
+                    break
+        return start, end
+
+    def _window_parent_text(
+        self, parent_text: str, sub_text: str, budget_chars: int
+    ) -> str | None:
+        """Return a ~``budget_chars``-sized window of *parent_text* around *sub_text*.
+
+        When the sub-node text itself already exceeds ``budget_chars`` —
+        possible because sub-nodes are sized to the *embedding* context
+        which can exceed the *chat* context — the window starts at the
+        sub-node and truncates to the budget so we never exceed it.
+
+        Returns ``None`` when the sub-node text cannot be located in the
+        parent (the caller falls back to emitting the sub-node).
+
+        Args:
+            parent_text: The full parent text.
+            sub_text: The matched sub-node text.
+            budget_chars: The character ceiling for the returned window.
+
+        Returns:
+            The windowed parent slice, or ``None`` on location miss.
+        """
+        if budget_chars <= 0 or not parent_text or not sub_text:
+            return None
+        if len(sub_text) >= budget_chars:
+            return sub_text[:budget_chars]
+
+        offset = self._find_match_offset(parent_text, sub_text)
+        if offset < 0:
+            return None
+
+        sub_end = offset + len(sub_text)
+        half = max(0, (budget_chars - len(sub_text)) // 2)
+        start = max(0, offset - half)
+        end = min(len(parent_text), sub_end + half)
+        start, end = self._snap_to_whitespace(parent_text, start, end)
+        return parent_text[start:end]
+
+    @staticmethod
+    def _emit_with_llm_exclusion(source: BaseNode) -> TextNode:
+        """Clone *source* into a ``TextNode`` whose LLM view hides noisy metadata.
+
+        The synthesiser splices each emitted node into the chat prompt
+        via ``get_content(MetadataMode.LLM)``, which renders
+        ``"{metadata_str}\\n\\n{content}"``. Unbounded metadata (NER
+        entities, per-column row dumps, PDF pipeline artefacts,
+        reference-metadata blocks) can balloon the prompt well past
+        ``OPENAI_CTX_WINDOW``. Cloning into a new :class:`TextNode` and
+        populating ``excluded_llm_metadata_keys`` with every key absent
+        from :data:`LLM_VISIBLE_METADATA_KEYS` keeps the LLM view
+        minimal while leaving the original ``node.metadata`` dict intact
+        for every other consumer (citations, analysis section,
+        Streamlit sources panel).
+
+        The clone is necessary because the docstore-loaded parent may be
+        cached across queries; mutating its ``excluded_llm_metadata_keys``
+        in place would silently leak this postprocessor's policy into
+        unrelated code paths.
+
+        Args:
+            source: The node to emit — a docstore-loaded parent, a
+                windowed ``TextNode``, or a retrieved sub-node.
+
+        Returns:
+            A fresh ``TextNode`` preserving the original ``node_id`` and
+            metadata dict but hiding non-whitelisted keys from LLM
+            serialisation.
+        """
+        # ``deepcopy`` — we are about to narrow nested dicts (``origin``)
+        # and clamp string values on the clone. The docstore may hand us a
+        # cached parent node, and mutating its nested dicts in place would
+        # leak policy into every future query that touches the same parent.
+        metadata = copy.deepcopy(dict(source.metadata or {}))
+
+        # Narrow ``origin`` to a known-safe sub-key set so a future reader
+        # that adds deployment-internal paths / tenant IDs / usernames to
+        # the nested dict cannot silently leak them into the chat prompt
+        # (and therefore into upstream LLM-provider logs).
+        raw_origin = metadata.get("origin")
+        if isinstance(raw_origin, dict):
+            metadata["origin"] = {
+                k: v for k, v in raw_origin.items() if k in LLM_VISIBLE_ORIGIN_SUBKEYS
+            }
+
+        # Clamp + scrub whitelisted metadata values. Protects against a
+        # bulky string sliding in via a social-table ``reference_mapping``
+        # pointing at a long prose column, and against prompt-injection
+        # payloads hidden in ingested content that use newline-heavy
+        # formatting to fake structured LLM instructions.
+        metadata = {k: _sanitize_metadata_value_for_llm(v) for k, v in metadata.items()}
+
+        # Sorted for deterministic log / test output; llama_index does not
+        # require a specific ordering for ``excluded_llm_metadata_keys``.
+        excluded = sorted(k for k in metadata if k not in LLM_VISIBLE_METADATA_KEYS)
+        # ``MetadataMode.NONE`` is explicit rather than relying on the
+        # BaseNode default so we never accidentally pick up a metadata-
+        # prefixed string if a future LlamaIndex release changes the
+        # default rendering for a ``BaseNode`` subclass.
+        clone = TextNode(
+            id_=source.node_id,
+            text=source.get_content(metadata_mode=MetadataMode.NONE),
+            metadata=metadata,
+            excluded_llm_metadata_keys=excluded,
+            excluded_embed_metadata_keys=list(
+                getattr(source, "excluded_embed_metadata_keys", []) or []
+            ),
+        )
+        return clone
+
     def _postprocess_nodes(
         self,
         nodes: list[NodeWithScore],
         query_bundle: QueryBundle | None = None,
     ) -> list[NodeWithScore]:
-        """Replace fine child hits with their deduplicated parent nodes when available.
+        """Expand reranked hits to their parents with a budget-aware packer.
 
         Args:
-            nodes (list[NodeWithScore]): The list of retrieved nodes to postprocess.
-            query_bundle (QueryBundle | None): The original query bundle that led to these retrieval results, which may be used for context but is not modified by this postprocessor.
+            nodes: Retrieved hits in score order after reranking.
+            query_bundle: Unused; required by the postprocessor contract.
 
         Returns:
-            list[NodeWithScore]: The postprocessed list of nodes, where child nodes have been replaced by their parent nodes when a parent context is available.
+            A list of ``NodeWithScore`` whose combined ``node.text``
+            token count never exceeds ``self.usable_tokens`` when that
+            bound is set. Hits without a parent link, with a missing
+            parent, or whose sub-node text cannot be located in the
+            loaded parent pass through unchanged so retrieval always
+            returns something citable.
         """
         _ = query_bundle
         expanded: list[NodeWithScore] = []
         seen_parent_ids: set[str] = set()
+        remaining_tokens = int(self.usable_tokens)
+        budget_enforced = bool(self.budget_enforced)
+        windowed_hits = 0
+        budget_exhausted_hits = 0
+        parent_hits = 0
+
+        def _emit(base_node: BaseNode, score: float | None) -> NodeWithScore:
+            """Wrap *base_node* in a ``NodeWithScore`` with LLM-view exclusions applied.
+
+            Hides non-whitelisted metadata from the chat prompt while
+            preserving the original ``metadata`` dict for citation /
+            analysis consumers. See :meth:`_emit_with_llm_exclusion`.
+
+            Args:
+                base_node: The ``BaseNode`` to emit (retrieved sub-node,
+                    docstore-loaded parent, or windowed clone).
+                score: The retrieval score to attach; may be ``None``
+                    when the caller has no score.
+
+            Returns:
+                A ``NodeWithScore`` whose underlying node hides noisy
+                metadata from ``get_content(MetadataMode.LLM)``.
+            """
+            return NodeWithScore(
+                node=self._emit_with_llm_exclusion(base_node), score=score
+            )
+
+        def _llm_tokens(base_node: BaseNode) -> int:
+            """Estimate the token cost of *base_node*'s rendered LLM payload.
+
+            The synthesiser calls ``get_content(MetadataMode.LLM)`` for
+            every node, so that rendered string — not ``node.text`` —
+            is what the budget must debit against. Runs against the
+            post-exclusion clone so the count matches what the prompt
+            actually carries.
+
+            Args:
+                base_node: The node whose LLM-payload token cost is
+                    being estimated.
+
+            Returns:
+                Estimated token count for the node's LLM-mode rendering.
+            """
+            clone = self._emit_with_llm_exclusion(base_node)
+            llm_payload = clone.get_content(metadata_mode=MetadataMode.LLM)
+            return estimate_tokens(llm_payload, self.char_token_ratio)
 
         for node in nodes:
             parent_id = self._parent_id(node)
             if not parent_id:
-                expanded.append(node)
+                expanded.append(_emit(node.node, node.score))
                 continue
             if parent_id in seen_parent_ids:
                 continue
 
             parent_node = self._load_parent_node(parent_id)
             if parent_node is None:
-                expanded.append(node)
+                expanded.append(_emit(node.node, node.score))
                 continue
 
             seen_parent_ids.add(parent_id)
-            expanded.append(NodeWithScore(node=parent_node, score=node.score))
+            parent_hits += 1
+            parent_text = parent_node.get_content()
+
+            # Legacy / unbounded path.
+            if not budget_enforced:
+                expanded.append(_emit(parent_node, node.score))
+                continue
+
+            # Budget exhausted by earlier hits — emit the sub-node so the hit
+            # still contributes to retrieval count and citations without
+            # inflating the prompt past ``usable_tokens``. Using
+            # ``per_hit_floor`` here would silently exceed the budget by
+            # ``per_hit_floor × remaining_hits`` tokens.
+            if remaining_tokens <= 0:
+                budget_exhausted_hits += 1
+                expanded.append(_emit(node.node, node.score))
+                continue
+
+            parent_tokens = _llm_tokens(parent_node)
+            if parent_tokens <= remaining_tokens:
+                expanded.append(_emit(parent_node, node.score))
+                remaining_tokens -= parent_tokens
+                continue
+
+            # Doesn't fit — window around the matched sub-node. ``per_hit_floor``
+            # is the MINIMUM window size: even when little budget is left, we
+            # window at least ``per_hit_floor`` tokens so the slice is useful.
+            # This is the one path that may overshoot ``usable_tokens`` by up
+            # to ``per_hit_floor`` tokens; the ``remaining_tokens <= 0``
+            # short-circuit above caps the overshoot at a single hit.
+            budget_tokens = max(self.per_hit_floor, remaining_tokens)
+            budget_chars = max(1, int(budget_tokens * self.char_token_ratio))
+            sub_text = (
+                getattr(getattr(node, "node", None), "text", "")
+                or getattr(node, "text", "")
+                or ""
+            )
+            windowed_text = self._window_parent_text(
+                parent_text, sub_text, budget_chars
+            )
+
+            if windowed_text is None:
+                logger.debug(
+                    "parent_context_fallback_subnode: parent_id={} "
+                    "sub_node_id={} sub_chars={} parent_chars={}",
+                    parent_id,
+                    getattr(getattr(node, "node", None), "node_id", ""),
+                    len(sub_text),
+                    len(parent_text),
+                )
+                expanded.append(_emit(node.node, node.score))
+                continue
+
+            windowed_node = TextNode(
+                id_=parent_node.node_id,
+                text=windowed_text,
+                metadata={
+                    **dict(parent_node.metadata or {}),
+                    "parent_context_windowed": True,
+                    "parent_full_chars": len(parent_text),
+                    "window_chars": len(windowed_text),
+                },
+            )
+            windowed_emit = _emit(windowed_node, node.score)
+            # Render once — the LLM payload is what both the log line and
+            # the budget debit need, so compute it here and reuse.
+            windowed_llm_payload = windowed_emit.node.get_content(
+                metadata_mode=MetadataMode.LLM
+            )
+            windowed_hits += 1
+            logger.info(
+                "parent_context_windowed: parent_id={} parent_full_chars={} "
+                "window_chars={} budget_tokens={} llm_payload_chars={}",
+                parent_id,
+                len(parent_text),
+                len(windowed_text),
+                budget_tokens,
+                len(windowed_llm_payload),
+            )
+            # Debit the LLM-rendered payload tokens (not just the raw
+            # windowed text), so the budget matches what the prompt
+            # carries after ``MetadataMode.LLM`` rendering.
+            remaining_tokens = max(
+                0,
+                remaining_tokens
+                - estimate_tokens(windowed_llm_payload, self.char_token_ratio),
+            )
+            expanded.append(windowed_emit)
+
+        if (
+            budget_enforced
+            and parent_hits > 0
+            and (windowed_hits > 0 or budget_exhausted_hits > 0)
+        ):
+            logger.info(
+                "parent_context_summary: windowed_hits={}/{} "
+                "budget_exhausted_hits={} usable_tokens={}",
+                windowed_hits,
+                parent_hits,
+                budget_exhausted_hits,
+                self.usable_tokens,
+            )
 
         return expanded
 
@@ -996,6 +1495,7 @@ class RAG:
     sparse_top_k: int = field(default=20, init=False)
     hybrid_top_k: int = field(default=20, init=False)
     parent_context_enabled: bool = field(default=True, init=False)
+    parent_context_safety_margin: float = field(default=0.95, init=False)
     graphrag_enabled: bool = field(default=False, init=False)
     graphrag_neighbor_hops: int = field(default=1, init=False)
     graphrag_top_k_nodes: int = field(default=100, init=False)
@@ -1231,6 +1731,9 @@ class RAG:
         self.sparse_top_k = self.retrieval_config.sparse_top_k
         self.hybrid_top_k = self.retrieval_config.hybrid_top_k
         self.parent_context_enabled = self.retrieval_config.parent_context_enabled
+        self.parent_context_safety_margin = (
+            self.retrieval_config.parent_context_safety_margin
+        )
         self.rerank_top_n = int(self.retrieve_similarity_top_k // 4)
         self.graphrag_enabled = self.graphrag_config.enabled
         self.graphrag_neighbor_hops = self.graphrag_config.neighbor_hops
@@ -3206,6 +3709,72 @@ class RAG:
             )
         return PromptTemplate(prompt)
 
+    def _compute_parent_context_budget(self, *, social_table: bool) -> tuple[int, int]:
+        """Compute the per-query chat budget available to parent-context expansion.
+
+        The synthesizer splices ``node.text`` directly into
+        ``{context_str}`` via the grounded templates
+        (:meth:`_build_grounded_text_qa_template`,
+        :meth:`_build_grounded_refine_template`). Both templates render
+        at ~150–200 tokens with an empty ``context_str``; the refine
+        path additionally includes the prior ``existing_answer``. We
+        estimate both and subtract the larger one, plus
+        ``openai_num_output`` and a small slack, from
+        ``openai_ctx_window × safety_margin``.
+
+        Args:
+            social_table: Forwarded to the grounded template builders
+                so the estimate reflects the template variant that
+                will actually render at synthesis time.
+
+        Returns:
+            A ``(usable_tokens, per_hit_floor)`` pair. ``usable_tokens``
+            is the total chat budget available to the postprocessor's
+            greedy packer; ``per_hit_floor`` is the minimum window size
+            when the packer has to truncate the last hit. Both are
+            ``0`` when the context window is misconfigured (``<= 0``)
+            so the postprocessor degrades to legacy unbounded behavior
+            rather than refusing every query.
+        """
+        ctx_window = int(self.openai_ctx_window)
+        if ctx_window <= 0:
+            return 0, 0
+
+        # Use the raw template strings (.template) rather than .format() —
+        # different template variants use different placeholder names and
+        # the static prose dominates the token count either way. Add a
+        # fixed allowance for the rendered query + prior existing_answer
+        # the refine path will splice in.
+        qa_raw = getattr(
+            self._build_grounded_text_qa_template(social_table=social_table),
+            "template",
+            "",
+        )
+        refine_raw = getattr(
+            self._build_grounded_refine_template(social_table=social_table),
+            "template",
+            "",
+        )
+        # Cross-model proxy: ``embed_char_token_ratio`` is calibrated
+        # against the embedding tokenizer, not the chat model's. The 64-
+        # token slack below absorbs the drift and we'd rather over-estimate
+        # the template overhead (shrinking the usable budget slightly) than
+        # under-estimate it (overflowing the chat context).
+        chat_ratio_proxy = float(self.embed_char_token_ratio or 3.5)
+        query_answer_allowance_tokens = 400  # user query + prior answer
+        template_tokens = (
+            max(
+                estimate_tokens(qa_raw, chat_ratio_proxy),
+                estimate_tokens(refine_raw, chat_ratio_proxy),
+            )
+            + query_answer_allowance_tokens
+        )
+        safety_margin = float(self.parent_context_safety_margin or 0.95)
+        reserved = template_tokens + int(self.openai_num_output) + 64  # 64 = slack
+        usable = max(0, int(ctx_window * safety_margin) - reserved)
+        per_hit_floor = max(256, usable // max(1, int(self.rerank_top_n)))
+        return usable, per_hit_floor
+
     def _build_retriever(
         self,
         *,
@@ -3295,8 +3864,23 @@ class RAG:
             LazyRerankerPostprocessor(rag=self)
         ]
         if retrieval_settings["parent_context_enabled"] and self.index is not None:
+            usable_tokens, per_hit_floor = self._compute_parent_context_budget(
+                social_table=bool(profile.get("is_social_table")),
+            )
             node_postprocessors.append(
-                ParentContextPostprocessor(docstore=self.index.docstore)
+                ParentContextPostprocessor(
+                    docstore=self.index.docstore,
+                    usable_tokens=usable_tokens,
+                    per_hit_floor=per_hit_floor,
+                    char_token_ratio=float(self.embed_char_token_ratio or 3.5),
+                    # Always enforce the budget when we're building from a
+                    # configured RAG instance. A ``usable_tokens`` value of
+                    # ``0`` that somehow slips through (e.g. a misconfigured
+                    # ``OPENAI_CTX_WINDOW`` smaller than the template
+                    # overhead) then collapses safely to emitting sub-nodes
+                    # rather than silently reverting to unbounded expansion.
+                    budget_enforced=True,
+                )
             )
         if bool(profile.get("is_social_table")):
             node_postprocessors.append(

@@ -18,7 +18,11 @@ from __future__ import annotations
 
 import pytest
 
-from docint.utils.env_cfg import load_embedding_env, load_model_env
+from docint.utils.env_cfg import (
+    load_embedding_env,
+    load_model_env,
+    load_retrieval_env,
+)
 
 
 def test_model_config_embed_tokenizer_repo_default_for_ollama(
@@ -433,3 +437,61 @@ def test_embedding_config_rejects_out_of_range_values(
     monkeypatch.setenv("EMBED_MAX_RETRIES", "11")
     with pytest.raises(ValueError):
         load_embedding_env()
+
+
+# ---------------------------------------------------------------------------
+# RetrievalConfig.parent_context_safety_margin
+# ---------------------------------------------------------------------------
+
+
+def test_parent_context_safety_margin_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default ``parent_context_safety_margin`` is 0.95.
+
+    Reserves 5 % of ``OPENAI_CTX_WINDOW`` for provider-side BOS/EOS and
+    char/token-estimator drift so the packer never rides the ceiling.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.delenv("PARENT_CONTEXT_SAFETY_MARGIN", raising=False)
+
+    cfg = load_retrieval_env()
+
+    assert cfg.parent_context_safety_margin == pytest.approx(0.95)
+
+
+def test_parent_context_safety_margin_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Operators can tighten the safety margin via the env var.
+
+    Useful on providers that 4xx close to the ceiling or when the
+    char/token estimator undershoots on dense multilingual text.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.setenv("PARENT_CONTEXT_SAFETY_MARGIN", "0.85")
+
+    cfg = load_retrieval_env()
+
+    assert cfg.parent_context_safety_margin == pytest.approx(0.85)
+
+
+def test_parent_context_safety_margin_rejects_out_of_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Out-of-range values fall back to the default without raising.
+
+    A stray typo (``1.5``, ``0``, ``-0.1``) should log a warning and
+    keep ingest / query running rather than raise at import time.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    for bad in ("1.5", "0", "-0.1", "not-a-float"):
+        monkeypatch.setenv("PARENT_CONTEXT_SAFETY_MARGIN", bad)
+        cfg = load_retrieval_env()
+        assert cfg.parent_context_safety_margin == pytest.approx(0.95)

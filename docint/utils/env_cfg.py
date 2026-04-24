@@ -1197,6 +1197,7 @@ class RetrievalConfig:
     sparse_top_k: int
     hybrid_top_k: int
     parent_context_enabled: bool
+    parent_context_safety_margin: float
 
 
 def load_retrieval_env(
@@ -1210,6 +1211,7 @@ def load_retrieval_env(
     default_sparse_top_k: int = 20,
     default_hybrid_top_k: int = 20,
     default_parent_context_enabled: bool = True,
+    default_parent_context_safety_margin: float = 0.95,
 ) -> RetrievalConfig:
     """Loads retrieval configuration from environment variables or defaults.
 
@@ -1222,6 +1224,11 @@ def load_retrieval_env(
         default_sparse_top_k (int): Default candidate depth for sparse retrieval in hybrid/sparse modes. Default is 20.
         default_hybrid_top_k (int): Default final candidate depth after dense/sparse fusion. Default is 20.
         default_parent_context_enabled (bool): Default flag to enable hierarchical parent context retrieval. Default is True.
+        default_parent_context_safety_margin (float): Default fraction of
+            ``OPENAI_CTX_WINDOW`` the chat-budget packer may consume when
+            deciding whether to emit a full parent or a windowed slice.
+            Reserves headroom for the provider's own BOS/EOS and rough
+            tokenizer-estimate drift. Must fall in ``(0, 1]``. Default 0.95.
 
     Returns:
         RetrievalConfig: Dataclass containing retrieval configuration.
@@ -1236,6 +1243,9 @@ def load_retrieval_env(
                 - hybrid_top_k (int): Final candidate depth after dense/sparse fusion.
                 - parent_context_enabled (bool): Whether fine-grained matches should expand
                     to their hierarchical parent context when available.
+                - parent_context_safety_margin (float): Fraction of
+                    ``OPENAI_CTX_WINDOW`` the parent-context packer may
+                    consume before windowing oversize parents.
     """
     raw_mode = (
         str(os.getenv("CHAT_RESPONSE_MODE", default_chat_response_mode)).strip().lower()
@@ -1292,7 +1302,56 @@ def load_retrieval_env(
             )
         ).lower()
         in {"true", "1", "yes"},
+        # Warn-and-fallback (not raise) — query-time tuning knob. A stray
+        # out-of-range value should keep the app running with the safe
+        # default rather than blocking startup. See
+        # :func:`_parse_parent_context_safety_margin`.
+        parent_context_safety_margin=_parse_parent_context_safety_margin(
+            default=default_parent_context_safety_margin,
+        ),
     )
+
+
+def _parse_parent_context_safety_margin(*, default: float) -> float:
+    """Parse ``PARENT_CONTEXT_SAFETY_MARGIN`` and clamp it to ``(0, 1]``.
+
+    The query-time parent-context packer reserves
+    ``(1 - safety_margin)`` of the chat context window for provider-side
+    BOS/EOS tokens and char/token-estimator drift. Values outside
+    ``(0, 1]`` would either disable the guard (``>= 1`` leaves no
+    headroom, defeating the purpose) or starve the prompt (``<= 0``
+    yields zero usable tokens and blocks all queries). The fallback
+    ``default`` is used when the env var is unset, malformed, or out of
+    range — we log the override rather than raising so a stray operator
+    typo doesn't brick ingest.
+
+    Args:
+        default: The value returned when the env var is absent,
+            malformed, or out of range.
+
+    Returns:
+        A float in ``(0, 1]``.
+    """
+    raw = os.getenv("PARENT_CONTEXT_SAFETY_MARGIN")
+    if raw is None or not raw.strip():
+        return default
+    try:
+        parsed = float(raw)
+    except ValueError:
+        logger.warning(
+            "PARENT_CONTEXT_SAFETY_MARGIN={!r} is not a float — using default {}",
+            raw,
+            default,
+        )
+        return default
+    if not (0.0 < parsed <= 1.0):
+        logger.warning(
+            "PARENT_CONTEXT_SAFETY_MARGIN={!r} is out of range (0, 1] — using default {}",
+            raw,
+            default,
+        )
+        return default
+    return parsed
 
 
 @dataclass(frozen=True)
