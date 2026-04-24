@@ -47,7 +47,7 @@ The same RAG engine is used for both ingestion (write path) and retrieval
 | `docint/core/api.py` | FastAPI app, request/response models, streaming handlers |
 | `docint/core/rag.py` | RAG engine: ingest, retrieve, rerank, chat/stream |
 | `docint/core/ingest/` | Ingestion pipeline and shared image service |
-| `docint/core/readers/` | File-type-specific readers (PDF, audio, images, tables, JSON) |
+| `docint/core/readers/` | File-type-specific readers (PDF, images, tables, JSON / Nextext transcripts) |
 | `docint/core/storage/` | Qdrant-backed docstore, hierarchical node storage, source staging |
 | `docint/core/state/` | Conversation sessions and citation tracking (SQLAlchemy) |
 | `docint/core/ner.py` | Named-entity extraction and graph building |
@@ -116,13 +116,15 @@ The diagram below expands what happens when the UI calls `POST /query` or
    - PDFs go through the page-level pipeline
      (`docint/core/readers/documents/`) — triage → layout → OCR →
      extraction → chunking.
-   - Audio files go through Whisper (`docint/core/readers/audio.py`).
    - Images go through CLIP + vision tagging
      (`docint/core/readers/images.py`,
      `docint/core/ingest/images_service.py`).
    - CSV / Parquet / Excel are handled by
      `docint/core/readers/tables.py`.
-   - JSON / JSONL by `docint/core/readers/json.py`.
+   - JSON / JSONL / NDJSON by `docint/core/readers/json.py`, which also
+     detects Nextext transcripts; each transcript segment becomes one
+     retrievable node (same one-to-one pattern as specialized table schemas)
+     with timing and speaker metadata in `reference_metadata`.
 4. **Hierarchical chunking** — `HierarchicalNodeParser`
    (`docint/core/storage/hierarchical.py`) produces coarse parent chunks
    and fine child chunks, linked by `node_id` metadata. Child chunks can

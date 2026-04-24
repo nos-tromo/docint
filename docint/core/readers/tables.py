@@ -14,7 +14,6 @@ from loguru import logger
 
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.mimetype import get_mimetype
-from docint.utils.reference_metadata import REFERENCE_METADATA_FIELDS
 
 RowFilter = Callable[[dict], bool]
 ORIGINAL_INDEX_COL = "_original_row_index"
@@ -372,9 +371,14 @@ class TableReader(BaseReader):
 
         Returns:
             dict[str, Any]: A dictionary containing the extracted reference metadata fields based on the profile's
+                ``reference_mapping`` keys.
         """
+        # Iterate the profile's declared reference keys rather than the global
+        # reference-metadata registry, so adding transcript-specific fields to
+        # the registry does not leak ``None`` placeholders into social-table
+        # rows — only keys declared by the profile are emitted.
         metadata: dict[str, Any] = {}
-        for key in REFERENCE_METADATA_FIELDS.keys():
+        for key in profile.reference_mapping.keys():
             if key == "type":
                 metadata[key] = profile.style.rstrip("s")
                 continue

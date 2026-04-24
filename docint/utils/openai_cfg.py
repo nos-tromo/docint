@@ -152,6 +152,14 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
     def _is_context_limit_error(cls, exc: Exception) -> bool:
         """Return whether an exception indicates an oversized embedding request.
 
+        Recognizes the common phrasings across OpenAI-compatible providers:
+        OpenAI itself (``"maximum context length" ... "input tokens"``),
+        vLLM (``"context length is only" ... "input tokens"`` or
+        ``"maximum input length"``), and ollama / generic providers
+        (``"the input length exceeds the context length"``, without any
+        token counts). Guarded so unrelated failures (connection refused,
+        rate limit, auth) do NOT trigger the truncation-retry path.
+
         Args:
             exc (Exception): Raised exception.
 
@@ -169,6 +177,7 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
             )
             or ("maximum input length" in message and "input tokens" in message)
             or "context_length_exceeded" in message
+            or ("input length exceeds" in message and "context length" in message)
         )
 
     def _emit_truncation_warning(

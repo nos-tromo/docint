@@ -23,10 +23,14 @@ The default list lives in `load_ingestion_env()` in
 
 - **Documents** — `.pdf`, `.docx`, `.md`, `.txt`
 - **Tables** — `.csv`, `.tsv`, `.xls`, `.xlsx`, `.parquet`
-- **Structured** — `.jsonl`
+- **Structured** — `.json`, `.jsonl`, `.ndjson` (generic payloads and
+  Nextext transcripts)
 - **Images** — `.png`, `.jpg`, `.jpeg`, `.gif`
-- **Audio / video** — `.mp3`, `.m4a`, `.ogg`, `.wav`, `.mp4`, `.m4v`,
-  `.avi`, `.flv`, `.mkv`, `.mov`, `.mpeg`, `.mpg`, `.webm`, `.wmv`
+
+Only the file types listed above are ingested; all others are silently
+skipped. For audio and video, transcribe them in
+[Nextext](https://github.com/nos-tromo/nextext) first and upload the
+resulting `.jsonl` transcript.
 
 Each extension is dispatched to the reader that knows how to parse it
 (see the next section).
@@ -57,14 +61,6 @@ Key knobs: `PIPELINE_TEXT_COVERAGE_THRESHOLD`,
 `PIPELINE_ENABLE_VISION_OCR`, `PIPELINE_MAX_WORKERS`,
 `PIPELINE_FORCE_REPROCESS`, `PIPELINE_VISION_OCR_*`.
 
-### Audio — `audio.py`
-
-`audio.py` wraps OpenAI-Whisper for transcription or translation. The
-`WhisperConfig` dataclass (`env_cfg.py:1215`) drives it via
-`WHISPER_MAX_WORKERS`, `WHISPER_TASK` (`transcribe` / `translate`) and
-`WHISPER_SRC_LANGUAGE`. Audio files are transcribed, split into
-sentences, and handed to the chunker as plain-text documents.
-
 ### Images — `images.py`
 
 `images.py` and `docint/core/ingest/images_service.py` own the image
@@ -89,8 +85,33 @@ configured id/text/metadata columns.
 
 ### JSON — `json.py`
 
-`json.py` flattens `.jsonl` files into documents. Each line becomes one
-document, with selected fields lifted into metadata.
+`json.py` handles generic `.json` / `.jsonl` / `.ndjson` files. It also
+detects the Nextext transcript schema (a JSONL stream whose segments have
+`text` plus either `start_ts`/`end_ts` or `start_seconds`/`end_seconds`)
+and emits one segment document per line with timing, speaker, and source
+metadata preserved.
+
+#### Ingestion granularity
+
+Each Nextext JSONL line becomes exactly one retrievable Qdrant node. The
+node's text field contains the segment's prose only (not raw JSON), and
+timing/speaker metadata are exposed through the `reference_metadata` dict
+so they surface automatically in citation UI.
+
+#### Transcript reference metadata fields
+
+The following fields from a Nextext segment are extracted into
+`reference_metadata` and rendered in citations:
+
+| Field | Description |
+|---|---|
+| `start_ts` | Segment start time in `hh:mm:ss` format (if available) |
+| `end_ts` | Segment end time in `hh:mm:ss` format (if available) |
+| `speaker` | Speaker name or identifier (if present in segment) |
+| `language` | Detected or specified language code |
+| `source_file` | Name of the original transcript file |
+| `type` | Always `"transcript_segment"` |
+| `network` | Always `"nextext"` |
 
 ## Ingestion orchestration
 

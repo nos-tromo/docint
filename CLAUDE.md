@@ -49,7 +49,7 @@ Streamlit UI (docint/ui/) → FastAPI (docint/core/api.py) → AgentOrchestrator
 - `docint/agents/orchestrator.py` — Coordinates understanding, clarification, retrieval, and generation agents
 - `docint/core/ingest/ingestion_pipeline.py` — Document processing, chunking, metadata extraction
 - `docint/core/readers/documents/` — Page-level PDF pipeline: triage, layout analysis, OCR fallback, extraction, chunking
-- `docint/core/readers/audio.py` — Audio transcription via Whisper
+- `docint/core/readers/json.py` — Generic JSON / JSONL reader. Detects Nextext transcripts (JSONL with `text` plus timing keys `start_ts`/`end_ts` or `start_seconds`/`end_seconds`) and routes them to one-node-per-segment ingestion, mirroring the social-table specialized schema pattern; timing/speaker metadata surface via `reference_metadata`.
 - `docint/core/storage/` — Qdrant-backed document store, hierarchical node storage, source tracking
 - `docint/core/state/` — Session management (SQLite-backed) and citation handling
 - `docint/core/ner.py` — Named entity recognition (GLiNER), entity clustering, graph building
@@ -59,7 +59,7 @@ Streamlit UI (docint/ui/) → FastAPI (docint/core/api.py) → AgentOrchestrator
 
 - **Python ≥3.11, <3.12**. Use `uv` for dependency management (`uv add`/`uv remove` to keep `pyproject.toml` and `uv.lock` in sync).
 - **Centralized config**: All `os.getenv` calls and config dataclasses must live in `docint/utils/env_cfg.py`. Other modules import from there. If a subpackage needs a short import path, use a thin re-export module.
-- **Test synchronization**: Every functional change must include corresponding test updates. Tests are in `tests/` and use pytest. `conftest.py` provides mock stubs for `magic` and `whisper` modules.
+- **Test synchronization**: Every functional change must include corresponding test updates. Tests are in `tests/` and use pytest. `conftest.py` provides mock stubs for external dependencies like `magic`.
 - **Google-style docstrings** for new/modified functions and classes.
 - **Pre-commit is mandatory**: always run `uv run pre-commit run --all-files` before finishing work (ruff check, ruff format, mypy).
 - Prefer incremental, focused commits. When changes affect both API and UI, update `README.md`.

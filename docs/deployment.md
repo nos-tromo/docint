@@ -94,7 +94,6 @@ survive container rebuilds. The helper script
 | `docling-cache` | external | Docling model cache. |
 | `huggingface-cache` | external | HF Hub cache (embedding, reranker, NER, image models). |
 | `ollama-cache` | external | Ollama model cache, used when Ollama is co-deployed. |
-| `whisper-cache` | external | Whisper model cache. |
 | `qdrant-storage` | internal | Qdrant's own storage directory. |
 | `qdrant-snapshots` | internal | Qdrant snapshot directory. |
 | `qdrant-sources` | internal | Raw source files staged for `/sources/preview`. |
@@ -122,7 +121,7 @@ Multi-stage builds:
 1. **Builder stage** — starts from
    `${PYTHON_SLIM_BOOKWORM_IMAGE:-python:3.11.12-slim-bookworm}` (or
    `${NVIDIA_CUDA_RUNTIME_IMAGE}` for the CUDA variant), installs
-   system dependencies (`ffmpeg`, `libmagic1`, `libgl1`), copies
+   system dependencies (`libmagic1`, `libgl1`), copies
    `pyproject.toml` / `uv.lock`, and runs `uv sync` with the matching
    extra.
 2. **Runtime stage** — copies the resolved virtualenv, copies the app
@@ -130,7 +129,7 @@ Multi-stage builds:
    `uvicorn docint.core.api:app --host 0.0.0.0 --port 8000`.
 3. **Optional model preload** — when `PRELOAD_MODELS=true` is passed
    as a build arg, the builder runs `uv run load-models` so the final
-   image embeds the HF / Docling / Whisper caches.
+   image embeds the HF / Docling caches.
 
 ### `Dockerfile.frontend`
 
@@ -195,7 +194,6 @@ To run both on a single host with a shared network:
    EMBED_MODEL=BAAI/bge-m3
    SPARSE_MODEL=BAAI/bge-m3
    RERANK_MODEL=BAAI/bge-reranker-v2-m3
-   WHISPER_MODEL=openai/whisper-large-v3-turbo
    INFERENCE_NET=inference-net
    ```
 
@@ -238,6 +236,5 @@ docker compose --profile cpu down --volumes # also remove internal volumes
 ```
 
 Note that `external` volumes (`docling-cache`, `huggingface-cache`,
-`ollama-cache`, `whisper-cache`) are **not** removed by `--volumes` —
-delete them explicitly with `docker volume rm` if you want a clean
-slate.
+`ollama-cache`) are **not** removed by `--volumes` — delete them
+explicitly with `docker volume rm` if you want a clean slate.

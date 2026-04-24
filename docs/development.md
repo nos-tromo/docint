@@ -19,7 +19,7 @@ docint/
 │   │   ├── ner.py       # Named-entity extraction + graph building
 │   │   ├── retrieval_filters.py
 │   │   ├── ingest/      # Ingestion pipeline + image service
-│   │   ├── readers/     # PDF pipeline, audio, images, tables, JSON
+│   │   ├── readers/     # PDF pipeline, images, tables, JSON / Nextext transcripts
 │   │   ├── storage/     # Docstore, hierarchical parser, source staging
 │   │   └── state/       # SQLAlchemy session model
 │   ├── ui/              # Streamlit pages and components
@@ -81,9 +81,9 @@ block merges if anything is dirty.
 
 ## Tests
 
-All tests live in `tests/` and run with `uv run pytest`. The `conftest.py`
-provides mock stubs for `magic` and `whisper` so the pipeline can be
-exercised without their native dependencies.
+All tests live in `tests/` and run with `uv run pytest`. The
+`conftest.py` provides a mock stub for `magic` so the pipeline can be
+exercised without its native dependency.
 
 Rough layout:
 
@@ -92,7 +92,7 @@ Rough layout:
 | API | `test_api.py` |
 | Agents | `test_agents_generation.py`, `test_agents_orchestrator.py` |
 | CLI | `test_query_cli.py`, `test_eval_cli.py` |
-| Ingestion & readers | `test_ingest.py`, `test_image_ingestion_service.py`, `test_documents_reader.py`, `test_audio_reader.py`, `test_table_reader.py` |
+| Ingestion & readers | `test_ingest.py`, `test_image_ingestion_service.py`, `test_documents_reader.py`, `test_table_reader.py`, `test_json_reader_nextext.py` |
 | NER | `test_app_ner.py`, `test_ner_extractor.py` |
 | RAG engine | `test_rag_unit.py`, `test_rag_pipeline_default.py`, `test_rag_list.py`, `test_hierarchical.py`, `test_pipeline.py` |
 | Storage | `test_docstore.py` |

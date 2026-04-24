@@ -51,8 +51,8 @@ extra context a new user needs to understand what they just started.
    ```
 
    This creates the external volumes `docling-cache`, `huggingface-cache`,
-   `ollama-cache`, and `whisper-cache` so model artifacts persist across
-   container rebuilds.
+   and `ollama-cache` so model artifacts persist across container
+   rebuilds.
 
 3. **Pick a profile and start the stack:**
 
@@ -105,8 +105,8 @@ through Docker.
    uv run load-models
    ```
 
-   This populates the Hugging Face, Docling, fastembed and Whisper caches so
-   the first backend startup does not block on downloads.
+   This populates the Hugging Face, Docling, and fastembed caches so the
+   first backend startup does not block on downloads.
 
 5. **Start the backend:**
 

@@ -21,6 +21,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from llama_index.core import Document
+from llama_index.core.base.response.schema import Response
 from llama_index.core.schema import NodeWithScore, TextNode
 
 from docint.core import rag as rag_module
@@ -386,48 +387,20 @@ def test_build_query_engine_does_not_materialize_reranker(
     )
 
 
-def test_unload_models_releases_audio_reader_and_dir_reader() -> None:
-    """``unload_models`` must release the Whisper reference held on the audio reader.
+def test_unload_models_releases_dir_reader() -> None:
+    """``unload_models`` must null the captured ``dir_reader`` handle.
 
-    On CPU-only deployments ``torch.cuda.empty_cache`` is a no-op, so the
-    only way Whisper weights (hundreds of MB to ~1.5 GB) return to the
-    allocator is via Python ref-count drop. Previously
-    ``RAG.unload_models`` nulled the embed / text / reranker / image
-    services but left ``self.audio_reader`` and ``self.dir_reader``
-    holding captured ingestion-pipeline state. This test locks in the
-    new behaviour: the Whisper model field is nulled explicitly, and
-    both reader handles are dropped so refcounting can reclaim them.
-
-    Uses a throwaway dummy reader so no real Whisper binary is loaded.
+    Previously ``RAG.unload_models`` nulled the embed / text / reranker
+    / image services but left ``self.dir_reader`` holding captured
+    ingestion-pipeline state. This test locks in the current behaviour:
+    the reader handle is dropped so refcounting can reclaim it.
     """
     rag = RAG(qdrant_collection="test")
-
-    class DummyAudioReader:
-        """Stand-in for an ``AudioReader`` with a Whisper-like model field."""
-
-        def __init__(self) -> None:
-            """Initialize with a non-None ``_model`` to exercise the null path."""
-            self._model: Any = object()
-
-    dummy_audio = DummyAudioReader()
-    rag.audio_reader = cast(Any, dummy_audio)
     rag.dir_reader = cast(Any, object())
 
     rag.unload_models()
 
-    # The Whisper reference on the captured reader must be cleared so the
-    # underlying weights are GC-eligible even if something else outside
-    # RAG is still holding the reader instance.
-    assert dummy_audio._model is None, (
-        "unload_models must null audio_reader._model so the Whisper weights "
-        "become ref-count-zero on CPU-only deployments."
-    )
-    assert rag.audio_reader is None, (
-        "unload_models must drop the audio_reader handle itself."
-    )
-    assert rag.dir_reader is None, (
-        "unload_models must drop the dir_reader handle as well."
-    )
+    assert rag.dir_reader is None, "unload_models must drop the dir_reader handle."
     # Existing fields remain nulled (guards against regressions to
     # unload_models's original behaviour).
     assert rag._embed_model is None
@@ -441,50 +414,126 @@ def test_unload_models_releases_audio_reader_and_dir_reader() -> None:
 
 
 def test_unload_models_is_idempotent() -> None:
-    """Calling ``unload_models`` twice in a row must not raise.
-
-    The ``self.audio_reader._model = None`` write is guarded by
-    ``if self.audio_reader is not None``. A future refactor that drops
-    the guard would blow up on the second call (AttributeError on
-    ``None._model``). This test pins the idempotence contract so the
-    guard is not silently removed.
-    """
+    """Calling ``unload_models`` twice in a row must not raise."""
     rag = RAG(qdrant_collection="test")
-
-    class DummyAudioReader:
-        """Minimal stand-in for ``AudioReader`` with a Whisper-like slot."""
-
-        def __init__(self) -> None:
-            """Initialize with a non-None model reference."""
-            self._model: Any = object()
-
-    rag.audio_reader = cast(Any, DummyAudioReader())
     rag.dir_reader = cast(Any, object())
 
     rag.unload_models()
     rag.unload_models()  # must not raise
 
-    assert rag.audio_reader is None
     assert rag.dir_reader is None
 
 
 def test_unload_models_on_fresh_rag_does_not_raise() -> None:
     """``unload_models`` on a never-ingested RAG must be a safe no-op.
 
-    A freshly constructed ``RAG`` has ``audio_reader = None`` and
-    ``dir_reader = None`` by dataclass default. The guard
-    ``if self.audio_reader is not None`` protects the ``_model = None``
-    line in this case. Lock the semantics so any regression on the
-    guard fails here rather than in production.
+    A freshly constructed ``RAG`` has ``dir_reader = None`` by
+    dataclass default. Lock the no-op semantics so any regression
+    fails here rather than in production.
     """
     rag = RAG(qdrant_collection="test")
-    assert rag.audio_reader is None
     assert rag.dir_reader is None
 
     rag.unload_models()  # must not raise
 
-    assert rag.audio_reader is None
     assert rag.dir_reader is None
+
+
+class _VectorStoreQueryModeStub:
+    """Tiny enum-like stub with a ``.value`` attribute for the query-mode field."""
+
+    class _Member:
+        """Single member stand-in exposing ``.value``."""
+
+        value = "default"
+
+    DEFAULT = _Member()
+
+
+def test_run_query_lazy_builds_query_engine_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run_query`` must lazy-build the query engine on first use.
+
+    Post-ingest eager warmup was removed in commits 18a47a6 / 72e299e
+    to avoid CPU OOM, so ``self.query_engine`` can legitimately be
+    ``None`` even after a successful ingest + collection select. This
+    test pins the defensive contract: ``run_query`` builds the engine
+    on demand rather than raising the opaque ``RuntimeError: Query
+    engine has not been initialized.`` that users previously saw as
+    empty chat responses on transcript-only collections.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+
+    rag = RAG(qdrant_collection="test")
+    assert rag.query_engine is None
+
+    class _SpyEngine:
+        """Records query prompts and returns a synthetic response."""
+
+        def __init__(self) -> None:
+            """Initialize with an empty list of observed prompts."""
+            self.queries: list[str] = []
+
+        def query(self, prompt: str) -> Response:
+            """Record the prompt and return a stub ``Response``.
+
+            Args:
+                prompt (str): The query prompt forwarded by ``run_query``.
+
+            Returns:
+                Response: A llama_index ``Response`` carrying a sentinel
+                    response string so ``_normalize_response_data`` has
+                    something to work with.
+            """
+            self.queries.append(prompt)
+            return Response(response="spy-result", source_nodes=[])
+
+    spy = _SpyEngine()
+    build_calls: list[None] = []
+
+    def _fake_build(self: RAG, **_kwargs: Any) -> _SpyEngine:
+        """Stand-in ``build_query_engine`` that returns the spy engine.
+
+        Args:
+            self: The RAG instance (monkeypatch binds this).
+
+        Returns:
+            _SpyEngine: The shared spy instance for this test.
+        """
+        build_calls.append(None)
+        return spy
+
+    monkeypatch.setattr(RAG, "build_query_engine", _fake_build)
+    monkeypatch.setattr(
+        RAG,
+        "_normalize_response_data",
+        lambda self, *args, **kwargs: {"response": "spy-result", "sources": []},
+    )
+    monkeypatch.setattr(
+        RAG,
+        "_resolve_runtime_retrieval_settings",
+        lambda self, *args, **kwargs: {
+            "vector_store_query_mode": _VectorStoreQueryModeStub.DEFAULT,
+            "label": "test",
+            "parent_context_enabled": False,
+        },
+    )
+
+    result = rag.run_query("what is the topic?")
+
+    assert build_calls == [None], (
+        "run_query must call build_query_engine exactly once when "
+        "self.query_engine is None and no override kwargs are supplied."
+    )
+    assert rag.query_engine is spy, (
+        "The lazily-built engine must be cached on self.query_engine "
+        "so subsequent queries reuse it."
+    )
+    assert spy.queries == ["what is the topic?"]
+    assert result["response"] == "spy-result"
 
 
 def test_lazy_reranker_postprocessor_delegates_on_call() -> None:

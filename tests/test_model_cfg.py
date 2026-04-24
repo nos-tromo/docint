@@ -30,7 +30,6 @@ def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch) -> Non
         embed_model="BAAI/bge-m3",
         text_model="Qwen/Qwen3.5-2B",
         vision_model="Qwen/Qwen3.5-2B",
-        whisper_model="base",
     )
     model_config.__dataclass_fields__ = {
         "image_embed_model": object(),
@@ -40,7 +39,6 @@ def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch) -> Non
         "embed_model": object(),
         "text_model": object(),
         "vision_model": object(),
-        "whisper_model": object(),
     }
 
     monkeypatch.setattr(
@@ -87,11 +85,6 @@ def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch) -> Non
         "load_ollama_model",
         lambda *args, **kwargs: calls.append(("ollama", "called")),
     )
-    monkeypatch.setattr(
-        model_cfg_module,
-        "load_whisper_model",
-        lambda model_id: calls.append(("local-whisper", model_id)),
-    )
 
     model_cfg_module.main()
 
@@ -102,6 +95,4 @@ def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch) -> Non
     assert ("embedding", "BAAI/bge-m3") in calls
     assert ("text", "Qwen/Qwen3.5-2B") in calls
     assert ("vision", "Qwen/Qwen3.5-2B") in calls
-    assert ("whisper", "base") in calls
-    assert ("local-whisper", "base") not in calls
     assert ("ollama", "called") not in calls

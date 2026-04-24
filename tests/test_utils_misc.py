@@ -469,10 +469,10 @@ def test_load_model_env_reads_direct_text_and_vision_model_ids(
     assert cfg.vision_model == "gpt-4.1-mini"
 
 
-def test_load_model_env_uses_vllm_sparse_and_asr_defaults(
+def test_load_model_env_uses_vllm_sparse_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """vLLM model defaults should align sparse and ASR models with the profile.
+    """vLLM model defaults should align the sparse model with the profile.
 
     Args:
         monkeypatch: Fixture to override environment variables.
@@ -481,12 +481,10 @@ def test_load_model_env_uses_vllm_sparse_and_asr_defaults(
     monkeypatch.setenv("INFERENCE_PROVIDER", "vllm")
     monkeypatch.setenv("EMBED_MODEL", "BAAI/bge-m3")
     monkeypatch.delenv("SPARSE_MODEL", raising=False)
-    monkeypatch.delenv("WHISPER_MODEL", raising=False)
 
     cfg = load_model_env()
 
     assert cfg.sparse_model == "BAAI/bge-m3"
-    assert cfg.whisper_model == "openai/whisper-large-v3-turbo"
 
 
 def test_apply_device_visibility_hides_cuda_on_cpu(

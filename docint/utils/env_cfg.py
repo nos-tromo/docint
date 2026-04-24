@@ -379,33 +379,20 @@ def load_ingestion_env(
     default_sentence_splitter_chunk_overlap: int = 64,
     default_sentence_splitter_chunk_size: int = 1024,
     default_supported_filetypes: list[str] = [
-        ".avi",
         ".csv",
         ".docx",
-        ".flv",
         ".gif",
         ".jpeg",
         ".jpg",
         ".json",
         ".jsonl",
         ".md",
-        ".mkv",
-        ".mov",
-        ".mpeg",
-        ".mpg",
-        ".mp3",
-        ".mp4",
-        ".m4a",
-        ".m4v",
-        ".ogg",
+        ".ndjson",
         ".parquet",
         ".pdf",
         ".png",
         ".tsv",
         ".txt",
-        ".wav",
-        ".webm",
-        ".wmv",
         ".xls",
         ".xlsx",
     ],
@@ -510,7 +497,6 @@ class ModelConfig:
     sparse_model: str
     text_model: str
     vision_model: str
-    whisper_model: str
 
 
 def load_model_env(
@@ -521,7 +507,6 @@ def load_model_env(
     default_sparse_model: str = "Qdrant/all_miniLM_L6_v2_with_attentions",
     default_text_model: str = "gpt-oss:20b",
     default_vision_model: str = "qwen3.5:9b",
-    default_whisper_model: str = "turbo",
 ) -> ModelConfig:
     """Loads model configuration from environment variables or defaults.
 
@@ -534,7 +519,6 @@ def load_model_env(
         default_sparse_model (str): Default sparse model identifier.
         default_text_model_str (str): Default text model identifier.
         default_vision_model_str (str): Default vision model identifier.
-        default_whisper_model (str): Default Whisper model identifier.
 
     Returns:
         ModelConfig: Dataclass containing model configuration.
@@ -545,7 +529,6 @@ def load_model_env(
         - sparse_model (str): The sparse model identifier.
         - text_model (str): The text model identifier.
         - vision_model (str): The vision model identifier.
-        - whisper_model (str): The Whisper model identifier.
     """
     inference_provider = os.getenv("INFERENCE_PROVIDER", "ollama").strip().lower()
 
@@ -554,13 +537,11 @@ def load_model_env(
         default_sparse_model = default_embed_model
         default_text_model = "Qwen/Qwen3.5-2B"
         default_vision_model = "Qwen/Qwen3.5-2B"
-        default_whisper_model = "openai/whisper-large-v3-turbo"
 
     if inference_provider == "openai":
         default_embed_model = "text-embedding-3-small"
         default_text_model = "gpt-4o"
         default_vision_model = "gpt-4o"
-        default_whisper_model = "whisper-1"
 
     return ModelConfig(
         embed_model=os.getenv("EMBED_MODEL", default_embed_model),
@@ -570,7 +551,6 @@ def load_model_env(
         sparse_model=os.getenv("SPARSE_MODEL", default_sparse_model),
         text_model=os.getenv("TEXT_MODEL", default_text_model),
         vision_model=os.getenv("VISION_MODEL", default_vision_model),
-        whisper_model=os.getenv("WHISPER_MODEL", default_whisper_model),
     )
 
 
@@ -1212,75 +1192,4 @@ def load_summary_env(
                 )
             ),
         ),
-    )
-
-
-@dataclass(frozen=True)
-class WhisperConfig:
-    """Dataclass for Whisper runtime configuration."""
-
-    max_workers: int
-    task: Literal["transcribe", "translate"]
-    src_language: str | None = None
-
-
-def load_whisper_env(
-    default_max_workers: int = 1,
-    default_src_language: str | None = None,
-    default_task: Literal["transcribe", "translate"] = "transcribe",
-) -> WhisperConfig:
-    """Load Whisper runtime settings from environment variables.
-
-    Args:
-        default_max_workers (int): Default number of file-level Whisper workers.
-        default_src_language (str | None): Optional source language code to pass to Whisper for
-            improved transcription accuracy. Should be an ISO 639-1 code (e.g. "en" for English,
-            "fr" for French, etc.). If not set, Whisper will attempt to auto-detect the source
-            language.
-        default_task (Literal['transcribe', 'translate']): Default Whisper task selector.
-
-    Returns:
-        WhisperConfig: Parsed Whisper runtime configuration.
-
-    Raises:
-        ValueError: If an invalid value is provided for WHISPER_TASK or WHISPER_MAX_WORKERS.
-    """
-
-    raw_max_workers = os.getenv("WHISPER_MAX_WORKERS")
-    if raw_max_workers is None:
-        max_workers = default_max_workers
-    else:
-        try:
-            parsed_max_workers = int(raw_max_workers)
-        except ValueError:
-            logger.warning(
-                "Invalid WHISPER_MAX_WORKERS value '{}'; falling back to {}.",
-                raw_max_workers,
-                default_max_workers,
-            )
-            parsed_max_workers = default_max_workers
-
-        if parsed_max_workers < 1:
-            logger.warning(
-                "WHISPER_MAX_WORKERS must be >= 1; received '{}'. Falling back to {}.",
-                raw_max_workers,
-                default_max_workers,
-            )
-            parsed_max_workers = default_max_workers
-        max_workers = parsed_max_workers
-
-    raw_task = os.getenv("WHISPER_TASK", default_task)
-    task = raw_task.strip().lower()
-    if task not in {"transcribe", "translate"}:
-        logger.warning(
-            "Invalid WHISPER_TASK value '{}'; falling back to '{}'.",
-            raw_task,
-            default_task,
-        )
-        task = default_task
-
-    return WhisperConfig(
-        max_workers=max_workers,
-        src_language=os.getenv("WHISPER_SRC_LANGUAGE", default_src_language),
-        task=cast(Literal["transcribe", "translate"], task),
     )
