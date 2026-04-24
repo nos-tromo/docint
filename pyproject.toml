@@ -9,14 +9,14 @@ requires-python = ">=3.11,<3.12"
 license = "Apache-2.0"
 dependencies = [
   "cryptography>=46.0.7",
-  "docling>=2.86.0",
-  "fastapi>=0.135.3",
+  "docling>=2.91.0",
+  "fastapi>=0.136.1",
   "fastembed>=0.8.0",
   "fastparquet>=2026.3.0",
   "flagembedding>=1.4.0",
-  "gliner>=0.2.23",
-  "huggingface-hub>=0.26,<1.0",
-  "llama-index>=0.14.20",
+  "gliner>=0.2.26",
+  "huggingface-hub>=1.11.0,<2.0",
+  "llama-index>=0.14.21",
   "llama-index-embeddings-huggingface>=0.7.0",
   "llama-index-embeddings-openai>=0.6.0",
   "llama-index-llms-openai>=0.7.5",
@@ -25,16 +25,16 @@ dependencies = [
   "llama-index-readers-docling>=0.4.2",
   "llama-index-vector-stores-qdrant>=0.10.0",
   "loguru>=0.7.3",
-  "numba>=0.65.0",
+  "numba>=0.65.1",
   "numpy>=2.3.5,<2.4",
   "ollama>=0.6.1",
-  "openai>=2.31.0",
+  "openai>=2.32.0",
   "opencv-python-headless>=4.13.0.92",
   "pandas>=3.0.2",
   "pillow>=11.3.0,<12.0.0",
-  "pyarrow>=23.0.1",
-  "pydantic>=2.12.5",
-  "pypdf>=6.10.0",
+  "pyarrow>=24.0.0",
+  "pydantic>=2.13.3",
+  "pypdf>=6.10.2",
   "python-dotenv>=1.2.2",
   "python-magic>=0.4.27",
   "python-multipart>=0.0.26",
@@ -52,8 +52,8 @@ dependencies = [
   # operator needs to point MODEL_* env vars at untrusted repos, or
   # (b) a 4.x patch release (or a FlagEmbedding>=1.5 with transformers-5
   # tokenizer compat) ships upstream.
-  "transformers>=4.44.2,<5.0",
-  "uvicorn>=0.44.0",
+  "transformers>=5.6.2,<6.0",
+  "uvicorn>=0.46.0",
   "watchdog>=6.0.0",
 ]
 
@@ -82,10 +82,10 @@ cuda = [
 
 [dependency-groups]
 dev = [
-    "mypy>=1.20.0",
-    "pre-commit>=4.5.1",
+    "mypy>=1.20.2",
+    "pre-commit>=4.6.0",
     "pytest>=9.0.3",
-    "ruff==0.15.10",
+    "ruff==0.15.11",
 ]
 
 [build-system]
