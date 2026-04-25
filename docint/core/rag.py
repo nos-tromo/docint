@@ -1551,6 +1551,7 @@ class RAG:
     # --- Qdrant controls ---
     docstore_batch_size: int = field(default=100, init=False)
     ingest_benchmark_enabled: bool = field(default=False, init=False)
+    ingest_fail_fast: bool = field(default=False, init=False)
     ingest_manifest_enabled: bool = field(default=True, init=False)
     docstore_max_retries: int = field(default=3, init=False)
     docstore_retry_backoff_seconds: float = field(default=0.25, init=False)
@@ -1616,6 +1617,7 @@ class RAG:
         # --- Ingestion config ---
         self.docstore_batch_size = self.ingestion_config.docstore_batch_size
         self.ingest_benchmark_enabled = self.ingestion_config.ingest_benchmark_enabled
+        self.ingest_fail_fast = self.ingestion_config.ingest_fail_fast
         self.ingest_manifest_enabled = self.ingestion_config.ingest_manifest_enabled
         self.docstore_max_retries = self.ingestion_config.docstore_max_retries
         self.docstore_retry_backoff_seconds = (
@@ -5137,6 +5139,31 @@ class RAG:
             image_ingestion_service=image_ingestion_service,
         )
 
+        ingest_failures: list[tuple[set[str], str]] = []
+
+        def _handle_batch_failure(
+            in_flight: set[str], exc: BaseException
+        ) -> None:
+            """Centralised handling for a per-batch persistence failure.
+
+            Reraises immediately when ``ingest_fail_fast`` is true (CI
+            mode); otherwise logs the failure with a structured marker,
+            marks every in-flight file hash failed in the manifest, and
+            records the failure for the end-of-run summary.
+            """
+            if self.ingest_fail_fast:
+                raise exc
+            failed_for_batch = set(in_flight)
+            for fh in failed_for_batch:
+                manifest.mark_failed(self.qdrant_collection, fh, repr(exc))
+            ingest_failures.append((failed_for_batch, repr(exc)))
+            logger.error(
+                "failed_ingest_batch | collection={!r} file_hashes={} error={!r}",
+                self.qdrant_collection,
+                sorted(failed_for_batch),
+                exc,
+            )
+
         try:
             for docs, nodes, file_hash in core_pdf_reader.build(
                 existing_hashes=processed_hashes, progress_callback=progress_callback
@@ -5147,7 +5174,15 @@ class RAG:
                     manifest_started.add(file_hash)
                     manifest_in_flight.add(file_hash)
                 if nodes:
-                    self._persist_node_batches(nodes)
+                    try:
+                        self._persist_node_batches(nodes)
+                    except Exception as exc:
+                        per_batch = (
+                            {file_hash} if file_hash else set(manifest_in_flight)
+                        )
+                        _handle_batch_failure(per_batch, exc)
+                        manifest_in_flight -= per_batch
+                        continue
                     core_nodes += len(nodes)
                     persist_batches += len(
                         chunk_nodes(nodes, self.docstore_batch_size)
@@ -5177,7 +5212,12 @@ class RAG:
                         manifest_started.add(fh)
                         manifest_in_flight.add(fh)
                     if nodes:
-                        self._persist_node_batches(nodes)
+                        try:
+                            self._persist_node_batches(nodes)
+                        except Exception as exc:
+                            _handle_batch_failure(batch_hashes, exc)
+                            manifest_in_flight -= batch_hashes
+                            continue
                         streaming_nodes += len(nodes)
                         persist_batches += len(
                             chunk_nodes(nodes, self.docstore_batch_size)
@@ -5199,11 +5239,24 @@ class RAG:
                             chunk_nodes(nodes, self.docstore_batch_size)
                         )
         except Exception as exc:
+            # Generator-level exception or fail-fast escape: mark every
+            # remaining in-flight file failed and abort.
             for fh in manifest_in_flight:
                 manifest.mark_failed(self.qdrant_collection, fh, repr(exc))
             raise
         finally:
             manifest.close()
+            if ingest_failures:
+                aggregated = sorted(
+                    {fh for hashes, _ in ingest_failures for fh in hashes}
+                )
+                logger.warning(
+                    "Ingest finished with {} failed batch(es) "
+                    "(skip-and-continue): collection={!r} failed_file_hashes={}",
+                    len(ingest_failures),
+                    self.qdrant_collection,
+                    aggregated,
+                )
 
         total_docs = core_docs + streaming_docs
         total_nodes = core_nodes + streaming_nodes
@@ -5328,6 +5381,25 @@ class RAG:
             image_ingestion_service=image_ingestion_service,
         )
 
+        ingest_failures: list[tuple[set[str], str]] = []
+
+        def _handle_batch_failure(
+            in_flight: set[str], exc: BaseException
+        ) -> None:
+            """Async ingest variant of :func:`_handle_batch_failure` (sync twin)."""
+            if self.ingest_fail_fast:
+                raise exc
+            failed_for_batch = set(in_flight)
+            for fh in failed_for_batch:
+                manifest.mark_failed(self.qdrant_collection, fh, repr(exc))
+            ingest_failures.append((failed_for_batch, repr(exc)))
+            logger.error(
+                "failed_ingest_batch | collection={!r} file_hashes={} error={!r}",
+                self.qdrant_collection,
+                sorted(failed_for_batch),
+                exc,
+            )
+
         try:
             for docs, nodes, file_hash in core_pdf_reader.build(
                 existing_hashes=processed_hashes, progress_callback=progress_callback
@@ -5338,7 +5410,15 @@ class RAG:
                     manifest_started.add(file_hash)
                     manifest_in_flight.add(file_hash)
                 if nodes:
-                    await self._apersist_node_batches(nodes)
+                    try:
+                        await self._apersist_node_batches(nodes)
+                    except Exception as exc:
+                        per_batch = (
+                            {file_hash} if file_hash else set(manifest_in_flight)
+                        )
+                        _handle_batch_failure(per_batch, exc)
+                        manifest_in_flight -= per_batch
+                        continue
                     core_nodes += len(nodes)
                     persist_batches += len(
                         chunk_nodes(nodes, self.docstore_batch_size)
@@ -5366,7 +5446,12 @@ class RAG:
                         manifest_started.add(fh)
                         manifest_in_flight.add(fh)
                     if nodes:
-                        await self._apersist_node_batches(nodes)
+                        try:
+                            await self._apersist_node_batches(nodes)
+                        except Exception as exc:
+                            _handle_batch_failure(batch_hashes, exc)
+                            manifest_in_flight -= batch_hashes
+                            continue
                         streaming_nodes += len(nodes)
                         persist_batches += len(
                             chunk_nodes(nodes, self.docstore_batch_size)
@@ -5393,6 +5478,17 @@ class RAG:
             raise
         finally:
             manifest.close()
+            if ingest_failures:
+                aggregated = sorted(
+                    {fh for hashes, _ in ingest_failures for fh in hashes}
+                )
+                logger.warning(
+                    "Async ingest finished with {} failed batch(es) "
+                    "(skip-and-continue): collection={!r} failed_file_hashes={}",
+                    len(ingest_failures),
+                    self.qdrant_collection,
+                    aggregated,
+                )
 
         total_docs = core_docs + streaming_docs
         total_nodes = core_nodes + streaming_nodes

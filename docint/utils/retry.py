@@ -198,6 +198,58 @@ def retry_with_backoff(
     return _run()
 
 
+def is_transient_ingest_error(exc: BaseException) -> bool:
+    """Return True if *exc* is a transient ingestion-time failure.
+
+    Used by per-file retry logic in the ingestion outer loop. Transient
+    errors are I/O blips, transport failures, and connection issues that
+    are likely to clear on a fresh attempt of the same file. Hard errors
+    (corrupt JSON, encoding errors, schema mismatches) are intentionally
+    excluded — retrying them just wastes budget.
+
+    Args:
+        exc: An exception raised during file enrichment, persistence, or
+            embedding.
+
+    Returns:
+        True for OS-level I/O errors, transport timeouts, connection
+        resets, and Qdrant transient errors; False for everything else.
+    """
+    if isinstance(exc, (OSError, IOError, ConnectionError, TimeoutError)):
+        return True
+    if is_transient_qdrant_error(exc):
+        return True
+    return False
+
+
+def is_hard_ingest_error(exc: BaseException) -> bool:
+    """Return True if *exc* is a non-recoverable ingestion failure.
+
+    Decoder errors, schema mismatches, and corrupt-input failures should
+    be logged and skipped without retry — repeating the same operation
+    on the same input cannot succeed.
+
+    Args:
+        exc: An exception raised during file enrichment.
+
+    Returns:
+        True for known parse/decode/schema errors that warrant
+        skip-without-retry; False for everything else.
+    """
+    import json as _json
+
+    if isinstance(exc, (_json.JSONDecodeError, UnicodeDecodeError)):
+        return True
+    try:
+        import pandas as _pd  # type: ignore[import-not-found]
+
+        if isinstance(exc, _pd.errors.ParserError):
+            return True
+    except ImportError:  # pragma: no cover - pandas is a hard dependency
+        pass
+    return False
+
+
 async def aretry_with_backoff(
     operation: str,
     fn: Callable[[], Awaitable[T]],

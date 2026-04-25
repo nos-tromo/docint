@@ -593,6 +593,7 @@ class IngestionConfig:
     docling_accelerator_num_threads: int
     docstore_batch_size: int
     ingest_benchmark_enabled: bool
+    ingest_fail_fast: bool
     ingest_manifest_enabled: bool
     docstore_max_retries: int
     docstore_retry_backoff_max_seconds: float
@@ -611,6 +612,7 @@ def load_ingestion_env(
     default_docling_accelerator_num_threads: int = 4,
     default_docstore_batch_size: int = 100,
     default_ingest_benchmark_enabled: bool = False,
+    default_ingest_fail_fast: bool = False,
     default_ingest_manifest_enabled: bool = True,
     default_docstore_max_retries: int = 3,
     default_docstore_retry_backoff_seconds: float = 0.25,
@@ -649,6 +651,12 @@ def load_ingestion_env(
         - docstore_batch_size (int): The batch size for document store operations.
         - ingest_benchmark_enabled (bool): Emit ingestion benchmark summary logs
             for throughput and batch diagnostics.
+        - ingest_fail_fast (bool): When true, abort ingestion on the first
+            persistence failure (current behaviour for CI/strict tests).
+            When false (default), the outer ingestion loop logs the
+            failure, marks the in-flight file hashes failed in the
+            manifest, and continues with the next batch — so one bad
+            file does not invalidate the rest of the run.
         - ingest_manifest_enabled (bool): Track in-flight, completed, and
             failed file ingestions in a SQLite manifest for resume
             visibility. Set to ``false`` to disable the manifest writes
@@ -683,6 +691,10 @@ def load_ingestion_env(
         ),
         ingest_benchmark_enabled=str(
             os.getenv("INGEST_BENCHMARK_ENABLED", default_ingest_benchmark_enabled)
+        ).lower()
+        in {"true", "1", "yes"},
+        ingest_fail_fast=str(
+            os.getenv("INGEST_FAIL_FAST", default_ingest_fail_fast)
         ).lower()
         in {"true", "1", "yes"},
         ingest_manifest_enabled=str(
