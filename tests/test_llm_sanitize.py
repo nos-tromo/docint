@@ -81,13 +81,13 @@ def test_strip_reasoning_harmony_analysis_and_final_channels() -> None:
 
 def test_strip_reasoning_harmony_analysis_only() -> None:
     """Without a Harmony final channel, analysis is stripped from the remainder."""
-    text = (
-        "prologue <|channel|>analysis<|message|>hidden<|end|> epilogue"
-    )
+    text = "prologue <|channel|>analysis<|message|>hidden<|end|> epilogue"
 
     clean, reasoning = strip_reasoning(text)
 
-    assert clean == "prologue  epilogue".strip() or clean == "prologue   epilogue".strip()
+    assert (
+        clean == "prologue  epilogue".strip() or clean == "prologue   epilogue".strip()
+    )
     assert "hidden" not in clean
     assert reasoning == "hidden"
 

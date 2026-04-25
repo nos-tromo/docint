@@ -234,7 +234,5 @@ def looks_like_no_image_refusal(text: str) -> bool:
     if any(phrase in normalized for phrase in _NO_IMAGE_PHRASES_UNCONDITIONAL):
         return True
     if len(normalized) <= _NO_IMAGE_LENGTH_GUARD_CHARS:
-        return any(
-            phrase in normalized for phrase in _NO_IMAGE_PHRASES_LENGTH_GUARDED
-        )
+        return any(phrase in normalized for phrase in _NO_IMAGE_PHRASES_LENGTH_GUARDED)
     return False
