@@ -595,6 +595,8 @@ class IngestionConfig:
     ingest_benchmark_enabled: bool
     ingest_fail_fast: bool
     ingest_manifest_enabled: bool
+    ingest_pipeline_overlap_enabled: bool
+    ingest_queue_max_size: int
     docstore_max_retries: int
     docstore_retry_backoff_max_seconds: float
     docstore_retry_backoff_seconds: float
@@ -614,6 +616,8 @@ def load_ingestion_env(
     default_ingest_benchmark_enabled: bool = False,
     default_ingest_fail_fast: bool = False,
     default_ingest_manifest_enabled: bool = True,
+    default_ingest_pipeline_overlap_enabled: bool = False,
+    default_ingest_queue_max_size: int = 4,
     default_docstore_max_retries: int = 3,
     default_docstore_retry_backoff_seconds: float = 0.25,
     default_docstore_retry_backoff_max_seconds: float = 2.0,
@@ -661,6 +665,14 @@ def load_ingestion_env(
             failed file ingestions in a SQLite manifest for resume
             visibility. Set to ``false`` to disable the manifest writes
             (returns the no-op stub from :class:`NullIngestManifest`).
+        - ingest_pipeline_overlap_enabled (bool): When true, run the
+            streaming pipeline producer on a background thread so
+            enrichment overlaps with persistence. Default false until
+            canary measurement confirms throughput gains; flip via
+            ``INGEST_PIPELINE_OVERLAP_ENABLED=true``.
+        - ingest_queue_max_size (int): Maximum number of pre-enriched
+            batches buffered between producer and consumer when
+            overlap is enabled. Bounds memory under back-pressure.
         - docstore_max_retries (int): Maximum retries for transient docstore
             transport failures (Qdrant vector writes) and SQLite locked-DB
             errors in :class:`SQLiteKVStore`.
@@ -701,6 +713,21 @@ def load_ingestion_env(
             os.getenv("INGEST_MANIFEST_ENABLED", default_ingest_manifest_enabled)
         ).lower()
         in {"true", "1", "yes"},
+        ingest_pipeline_overlap_enabled=str(
+            os.getenv(
+                "INGEST_PIPELINE_OVERLAP_ENABLED",
+                default_ingest_pipeline_overlap_enabled,
+            )
+        ).lower()
+        in {"true", "1", "yes"},
+        ingest_queue_max_size=max(
+            1,
+            int(
+                os.getenv(
+                    "INGEST_QUEUE_MAX_SIZE", default_ingest_queue_max_size
+                )
+            ),
+        ),
         docstore_max_retries=max(
             0,
             int(os.getenv("DOCSTORE_MAX_RETRIES", default_docstore_max_retries)),

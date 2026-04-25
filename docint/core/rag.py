@@ -20,7 +20,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Sequence, cast
+from typing import Any, Callable, Iterable, Sequence, cast
 
 # isort: off
 # Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
@@ -108,6 +108,7 @@ from docint.core.ner import (
 )
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
+from docint.core.ingest.streaming_executor import overlapped
 from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.retrieval_filters import matches_metadata_filters
 from docint.core.state.session_manager import SessionManager
@@ -1553,6 +1554,8 @@ class RAG:
     ingest_benchmark_enabled: bool = field(default=False, init=False)
     ingest_fail_fast: bool = field(default=False, init=False)
     ingest_manifest_enabled: bool = field(default=True, init=False)
+    ingest_pipeline_overlap_enabled: bool = field(default=False, init=False)
+    ingest_queue_max_size: int = field(default=4, init=False)
     docstore_max_retries: int = field(default=3, init=False)
     docstore_retry_backoff_seconds: float = field(default=0.25, init=False)
     docstore_retry_backoff_max_seconds: float = field(default=2.0, init=False)
@@ -1619,6 +1622,10 @@ class RAG:
         self.ingest_benchmark_enabled = self.ingestion_config.ingest_benchmark_enabled
         self.ingest_fail_fast = self.ingestion_config.ingest_fail_fast
         self.ingest_manifest_enabled = self.ingestion_config.ingest_manifest_enabled
+        self.ingest_pipeline_overlap_enabled = (
+            self.ingestion_config.ingest_pipeline_overlap_enabled
+        )
+        self.ingest_queue_max_size = self.ingestion_config.ingest_queue_max_size
         self.docstore_max_retries = self.ingestion_config.docstore_max_retries
         self.docstore_retry_backoff_seconds = (
             self.ingestion_config.docstore_retry_backoff_seconds
@@ -5201,9 +5208,16 @@ class RAG:
             if hasattr(pipeline, "build_streaming") and callable(
                 getattr(pipeline, "build_streaming")
             ):
-                for docs, nodes, completed_hashes in pipeline.build_streaming(
-                    processed_hashes
-                ):
+                if self.ingest_pipeline_overlap_enabled:
+                    streaming_iter: Iterable[
+                        tuple[list[Document], list[BaseNode], set[str]]
+                    ] = overlapped(
+                        lambda: pipeline.build_streaming(processed_hashes),
+                        queue_max_size=self.ingest_queue_max_size,
+                    )
+                else:
+                    streaming_iter = pipeline.build_streaming(processed_hashes)
+                for docs, nodes, completed_hashes in streaming_iter:
                     if docs:
                         streaming_docs += len(docs)
                     batch_hashes = _extract_node_file_hashes(nodes)
