@@ -722,11 +722,7 @@ def load_ingestion_env(
         in {"true", "1", "yes"},
         ingest_queue_max_size=max(
             1,
-            int(
-                os.getenv(
-                    "INGEST_QUEUE_MAX_SIZE", default_ingest_queue_max_size
-                )
-            ),
+            int(os.getenv("INGEST_QUEUE_MAX_SIZE", default_ingest_queue_max_size)),
         ),
         docstore_max_retries=max(
             0,

@@ -5148,9 +5148,7 @@ class RAG:
 
         ingest_failures: list[tuple[set[str], str]] = []
 
-        def _handle_batch_failure(
-            in_flight: set[str], exc: BaseException
-        ) -> None:
+        def _handle_batch_failure(in_flight: set[str], exc: BaseException) -> None:
             """Centralised handling for a per-batch persistence failure.
 
             Reraises immediately when ``ingest_fail_fast`` is true (CI
@@ -5191,9 +5189,7 @@ class RAG:
                         manifest_in_flight -= per_batch
                         continue
                     core_nodes += len(nodes)
-                    persist_batches += len(
-                        chunk_nodes(nodes, self.docstore_batch_size)
-                    )
+                    persist_batches += len(chunk_nodes(nodes, self.docstore_batch_size))
                     processed_hashes.add(file_hash)
                     if file_hash:
                         manifest.mark_completed(self.qdrant_collection, file_hash)
@@ -5397,9 +5393,7 @@ class RAG:
 
         ingest_failures: list[tuple[set[str], str]] = []
 
-        def _handle_batch_failure(
-            in_flight: set[str], exc: BaseException
-        ) -> None:
+        def _handle_batch_failure(in_flight: set[str], exc: BaseException) -> None:
             """Async ingest variant of :func:`_handle_batch_failure` (sync twin)."""
             if self.ingest_fail_fast:
                 raise exc
@@ -5434,9 +5428,7 @@ class RAG:
                         manifest_in_flight -= per_batch
                         continue
                     core_nodes += len(nodes)
-                    persist_batches += len(
-                        chunk_nodes(nodes, self.docstore_batch_size)
-                    )
+                    persist_batches += len(chunk_nodes(nodes, self.docstore_batch_size))
                     processed_hashes.add(file_hash)
                     if file_hash:
                         manifest.mark_completed(self.qdrant_collection, file_hash)

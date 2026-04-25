@@ -635,9 +635,7 @@ class CustomJSONReader(BaseReader):
     # Public entry point
     # ------------------------------------------------------------------
 
-    def iter_documents(
-        self, file: str | Path, **kwargs: Any
-    ) -> Iterator[Document]:
+    def iter_documents(self, file: str | Path, **kwargs: Any) -> Iterator[Document]:
         """Yield ``Document`` objects for a JSON / JSONL / Nextext file.
 
         Streaming variant of :meth:`load_data` introduced in Phase 2 of

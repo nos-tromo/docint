@@ -81,9 +81,7 @@ class ImageReader(BaseReader):
             metadata=metadata,
         )
 
-    def iter_documents(
-        self, file: str | Path, **kwargs: Any
-    ) -> Iterator[Document]:
+    def iter_documents(self, file: str | Path, **kwargs: Any) -> Iterator[Document]:
         """Yield ingestion documents for a single image file.
 
         Image readers always yield exactly one document, so the

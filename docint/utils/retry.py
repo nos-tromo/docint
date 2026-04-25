@@ -110,7 +110,8 @@ def is_transient_qdrant_error(exc: BaseException) -> bool:
         import httpx  # type: ignore[import-not-found]
 
         if isinstance(
-            exc, (httpx.TransportError, httpx.RemoteProtocolError, httpx.TimeoutException)
+            exc,
+            (httpx.TransportError, httpx.RemoteProtocolError, httpx.TimeoutException),
         ):
             return True
     except ImportError:  # pragma: no cover - httpx ships with qdrant-client

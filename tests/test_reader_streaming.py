@@ -79,9 +79,7 @@ def test_custom_json_iter_documents_matches_load_data_for_nextext(
     assert len(eager) == len(streamed) == 4
     for a, b in zip(eager, streamed):
         assert a.text == b.text
-        assert a.metadata.get("sentence_index") == b.metadata.get(
-            "sentence_index"
-        )
+        assert a.metadata.get("sentence_index") == b.metadata.get("sentence_index")
         assert a.metadata.get("file_hash") == b.metadata.get("file_hash")
 
 

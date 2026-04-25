@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import queue
 import threading
-from typing import Any, Callable, Iterable, Iterator, TypeVar
+from typing import Any, Callable, Generic, Iterable, Iterator, TypeVar
 
 from loguru import logger
 
@@ -45,7 +45,7 @@ class _Sentinel:
 _END = _Sentinel()
 
 
-class ProducerConsumer:
+class ProducerConsumer(Generic[T]):
     """Thread-based producer/consumer with a bounded queue.
 
     Use as a context manager::
@@ -85,7 +85,7 @@ class ProducerConsumer:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def __enter__(self) -> ProducerConsumer:
+    def __enter__(self) -> ProducerConsumer[T]:
         """Start the producer thread."""
         self._thread = threading.Thread(
             target=self._run,

@@ -354,7 +354,9 @@ def test_is_transient_qdrant_error_rejects_application_errors(
     assert is_transient_qdrant_error(exc) is False
 
 
-def test_is_transient_qdrant_error_handles_httpx_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_is_transient_qdrant_error_handles_httpx_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """``httpx.TransportError`` should classify as transient.
 
     Args:

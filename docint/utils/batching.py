@@ -30,6 +30,5 @@ def chunk_nodes(items: Sequence[T], batch_size: int) -> list[list[T]]:
     effective = max(1, int(batch_size))
     materialised = list(items)
     return [
-        materialised[i : i + effective]
-        for i in range(0, len(materialised), effective)
+        materialised[i : i + effective] for i in range(0, len(materialised), effective)
     ]

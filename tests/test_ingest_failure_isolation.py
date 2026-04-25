@@ -83,10 +83,7 @@ def test_is_transient_ingest_error_includes_qdrant_transients() -> None:
 def test_is_transient_ingest_error_rejects_hard_errors() -> None:
     """Decoder/parser failures should not classify as transient."""
     assert is_transient_ingest_error(ValueError("bad header")) is False
-    assert (
-        is_transient_ingest_error(json.JSONDecodeError("bad", "x", 0))
-        is False
-    )
+    assert is_transient_ingest_error(json.JSONDecodeError("bad", "x", 0)) is False
 
 
 def test_is_hard_ingest_error_catches_decoder_failures() -> None:
@@ -168,24 +165,16 @@ def _make_rag_with_streaming_pipeline(
     rag.qdrant_collection = "bench"
     rag.data_dir = Path("/tmp/_bench_unused")
 
-    monkeypatch.setattr(
-        RAG, "_prepare_sources_dir", lambda self, p: p
-    )
-    monkeypatch.setattr(
-        RAG, "_vector_store", lambda self: cast(Any, object())
-    )
-    monkeypatch.setattr(
-        RAG, "_storage_context", lambda self, vs: cast(Any, object())
-    )
+    monkeypatch.setattr(RAG, "_prepare_sources_dir", lambda self, p: p)
+    monkeypatch.setattr(RAG, "_vector_store", lambda self: cast(Any, object()))
+    monkeypatch.setattr(RAG, "_storage_context", lambda self, vs: cast(Any, object()))
     monkeypatch.setattr(
         RAG, "_build_ingestion_pipeline", lambda self, **kwargs: FakePipeline()
     )
     monkeypatch.setattr(
         RAG, "_build_ingest_manifest", lambda self, *a, **k: fake_manifest
     )
-    monkeypatch.setattr(
-        RAG, "_get_existing_file_hashes", lambda self: set()
-    )
+    monkeypatch.setattr(RAG, "_get_existing_file_hashes", lambda self: set())
 
     class _StubCorePDFReader:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -221,25 +210,15 @@ def _make_rag_with_streaming_pipeline(
 
     def _record_persist(self: RAG, nodes: list[Any]) -> None:
         persist_calls.append(list(nodes))
-        if nodes and any(
-            getattr(n, "node_id", "") == "fail-me" for n in nodes
-        ):
+        if nodes and any(getattr(n, "node_id", "") == "fail-me" for n in nodes):
             raise ConnectionError("connection reset")
 
     monkeypatch.setattr(RAG, "_persist_node_batches", _record_persist)
 
-    monkeypatch.setattr(
-        RAG, "create_query_engine", lambda self: None
-    )
-    monkeypatch.setattr(
-        RAG, "reset_session_state", lambda self: None
-    )
-    monkeypatch.setattr(
-        RAG, "_invalidate_ner_cache", lambda self, c: None
-    )
-    monkeypatch.setattr(
-        RAG, "_bump_summary_revision", lambda self, c: None
-    )
+    monkeypatch.setattr(RAG, "create_query_engine", lambda self: None)
+    monkeypatch.setattr(RAG, "reset_session_state", lambda self: None)
+    monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, c: None)
+    monkeypatch.setattr(RAG, "_bump_summary_revision", lambda self, c: None)
 
     return rag, persist_calls, fake_manifest
 
@@ -252,7 +231,7 @@ def test_skip_and_continue_logs_failed_ingest_batch_and_marks_failed(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A single bad batch should be skipped and other batches still persist."""
-    yields = [
+    yields: list[tuple[list[Any], list[TextNode], set[str]]] = [
         ([], [_node("ok-1", "h1", "ok-1")], {"h1"}),
         ([], [_node("ok-2", "h2", "fail-me")], set()),
         ([], [_node("ok-3", "h3", "ok-3")], {"h3"}),
@@ -274,9 +253,7 @@ def test_skip_and_continue_logs_failed_ingest_batch_and_marks_failed(
     # h1 and h3 completed; h2 was marked failed.
     assert ("bench", "h1") in fake.completed
     assert ("bench", "h3") in fake.completed
-    assert any(
-        c == "bench" and h == "h2" for c, h, _ in fake.failed
-    )
+    assert any(c == "bench" and h == "h2" for c, h, _ in fake.failed)
     # Manifest was closed in the finally clause.
     assert fake.closed is True
     # Structured failure log emitted.
@@ -291,7 +268,7 @@ def test_fail_fast_aborts_on_first_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``ingest_fail_fast=True`` should re-raise on the first persistence failure."""
-    yields = [
+    yields: list[tuple[list[Any], list[TextNode], set[str]]] = [
         ([], [_node("ok-1", "h1", "ok-1")], {"h1"}),
         ([], [_node("bad", "h2", "fail-me")], set()),
         ([], [_node("ok-3", "h3", "ok-3")], {"h3"}),
@@ -315,7 +292,7 @@ def test_skip_and_continue_async_path(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The async ingest path should mirror sync skip-and-continue semantics."""
-    yields = [
+    yields: list[tuple[list[Any], list[TextNode], set[str]]] = [
         ([], [_node("ok-1", "h1", "ok-1")], {"h1"}),
         ([], [_node("bad", "h2", "fail-me")], set()),
     ]
@@ -335,9 +312,7 @@ def test_skip_and_continue_async_path(
 
     cleanup = _capture_loguru(caplog)
     try:
-        asyncio.run(
-            rag.asingest_docs(Path("/tmp/_unused"), build_query_engine=False)
-        )
+        asyncio.run(rag.asingest_docs(Path("/tmp/_unused"), build_query_engine=False))
     finally:
         cleanup()
 

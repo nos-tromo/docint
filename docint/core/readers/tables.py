@@ -391,9 +391,7 @@ class TableReader(BaseReader):
             metadata[key] = row_dict.get(original_column) if original_column else None
         return metadata
 
-    def iter_documents(
-        self, file: str | Path, **kwargs: Any
-    ) -> Iterator[Document]:
+    def iter_documents(self, file: str | Path, **kwargs: Any) -> Iterator[Document]:
         """Yield ``Document`` objects from a tabular file row by row.
 
         Streaming variant of :meth:`load_data` introduced in Phase 2 of

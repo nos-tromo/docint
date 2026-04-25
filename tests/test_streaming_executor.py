@@ -25,9 +25,7 @@ from docint.core.ingest.streaming_executor import (
 )
 
 
-def _slow_producer(
-    items: list[Any], delay_seconds: float = 0.0
-) -> Any:
+def _slow_producer(items: list[Any], delay_seconds: float = 0.0) -> Any:
     """Yield *items* with an optional ``delay_seconds`` between each."""
 
     def _gen() -> Iterator[Any]:
@@ -41,15 +39,19 @@ def _slow_producer(
 
 def test_producer_consumer_yields_items_in_order() -> None:
     """All items produced should reach the consumer in input order."""
-    pc = ProducerConsumer(_slow_producer([1, 2, 3, 4, 5]), queue_max_size=2)
+    pc: ProducerConsumer[int] = ProducerConsumer(
+        _slow_producer([1, 2, 3, 4, 5]), queue_max_size=2
+    )
     with pc:
-        result = list(pc.consume())
+        result: list[int] = list(pc.consume())
     assert result == [1, 2, 3, 4, 5]
 
 
 def test_overlapped_helper_short_form() -> None:
     """The :func:`overlapped` helper should mirror context-manager usage."""
-    items = list(overlapped(_slow_producer(["a", "b", "c"]), queue_max_size=1))
+    items: list[str] = list(
+        overlapped(_slow_producer(["a", "b", "c"]), queue_max_size=1)
+    )
     assert items == ["a", "b", "c"]
 
 
@@ -61,7 +63,7 @@ def test_producer_exception_surfaces_to_consumer() -> None:
         yield 2
         raise RuntimeError("producer-blew-up")
 
-    pc = ProducerConsumer(_producer, queue_max_size=2)
+    pc: ProducerConsumer[int] = ProducerConsumer(_producer, queue_max_size=2)
     received: list[int] = []
     with pytest.raises(RuntimeError, match="producer-blew-up"):
         with pc:
@@ -82,32 +84,30 @@ def test_queue_bound_keeps_producer_blocked_until_consumer_drains() -> None:
             produced.append(i)
             yield i
 
-    pc = ProducerConsumer(_producer, queue_max_size=2)
+    pc: ProducerConsumer[int] = ProducerConsumer(_producer, queue_max_size=2)
     with pc:
         # Pull the first item, then wait briefly to let the producer fill
         # the queue. Since the queue caps at 2 items, the producer should
         # have produced at most 3 items (one yielded + two buffered)
         # before being blocked on queue.put.
-        consumer = pc.consume()
+        consumer: Iterator[int] = pc.consume()
         first = next(consumer)
         assert first == 0
         time.sleep(0.05)
         # The producer can sit at most: 1 (consumer-taken) + 2 (queue
         # capacity) + 1 (in-flight ``yield``) = 4 ahead of consumption.
-        assert len(produced) <= 4, (
-            f"producer ran ahead of bounded queue: {produced}"
-        )
+        assert len(produced) <= 4, f"producer ran ahead of bounded queue: {produced}"
         # Drain the rest.
-        rest = list(consumer)
+        rest: list[int] = list(consumer)
     drain_event.set()  # not strictly used; pin sequencing for future
     assert rest == [1, 2, 3, 4, 5, 6, 7, 8, 9]
 
 
 def test_empty_producer_terminates_cleanly() -> None:
     """An empty producer should produce nothing and not deadlock."""
-    pc = ProducerConsumer(_slow_producer([]), queue_max_size=1)
+    pc: ProducerConsumer[Any] = ProducerConsumer(_slow_producer([]), queue_max_size=1)
     with pc:
-        result = list(pc.consume())
+        result: list[Any] = list(pc.consume())
     assert result == []
 
 
@@ -118,7 +118,7 @@ def test_consumer_can_break_early_without_deadlock() -> None:
         for i in range(100):
             yield i
 
-    pc = ProducerConsumer(_producer, queue_max_size=2)
+    pc: ProducerConsumer[int] = ProducerConsumer(_producer, queue_max_size=2)
     received: list[int] = []
     with pc:
         for item in pc.consume():
@@ -139,7 +139,7 @@ def test_overlap_runs_producer_on_background_thread() -> None:
         producer_thread.append(threading.current_thread())
         yield 1
 
-    pc = ProducerConsumer(_producer, queue_max_size=1)
+    pc: ProducerConsumer[int] = ProducerConsumer(_producer, queue_max_size=1)
     with pc:
         list(pc.consume())
 
