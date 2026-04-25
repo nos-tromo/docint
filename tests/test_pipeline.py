@@ -1435,6 +1435,250 @@ class TestOCR:
         assert spans[0].text == "Recovered OCR text"
         assert mock_create.call_count == 2
 
+    def test_vision_ocr_strips_reasoning_and_keeps_ocr_text(self) -> None:
+        """Reasoning scratchpads must be stripped, real OCR text must survive."""
+        from docint.core.readers.documents.ocr import VisionOCREngine
+
+        mock_page = MagicMock()
+        mock_page.get_width.return_value = 612.0
+        mock_page.get_height.return_value = 792.0
+
+        from PIL import Image as PILImage
+
+        img = PILImage.new("RGB", (900, 1200), color="white")
+        mock_bitmap = MagicMock()
+        mock_bitmap.to_pil.return_value = img
+        mock_page.render.return_value = mock_bitmap
+
+        mock_pdf = MagicMock()
+        mock_pdf.__getitem__ = MagicMock(return_value=mock_page)
+
+        with (
+            patch("docint.core.readers.documents.ocr.pypdfium2") as mock_pdfium,
+            patch("docint.core.readers.documents.ocr.OpenAIPipeline") as MockPipeline,
+            patch("docint.core.readers.documents.ocr._OpenAI"),
+            patch("docint.core.readers.documents.ocr.load_openai_env"),
+            patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+        ):
+            mock_pdfium.PdfDocument.return_value = mock_pdf
+            pipeline_instance = MagicMock()
+            pipeline_instance.load_prompt.return_value = "Extract text"
+            pipeline_instance.seed = 42
+            pipeline_instance.temperature = 0.0
+            pipeline_instance.top_p = 0.0
+            pipeline_instance.reasoning_effort = None
+            MockPipeline.return_value = pipeline_instance
+            mock_model_env.return_value.vision_model_file = "test-vision.gguf"
+
+            response = MagicMock()
+            response.choices = [MagicMock()]
+            response.choices[
+                0
+            ].message.content = "<think>analyzing layout</think>ACTUAL_OCR_TEXT"
+
+            engine = VisionOCREngine(
+                "/fake/doc.pdf",
+                timeout=10.0,
+                max_retries=0,
+                max_image_dimension=1024,
+                max_tokens=4096,
+            )
+
+            with patch.object(
+                engine._vision_client.chat.completions,
+                "create",
+                return_value=response,
+            ) as mock_create:
+                spans = engine.ocr_page(0)
+
+        assert len(spans) == 1
+        assert spans[0].text == "ACTUAL_OCR_TEXT"
+        assert mock_create.call_count == 1
+
+    def test_vision_ocr_reasoning_only_triggers_recovery(self) -> None:
+        """A pure reasoning response should be treated empty so recovery retries."""
+        from docint.core.readers.documents.ocr import VisionOCREngine
+
+        mock_page = MagicMock()
+        mock_page.get_width.return_value = 612.0
+        mock_page.get_height.return_value = 792.0
+
+        from PIL import Image as PILImage
+
+        img = PILImage.new("RGB", (900, 3000), color="white")
+        mock_bitmap = MagicMock()
+        mock_bitmap.to_pil.return_value = img
+        mock_page.render.return_value = mock_bitmap
+
+        mock_pdf = MagicMock()
+        mock_pdf.__getitem__ = MagicMock(return_value=mock_page)
+
+        with (
+            patch("docint.core.readers.documents.ocr.pypdfium2") as mock_pdfium,
+            patch("docint.core.readers.documents.ocr.OpenAIPipeline") as MockPipeline,
+            patch("docint.core.readers.documents.ocr._OpenAI"),
+            patch("docint.core.readers.documents.ocr.load_openai_env"),
+            patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+        ):
+            mock_pdfium.PdfDocument.return_value = mock_pdf
+            pipeline_instance = MagicMock()
+            pipeline_instance.load_prompt.return_value = "Extract text"
+            pipeline_instance.seed = 42
+            pipeline_instance.temperature = 0.0
+            pipeline_instance.top_p = 0.0
+            pipeline_instance.reasoning_effort = None
+            MockPipeline.return_value = pipeline_instance
+            mock_model_env.return_value.vision_model_file = "test-vision.gguf"
+
+            reasoning_only = MagicMock()
+            reasoning_only.choices = [MagicMock()]
+            reasoning_only.choices[
+                0
+            ].message.content = "<think>lots of reasoning and nothing else</think>"
+
+            recovered = MagicMock()
+            recovered.choices = [MagicMock()]
+            recovered.choices[0].message.content = "Recovered OCR text"
+
+            engine = VisionOCREngine(
+                "/fake/doc.pdf",
+                timeout=10.0,
+                max_retries=0,
+                max_image_dimension=1024,
+                max_tokens=4096,
+            )
+
+            with patch.object(
+                engine._vision_client.chat.completions,
+                "create",
+                side_effect=[reasoning_only, recovered],
+            ) as mock_create:
+                spans = engine.ocr_page(0)
+
+        assert len(spans) == 1
+        assert spans[0].text == "Recovered OCR text"
+        assert mock_create.call_count == 2
+
+    def test_vision_ocr_no_image_refusal_is_empty(self) -> None:
+        """A no-image refusal should be dropped so recovery can retry."""
+        from docint.core.readers.documents.ocr import VisionOCREngine
+
+        mock_page = MagicMock()
+        mock_page.get_width.return_value = 612.0
+        mock_page.get_height.return_value = 792.0
+
+        from PIL import Image as PILImage
+
+        img = PILImage.new("RGB", (900, 3000), color="white")
+        mock_bitmap = MagicMock()
+        mock_bitmap.to_pil.return_value = img
+        mock_page.render.return_value = mock_bitmap
+
+        mock_pdf = MagicMock()
+        mock_pdf.__getitem__ = MagicMock(return_value=mock_page)
+
+        with (
+            patch("docint.core.readers.documents.ocr.pypdfium2") as mock_pdfium,
+            patch("docint.core.readers.documents.ocr.OpenAIPipeline") as MockPipeline,
+            patch("docint.core.readers.documents.ocr._OpenAI"),
+            patch("docint.core.readers.documents.ocr.load_openai_env"),
+            patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+        ):
+            mock_pdfium.PdfDocument.return_value = mock_pdf
+            pipeline_instance = MagicMock()
+            pipeline_instance.load_prompt.return_value = "Extract text"
+            pipeline_instance.seed = 42
+            pipeline_instance.temperature = 0.0
+            pipeline_instance.top_p = 0.0
+            pipeline_instance.reasoning_effort = None
+            MockPipeline.return_value = pipeline_instance
+            mock_model_env.return_value.vision_model_file = "test-vision.gguf"
+
+            refusal = MagicMock()
+            refusal.choices = [MagicMock()]
+            refusal.choices[
+                0
+            ].message.content = "I don't see any image attached to your message."
+
+            recovered = MagicMock()
+            recovered.choices = [MagicMock()]
+            recovered.choices[0].message.content = "Recovered OCR text"
+
+            engine = VisionOCREngine(
+                "/fake/doc.pdf",
+                timeout=10.0,
+                max_retries=0,
+                max_image_dimension=1024,
+                max_tokens=4096,
+            )
+
+            with patch.object(
+                engine._vision_client.chat.completions,
+                "create",
+                side_effect=[refusal, recovered],
+            ) as mock_create:
+                spans = engine.ocr_page(0)
+
+        assert len(spans) == 1
+        assert spans[0].text == "Recovered OCR text"
+        assert mock_create.call_count == 2
+
+    def test_vision_ocr_forwards_reasoning_effort(self) -> None:
+        """Reasoning effort from the pipeline should be passed to the vision call."""
+        from docint.core.readers.documents.ocr import VisionOCREngine
+
+        mock_page = MagicMock()
+        mock_page.get_width.return_value = 612.0
+        mock_page.get_height.return_value = 792.0
+
+        from PIL import Image as PILImage
+
+        img = PILImage.new("RGB", (900, 1200), color="white")
+        mock_bitmap = MagicMock()
+        mock_bitmap.to_pil.return_value = img
+        mock_page.render.return_value = mock_bitmap
+
+        mock_pdf = MagicMock()
+        mock_pdf.__getitem__ = MagicMock(return_value=mock_page)
+
+        with (
+            patch("docint.core.readers.documents.ocr.pypdfium2") as mock_pdfium,
+            patch("docint.core.readers.documents.ocr.OpenAIPipeline") as MockPipeline,
+            patch("docint.core.readers.documents.ocr._OpenAI"),
+            patch("docint.core.readers.documents.ocr.load_openai_env"),
+            patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+        ):
+            mock_pdfium.PdfDocument.return_value = mock_pdf
+            pipeline_instance = MagicMock()
+            pipeline_instance.load_prompt.return_value = "Extract text"
+            pipeline_instance.seed = 42
+            pipeline_instance.temperature = 0.0
+            pipeline_instance.top_p = 0.0
+            pipeline_instance.reasoning_effort = "high"
+            MockPipeline.return_value = pipeline_instance
+            mock_model_env.return_value.vision_model_file = "test-vision.gguf"
+
+            response = MagicMock()
+            response.choices = [MagicMock()]
+            response.choices[0].message.content = "extracted"
+
+            engine = VisionOCREngine(
+                "/fake/doc.pdf",
+                timeout=10.0,
+                max_retries=0,
+                max_image_dimension=1024,
+                max_tokens=4096,
+            )
+
+            with patch.object(
+                engine._vision_client.chat.completions,
+                "create",
+                return_value=response,
+            ) as mock_create:
+                engine.ocr_page(0)
+
+        assert mock_create.call_args_list[0].kwargs["reasoning_effort"] == "high"
+
 
 # ---------------------------------------------------------------------------
 # Orchestrator tests

@@ -41,6 +41,34 @@ OpenAI-compatible client used for chat, embeddings, and vision.
 | `OPENAI_ENABLE_THINKING` | `false` | Opt into reasoning/"thinking" mode. |
 | `OPENAI_THINKING_EFFORT` | `medium` | One of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`. |
 
+## Embedding — `EmbeddingConfig`
+
+Loaded by `load_embedding_env()` in `env_cfg.py`. Bounds the text
+payload sent to the embedding endpoint so oversize chunks are
+re-chunked by `docint/utils/embed_chunking.py` before the API call
+instead of being silently truncated.
+
+### Token counting strategy
+
+When `EMBED_TOKENIZER_REPO` is non-empty and the tokenizer snapshot exists in the HF cache (via `uv run load-models`), the pre-embed re-chunker uses the embedding model's authoritative tokenizer to count tokens. This is accurate across languages and domains (e.g. CJK, German compounds, transcripts with timestamps).
+
+When the snapshot is missing or `EMBED_TOKENIZER_REPO` is empty (e.g. OpenAI provider), the re-chunker falls back to the `EMBED_CHAR_TOKEN_RATIO` heuristic and emits a WARNING at RAG init. The char-ratio approach is inherently biased toward English and significantly under-counts token budgets for multilingual or token-dense content.
+
+| Variable | Default | Description |
+|---|---|---|
+| `EMBED_CTX_TOKENS` | `2048` (ollama) / `8191` (openai + `text-embedding-3-*`) / `CHAT_MAX_MODEL_LEN` (vllm) / `8192` (fallback) | Embedding context window in tokens. Must match the provider's serving ceiling. Ollama's default is `num_ctx=2048`; operators who bake a custom Modelfile with `PARAMETER num_ctx 8192` can set this to `8192` to reclaim the full bge-m3 window — see `docs/deployment.md` for the `deploy/Modelfile.bge-m3` recipe. Must be between `256` and `32768`. |
+| `EMBED_CHAR_TOKEN_RATIO` | `3.5` | Characters-per-token estimator for mixed-language content (fallback when tokenizer is unavailable). Under-counts tokens intentionally to stay under budget. |
+| `EMBED_CTX_SAFETY_MARGIN` | `0.95` | Fraction of `EMBED_CTX_TOKENS` left for the payload after reserving BOS/EOS and estimator slack. Must lie in `(0, 1]`. |
+| `EMBED_TIMEOUT_SECONDS` | `1800` (ollama) / `600` (vllm) / `60` (openai) | HTTP request timeout in seconds for the embedding endpoint. Must be positive. Init-time warning logged if `timeout × (1 + max_retries) > 3600` (potential multi-hour stall). |
+| `EMBED_BATCH_SIZE` | `16` (ollama) / `64` (vllm) / `100` (openai) | Maximum number of texts sent per embedding API batch. Must be between `1` and `1024`. |
+| `EMBED_MAX_RETRIES` | `1` (ollama / vllm) / `2` (openai) | Maximum retries for transient HTTP failures on embedding requests. Must be between `0` and `10`. |
+
+> **Not the same as `OPENAI_CTX_WINDOW`.** `OPENAI_CTX_WINDOW` controls
+> the chat LLM only. It does **not** affect the embedding pipeline.
+> Use `EMBED_CTX_TOKENS` for that. The two limits are disjoint because
+> embedding models and chat models almost never share a context
+> window, even when served from the same provider.
+
 ## Models — `ModelConfig`
 
 Loaded by `load_model_env()` (`env_cfg.py:512`). Resolves model
@@ -49,6 +77,7 @@ identifiers, with provider-specific fallbacks.
 | Variable | Default (by provider) | Description |
 |---|---|---|
 | `EMBED_MODEL` | `bge-m3` (ollama) / `BAAI/bge-m3` (vllm) / `text-embedding-3-small` (openai) | Dense text embedding model. |
+| `EMBED_TOKENIZER_REPO` | `BAAI/bge-m3` (ollama / vllm) / `""` (openai) | Hugging Face repository ID of the tokenizer used for offline token counting at ingestion time. Empty string for providers (e.g. `openai`) where the embedding endpoint handles tokenization. Snapshot must be in the HF cache; run `uv run load-models` to populate it. |
 | `SPARSE_MODEL` | `Qdrant/all_miniLM_L6_v2_with_attentions` (ollama) / `BAAI/bge-m3` (vllm) | Sparse retrieval model. |
 | `TEXT_MODEL` | `gpt-oss:20b` (ollama) / `Qwen/Qwen3.5-2B` (vllm) / `gpt-4o` (openai) | Chat / generation model. |
 | `VISION_MODEL` | `qwen3.5:9b` (ollama) / `Qwen/Qwen3.5-2B` (vllm) / `gpt-4o` (openai) | Vision-OCR model. |
@@ -81,6 +110,75 @@ Loaded by `load_retrieval_env()` (`env_cfg.py:967`).
 | `CHAT_RESPONSE_MODE` | `auto` | Response-synthesiser mode: `auto`, `compact`, `refine`. |
 | `RERANK_USE_FP16` | `false` | Use FP16 for the reranker. |
 | `PARENT_CONTEXT_RETRIEVAL_ENABLED` | `true` | Expand fine chunks to their hierarchical parent context when available. |
+| `PARENT_CONTEXT_SAFETY_MARGIN` | `0.95` | Fraction of `OPENAI_CTX_WINDOW` the parent-context packer may consume before windowing. Clamped to `(0, 1]`; values outside that range fall back to `0.95` with a warning. |
+
+### Parent-context windowing
+
+`PARENT_CONTEXT_RETRIEVAL_ENABLED=true` expands every reranked fine
+sub-node hit to its coarse parent (kept intact in the docstore by the
+pre-embed re-splitter in `docint/utils/embed_chunking.py`). To keep
+arbitrarily large parents from overflowing the chat context, the
+postprocessor packs hits greedily against a budget derived from
+`OPENAI_CTX_WINDOW × PARENT_CONTEXT_SAFETY_MARGIN` minus the rendered
+prompt template and `OPENAI_NUM_OUTPUT`. Parents that fit are emitted
+verbatim; parents that do not fit are emitted as a **windowed slice**
+centred on the matched sub-node, tagged with
+`parent_context_windowed=True`, `parent_full_chars=<N>`, and
+`window_chars=<M>` in metadata. The parent's `node_id` is preserved so
+citations still resolve to the original source. `grep
+parent_context_windowed` in the logs surfaces when windowing fires and
+at what ratio.
+
+If windowing fires frequently and you want the full parent back,
+raise the chat context window at the provider. For Ollama, a
+Modelfile override is the cleanest path — mirror the
+`deploy/Modelfile.bge-m3` pattern already used for embeddings:
+
+```text
+FROM gemma4:31b-cloud
+PARAMETER num_ctx 32768
+```
+
+`ollama create docint-gemma4 -f deploy/Modelfile.gemma4.example`, set
+`OPENAI_MODEL=docint-gemma4` and `OPENAI_CTX_WINDOW=32768`, and the
+packer automatically scales up.
+
+#### What metadata reaches the chat LLM
+
+The postprocessor adds every non-whitelisted metadata key to each
+emitted node's `excluded_llm_metadata_keys`, so the chat prompt only
+carries a tight set of locator fields: `filename`, `origin`, `page` /
+`page_number`, `start_ts` / `end_ts` / `speaker` / `sentence_index`,
+`table` (containing `row_index`), `reference_metadata`, and
+`docint_doc_kind`. Everything else (`entities`, `relations`,
+`llm_description`, `file_hash`, per-column row dumps, internal
+hierarchical / ingest markers) stays in `node.metadata` on the
+docstore-side parent but is hidden from the LLM prompt.
+
+Whitelisted values are additionally clamped to
+1024 characters and stripped of `\n` / `\r` / `\t` runs before
+emission. This bounds a single bulky field (e.g. a social-table
+`reference_mapping` column that happens to carry long prose) and
+neutralises ingested-content prompt-injection attempts that use
+newline-heavy formatting to forge chat-role markers inside
+`{metadata_str}\n\n{content}`. The clamped copy is visible in
+`response.source_nodes`; the full original value remains on the
+docstore parent for graph-building and entity analysis consumers that
+read it directly.
+
+The `origin` sub-dict is additionally filtered to `filename`,
+`mimetype`, `filetype`, and `page_number` only — deployment-internal
+keys (absolute `file_path`, tenant IDs) that a future reader might
+add cannot silently leak into the LLM prompt or upstream
+provider-retained logs.
+
+**Trust boundary**: ingested document content (the `node.text` itself,
+plus whitelisted metadata values that copy through from source rows)
+is treated as untrusted input to the chat LLM. Prompt-injection
+payloads embedded in ingested CSVs / transcripts will reach the
+model. The clamp + control-char scrub closes a narrow set of forged-
+formatting vectors but is not a substitute for reviewing ingest
+sources you do not control.
 
 ## Pipeline — `PipelineConfig`
 

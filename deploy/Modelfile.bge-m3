@@ -1,0 +1,23 @@
+# Ollama Modelfile for docint's bge-m3 embedding profile.
+#
+# Ollama serves bge-m3 with ``num_ctx=2048`` by default, which caps each
+# embedding request at a 2048-token window regardless of bge-m3's real
+# 8192-token model capacity. Operators who want docint's pre-embed
+# re-splitter to use the full window can bake a custom tag with this
+# Modelfile:
+#
+#     ollama pull bge-m3
+#     ollama create docint-bge-m3 -f deploy/Modelfile.bge-m3
+#
+# Then, in ``.env``:
+#
+#     EMBED_MODEL=docint-bge-m3
+#     EMBED_CTX_TOKENS=8192
+#
+# docint's worker side verifies every outbound payload against the
+# configured ``EMBED_CTX_TOKENS`` using the real bge-m3 tokenizer, so as
+# long as the ollama-side ``num_ctx`` and the env-side
+# ``EMBED_CTX_TOKENS`` agree, ingestion stays correct.
+
+FROM bge-m3
+PARAMETER num_ctx 8192

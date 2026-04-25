@@ -1,10 +1,9 @@
-"""OpenAI-compatible model helpers and truncation-aware embedding wrappers."""
+"""OpenAI-compatible model helpers and budget-aware embedding wrappers."""
 
 import re
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from llama_index.core.bridge.pydantic import PrivateAttr
 from llama_index.core.base.llms.types import LLMMetadata
@@ -20,6 +19,7 @@ from docint.utils.env_cfg import (
     load_openai_env,
     load_path_env,
 )
+from docint.utils.llm_sanitize import strip_reasoning
 
 
 class EmbeddingInputTooLongError(RuntimeError):
@@ -78,38 +78,37 @@ class LocalOpenAI(LlamaIndexOpenAI):
             )
 
 
-class TruncatingOpenAIEmbedding(OpenAIEmbedding):
-    """Retry oversized embedding requests with progressively truncated input text."""
+class BudgetedOpenAIEmbedding(OpenAIEmbedding):
+    """Embedding client that fails loudly when an oversize input reaches it.
 
-    _warning_callback: Callable[[str], None] | None = PrivateAttr(default=None)
+    The pre-embed re-splitter (:mod:`docint.utils.embed_chunking`) is the
+    only supported defense against oversize inputs: any request that
+    still overflows the provider's context window indicates the splitter
+    missed the input, and silently truncating here would corrupt the
+    vector store with prefix-only embeddings. Instead, this wrapper
+    detects the overflow and raises
+    :class:`EmbeddingInputTooLongError` so ingestion aborts and the
+    operator can diagnose the gap (usually a misconfigured
+    ``EMBED_CTX_TOKENS`` relative to the provider's true limit).
+    """
+
     _context_window: int = PrivateAttr(default=8192)
 
     def __init__(
         self,
         *args: Any,
         context_window: int = 8192,
-        warning_callback: Callable[[str], None] | None = None,
         **kwargs: Any,
     ) -> None:
-        """Initialize the embedding client with context-window-aware truncation.
+        """Initialize the embedding client with a configured context budget.
 
         Args:
             *args (Any): Positional arguments forwarded to ``OpenAIEmbedding``.
             context_window (int): Configured context window for the embedding model.
-            warning_callback (Callable[[str], None] | None): Optional callback for truncation warnings.
             **kwargs (Any): Keyword arguments forwarded to ``OpenAIEmbedding``.
         """
         super().__init__(*args, **kwargs)
         self._context_window = max(1, int(context_window))
-        self._warning_callback = warning_callback
-
-    def set_warning_callback(self, callback: Callable[[str], None] | None) -> None:
-        """Register a callback that receives truncation warnings.
-
-        Args:
-            callback (Callable[[str], None] | None): Callable invoked for each truncation warning, or ``None``.
-        """
-        self._warning_callback = callback
 
     @staticmethod
     def _extract_context_limit_details(message: str) -> tuple[int | None, int | None]:
@@ -158,7 +157,7 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
         ``"maximum input length"``), and ollama / generic providers
         (``"the input length exceeds the context length"``, without any
         token counts). Guarded so unrelated failures (connection refused,
-        rate limit, auth) do NOT trigger the truncation-retry path.
+        rate limit, auth) are NOT reclassified as context-limit overflows.
 
         Args:
             exc (Exception): Raised exception.
@@ -180,356 +179,130 @@ class TruncatingOpenAIEmbedding(OpenAIEmbedding):
             or ("input length exceeds" in message and "context length" in message)
         )
 
-    def _emit_truncation_warning(
+    def _raise_budget_overflow(
         self,
+        exc: Exception,
         *,
-        original_chars: int,
-        truncated_chars: int,
-        model_limit: int | None,
-        input_tokens: int | None,
-    ) -> None:
-        """Log and forward a truncation warning.
+        texts: list[str] | None = None,
+    ) -> EmbeddingInputTooLongError:
+        """Build a diagnostic ``EmbeddingInputTooLongError`` from *exc*.
+
+        Ollama reports context overflow without token counts (so
+        ``provider_input_tokens`` ends up ``None``), which makes the raw
+        exception difficult to correlate with the offending batch. When
+        the caller supplies the embed-batch texts, this helper records
+        the batch size, the longest payload, and the total character
+        count so operators can pinpoint the slipped input without
+        re-deriving the batch.
 
         Args:
-            original_chars (int): Original payload size in characters.
-            truncated_chars (int): Truncated payload size in characters.
-            model_limit (int | None): Parsed model limit in tokens, when available.
-            input_tokens (int | None): Parsed input token count, when available.
-        """
-        detail = ""
-        if model_limit is not None and input_tokens is not None:
-            detail = f" Provider reported {input_tokens} input tokens against a {model_limit}-token limit."
-        message = (
-            "Warning: truncated oversized embedding input "
-            f"from {original_chars} to {truncated_chars} characters to fit the model context window."
-            f"{detail}"
-        )
-        logger.warning(message)
-        if self._warning_callback is None:
-            return
-        try:
-            self._warning_callback(message)
-        except Exception as exc:  # pragma: no cover - defensive logging only
-            logger.debug("Failed to deliver embedding truncation warning: {}", exc)
-
-    def _emit_skip_warning(
-        self,
-        *,
-        original_chars: int,
-        truncated_chars: int,
-        retries: int,
-        model_limit: int | None,
-        input_tokens: int | None,
-    ) -> str:
-        """Log and forward a warning for an input that must be skipped.
-
-        Args:
-            original_chars (int): Original payload size in characters.
-            truncated_chars (int): Final candidate size in characters.
-            retries (int): Number of truncation retries attempted.
-            model_limit (int | None): Parsed model limit in tokens, when available.
-            input_tokens (int | None): Parsed input token count, when available.
+            exc (Exception): Provider exception that tripped the
+                context-limit detector.
+            texts (list[str] | None): Embed-batch texts the caller was
+                trying to embed. Optional — when omitted, the error
+                message falls back to the provider-level detail only.
 
         Returns:
-            str: The emitted warning message.
-        """
-        detail = ""
-        if model_limit is not None and input_tokens is not None:
-            detail = (
-                " Provider reported "
-                f"{input_tokens} input tokens against a "
-                f"{model_limit}-token limit."
-            )
-        message = (
-            "Warning: skipping embedding input after "
-            f"{retries} truncation attempt(s). Final candidate length was "
-            f"{truncated_chars} characters after starting at "
-            f"{original_chars} characters, but the payload still exceeded "
-            f"the model context window.{detail}"
-        )
-        logger.warning(message)
-        if self._warning_callback is None:
-            return message
-        try:
-            self._warning_callback(message)
-        except Exception as exc:  # pragma: no cover - defensive logging only
-            logger.debug("Failed to deliver embedding skip warning: {}", exc)
-        return message
-
-    def _truncate_text(self, text: str, exc: Exception) -> str:
-        """Return a smaller text candidate after a context-limit failure.
-
-        Args:
-            text (str): Current embedding payload.
-            exc (Exception): Exception raised for the current payload.
-
-        Returns:
-            str: A shorter candidate string.
+            EmbeddingInputTooLongError: Ready to be raised by the caller.
         """
         model_limit, input_tokens = self._extract_context_limit_details(str(exc))
-        effective_limit = min(model_limit or self._context_window, self._context_window)
-        reserve = min(256, max(32, effective_limit // 16))
-        target_tokens = max(1, effective_limit - reserve)
-
-        if input_tokens is not None and input_tokens > 0:
-            target_chars = int(len(text) * (target_tokens / input_tokens))
-        else:
-            target_chars = int(len(text) * 0.8)
-
-        target_chars = min(len(text) - 1, max(1, target_chars))
-        candidate = text[:target_chars].rstrip()
-        boundary = max(
-            candidate.rfind("\n\n"), candidate.rfind("\n"), candidate.rfind(" ")
+        batch_stats = ""
+        if texts:
+            lens = [len(t) for t in texts]
+            batch_stats = (
+                f", batch_size={len(texts)}"
+                f", max_text_chars={max(lens)}"
+                f", total_chars={sum(lens)}"
+            )
+        return EmbeddingInputTooLongError(
+            "Embedding input exceeded context budget: "
+            f"configured={self._context_window}, "
+            f"provider_limit={model_limit}, "
+            f"provider_input_tokens={input_tokens}{batch_stats}. "
+            "Lower EMBED_CTX_TOKENS to match the provider's serving "
+            "ceiling, or raise ollama's num_ctx via a Modelfile "
+            "(PARAMETER num_ctx N) — see docs/deployment.md."
         )
-        if boundary > max(32, target_chars // 2):
-            candidate = candidate[:boundary].rstrip()
 
-        if candidate and candidate != text:
-            return candidate
-
-        fallback_chars = max(1, len(text) - max(64, len(text) // 5))
-        return text[:fallback_chars].rstrip() or text[:1]
-
-    def _embed_text_with_truncation(
-        self, text: str, n_retries: int = 24
-    ) -> list[float]:
-        """Embed a single text, truncating and retrying on context-limit errors.
-
-        Args:
-            text (str): Input text to embed.
-            n_retries (int): Maximum number of truncation attempts before giving up.
-
-        Returns:
-            list[float]: The embedding vector.
-        """
-        original_chars = len(text)
-        candidate = text
-        last_exc: Exception | None = None
-
-        for attempt in range(1, n_retries + 1):
-            try:
-                embedding = super()._get_text_embedding(candidate)
-                if candidate != text:
-                    model_limit, input_tokens = self._extract_context_limit_details(
-                        str(last_exc) if last_exc is not None else ""
-                    )
-                    self._emit_truncation_warning(
-                        original_chars=original_chars,
-                        truncated_chars=len(candidate),
-                        model_limit=model_limit,
-                        input_tokens=input_tokens,
-                    )
-                return embedding
-            except Exception as exc:
-                if not self._is_context_limit_error(exc):
-                    raise
-                last_exc = exc
-                next_candidate = self._truncate_text(candidate, exc)
-                if not next_candidate or next_candidate == candidate:
-                    model_limit, input_tokens = self._extract_context_limit_details(
-                        str(exc)
-                    )
-                    message = self._emit_skip_warning(
-                        original_chars=original_chars,
-                        truncated_chars=len(candidate),
-                        retries=attempt,
-                        model_limit=model_limit,
-                        input_tokens=input_tokens,
-                    )
-                    raise EmbeddingInputTooLongError(message) from exc
-                candidate = next_candidate
-
-        try:
-            embedding = super()._get_text_embedding(candidate)
-        except Exception as exc:
-            if not self._is_context_limit_error(exc):
-                raise
-            model_limit, input_tokens = self._extract_context_limit_details(str(exc))
-            message = self._emit_skip_warning(
-                original_chars=original_chars,
-                truncated_chars=len(candidate),
-                retries=n_retries,
-                model_limit=model_limit,
-                input_tokens=input_tokens,
-            )
-            raise EmbeddingInputTooLongError(message) from exc
-
-        if candidate != text:
-            model_limit, input_tokens = self._extract_context_limit_details(
-                str(last_exc) if last_exc is not None else ""
-            )
-            self._emit_truncation_warning(
-                original_chars=original_chars,
-                truncated_chars=len(candidate),
-                model_limit=model_limit,
-                input_tokens=input_tokens,
-            )
-        return embedding
-
-    async def _aembed_text_with_truncation(
-        self, text: str, n_retries: int = 24
-    ) -> list[float]:
-        """Async variant of ``_embed_text_with_truncation``.
-
-        Args:
-            text (str): Input text to embed.
-            n_retries (int): Maximum number of truncation attempts before giving up.
-
-        Returns:
-            list[float]: The embedding vector.
-        """
-        original_chars = len(text)
-        candidate = text
-        last_exc: Exception | None = None
-
-        for attempt in range(1, n_retries + 1):
-            try:
-                embedding = await super()._aget_text_embedding(candidate)
-                if candidate != text:
-                    model_limit, input_tokens = self._extract_context_limit_details(
-                        str(last_exc) if last_exc is not None else ""
-                    )
-                    self._emit_truncation_warning(
-                        original_chars=original_chars,
-                        truncated_chars=len(candidate),
-                        model_limit=model_limit,
-                        input_tokens=input_tokens,
-                    )
-                return embedding
-            except Exception as exc:
-                if not self._is_context_limit_error(exc):
-                    raise
-                last_exc = exc
-                next_candidate = self._truncate_text(candidate, exc)
-                if not next_candidate or next_candidate == candidate:
-                    model_limit, input_tokens = self._extract_context_limit_details(
-                        str(exc)
-                    )
-                    message = self._emit_skip_warning(
-                        original_chars=original_chars,
-                        truncated_chars=len(candidate),
-                        retries=attempt,
-                        model_limit=model_limit,
-                        input_tokens=input_tokens,
-                    )
-                    raise EmbeddingInputTooLongError(message) from exc
-                candidate = next_candidate
-
-        try:
-            embedding = await super()._aget_text_embedding(candidate)
-        except Exception as exc:
-            if not self._is_context_limit_error(exc):
-                raise
-            model_limit, input_tokens = self._extract_context_limit_details(str(exc))
-            message = self._emit_skip_warning(
-                original_chars=original_chars,
-                truncated_chars=len(candidate),
-                retries=n_retries,
-                model_limit=model_limit,
-                input_tokens=input_tokens,
-            )
-            raise EmbeddingInputTooLongError(message) from exc
-
-        if candidate != text:
-            model_limit, input_tokens = self._extract_context_limit_details(
-                str(last_exc) if last_exc is not None else ""
-            )
-            self._emit_truncation_warning(
-                original_chars=original_chars,
-                truncated_chars=len(candidate),
-                model_limit=model_limit,
-                input_tokens=input_tokens,
-            )
-        return embedding
-
-    def get_text_embeddings_with_skips(
-        self, texts: list[str]
-    ) -> list[list[float] | None]:
-        """Embed a batch of texts while allowing irreducible inputs to skip.
+    def get_text_embeddings_strict(self, texts: list[str]) -> list[list[float]]:
+        """Embed a batch of texts, raising on context overflow.
 
         Args:
             texts (list[str]): Text batch to embed.
 
         Returns:
-            list[list[float] | None]: Embeddings aligned to the input order.
-                ``None`` marks a skipped text that still exceeded the context
-                window after truncation retries.
-        """
-        try:
-            return cast(list[list[float] | None], super()._get_text_embeddings(texts))
-        except Exception as exc:
-            if not self._is_context_limit_error(exc):
-                raise
+            list[list[float]]: Embedding vectors aligned to input order.
 
-        embeddings: list[list[float] | None] = []
-        for text in texts:
-            try:
-                embeddings.append(self._embed_text_with_truncation(text))
-            except EmbeddingInputTooLongError:
-                embeddings.append(None)
-        return embeddings
-
-    async def aget_text_embeddings_with_skips(
-        self, texts: list[str]
-    ) -> list[list[float] | None]:
-        """Async batch embedding that allows irreducible inputs to skip.
-
-        Args:
-            texts (list[str]): Text batch to embed.
-
-        Returns:
-            list[list[float] | None]: Embeddings aligned to the input order.
-                ``None`` marks a skipped text that still exceeded the context
-                window after truncation retries.
-        """
-        try:
-            return cast(
-                list[list[float] | None],
-                await super()._aget_text_embeddings(texts),
-            )
-        except Exception as exc:
-            if not self._is_context_limit_error(exc):
-                raise
-
-        embeddings: list[list[float] | None] = []
-        for text in texts:
-            try:
-                embeddings.append(await self._aembed_text_with_truncation(text))
-            except EmbeddingInputTooLongError:
-                embeddings.append(None)
-        return embeddings
-
-    def _get_text_embeddings(self, texts: list[str]) -> list[list[float]]:
-        """Embed a batch of texts, falling back to per-item truncation on overflow.
-
-        Args:
-            texts (list[str]): Text batch.
-
-        Returns:
-            list[list[float]]: Embedding vectors in input order.
+        Raises:
+            EmbeddingInputTooLongError: When any text triggers the
+                provider's context-limit error. No retry, no truncation.
         """
         try:
             return super()._get_text_embeddings(texts)
         except Exception as exc:
             if not self._is_context_limit_error(exc):
                 raise
-            return [self._embed_text_with_truncation(text) for text in texts]
+            raise self._raise_budget_overflow(exc, texts=texts) from exc
 
-    async def _aget_text_embeddings(self, texts: list[str]) -> list[list[float]]:
-        """Async batch embedding with truncation fallback.
+    async def aget_text_embeddings_strict(self, texts: list[str]) -> list[list[float]]:
+        """Async variant of :meth:`get_text_embeddings_strict`.
 
         Args:
-            texts (list[str]): Text batch.
+            texts (list[str]): Text batch to embed.
 
         Returns:
-            list[list[float]]: Embedding vectors in input order.
+            list[list[float]]: Embedding vectors aligned to input order.
+
+        Raises:
+            EmbeddingInputTooLongError: When any text triggers the
+                provider's context-limit error.
         """
         try:
             return await super()._aget_text_embeddings(texts)
         except Exception as exc:
             if not self._is_context_limit_error(exc):
                 raise
-            return [await self._aembed_text_with_truncation(text) for text in texts]
+            raise self._raise_budget_overflow(exc, texts=texts) from exc
+
+    def _get_text_embeddings(self, texts: list[str]) -> list[list[float]]:
+        """Embed a batch of texts, raising loudly on context overflow.
+
+        Args:
+            texts (list[str]): Text batch.
+
+        Returns:
+            list[list[float]]: Embedding vectors in input order.
+
+        Raises:
+            EmbeddingInputTooLongError: When the provider reports an
+                oversize input. No retry, no silent truncation.
+        """
+        try:
+            return super()._get_text_embeddings(texts)
+        except Exception as exc:
+            if not self._is_context_limit_error(exc):
+                raise
+            raise self._raise_budget_overflow(exc, texts=texts) from exc
+
+    async def _aget_text_embeddings(self, texts: list[str]) -> list[list[float]]:
+        """Async batch embedding that raises loudly on context overflow.
+
+        Args:
+            texts (list[str]): Text batch.
+
+        Returns:
+            list[list[float]]: Embedding vectors in input order.
+
+        Raises:
+            EmbeddingInputTooLongError: When the provider reports an
+                oversize input. No retry, no silent truncation.
+        """
+        try:
+            return await super()._aget_text_embeddings(texts)
+        except Exception as exc:
+            if not self._is_context_limit_error(exc):
+                raise
+            raise self._raise_budget_overflow(exc, texts=texts) from exc
 
 
 def get_openai_reasoning_effort(
@@ -691,14 +464,27 @@ class OpenAIPipeline:
             messages: list[ChatCompletionMessageParam] = [
                 {"role": "user", "content": content_parts}
             ]
+
+            request_kwargs: dict[str, Any] = {}
+            if self.reasoning_effort is not None:
+                request_kwargs["reasoning_effort"] = self.reasoning_effort
+
             response = self.vision_client.chat.completions.create(
                 model=self.vision_model_id,
                 messages=messages,
                 seed=self.seed,
                 temperature=self.temperature,
                 top_p=self.top_p,
+                **request_kwargs,
             )
-            return response.choices[0].message.content or ""
+            raw = response.choices[0].message.content or ""
+            clean, captured = strip_reasoning(raw)
+            if captured:
+                logger.debug(
+                    "Stripped {} chars of reasoning from vision response",
+                    len(captured),
+                )
+            return clean
         except Exception as e:
             logger.error("Error during vision inference: {}", e)
             raise RuntimeError(f"Vision inference failed: {e}")

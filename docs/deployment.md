@@ -221,6 +221,52 @@ EMBED_MODEL=bge-m3
 Mount the `ollama-cache` volume on the Ollama container so downloaded
 models are shared across Docint and Ollama.
 
+### Embedding throughput with Ollama
+
+CPU-resident embedding models can take minutes per batch. The default tuning
+(`EMBED_BATCH_SIZE=16`, `EMBED_TIMEOUT_SECONDS=1800`) is conservative to
+minimize timeout risk on slower machines. Adjust based on your hardware and
+corpus size:
+
+- **Slow CPU or very large batches**: increase `EMBED_TIMEOUT_SECONDS` or
+  reduce `EMBED_BATCH_SIZE`.
+- **Fast CPU or small batches**: consider increasing `EMBED_BATCH_SIZE` to
+  `32–64` for better throughput, keeping `timeout × (1 + max_retries) ≤ 3600`
+  to avoid potential multi-hour stalls.
+
+### Ollama context window — match the serving ceiling
+
+Ollama serves `bge-m3` with `num_ctx=2048` by default, independent of the
+model's 8192-token capacity. `/api/show` does not advertise the runtime value,
+so Docint cannot probe it — operators must align the two sides explicitly.
+
+Default on the `cpu-ollama` / `cuda-ollama` profiles: `EMBED_CTX_TOKENS=2048`.
+The pre-embed re-splitter bounds every outbound payload to
+`int(2048 × EMBED_CTX_SAFETY_MARGIN) = 1945` tokens, which ollama accepts
+unconditionally. Ingest completes — slower than an 8192 budget would imply
+because payloads are smaller and more numerous, but correct.
+
+**Reclaim the full 8192-token window** with a one-line custom Modelfile. Docint
+ships it at `deploy/Modelfile.bge-m3`:
+
+```bash
+ollama pull bge-m3
+ollama create docint-bge-m3 -f deploy/Modelfile.bge-m3
+```
+
+Then in `.env`:
+
+```
+EMBED_MODEL=docint-bge-m3
+EMBED_CTX_TOKENS=8192
+```
+
+Verify with `ollama show docint-bge-m3 --modelfile` — the output must include
+`PARAMETER num_ctx 8192`. Any mismatch between the served `num_ctx` and the
+configured `EMBED_CTX_TOKENS` surfaces as an `EmbeddingInputTooLongError` at
+ingest time; the error message names the mismatch and points back to this
+section.
+
 ## Health checks
 
 - Backend readiness — `GET /collections/list` returns `200` once Qdrant

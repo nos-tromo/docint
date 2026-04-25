@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import datetime
+import json
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from docint.core.readers.tables import TableReader
@@ -212,3 +215,48 @@ def test_table_reader_preserves_generic_behavior_for_non_matching_schema(
     assert docs[0].doc_id == "chat-1"
     assert "style" not in docs[0].metadata["table"]
     assert "reference_metadata" not in docs[0].metadata
+
+
+def test_table_reader_sanitizes_excel_time_column(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Excel-sourced ``datetime.time`` cells sanitize to ISO strings.
+
+    Reproduces the ingestion crash reported in the ``testdata-1`` run:
+    ``pd.read_excel`` surfaces Excel time cells as ``datetime.time``
+    instances which were previously planted verbatim into node metadata
+    and later exploded inside ``SQLiteKVStore.put_all``'s ``json.dumps``.
+
+    Monkeypatches ``pd.read_excel`` so the test does not depend on an
+    ``openpyxl`` fixture or an on-disk ``.xlsx``. Asserts both that the
+    resulting metadata survives ``json.dumps`` and that the time column
+    appears as its ``HH:MM:SS`` ISO representation.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory for the synthetic
+            Excel placeholder file.
+        monkeypatch: Pytest monkeypatch fixture used to replace
+            ``pd.read_excel`` with an in-memory DataFrame.
+    """
+    df = pd.DataFrame(
+        {
+            "title": ["morning standup", "afternoon sync"],
+            "starts_at": [datetime.time(8, 30), datetime.time(14, 15)],
+        }
+    )
+    monkeypatch.setattr(
+        "docint.core.readers.tables.pd.read_excel",
+        lambda *args, **kwargs: df.copy(),
+    )
+
+    xlsx_placeholder = tmp_path / "schedule.xlsx"
+    xlsx_placeholder.write_bytes(b"")  # content is irrelevant — read is stubbed
+
+    docs = TableReader(text_cols=["title"]).load_data(xlsx_placeholder)
+
+    assert len(docs) == 2
+    # Metadata must be JSON-serializable — this is the regression guard.
+    serialized = json.dumps(docs[0].metadata)
+    assert "08:30:00" in serialized
+    assert docs[0].metadata["starts_at"] == "08:30:00"
+    assert docs[1].metadata["starts_at"] == "14:15:00"

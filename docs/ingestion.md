@@ -168,6 +168,52 @@ to include its parent context — see
 Set `HIERARCHICAL_CHUNKING_ENABLED=false` to fall back to flat
 sentence-level chunking only.
 
+### Pre-embed re-splitting
+
+Even after hierarchical chunking, individual fine chunks can still
+exceed the embedding model's context window — most commonly when an
+operator raises `FINE_CHUNK_SIZE` above the embedding service's true
+limit, or when a source document has a single very long paragraph.
+`docint/utils/embed_chunking.py` runs a pre-embed re-chunking pass
+(`resplit_nodes_for_embedding`) right before the embedding API is
+called:
+
+Token counting uses the embedding model's authoritative tokenizer when
+available. The tokenizer snapshot is fetched from the HF cache by
+`docint/utils/embedding_tokenizer.py::build_embedding_token_counter()`
+during RAG initialization. When the snapshot is missing or the
+tokenizer repo is empty (e.g. OpenAI provider), a WARNING is logged and
+the code falls back to the `EMBED_CHAR_TOKEN_RATIO` heuristic.
+
+- Within-budget chunks pass through unchanged.
+- Oversize chunks are split into sub-nodes via llama_index's
+  `SentenceSplitter` at `chunk_size = EMBED_CTX_TOKENS *
+  EMBED_CTX_SAFETY_MARGIN`. Each sub-node gets a fresh UUID,
+  `embedding_split=True`, `split_part_index`, `split_total_parts`,
+  and `hier.parent_id=<original node id>` so that the existing
+  parent-context postprocessor can reconstruct the full parent
+  content from the docstore at query time.
+- The original oversize parent is kept in the docstore (not in the
+  vector store) for citation reconstruction; the vector store holds
+  one embedding per sub-node.
+- Irreducible single-token streams (e.g. a 60k-character word with
+  no whitespace) raise `EmbeddingInputTooLongError` loudly so the
+  operator can diagnose the source rather than store a lossy
+  prefix-only vector.
+
+Tune the pass via `EMBED_TOKENIZER_REPO`, `EMBED_CTX_TOKENS`,
+`EMBED_CHAR_TOKEN_RATIO`, and `EMBED_CTX_SAFETY_MARGIN` — see
+[configuration.md](configuration.md#embedding--embeddingconfig).
+
+### Stale embeddings
+
+Qdrant collections ingested before the pre-embed re-splitter landed
+may carry prefix-only vectors for their oversize chunks. A dedicated
+`docint reingest-stale` CLI to identify and re-ingest affected files
+is TODO and will follow in a separate PR. For now, re-ingesting the
+source files manually via the UI or the existing `ingest` CLI is the
+supported workaround.
+
 ## NER and hate-speech
 
 Entity extraction runs during ingestion through

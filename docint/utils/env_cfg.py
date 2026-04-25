@@ -1,5 +1,6 @@
 """Centralized environment-variable loaders and configuration dataclasses."""
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -101,6 +102,246 @@ def resolve_hf_cache_path(
         return file_path if file_path.exists() else None
 
     return snapshot_path if snapshot_path.exists() else None
+
+
+@dataclass(frozen=True)
+class EmbeddingConfig:
+    """Dataclass for embedding-pipeline context limits and HTTP envelope.
+
+    Separate from :class:`OpenAIConfig` so the chat LLM context window
+    (``OPENAI_CTX_WINDOW``) and the embedding context window
+    (``EMBED_CTX_TOKENS``) can vary independently — they almost always
+    do, since embedding models rarely share a context window with the
+    chat LLM served from the same provider. The HTTP envelope
+    (``timeout_seconds``, ``batch_size``, ``max_retries``) is also
+    carved out here because CPU-served embedding providers (ollama) can
+    legitimately take minutes per batch, which would starve the
+    lower-latency chat client if both shared the same timeout.
+    """
+
+    ctx_tokens: int
+    char_token_ratio: float
+    ctx_safety_margin: float
+    timeout_seconds: float
+    batch_size: int
+    max_retries: int
+
+
+def load_embedding_env(
+    default_ctx_tokens: int = 8192,
+    default_char_token_ratio: float = 3.5,
+    default_ctx_safety_margin: float = 0.95,
+) -> EmbeddingConfig:
+    """Load embedding-pipeline configuration from environment variables.
+
+    Provider-aware defaults:
+
+    - ``openai`` + ``EMBED_MODEL`` starting with ``text-embedding-3-``:
+      defaults ``ctx_tokens`` to ``8191`` (OpenAI's documented limit).
+    - ``vllm`` with ``CHAT_MAX_MODEL_LEN`` set: uses that value as the
+      default (operators keep the vLLM chat and embed servers in sync
+      via the same env var).
+    - Ollama and everything else: defaults to ``8192``.
+
+    Operators always win — any explicit ``EMBED_CTX_TOKENS`` value
+    overrides the provider default.
+
+    Args:
+        default_ctx_tokens: Base default when no provider-specific
+            hint applies.
+        default_char_token_ratio: Characters per token estimator for
+            budget checks (see
+            :func:`docint.utils.embed_chunking.estimate_tokens`).
+        default_ctx_safety_margin: Fraction of ``ctx_tokens`` that
+            remains for the user payload after the provider reserves
+            BOS/EOS slots. Must lie in ``(0, 1]``.
+
+    Returns:
+        EmbeddingConfig: Parsed embedding configuration.
+        - ctx_tokens (int): Embedding context window in tokens.
+        - char_token_ratio (float): Characters per token estimator.
+        - ctx_safety_margin (float): Safety margin fraction.
+        - timeout_seconds (float): Per-request HTTP timeout for the
+          embed client.
+        - batch_size (int): Inputs per embed request.
+        - max_retries (int): Retries on transient embed-client
+          failures.
+
+    Raises:
+        ValueError: When ``EMBED_CTX_TOKENS`` falls outside
+            ``[256, 32768]``, ``EMBED_CHAR_TOKEN_RATIO`` is
+            non-positive, ``EMBED_CTX_SAFETY_MARGIN`` is outside
+            ``(0, 1]``, ``EMBED_TIMEOUT_SECONDS`` is not a finite
+            positive float, ``EMBED_BATCH_SIZE`` falls outside
+            ``[1, 1024]``, or ``EMBED_MAX_RETRIES`` falls outside
+            ``[0, 10]``.
+    """
+    inference_provider = os.getenv("INFERENCE_PROVIDER", "ollama").strip().lower()
+    embed_model = os.getenv("EMBED_MODEL", "").strip()
+
+    provider_default_ctx = default_ctx_tokens
+    if inference_provider == "ollama":
+        # Ollama's default num_ctx is 2048 regardless of model capacity.
+        # Operators who raise it via a Modelfile set EMBED_CTX_TOKENS
+        # explicitly. See deploy/Modelfile.bge-m3 and docs/deployment.md.
+        provider_default_ctx = 2048
+    elif inference_provider == "openai" and embed_model.startswith("text-embedding-3-"):
+        provider_default_ctx = 8191
+    elif inference_provider == "vllm":
+        raw_chat_max_model_len = os.getenv("CHAT_MAX_MODEL_LEN")
+        if raw_chat_max_model_len is not None and raw_chat_max_model_len.strip():
+            try:
+                provider_default_ctx = int(raw_chat_max_model_len)
+            except ValueError as exc:
+                raise ValueError(
+                    f"CHAT_MAX_MODEL_LEN must be an integer, "
+                    f"got {raw_chat_max_model_len!r}"
+                ) from exc
+
+    raw_ctx_tokens = os.getenv("EMBED_CTX_TOKENS")
+    if raw_ctx_tokens is not None and raw_ctx_tokens.strip():
+        try:
+            ctx_tokens = int(raw_ctx_tokens)
+        except ValueError as exc:
+            raise ValueError(
+                f"EMBED_CTX_TOKENS must be an integer, got {raw_ctx_tokens!r}"
+            ) from exc
+    else:
+        ctx_tokens = provider_default_ctx
+    if not (256 <= ctx_tokens <= 32768):
+        raise ValueError(
+            f"EMBED_CTX_TOKENS={ctx_tokens!r} is out of range — "
+            f"must be between 256 and 32768 tokens."
+        )
+
+    raw_char_token_ratio = os.getenv("EMBED_CHAR_TOKEN_RATIO")
+    if raw_char_token_ratio is not None and raw_char_token_ratio.strip():
+        try:
+            char_token_ratio = float(raw_char_token_ratio)
+        except ValueError as exc:
+            raise ValueError(
+                f"EMBED_CHAR_TOKEN_RATIO must be a float, got {raw_char_token_ratio!r}"
+            ) from exc
+    else:
+        char_token_ratio = float(default_char_token_ratio)
+    if char_token_ratio <= 0:
+        raise ValueError(
+            f"EMBED_CHAR_TOKEN_RATIO={char_token_ratio!r} is out of range — "
+            f"must be positive."
+        )
+
+    raw_ctx_safety_margin = os.getenv("EMBED_CTX_SAFETY_MARGIN")
+    if raw_ctx_safety_margin is not None and raw_ctx_safety_margin.strip():
+        try:
+            ctx_safety_margin = float(raw_ctx_safety_margin)
+        except ValueError as exc:
+            raise ValueError(
+                f"EMBED_CTX_SAFETY_MARGIN must be a float, "
+                f"got {raw_ctx_safety_margin!r}"
+            ) from exc
+    else:
+        ctx_safety_margin = float(default_ctx_safety_margin)
+    if not (0.0 < ctx_safety_margin <= 1.0):
+        raise ValueError(
+            f"EMBED_CTX_SAFETY_MARGIN={ctx_safety_margin!r} is out of range — "
+            f"must be within (0, 1]."
+        )
+
+    provider_timeout_default, provider_batch_default, provider_retries_default = (
+        _embed_envelope_defaults(inference_provider)
+    )
+
+    raw_timeout_seconds = os.getenv("EMBED_TIMEOUT_SECONDS")
+    if raw_timeout_seconds is not None and raw_timeout_seconds.strip():
+        try:
+            timeout_seconds = float(raw_timeout_seconds)
+        except ValueError as exc:
+            raise ValueError(
+                f"EMBED_TIMEOUT_SECONDS must be a float, got {raw_timeout_seconds!r}"
+            ) from exc
+    else:
+        timeout_seconds = float(provider_timeout_default)
+    # Guard against NaN and ±inf up front: NaN comparisons are always False, so
+    # a ``<= 0`` check would silently admit ``float('nan')`` and ``float('inf')``
+    # would disable the HTTP timeout entirely (ingest hangs on a silent provider
+    # with the ``worst_case_wait > 3600`` operator warning also skipped).
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise ValueError(
+            f"EMBED_TIMEOUT_SECONDS={timeout_seconds!r} is out of range — "
+            f"must be a finite positive float."
+        )
+
+    raw_batch_size = os.getenv("EMBED_BATCH_SIZE")
+    if raw_batch_size is not None and raw_batch_size.strip():
+        try:
+            batch_size = int(raw_batch_size)
+        except ValueError as exc:
+            raise ValueError(
+                f"EMBED_BATCH_SIZE must be an integer, got {raw_batch_size!r}"
+            ) from exc
+    else:
+        batch_size = provider_batch_default
+    if not (1 <= batch_size <= 1024):
+        raise ValueError(
+            f"EMBED_BATCH_SIZE={batch_size!r} is out of range — "
+            f"must be between 1 and 1024."
+        )
+
+    raw_max_retries = os.getenv("EMBED_MAX_RETRIES")
+    if raw_max_retries is not None and raw_max_retries.strip():
+        try:
+            max_retries = int(raw_max_retries)
+        except ValueError as exc:
+            raise ValueError(
+                f"EMBED_MAX_RETRIES must be an integer, got {raw_max_retries!r}"
+            ) from exc
+    else:
+        max_retries = provider_retries_default
+    if not (0 <= max_retries <= 10):
+        raise ValueError(
+            f"EMBED_MAX_RETRIES={max_retries!r} is out of range — "
+            f"must be between 0 and 10."
+        )
+
+    return EmbeddingConfig(
+        ctx_tokens=ctx_tokens,
+        char_token_ratio=char_token_ratio,
+        ctx_safety_margin=ctx_safety_margin,
+        timeout_seconds=timeout_seconds,
+        batch_size=batch_size,
+        max_retries=max_retries,
+    )
+
+
+def _embed_envelope_defaults(inference_provider: str) -> tuple[float, int, int]:
+    """Return the provider-aware ``(timeout_s, batch_size, max_retries)`` defaults.
+
+    The embedding client runs against a provider whose throughput and
+    latency profile differ sharply from the chat client. Defaults are
+    tuned so the first batch completes well within the HTTP envelope:
+
+    - ``ollama``: CPU-bound, minutes-per-batch on large corpora →
+      long timeout, small batch, minimal retries.
+    - ``vllm``: GPU-served on a shared box → moderate timeout, larger
+      batch, minimal retries.
+    - ``openai`` (and every other remote API): network-latency-bound →
+      short timeout, full batch, more retries to absorb transient
+      failures.
+
+    Args:
+        inference_provider: Value of the ``INFERENCE_PROVIDER`` env var,
+            already lower-cased and stripped.
+
+    Returns:
+        tuple[float, int, int]: ``(timeout_seconds, batch_size,
+        max_retries)`` for the provider.
+    """
+    if inference_provider == "vllm":
+        return 600.0, 64, 1
+    if inference_provider == "openai":
+        return 60.0, 100, 2
+    # Ollama is the default, along with any unknown provider.
+    return 1800.0, 16, 1
 
 
 @dataclass(frozen=True)
@@ -491,6 +732,7 @@ class ModelConfig:
     """Dataclass for model configuration."""
 
     embed_model: str
+    embed_tokenizer_repo: str
     image_embed_model: str
     ner_model: str
     rerank_model: str
@@ -523,6 +765,9 @@ def load_model_env(
     Returns:
         ModelConfig: Dataclass containing model configuration.
         - embed_model (str): The embedding model identifier.
+        - embed_tokenizer_repo (str): HF repo id of the tokenizer used
+          for offline token counting at ingestion time. Empty when
+          tokenization happens on the provider side (e.g. ``openai``).
         - image_embed_model (str): The image embedding model identifier.
         - ner_model (str): The NER model identifier.
         - rerank_model (str): The reranker model identifier.
@@ -531,6 +776,8 @@ def load_model_env(
         - vision_model (str): The vision model identifier.
     """
     inference_provider = os.getenv("INFERENCE_PROVIDER", "ollama").strip().lower()
+
+    default_embed_tokenizer_repo = "BAAI/bge-m3"
 
     if inference_provider == "vllm":
         default_embed_model = "BAAI/bge-m3"
@@ -542,9 +789,13 @@ def load_model_env(
         default_embed_model = "text-embedding-3-small"
         default_text_model = "gpt-4o"
         default_vision_model = "gpt-4o"
+        default_embed_tokenizer_repo = ""
 
     return ModelConfig(
         embed_model=os.getenv("EMBED_MODEL", default_embed_model),
+        embed_tokenizer_repo=os.getenv(
+            "EMBED_TOKENIZER_REPO", default_embed_tokenizer_repo
+        ),
         image_embed_model=os.getenv("IMAGE_EMBED_MODEL", default_image_embed_model),
         ner_model=os.getenv("NER_MODEL", default_ner_model),
         rerank_model=os.getenv("RERANK_MODEL", default_rerank_model),
@@ -946,6 +1197,7 @@ class RetrievalConfig:
     sparse_top_k: int
     hybrid_top_k: int
     parent_context_enabled: bool
+    parent_context_safety_margin: float
 
 
 def load_retrieval_env(
@@ -959,6 +1211,7 @@ def load_retrieval_env(
     default_sparse_top_k: int = 20,
     default_hybrid_top_k: int = 20,
     default_parent_context_enabled: bool = True,
+    default_parent_context_safety_margin: float = 0.95,
 ) -> RetrievalConfig:
     """Loads retrieval configuration from environment variables or defaults.
 
@@ -971,6 +1224,11 @@ def load_retrieval_env(
         default_sparse_top_k (int): Default candidate depth for sparse retrieval in hybrid/sparse modes. Default is 20.
         default_hybrid_top_k (int): Default final candidate depth after dense/sparse fusion. Default is 20.
         default_parent_context_enabled (bool): Default flag to enable hierarchical parent context retrieval. Default is True.
+        default_parent_context_safety_margin (float): Default fraction of
+            ``OPENAI_CTX_WINDOW`` the chat-budget packer may consume when
+            deciding whether to emit a full parent or a windowed slice.
+            Reserves headroom for the provider's own BOS/EOS and rough
+            tokenizer-estimate drift. Must fall in ``(0, 1]``. Default 0.95.
 
     Returns:
         RetrievalConfig: Dataclass containing retrieval configuration.
@@ -985,6 +1243,9 @@ def load_retrieval_env(
                 - hybrid_top_k (int): Final candidate depth after dense/sparse fusion.
                 - parent_context_enabled (bool): Whether fine-grained matches should expand
                     to their hierarchical parent context when available.
+                - parent_context_safety_margin (float): Fraction of
+                    ``OPENAI_CTX_WINDOW`` the parent-context packer may
+                    consume before windowing oversize parents.
     """
     raw_mode = (
         str(os.getenv("CHAT_RESPONSE_MODE", default_chat_response_mode)).strip().lower()
@@ -1041,7 +1302,56 @@ def load_retrieval_env(
             )
         ).lower()
         in {"true", "1", "yes"},
+        # Warn-and-fallback (not raise) — query-time tuning knob. A stray
+        # out-of-range value should keep the app running with the safe
+        # default rather than blocking startup. See
+        # :func:`_parse_parent_context_safety_margin`.
+        parent_context_safety_margin=_parse_parent_context_safety_margin(
+            default=default_parent_context_safety_margin,
+        ),
     )
+
+
+def _parse_parent_context_safety_margin(*, default: float) -> float:
+    """Parse ``PARENT_CONTEXT_SAFETY_MARGIN`` and clamp it to ``(0, 1]``.
+
+    The query-time parent-context packer reserves
+    ``(1 - safety_margin)`` of the chat context window for provider-side
+    BOS/EOS tokens and char/token-estimator drift. Values outside
+    ``(0, 1]`` would either disable the guard (``>= 1`` leaves no
+    headroom, defeating the purpose) or starve the prompt (``<= 0``
+    yields zero usable tokens and blocks all queries). The fallback
+    ``default`` is used when the env var is unset, malformed, or out of
+    range — we log the override rather than raising so a stray operator
+    typo doesn't brick ingest.
+
+    Args:
+        default: The value returned when the env var is absent,
+            malformed, or out of range.
+
+    Returns:
+        A float in ``(0, 1]``.
+    """
+    raw = os.getenv("PARENT_CONTEXT_SAFETY_MARGIN")
+    if raw is None or not raw.strip():
+        return default
+    try:
+        parsed = float(raw)
+    except ValueError:
+        logger.warning(
+            "PARENT_CONTEXT_SAFETY_MARGIN={!r} is not a float — using default {}",
+            raw,
+            default,
+        )
+        return default
+    if not (0.0 < parsed <= 1.0):
+        logger.warning(
+            "PARENT_CONTEXT_SAFETY_MARGIN={!r} is out of range (0, 1] — using default {}",
+            raw,
+            default,
+        )
+        return default
+    return parsed
 
 
 @dataclass(frozen=True)
