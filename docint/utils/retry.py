@@ -94,7 +94,13 @@ def is_transient_qdrant_error(exc: BaseException) -> bool:
         )
 
         if isinstance(exc, ResponseHandlingException):
-            return True
+            # ResponseHandlingException wraps any malformed/unexpected
+            # response — including 401 auth failures and 422 schema
+            # rejections that should fail fast. Apply the same
+            # transient-substring filter we use for UnexpectedResponse
+            # so a misconfigured Qdrant URL or stale API key surfaces
+            # immediately rather than burning three retries.
+            return _matches_transient_substring(exc)
         if isinstance(exc, UnexpectedResponse):
             return _matches_transient_substring(exc)
     except ImportError:  # pragma: no cover - qdrant is a hard dependency

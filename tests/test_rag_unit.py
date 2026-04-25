@@ -2105,46 +2105,40 @@ def test_build_ingestion_pipeline_passes_configured_device_to_gliner(
     assert captured["device"] == "cpu"
     assert getattr(rag._image_ingestion_service, "device", None) == "cpu"
 
-    def test_sparse_model_uses_cached_path(
-        monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        """Ensure sparse_model resolves to a cached snapshot path when available.
 
-        Args:
-            monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
-            tmp_path (Path): The temporary path fixture.
-        """
+def test_sparse_model_returns_id_when_directly_supported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sparse_model should return the configured ID when fastembed lists it directly.
 
-        # Build a fake HF cache layout with refs/main -> snapshots/abc123
-        cache_root = tmp_path / "hub"
-        model_dir = cache_root / "models--Qdrant--all_miniLM_L6_v2_with_attentions"
-        refs_dir = model_dir / "refs"
-        snaps_dir = model_dir / "snapshots"
-        snap = snaps_dir / "abc123"
-        snap.mkdir(parents=True)
-        refs_dir.mkdir(parents=True, exist_ok=True)
-        (refs_dir / "main").write_text("abc123")
+    The historical name of this test (``test_sparse_model_uses_cached_path``)
+    described a path-resolution behaviour that the current
+    :pyattr:`RAG.sparse_model` no longer performs — fastembed resolves local
+    files via ``FASTEMBED_CACHE_PATH`` (set by env_cfg to ``HF_HUB_CACHE``)
+    rather than via this property. This test pins the canonical-ID return
+    contract instead, which is what callers actually rely on.
 
-        # Stub supported models to match the configured sparse ID
-        monkeypatch.setattr(
-            rag_module.SparseTextEmbedding,
-            "list_supported_models",
-            staticmethod(
-                lambda: [
-                    {
-                        "model": "Qdrant/all_miniLM_L6_v2_with_attentions",
-                        "sources": {"hf": "Qdrant/all_miniLM_L6_v2_with_attentions"},
-                    }
-                ]
-            ),
-        )
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setattr(
+        rag_module.SparseTextEmbedding,
+        "list_supported_models",
+        staticmethod(
+            lambda: [
+                {
+                    "model": "Qdrant/all_miniLM_L6_v2_with_attentions",
+                    "sources": {"hf": "Qdrant/all_miniLM_L6_v2_with_attentions"},
+                }
+            ]
+        ),
+    )
 
-        rag = RAG(qdrant_collection="test")
-        rag.hf_hub_cache = cache_root
-        rag.sparse_model_id = "Qdrant/all_miniLM_L6_v2_with_attentions"
+    rag = RAG(qdrant_collection="test")
+    rag.enable_hybrid = True
+    rag.sparse_model_id = "Qdrant/all_miniLM_L6_v2_with_attentions"
 
-        resolved = rag.sparse_model
-        assert resolved == str(snap)
+    assert rag.sparse_model == "Qdrant/all_miniLM_L6_v2_with_attentions"
 
 
 def test_reranker_passes_configured_fp16(monkeypatch: pytest.MonkeyPatch) -> None:

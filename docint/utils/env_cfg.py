@@ -593,6 +593,7 @@ class IngestionConfig:
     docling_accelerator_num_threads: int
     docstore_batch_size: int
     ingest_benchmark_enabled: bool
+    ingest_manifest_enabled: bool
     docstore_max_retries: int
     docstore_retry_backoff_max_seconds: float
     docstore_retry_backoff_seconds: float
@@ -610,6 +611,7 @@ def load_ingestion_env(
     default_docling_accelerator_num_threads: int = 4,
     default_docstore_batch_size: int = 100,
     default_ingest_benchmark_enabled: bool = False,
+    default_ingest_manifest_enabled: bool = True,
     default_docstore_max_retries: int = 3,
     default_docstore_retry_backoff_seconds: float = 0.25,
     default_docstore_retry_backoff_max_seconds: float = 2.0,
@@ -647,6 +649,10 @@ def load_ingestion_env(
         - docstore_batch_size (int): The batch size for document store operations.
         - ingest_benchmark_enabled (bool): Emit ingestion benchmark summary logs
             for throughput and batch diagnostics.
+        - ingest_manifest_enabled (bool): Track in-flight, completed, and
+            failed file ingestions in a SQLite manifest for resume
+            visibility. Set to ``false`` to disable the manifest writes
+            (returns the no-op stub from :class:`NullIngestManifest`).
         - docstore_max_retries (int): Maximum retries for transient docstore
             transport failures (Qdrant vector writes) and SQLite locked-DB
             errors in :class:`SQLiteKVStore`.
@@ -677,6 +683,10 @@ def load_ingestion_env(
         ),
         ingest_benchmark_enabled=str(
             os.getenv("INGEST_BENCHMARK_ENABLED", default_ingest_benchmark_enabled)
+        ).lower()
+        in {"true", "1", "yes"},
+        ingest_manifest_enabled=str(
+            os.getenv("INGEST_MANIFEST_ENABLED", default_ingest_manifest_enabled)
         ).lower()
         in {"true", "1", "yes"},
         docstore_max_retries=max(
