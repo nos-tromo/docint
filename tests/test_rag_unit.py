@@ -4846,6 +4846,191 @@ def test_persist_node_batches_logs_failed_persist_on_docstore_failure(
     assert "node-x" in combined
 
 
+def test_persist_node_batches_retries_transient_qdrant_error_then_succeeds(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Vector-insert retries should recover from transient Qdrant failures.
+
+    Simulates two transient ``ConnectionError`` failures followed by a
+    successful insert. With ``docstore_max_retries=3`` and zero-delay
+    backoff (so no real sleep occurs), the call should succeed without
+    emitting the ``orphaned_kv_nodes`` marker.
+
+    Args:
+        caplog: Pytest log capture fixture.
+        monkeypatch: Pytest monkeypatch fixture used to stub the
+            embedding-prep helper so the test does not load a model.
+    """
+
+    insert_calls: list[int] = []
+
+    class FakeDocStore:
+        """Record persisted node IDs across batches."""
+
+        def __init__(self) -> None:
+            self.persisted: list[str] = []
+
+        def add_documents(self, nodes: list[Any], allow_update: bool = True) -> None:
+            _ = allow_update
+            self.persisted.extend(n.node_id for n in nodes)
+
+    class FakeIndex:
+        """Fail twice with a transient error, then succeed on the third attempt."""
+
+        def __init__(self) -> None:
+            self.docstore = FakeDocStore()
+            self.successful_inserts: list[list[Any]] = []
+
+        def insert_nodes(self, nodes: list[Any]) -> None:
+            insert_calls.append(len(nodes))
+            if len(insert_calls) <= 2:
+                raise ConnectionError("connection reset by peer")
+            self.successful_inserts.append(list(nodes))
+
+    monkeypatch.setattr(
+        RAG,
+        "_prepare_vector_nodes_for_insert",
+        _fake_prepare_vector_nodes_for_insert,
+    )
+
+    rag = RAG(qdrant_collection="active")
+    rag.docstore_batch_size = 10
+    rag.docstore_max_retries = 3
+    rag.docstore_retry_backoff_seconds = 0.0
+    rag.docstore_retry_backoff_max_seconds = 0.0
+    rag.index = cast(Any, FakeIndex())
+
+    node = TextNode(text="resilient", metadata={}, id_="node-r")
+
+    cleanup = _capture_loguru(caplog)
+    try:
+        rag._persist_node_batches([node])
+    finally:
+        cleanup()
+
+    assert len(insert_calls) == 3
+    index = cast(Any, rag.index)
+    assert index.successful_inserts == [[node]]
+    assert index.docstore.persisted == ["node-r"]
+    combined = "\n".join(str(record.msg) for record in caplog.records)
+    assert "orphaned_kv_nodes" not in combined
+
+
+def test_persist_node_batches_orphaned_log_includes_attempt_count(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The orphaned_kv_nodes log should record the exhausted attempt count.
+
+    Args:
+        caplog: Pytest log capture fixture.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+
+    class FakeDocStore:
+        def add_documents(self, nodes: list[Any], allow_update: bool = True) -> None:
+            _ = (nodes, allow_update)
+
+    class FakeIndex:
+        def __init__(self) -> None:
+            self.docstore = FakeDocStore()
+
+        def insert_nodes(self, nodes: list[Any]) -> None:
+            _ = nodes
+            raise ConnectionError("connection reset")
+
+    monkeypatch.setattr(
+        RAG,
+        "_prepare_vector_nodes_for_insert",
+        _fake_prepare_vector_nodes_for_insert,
+    )
+
+    rag = RAG(qdrant_collection="active")
+    rag.docstore_batch_size = 10
+    rag.docstore_max_retries = 2
+    rag.docstore_retry_backoff_seconds = 0.0
+    rag.docstore_retry_backoff_max_seconds = 0.0
+    rag.index = cast(Any, FakeIndex())
+
+    node = TextNode(text="hello", metadata={}, id_="node-1")
+
+    cleanup = _capture_loguru(caplog)
+    try:
+        with pytest.raises(ConnectionError, match="connection reset"):
+            rag._persist_node_batches([node])
+    finally:
+        cleanup()
+
+    combined = "\n".join(str(record.msg) for record in caplog.records)
+    assert "orphaned_kv_nodes" in combined
+    assert "max_attempts=3" in combined
+    assert "node-1" in combined
+
+
+def test_apersist_node_batches_retries_transient_qdrant_error_then_succeeds(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Async vector-insert retries should recover from transient failures.
+
+    Args:
+        caplog: Pytest log capture fixture.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+
+    async def _afake_prepare(
+        _self: RAG, vector_nodes: list[Any]
+    ) -> tuple[list[Any], list[Any]]:
+        return (list(vector_nodes), list(vector_nodes))
+
+    insert_calls: list[int] = []
+
+    class FakeDocStore:
+        def __init__(self) -> None:
+            self.persisted: list[str] = []
+
+        def add_documents(self, nodes: list[Any], allow_update: bool = True) -> None:
+            _ = allow_update
+            self.persisted.extend(n.node_id for n in nodes)
+
+    class FakeAsyncIndex:
+        def __init__(self) -> None:
+            self.docstore = FakeDocStore()
+            self.successful_inserts: list[list[Any]] = []
+
+        async def ainsert_nodes(self, nodes: list[Any]) -> None:
+            insert_calls.append(len(nodes))
+            if len(insert_calls) <= 2:
+                raise TimeoutError("read timed out")
+            self.successful_inserts.append(list(nodes))
+
+    monkeypatch.setattr(
+        RAG,
+        "_aprepare_vector_nodes_for_insert",
+        _afake_prepare,
+    )
+
+    rag = RAG(qdrant_collection="active")
+    rag.docstore_batch_size = 10
+    rag.docstore_max_retries = 3
+    rag.docstore_retry_backoff_seconds = 0.0
+    rag.docstore_retry_backoff_max_seconds = 0.0
+    rag.index = cast(Any, FakeAsyncIndex())
+
+    node = TextNode(text="resilient async", metadata={}, id_="node-ra")
+
+    cleanup = _capture_loguru(caplog)
+    try:
+        asyncio.run(rag._apersist_node_batches([node]))
+    finally:
+        cleanup()
+
+    assert len(insert_calls) == 3
+    index = cast(Any, rag.index)
+    assert index.successful_inserts == [[node]]
+    assert index.docstore.persisted == ["node-ra"]
+    combined = "\n".join(str(record.msg) for record in caplog.records)
+    assert "orphaned_kv_nodes" not in combined
+
+
 def test_log_ingest_benchmark_summary_emits_metrics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

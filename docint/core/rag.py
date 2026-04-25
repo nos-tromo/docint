@@ -114,6 +114,12 @@ from docint.core.state.session_manager import SessionManager
 from docint.core.storage.sqlite_kvstore import SQLiteKVStore
 from docint.core.storage.utils import qdrant_collection_exists
 from docint.core.storage.sources import stage_sources_to_qdrant
+from docint.utils.batching import chunk_nodes
+from docint.utils.retry import (
+    aretry_with_backoff,
+    is_transient_qdrant_error,
+    retry_with_backoff,
+)
 from docint.utils.embed_chunking import (
     effective_budget,
     estimate_tokens,
@@ -2632,20 +2638,20 @@ class RAG:
         # so the RAG layer must chunk explicitly. The safety net runs
         # per chunk — an oversize payload slipping through the
         # re-splitter raises BEFORE its chunk hits the provider, not
-        # after 4 minutes of stalled batch processing. Mirrors the
-        # slice idiom in :meth:`_chunk_nodes`; kept inline because we
-        # need parallel slicing of ``nodes_to_embed`` and
-        # ``texts_to_embed`` in lockstep.
+        # after 4 minutes of stalled batch processing. The slicing is
+        # kept inline because we need parallel slicing of
+        # ``nodes_to_embed`` and ``texts_to_embed`` in lockstep, which
+        # the generic :func:`chunk_nodes` helper cannot express.
         batch_size = max(1, self.embed_batch_size)
         for start in range(0, len(nodes_to_embed), batch_size):
-            chunk_nodes = nodes_to_embed[start : start + batch_size]
+            embed_batch = nodes_to_embed[start : start + batch_size]
             chunk_texts = texts_to_embed[start : start + batch_size]
-            self._assert_embed_payloads_fit_budget(chunk_nodes, chunk_texts)
+            self._assert_embed_payloads_fit_budget(embed_batch, chunk_texts)
             chunk_embeddings = cast(
                 list[list[float]],
                 get_embeddings(chunk_texts),
             )
-            for node, embedding in zip(chunk_nodes, chunk_embeddings):
+            for node, embedding in zip(embed_batch, chunk_embeddings):
                 node.embedding = embedding
 
         return vector_nodes, docstore_nodes
@@ -2690,36 +2696,17 @@ class RAG:
         # layer and not inside ``aget_text_embeddings_strict``.
         batch_size = max(1, self.embed_batch_size)
         for start in range(0, len(nodes_to_embed), batch_size):
-            chunk_nodes = nodes_to_embed[start : start + batch_size]
+            embed_batch = nodes_to_embed[start : start + batch_size]
             chunk_texts = texts_to_embed[start : start + batch_size]
-            self._assert_embed_payloads_fit_budget(chunk_nodes, chunk_texts)
+            self._assert_embed_payloads_fit_budget(embed_batch, chunk_texts)
             chunk_embeddings = cast(
                 list[list[float]],
                 await aget_embeddings(chunk_texts),
             )
-            for node, embedding in zip(chunk_nodes, chunk_embeddings):
+            for node, embedding in zip(embed_batch, chunk_embeddings):
                 node.embedding = embedding
 
         return vector_nodes, docstore_nodes
-
-    @staticmethod
-    def _chunk_nodes(nodes: list[BaseNode], batch_size: int) -> list[list[BaseNode]]:
-        """Split nodes into non-empty batches.
-
-        Args:
-            nodes (list[BaseNode]): Nodes to split.
-            batch_size (int): Preferred maximum batch size.
-
-        Returns:
-            list[list[BaseNode]]: Node batches in input order.
-        """
-        if not nodes:
-            return []
-        effective_batch_size = max(1, int(batch_size))
-        return [
-            nodes[i : i + effective_batch_size]
-            for i in range(0, len(nodes), effective_batch_size)
-        ]
 
     def _docstore_batch_for_persist(
         self,
@@ -2779,7 +2766,7 @@ class RAG:
         if self.index is None:
             raise RuntimeError("Index is not initialized.")
 
-        batches = self._chunk_nodes(nodes, self.docstore_batch_size)
+        batches = chunk_nodes(nodes, self.docstore_batch_size)
         for batch_no, batch in enumerate(batches, start=1):
             logger.debug(
                 "Persisting node batch {}/{} ({} node(s)) to DocStore...",
@@ -2813,16 +2800,25 @@ class RAG:
                     )
                     raise
             if prepared_vector_nodes:
+                index = self.index
                 try:
-                    self.index.insert_nodes(prepared_vector_nodes)
+                    retry_with_backoff(
+                        "qdrant_insert_nodes",
+                        lambda: index.insert_nodes(prepared_vector_nodes),
+                        max_retries=self.docstore_max_retries,
+                        initial_backoff=self.docstore_retry_backoff_seconds,
+                        max_backoff=self.docstore_retry_backoff_max_seconds,
+                        is_retryable=is_transient_qdrant_error,
+                    )
                 except Exception as exc:
                     logger.error(
                         "orphaned_kv_nodes | batch={}/{} collection={!r} "
-                        "error={!r} node_ids={}",
+                        "error={!r} max_attempts={} node_ids={}",
                         batch_no,
                         len(batches),
                         self.qdrant_collection,
                         exc,
+                        self.docstore_max_retries + 1,
                         [node.node_id for node in prepared_vector_nodes],
                     )
                     raise
@@ -2892,7 +2888,7 @@ class RAG:
         if self.index is None:
             raise RuntimeError("Index is not initialized.")
 
-        batches = self._chunk_nodes(nodes, self.docstore_batch_size)
+        batches = chunk_nodes(nodes, self.docstore_batch_size)
         for batch_no, batch in enumerate(batches, start=1):
             logger.debug(
                 "Persisting async node batch {}/{} ({} node(s)) to DocStore...",
@@ -2926,16 +2922,29 @@ class RAG:
                     )
                     raise
             if prepared_vector_nodes:
+                index = self.index
+
+                async def _do_ainsert() -> None:
+                    await index.ainsert_nodes(prepared_vector_nodes)
+
                 try:
-                    await self.index.ainsert_nodes(prepared_vector_nodes)
+                    await aretry_with_backoff(
+                        "qdrant_ainsert_nodes",
+                        _do_ainsert,
+                        max_retries=self.docstore_max_retries,
+                        initial_backoff=self.docstore_retry_backoff_seconds,
+                        max_backoff=self.docstore_retry_backoff_max_seconds,
+                        is_retryable=is_transient_qdrant_error,
+                    )
                 except Exception as exc:
                     logger.error(
                         "orphaned_kv_nodes | batch={}/{} collection={!r} "
-                        "error={!r} node_ids={}",
+                        "error={!r} max_attempts={} node_ids={}",
                         batch_no,
                         len(batches),
                         self.qdrant_collection,
                         exc,
+                        self.docstore_max_retries + 1,
                         [node.node_id for node in prepared_vector_nodes],
                     )
                     raise
@@ -5058,7 +5067,7 @@ class RAG:
                 self._persist_node_batches(nodes)
                 core_nodes += len(nodes)
                 persist_batches += len(
-                    self._chunk_nodes(nodes, self.docstore_batch_size)
+                    chunk_nodes(nodes, self.docstore_batch_size)
                 )
                 processed_hashes.add(file_hash)
 
@@ -5080,7 +5089,7 @@ class RAG:
                     self._persist_node_batches(nodes)
                     streaming_nodes += len(nodes)
                     persist_batches += len(
-                        self._chunk_nodes(nodes, self.docstore_batch_size)
+                        chunk_nodes(nodes, self.docstore_batch_size)
                     )
                     enrich_batches += 1
                 if completed_hashes:
@@ -5093,7 +5102,7 @@ class RAG:
                     self._persist_node_batches(nodes)
                     streaming_nodes += len(nodes)
                     persist_batches += len(
-                        self._chunk_nodes(nodes, self.docstore_batch_size)
+                        chunk_nodes(nodes, self.docstore_batch_size)
                     )
 
         total_docs = core_docs + streaming_docs
@@ -5223,7 +5232,7 @@ class RAG:
                 await self._apersist_node_batches(nodes)
                 core_nodes += len(nodes)
                 persist_batches += len(
-                    self._chunk_nodes(nodes, self.docstore_batch_size)
+                    chunk_nodes(nodes, self.docstore_batch_size)
                 )
                 processed_hashes.add(file_hash)
 
@@ -5243,7 +5252,7 @@ class RAG:
                     await self._apersist_node_batches(nodes)
                     streaming_nodes += len(nodes)
                     persist_batches += len(
-                        self._chunk_nodes(nodes, self.docstore_batch_size)
+                        chunk_nodes(nodes, self.docstore_batch_size)
                     )
                     enrich_batches += 1
                 if completed_hashes:
@@ -5256,7 +5265,7 @@ class RAG:
                     await self._apersist_node_batches(nodes)
                     streaming_nodes += len(nodes)
                     persist_batches += len(
-                        self._chunk_nodes(nodes, self.docstore_batch_size)
+                        chunk_nodes(nodes, self.docstore_batch_size)
                     )
 
         total_docs = core_docs + streaming_docs

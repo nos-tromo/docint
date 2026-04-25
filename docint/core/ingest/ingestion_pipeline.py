@@ -24,6 +24,7 @@ from docint.core.readers.images import ImageReader
 from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.tables import TableReader
 from docint.core.storage.hierarchical import HierarchicalNodeParser
+from docint.utils.batching import chunk_nodes
 from docint.utils.clean_text import basic_clean
 from docint.utils.env_cfg import (
     load_hate_speech_env,
@@ -284,25 +285,6 @@ class DocumentIngestionPipeline:
             yield from self._stream_processed_batch(current_docs, existing_hashes)
 
     @staticmethod
-    def _chunk_nodes(nodes: list[BaseNode], batch_size: int) -> list[list[BaseNode]]:
-        """Split nodes into non-empty batches.
-
-        Args:
-            nodes (list[BaseNode]): Nodes to split.
-            batch_size (int): Maximum number of nodes per batch.
-
-        Returns:
-            list[list[BaseNode]]: Batched nodes preserving input order.
-        """
-        if not nodes:
-            return []
-        effective_batch_size = max(1, int(batch_size))
-        return [
-            nodes[i : i + effective_batch_size]
-            for i in range(0, len(nodes), effective_batch_size)
-        ]
-
-    @staticmethod
     def _extract_doc_file_hashes(docs: list[Document]) -> set[str]:
         """Collect unique file hashes from processed documents.
 
@@ -341,7 +323,7 @@ class DocumentIngestionPipeline:
 
         total_nodes = len(nodes)
         processed_nodes = 0
-        node_batches = self._chunk_nodes(nodes, self.ingestion_batch_size)
+        node_batches = chunk_nodes(nodes, self.ingestion_batch_size)
         for batch_idx, node_batch in enumerate(node_batches):
             self._enrich_nodes_in_place(
                 node_batch,
