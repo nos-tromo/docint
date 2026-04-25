@@ -121,6 +121,7 @@ from docint.utils.embed_chunking import (
     resplit_nodes_for_embedding,
 )
 from docint.utils.embedding_tokenizer import build_embedding_token_counter
+from docint.utils.llm_sanitize import strip_reasoning
 from docint.utils.openai_cfg import (
     BudgetedOpenAIEmbedding,
     EmbeddingInputTooLongError,
@@ -4036,15 +4037,8 @@ class RAG:
         else:
             resp_text = ""
 
-        # strip <think>…</think> (optional)
-        m = re.search(
-            r"<think>(.*?)</think>", resp_text, flags=re.DOTALL | re.IGNORECASE
-        )
-        if m:
-            reason = (m.group(1).strip() if m else None) or reason
-            resp_text = re.sub(
-                r"<think>.*?</think>", "", resp_text, flags=re.DOTALL | re.IGNORECASE
-            ).strip()
+        resp_text, captured = strip_reasoning(resp_text or "")
+        reason = captured or reason
 
         # --- normalize source_nodes ---
         source_nodes = getattr(result, "source_nodes", None)

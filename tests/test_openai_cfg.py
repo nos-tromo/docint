@@ -292,6 +292,157 @@ def test_openai_pipeline_call_chat_omits_reasoning_effort_when_disabled(
     assert "reasoning_effort" not in captured
 
 
+def _install_vision_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    inference_provider: str,
+    thinking_enabled: bool,
+    response_content: str,
+    captured: dict[str, Any],
+) -> "OpenAIPipeline":
+    """Build an ``OpenAIPipeline`` whose vision client returns a fixed response.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Temporary cache root.
+        inference_provider: Provider string for ``OpenAIConfig``.
+        thinking_enabled: Whether reasoning effort is enabled.
+        response_content: String the fake vision client returns.
+        captured: Dict the fake client fills with the request kwargs.
+
+    Returns:
+        OpenAIPipeline: A pipeline wired to the fake client.
+    """
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(create=self._create),
+            )
+
+        def _create(self, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(message=SimpleNamespace(content=response_content))
+                ]
+            )
+
+    monkeypatch.setattr(
+        "docint.utils.openai_cfg.load_model_env",
+        lambda: SimpleNamespace(
+            text_model="qwen3.5:9b",
+            vision_model="qwen3.5-vl:7b",
+        ),
+    )
+    monkeypatch.setattr(
+        "docint.utils.openai_cfg.load_openai_env",
+        lambda: OpenAIConfig(
+            api_base="http://localhost:11434/v1",
+            api_key="sk-test",
+            ctx_window=200000,
+            dimensions=1024,
+            max_retries=2,
+            num_output=256,
+            inference_provider=inference_provider,
+            reuse_client=False,
+            seed=42,
+            temperature=0.0,
+            thinking_effort="high",
+            thinking_enabled=thinking_enabled,
+            timeout=300.0,
+            top_p=0.0,
+        ),
+    )
+    monkeypatch.setattr(
+        "docint.utils.openai_cfg.load_path_env",
+        lambda: SimpleNamespace(prompts=tmp_path),
+    )
+    monkeypatch.setattr("docint.utils.openai_cfg.OpenAI", lambda **_: FakeClient())
+
+    return OpenAIPipeline()
+
+
+def test_call_vision_strips_think_tags(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``call_vision`` must strip ``<think>...</think>`` before returning."""
+    captured: dict[str, Any] = {}
+    pipeline = _install_vision_pipeline(
+        monkeypatch,
+        tmp_path,
+        inference_provider="ollama",
+        thinking_enabled=False,
+        response_content="<think>scratch work</think>final description",
+        captured=captured,
+    )
+
+    result = pipeline.call_vision(prompt="describe", img_base64="AA==")
+
+    assert result == "final description"
+
+
+def test_call_vision_forwards_reasoning_effort_for_ollama(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Reasoning effort should be forwarded for the vision path like chat does."""
+    captured: dict[str, Any] = {}
+    pipeline = _install_vision_pipeline(
+        monkeypatch,
+        tmp_path,
+        inference_provider="ollama",
+        thinking_enabled=True,
+        response_content="ok",
+        captured=captured,
+    )
+
+    pipeline.call_vision(prompt="describe", img_base64="AA==")
+
+    assert captured["reasoning_effort"] == "high"
+
+
+def test_call_vision_omits_reasoning_effort_when_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Reasoning effort must not be sent when the pipeline has thinking disabled."""
+    captured: dict[str, Any] = {}
+    pipeline = _install_vision_pipeline(
+        monkeypatch,
+        tmp_path,
+        inference_provider="openai",
+        thinking_enabled=False,
+        response_content="ok",
+        captured=captured,
+    )
+
+    pipeline.call_vision(prompt="describe", img_base64="AA==")
+
+    assert "reasoning_effort" not in captured
+
+
+def test_call_vision_strips_reasoning_around_refusal_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Reasoning is stripped but refusal detection is left to call sites."""
+    captured: dict[str, Any] = {}
+    pipeline = _install_vision_pipeline(
+        monkeypatch,
+        tmp_path,
+        inference_provider="ollama",
+        thinking_enabled=False,
+        response_content=(
+            "<think>I wasn't given an image</think>"
+            "I don't see any image attached to your message."
+        ),
+        captured=captured,
+    )
+
+    result = pipeline.call_vision(prompt="describe", img_base64="AA==")
+
+    assert result == "I don't see any image attached to your message."
+
+
 def test_budgeted_embedding_raises_on_oversize(
     monkeypatch,
 ) -> None:

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
+import pytest
 from PIL import Image
 
 from docint.core.ingest.images_service import (
@@ -282,6 +283,141 @@ def test_parse_tag_payload_extracts_structured_json() -> None:
 
     assert description == "A technical architecture diagram."
     assert tags == ["diagram", "system design"]
+
+
+def test_parse_tag_payload_strips_think_before_json() -> None:
+    """Reasoning scratchpads must be removed before JSON parsing."""
+    raw = "<think>the user wants strict JSON</think>" + json.dumps(
+        {"description": "A flowchart.", "tags": ["flowchart", "ops"]}
+    )
+
+    description, tags = VisionJSONTagger.parse_tag_payload(raw)
+
+    assert description == "A flowchart."
+    assert tags == ["flowchart", "ops"]
+
+
+def test_parse_tag_payload_returns_empty_when_reasoning_only() -> None:
+    """A response that is only a reasoning block must not poison the store."""
+    raw = (
+        "The user wants a strict JSON with keys 'description' and 'tags'. "
+        "I should produce JSON only.\n</think>"
+    )
+
+    description, tags = VisionJSONTagger.parse_tag_payload(raw)
+
+    assert description == ""
+    assert tags == []
+
+
+def test_parse_tag_payload_returns_empty_when_json_missing() -> None:
+    """Non-JSON responses must not fall back to the raw content as description."""
+    raw = "Sorry, I don't have enough context to describe this image."
+
+    description, tags = VisionJSONTagger.parse_tag_payload(raw)
+
+    assert description == ""
+    assert tags == []
+
+
+def test_parse_tag_payload_brace_extractor_handles_prose_wrapped_json() -> None:
+    """A JSON object embedded in prose should still be parsed."""
+    raw = (
+        "Here you go: "
+        + json.dumps({"description": "A diagram.", "tags": ["one", "two"]})
+        + " — hope this helps!"
+    )
+
+    description, tags = VisionJSONTagger.parse_tag_payload(raw)
+
+    assert description == "A diagram."
+    assert tags == ["one", "two"]
+
+
+def test_parse_tag_payload_brace_extractor_handles_nested_strings() -> None:
+    """Braces inside string values must not confuse the balanced extractor."""
+    raw = 'prefix {"description": "a {not json} caption", "tags": ["x"]} suffix'
+
+    description, tags = VisionJSONTagger.parse_tag_payload(raw)
+
+    assert description == "a {not json} caption"
+    assert tags == ["x"]
+
+
+def test_parse_tag_payload_accepts_tags_only_json_without_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Valid JSON lacking a description key must not trigger a spurious warning."""
+    raw = json.dumps({"tags": ["cat", "photo"]})
+
+    with caplog.at_level("WARNING"):
+        description, tags = VisionJSONTagger.parse_tag_payload(raw)
+
+    assert description == ""
+    assert tags == ["cat", "photo"]
+    assert "non-JSON output" not in caplog.text
+
+
+class _StubPipeline:
+    """Minimal ``OpenAIPipeline`` stand-in that returns a canned vision response."""
+
+    def __init__(self, response: str) -> None:
+        self._response = response
+        self.calls: list[tuple[str, str, str]] = []
+
+    def call_vision(self, *, prompt: str, img_base64: str, mime_type: str) -> str:
+        self.calls.append((prompt, img_base64, mime_type))
+        return self._response
+
+
+def test_describe_and_tag_returns_empty_on_no_image_refusal() -> None:
+    """A no-image refusal from the pipeline should map to empty description/tags."""
+    tagger = VisionJSONTagger.__new__(VisionJSONTagger)
+    tagger.pipeline = cast(
+        Any,
+        _StubPipeline(response="I don't see any image attached to your message."),
+    )
+    tagger.max_image_dimension = 1024
+    tagger.prompt_template = "Return strict JSON."
+
+    description, tags = tagger.describe_and_tag(_make_png_bytes(), "image/png")
+
+    assert description == ""
+    assert tags == []
+
+
+def test_describe_and_tag_strips_reasoning_wrapped_json() -> None:
+    """Reasoning-wrapped JSON should still produce clean description and tags."""
+    tagger = VisionJSONTagger.__new__(VisionJSONTagger)
+    payload = json.dumps({"description": "A cat.", "tags": ["animal", "cat"]})
+    tagger.pipeline = cast(
+        Any, _StubPipeline(response=f"<think>user wants JSON</think>{payload}")
+    )
+    tagger.max_image_dimension = 1024
+    tagger.prompt_template = "Return strict JSON."
+
+    description, tags = tagger.describe_and_tag(_make_png_bytes(), "image/png")
+
+    assert description == "A cat."
+    assert tags == ["animal", "cat"]
+
+
+def test_describe_and_tag_discards_pure_reasoning_response() -> None:
+    """Reasoning-only responses must not leak into description."""
+    tagger = VisionJSONTagger.__new__(VisionJSONTagger)
+    tagger.pipeline = cast(
+        Any,
+        _StubPipeline(
+            response="The user wants a strict JSON with keys description and tags.</think>"
+        ),
+    )
+    tagger.max_image_dimension = 1024
+    tagger.prompt_template = "Return strict JSON."
+
+    description, tags = tagger.describe_and_tag(_make_png_bytes(), "image/png")
+
+    assert description == ""
+    assert tags == []
 
 
 def test_ingest_image_stores_expected_payload_and_vector() -> None:

@@ -33,6 +33,7 @@ from docint.utils.env_cfg import (
     load_path_env,
     resolve_hf_cache_path,
 )
+from docint.utils.llm_sanitize import looks_like_no_image_refusal, strip_reasoning
 from docint.utils.mimetype import get_mimetype
 from docint.utils.openai_cfg import OpenAIPipeline
 
@@ -225,27 +226,43 @@ class VisionJSONTagger:
     def parse_tag_payload(raw: str) -> tuple[str, list[str]]:
         """Parse a raw vision response into ``(description, tags)``.
 
+        Reasoning scratchpads (``<think>...</think>``, Harmony channels)
+        are stripped before JSON parsing. If parsing still fails an
+        empty description is returned — the raw response is never used
+        as a fallback, because reasoning models routinely emit
+        meta-commentary that would otherwise poison the store.
+
         Args:
             raw (str): Raw model output string.
 
         Returns:
             tuple[str, list[str]]: A tuple of cleaned description and tags.
         """
+        cleaned, captured = strip_reasoning(raw or "")
+        if captured:
+            logger.debug(
+                "Stripped {} chars of reasoning from image tagger response",
+                len(captured),
+            )
+
         payload: dict[str, Any] = {}
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                payload = parsed
-        except Exception:
-            start = raw.find("{")
-            end = raw.rfind("}")
-            if start != -1 and end > start:
-                try:
-                    parsed = json.loads(raw[start : end + 1])
-                    if isinstance(parsed, dict):
-                        payload = parsed
-                except Exception:
-                    payload = {}
+        json_parsed = False
+        if cleaned:
+            try:
+                parsed = json.loads(cleaned)
+                if isinstance(parsed, dict):
+                    payload = parsed
+                    json_parsed = True
+            except Exception:
+                extracted = VisionJSONTagger._extract_first_json_object(cleaned)
+                if extracted is not None:
+                    try:
+                        parsed = json.loads(extracted)
+                        if isinstance(parsed, dict):
+                            payload = parsed
+                            json_parsed = True
+                    except Exception:
+                        payload = {}
 
         description = str(payload.get("description") or "").strip()
         tags_raw = payload.get("tags")
@@ -260,9 +277,13 @@ class VisionJSONTagger:
                     continue
                 tags.append(tag_str)
 
-        # Fallback to raw content when JSON parse fails.
-        if not description and raw.strip():
-            description = raw.strip()
+        if not json_parsed and cleaned:
+            preview = cleaned[:120].replace("\n", " ")
+            logger.warning(
+                "Image tagger returned non-JSON output; discarding description "
+                "(preview={!r})",
+                preview,
+            )
 
         deduped: list[str] = []
         seen: set[str] = set()
@@ -273,6 +294,52 @@ class VisionJSONTagger:
             seen.add(key)
             deduped.append(tag)
         return description, deduped[:20]
+
+    @staticmethod
+    def _extract_first_json_object(text: str) -> str | None:
+        """Return the first balanced ``{...}`` object found in *text*.
+
+        Walks the string character by character, tracking string
+        literals and escape sequences so that braces inside string
+        values don't throw off the balance counter. Returns ``None``
+        when no balanced object is found.
+
+        Args:
+            text (str): Arbitrary text that may contain a JSON object.
+
+        Returns:
+            str | None: The substring from the first ``{`` to its
+            matching ``}``, or ``None`` when no balanced pair exists.
+        """
+        start = text.find("{")
+        if start < 0:
+            return None
+
+        depth = 0
+        in_string = False
+        escape = False
+        for idx in range(start, len(text)):
+            ch = text[idx]
+            if escape:
+                escape = False
+                continue
+            if in_string:
+                if ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : idx + 1]
+
+        return None
 
     # MIME types commonly supported by vision APIs.
     _SUPPORTED_MIME_TYPES: frozenset[str] = frozenset(
@@ -305,6 +372,19 @@ class VisionJSONTagger:
             img_base64=encoded,
             mime_type=mime_type,
         )
+        if looks_like_no_image_refusal(raw):
+            # This hash is of the normalized+capped bytes actually sent to the
+            # API, which differs from the stored ``image_id`` (hash of the
+            # original bytes). It is only useful for cross-referencing
+            # consecutive WARNINGs for the same input.
+            tagging_input_hash = sha256(image_bytes).hexdigest()[:12]
+            logger.warning(
+                "Vision tagger reported no image (tagging-input hash={}, mime={}); "
+                "storing empty description/tags",
+                tagging_input_hash,
+                mime_type,
+            )
+            return "", []
         return self.parse_tag_payload(raw)
 
     def _normalize_image(self, image_bytes: bytes, mime_type: str) -> tuple[bytes, str]:

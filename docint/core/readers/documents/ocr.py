@@ -23,6 +23,7 @@ from docint.core.readers.documents.models import (
     PageText,
 )
 from docint.utils.env_cfg import load_model_env, load_openai_env
+from docint.utils.llm_sanitize import looks_like_no_image_refusal, strip_reasoning
 from docint.utils.openai_cfg import OpenAIPipeline
 
 
@@ -398,6 +399,10 @@ class VisionOCREngine(OCREngine):
         ]
 
         try:
+            request_kwargs: dict[str, object] = {}
+            if self._pipeline.reasoning_effort is not None:
+                request_kwargs["reasoning_effort"] = self._pipeline.reasoning_effort
+
             response = self._vision_client.chat.completions.create(
                 model=vision_model_id,
                 messages=messages,
@@ -405,8 +410,21 @@ class VisionOCREngine(OCREngine):
                 seed=self._pipeline.seed,
                 temperature=self._pipeline.temperature,
                 top_p=self._pipeline.top_p,
+                **request_kwargs,
             )
-            text = response.choices[0].message.content or ""
+            raw = response.choices[0].message.content or ""
+            text, captured = strip_reasoning(raw)
+            if captured:
+                logger.debug(
+                    "Stripped {} chars of reasoning from vision OCR response",
+                    len(captured),
+                )
+            if looks_like_no_image_refusal(text):
+                logger.warning(
+                    "Vision OCR reported no image despite image being attached; "
+                    "treating as empty text"
+                )
+                return ""
             if self._looks_like_refusal(text):
                 logger.warning(
                     "Vision OCR returned refusal-style output; treating as empty text"

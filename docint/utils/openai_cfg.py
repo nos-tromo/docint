@@ -19,6 +19,7 @@ from docint.utils.env_cfg import (
     load_openai_env,
     load_path_env,
 )
+from docint.utils.llm_sanitize import strip_reasoning
 
 
 class EmbeddingInputTooLongError(RuntimeError):
@@ -463,14 +464,27 @@ class OpenAIPipeline:
             messages: list[ChatCompletionMessageParam] = [
                 {"role": "user", "content": content_parts}
             ]
+
+            request_kwargs: dict[str, Any] = {}
+            if self.reasoning_effort is not None:
+                request_kwargs["reasoning_effort"] = self.reasoning_effort
+
             response = self.vision_client.chat.completions.create(
                 model=self.vision_model_id,
                 messages=messages,
                 seed=self.seed,
                 temperature=self.temperature,
                 top_p=self.top_p,
+                **request_kwargs,
             )
-            return response.choices[0].message.content or ""
+            raw = response.choices[0].message.content or ""
+            clean, captured = strip_reasoning(raw)
+            if captured:
+                logger.debug(
+                    "Stripped {} chars of reasoning from vision response",
+                    len(captured),
+                )
+            return clean
         except Exception as e:
             logger.error("Error during vision inference: {}", e)
             raise RuntimeError(f"Vision inference failed: {e}")

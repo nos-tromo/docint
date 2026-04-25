@@ -152,6 +152,45 @@ def test_normalize_response_data_extracts_sources(
     assert first_source.get("document_url") == first_source.get("preview_url")
 
 
+def test_normalize_response_data_handles_harmony_analysis_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Harmony analysis channels must be stripped from the final response text.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="test")
+    monkeypatch.setattr(
+        RAG,
+        "_retrieve_image_sources",
+        lambda self, query, top_k=3, metadata_filter_rules=None: [],
+    )
+
+    node = DummyNode(
+        "Example text",
+        {
+            "origin": {
+                "filename": "doc.pdf",
+                "mimetype": "application/pdf",
+                "file_hash": "abc",
+            },
+            "page_number": 1,
+            "source": "document",
+        },
+    )
+    result = DummyResponse(
+        "<|channel|>analysis<|message|>hidden scratch<|end|>"
+        "<|channel|>final<|message|>Answer<|end|>",
+        [DummyNodeWithScore(node)],
+    )
+
+    normalized = rag._normalize_response_data("query", result)
+
+    assert normalized["response"] == "Answer"
+    assert normalized["reasoning"] == "hidden scratch"
+
+
 def test_create_text_model_disables_reasoning_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
