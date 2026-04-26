@@ -34,6 +34,7 @@ class ImageReader(BaseReader):
         source: str = "image",
         file_hash: str | None = None,
         image_metadata: dict[str, object] | None = None,
+        extra_info: dict[str, object] | None = None,
     ) -> Document:
         """Enrich a document with metadata from the image file.
 
@@ -43,6 +44,9 @@ class ImageReader(BaseReader):
             source (str, optional): The source type. Defaults to "image".
             file_hash (str | None, optional): Pre-computed file hash. Defaults to None.
             image_metadata (dict[str, object] | None, optional): Additional metadata from image ingestion.
+                Defaults to None.
+            extra_info (dict[str, object] | None, optional): Caller-supplied metadata merged last
+                so pipeline-provided keys (e.g. ``file_hash``, ``file_path``) always win.
                 Defaults to None.
 
         Returns:
@@ -70,6 +74,8 @@ class ImageReader(BaseReader):
         }
         if image_metadata:
             metadata.update(image_metadata)
+        if extra_info:
+            metadata.update(extra_info)
         ensure_file_hash(
             metadata,
             file_hash=file_hash if file_hash is not None else None,
@@ -152,6 +158,7 @@ class ImageReader(BaseReader):
             text,
             file_hash=file_hash,
             image_metadata=image_meta,
+            extra_info=extra_info if isinstance(extra_info, dict) else None,
         )
 
     def load_data(self, file: str | Path, **kwargs: Any) -> list[Document]:

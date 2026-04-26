@@ -121,6 +121,7 @@ class DocumentIngestionPipeline:
 
     # --- Ingestion config ---
     ingestion_batch_size: int = field(default=5, init=False)
+    streaming_readers_enabled: bool = field(default=False, init=False)
 
     # --- OpenAI config (for LLM-based NER) ---
     openai_inference_provider: str = field(default="ollama")
@@ -186,6 +187,7 @@ class DocumentIngestionPipeline:
         # --- Ingestion config ---
         ingestion_cfg = load_ingestion_env()
         self.ingestion_batch_size = ingestion_cfg.ingestion_batch_size
+        self.streaming_readers_enabled = ingestion_cfg.streaming_readers_enabled
         sentence_splitter_chunk_size = ingestion_cfg.sentence_splitter_chunk_size
         sentence_splitter_chunk_overlap = ingestion_cfg.sentence_splitter_chunk_overlap
         self.sentence_splitter = SentenceSplitter(
@@ -357,16 +359,30 @@ class DocumentIngestionPipeline:
         dir_reader = self.dir_reader
 
         for input_file in dir_reader.input_files:
-            docs = SimpleDirectoryReader.load_file(
-                input_file=input_file,
-                file_metadata=dir_reader.file_metadata,
-                file_extractor=dir_reader.file_extractor,
-                filename_as_id=dir_reader.filename_as_id,
-                encoding=dir_reader.encoding,
-                errors=dir_reader.errors,
-                raise_on_error=dir_reader.raise_on_error,
-                fs=dir_reader.fs,
+            ext = input_file.suffix.lower()
+            reader = (
+                dir_reader.file_extractor.get(ext)
+                if dir_reader.file_extractor
+                else None
             )
+            if (
+                self.streaming_readers_enabled
+                and reader is not None
+                and hasattr(reader, "iter_documents")
+            ):
+                extra_info = dir_reader.file_metadata(str(input_file))
+                docs = list(reader.iter_documents(input_file, extra_info=extra_info))
+            else:
+                docs = SimpleDirectoryReader.load_file(
+                    input_file=input_file,
+                    file_metadata=dir_reader.file_metadata,
+                    file_extractor=dir_reader.file_extractor,
+                    filename_as_id=dir_reader.filename_as_id,
+                    encoding=dir_reader.encoding,
+                    errors=dir_reader.errors,
+                    raise_on_error=dir_reader.raise_on_error,
+                    fs=dir_reader.fs,
+                )
             if docs:
                 yield dir_reader._exclude_metadata(docs)
 

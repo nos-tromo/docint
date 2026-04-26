@@ -308,6 +308,7 @@ def _install_transcript_pipeline_stubs(
         coarse_chunk_size = 1024
         fine_chunk_size = 256
         fine_chunk_overlap = 32
+        streaming_readers_enabled = False
 
     monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
     monkeypatch.setattr(
@@ -480,6 +481,7 @@ def test_hate_speech_detection_attaches_flagged_metadata(
         coarse_chunk_size = 1024
         fine_chunk_size = 256
         fine_chunk_overlap = 32
+        streaming_readers_enabled = False
 
     class FakeOpenAIPipeline:
         """Fake OpenAIPipeline class for testing hate-speech detection integration."""
@@ -611,6 +613,7 @@ def test_hate_speech_detection_parallel_workers(
         coarse_chunk_size = 1024
         fine_chunk_size = 256
         fine_chunk_overlap = 32
+        streaming_readers_enabled = False
 
     class FakeOpenAIPipeline:
         """Fake OpenAIPipeline that returns a hate-speech prompt."""
@@ -738,6 +741,7 @@ def test_build_streaming_yields_enrichment_batches_and_completion_hashes(
         coarse_chunk_size = 1024
         fine_chunk_size = 256
         fine_chunk_overlap = 32
+        streaming_readers_enabled = False
 
     monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
     monkeypatch.setattr(
@@ -815,3 +819,164 @@ def test_build_streaming_yields_enrichment_batches_and_completion_hashes(
         (2, 2, 5),
         (1, 4, 5),
     ]
+
+
+def _make_streaming_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    streaming_readers_enabled: bool,
+) -> DocumentIngestionPipeline:
+    """Construct a pipeline stub with streaming_readers_enabled set as requested."""
+
+    class FakeNERConfig:
+        enabled = False
+        max_chars = 256
+        max_workers = 1
+
+    class FakeIngestionConfig:
+        ingestion_batch_size = 5
+        sentence_splitter_chunk_size = 512
+        sentence_splitter_chunk_overlap = 64
+        supported_filetypes: list[str] = []
+        hierarchical_chunking_enabled = False
+        coarse_chunk_size = 1024
+        fine_chunk_size = 256
+        fine_chunk_overlap = 32
+        streaming_readers_enabled = False  # overridden below
+
+    FakeIngestionConfig.streaming_readers_enabled = streaming_readers_enabled  # type: ignore[assignment]
+
+    monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
+    monkeypatch.setattr(
+        pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig()
+    )
+    monkeypatch.setattr(
+        DocumentIngestionPipeline, "_load_doc_readers", lambda self: None
+    )
+    monkeypatch.setattr(
+        DocumentIngestionPipeline, "_load_node_parsers", lambda self: None
+    )
+
+    return DocumentIngestionPipeline(
+        data_dir=tmp_path,
+        device="cpu",
+        ner_model=None,
+        progress_callback=None,
+    )
+
+
+def test_streaming_reader_dispatch_calls_iter_documents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """With STREAMING_READERS_ENABLED=true, _iter_loaded_documents calls iter_documents directly.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+    """
+    pipeline = _make_streaming_pipeline(
+        monkeypatch, tmp_path, streaming_readers_enabled=True
+    )
+
+    csv_file = tmp_path / "rows.csv"
+    csv_file.write_text("text\nhello\n", encoding="utf-8")
+
+    iter_calls: list[dict] = []
+    fake_doc = Document(
+        text="streamed",
+        metadata={"file_hash": "abc123", "file_path": str(csv_file)},
+    )
+
+    class FakeReader:
+        def iter_documents(self, file: Path, **kwargs: Any) -> Any:
+            iter_calls.append({"file": file, "extra_info": kwargs.get("extra_info")})
+            yield fake_doc
+
+    fake_metadata = {
+        "file_path": str(csv_file),
+        "file_name": "rows.csv",
+        "filename": "rows.csv",
+        "file_hash": "abc123",
+    }
+    pipeline.dir_reader = cast(
+        Any,
+        SimpleNamespace(
+            input_files=[csv_file],
+            file_extractor={".csv": FakeReader()},
+            file_metadata=lambda _path: fake_metadata,
+            _exclude_metadata=lambda docs: docs,
+        ),
+    )
+
+    result = list(pipeline._iter_loaded_documents())
+
+    assert len(iter_calls) == 1, "iter_documents should be called once per file"
+    assert iter_calls[0]["file"] == csv_file
+    assert iter_calls[0]["extra_info"]["file_hash"] == "abc123"
+    assert len(result) == 1
+    assert result[0][0].text == "streamed"
+
+
+def test_streaming_reader_dispatch_falls_back_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """With STREAMING_READERS_ENABLED=false, _iter_loaded_documents uses SimpleDirectoryReader.load_file.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        tmp_path: Temporary directory provided by pytest.
+    """
+    pipeline = _make_streaming_pipeline(
+        monkeypatch, tmp_path, streaming_readers_enabled=False
+    )
+
+    csv_file = tmp_path / "rows.csv"
+    csv_file.write_text("text\nhello\n", encoding="utf-8")
+
+    iter_calls: list[Path] = []
+
+    class FakeReader:
+        def iter_documents(self, file: Path, **kwargs: Any) -> Any:
+            iter_calls.append(file)
+            yield Document(text="should-not-appear", metadata={})
+
+    load_file_calls: list[Path] = []
+    fallback_doc = Document(
+        text="from-load-file",
+        metadata={"file_hash": "xyz", "file_path": str(csv_file)},
+    )
+
+    def fake_load_file(input_file: Path, **_kwargs: Any) -> list[Document]:
+        load_file_calls.append(input_file)
+        return [fallback_doc]
+
+    monkeypatch.setattr(
+        pipeline_module.SimpleDirectoryReader, "load_file", staticmethod(fake_load_file)
+    )
+
+    pipeline.dir_reader = cast(
+        Any,
+        SimpleNamespace(
+            input_files=[csv_file],
+            file_extractor={".csv": FakeReader()},
+            file_metadata=lambda _path: {"file_hash": "xyz"},
+            _exclude_metadata=lambda docs: docs,
+            filename_as_id=False,
+            encoding="utf-8",
+            errors="ignore",
+            raise_on_error=False,
+            fs=None,
+        ),
+    )
+
+    result = list(pipeline._iter_loaded_documents())
+
+    assert iter_calls == [], (
+        "iter_documents must NOT be called when streaming is disabled"
+    )
+    assert len(load_file_calls) == 1
+    assert load_file_calls[0] == csv_file
+    assert len(result) == 1
+    assert result[0][0].text == "from-load-file"

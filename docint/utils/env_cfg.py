@@ -596,6 +596,7 @@ class IngestionConfig:
     ingest_fail_fast: bool
     ingest_manifest_enabled: bool
     ingest_pipeline_overlap_enabled: bool
+    streaming_readers_enabled: bool
     ingest_queue_max_size: int
     docstore_max_retries: int
     docstore_retry_backoff_max_seconds: float
@@ -617,6 +618,7 @@ def load_ingestion_env(
     default_ingest_fail_fast: bool = False,
     default_ingest_manifest_enabled: bool = True,
     default_ingest_pipeline_overlap_enabled: bool = False,
+    default_streaming_readers_enabled: bool = True,
     default_ingest_queue_max_size: int = 4,
     default_docstore_max_retries: int = 3,
     default_docstore_retry_backoff_seconds: float = 0.25,
@@ -670,6 +672,11 @@ def load_ingestion_env(
             enrichment overlaps with persistence. Default false until
             canary measurement confirms throughput gains; flip via
             ``INGEST_PIPELINE_OVERLAP_ENABLED=true``.
+        - streaming_readers_enabled (bool): When true, dispatch to each
+            reader's ``iter_documents()`` generator directly instead of
+            routing through ``SimpleDirectoryReader.load_file()``. Reduces
+            peak memory for large CSV/JSONL files. Default false; enable via
+            ``STREAMING_READERS_ENABLED=true``.
         - ingest_queue_max_size (int): Maximum number of pre-enriched
             batches buffered between producer and consumer when
             overlap is enabled. Bounds memory under back-pressure.
@@ -718,6 +725,10 @@ def load_ingestion_env(
                 "INGEST_PIPELINE_OVERLAP_ENABLED",
                 default_ingest_pipeline_overlap_enabled,
             )
+        ).lower()
+        in {"true", "1", "yes"},
+        streaming_readers_enabled=str(
+            os.getenv("STREAMING_READERS_ENABLED", default_streaming_readers_enabled)
         ).lower()
         in {"true", "1", "yes"},
         ingest_queue_max_size=max(
