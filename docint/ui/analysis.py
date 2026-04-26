@@ -677,7 +677,16 @@ def _analysis_chunk_export_block(
 def _analysis_reference_export_sections(
     chunk: dict[str, Any],
 ) -> tuple[list[str], list[str]]:
-    """Split reference metadata into compact metadata lines and ordered text sections."""
+    """Split reference metadata into compact metadata lines and ordered text sections.
+
+    Note:
+        TXT/CSV downloads emit every populated ``REFERENCE_METADATA_FIELDS``
+        key — including ``text_id`` for transcript_segment chunks — even though
+        the on-screen citation body (``reference_metadata_inline``) hides
+        ``text_id`` for transcripts. Exports are deliberately exhaustive so
+        analysts can cross-reference the underlying segment locator; the inline
+        display stays lean.
+    """
     raw = chunk.get("reference_metadata")
     metadata_lines: list[str] = []
     text_sections: list[str] = []

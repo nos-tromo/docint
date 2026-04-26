@@ -6102,3 +6102,64 @@ def test_prepare_vector_nodes_safety_net_runs_per_chunk_and_stops_on_oversize(
     assert embed_calls[0] == expected_chunk1, (
         "chunk 1 must contain the first four nodes in input order"
     )
+
+
+def test_source_from_payload_surfaces_sentence_index_as_row_for_transcripts() -> None:
+    """Transcript-segment payloads must surface ``sentence_index`` as ``row``.
+
+    The dropdown header in the Analysis NER tab renders
+    ``(page=..., row=..., id=...)`` from the source dict's ``page`` / ``row``
+    keys. For Nextext transcripts there is no ``table.row_index`` but each
+    segment carries a sequential ``sentence_index`` — the natural locator.
+    Without this fallback the header showed ``row=None`` even though the
+    citation body listed the same index in ``text_id``, an inconsistency the
+    user reported. The fallback only fires when ``docint_doc_kind`` marks the
+    payload as a ``transcript_segment``; non-transcript payloads continue to
+    pull ``row`` exclusively from ``table.row_index``.
+    """
+    transcript_payload: dict[str, object] = {
+        "filename": "interview.webm",
+        "docint_doc_kind": "transcript_segment",
+        "sentence_index": 91,
+        "start_ts": "00:11:50",
+        "end_ts": "00:11:55",
+        "reference_metadata": {
+            "type": "transcript_segment",
+            "network": "nextext",
+            "timestamp": "00:11:50",
+            "text_id": "interview.webm:91",
+            "source_file": "interview.webm",
+        },
+    }
+
+    src = RAG._source_from_payload(collection="c", payload=transcript_payload)
+
+    assert src.get("row") == 91, (
+        "transcript_segment payload must populate src['row'] from "
+        f"sentence_index=91, got {src.get('row')!r}"
+    )
+
+    # Without the transcript_segment marker, sentence_index alone does NOT
+    # promote to row — the fallback is intentionally narrow.
+    untagged_payload: dict[str, object] = {
+        "filename": "other.json",
+        "sentence_index": 91,
+    }
+    untagged_src = RAG._source_from_payload(collection="c", payload=untagged_payload)
+    assert "row" not in untagged_src, (
+        "sentence_index must not promote to row without docint_doc_kind == "
+        "'transcript_segment'"
+    )
+
+    # When table.row_index IS present, it wins — the transcript fallback is a
+    # secondary path, not an override.
+    table_payload: dict[str, object] = {
+        "filename": "table.csv",
+        "docint_doc_kind": "transcript_segment",
+        "sentence_index": 91,
+        "table": {"row_index": 4711},
+    }
+    table_src = RAG._source_from_payload(collection="c", payload=table_payload)
+    assert table_src.get("row") == 4711, (
+        "table.row_index must take precedence over the transcript fallback"
+    )

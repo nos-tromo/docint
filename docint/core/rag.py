@@ -3232,6 +3232,12 @@ class RAG:
 
         table_meta = payload.get("table") or {}
         row_index = table_meta.get("row_index")
+        if row_index is None and payload.get("docint_doc_kind") == "transcript_segment":
+            # Transcript segments have no table.row_index but do carry a
+            # sequential ``sentence_index``. Surface it as ``row`` so the
+            # citation/dropdown header shows ``row=<index>`` instead of the
+            # default ``row=None`` placeholder.
+            row_index = payload.get("sentence_index")
         try:
             row_index = int(row_index) if row_index is not None else None
         except Exception:
