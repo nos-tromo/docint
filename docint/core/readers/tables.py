@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Iterator, cast
 
-import pandas as pd
+import pandas as pd  # type: ignore[import]
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from loguru import logger
