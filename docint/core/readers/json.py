@@ -416,10 +416,17 @@ class CustomJSONReader(BaseReader):
         Produces the flat backward-compatible keys (``whisper_task``,
         ``whisper_language``, ``sentence_index``, ``start_seconds``,
         ``end_seconds``, ``start_ts``, ``end_ts``, ``speaker``,
-        ``source_file``, ``source_file_hash``) and a ``reference_metadata``
-        dict that surfaces timing / speaker / language / source fields through
-        the existing citation UI. Mirrors the specialized-schema pattern used
-        by :mod:`docint.core.readers.tables`.
+        ``source_file``, ``source_file_hash``) at the top level. The nested
+        ``reference_metadata`` sub-dict carries the citation-UI fields:
+        ``type``, ``network``, ``author``, ``text``, ``text_id``, plus
+        ``timestamp`` (segment start, mirrors the generic anchor used by
+        social-table content), ``language``, ``source_file``, and
+        ``speaker`` when present. ``start_ts`` / ``end_ts`` are intentionally
+        absent from ``reference_metadata`` — surfacing them duplicated the
+        ``timestamp`` row in the citation view; the flat-metadata copies
+        feed ``LLM_VISIBLE_METADATA_KEYS`` for prompt-side citation context.
+        Mirrors the specialized-schema pattern used by
+        :mod:`docint.core.readers.tables`.
 
         Args:
             segment: Parsed Nextext line.
@@ -521,9 +528,6 @@ class CustomJSONReader(BaseReader):
         }
         if start_ts_str is not None:
             reference_metadata["timestamp"] = start_ts_str
-            reference_metadata["start_ts"] = start_ts_str
-        if end_ts_str is not None:
-            reference_metadata["end_ts"] = end_ts_str
         if language_str is not None:
             reference_metadata["language"] = language_str
         if source_file_str is not None:
