@@ -631,7 +631,7 @@ def test_lazy_reranker_postprocessor_delegates_on_call() -> None:
     assert accesses == [], "construction must not touch rag.reranker"
 
     sentinel_nodes: list[Any] = [object(), object()]
-    sentinel_bundle = object()
+    sentinel_bundle = cast(Any, object())
     result = wrapper._postprocess_nodes(sentinel_nodes, sentinel_bundle)
 
     assert accesses == ["reranker"], (
@@ -687,9 +687,19 @@ def test_lazy_reranker_postprocessor_delegates_on_repeated_calls() -> None:
             return FakeReranker()
 
     wrapper = LazyRerankerPostprocessor(rag=FakeRAG())
-    wrapper._postprocess_nodes([object()], object())
-    wrapper._postprocess_nodes([object()], object())
-    wrapper._postprocess_nodes([object()], object())
+    qb = rag_module.QueryBundle(query_str="q")
+    wrapper._postprocess_nodes(
+        [NodeWithScore(node=TextNode(text="sentinel-node", id_="lr-1"), score=0.0)],
+        qb,
+    )
+    wrapper._postprocess_nodes(
+        [NodeWithScore(node=TextNode(text="sentinel-node", id_="lr-2"), score=0.0)],
+        qb,
+    )
+    wrapper._postprocess_nodes(
+        [NodeWithScore(node=TextNode(text="sentinel-node", id_="lr-3"), score=0.0)],
+        qb,
+    )
 
     assert len(accesses) == 3, (
         "Wrapper must re-read rag.reranker on every call — caching is the "
@@ -737,7 +747,10 @@ def test_lazy_reranker_postprocessor_passes_none_query_bundle() -> None:
             return FakeReranker()
 
     wrapper = LazyRerankerPostprocessor(rag=FakeRAG())
-    wrapper._postprocess_nodes([object()], None)
+    wrapper._postprocess_nodes(
+        [NodeWithScore(node=TextNode(text="sentinel-none", id_="lr-none"), score=0.0)],
+        None,
+    )
 
     assert forwarded["query_bundle"] is None, (
         "LazyRerankerPostprocessor must forward query_bundle=None unchanged; "
@@ -1137,7 +1150,7 @@ def test_select_collection_resets_image_service(
         monkeypatch: The monkeypatch fixture.
     """
     rag = RAG(qdrant_collection="alpha")
-    rag._image_ingestion_service = object()  # type: ignore[assignment]
+    rag._image_ingestion_service = cast(Any, object())
     monkeypatch.setattr(
         RAG,
         "list_collections",
@@ -2105,46 +2118,40 @@ def test_build_ingestion_pipeline_passes_configured_device_to_gliner(
     assert captured["device"] == "cpu"
     assert getattr(rag._image_ingestion_service, "device", None) == "cpu"
 
-    def test_sparse_model_uses_cached_path(
-        monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        """Ensure sparse_model resolves to a cached snapshot path when available.
 
-        Args:
-            monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
-            tmp_path (Path): The temporary path fixture.
-        """
+def test_sparse_model_returns_id_when_directly_supported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sparse_model should return the configured ID when fastembed lists it directly.
 
-        # Build a fake HF cache layout with refs/main -> snapshots/abc123
-        cache_root = tmp_path / "hub"
-        model_dir = cache_root / "models--Qdrant--all_miniLM_L6_v2_with_attentions"
-        refs_dir = model_dir / "refs"
-        snaps_dir = model_dir / "snapshots"
-        snap = snaps_dir / "abc123"
-        snap.mkdir(parents=True)
-        refs_dir.mkdir(parents=True, exist_ok=True)
-        (refs_dir / "main").write_text("abc123")
+    The historical name of this test (``test_sparse_model_uses_cached_path``)
+    described a path-resolution behaviour that the current
+    :pyattr:`RAG.sparse_model` no longer performs — fastembed resolves local
+    files via ``FASTEMBED_CACHE_PATH`` (set by env_cfg to ``HF_HUB_CACHE``)
+    rather than via this property. This test pins the canonical-ID return
+    contract instead, which is what callers actually rely on.
 
-        # Stub supported models to match the configured sparse ID
-        monkeypatch.setattr(
-            rag_module.SparseTextEmbedding,
-            "list_supported_models",
-            staticmethod(
-                lambda: [
-                    {
-                        "model": "Qdrant/all_miniLM_L6_v2_with_attentions",
-                        "sources": {"hf": "Qdrant/all_miniLM_L6_v2_with_attentions"},
-                    }
-                ]
-            ),
-        )
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setattr(
+        rag_module.SparseTextEmbedding,
+        "list_supported_models",
+        staticmethod(
+            lambda: [
+                {
+                    "model": "Qdrant/all_miniLM_L6_v2_with_attentions",
+                    "sources": {"hf": "Qdrant/all_miniLM_L6_v2_with_attentions"},
+                }
+            ]
+        ),
+    )
 
-        rag = RAG(qdrant_collection="test")
-        rag.hf_hub_cache = cache_root
-        rag.sparse_model_id = "Qdrant/all_miniLM_L6_v2_with_attentions"
+    rag = RAG(qdrant_collection="test")
+    rag.enable_hybrid = True
+    rag.sparse_model_id = "Qdrant/all_miniLM_L6_v2_with_attentions"
 
-        resolved = rag.sparse_model
-        assert resolved == str(snap)
+    assert rag.sparse_model == "Qdrant/all_miniLM_L6_v2_with_attentions"
 
 
 def test_reranker_passes_configured_fp16(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3416,7 +3423,7 @@ def test_summarize_collection_reports_coverage_diagnostics(
         monkeypatch: The monkeypatch fixture.
     """
     rag = RAG(qdrant_collection="test")
-    rag._post_retrieval_text_model = _FakeSummaryLLM("Collection summary")  # type: ignore[assignment]
+    rag._post_retrieval_text_model = cast(Any, _FakeSummaryLLM("Collection summary"))
 
     docs = [
         {"filename": "a.pdf", "file_hash": "ha", "node_count": 9},
@@ -3471,7 +3478,7 @@ def test_summarize_collection_uses_post_coverage_for_social_rows(
     """
     rag = RAG(qdrant_collection="test")
     llm = _FakeSummaryLLM("Social summary")
-    rag._post_retrieval_text_model = llm  # type: ignore[assignment]
+    rag._post_retrieval_text_model = cast(Any, llm)
     rag.social_summary_diversity_limit = 1
 
     monkeypatch.setattr(
@@ -3580,7 +3587,7 @@ def test_summarize_collection_handles_no_documents(
         monkeypatch: The monkeypatch fixture.
     """
     rag = RAG(qdrant_collection="test")
-    rag._post_retrieval_text_model = _FakeSummaryLLM("unused")  # type: ignore[assignment]
+    rag._post_retrieval_text_model = cast(Any, _FakeSummaryLLM("unused"))
     rag.summary_coverage_target = 0.7
     rag.summary_max_docs = 30
 
@@ -3715,7 +3722,7 @@ def test_summarize_collection_cache_miss_then_hit(
     """
     rag = RAG(qdrant_collection="test")
     llm = _FakeSummaryLLM("Collection summary")
-    rag._post_retrieval_text_model = llm  # type: ignore[assignment]
+    rag._post_retrieval_text_model = cast(Any, llm)
     _patch_summary_context(monkeypatch)
 
     kv_store = _InMemorySummaryKVStore()
@@ -3766,7 +3773,7 @@ def test_summarize_collection_refresh_bypasses_cache(
     """
     rag = RAG(qdrant_collection="test")
     llm = _FakeSummaryLLM("Collection summary")
-    rag._post_retrieval_text_model = llm  # type: ignore[assignment]
+    rag._post_retrieval_text_model = cast(Any, llm)
     _patch_summary_context(monkeypatch)
 
     kv_store = _InMemorySummaryKVStore()
@@ -3808,7 +3815,7 @@ def test_summarize_collection_prompt_fingerprint_change_forces_recompute(
     """
     rag = RAG(qdrant_collection="test")
     llm = _FakeSummaryLLM("Collection summary")
-    rag._post_retrieval_text_model = llm  # type: ignore[assignment]
+    rag._post_retrieval_text_model = cast(Any, llm)
     _patch_summary_context(monkeypatch)
 
     kv_store = _InMemorySummaryKVStore()
@@ -3851,7 +3858,7 @@ def test_summarize_collection_revision_bump_invalidates_cache(
     """
     rag = RAG(qdrant_collection="test")
     llm = _FakeSummaryLLM("Collection summary")
-    rag._post_retrieval_text_model = llm  # type: ignore[assignment]
+    rag._post_retrieval_text_model = cast(Any, llm)
     _patch_summary_context(monkeypatch)
 
     kv_store = _InMemorySummaryKVStore()
@@ -4116,7 +4123,7 @@ def test_persist_node_batches_streams_micro_batches() -> None:
 
     nodes = [types.SimpleNamespace(metadata={}) for _ in range(5)]
     rag._persist_node_batches(cast(list[Any], nodes))
-    index = rag.index
+    index: Any = rag.index
 
     assert index.docstore.batch_sizes == [2, 2, 1]
     assert index.vector_batch_sizes == [2, 2, 1]
@@ -4164,7 +4171,7 @@ def test_apersist_node_batches_streams_micro_batches() -> None:
 
     nodes = [types.SimpleNamespace(metadata={}) for _ in range(7)]
     asyncio.run(rag._apersist_node_batches(cast(list[Any], nodes)))
-    index = cast(Any, rag.index)
+    index: Any = rag.index
 
     assert index.docstore.batch_sizes == [3, 3, 1]
     assert index.vector_batch_sizes == [3, 3, 1]
@@ -4280,7 +4287,7 @@ def test_prepare_vector_nodes_writes_original_to_docstore() -> None:
     )
     rag._persist_node_batches([oversize])
 
-    index = cast(Any, rag.index)
+    index: Any = rag.index
     docstore_ids: set[str] = set()
     for batch in index.docstore.persisted:
         docstore_ids.update(n.node_id for n in batch)
@@ -4768,7 +4775,7 @@ def test_persist_node_batches_logs_orphaned_kv_nodes_on_vector_failure(
     finally:
         cleanup()
 
-    index = cast(Any, rag.index)
+    index: Any = rag.index
     # The docstore write committed before the vector insert failed.
     assert index.docstore.persisted == ["node-1"]
     # The structured marker and node id appear in the logs.
@@ -4840,10 +4847,196 @@ def test_persist_node_batches_logs_failed_persist_on_docstore_failure(
         cleanup()
 
     # Vector insert must not have been attempted once the KV write failed.
-    assert cast(Any, rag.index).inserts == []
+    rag_index: Any = rag.index
+    assert rag_index.inserts == []
     combined = "\n".join(str(record.msg) for record in caplog.records)
     assert "failed_persist_nodes" in combined
     assert "node-x" in combined
+
+
+def test_persist_node_batches_retries_transient_qdrant_error_then_succeeds(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Vector-insert retries should recover from transient Qdrant failures.
+
+    Simulates two transient ``ConnectionError`` failures followed by a
+    successful insert. With ``docstore_max_retries=3`` and zero-delay
+    backoff (so no real sleep occurs), the call should succeed without
+    emitting the ``orphaned_kv_nodes`` marker.
+
+    Args:
+        caplog: Pytest log capture fixture.
+        monkeypatch: Pytest monkeypatch fixture used to stub the
+            embedding-prep helper so the test does not load a model.
+    """
+
+    insert_calls: list[int] = []
+
+    class FakeDocStore:
+        """Record persisted node IDs across batches."""
+
+        def __init__(self) -> None:
+            self.persisted: list[str] = []
+
+        def add_documents(self, nodes: list[Any], allow_update: bool = True) -> None:
+            _ = allow_update
+            self.persisted.extend(n.node_id for n in nodes)
+
+    class FakeIndex:
+        """Fail twice with a transient error, then succeed on the third attempt."""
+
+        def __init__(self) -> None:
+            self.docstore = FakeDocStore()
+            self.successful_inserts: list[list[Any]] = []
+
+        def insert_nodes(self, nodes: list[Any]) -> None:
+            insert_calls.append(len(nodes))
+            if len(insert_calls) <= 2:
+                raise ConnectionError("connection reset by peer")
+            self.successful_inserts.append(list(nodes))
+
+    monkeypatch.setattr(
+        RAG,
+        "_prepare_vector_nodes_for_insert",
+        _fake_prepare_vector_nodes_for_insert,
+    )
+
+    rag = RAG(qdrant_collection="active")
+    rag.docstore_batch_size = 10
+    rag.docstore_max_retries = 3
+    rag.docstore_retry_backoff_seconds = 0.0
+    rag.docstore_retry_backoff_max_seconds = 0.0
+    rag.index = cast(Any, FakeIndex())
+
+    node = TextNode(text="resilient", metadata={}, id_="node-r")
+
+    cleanup = _capture_loguru(caplog)
+    try:
+        rag._persist_node_batches([node])
+    finally:
+        cleanup()
+
+    assert len(insert_calls) == 3
+    index: Any = rag.index
+    assert index.successful_inserts == [[node]]
+    assert index.docstore.persisted == ["node-r"]
+    combined = "\n".join(str(record.msg) for record in caplog.records)
+    assert "orphaned_kv_nodes" not in combined
+
+
+def test_persist_node_batches_orphaned_log_includes_attempt_count(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The orphaned_kv_nodes log should record the exhausted attempt count.
+
+    Args:
+        caplog: Pytest log capture fixture.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+
+    class FakeDocStore:
+        def add_documents(self, nodes: list[Any], allow_update: bool = True) -> None:
+            _ = (nodes, allow_update)
+
+    class FakeIndex:
+        def __init__(self) -> None:
+            self.docstore = FakeDocStore()
+
+        def insert_nodes(self, nodes: list[Any]) -> None:
+            _ = nodes
+            raise ConnectionError("connection reset")
+
+    monkeypatch.setattr(
+        RAG,
+        "_prepare_vector_nodes_for_insert",
+        _fake_prepare_vector_nodes_for_insert,
+    )
+
+    rag = RAG(qdrant_collection="active")
+    rag.docstore_batch_size = 10
+    rag.docstore_max_retries = 2
+    rag.docstore_retry_backoff_seconds = 0.0
+    rag.docstore_retry_backoff_max_seconds = 0.0
+    rag.index = cast(Any, FakeIndex())
+
+    node = TextNode(text="hello", metadata={}, id_="node-1")
+
+    cleanup = _capture_loguru(caplog)
+    try:
+        with pytest.raises(ConnectionError, match="connection reset"):
+            rag._persist_node_batches([node])
+    finally:
+        cleanup()
+
+    combined = "\n".join(str(record.msg) for record in caplog.records)
+    assert "orphaned_kv_nodes" in combined
+    assert "max_attempts=3" in combined
+    assert "node-1" in combined
+
+
+def test_apersist_node_batches_retries_transient_qdrant_error_then_succeeds(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Async vector-insert retries should recover from transient failures.
+
+    Args:
+        caplog: Pytest log capture fixture.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+
+    async def _afake_prepare(
+        _self: RAG, vector_nodes: list[Any]
+    ) -> tuple[list[Any], list[Any]]:
+        return (list(vector_nodes), list(vector_nodes))
+
+    insert_calls: list[int] = []
+
+    class FakeDocStore:
+        def __init__(self) -> None:
+            self.persisted: list[str] = []
+
+        def add_documents(self, nodes: list[Any], allow_update: bool = True) -> None:
+            _ = allow_update
+            self.persisted.extend(n.node_id for n in nodes)
+
+    class FakeAsyncIndex:
+        def __init__(self) -> None:
+            self.docstore = FakeDocStore()
+            self.successful_inserts: list[list[Any]] = []
+
+        async def ainsert_nodes(self, nodes: list[Any]) -> None:
+            insert_calls.append(len(nodes))
+            if len(insert_calls) <= 2:
+                raise TimeoutError("read timed out")
+            self.successful_inserts.append(list(nodes))
+
+    monkeypatch.setattr(
+        RAG,
+        "_aprepare_vector_nodes_for_insert",
+        _afake_prepare,
+    )
+
+    rag = RAG(qdrant_collection="active")
+    rag.docstore_batch_size = 10
+    rag.docstore_max_retries = 3
+    rag.docstore_retry_backoff_seconds = 0.0
+    rag.docstore_retry_backoff_max_seconds = 0.0
+    rag.index = cast(Any, FakeAsyncIndex())
+
+    node = TextNode(text="resilient async", metadata={}, id_="node-ra")
+
+    cleanup = _capture_loguru(caplog)
+    try:
+        asyncio.run(rag._apersist_node_batches([node]))
+    finally:
+        cleanup()
+
+    assert len(insert_calls) == 3
+    index: Any = rag.index
+    assert index.successful_inserts == [[node]]
+    assert index.docstore.persisted == ["node-ra"]
+    combined = "\n".join(str(record.msg) for record in caplog.records)
+    assert "orphaned_kv_nodes" not in combined
 
 
 def test_log_ingest_benchmark_summary_emits_metrics(
@@ -5538,8 +5731,8 @@ def test_vector_store_uses_vllm_sparse_functions(
     monkeypatch.setattr(rag_module, "QdrantVectorStore", FakeQdrantVectorStore)
 
     rag = RAG(qdrant_collection="test")
-    rag._qdrant_client = object()  # type: ignore[assignment]
-    rag._qdrant_aclient = object()  # type: ignore[assignment]
+    rag._qdrant_client = cast(Any, object())
+    rag._qdrant_aclient = cast(Any, object())
     rag.openai_inference_provider = "vllm"
     rag.openai_api_base = "http://vllm-router:9000/v1"
     rag.openai_api_key = "sk-no-key-required"
@@ -5567,7 +5760,7 @@ def test_run_query_wraps_context_window_overflow() -> None:
             )
 
     rag = RAG(qdrant_collection="test")
-    rag.query_engine = _FakeEngine()  # type: ignore[assignment]
+    rag.query_engine = cast(Any, _FakeEngine())
     rag.openai_ctx_window = 4096
 
     with pytest.raises(ValueError, match="OPENAI_CTX_WINDOW"):
@@ -5582,7 +5775,7 @@ def test_run_query_propagates_unrelated_value_error() -> None:
             raise ValueError("Something else went wrong")
 
     rag = RAG(qdrant_collection="test")
-    rag.query_engine = _FakeEngine()  # type: ignore[assignment]
+    rag.query_engine = cast(Any, _FakeEngine())
 
     with pytest.raises(ValueError, match="Something else"):
         rag.run_query("hello")
@@ -5598,7 +5791,7 @@ def test_run_query_async_wraps_context_window_overflow() -> None:
             )
 
     rag = RAG(qdrant_collection="test")
-    rag.query_engine = _FakeEngine()  # type: ignore[assignment]
+    rag.query_engine = cast(Any, _FakeEngine())
     rag.openai_ctx_window = 4096
 
     with pytest.raises(ValueError, match="OPENAI_CTX_WINDOW"):
@@ -5790,7 +5983,7 @@ def test_prepare_vector_nodes_chunks_by_embed_batch_size(
     ]
 
     prepared_vector, _prepared_docstore = rag._prepare_vector_nodes_for_insert(
-        test_nodes
+        cast(list[Any], test_nodes)
     )
 
     assert chunk_sizes == [4, 4, 2], (
@@ -5901,7 +6094,7 @@ def test_prepare_vector_nodes_safety_net_runs_per_chunk_and_stops_on_oversize(
     ]
 
     with pytest.raises(EmbeddingInputTooLongError):
-        rag._prepare_vector_nodes_for_insert(test_nodes)
+        rag._prepare_vector_nodes_for_insert(cast(list[Any], test_nodes))
 
     # Per-chunk safety-net contract:
     #   - Chunk 1 (nodes 0..3) has no marker => safety-net admits =>
@@ -5922,4 +6115,65 @@ def test_prepare_vector_nodes_safety_net_runs_per_chunk_and_stops_on_oversize(
     ]
     assert embed_calls[0] == expected_chunk1, (
         "chunk 1 must contain the first four nodes in input order"
+    )
+
+
+def test_source_from_payload_surfaces_sentence_index_as_row_for_transcripts() -> None:
+    """Transcript-segment payloads must surface ``sentence_index`` as ``row``.
+
+    The dropdown header in the Analysis NER tab renders
+    ``(page=..., row=..., id=...)`` from the source dict's ``page`` / ``row``
+    keys. For Nextext transcripts there is no ``table.row_index`` but each
+    segment carries a sequential ``sentence_index`` — the natural locator.
+    Without this fallback the header showed ``row=None`` even though the
+    citation body listed the same index in ``text_id``, an inconsistency the
+    user reported. The fallback only fires when ``docint_doc_kind`` marks the
+    payload as a ``transcript_segment``; non-transcript payloads continue to
+    pull ``row`` exclusively from ``table.row_index``.
+    """
+    transcript_payload: dict[str, object] = {
+        "filename": "interview.webm",
+        "docint_doc_kind": "transcript_segment",
+        "sentence_index": 91,
+        "start_ts": "00:11:50",
+        "end_ts": "00:11:55",
+        "reference_metadata": {
+            "type": "transcript_segment",
+            "network": "nextext",
+            "timestamp": "00:11:50",
+            "text_id": "interview.webm:91",
+            "source_file": "interview.webm",
+        },
+    }
+
+    src = RAG._source_from_payload(collection="c", payload=transcript_payload)
+
+    assert src.get("row") == 91, (
+        "transcript_segment payload must populate src['row'] from "
+        f"sentence_index=91, got {src.get('row')!r}"
+    )
+
+    # Without the transcript_segment marker, sentence_index alone does NOT
+    # promote to row — the fallback is intentionally narrow.
+    untagged_payload: dict[str, object] = {
+        "filename": "other.json",
+        "sentence_index": 91,
+    }
+    untagged_src = RAG._source_from_payload(collection="c", payload=untagged_payload)
+    assert "row" not in untagged_src, (
+        "sentence_index must not promote to row without docint_doc_kind == "
+        "'transcript_segment'"
+    )
+
+    # When table.row_index IS present, it wins — the transcript fallback is a
+    # secondary path, not an override.
+    table_payload: dict[str, object] = {
+        "filename": "table.csv",
+        "docint_doc_kind": "transcript_segment",
+        "sentence_index": 91,
+        "table": {"row_index": 4711},
+    }
+    table_src = RAG._source_from_payload(collection="c", payload=table_payload)
+    assert table_src.get("row") == 4711, (
+        "table.row_index must take precedence over the transcript fallback"
     )

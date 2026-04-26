@@ -5,9 +5,9 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, ClassVar, cast
+from typing import Any, Callable, ClassVar, Iterator, cast
 
-import pandas as pd
+import pandas as pd  # type: ignore[import]
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from loguru import logger
@@ -391,15 +391,26 @@ class TableReader(BaseReader):
             metadata[key] = row_dict.get(original_column) if original_column else None
         return metadata
 
-    def load_data(self, file: str | Path, **kwargs) -> list[Document]:
-        """Load data from a file into a list of Document objects.
+    def iter_documents(self, file: str | Path, **kwargs: Any) -> Iterator[Document]:
+        """Yield ``Document`` objects from a tabular file row by row.
+
+        Streaming variant of :meth:`load_data` introduced in Phase 2 of
+        the ingestion-streaming generalisation. The underlying DataFrame
+        is still loaded eagerly (pandas / pyarrow do not expose a
+        stream-friendly schema-profile inference), but per-row yield
+        lets the ingestion pipeline flush enrichment batches mid-file
+        — large CSVs and Parquet files no longer materialise every
+        ``Document`` before any node persistence happens.
 
         Args:
-            file (str | Path): The path to the file to load.
-            **kwargs (Any): Additional keyword arguments forwarded to the reader.
+            file: The path to the table file.
+            **kwargs: Additional keyword arguments forwarded by the
+                ingestion pipeline (notably ``extra_info`` carrying
+                a pre-computed ``file_hash``).
 
-        Returns:
-            list[Document]: A list of Document objects representing the loaded data.
+        Yields:
+            Document: One per non-filtered, non-empty row, in input
+                order.
 
         Raises:
             ValueError: If the file type is unsupported.
@@ -484,7 +495,6 @@ class TableReader(BaseReader):
         if ORIGINAL_INDEX_COL in meta_cols:
             meta_cols.remove(ORIGINAL_INDEX_COL)
 
-        docs: list[Document] = []
         n_rows, n_cols = len(df), len(df.columns)
         columns = [c for c in df.columns if c != ORIGINAL_INDEX_COL]
         column_types = {
@@ -553,22 +563,31 @@ class TableReader(BaseReader):
 
             # Only set doc_id if present; passing None triggers Pydantic validation in some versions
             if effective_id_col and row_dict.get(effective_id_col) is not None:
-                docs.append(
-                    Document(
-                        text=content,
-                        metadata=metadata,
-                        doc_id=str(row_dict[effective_id_col]),
-                    )
+                yield Document(
+                    text=content,
+                    metadata=metadata,
+                    doc_id=str(row_dict[effective_id_col]),
                 )
             else:
-                docs.append(
-                    Document(
-                        text=content,
-                        metadata=metadata,
-                    )
+                yield Document(
+                    text=content,
+                    metadata=metadata,
                 )
             count += 1
             if self.limit and count >= self.limit:
                 break
 
-        return docs
+    def load_data(self, file: str | Path, **kwargs: Any) -> list[Document]:
+        """Eager-list shim over :meth:`iter_documents` for legacy callers.
+
+        Args:
+            file (str | Path): The path to the file to load.
+            **kwargs (Any): Additional keyword arguments forwarded to the reader.
+
+        Returns:
+            list[Document]: A list of Document objects representing the loaded data.
+
+        Raises:
+            ValueError: If the file type is unsupported.
+        """
+        return list(self.iter_documents(file, **kwargs))

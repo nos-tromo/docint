@@ -39,6 +39,7 @@ class _GLiNERRuntime:
     model: Any
     max_tokens: int
     tokenizer: Any | None
+    words_splitter: Any | None
     lock: threading.Lock
 
 
@@ -265,6 +266,7 @@ def _get_or_load_gliner_runtime(
             model=model,
             max_tokens=_resolve_gliner_context_window(model),
             tokenizer=_get_gliner_tokenizer(model),
+            words_splitter=_get_gliner_words_splitter(model),
             lock=threading.Lock(),
         )
         _GLINER_RUNTIME_CACHE[cache_key] = runtime
@@ -477,20 +479,61 @@ def _get_gliner_tokenizer(model: Any) -> Any | None:
     return getattr(data_processor, "transformer_tokenizer", None)
 
 
-def _count_text_tokens(text: str, tokenizer: Any | None) -> int:
-    """Count tokens for a text span using the model tokenizer when possible.
+def _get_gliner_words_splitter(model: Any) -> Any | None:
+    """Return GLiNER's words_splitter callable when available.
+
+    The words_splitter is the exact tokenizer GLiNER uses when counting words
+    for its internal truncation guard (``len(words) > max_len``).  Using it for
+    pre-inference chunking ensures the two counts always agree.
+
+    Args:
+        model (Any): Loaded GLiNER model instance.
+
+    Returns:
+        Any | None: Callable that yields ``(token, start, end)`` triples, or
+        ``None`` when the attribute is unavailable.
+    """
+    data_processor = getattr(model, "data_processor", None)
+    return getattr(data_processor, "words_splitter", None)
+
+
+def _count_text_tokens(
+    text: str,
+    tokenizer: Any | None,
+    words_splitter: Any | None = None,
+) -> int:
+    """Count tokens for a text span in the same units GLiNER uses for truncation.
+
+    When ``words_splitter`` is provided it is used as the primary counter because
+    GLiNER's internal processor truncates by ``len(words)`` where ``words`` is
+    produced by the same splitter.  The BPE tokenizer and whitespace fallbacks are
+    retained for deployments where ``words_splitter`` is unavailable.
 
     Args:
         text (str): Input text span.
-        tokenizer (Any | None): Tokenizer associated with the loaded GLiNER model.
+        tokenizer (Any | None): BPE tokenizer associated with the loaded GLiNER model.
+        words_splitter (Any | None): GLiNER words_splitter callable that yields
+            ``(token, start, end)`` triples.  When provided, used as the primary
+            counting branch to guarantee budget units match GLiNER's truncation units.
 
     Returns:
-        int: Estimated token count for the input text. Tokenizer errors are caught and logged,
-        with a fallback to whitespace token counting.
+        int: Word count (GLiNER units) when ``words_splitter`` is provided; sub-word
+        BPE token count when only ``tokenizer`` is available; whitespace word count as
+        final fallback.
     """
     stripped = text.strip()
     if not stripped:
         return 0
+
+    if words_splitter is not None and callable(words_splitter):
+        try:
+            return sum(1 for _ in words_splitter(stripped))
+        except Exception as exc:
+            logger.warning(
+                "GLiNER words_splitter failed ({}); falling back to BPE tokenizer. "
+                "Chunking may be under-counted and truncation warnings may reappear.",
+                exc,
+            )
 
     if tokenizer is not None and hasattr(tokenizer, "encode"):
         try:
@@ -547,6 +590,7 @@ def _split_oversized_token(
     token: str,
     max_tokens: int,
     tokenizer: Any | None,
+    words_splitter: Any | None = None,
 ) -> list[str]:
     """Split a single oversized token as a last-resort fallback.
 
@@ -554,6 +598,7 @@ def _split_oversized_token(
         token (str): Single token-like span that still exceeds the model budget.
         max_tokens (int): Maximum token budget per chunk.
         tokenizer (Any | None): Tokenizer associated with the loaded GLiNER model.
+        words_splitter (Any | None): GLiNER words_splitter callable used for token counting.
 
     Returns:
         list[str]: Smaller character-based chunks guaranteed to fit the budget.
@@ -566,7 +611,7 @@ def _split_oversized_token(
         last_fit = end
         while end <= len(token):
             candidate = token[start:end]
-            if _count_text_tokens(candidate, tokenizer) > max_tokens:
+            if _count_text_tokens(candidate, tokenizer, words_splitter) > max_tokens:
                 break
             last_fit = end
             end += 1
@@ -581,6 +626,7 @@ def _pack_text_segments(
     segments: list[str],
     max_tokens: int,
     tokenizer: Any | None,
+    words_splitter: Any | None = None,
 ) -> list[str]:
     """Pack sentence or word segments into GLiNER-sized chunks.
 
@@ -588,6 +634,7 @@ def _pack_text_segments(
         segments (list[str]): Ordered text segments to pack.
         max_tokens (int): Maximum token budget per chunk.
         tokenizer (Any | None): Tokenizer associated with the loaded GLiNER model.
+        words_splitter (Any | None): GLiNER words_splitter callable used for token counting.
 
     Returns:
         list[str]: Packed chunks whose token counts fit the requested budget.
@@ -600,7 +647,7 @@ def _pack_text_segments(
         if not segment:
             continue
 
-        segment_tokens = _count_text_tokens(segment, tokenizer)
+        segment_tokens = _count_text_tokens(segment, tokenizer, words_splitter)
         if segment_tokens > max_tokens:
             if current:
                 chunks.append(current)
@@ -613,6 +660,7 @@ def _pack_text_segments(
                         token=segment,
                         max_tokens=max_tokens,
                         tokenizer=tokenizer,
+                        words_splitter=words_splitter,
                     )
                 )
             else:
@@ -621,12 +669,16 @@ def _pack_text_segments(
                         segments=word_segments,
                         max_tokens=max_tokens,
                         tokenizer=tokenizer,
+                        words_splitter=words_splitter,
                     )
                 )
             continue
 
         candidate = segment if not current else f"{current} {segment}"
-        if current and _count_text_tokens(candidate, tokenizer) > max_tokens:
+        if (
+            current
+            and _count_text_tokens(candidate, tokenizer, words_splitter) > max_tokens
+        ):
             chunks.append(current)
             current = segment
         else:
@@ -642,6 +694,7 @@ def _chunk_text_for_gliner(
     text: str,
     max_tokens: int,
     tokenizer: Any | None,
+    words_splitter: Any | None = None,
 ) -> list[str]:
     """Split text into GLiNER-safe chunks with sentence-first packing.
 
@@ -649,6 +702,7 @@ def _chunk_text_for_gliner(
         text (str): Raw input text.
         max_tokens (int): Maximum token budget per chunk.
         tokenizer (Any | None): Tokenizer associated with the loaded GLiNER model.
+        words_splitter (Any | None): GLiNER words_splitter callable used for token counting.
 
     Returns:
         list[str]: Ordered list of chunks suitable for repeated GLiNER inference.
@@ -658,6 +712,7 @@ def _chunk_text_for_gliner(
         segments=sentences,
         max_tokens=max_tokens,
         tokenizer=tokenizer,
+        words_splitter=words_splitter,
     )
 
 
@@ -727,6 +782,7 @@ def build_gliner_ner_extractor(
                     text=text,
                     max_tokens=runtime.max_tokens,
                     tokenizer=runtime.tokenizer,
+                    words_splitter=runtime.words_splitter,
                 ):
                     # Suppress the "Asking to truncate to max_length but no maximum
                     # length is provided" warning from the internal DeBERTa tokenizer.

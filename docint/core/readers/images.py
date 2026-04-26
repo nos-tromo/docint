@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Iterator
 
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
@@ -33,6 +34,7 @@ class ImageReader(BaseReader):
         source: str = "image",
         file_hash: str | None = None,
         image_metadata: dict[str, object] | None = None,
+        extra_info: dict[str, object] | None = None,
     ) -> Document:
         """Enrich a document with metadata from the image file.
 
@@ -42,6 +44,9 @@ class ImageReader(BaseReader):
             source (str, optional): The source type. Defaults to "image".
             file_hash (str | None, optional): Pre-computed file hash. Defaults to None.
             image_metadata (dict[str, object] | None, optional): Additional metadata from image ingestion.
+                Defaults to None.
+            extra_info (dict[str, object] | None, optional): Caller-supplied metadata merged last
+                so pipeline-provided keys (e.g. ``file_hash``, ``file_path``) always win.
                 Defaults to None.
 
         Returns:
@@ -69,6 +74,8 @@ class ImageReader(BaseReader):
         }
         if image_metadata:
             metadata.update(image_metadata)
+        if extra_info:
+            metadata.update(extra_info)
         ensure_file_hash(
             metadata,
             file_hash=file_hash if file_hash is not None else None,
@@ -80,15 +87,24 @@ class ImageReader(BaseReader):
             metadata=metadata,
         )
 
-    def load_data(self, file: str | Path, **kwargs) -> list[Document]:
-        """Load and process image data through the shared image ingestion service.
+    def iter_documents(self, file: str | Path, **kwargs: Any) -> Iterator[Document]:
+        """Yield ingestion documents for a single image file.
+
+        Image readers always yield exactly one document, so the
+        generator entry point is a uniformity wrapper rather than a
+        throughput optimisation. The streaming-aware ingestion
+        pipeline (Phase 2 of the streaming generalisation) calls
+        this when ``STREAMING_READERS_ENABLED=true`` so all reader
+        types share the same per-row/per-file emit semantics.
 
         Args:
-            file (str | Path): The path to the image file.
-            **kwargs (Any): Additional keyword arguments forwarded to the reader.
+            file: The path to the image file.
+            **kwargs: Additional keyword arguments forwarded by the
+                pipeline (notably ``extra_info`` carrying the
+                pre-computed file hash).
 
-        Returns:
-            list[Document]: A list containing a single Document object with the processed image data.
+        Yields:
+            Document: A single document representing the image.
         """
         logger.info("[ImageReader] Loading image from {}", file)
         file_path = Path(file) if not isinstance(file, Path) else file
@@ -137,11 +153,22 @@ class ImageReader(BaseReader):
         if record.status:
             image_meta["image_ingest_status"] = record.status
 
-        return [
-            self._enrich_document(
-                file_path,
-                text,
-                file_hash=file_hash,
-                image_metadata=image_meta,
-            )
-        ]
+        yield self._enrich_document(
+            file_path,
+            text,
+            file_hash=file_hash,
+            image_metadata=image_meta,
+            extra_info=extra_info if isinstance(extra_info, dict) else None,
+        )
+
+    def load_data(self, file: str | Path, **kwargs: Any) -> list[Document]:
+        """Eager-list shim over :meth:`iter_documents` for legacy callers.
+
+        Args:
+            file (str | Path): The path to the image file.
+            **kwargs (Any): Additional keyword arguments forwarded to the reader.
+
+        Returns:
+            list[Document]: A list containing a single Document object with the processed image data.
+        """
+        return list(self.iter_documents(file, **kwargs))

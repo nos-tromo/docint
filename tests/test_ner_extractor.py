@@ -1,6 +1,7 @@
 """Tests for NER extractor helpers."""
 
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -36,6 +37,29 @@ class FakeTokenizer:
         return text.split()
 
 
+class FakeWordsSplitter:
+    """Words splitter counting whitespace-delimited tokens, mirroring FakeTokenizer.
+
+    Using the same split boundaries as FakeTokenizer ensures existing test
+    assertions on chunk boundaries remain correct when the new words_splitter
+    code path is exercised.
+    """
+
+    _PATTERN = re.compile(r"\S+")
+
+    def __call__(self, text: str):
+        """Yield (token, start, end) triples for each whitespace-delimited span.
+
+        Args:
+            text: Input text to split.
+
+        Yields:
+            tuple[str, int, int]: Token string and its character offsets.
+        """
+        for match in self._PATTERN.finditer(text):
+            yield match.group(), match.start(), match.end()
+
+
 def _fake_gliner_runtime(
     *,
     max_len: int = 768,
@@ -49,7 +73,10 @@ def _fake_gliner_runtime(
         Tuple of fake config and fake data processor objects.
     """
     config = SimpleNamespace(max_len=max_len)
-    data_processor = SimpleNamespace(transformer_tokenizer=FakeTokenizer())
+    data_processor = SimpleNamespace(
+        transformer_tokenizer=FakeTokenizer(),
+        words_splitter=FakeWordsSplitter(),
+    )
     return config, data_processor
 
 
@@ -688,6 +715,88 @@ def test_build_gliner_ner_extractor_falls_back_to_word_chunks_for_long_sentence(
         "delta epsilon zeta",
         "eta",
     ]
+
+
+def test_chunk_text_for_gliner_uses_gliner_word_count_not_bpe_count() -> None:
+    """Chunking must count in words_splitter units, not BPE sub-word units.
+
+    This is a regression test for the truncation warning:
+      'Sentence of length N has been truncated to 768'
+    which occurred because the BPE token count for CJK or punctuation-dense text
+    is far smaller than GLiNER's internal word count, allowing oversized chunks
+    through the budget guard.
+    """
+
+    class AlwaysOneBPETokenizer:
+        """Tokenizer that always returns 1 BPE token regardless of input length."""
+
+        def encode(
+            self,
+            text: str,
+            *,
+            add_special_tokens: bool = False,
+            truncation: bool = False,
+        ) -> list[str]:
+            """Return a single pseudo-token for any input.
+
+            Args:
+                text: Input text (ignored — always returns one token).
+                add_special_tokens: Ignored.
+                truncation: Ignored.
+
+            Returns:
+                A single-element list, simulating extreme BPE under-counting.
+            """
+            del add_special_tokens, truncation, text
+            return ["TOKEN"]
+
+    class CharacterWordsSplitter:
+        """Words splitter yielding one token per non-space character."""
+
+        def __call__(self, text: str):
+            """Yield (char, start, end) for each non-space character.
+
+            Args:
+                text: Input text to split.
+
+            Yields:
+                tuple[str, int, int]: Single character and its offsets.
+            """
+            for i, ch in enumerate(text):
+                if ch != " ":
+                    yield ch, i, i + 1
+
+    # Budget: 3 GLiNER words per chunk.
+    # Input: 9 non-space characters = 9 GLiNER words.
+    # BPE-only (without fix): 1 token for the whole string ≤ 3 → single chunk → truncation.
+    # With fix (words_splitter): 9 > 3 → split into 3 chunks of 3 characters each.
+    chunks = ner_extractor_module._chunk_text_for_gliner(
+        text="abcdefghi",
+        max_tokens=3,
+        tokenizer=AlwaysOneBPETokenizer(),
+        words_splitter=CharacterWordsSplitter(),
+    )
+
+    splitter = CharacterWordsSplitter()
+    assert len(chunks) == 3, f"Expected 3 chunks, got {len(chunks)}: {chunks}"
+    for chunk in chunks:
+        word_count = sum(1 for _ in splitter(chunk))
+        assert word_count <= 3, (
+            f"Chunk '{chunk}' has {word_count} words, exceeds budget of 3"
+        )
+
+    # Demonstrate the pre-fix failure: without words_splitter the BPE tokenizer
+    # always returns 1 token regardless of text length, so the budget guard never
+    # fires and the whole 9-character string is packed into one oversized chunk.
+    pre_fix_chunks = ner_extractor_module._chunk_text_for_gliner(
+        text="abcdefghi",
+        max_tokens=3,
+        tokenizer=AlwaysOneBPETokenizer(),
+        words_splitter=None,
+    )
+    assert len(pre_fix_chunks) == 1, (
+        f"Expected 1 oversized chunk without words_splitter, got {len(pre_fix_chunks)}"
+    )
 
 
 def test_build_gliner_ner_extractor_serializes_concurrent_model_access(

@@ -593,6 +593,11 @@ class IngestionConfig:
     docling_accelerator_num_threads: int
     docstore_batch_size: int
     ingest_benchmark_enabled: bool
+    ingest_fail_fast: bool
+    ingest_manifest_enabled: bool
+    ingest_pipeline_overlap_enabled: bool
+    streaming_readers_enabled: bool
+    ingest_queue_max_size: int
     docstore_max_retries: int
     docstore_retry_backoff_max_seconds: float
     docstore_retry_backoff_seconds: float
@@ -610,6 +615,11 @@ def load_ingestion_env(
     default_docling_accelerator_num_threads: int = 4,
     default_docstore_batch_size: int = 100,
     default_ingest_benchmark_enabled: bool = False,
+    default_ingest_fail_fast: bool = False,
+    default_ingest_manifest_enabled: bool = True,
+    default_ingest_pipeline_overlap_enabled: bool = False,
+    default_streaming_readers_enabled: bool = True,
+    default_ingest_queue_max_size: int = 4,
     default_docstore_max_retries: int = 3,
     default_docstore_retry_backoff_seconds: float = 0.25,
     default_docstore_retry_backoff_max_seconds: float = 2.0,
@@ -647,6 +657,29 @@ def load_ingestion_env(
         - docstore_batch_size (int): The batch size for document store operations.
         - ingest_benchmark_enabled (bool): Emit ingestion benchmark summary logs
             for throughput and batch diagnostics.
+        - ingest_fail_fast (bool): When true, abort ingestion on the first
+            persistence failure (current behaviour for CI/strict tests).
+            When false (default), the outer ingestion loop logs the
+            failure, marks the in-flight file hashes failed in the
+            manifest, and continues with the next batch — so one bad
+            file does not invalidate the rest of the run.
+        - ingest_manifest_enabled (bool): Track in-flight, completed, and
+            failed file ingestions in a SQLite manifest for resume
+            visibility. Set to ``false`` to disable the manifest writes
+            (returns the no-op stub from :class:`NullIngestManifest`).
+        - ingest_pipeline_overlap_enabled (bool): When true, run the
+            streaming pipeline producer on a background thread so
+            enrichment overlaps with persistence. Default false until
+            canary measurement confirms throughput gains; flip via
+            ``INGEST_PIPELINE_OVERLAP_ENABLED=true``.
+        - streaming_readers_enabled (bool): When true, dispatch to each
+            reader's ``iter_documents()`` generator directly instead of
+            routing through ``SimpleDirectoryReader.load_file()``. Reduces
+            peak memory for large CSV/JSONL files. Default false; enable via
+            ``STREAMING_READERS_ENABLED=true``.
+        - ingest_queue_max_size (int): Maximum number of pre-enriched
+            batches buffered between producer and consumer when
+            overlap is enabled. Bounds memory under back-pressure.
         - docstore_max_retries (int): Maximum retries for transient docstore
             transport failures (Qdrant vector writes) and SQLite locked-DB
             errors in :class:`SQLiteKVStore`.
@@ -679,6 +712,29 @@ def load_ingestion_env(
             os.getenv("INGEST_BENCHMARK_ENABLED", default_ingest_benchmark_enabled)
         ).lower()
         in {"true", "1", "yes"},
+        ingest_fail_fast=str(
+            os.getenv("INGEST_FAIL_FAST", default_ingest_fail_fast)
+        ).lower()
+        in {"true", "1", "yes"},
+        ingest_manifest_enabled=str(
+            os.getenv("INGEST_MANIFEST_ENABLED", default_ingest_manifest_enabled)
+        ).lower()
+        in {"true", "1", "yes"},
+        ingest_pipeline_overlap_enabled=str(
+            os.getenv(
+                "INGEST_PIPELINE_OVERLAP_ENABLED",
+                default_ingest_pipeline_overlap_enabled,
+            )
+        ).lower()
+        in {"true", "1", "yes"},
+        streaming_readers_enabled=str(
+            os.getenv("STREAMING_READERS_ENABLED", default_streaming_readers_enabled)
+        ).lower()
+        in {"true", "1", "yes"},
+        ingest_queue_max_size=max(
+            1,
+            int(os.getenv("INGEST_QUEUE_MAX_SIZE", default_ingest_queue_max_size)),
+        ),
         docstore_max_retries=max(
             0,
             int(os.getenv("DOCSTORE_MAX_RETRIES", default_docstore_max_retries)),

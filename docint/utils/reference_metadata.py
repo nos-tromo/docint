@@ -14,9 +14,6 @@ REFERENCE_METADATA_FIELDS: dict[str, str] = {
     "text_id": "Text ID",
     "parent_text": "Parent Text",
     "anchor_text": "Anchor Text",
-    # Transcript-specific fields surfaced for Nextext JSONL segments.
-    "start_ts": "Start",
-    "end_ts": "End",
     "speaker": "Speaker",
     "language": "Language",
     "source_file": "Source File",

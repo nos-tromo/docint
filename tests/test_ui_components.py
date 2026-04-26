@@ -240,6 +240,58 @@ def test_reference_metadata_helpers_format_compact_and_multiline_text() -> None:
     assert "- Text: Acme content" in text_block
 
 
+def test_reference_metadata_helpers_hide_text_id_for_transcript_segments() -> None:
+    """Transcript-segment citations must omit ``Text ID`` from body rendering.
+
+    For Nextext transcript segments the ``text_id`` field is
+    ``{source_file}:{sentence_index}`` — visually redundant with the
+    ``Source File`` row plus the ``row=<sentence_index>`` already shown in
+    the dropdown header / ``source_label``. The key must still be present in
+    ``reference_metadata`` (used by source-diversity / identity-key logic in
+    ``rag.py``); only the body presentation hides it.
+
+    For non-transcript types (e.g. social-table comments) ``text_id`` must
+    continue to render — it is the post / comment / chat ID.
+    """
+    transcript_source = {
+        "reference_metadata": {
+            "type": "transcript_segment",
+            "network": "nextext",
+            "timestamp": "00:11:50",
+            "text": "Sample segment.",
+            "text_id": "interview.webm:91",
+            "language": "de",
+            "source_file": "interview.webm",
+        }
+    }
+
+    inline = reference_metadata_inline(transcript_source)
+    text_block = reference_metadata_text_block(transcript_source)
+
+    assert inline is not None
+    assert "**Text ID**" not in inline, (
+        "transcript_segment citations must hide Text ID from inline body"
+    )
+    assert "- Text ID:" not in text_block, (
+        "transcript_segment citations must hide Text ID from text-block export"
+    )
+    # Other rows still render normally.
+    assert "**Network**: nextext" in inline
+    assert "**Timestamp**: 00:11:50" in inline
+    assert "**Source File**: interview.webm" in inline
+
+    # Regression guard: non-transcript types must still surface text_id.
+    comment_source = {
+        "reference_metadata": {
+            "network": "Telegram",
+            "type": "comment",
+            "timestamp": "2026-01-02T10:00:00Z",
+            "text_id": "c1",
+        }
+    }
+    assert "**Text ID**: c1" in (reference_metadata_inline(comment_source) or "")
+
+
 def test_build_source_files_zip_deduplicates_entries_and_keeps_names() -> None:
     """ZIP builder should keep source names and avoid duplicate file entries."""
 

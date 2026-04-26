@@ -20,7 +20,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Sequence, cast
+from typing import Any, Callable, Iterable, Sequence, cast
 
 # isort: off
 # Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
@@ -108,12 +108,23 @@ from docint.core.ner import (
 )
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
+from docint.core.ingest.streaming_executor import overlapped
 from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.retrieval_filters import matches_metadata_filters
 from docint.core.state.session_manager import SessionManager
+from docint.core.storage.ingest_manifest import (
+    IngestManifest,
+    NullIngestManifest,
+)
 from docint.core.storage.sqlite_kvstore import SQLiteKVStore
 from docint.core.storage.utils import qdrant_collection_exists
 from docint.core.storage.sources import stage_sources_to_qdrant
+from docint.utils.batching import chunk_nodes
+from docint.utils.retry import (
+    aretry_with_backoff,
+    is_transient_qdrant_error,
+    retry_with_backoff,
+)
 from docint.utils.embed_chunking import (
     effective_budget,
     estimate_tokens,
@@ -303,6 +314,31 @@ DEFAULT_GROUNDED_REFINE_PROMPT = (
     "return the current answer unchanged.\n"
     "Refined grounded answer:"
 )
+
+
+def _extract_node_file_hashes(nodes: list[BaseNode]) -> set[str]:
+    """Collect unique ``file_hash`` values from a list of ingestion nodes.
+
+    Used by :meth:`RAG.ingest_docs` and :meth:`RAG.asingest_docs` to
+    drive per-file manifest hooks without requiring the streaming
+    pipeline to surface in-flight file hashes through its yield shape.
+    Each ingestion node carries its source document's ``file_hash`` in
+    metadata via :meth:`DocumentIngestionPipeline._ensure_file_hashes`.
+
+    Args:
+        nodes: Ingestion nodes about to be persisted.
+
+    Returns:
+        Set of unique non-empty file-hash strings observed in
+        ``node.metadata['file_hash']``.
+    """
+    hashes: set[str] = set()
+    for node in nodes:
+        metadata = getattr(node, "metadata", None) or {}
+        value = metadata.get("file_hash")
+        if isinstance(value, str) and value.strip():
+            hashes.add(value.strip())
+    return hashes
 
 
 class EmptyIngestionError(Exception):
@@ -1516,6 +1552,10 @@ class RAG:
     # --- Qdrant controls ---
     docstore_batch_size: int = field(default=100, init=False)
     ingest_benchmark_enabled: bool = field(default=False, init=False)
+    ingest_fail_fast: bool = field(default=False, init=False)
+    ingest_manifest_enabled: bool = field(default=True, init=False)
+    ingest_pipeline_overlap_enabled: bool = field(default=False, init=False)
+    ingest_queue_max_size: int = field(default=4, init=False)
     docstore_max_retries: int = field(default=3, init=False)
     docstore_retry_backoff_seconds: float = field(default=0.25, init=False)
     docstore_retry_backoff_max_seconds: float = field(default=2.0, init=False)
@@ -1580,6 +1620,12 @@ class RAG:
         # --- Ingestion config ---
         self.docstore_batch_size = self.ingestion_config.docstore_batch_size
         self.ingest_benchmark_enabled = self.ingestion_config.ingest_benchmark_enabled
+        self.ingest_fail_fast = self.ingestion_config.ingest_fail_fast
+        self.ingest_manifest_enabled = self.ingestion_config.ingest_manifest_enabled
+        self.ingest_pipeline_overlap_enabled = (
+            self.ingestion_config.ingest_pipeline_overlap_enabled
+        )
+        self.ingest_queue_max_size = self.ingestion_config.ingest_queue_max_size
         self.docstore_max_retries = self.ingestion_config.docstore_max_retries
         self.docstore_retry_backoff_seconds = (
             self.ingestion_config.docstore_retry_backoff_seconds
@@ -2311,6 +2357,40 @@ class RAG:
             retry_backoff_max_seconds=self.docstore_retry_backoff_max_seconds,
         )
 
+    def _build_ingest_manifest(
+        self, collection: str | None = None
+    ) -> IngestManifest | NullIngestManifest:
+        """Build the per-collection ingestion manifest.
+
+        Returns a :class:`NullIngestManifest` no-op stub when
+        ``INGEST_MANIFEST_ENABLED`` is false, so callers can use the
+        manifest unconditionally without None-checks. Otherwise the
+        manifest lives at
+        ``{qdrant_src_dir}/{collection}/{collection}_ingest_manifest.db``,
+        sharing the same parent directory as the SQLite KV store but
+        a separate file (different access patterns: frequent updates
+        vs. blob KV).
+
+        Args:
+            collection: Optional collection name override.  When
+                *None* the current ``qdrant_collection`` is used.
+
+        Returns:
+            IngestManifest | NullIngestManifest: The manifest instance.
+        """
+        if not self.ingest_manifest_enabled:
+            return NullIngestManifest()
+        target = str(collection or self.qdrant_collection or "").strip()
+        if not target:
+            return NullIngestManifest()
+        db_path = self.qdrant_src_dir / target / f"{target}_ingest_manifest.db"
+        return IngestManifest(
+            db_path=db_path,
+            max_retries=self.docstore_max_retries,
+            retry_backoff_seconds=self.docstore_retry_backoff_seconds,
+            retry_backoff_max_seconds=self.docstore_retry_backoff_max_seconds,
+        )
+
     def _build_ingestion_pipeline(
         self, progress_callback: Callable[[str], None] | None = None
     ) -> DocumentIngestionPipeline:
@@ -2632,20 +2712,20 @@ class RAG:
         # so the RAG layer must chunk explicitly. The safety net runs
         # per chunk — an oversize payload slipping through the
         # re-splitter raises BEFORE its chunk hits the provider, not
-        # after 4 minutes of stalled batch processing. Mirrors the
-        # slice idiom in :meth:`_chunk_nodes`; kept inline because we
-        # need parallel slicing of ``nodes_to_embed`` and
-        # ``texts_to_embed`` in lockstep.
+        # after 4 minutes of stalled batch processing. The slicing is
+        # kept inline because we need parallel slicing of
+        # ``nodes_to_embed`` and ``texts_to_embed`` in lockstep, which
+        # the generic :func:`chunk_nodes` helper cannot express.
         batch_size = max(1, self.embed_batch_size)
         for start in range(0, len(nodes_to_embed), batch_size):
-            chunk_nodes = nodes_to_embed[start : start + batch_size]
+            embed_batch = nodes_to_embed[start : start + batch_size]
             chunk_texts = texts_to_embed[start : start + batch_size]
-            self._assert_embed_payloads_fit_budget(chunk_nodes, chunk_texts)
+            self._assert_embed_payloads_fit_budget(embed_batch, chunk_texts)
             chunk_embeddings = cast(
                 list[list[float]],
                 get_embeddings(chunk_texts),
             )
-            for node, embedding in zip(chunk_nodes, chunk_embeddings):
+            for node, embedding in zip(embed_batch, chunk_embeddings):
                 node.embedding = embedding
 
         return vector_nodes, docstore_nodes
@@ -2690,36 +2770,17 @@ class RAG:
         # layer and not inside ``aget_text_embeddings_strict``.
         batch_size = max(1, self.embed_batch_size)
         for start in range(0, len(nodes_to_embed), batch_size):
-            chunk_nodes = nodes_to_embed[start : start + batch_size]
+            embed_batch = nodes_to_embed[start : start + batch_size]
             chunk_texts = texts_to_embed[start : start + batch_size]
-            self._assert_embed_payloads_fit_budget(chunk_nodes, chunk_texts)
+            self._assert_embed_payloads_fit_budget(embed_batch, chunk_texts)
             chunk_embeddings = cast(
                 list[list[float]],
                 await aget_embeddings(chunk_texts),
             )
-            for node, embedding in zip(chunk_nodes, chunk_embeddings):
+            for node, embedding in zip(embed_batch, chunk_embeddings):
                 node.embedding = embedding
 
         return vector_nodes, docstore_nodes
-
-    @staticmethod
-    def _chunk_nodes(nodes: list[BaseNode], batch_size: int) -> list[list[BaseNode]]:
-        """Split nodes into non-empty batches.
-
-        Args:
-            nodes (list[BaseNode]): Nodes to split.
-            batch_size (int): Preferred maximum batch size.
-
-        Returns:
-            list[list[BaseNode]]: Node batches in input order.
-        """
-        if not nodes:
-            return []
-        effective_batch_size = max(1, int(batch_size))
-        return [
-            nodes[i : i + effective_batch_size]
-            for i in range(0, len(nodes), effective_batch_size)
-        ]
 
     def _docstore_batch_for_persist(
         self,
@@ -2779,7 +2840,7 @@ class RAG:
         if self.index is None:
             raise RuntimeError("Index is not initialized.")
 
-        batches = self._chunk_nodes(nodes, self.docstore_batch_size)
+        batches = chunk_nodes(nodes, self.docstore_batch_size)
         for batch_no, batch in enumerate(batches, start=1):
             logger.debug(
                 "Persisting node batch {}/{} ({} node(s)) to DocStore...",
@@ -2813,16 +2874,30 @@ class RAG:
                     )
                     raise
             if prepared_vector_nodes:
+                index = self.index
+                # Retry safety invariant: ``_prepare_vector_nodes_for_insert``
+                # has already attached an embedding to every vector node, so
+                # llama-index's ``insert_nodes`` will not re-embed on a
+                # retry attempt — the retry simply replays the Qdrant
+                # upsert with the same point payloads.
                 try:
-                    self.index.insert_nodes(prepared_vector_nodes)
+                    retry_with_backoff(
+                        "qdrant_insert_nodes",
+                        lambda: index.insert_nodes(prepared_vector_nodes),
+                        max_retries=self.docstore_max_retries,
+                        initial_backoff=self.docstore_retry_backoff_seconds,
+                        max_backoff=self.docstore_retry_backoff_max_seconds,
+                        is_retryable=is_transient_qdrant_error,
+                    )
                 except Exception as exc:
                     logger.error(
                         "orphaned_kv_nodes | batch={}/{} collection={!r} "
-                        "error={!r} node_ids={}",
+                        "error={!r} max_attempts={} node_ids={}",
                         batch_no,
                         len(batches),
                         self.qdrant_collection,
                         exc,
+                        self.docstore_max_retries + 1,
                         [node.node_id for node in prepared_vector_nodes],
                     )
                     raise
@@ -2892,7 +2967,7 @@ class RAG:
         if self.index is None:
             raise RuntimeError("Index is not initialized.")
 
-        batches = self._chunk_nodes(nodes, self.docstore_batch_size)
+        batches = chunk_nodes(nodes, self.docstore_batch_size)
         for batch_no, batch in enumerate(batches, start=1):
             logger.debug(
                 "Persisting async node batch {}/{} ({} node(s)) to DocStore...",
@@ -2926,16 +3001,33 @@ class RAG:
                     )
                     raise
             if prepared_vector_nodes:
+                index = self.index
+
+                async def _do_ainsert() -> None:
+                    # See sync twin for the retry-safety invariant —
+                    # nodes are pre-embedded by
+                    # ``_aprepare_vector_nodes_for_insert`` so a retry
+                    # replays the upsert without re-embedding.
+                    await index.ainsert_nodes(prepared_vector_nodes)
+
                 try:
-                    await self.index.ainsert_nodes(prepared_vector_nodes)
+                    await aretry_with_backoff(
+                        "qdrant_ainsert_nodes",
+                        _do_ainsert,
+                        max_retries=self.docstore_max_retries,
+                        initial_backoff=self.docstore_retry_backoff_seconds,
+                        max_backoff=self.docstore_retry_backoff_max_seconds,
+                        is_retryable=is_transient_qdrant_error,
+                    )
                 except Exception as exc:
                     logger.error(
                         "orphaned_kv_nodes | batch={}/{} collection={!r} "
-                        "error={!r} node_ids={}",
+                        "error={!r} max_attempts={} node_ids={}",
                         batch_no,
                         len(batches),
                         self.qdrant_collection,
                         exc,
+                        self.docstore_max_retries + 1,
                         [node.node_id for node in prepared_vector_nodes],
                     )
                     raise
@@ -3140,6 +3232,12 @@ class RAG:
 
         table_meta = payload.get("table") or {}
         row_index = table_meta.get("row_index")
+        if row_index is None and payload.get("docint_doc_kind") == "transcript_segment":
+            # Transcript segments have no table.row_index but do carry a
+            # sequential ``sentence_index``. Surface it as ``row`` so the
+            # citation/dropdown header shows ``row=<index>`` instead of the
+            # default ``row=None`` placeholder.
+            row_index = payload.get("sentence_index")
         try:
             row_index = int(row_index) if row_index is not None else None
         except Exception:
@@ -5039,8 +5137,12 @@ class RAG:
         )
 
         pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
-        existing_hashes = self._get_existing_file_hashes()
+        manifest = self._build_ingest_manifest()
+        manifest_completed = manifest.completed_files(self.qdrant_collection)
+        existing_hashes = self._get_existing_file_hashes() | manifest_completed
         processed_hashes = set(existing_hashes)
+        manifest_started: set[str] = set()
+        manifest_in_flight: set[str] = set()
         image_ingestion_service = getattr(pipeline, "image_ingestion_service", None)
         core_pdf_reader = CorePDFPipelineReader(
             data_dir=prepared_dir,
@@ -5050,51 +5152,127 @@ class RAG:
             image_ingestion_service=image_ingestion_service,
         )
 
-        for docs, nodes, file_hash in core_pdf_reader.build(
-            existing_hashes=processed_hashes, progress_callback=progress_callback
-        ):
-            core_docs += len(docs)
-            if nodes:
-                self._persist_node_batches(nodes)
-                core_nodes += len(nodes)
-                persist_batches += len(
-                    self._chunk_nodes(nodes, self.docstore_batch_size)
-                )
-                processed_hashes.add(file_hash)
+        ingest_failures: list[tuple[set[str], str]] = []
 
-        # PDFs are owned by the core pipeline reader and should not be
-        # re-processed by the legacy ingestion path.
-        processed_hashes.update(core_pdf_reader.discovered_hashes)
+        def _handle_batch_failure(in_flight: set[str], exc: BaseException) -> None:
+            """Centralised handling for a per-batch persistence failure.
 
-        # Process batches from the pipeline generator, persisting nodes as soon
-        # as each enrichment micro-batch completes when supported.
-        if hasattr(pipeline, "build_streaming") and callable(
-            getattr(pipeline, "build_streaming")
-        ):
-            for docs, nodes, completed_hashes in pipeline.build_streaming(
-                processed_hashes
+            Reraises immediately when ``ingest_fail_fast`` is true (CI
+            mode); otherwise logs the failure with a structured marker,
+            marks every in-flight file hash failed in the manifest, and
+            records the failure for the end-of-run summary.
+            """
+            if self.ingest_fail_fast:
+                raise exc
+            failed_for_batch = set(in_flight)
+            for fh in failed_for_batch:
+                manifest.mark_failed(self.qdrant_collection, fh, repr(exc))
+            ingest_failures.append((failed_for_batch, repr(exc)))
+            logger.error(
+                "failed_ingest_batch | collection={!r} file_hashes={} error={!r}",
+                self.qdrant_collection,
+                sorted(failed_for_batch),
+                exc,
+            )
+
+        try:
+            for docs, nodes, file_hash in core_pdf_reader.build(
+                existing_hashes=processed_hashes, progress_callback=progress_callback
             ):
-                if docs:
-                    streaming_docs += len(docs)
+                core_docs += len(docs)
+                if file_hash and file_hash not in manifest_started:
+                    manifest.mark_started(self.qdrant_collection, file_hash)
+                    manifest_started.add(file_hash)
+                    manifest_in_flight.add(file_hash)
                 if nodes:
-                    self._persist_node_batches(nodes)
-                    streaming_nodes += len(nodes)
-                    persist_batches += len(
-                        self._chunk_nodes(nodes, self.docstore_batch_size)
+                    try:
+                        self._persist_node_batches(nodes)
+                    except Exception as exc:
+                        per_batch = (
+                            {file_hash} if file_hash else set(manifest_in_flight)
+                        )
+                        _handle_batch_failure(per_batch, exc)
+                        manifest_in_flight -= per_batch
+                        continue
+                    core_nodes += len(nodes)
+                    persist_batches += len(chunk_nodes(nodes, self.docstore_batch_size))
+                    processed_hashes.add(file_hash)
+                    if file_hash:
+                        manifest.mark_completed(self.qdrant_collection, file_hash)
+                        manifest_in_flight.discard(file_hash)
+
+            # PDFs are owned by the core pipeline reader and should not be
+            # re-processed by the legacy ingestion path.
+            processed_hashes.update(core_pdf_reader.discovered_hashes)
+
+            # Process batches from the pipeline generator, persisting nodes as
+            # soon as each enrichment micro-batch completes when supported.
+            if hasattr(pipeline, "build_streaming") and callable(
+                getattr(pipeline, "build_streaming")
+            ):
+                if self.ingest_pipeline_overlap_enabled:
+                    streaming_iter: Iterable[
+                        tuple[list[Document], list[BaseNode], set[str]]
+                    ] = overlapped(
+                        lambda: pipeline.build_streaming(processed_hashes),
+                        queue_max_size=self.ingest_queue_max_size,
                     )
-                    enrich_batches += 1
-                if completed_hashes:
-                    processed_hashes.update(completed_hashes)
-        else:
-            for docs, nodes in pipeline.build(processed_hashes):
-                if docs:
-                    streaming_docs += len(docs)
-                if nodes:
-                    self._persist_node_batches(nodes)
-                    streaming_nodes += len(nodes)
-                    persist_batches += len(
-                        self._chunk_nodes(nodes, self.docstore_batch_size)
-                    )
+                else:
+                    streaming_iter = pipeline.build_streaming(processed_hashes)
+                for docs, nodes, completed_hashes in streaming_iter:
+                    if docs:
+                        streaming_docs += len(docs)
+                    batch_hashes = _extract_node_file_hashes(nodes)
+                    for fh in batch_hashes - manifest_started:
+                        manifest.mark_started(self.qdrant_collection, fh)
+                        manifest_started.add(fh)
+                        manifest_in_flight.add(fh)
+                    if nodes:
+                        try:
+                            self._persist_node_batches(nodes)
+                        except Exception as exc:
+                            _handle_batch_failure(batch_hashes, exc)
+                            manifest_in_flight -= batch_hashes
+                            continue
+                        streaming_nodes += len(nodes)
+                        persist_batches += len(
+                            chunk_nodes(nodes, self.docstore_batch_size)
+                        )
+                        enrich_batches += 1
+                    if completed_hashes:
+                        processed_hashes.update(completed_hashes)
+                        for fh in completed_hashes:
+                            manifest.mark_completed(self.qdrant_collection, fh)
+                            manifest_in_flight.discard(fh)
+            else:
+                for docs, nodes in pipeline.build(processed_hashes):
+                    if docs:
+                        streaming_docs += len(docs)
+                    if nodes:
+                        self._persist_node_batches(nodes)
+                        streaming_nodes += len(nodes)
+                        persist_batches += len(
+                            chunk_nodes(nodes, self.docstore_batch_size)
+                        )
+        except Exception as exc:
+            # Generator-level exception or fail-fast escape: mark every
+            # remaining in-flight file failed and abort.
+            for fh in manifest_in_flight:
+                manifest.mark_failed(self.qdrant_collection, fh, repr(exc))
+            raise
+        finally:
+            manifest.close()
+            if ingest_failures:
+                aggregated = sorted(
+                    {fh for hashes, _ in ingest_failures for fh in hashes}
+                )
+                logger.warning(
+                    "Ingest finished with {} failed batch(es) "
+                    "(skip-and-continue): collection={!r} failed_file_hashes={}",
+                    len(ingest_failures),
+                    self.qdrant_collection,
+                    aggregated,
+                )
 
         total_docs = core_docs + streaming_docs
         total_nodes = core_nodes + streaming_nodes
@@ -5204,8 +5382,12 @@ class RAG:
         )
 
         pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
-        existing_hashes = self._get_existing_file_hashes()
+        manifest = self._build_ingest_manifest()
+        manifest_completed = manifest.completed_files(self.qdrant_collection)
+        existing_hashes = self._get_existing_file_hashes() | manifest_completed
         processed_hashes = set(existing_hashes)
+        manifest_started: set[str] = set()
+        manifest_in_flight: set[str] = set()
         image_ingestion_service = getattr(pipeline, "image_ingestion_service", None)
         core_pdf_reader = CorePDFPipelineReader(
             data_dir=prepared_dir,
@@ -5215,49 +5397,110 @@ class RAG:
             image_ingestion_service=image_ingestion_service,
         )
 
-        for docs, nodes, file_hash in core_pdf_reader.build(
-            existing_hashes=processed_hashes, progress_callback=progress_callback
-        ):
-            core_docs += len(docs)
-            if nodes:
-                await self._apersist_node_batches(nodes)
-                core_nodes += len(nodes)
-                persist_batches += len(
-                    self._chunk_nodes(nodes, self.docstore_batch_size)
-                )
-                processed_hashes.add(file_hash)
+        ingest_failures: list[tuple[set[str], str]] = []
 
-        processed_hashes.update(core_pdf_reader.discovered_hashes)
+        def _handle_batch_failure(in_flight: set[str], exc: BaseException) -> None:
+            """Async ingest variant of :func:`_handle_batch_failure` (sync twin)."""
+            if self.ingest_fail_fast:
+                raise exc
+            failed_for_batch = set(in_flight)
+            for fh in failed_for_batch:
+                manifest.mark_failed(self.qdrant_collection, fh, repr(exc))
+            ingest_failures.append((failed_for_batch, repr(exc)))
+            logger.error(
+                "failed_ingest_batch | collection={!r} file_hashes={} error={!r}",
+                self.qdrant_collection,
+                sorted(failed_for_batch),
+                exc,
+            )
 
-        # Process batches, persisting nodes as soon as each enrichment
-        # micro-batch completes when supported.
-        if hasattr(pipeline, "build_streaming") and callable(
-            getattr(pipeline, "build_streaming")
-        ):
-            for docs, nodes, completed_hashes in pipeline.build_streaming(
-                processed_hashes
+        try:
+            for docs, nodes, file_hash in core_pdf_reader.build(
+                existing_hashes=processed_hashes, progress_callback=progress_callback
             ):
-                if docs:
-                    streaming_docs += len(docs)
+                core_docs += len(docs)
+                if file_hash and file_hash not in manifest_started:
+                    manifest.mark_started(self.qdrant_collection, file_hash)
+                    manifest_started.add(file_hash)
+                    manifest_in_flight.add(file_hash)
                 if nodes:
-                    await self._apersist_node_batches(nodes)
-                    streaming_nodes += len(nodes)
-                    persist_batches += len(
-                        self._chunk_nodes(nodes, self.docstore_batch_size)
-                    )
-                    enrich_batches += 1
-                if completed_hashes:
-                    processed_hashes.update(completed_hashes)
-        else:
-            for docs, nodes in pipeline.build(processed_hashes):
-                if docs:
-                    streaming_docs += len(docs)
-                if nodes:
-                    await self._apersist_node_batches(nodes)
-                    streaming_nodes += len(nodes)
-                    persist_batches += len(
-                        self._chunk_nodes(nodes, self.docstore_batch_size)
-                    )
+                    try:
+                        await self._apersist_node_batches(nodes)
+                    except Exception as exc:
+                        per_batch = (
+                            {file_hash} if file_hash else set(manifest_in_flight)
+                        )
+                        _handle_batch_failure(per_batch, exc)
+                        manifest_in_flight -= per_batch
+                        continue
+                    core_nodes += len(nodes)
+                    persist_batches += len(chunk_nodes(nodes, self.docstore_batch_size))
+                    processed_hashes.add(file_hash)
+                    if file_hash:
+                        manifest.mark_completed(self.qdrant_collection, file_hash)
+                        manifest_in_flight.discard(file_hash)
+
+            processed_hashes.update(core_pdf_reader.discovered_hashes)
+
+            # Process batches, persisting nodes as soon as each enrichment
+            # micro-batch completes when supported.
+            if hasattr(pipeline, "build_streaming") and callable(
+                getattr(pipeline, "build_streaming")
+            ):
+                for docs, nodes, completed_hashes in pipeline.build_streaming(
+                    processed_hashes
+                ):
+                    if docs:
+                        streaming_docs += len(docs)
+                    batch_hashes = _extract_node_file_hashes(nodes)
+                    for fh in batch_hashes - manifest_started:
+                        manifest.mark_started(self.qdrant_collection, fh)
+                        manifest_started.add(fh)
+                        manifest_in_flight.add(fh)
+                    if nodes:
+                        try:
+                            await self._apersist_node_batches(nodes)
+                        except Exception as exc:
+                            _handle_batch_failure(batch_hashes, exc)
+                            manifest_in_flight -= batch_hashes
+                            continue
+                        streaming_nodes += len(nodes)
+                        persist_batches += len(
+                            chunk_nodes(nodes, self.docstore_batch_size)
+                        )
+                        enrich_batches += 1
+                    if completed_hashes:
+                        processed_hashes.update(completed_hashes)
+                        for fh in completed_hashes:
+                            manifest.mark_completed(self.qdrant_collection, fh)
+                            manifest_in_flight.discard(fh)
+            else:
+                for docs, nodes in pipeline.build(processed_hashes):
+                    if docs:
+                        streaming_docs += len(docs)
+                    if nodes:
+                        await self._apersist_node_batches(nodes)
+                        streaming_nodes += len(nodes)
+                        persist_batches += len(
+                            chunk_nodes(nodes, self.docstore_batch_size)
+                        )
+        except Exception as exc:
+            for fh in manifest_in_flight:
+                manifest.mark_failed(self.qdrant_collection, fh, repr(exc))
+            raise
+        finally:
+            manifest.close()
+            if ingest_failures:
+                aggregated = sorted(
+                    {fh for hashes, _ in ingest_failures for fh in hashes}
+                )
+                logger.warning(
+                    "Async ingest finished with {} failed batch(es) "
+                    "(skip-and-continue): collection={!r} failed_file_hashes={}",
+                    len(ingest_failures),
+                    self.qdrant_collection,
+                    aggregated,
+                )
 
         total_docs = core_docs + streaming_docs
         total_nodes = core_nodes + streaming_nodes

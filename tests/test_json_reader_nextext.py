@@ -405,9 +405,11 @@ def test_nextext_segment_emits_one_document_per_line(tmp_path: Path) -> None:
 def test_nextext_reference_metadata_populated(tmp_path: Path) -> None:
     """Each emitted Document carries a ``reference_metadata`` dict with required keys.
 
-    Required keys: ``type``, ``network``, ``text``, ``text_id``,
-    ``start_ts``, ``end_ts``, ``language``, ``source_file``.
-    ``author`` must equal ``speaker`` when a speaker is present.
+    Required keys: ``type``, ``network``, ``text``, ``text_id``, ``timestamp``,
+    ``language``, ``source_file``. ``author`` must equal ``speaker`` when a
+    speaker is present. The transcript-specific ``start_ts`` / ``end_ts`` keys
+    must NOT appear in ``reference_metadata`` — they duplicated ``timestamp``
+    in the citation view; the canonical anchor is ``timestamp``.
 
     Args:
         tmp_path: Temporary directory provided by pytest.
@@ -440,8 +442,14 @@ def test_nextext_reference_metadata_populated(tmp_path: Path) -> None:
     assert ref["network"] == "nextext"
     assert ref["text"] == "Hallo Welt."
     assert ref["text_id"] == f"{source_file}:0"
-    assert ref["start_ts"] == "00:00:12"
-    assert ref["end_ts"] == "00:00:18"
+    assert ref["timestamp"] == "00:00:12"
+    assert "start_ts" not in ref, (
+        "start_ts must not appear in reference_metadata; it duplicated `timestamp`"
+    )
+    assert "end_ts" not in ref, (
+        "end_ts must not appear in reference_metadata; the citation view drops it "
+        "intentionally — flat metadata still carries it for LLM context"
+    )
     assert ref["language"] == "de"
     assert ref["source_file"] == source_file
     assert ref["author"] == "SPEAKER_01"
@@ -495,16 +503,19 @@ def test_nextext_derives_missing_timestamp_strings(
     expected_start_ts: str,
     expected_end_ts: str,
 ) -> None:
-    """Segments with only ``*_seconds`` produce derived ``start_ts`` / ``end_ts``.
+    """Segments with only ``*_seconds`` produce derived timestamp strings.
 
-    The derivation must follow ``HH:MM:SS`` zero-padded format.
+    The derivation must follow ``HH:MM:SS`` zero-padded format. The start time
+    surfaces as ``reference_metadata["timestamp"]`` (canonical citation anchor);
+    both endpoints remain in flat metadata as ``start_ts`` / ``end_ts`` for the
+    LLM-visible whitelist.
 
     Args:
         tmp_path: Temporary directory provided by pytest.
         start_seconds: Input start time in fractional seconds.
         end_seconds: Input end time in fractional seconds.
-        expected_start_ts: Expected derived ``start_ts`` string.
-        expected_end_ts: Expected derived ``end_ts`` string.
+        expected_start_ts: Expected derived start timestamp string.
+        expected_end_ts: Expected derived end timestamp string.
     """
     jsonl = tmp_path / "derive_ts.jsonl"
     seg: dict[str, Any] = {
@@ -523,13 +534,26 @@ def test_nextext_derives_missing_timestamp_strings(
     documents = reader.load_data(jsonl)
 
     assert len(documents) == 1
-    ref = documents[0].metadata.get("reference_metadata")
+    meta = documents[0].metadata
+    ref = meta.get("reference_metadata")
     assert isinstance(ref, dict), "reference_metadata must be a dict"
-    assert ref["start_ts"] == expected_start_ts, (
-        f"Expected start_ts={expected_start_ts!r}, got {ref.get('start_ts')!r}"
+    assert ref["timestamp"] == expected_start_ts, (
+        f"Expected reference_metadata.timestamp={expected_start_ts!r}, "
+        f"got {ref.get('timestamp')!r}"
     )
-    assert ref["end_ts"] == expected_end_ts, (
-        f"Expected end_ts={expected_end_ts!r}, got {ref.get('end_ts')!r}"
+    assert "start_ts" not in ref, (
+        "start_ts must not appear in reference_metadata even when derived from "
+        "start_seconds; only `timestamp` carries the start time in the citation view"
+    )
+    assert "end_ts" not in ref, (
+        "end_ts must not appear in reference_metadata even when derived from "
+        "end_seconds; flat metadata still carries it for the LLM whitelist"
+    )
+    assert meta["start_ts"] == expected_start_ts, (
+        f"Expected flat start_ts={expected_start_ts!r}, got {meta.get('start_ts')!r}"
+    )
+    assert meta["end_ts"] == expected_end_ts, (
+        f"Expected flat end_ts={expected_end_ts!r}, got {meta.get('end_ts')!r}"
     )
 
 

@@ -24,6 +24,7 @@ from docint.core.readers.images import ImageReader
 from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.tables import TableReader
 from docint.core.storage.hierarchical import HierarchicalNodeParser
+from docint.utils.batching import chunk_nodes
 from docint.utils.clean_text import basic_clean
 from docint.utils.env_cfg import (
     load_hate_speech_env,
@@ -120,6 +121,7 @@ class DocumentIngestionPipeline:
 
     # --- Ingestion config ---
     ingestion_batch_size: int = field(default=5, init=False)
+    streaming_readers_enabled: bool = field(default=False, init=False)
 
     # --- OpenAI config (for LLM-based NER) ---
     openai_inference_provider: str = field(default="ollama")
@@ -185,6 +187,7 @@ class DocumentIngestionPipeline:
         # --- Ingestion config ---
         ingestion_cfg = load_ingestion_env()
         self.ingestion_batch_size = ingestion_cfg.ingestion_batch_size
+        self.streaming_readers_enabled = ingestion_cfg.streaming_readers_enabled
         sentence_splitter_chunk_size = ingestion_cfg.sentence_splitter_chunk_size
         sentence_splitter_chunk_overlap = ingestion_cfg.sentence_splitter_chunk_overlap
         self.sentence_splitter = SentenceSplitter(
@@ -284,25 +287,6 @@ class DocumentIngestionPipeline:
             yield from self._stream_processed_batch(current_docs, existing_hashes)
 
     @staticmethod
-    def _chunk_nodes(nodes: list[BaseNode], batch_size: int) -> list[list[BaseNode]]:
-        """Split nodes into non-empty batches.
-
-        Args:
-            nodes (list[BaseNode]): Nodes to split.
-            batch_size (int): Maximum number of nodes per batch.
-
-        Returns:
-            list[list[BaseNode]]: Batched nodes preserving input order.
-        """
-        if not nodes:
-            return []
-        effective_batch_size = max(1, int(batch_size))
-        return [
-            nodes[i : i + effective_batch_size]
-            for i in range(0, len(nodes), effective_batch_size)
-        ]
-
-    @staticmethod
     def _extract_doc_file_hashes(docs: list[Document]) -> set[str]:
         """Collect unique file hashes from processed documents.
 
@@ -341,7 +325,7 @@ class DocumentIngestionPipeline:
 
         total_nodes = len(nodes)
         processed_nodes = 0
-        node_batches = self._chunk_nodes(nodes, self.ingestion_batch_size)
+        node_batches = chunk_nodes(nodes, self.ingestion_batch_size)
         for batch_idx, node_batch in enumerate(node_batches):
             self._enrich_nodes_in_place(
                 node_batch,
@@ -375,16 +359,30 @@ class DocumentIngestionPipeline:
         dir_reader = self.dir_reader
 
         for input_file in dir_reader.input_files:
-            docs = SimpleDirectoryReader.load_file(
-                input_file=input_file,
-                file_metadata=dir_reader.file_metadata,
-                file_extractor=dir_reader.file_extractor,
-                filename_as_id=dir_reader.filename_as_id,
-                encoding=dir_reader.encoding,
-                errors=dir_reader.errors,
-                raise_on_error=dir_reader.raise_on_error,
-                fs=dir_reader.fs,
+            ext = input_file.suffix.lower()
+            reader = (
+                dir_reader.file_extractor.get(ext)
+                if dir_reader.file_extractor
+                else None
             )
+            if (
+                self.streaming_readers_enabled
+                and reader is not None
+                and hasattr(reader, "iter_documents")
+            ):
+                extra_info = dir_reader.file_metadata(str(input_file))
+                docs = list(reader.iter_documents(input_file, extra_info=extra_info))
+            else:
+                docs = SimpleDirectoryReader.load_file(
+                    input_file=input_file,
+                    file_metadata=dir_reader.file_metadata,
+                    file_extractor=dir_reader.file_extractor,
+                    filename_as_id=dir_reader.filename_as_id,
+                    encoding=dir_reader.encoding,
+                    errors=dir_reader.errors,
+                    raise_on_error=dir_reader.raise_on_error,
+                    fs=dir_reader.fs,
+                )
             if docs:
                 yield dir_reader._exclude_metadata(docs)
 

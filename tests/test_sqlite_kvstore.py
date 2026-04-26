@@ -298,7 +298,7 @@ def test_put_retries_locked_db_error(
     """
     sleep_calls: list[float] = []
     monkeypatch.setattr(
-        "docint.core.storage.sqlite_kvstore.time.sleep",
+        "docint.utils.retry.time.sleep",
         lambda delay: sleep_calls.append(delay),
     )
 
@@ -348,7 +348,7 @@ def test_put_raises_non_retryable_sqlite_error(
     """
     sleep_calls: list[float] = []
     monkeypatch.setattr(
-        "docint.core.storage.sqlite_kvstore.time.sleep",
+        "docint.utils.retry.time.sleep",
         lambda delay: sleep_calls.append(delay),
     )
 

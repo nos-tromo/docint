@@ -7,7 +7,7 @@ import math
 import random
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Iterator, Sequence
 
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
@@ -416,10 +416,17 @@ class CustomJSONReader(BaseReader):
         Produces the flat backward-compatible keys (``whisper_task``,
         ``whisper_language``, ``sentence_index``, ``start_seconds``,
         ``end_seconds``, ``start_ts``, ``end_ts``, ``speaker``,
-        ``source_file``, ``source_file_hash``) and a ``reference_metadata``
-        dict that surfaces timing / speaker / language / source fields through
-        the existing citation UI. Mirrors the specialized-schema pattern used
-        by :mod:`docint.core.readers.tables`.
+        ``source_file``, ``source_file_hash``) at the top level. The nested
+        ``reference_metadata`` sub-dict carries the citation-UI fields:
+        ``type``, ``network``, ``author``, ``text``, ``text_id``, plus
+        ``timestamp`` (segment start, mirrors the generic anchor used by
+        social-table content), ``language``, ``source_file``, and
+        ``speaker`` when present. ``start_ts`` / ``end_ts`` are intentionally
+        absent from ``reference_metadata`` — surfacing them duplicated the
+        ``timestamp`` row in the citation view; the flat-metadata copies
+        feed ``LLM_VISIBLE_METADATA_KEYS`` for prompt-side citation context.
+        Mirrors the specialized-schema pattern used by
+        :mod:`docint.core.readers.tables`.
 
         Args:
             segment: Parsed Nextext line.
@@ -521,9 +528,6 @@ class CustomJSONReader(BaseReader):
         }
         if start_ts_str is not None:
             reference_metadata["timestamp"] = start_ts_str
-            reference_metadata["start_ts"] = start_ts_str
-        if end_ts_str is not None:
-            reference_metadata["end_ts"] = end_ts_str
         if language_str is not None:
             reference_metadata["language"] = language_str
         if source_file_str is not None:
@@ -534,37 +538,38 @@ class CustomJSONReader(BaseReader):
         metadata["reference_metadata"] = reference_metadata
         return metadata
 
-    def _load_nextext_transcript(
+    def _iter_nextext_transcript(
         self,
         file_path: Path,
         *,
         file_hash: str,
         base_extra_info: dict[str, Any],
-    ) -> list[Document]:
-        """Materialize one ``Document`` per Nextext transcript segment.
+    ) -> Iterator[Document]:
+        """Yield one ``Document`` per Nextext transcript segment.
 
-        Each emitted ``Document`` holds the segment's prose as its ``text``
-        and a metadata dict whose ``docint_doc_kind`` routes it through the
-        one-node-per-segment :class:`SentenceSplitter` override in the
-        ingestion pipeline — mirroring the social-table specialized-schema
-        pattern at :mod:`docint.core.readers.tables`.
+        Streaming variant of :meth:`_load_nextext_transcript` introduced
+        for Phase 2 of the ingestion-streaming generalisation. The
+        underlying :meth:`_iter_segments` is already a generator over
+        the JSONL file, so this routes its output straight to the
+        ingestion pipeline without materialising the full list — large
+        transcripts no longer hold every segment in memory before any
+        node persistence happens.
 
-        Iteration is capped at :data:`NEXTEXT_MAX_SEGMENTS` emitted documents
-        to prevent a pathological transcript file from exhausting memory.
-        When the cap is reached, a warning is logged and the remaining
-        segments are discarded — the reader never raises so partial ingest
-        still succeeds.
+        Iteration is capped at :data:`NEXTEXT_MAX_SEGMENTS` documents
+        to bound pathological inputs. When the cap is hit, a warning
+        is logged and iteration ends; the reader never raises so
+        partial ingest still succeeds.
 
         Args:
             file_path: Path to the transcript file.
             file_hash: Precomputed hash of the transcript file itself.
-            base_extra_info: Ingestion-provided metadata (filename, mimetype,
-                ``file_hash`` of the transcript, etc.).
+            base_extra_info: Ingestion-provided metadata (filename,
+                mimetype, ``file_hash`` of the transcript, etc.).
 
-        Returns:
-            Ordered list of segment documents. Empty segments are skipped.
+        Yields:
+            Document: One per non-empty transcript segment, in input
+                order.
         """
-        documents: list[Document] = []
         seen_segments = 0
         truncated = False
         for segment in self._iter_segments(file_path):
@@ -582,7 +587,7 @@ class CustomJSONReader(BaseReader):
                 segment_text=cleaned_text,
             )
             ensure_file_hash(metadata, file_hash=file_hash, path=file_path)
-            documents.append(Document(text=cleaned_text, metadata=metadata))
+            yield Document(text=cleaned_text, metadata=metadata)
             seen_segments += 1
 
         if truncated:
@@ -596,32 +601,69 @@ class CustomJSONReader(BaseReader):
 
         logger.info(
             "[CustomJSONReader] Loaded {} Nextext segment(s) from {}",
-            len(documents),
+            seen_segments,
             file_path,
         )
-        return documents
+
+    def _load_nextext_transcript(
+        self,
+        file_path: Path,
+        *,
+        file_hash: str,
+        base_extra_info: dict[str, Any],
+    ) -> list[Document]:
+        """Materialise the streaming Nextext iterator into a list.
+
+        Kept for backward compatibility with code paths that need an
+        eager list (notably the existing :meth:`load_data` shim). New
+        callers should prefer :meth:`_iter_nextext_transcript`.
+
+        Args:
+            file_path: Path to the transcript file.
+            file_hash: Precomputed hash of the transcript file itself.
+            base_extra_info: Ingestion-provided metadata.
+
+        Returns:
+            Ordered list of segment documents. Empty segments are
+            skipped.
+        """
+        return list(
+            self._iter_nextext_transcript(
+                file_path,
+                file_hash=file_hash,
+                base_extra_info=base_extra_info,
+            )
+        )
 
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
 
-    def load_data(self, file: str | Path, **kwargs: Any) -> list[Document]:
-        """Load data from a JSON / JSONL file and return ``Document`` objects.
+    def iter_documents(self, file: str | Path, **kwargs: Any) -> Iterator[Document]:
+        """Yield ``Document`` objects for a JSON / JSONL / Nextext file.
+
+        Streaming variant of :meth:`load_data` introduced in Phase 2 of
+        the ingestion-streaming generalisation. The Nextext transcript
+        path streams one document per segment without materialising
+        the full list; the generic JSON path falls back to
+        :class:`JSONReader.load_data` (which has no streaming API) and
+        yields its output sequentially.
 
         Args:
             file: Path to the JSON or JSONL file.
             **kwargs: Accepts ``extra_info`` (``dict``) following the
-                LlamaIndex convention. When provided, an existing ``file_hash``
-                is reused instead of being recomputed.
+                LlamaIndex convention. When provided, an existing
+                ``file_hash`` is reused instead of being recomputed.
 
-        Returns:
-            A list of ``Document`` objects. For Nextext transcripts, one
-            document is returned per segment in input order. For generic JSON
-            payloads, the shape follows the existing ``JSONReader`` behaviour.
+        Yields:
+            Document: One per Nextext segment for transcript files,
+                otherwise the shape follows the underlying
+                ``JSONReader`` behaviour.
 
         Raises:
             FileNotFoundError: If ``file`` does not exist.
-            ValueError: If the suffix is not ``.json`` / ``.jsonl`` / ``.ndjson``.
+            ValueError: If the suffix is not ``.json`` / ``.jsonl``
+                / ``.ndjson``.
         """
         file_path = Path(file) if not isinstance(file, Path) else file
 
@@ -671,16 +713,36 @@ class CustomJSONReader(BaseReader):
         ensure_file_hash(base_extra_info, file_hash=file_hash, path=file_path)
 
         if is_nextext:
-            return self._load_nextext_transcript(
+            yield from self._iter_nextext_transcript(
                 file_path,
                 file_hash=file_hash,
                 base_extra_info=base_extra_info,
             )
+            return
 
         schema_info = self._infer_schema(file_path, is_jsonl)
         base_extra_info["schema"] = schema_info
 
-        return self.json_reader.load_data(
+        # JSONReader has no streaming API; consume its eager list and
+        # yield sequentially so callers see the same lazy interface.
+        for doc in self.json_reader.load_data(
             input_file=file_path_str,
             extra_info=base_extra_info,
-        )
+        ):
+            yield doc
+
+    def load_data(self, file: str | Path, **kwargs: Any) -> list[Document]:
+        """Eager-list shim over :meth:`iter_documents` for legacy callers.
+
+        Args:
+            file: Path to the JSON or JSONL file.
+            **kwargs: Forwarded to :meth:`iter_documents`.
+
+        Returns:
+            A list of ``Document`` objects in input order.
+
+        Raises:
+            FileNotFoundError: Propagated from :meth:`iter_documents`.
+            ValueError: Propagated from :meth:`iter_documents`.
+        """
+        return list(self.iter_documents(file, **kwargs))

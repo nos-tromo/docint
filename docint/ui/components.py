@@ -135,9 +135,17 @@ def reference_metadata_items(
     if not isinstance(raw, dict):
         return []
 
+    ref_type = str(raw.get("type") or "").strip()
     items: list[tuple[str, str]] = []
     for key, label in REFERENCE_METADATA_FIELDS.items():
         if not include_text and key == "text":
+            continue
+        # ``text_id`` for transcript segments is ``{source_file}:{sentence_index}``
+        # — redundant with ``Source File`` + the segment-index ``row`` already
+        # surfaced in the dropdown/source label. Hide it from the body to keep
+        # the citation lean; the key remains in ``reference_metadata`` so the
+        # source-diversity / identity-key logic in rag.py keeps working.
+        if ref_type == "transcript_segment" and key == "text_id":
             continue
         value = raw.get(key)
         if value is None:

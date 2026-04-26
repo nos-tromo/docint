@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-import time
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -17,6 +16,7 @@ from llama_index.core.storage.kvstore.types import DEFAULT_COLLECTION, BaseKVSto
 from loguru import logger
 
 from docint.utils.metadata_sanitize import sanitize_for_json
+from docint.utils.retry import retry_with_backoff
 
 T = TypeVar("T")
 
@@ -89,6 +89,24 @@ def _is_locked_db_error(exc: sqlite3.OperationalError) -> bool:
     return "database is locked" in msg or "database is busy" in msg
 
 
+def _is_retryable_sqlite_error(exc: BaseException) -> bool:
+    """Predicate adapter for :func:`docint.utils.retry.retry_with_backoff`.
+
+    The retry helper invokes the predicate with the broader
+    :class:`BaseException` type; this adapter narrows to
+    :class:`sqlite3.OperationalError` and defers to
+    :func:`_is_locked_db_error`.
+
+    Args:
+        exc: The exception raised by the underlying SQLite call.
+
+    Returns:
+        ``True`` only for transient locked/busy ``OperationalError``
+        instances; ``False`` for every other error.
+    """
+    return isinstance(exc, sqlite3.OperationalError) and _is_locked_db_error(exc)
+
+
 class SQLiteKVStore(BaseKVStore):
     """A key-value store backed by a local SQLite database.
 
@@ -146,10 +164,12 @@ class SQLiteKVStore(BaseKVStore):
     def _execute_locked(self, operation: str, fn: Callable[[], T]) -> T:
         """Run *fn* under the instance lock with retries on locked-DB errors.
 
-        The instance lock serialises in-process access to the shared
-        connection.  A small exponential backoff retries transient
-        ``database is locked`` errors caused by cross-process contention
-        (e.g. another process holding the WAL write lock).
+        Delegates to :func:`docint.utils.retry.retry_with_backoff`, the
+        shared engine that also powers Qdrant vector-insert retries. The
+        instance lock serialises in-process access to the shared SQLite
+        connection; the retry layer handles transient ``database is
+        locked`` errors caused by cross-process contention (e.g. another
+        process holding the WAL write lock).
 
         Args:
             operation: Human-readable operation name used for log messages.
@@ -162,31 +182,15 @@ class SQLiteKVStore(BaseKVStore):
             sqlite3.OperationalError: If retries are exhausted or the error
                 is not a transient lock/busy condition.
         """
-        attempts = max(1, self.max_retries + 1)
-        attempt = 1
-        with self._lock:
-            while True:
-                try:
-                    return fn()
-                except sqlite3.OperationalError as exc:
-                    if not _is_locked_db_error(exc) or attempt >= attempts:
-                        raise
-                    delay = min(
-                        self.retry_backoff_seconds * (2 ** (attempt - 1)),
-                        self.retry_backoff_max_seconds,
-                    )
-                    logger.warning(
-                        "SQLite KV operation '{}' hit locked DB on attempt "
-                        "{}/{}: {}. Retrying in {:.2f}s",
-                        operation,
-                        attempt,
-                        attempts,
-                        exc,
-                        delay,
-                    )
-                    if delay > 0:
-                        time.sleep(delay)
-                    attempt += 1
+        return retry_with_backoff(
+            f"sqlite_kvstore.{operation}",
+            fn,
+            max_retries=self.max_retries,
+            initial_backoff=self.retry_backoff_seconds,
+            max_backoff=self.retry_backoff_max_seconds,
+            is_retryable=_is_retryable_sqlite_error,
+            lock=self._lock,
+        )
 
     # ------------------------------------------------------------------
     # Sync API
