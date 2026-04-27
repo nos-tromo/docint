@@ -1,5 +1,5 @@
 ARG PYTHON_SLIM_BOOKWORM_IMAGE=python:3.11.12-slim-bookworm
-ARG NVIDIA_CUDA_RUNTIME_IMAGE=nvidia/cuda:13.0.2-cudnn-runtime-ubuntu22.04
+ARG NVIDIA_CUDA_RUNTIME_IMAGE=nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
 FROM ${PYTHON_SLIM_BOOKWORM_IMAGE} AS uv-installer
 

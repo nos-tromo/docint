@@ -105,17 +105,17 @@ conflicts = [
 [tool.uv.sources]
 docint = { workspace = true }
 torch = [
-  { index = "pytorch-cu130", extra = "cuda" },
+  { index = "pytorch-cu128", extra = "cuda" },
   { index = "pytorch-cpu", extra = "cpu" },
 ]
 torchvision = [
-  { index = "pytorch-cu130", extra = "cuda" },
+  { index = "pytorch-cu128", extra = "cuda" },
   { index = "pytorch-cpu", extra = "cpu" },
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [[tool.uv.index]]
