@@ -1442,9 +1442,8 @@ async def ingest_upload(
             ingestion_task = asyncio.create_task(run_ingestion())
 
             # Poll periodically so client disconnects are noticed even when
-            # the worker is quiet (long Whisper transcription, embedding
-            # batches, etc.). The interval is a module-level constant so
-            # tests can override it.
+            # the worker is quiet (embedding batches, etc.). The interval is 
+            # a module-level constant so tests can override it.
             while True:
                 try:
                     msg = await asyncio.wait_for(
