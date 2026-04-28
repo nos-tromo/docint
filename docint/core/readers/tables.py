@@ -146,8 +146,8 @@ class TableReader(BaseReader):
                 "vanity": "Vanity Name",
                 "text": "Text Content",
                 "text_id": "Comment ID",
-                "parent_text": "Parent Comment Text",
                 "anchor_text": "Posting Text",
+                "parent_text": "Parent Comment Text",
             },
         ),
         TableSchemaProfile(
@@ -177,8 +177,8 @@ class TableReader(BaseReader):
                 "vanity": None,
                 "text": "Text",
                 "text_id": "Chat ID",
-                "parent_text": "Reply To",
                 "anchor_text": None,
+                "parent_text": "Reply To",
             },
         ),
         TableSchemaProfile(
@@ -222,8 +222,8 @@ class TableReader(BaseReader):
                 "vanity": "Vanity Name",
                 "text": "Text Content",
                 "text_id": "Posting ID",
-                "parent_text": None,
                 "anchor_text": None,
+                "parent_text": None,
             },
         ),
     )

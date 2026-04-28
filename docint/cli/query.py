@@ -530,8 +530,8 @@ def _build_hate_speech_csv(findings: list[dict[str, Any]]) -> list[dict[str, Any
                 "author_id": ref.get("author_id"),
                 "vanity": ref.get("vanity"),
                 "text_id": ref.get("text_id"),
-                "parent_text": ref.get("parent_text"),
                 "anchor_text": ref.get("anchor_text"),
+                "parent_text": ref.get("parent_text"),
             }
         )
     return rows

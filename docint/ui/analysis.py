@@ -550,8 +550,8 @@ def _entity_chunks_to_csv(entity: str, chunks: list[dict[str, Any]]) -> str:
         "author_id",
         "vanity",
         "text_id",
-        "parent_text",
         "anchor_text",
+        "parent_text",
     ]
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=fieldnames)
@@ -574,8 +574,8 @@ def _entity_chunks_to_csv(entity: str, chunks: list[dict[str, Any]]) -> str:
                 "author_id": ref.get("author_id"),
                 "vanity": ref.get("vanity"),
                 "text_id": ref.get("text_id"),
-                "parent_text": ref.get("parent_text"),
                 "anchor_text": ref.get("anchor_text"),
+                "parent_text": ref.get("parent_text"),
             }
         )
     return buf.getvalue()
@@ -607,8 +607,8 @@ def _hate_speech_chunks_to_csv(chunks: list[dict[str, Any]]) -> str:
         "author_id",
         "vanity",
         "text_id",
-        "parent_text",
         "anchor_text",
+        "parent_text",
     ]
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=fieldnames)
@@ -633,8 +633,8 @@ def _hate_speech_chunks_to_csv(chunks: list[dict[str, Any]]) -> str:
                 "author_id": ref.get("author_id"),
                 "vanity": ref.get("vanity"),
                 "text_id": ref.get("text_id"),
-                "parent_text": ref.get("parent_text"),
                 "anchor_text": ref.get("anchor_text"),
+                "parent_text": ref.get("parent_text"),
             }
         )
     return buf.getvalue()
