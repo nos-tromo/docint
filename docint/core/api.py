@@ -144,6 +144,10 @@ def _validation_payload(
     answer: str | None,
     sources: list[dict[str, Any]],
     summary_diagnostics: dict[str, Any] | None = None,
+    retrieval_query: str | None = None,
+    rewritten_query: str | None = None,
+    intent: str | None = None,
+    tool_used: str | None = None,
 ) -> dict[str, bool | str | None]:
     """Validate a response against retrieved sources and return metadata.
 
@@ -152,6 +156,10 @@ def _validation_payload(
         answer (str | None): The generated answer text.
         sources (list[dict[str, Any]]): Retrieved source payloads.
         summary_diagnostics (dict[str, Any] | None): Optional summary coverage diagnostics.
+        retrieval_query (str | None): Query actually used for retrieval (after any rewrite/expansion).
+        rewritten_query (str | None): Rewritten query from the understanding agent, if any.
+        intent (str | None): Detected intent label, if any.
+        tool_used (str | None): Retrieval tool that produced the sources, if any.
 
     Returns:
         dict[str, bool | str | None]: Validation metadata dictionary suitable for API responses.
@@ -172,6 +180,10 @@ def _validation_payload(
         answer=answer,
         sources=sources,
         summary_diagnostics=summary_diagnostics,
+        retrieval_query=retrieval_query,
+        rewritten_query=rewritten_query,
+        intent=intent,
+        tool_used=tool_used,
     )
     validated = validator.finalize(retrieval, Turn(user_input=question))
     return {
@@ -568,10 +580,22 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
             else []
         )
 
+        summary_diagnostics_query = (
+            data.get("summary_diagnostics")
+            if isinstance(data, dict)
+            and isinstance(data.get("summary_diagnostics"), dict)
+            else None
+        )
+        # `retrieval_mode` here is the session-routing mode
+        # ("session"/"stateless"), not the retrieval tool, so it is not
+        # forwarded as `tool_used`. The orchestrator path populates
+        # `tool_used` directly on the RetrievalResult instead.
         validation = _validation_payload(
             question=payload.question,
             answer=answer,
             sources=sources,
+            summary_diagnostics=summary_diagnostics_query,
+            retrieval_query=retrieval_query_value,
         )
         return {
             "answer": answer,
@@ -736,10 +760,24 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
             sources = payload_out.get("sources")
             if not isinstance(sources, list):
                 sources = []
+            stream_summary_diagnostics = (
+                payload_out.get("summary_diagnostics")
+                if isinstance(payload_out.get("summary_diagnostics"), dict)
+                else None
+            )
+            stream_retrieval_query = (
+                str(payload_out.get("retrieval_query"))
+                if payload_out.get("retrieval_query")
+                else None
+            )
+            # `retrieval_mode` here is the session-routing mode, not the
+            # retrieval tool, so it is not forwarded as `tool_used`.
             validation = _validation_payload(
                 question=payload.question,
                 answer=answer,
                 sources=sources,
+                summary_diagnostics=stream_summary_diagnostics,
+                retrieval_query=stream_retrieval_query,
             )
             payload_out.update(validation)
             if payload_out:

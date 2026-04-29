@@ -2098,6 +2098,51 @@ def test_ingest_sync_success_does_not_warm_query_engine(
     assert api_module.rag.selected == []
 
 
+def test_query_forwards_retrieval_query_to_validation_payload(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """The /query endpoint must forward retrieval_query to _validation_payload.
+
+    The DummyRAG.chat stub returns ``retrieval_query`` in its response dict.
+    This test monkeypatches ``_validation_payload`` in the api module and
+    captures the kwargs it receives, then asserts the retrieval query is
+    forwarded unchanged. ``retrieval_mode`` is the session-routing mode and
+    is NOT forwarded as ``tool_used`` (those are semantically distinct).
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Pytest monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    captured: dict[str, Any] = {}
+
+    def _stub_validation_payload(**kwargs: Any) -> dict[str, Any]:
+        """Capture kwargs forwarded from the /query handler.
+
+        Args:
+            **kwargs: All keyword arguments forwarded to the real helper.
+
+        Returns:
+            dict[str, Any]: A minimal valid validation payload.
+        """
+        captured.update(kwargs)
+        return {
+            "validation_checked": None,
+            "validation_mismatch": None,
+            "validation_reason": None,
+        }
+
+    monkeypatch.setattr(api_module, "_validation_payload", _stub_validation_payload)
+
+    response = client.post("/query", json={"question": "What?"})
+
+    assert response.status_code == 200
+    # DummyRAG.chat returns retrieval_query="rewritten::What?" and retrieval_mode="rewrite_compact_graph".
+    assert captured.get("retrieval_query") == "rewritten::What?"
+    # retrieval_mode is the session-routing mode and must not be passed as tool_used.
+    assert captured.get("tool_used") is None
+    assert captured.get("question") == "What?"
+
+
 def test_stream_query_context_window_overflow_surfaces_descriptive_error(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
