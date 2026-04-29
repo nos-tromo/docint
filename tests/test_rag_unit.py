@@ -1128,17 +1128,293 @@ def test_directory_ingestion_attaches_file_hash(tmp_path: Path) -> None:
     assert all(getattr(doc, "metadata", {}).get("file_hash") == digest for doc in docs)
 
 
-def test_start_session_requires_query_engine(tmp_path: Path) -> None:
-    """Test that start_session raises RuntimeError if query_engine is not initialized.
+def test_start_session_lazily_builds_query_engine(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`start_session` should lazily build the query engine when it is None.
+
+    After ``select_collection`` switches to an already-ingested collection it
+    deliberately resets ``self.query_engine`` and ``self.index`` to ``None``.
+    ``run_query`` already handles this with a lazy ``build_query_engine``
+    fallback; ``start_session`` must follow the same pattern instead of
+    raising ``RuntimeError("Query engine has not been initialized. Call
+    ingest_docs() first.")`` from ``SessionManager.start_session``.
 
     Args:
+        monkeypatch: The monkeypatch fixture.
         tmp_path: The temporary path fixture.
     """
     rag = RAG(qdrant_collection="test")
     rag.init_session_store(f"sqlite:///{tmp_path / 'sessions.db'}")
+    rag.index = None
     rag.query_engine = None
-    with pytest.raises(RuntimeError):
-        rag.start_session()
+    rag._text_model = cast(Any, object())
+
+    sentinel_engine = cast(Any, object())
+    build_calls: list[dict[str, Any]] = []
+
+    def _fake_build_query_engine(self: RAG, **kwargs: Any) -> Any:
+        """Record the call and return a sentinel engine.
+
+        Args:
+            self: The RAG instance.
+            **kwargs: Forwarded keyword arguments (ignored by the stub).
+
+        Returns:
+            The shared sentinel engine instance used by the test.
+        """
+        build_calls.append(kwargs)
+        return sentinel_engine
+
+    monkeypatch.setattr(RAG, "build_query_engine", _fake_build_query_engine)
+
+    class FakeMemory:
+        """A fake memory class for testing purposes."""
+
+        def __init__(self) -> None:
+            """Initialize the FakeMemory with an empty message list."""
+            self.messages: list[object] = []
+
+        def put(self, message: object) -> None:
+            """Add a message to the FakeMemory.
+
+            Args:
+                message: The chat message instance to record.
+            """
+            self.messages.append(message)
+
+    class FakeChatEngine:
+        """A fake chat engine class for testing purposes."""
+
+        def __init__(self, **kwargs: Any) -> None:
+            """Initialize the FakeChatEngine with the provided keyword arguments.
+
+            Args:
+                **kwargs: Arbitrary keyword arguments to store in the instance.
+            """
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        "docint.core.state.session_manager.ChatMemoryBuffer",
+        types.SimpleNamespace(from_defaults=lambda **_: FakeMemory()),
+    )
+    monkeypatch.setattr(
+        "docint.core.state.session_manager.CondenseQuestionChatEngine",
+        types.SimpleNamespace(from_defaults=lambda **kwargs: FakeChatEngine(**kwargs)),
+    )
+
+    session_id = rag.start_session("abc")
+
+    assert session_id == "abc"
+    assert rag.query_engine is sentinel_engine
+    assert len(build_calls) == 1
+
+
+def test_start_session_lazy_inits_query_engine_after_collection_switch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: post-`select_collection` the engine must be rebuilt lazily.
+
+    Reproduces the bug where switching to an already-ingested collection
+    leaves ``rag.query_engine`` and ``rag.index`` at ``None`` (per
+    ``RAG.select_collection`` at ``docint/core/rag.py:5000``) and the next
+    ``rag.start_session(...)`` call raises ``RuntimeError`` from
+    ``SessionManager.start_session`` instead of lazily rebuilding the engine
+    the way ``run_query`` already does
+    (``docint/core/rag.py:5609-5618``).
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The temporary path fixture.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag.init_session_store(f"sqlite:///{tmp_path / 'sessions.db'}")
+    # Mirror the post-`select_collection` state.
+    rag.index = None
+    rag.query_engine = None
+    rag._text_model = cast(Any, object())
+
+    sentinel_engine = cast(Any, object())
+    build_calls: list[dict[str, Any]] = []
+
+    def _fake_build_query_engine(self: RAG, **kwargs: Any) -> Any:
+        """Record build args and return the sentinel engine without hitting Qdrant.
+
+        Args:
+            self: The RAG instance.
+            **kwargs: Forwarded keyword arguments (ignored by the stub).
+
+        Returns:
+            The shared sentinel engine instance used by the test.
+        """
+        build_calls.append(kwargs)
+        return sentinel_engine
+
+    monkeypatch.setattr(RAG, "build_query_engine", _fake_build_query_engine)
+
+    class FakeMemory:
+        """A fake memory class mirroring the gold-standard test pattern."""
+
+        def __init__(self) -> None:
+            """Initialize FakeMemory with an empty message list."""
+            self.messages: list[object] = []
+
+        def put(self, message: object) -> None:
+            """Record an incoming chat message.
+
+            Args:
+                message: The chat message instance to record.
+            """
+            self.messages.append(message)
+
+    class FakeChatEngine:
+        """A fake chat engine that simply stores its construction kwargs."""
+
+        def __init__(self, **kwargs: Any) -> None:
+            """Initialize FakeChatEngine.
+
+            Args:
+                **kwargs: Arbitrary keyword arguments to store in the instance.
+            """
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        "docint.core.state.session_manager.ChatMemoryBuffer",
+        types.SimpleNamespace(from_defaults=lambda **_: FakeMemory()),
+    )
+    monkeypatch.setattr(
+        "docint.core.state.session_manager.CondenseQuestionChatEngine",
+        types.SimpleNamespace(from_defaults=lambda **kwargs: FakeChatEngine(**kwargs)),
+    )
+
+    # Must not raise. After the fix, lazy init in start_session populates
+    # rag.query_engine via build_query_engine before SessionManager reads it.
+    session_id = rag.start_session("abc")
+
+    assert session_id == "abc"
+    assert rag.query_engine is sentinel_engine, (
+        "start_session must lazily build the query engine when it is None"
+    )
+    assert len(build_calls) == 1, (
+        "build_query_engine should be invoked exactly once during lazy init"
+    )
+
+
+def test_session_manager_chat_lazy_inits_query_engine(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: `SessionManager.chat` must lazily build the engine.
+
+    Parallel to ``RAG.start_session`` lazy-init bug:
+    ``SessionManager.chat`` (``docint/core/state/session_manager.py:211-215``)
+    raises ``RuntimeError`` on the default code path (no ``metadata_filters``
+    and no ``vector_store_kwargs``) when ``self.rag.query_engine`` is None.
+    The fix should mirror ``run_query`` and lazily call
+    ``self.rag.build_query_engine()`` instead of raising.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        tmp_path: The temporary path fixture.
+    """
+    from docint.core.state.session_manager import SessionManager
+
+    rag = RAG(qdrant_collection="test")
+    rag.init_session_store(f"sqlite:///{tmp_path / 'sessions.db'}")
+    rag.index = None
+    rag.query_engine = None
+    rag._text_model = cast(Any, object())
+
+    sentinel_engine = MagicMock(name="sentinel_query_engine")
+    sentinel_engine.query.return_value = MagicMock(name="raw_response")
+
+    build_calls: list[dict[str, Any]] = []
+
+    def _fake_build_query_engine(self: RAG, **kwargs: Any) -> Any:
+        """Record the call and return a sentinel engine without hitting Qdrant.
+
+        Args:
+            self: The RAG instance.
+            **kwargs: Forwarded keyword arguments (ignored by the stub).
+
+        Returns:
+            The MagicMock-backed sentinel query engine.
+        """
+        build_calls.append(kwargs)
+        return sentinel_engine
+
+    monkeypatch.setattr(RAG, "build_query_engine", _fake_build_query_engine)
+    monkeypatch.setattr(
+        RAG,
+        "rewrite_retrieval_query",
+        lambda self, *, user_msg, conversation_context="": user_msg,
+    )
+    monkeypatch.setattr(
+        RAG,
+        "expand_query_with_graph_with_debug",
+        lambda self, query: (query, {"applied": False}),
+    )
+    monkeypatch.setattr(
+        RAG,
+        "_infer_collection_profile",
+        lambda self: {"coverage_unit": "documents"},
+    )
+    monkeypatch.setattr(
+        RAG,
+        "_resolve_chat_response_mode",
+        lambda self: types.SimpleNamespace(value="compact"),
+    )
+    monkeypatch.setattr(
+        RAG,
+        "_normalize_response_data",
+        lambda self, *args, **kwargs: {"response": "ok"},
+    )
+
+    sm = cast(SessionManager, rag.sessions)
+    monkeypatch.setattr(
+        SessionManager, "_get_session_context", lambda self, session_id: ""
+    )
+    monkeypatch.setattr(
+        SessionManager,
+        "_persist_turn",
+        lambda self, session_id, user_msg, raw_resp, response: None,
+    )
+    monkeypatch.setattr(
+        SessionManager, "_maybe_update_summary", lambda self, session_id: None
+    )
+
+    # Patch start_session so the test focuses purely on whether chat()
+    # itself accepts query_engine=None, not on start_session's own lazy
+    # init (covered by the dedicated regression above).
+    def _fake_start_session(
+        self: SessionManager, requested_id: str | None = None
+    ) -> str:
+        """Bypass the full session bootstrap to isolate the chat() lazy-init path.
+
+        Args:
+            self: The SessionManager instance.
+            requested_id: Optional explicit session ID.
+
+        Returns:
+            The resolved session ID.
+        """
+        sid = requested_id or "fixed-session-id"
+        self.session_id = sid
+        self.chat_engine = cast(Any, object())
+        return sid
+
+    monkeypatch.setattr(SessionManager, "start_session", _fake_start_session)
+
+    # Must not raise. After the fix, chat() lazily builds the engine when
+    # both metadata_filters and vector_store_kwargs are absent and
+    # rag.query_engine is None.
+    response = sm.chat("hello")
+
+    assert response == {"response": "ok", "graph_debug": {"applied": False}}
+    assert len(build_calls) == 1, (
+        "SessionManager.chat must lazily call rag.build_query_engine() "
+        "exactly once when rag.query_engine is None"
+    )
+    sentinel_engine.query.assert_called_once()
 
 
 def test_select_collection_resets_image_service(

@@ -139,6 +139,14 @@ class DummyRAG:
         self.created_query_engine += 1
         self.query_engine = object()
 
+    def ensure_session_manager(self) -> DummySessionManager:
+        """Return the SessionManager stub, mirroring RAG.ensure_session_manager.
+
+        Returns:
+            DummySessionManager: The pre-initialized session manager stub.
+        """
+        return self.sessions
+
     def start_session(self, session_id: str | None = None) -> str:
         """Start a new session or resume an existing one.
 
