@@ -71,6 +71,13 @@ class ResultValidationResponseAgent(ResponseAgent):
                 reason="No answer to validate.",
             )
             return result
+        if not result.sources:
+            # An answer with no retrieved sources is mismatched by construction:
+            # there is nothing to be grounded against.
+            result.validation_checked = True
+            result.validation_mismatch = True
+            result.validation_reason = "Answer produced without retrieved sources."
+            return result
 
         try:
             prompt = self._build_prompt(
@@ -78,6 +85,10 @@ class ResultValidationResponseAgent(ResponseAgent):
                 answer=result.answer,
                 sources=result.sources,
                 summary_diagnostics=result.summary_diagnostics,
+                retrieval_query=result.retrieval_query,
+                rewritten_query=result.rewritten_query,
+                intent=result.intent,
+                tool_used=result.tool_used,
             )
             response = self.llm.complete(prompt)
             response_text = str(getattr(response, "text", "") or "").strip()
@@ -159,34 +170,89 @@ class ResultValidationResponseAgent(ResponseAgent):
         answer: str,
         sources: list[dict[str, Any]],
         summary_diagnostics: dict[str, Any] | None = None,
+        retrieval_query: str | None = None,
+        rewritten_query: str | None = None,
+        intent: str | None = None,
+        tool_used: str | None = None,
     ) -> str:
         """Build validation prompt for the secondary LLM check.
 
         Args:
-            query (str): User query.
+            query (str): User query (verbatim user input).
             answer (str): Generated answer.
             sources (list[dict[str, Any]]): Retrieved chunks/sources.
             summary_diagnostics (dict[str, Any] | None): Optional summary diagnostics for coverage context.
+            retrieval_query (str | None): The query string actually used for retrieval (after any rewrite/expansion).
+            rewritten_query (str | None): The rewritten query produced by the understanding agent, if any.
+            intent (str | None): Detected intent label.
+            tool_used (str | None): Retrieval tool that produced the sources.
 
         Returns:
             str: Prompt asking for groundedness/relevance validation.
         """
         sources_text = self._sources_to_text(sources)
         diagnostics_text = self._summary_diagnostics_to_text(summary_diagnostics)
+        retrieval_context = self._retrieval_context_to_text(
+            user_query=query,
+            retrieval_query=retrieval_query,
+            rewritten_query=rewritten_query,
+            intent=intent,
+            tool_used=tool_used,
+        )
         return (
             "You are a strict response validator for a RAG system.\n"
-            "Assess if the answer is faithful to the retrieved sources and if sources fit the query.\n"
+            "Assess if the answer is faithful to the retrieved sources and if "
+            "the sources fit the user's original query. If a retrieval query "
+            "differs from the user's question, also judge whether that rewrite "
+            "preserved the user's intent — flag a mismatch if it did not.\n"
             "Return JSON only with this schema:\n"
             "{\n"
             '  "summary_grounded": true|false,\n'
             '  "sources_relevant": true|false,\n'
             '  "reason": "short reason"\n'
             "}\n\n"
-            f"Query:\n{query}\n\n"
+            f"{retrieval_context}"
             f"Answer:\n{answer}\n\n"
             f"{diagnostics_text}"
             f"Retrieved sources:\n{sources_text}\n"
         )
+
+    def _retrieval_context_to_text(
+        self,
+        *,
+        user_query: str,
+        retrieval_query: str | None,
+        rewritten_query: str | None,
+        intent: str | None,
+        tool_used: str | None,
+    ) -> str:
+        """Render retrieval context (original query + rewrite + intent) for the validator.
+
+        Args:
+            user_query (str): Verbatim user input.
+            retrieval_query (str | None): Query actually used for retrieval.
+            rewritten_query (str | None): Rewritten query from the understanding agent.
+            intent (str | None): Detected intent label.
+            tool_used (str | None): Retrieval tool that produced the sources.
+
+        Returns:
+            str: Prompt context block ending in a blank line.
+        """
+        lines = [f"User query:\n{user_query}"]
+        effective_retrieval = retrieval_query or rewritten_query
+        if (
+            effective_retrieval
+            and effective_retrieval.strip().casefold() != user_query.strip().casefold()
+        ):
+            lines.append(f"Retrieval query (after rewrite):\n{effective_retrieval}")
+        meta_parts: list[str] = []
+        if intent:
+            meta_parts.append(f"intent={intent}")
+        if tool_used:
+            meta_parts.append(f"tool={tool_used}")
+        if meta_parts:
+            lines.append("Routing: " + ", ".join(meta_parts))
+        return "\n\n".join(lines) + "\n\n"
 
     def _summary_diagnostics_to_text(
         self, summary_diagnostics: dict[str, Any] | None

@@ -237,6 +237,10 @@ def _get_validation_payload(
     answer: str | None,
     sources: list[dict[str, Any]],
     summary_diagnostics: dict[str, Any] | None = None,
+    retrieval_query: str | None = None,
+    rewritten_query: str | None = None,
+    intent: str | None = None,
+    tool_used: str | None = None,
 ) -> dict[str, bool | str | None]:
     """Validate an answer against sources using the same logic as API/frontend flows.
 
@@ -246,6 +250,10 @@ def _get_validation_payload(
         answer (str | None): Generated answer text.
         sources (list[dict[str, Any]]): Retrieved or summary sources.
         summary_diagnostics (dict[str, Any] | None): Optional summary diagnostics payload.
+        retrieval_query (str | None): Query actually used for retrieval (after any rewrite/expansion).
+        rewritten_query (str | None): Rewritten query from the understanding agent, if any.
+        intent (str | None): Detected intent label, if any.
+        tool_used (str | None): Retrieval tool that produced the sources, if any.
 
     Returns:
         dict[str, bool | str | None]: Validation metadata dictionary.
@@ -266,6 +274,10 @@ def _get_validation_payload(
         answer=answer,
         sources=sources,
         summary_diagnostics=summary_diagnostics,
+        retrieval_query=retrieval_query,
+        rewritten_query=rewritten_query,
+        intent=intent,
+        tool_used=tool_used,
     )
     validated = validator.finalize(retrieval, Turn(user_input=question))
     return {
@@ -605,12 +617,17 @@ def run_query(rag: RAG, query: str, index: int, output_path: str | Path) -> None
     if isinstance(raw_sources, list):
         sources = [src for src in raw_sources if isinstance(src, dict)]
 
+    result_summary_diagnostics = result.get("summary_diagnostics")
+    if not isinstance(result_summary_diagnostics, dict):
+        result_summary_diagnostics = None
     result.update(
         _get_validation_payload(
             rag,
             question=query,
             answer=str(result.get("response") or result.get("answer") or ""),
             sources=sources,
+            summary_diagnostics=result_summary_diagnostics,
+            retrieval_query=retrieval_query if retrieval_query != query else None,
         )
     )
 

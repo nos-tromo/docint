@@ -185,15 +185,19 @@ stateless path so the UI can visualise what was added.
 ## Response validation
 
 When `RESPONSE_VALIDATION_ENABLED=true`, the orchestrator attaches a
-`ResultValidationResponseAgent`. It asks the text LLM two questions:
+`ResultValidationResponseAgent`. If no sources were retrieved, validation
+short-circuits with `validation_mismatch=true` and a reason of "Answer
+produced without retrieved sources." Otherwise, it asks the text LLM two
+questions:
 
 1. Does the answer match the retrieved sources?
 2. Do the sources actually contain the answer?
 
-If the LLM answers "no" to either, `validation_mismatch=true` is set
-on the `QueryOut` / `AgentChatOut` payload and `validation_reason`
-carries the LLM's explanation. The frontend surfaces this as a
-warning banner.
+When building the validation prompt, the agent includes retrieval context
+such as the retrieval query (if rewritten), the detected intent, and the
+tool used. If the LLM answers "no" to either question, `validation_mismatch=true`
+is set on the `QueryOut` / `AgentChatOut` payload and `validation_reason`
+carries the LLM's explanation. The frontend surfaces this as a warning banner.
 
 ## Sessions and citations
 
