@@ -781,7 +781,9 @@ def render_ner_overview(sources: list[dict[str, Any]]) -> None:
         st.caption("No relations detected.")
 
 
-def render_source_item(src: dict[str, Any], collection: str) -> None:
+def render_source_item(
+    src: dict[str, Any], collection: str, *, show_ner: bool = True
+) -> None:
     """Render a single source item (filename, score, preview, download link).
 
     Used by the Chat and Analysis pages to display retrieval sources.
@@ -789,6 +791,10 @@ def render_source_item(src: dict[str, Any], collection: str) -> None:
     Args:
         src (dict[str, Any]): Source dictionary from the backend.
         collection (str): Currently selected collection name.
+        show_ner (bool): When ``True`` (default), append the per-source
+            entities/relations grid. The chat tab and analysis summary section
+            pass ``False`` because entity exploration lives on the dedicated
+            Analysis entities tab.
     """
     loc = ""
     if src.get("page") is not None:
@@ -816,7 +822,8 @@ def render_source_item(src: dict[str, Any], collection: str) -> None:
             unsafe_allow_html=True,
         )
 
-    render_entities_relations(src)
+    if show_ner:
+        render_entities_relations(src)
     st.divider()
 
 
