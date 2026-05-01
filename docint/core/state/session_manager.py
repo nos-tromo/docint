@@ -71,14 +71,17 @@ class SessionManager:
     def start_session(self, requested_id: str | None = None) -> str:
         """Start a new chat session.
 
+        After ``RAG.select_collection`` switches collections it deliberately
+        resets ``rag.query_engine`` and ``rag.index`` to ``None``. To avoid
+        forcing callers to rebuild before every session, this method mirrors
+        the lazy-init pattern already used by ``RAG.run_query`` and builds the
+        query engine on demand when it is missing.
+
         Args:
             requested_id (str | None, optional): The ID of the session to start. Defaults to None.
 
         Returns:
             str: The ID of the started session.
-
-        Raises:
-            RuntimeError: If the session cannot be started.
         """
         if not requested_id:
             requested_id = str(uuid.uuid4())
@@ -106,10 +109,11 @@ class SessionManager:
 
         engine = self.rag.query_engine
         if engine is None:
-            logger.error("RuntimeError: Query engine has not been initialized.")
-            raise RuntimeError(
-                "Query engine has not been initialized. Call ingest_docs() first."
+            logger.debug(
+                "Query engine not initialized; building lazily for start_session."
             )
+            self.rag.query_engine = self.rag.build_query_engine()
+            engine = self.rag.query_engine
 
         self.chat_engine = CondenseQuestionChatEngine.from_defaults(
             query_engine=engine,
@@ -194,7 +198,6 @@ class SessionManager:
 
         Raises:
             ValueError: If the user message is empty.
-            RuntimeError: If the query engine has not been initialized.
         """
         if not user_msg.strip():
             logger.error("ValueError: Chat prompt cannot be empty.")
@@ -209,10 +212,13 @@ class SessionManager:
             else self.rag.query_engine
         )
         if engine is None:
-            logger.error("RuntimeError: Query engine has not been initialized.")
-            raise RuntimeError(
-                "Query engine has not been initialized. Call ingest_docs() first."
+            # Mirror RAG.run_query's lazy fallback: a default-path chat after a
+            # collection switch can legitimately see query_engine=None.
+            logger.debug(
+                "Query engine not initialized; building lazily for SessionManager.chat."
             )
+            self.rag.query_engine = self.rag.build_query_engine()
+            engine = self.rag.query_engine
 
         session_id = self.session_id
         if self.chat_engine is None or session_id is None:

@@ -1052,17 +1052,10 @@ def list_sessions() -> dict[str, list[dict]]:
         dict[str, list[dict]]: A dictionary containing the list of sessions.
 
     Raises:
-        ValueError: If the session manager is not initialized.
         HTTPException: If an error occurs while listing sessions.
     """
     try:
-        if rag.sessions is None:
-            rag.start_session()  # Initialize session manager if needed
-
-        if rag.sessions is None:
-            raise ValueError("Session manager not initialized")
-
-        sessions = rag.sessions.list_sessions()
+        sessions = rag.ensure_session_manager().list_sessions()
         return {"sessions": sessions}
     except Exception as e:
         logger.error("Error listing sessions: {}", e)
@@ -1084,17 +1077,10 @@ def get_session_history(session_id: str) -> dict[str, list[dict]]:
         dict[str, list[dict]]: A dictionary containing the session messages.
 
     Raises:
-        ValueError: If the session manager is not initialized.
         HTTPException: If an error occurs while fetching session history.
     """
     try:
-        if rag.sessions is None:
-            rag.start_session()
-
-        if rag.sessions is None:
-            raise ValueError("Session manager not initialized")
-
-        messages = rag.sessions.get_session_history(session_id)
+        messages = rag.ensure_session_manager().get_session_history(session_id)
         return {"messages": messages}
     except Exception as e:
         logger.error("Error fetching history: {}", e)
@@ -1112,17 +1098,10 @@ def delete_session(session_id: str) -> dict[str, bool]:
         dict[str, bool]: A dictionary indicating whether the deletion was successful.
 
     Raises:
-        ValueError: If the session manager is not initialized.
         HTTPException: If an error occurs while deleting the session.
     """
     try:
-        if rag.sessions is None:
-            rag.start_session()
-
-        if rag.sessions is None:
-            raise ValueError("Session manager not initialized")
-
-        success = rag.sessions.delete_session(session_id)
+        success = rag.ensure_session_manager().delete_session(session_id)
         return {"ok": success}
     except Exception as e:
         logger.error("Error deleting session: {}", e)
