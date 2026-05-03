@@ -3,6 +3,11 @@ name: Claude Code Review
 on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened]
+    # The claude-code-action OIDC exchange requires this workflow file to
+    # match main byte-for-byte, so workflow-only PRs (e.g. Dependabot action
+    # bumps) cannot pass review. Skip them entirely.
+    paths-ignore:
+      - '.github/workflows/**'
     # Optional: Only run on specific file changes
     # paths:
     #   - "src/**/*.ts"
