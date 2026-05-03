@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from docint.agents.types import ResponseAgent, RetrievalResult, Turn
+from docint.utils.reference_metadata import format_reference_metadata_block
 
 if TYPE_CHECKING:
     from llama_index.core.llms import LLM
@@ -323,6 +324,14 @@ class ResultValidationResponseAgent(ResponseAgent):
     def _sources_to_text(self, sources: list[dict[str, Any]]) -> str:
         """Convert source dictionaries to compact text snippets for validation.
 
+        Each source renders as a header line (filename | page | row), an
+        optional ``reference_metadata`` block (Network, UUID, Timestamp,
+        Author, ...), and the chunk text body capped at ``MAX_SOURCE_CHARS``.
+        The metadata block is emitted untruncated because for table-derived
+        sources (e.g. social posts) the citation fields live there, not in
+        the body — without them the validator would flag answers that
+        legitimately cite metadata as ungrounded.
+
         Args:
             sources (list[dict[str, Any]]): Retrieved sources.
 
@@ -331,15 +340,38 @@ class ResultValidationResponseAgent(ResponseAgent):
         """
         snippets: list[str] = []
         for idx, source in enumerate(sources[:MAX_VALIDATION_SOURCES], start=1):
+            filename = source.get("filename") or source.get("source_ref") or "Unknown"
+            page = source.get("page")
+            row = source.get("row")
+            header = (
+                f"Source {idx} [{filename} | "
+                f"page={page if page is not None else 'n/a'} | "
+                f"row={row if row is not None else 'n/a'}]:"
+            )
+
             text = ""
             for key in ("text", "content", "chunk", "snippet", "node_text"):
                 value = source.get(key)
                 if value:
                     text = str(value)
                     break
-            if not text:
-                text = json.dumps(source, ensure_ascii=False)
-            snippets.append(f"Source {idx}: {text[:MAX_SOURCE_CHARS]}")
+
+            # Suppress ``Text`` from the metadata block only when we already
+            # have a top-level body to render separately; otherwise let it
+            # through so sources that carry their text inside
+            # ``reference_metadata["text"]`` still surface a body.
+            metadata_block = format_reference_metadata_block(
+                source, include_text=not text
+            )
+
+            parts: list[str] = [header]
+            if metadata_block:
+                parts.append(metadata_block)
+            if text:
+                parts.append(f"Text: {text[:MAX_SOURCE_CHARS]}")
+            elif not metadata_block:
+                parts.append(json.dumps(source, ensure_ascii=False)[:MAX_SOURCE_CHARS])
+            snippets.append("\n".join(parts))
         return "\n\n".join(snippets) if snippets else "(none)"
 
     def _parse_response(self, text: str) -> dict[str, Any]:

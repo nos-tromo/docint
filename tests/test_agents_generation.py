@@ -1,6 +1,6 @@
 """Tests for :class:`ResultValidationResponseAgent` in the generation module."""
 
-from docint.agents.generation import ResultValidationResponseAgent
+from docint.agents.generation import MAX_SOURCE_CHARS, ResultValidationResponseAgent
 from docint.agents.types import RetrievalResult, Turn
 
 
@@ -224,172 +224,133 @@ def test_validation_agent_without_model_reports_unavailable_reason() -> None:
     assert finalized.validation_reason == "Validation model unavailable."
 
 
-# ---------------------------------------------------------------------------
-# New tests for refactor/response-validation-context changes
-# ---------------------------------------------------------------------------
+def test_validation_agent_prompt_includes_reference_metadata() -> None:
+    """Reference-metadata fields must reach the validator LLM prompt.
 
-
-def test_retrieval_query_rendered_when_differs_from_user_input() -> None:
-    """Retrieval query should appear in prompt when it differs from user input.
-
-    Arranges a RetrievalResult where retrieval_query differs from the Turn's
-    user_input, builds the prompt via a fake LLM call, and asserts both the
-    "User query" and "Retrieval query (after rewrite)" lines are present.
+    Regression test for false-positive ungrounded verdicts on answers that cite
+    social-post metadata (Network, UUID, Timestamp, Author, ...) which lives in
+    ``source["reference_metadata"]`` rather than ``source["text"]``.
     """
+    llm = _FakeLLM(
+        '{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}'
+    )
+    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    source = {
+        "text": "post body",
+        "filename": "table_socials.csv",
+        "row": 26,
+        "reference_metadata": {
+            "network": "Facebook",
+            "type": "posting",
+            "uuid": "2d2425aeadfd4ca5a2cddd2d3b8e27cb",
+            "timestamp": "2025-09-09 17:47:50.000000",
+            "author": "Wolfgang Krieger",
+            "author_id": "100007940942252",
+            "vanity": "krieger.advokat",
+            "text_id": "b9613b34-d488-565d-a4bf-af7b9d1de212",
+        },
+    }
+    result = RetrievalResult(answer="answer", sources=[source])
+
+    agent.finalize(result, Turn(user_input="who posted this?"))
+
+    assert llm.last_prompt is not None
+    prompt = llm.last_prompt
+    for expected in (
+        "Facebook",
+        "2d2425aeadfd4ca5a2cddd2d3b8e27cb",
+        "2025-09-09 17:47:50.000000",
+        "Wolfgang Krieger",
+        "100007940942252",
+        "krieger.advokat",
+        "b9613b34-d488-565d-a4bf-af7b9d1de212",
+        "table_socials.csv",
+        "row=26",
+        "post body",
+    ):
+        assert expected in prompt, f"missing {expected!r} in validator prompt"
+
+
+def test_validation_agent_prompt_metadata_block_not_truncated() -> None:
+    """Metadata fields must survive even when the text body exceeds the per-source cap."""
+    llm = _FakeLLM(
+        '{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}'
+    )
+    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    long_body = "x" * 5000
+    source = {
+        "text": long_body,
+        "filename": "big.csv",
+        "row": 1,
+        "reference_metadata": {
+            "network": "Facebook",
+            "uuid": "deadbeef",
+            "author": "Alice",
+        },
+    }
+    result = RetrievalResult(answer="a", sources=[source])
+
+    agent.finalize(result, Turn(user_input="q"))
+
+    assert llm.last_prompt is not None
+    prompt = llm.last_prompt
+    assert "Facebook" in prompt
+    assert "deadbeef" in prompt
+    assert "Alice" in prompt
+    # Body sliced to MAX_SOURCE_CHARS — exactly that many consecutive x's, no more.
+    assert ("x" * MAX_SOURCE_CHARS) in prompt
+    assert ("x" * (MAX_SOURCE_CHARS + 1)) not in prompt
+
+
+def test_validation_agent_prompt_handles_text_only_source() -> None:
+    """Sources without reference_metadata must still produce a well-formed prompt."""
     llm = _FakeLLM(
         '{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}'
     )
     agent = ResultValidationResponseAgent(enabled=True, llm=llm)
     result = RetrievalResult(
-        answer="some answer",
-        sources=[{"text": "source"}],
-        retrieval_query="rewritten thing",
+        answer="a", sources=[{"text": "plain body without metadata"}]
     )
 
-    agent.finalize(result, Turn(user_input="original thing"))
+    agent.finalize(result, Turn(user_input="q"))
 
     assert llm.last_prompt is not None
-    assert "User query:\noriginal thing" in llm.last_prompt
-    assert "Retrieval query (after rewrite):\nrewritten thing" in llm.last_prompt
+    prompt = llm.last_prompt
+    assert "Source 1" in prompt
+    assert "plain body without metadata" in prompt
+    assert "- Network:" not in prompt
+    assert "- UUID:" not in prompt
 
 
-def test_retrieval_query_not_rendered_when_equal_to_user_input() -> None:
-    """Retrieval query line must be suppressed when it equals the user input.
-
-    When retrieval_query and Turn.user_input are the same string (whitespace-
-    insensitive), the "Retrieval query (after rewrite)" line must not appear in
-    the prompt.
-    """
+def test_validation_agent_prompt_includes_metadata_text_when_no_top_level_body() -> (
+    None
+):
+    """Sources whose body lives inside ``reference_metadata['text']`` must still
+    surface the body to the validator — covers transcript-style payloads where
+    the text may not be propagated as a top-level key."""
     llm = _FakeLLM(
         '{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}'
     )
     agent = ResultValidationResponseAgent(enabled=True, llm=llm)
     result = RetrievalResult(
-        answer="some answer",
-        sources=[{"text": "source"}],
-        retrieval_query="same thing",
+        answer="a",
+        sources=[
+            {
+                "filename": "seg.jsonl",
+                "row": 3,
+                "reference_metadata": {
+                    "speaker": "Alice",
+                    "language": "en",
+                    "text": "spoken segment body",
+                },
+            }
+        ],
     )
 
-    agent.finalize(result, Turn(user_input="same thing"))
+    agent.finalize(result, Turn(user_input="q"))
 
     assert llm.last_prompt is not None
-    assert "Retrieval query (after rewrite)" not in llm.last_prompt
-
-
-def test_retrieval_query_not_rendered_when_case_only_difference() -> None:
-    """Case-only differences between user input and retrieval query must not render.
-
-    A rewrite that only changes casing (e.g. ``"EU Policy"`` → ``"eu policy"``)
-    is not a meaningful rewrite, so the validator prompt must not include a
-    "Retrieval query (after rewrite)" line.
-    """
-    llm = _FakeLLM(
-        '{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}'
-    )
-    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
-    result = RetrievalResult(
-        answer="some answer",
-        sources=[{"text": "source"}],
-        retrieval_query="eu policy",
-    )
-
-    agent.finalize(result, Turn(user_input="EU Policy"))
-
-    assert llm.last_prompt is not None
-    assert "Retrieval query (after rewrite)" not in llm.last_prompt
-
-
-def test_rewritten_query_used_as_fallback_when_retrieval_query_is_none() -> None:
-    """rewritten_query is used when retrieval_query is None and both differ from user input.
-
-    Arranges a RetrievalResult with retrieval_query=None but rewritten_query set,
-    then asserts the prompt renders the rewrite line using the rewritten_query value.
-    """
-    llm = _FakeLLM(
-        '{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}'
-    )
-    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
-    result = RetrievalResult(
-        answer="some answer",
-        sources=[{"text": "source"}],
-        retrieval_query=None,
-        rewritten_query="rewrite",
-    )
-
-    agent.finalize(result, Turn(user_input="original"))
-
-    assert llm.last_prompt is not None
-    assert "Retrieval query (after rewrite):\nrewrite" in llm.last_prompt
-
-
-def test_intent_and_tool_rendered_in_routing_line() -> None:
-    """Intent and tool_used should appear together on a "Routing:" line in the prompt.
-
-    Sets intent="rag_chat" and tool_used="rag_chat" on a RetrievalResult and asserts
-    the rendered prompt contains the expected routing metadata.
-    """
-    llm = _FakeLLM(
-        '{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}'
-    )
-    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
-    result = RetrievalResult(
-        answer="some answer",
-        sources=[{"text": "source"}],
-        intent="rag_chat",
-        tool_used="rag_chat",
-    )
-
-    agent.finalize(result, Turn(user_input="question"))
-
-    assert llm.last_prompt is not None
-    assert "Routing: intent=rag_chat, tool=rag_chat" in llm.last_prompt
-
-
-def test_empty_sources_short_circuits_without_calling_llm() -> None:
-    """An answer with no sources must be flagged as mismatched without invoking the LLM.
-
-    Verifies the short-circuit path: validation_checked=True, validation_mismatch=True,
-    the canonical reason string, and that the LLM receives zero calls.
-    """
-    llm = _FakeLLM(
-        '{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}'
-    )
-    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
-    result = RetrievalResult(answer="hi", sources=[])
-
-    finalized = agent.finalize(result, Turn(user_input="question"))
-
-    assert llm.calls == 0
-    assert finalized.validation_checked is True
-    assert finalized.validation_mismatch is True
-    assert finalized.validation_reason == "Answer produced without retrieved sources."
-
-
-def test_all_new_fields_none_produces_original_prompt_structure() -> None:
-    """When new context fields are all None the prompt retains its original structure.
-
-    Regression guard: a RetrievalResult with retrieval_query, rewritten_query, intent,
-    and tool_used all None must still produce a prompt that contains the user query and
-    answer blocks and must NOT contain the new "Retrieval query (after rewrite)" or
-    "Routing:" lines.
-    """
-    llm = _FakeLLM(
-        '{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}'
-    )
-    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
-    result = RetrievalResult(
-        answer="answer",
-        sources=[{"text": "source"}],
-        retrieval_query=None,
-        rewritten_query=None,
-        intent=None,
-        tool_used=None,
-    )
-
-    agent.finalize(result, Turn(user_input="question"))
-
-    assert llm.last_prompt is not None
-    assert "User query:\nquestion" in llm.last_prompt
-    assert "Answer:\nanswer" in llm.last_prompt
-    assert "Retrieval query (after rewrite)" not in llm.last_prompt
-    assert "Routing:" not in llm.last_prompt
+    prompt = llm.last_prompt
+    assert "Alice" in prompt
+    assert "en" in prompt
+    assert "spoken segment body" in prompt

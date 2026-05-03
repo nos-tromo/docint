@@ -22,7 +22,7 @@ from docint.utils.env_cfg import (
     set_offline_env,
 )
 from docint.utils.logger_cfg import init_logger
-from docint.utils.reference_metadata import REFERENCE_METADATA_FIELDS
+from docint.utils.reference_metadata import format_reference_metadata_block
 
 DEFAULT_CHAT_SENTINEL = "__default_chat_queries__"
 DEFAULT_ENTITY_LIMIT = 50
@@ -323,6 +323,10 @@ def _reference_metadata_text_block(
 ) -> str:
     """Return a multi-line text block for reference metadata.
 
+    Thin wrapper preserved so existing callers keep working; delegates to
+    :func:`docint.utils.reference_metadata.format_reference_metadata_block`,
+    which is the shared formatter also used by the response validator.
+
     Args:
         src (dict[str, Any]): Source dictionary containing optional reference metadata.
         include_text (bool): Whether to include the raw ``text`` field.
@@ -330,22 +334,7 @@ def _reference_metadata_text_block(
     Returns:
         str: Text block suitable for exports, or an empty string.
     """
-    raw = src.get("reference_metadata")
-    if not isinstance(raw, dict):
-        return ""
-
-    lines: list[str] = []
-    for key, label in REFERENCE_METADATA_FIELDS.items():
-        if not include_text and key == "text":
-            continue
-        value = raw.get(key)
-        if value is None:
-            continue
-        text = str(value).strip()
-        if not text:
-            continue
-        lines.append(f"- {label}: {text}")
-    return "\n".join(lines)
+    return format_reference_metadata_block(src, include_text=include_text)
 
 
 def _build_sources_txt(sources: list[dict[str, Any]]) -> str:
