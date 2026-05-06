@@ -15,15 +15,20 @@ ARG no_proxy
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONIOENCODING=utf-8 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/usr/local
 
 WORKDIR /app
 
 COPY --from=uvbin /uv /usr/local/bin/uv
 COPY --from=uvbin /uvx /usr/local/bin/uvx
 
+COPY pyproject.toml uv.lock ./
+
 # Install only the lightweight dependencies needed for the frontend
-RUN uv pip install --system loguru pandas python-dotenv requests streamlit
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --only-group frontend --frozen --no-install-project
 
 COPY docint/ docint/
 
