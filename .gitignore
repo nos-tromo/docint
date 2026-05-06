@@ -67,6 +67,7 @@
 *.pid
 *.sock
 docker-compose.override.yml
+wheels/*.whl
 
 # ==================================
 # Hidden files
@@ -85,6 +86,7 @@ docker-compose.override.yml
 !.pre-commit-config.yaml
 !scripts/
 !scripts/create_docker_volumes.sh
+!scripts/download-frontend-wheels.sh
 !**/prompts/*.txt
 !**/required_exts.txt
 !AGENTS.md

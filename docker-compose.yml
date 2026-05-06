@@ -88,6 +88,7 @@ services:
       dockerfile: Dockerfile.frontend
       args:
         <<: *proxy-build-args
+        OFFLINE_BUILD: ${OFFLINE_BUILD:-}
     ports: &frontend-ports
       - ${DOCINT_HOST_PORT:-8501}:8501
     environment:

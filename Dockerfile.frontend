@@ -11,6 +11,7 @@ ARG NO_PROXY
 ARG http_proxy
 ARG https_proxy
 ARG no_proxy
+ARG OFFLINE_BUILD=
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONIOENCODING=utf-8 \
@@ -26,9 +27,18 @@ COPY --from=uvbin /uvx /usr/local/bin/uvx
 
 COPY pyproject.toml uv.lock ./
 
-# Install only the lightweight dependencies needed for the frontend
+# Install only the lightweight dependencies needed for the frontend.
+# Online:  a BuildKit cache mount avoids re-downloading unchanged packages.
+# Offline: pre-fetch wheels with scripts/download-frontend-wheels.sh, place the
+#          wheels/ directory in the build context, then set OFFLINE_BUILD=1.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --only-group frontend --frozen --no-install-project
+    --mount=type=bind,source=wheels,target=/wheels \
+    if [ -n "$OFFLINE_BUILD" ]; then \
+        uv pip install --system --no-cache --no-index --find-links /wheels \
+            loguru pandas python-dotenv requests streamlit; \
+    else \
+        uv sync --only-group frontend --frozen --no-install-project; \
+    fi
 
 COPY docint/ docint/
 
