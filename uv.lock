@@ -618,6 +618,13 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
 ]
+frontend = [
+    { name = "loguru" },
+    { name = "pandas" },
+    { name = "python-dotenv" },
+    { name = "requests" },
+    { name = "streamlit" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -673,6 +680,13 @@ dev = [
     { name = "pre-commit", specifier = ">=4.5.1" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "ruff", specifier = "==0.15.10" },
+]
+frontend = [
+    { name = "loguru", specifier = ">=0.7.3" },
+    { name = "pandas", specifier = ">=3.0.2" },
+    { name = "python-dotenv", specifier = ">=1.2.2" },
+    { name = "requests", specifier = ">=2.33.1" },
+    { name = "streamlit", specifier = ">=1.56.0" },
 ]
 
 [[package]]
