@@ -3,14 +3,6 @@ name: docint
 ##########################################################
 # Shared backend fragments (YAML anchors)
 ##########################################################
-x-proxy-build-args: &proxy-build-args
-  HTTP_PROXY: ${HTTP_PROXY:-}
-  HTTPS_PROXY: ${HTTPS_PROXY:-}
-  NO_PROXY: ${NO_PROXY:-}
-  http_proxy: ${http_proxy:-}
-  https_proxy: ${https_proxy:-}
-  no_proxy: ${no_proxy:-}
-
 x-env-file: &env-file
   - .env
 
@@ -23,8 +15,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend.cpu
-      args:
-        <<: *proxy-build-args
     ports: &backend-ports
       - 8000:8000
     environment:
@@ -59,8 +49,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend.cuda
-      args:
-        <<: *proxy-build-args
     ports: *backend-ports
     environment:
       LOG_PATH: /var/log/docint/backend-cuda.log
@@ -91,8 +79,6 @@ services:
     build: &frontend-build
       context: .
       dockerfile: Dockerfile.frontend
-      args:
-        <<: *proxy-build-args
     ports: &frontend-ports
       - ${DOCINT_HOST_PORT:-8501}:8501
     environment:
