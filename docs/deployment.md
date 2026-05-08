@@ -14,6 +14,8 @@ supported co-deployment patterns with external inference services.
 | `Dockerfile.backend.cuda` | Multi-stage backend image with CUDA PyTorch. |
 | `Dockerfile.frontend` | Lightweight Streamlit image. |
 | `scripts/create_docker_volumes.sh` | Creates the external cache volumes (idempotent). |
+| `scripts/bundle_images.sh` | Builds and packages versioned image tarballs for offline distribution. |
+| `Makefile` | Convenience targets wrapping the above (`make volumes`, `make build-cpu`, `make bundle-cuda`, ...). |
 | `.env.example` | Canonical `.env` template. |
 
 ## Profiles
@@ -266,6 +268,59 @@ Verify with `ollama show docint-bge-m3 --modelfile` — the output must include
 configured `EMBED_CTX_TOKENS` surfaces as an `EmbeddingInputTooLongError` at
 ingest time; the error message names the mismatch and points back to this
 section.
+
+## Distributable image bundles
+
+For air-gapped hosts, customer deployments, or any environment without
+Docker Hub access, build a versioned tarball pair on a connected machine
+and copy them across with `docker-compose.yml` and `.env`.
+
+### Producing the bundle
+
+`make bundle-cpu` (or `make bundle-cuda`) wraps build → pull → re-tag → save:
+
+```bash
+make bundle-cpu     # or: make bundle-cuda
+```
+
+The underlying script is `./scripts/bundle_images.sh <profile>`.
+
+This computes `DOCINT_VERSION` as `YYYY-MM-DD-<short-sha>` (override by
+exporting it before invocation), tags the four buildable services with
+that version, then writes two gzipped tarballs:
+
+| File | Contents |
+|---|---|
+| `docint-built-<profile>-<version>.tar.gz` | Locally-built `docint-backend-*` and `docint-frontend-*` images. |
+| `docint-pulled-<profile>-<version>.tar.gz` | Externally-hosted images (Qdrant); re-tagged so the `name:tag@digest` references in `docker-compose.yml` resolve after `docker load`. |
+
+The compose file references the version through
+`image: docint-<service>:${DOCINT_VERSION:-latest}`. The `Makefile`
+derives and exports `DOCINT_VERSION` (using the same `YYYY-MM-DD-<short-sha>`
+scheme), so `make build-{cpu,cuda}` and `make bundle-{cpu,cuda}` always
+produce versioned tags. The `:latest` fallback only kicks in for direct
+`docker compose build` invocations without `DOCINT_VERSION` exported.
+
+### Loading and running the bundle
+
+Ship three things to the target host: the two tarballs, the matching
+`docker-compose.yml`, and a `.env` file. Then:
+
+```bash
+docker load -i docint-built-cpu-<version>.tar.gz
+docker load -i docint-pulled-cpu-<version>.tar.gz
+export DOCINT_VERSION=<version>
+docker compose --profile cpu up --no-build
+```
+
+The version is embedded in the tarball filenames, so the operator just
+reads it off the file. Verify with `docker images | grep docint` before
+`up`.
+
+> `--no-build` does **not** suppress pulls from a registry. If the
+> tagged image isn't loaded locally, Compose still tries to resolve it
+> against Docker Hub and errors with a DNS / "no such host" failure on
+> offline machines. Always `docker load` first.
 
 ## Health checks
 

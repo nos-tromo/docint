@@ -1,21 +1,8 @@
+name: docint
+
 ##########################################################
 # Shared backend fragments (YAML anchors)
 ##########################################################
-x-proxy-build-args: &proxy-build-args
-  HTTP_PROXY: ${HTTP_PROXY:-}
-  HTTPS_PROXY: ${HTTPS_PROXY:-}
-  NO_PROXY: ${NO_PROXY:-}
-  http_proxy: ${http_proxy:-}
-  https_proxy: ${https_proxy:-}
-  no_proxy: ${no_proxy:-}
-
-x-base-image-build-args: &base-image-build-args
-  PYTHON_SLIM_BOOKWORM_IMAGE: ${PYTHON_SLIM_BOOKWORM_IMAGE:-python:3.11.12-slim-bookworm}
-  NVIDIA_CUDA_RUNTIME_IMAGE: ${NVIDIA_CUDA_RUNTIME_IMAGE:-nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04}
-
-x-build-args: &build-args
-  <<: [*proxy-build-args, *base-image-build-args]
-
 x-env-file: &env-file
   - .env
 
@@ -24,11 +11,10 @@ services:
   # Backend – CPU
   ##########################################################
   backend-cpu:
+    image: docint-backend-cpu:${DOCINT_VERSION:-latest}
     build:
       context: .
       dockerfile: Dockerfile.backend.cpu
-      args:
-        <<: *build-args
     ports: &backend-ports
       - 8000:8000
     environment:
@@ -59,11 +45,10 @@ services:
   # Backend – CUDA
   ##########################################################
   backend-cuda:
+    image: docint-backend-cuda:${DOCINT_VERSION:-latest}
     build:
       context: .
       dockerfile: Dockerfile.backend.cuda
-      args:
-        <<: *build-args
     ports: *backend-ports
     environment:
       LOG_PATH: /var/log/docint/backend-cuda.log
@@ -90,11 +75,10 @@ services:
   # Frontend – CPU
   ##########################################################
   frontend-cpu:
+    image: docint-frontend-cpu:${DOCINT_VERSION:-latest}
     build: &frontend-build
       context: .
       dockerfile: Dockerfile.frontend
-      args:
-        <<: *build-args
     ports: &frontend-ports
       - ${DOCINT_HOST_PORT:-8501}:8501
     environment:
@@ -115,6 +99,7 @@ services:
   # Frontend – CUDA
   ##########################################################
   frontend-cuda:
+    image: docint-frontend-cuda:${DOCINT_VERSION:-latest}
     build: *frontend-build
     ports: *frontend-ports
     environment: 
@@ -133,7 +118,7 @@ services:
   # Qdrant – CPU
   ##########################################################
   qdrant-cpu:
-    image: qdrant/qdrant:v1.17.0
+    image: docker.io/qdrant/qdrant:v1.17.0@sha256:f1c7272cdac52b38c1a0e89313922d940ba50afd90d593a1605dbbc214e66ffb
     ports: &qdrant-ports
       - 6333:6333
       - 6334:6334
@@ -154,7 +139,7 @@ services:
   # Qdrant – CUDA
   ##########################################################
   qdrant-cuda:
-    image: qdrant/qdrant:v1.17.0-gpu-nvidia
+    image: docker.io/qdrant/qdrant:v1.17.0-gpu-nvidia@sha256:5315819b0721f5211ccb432c6949e81c56bdcf63cab33b4dec45f42126970bde
     ports: *qdrant-ports
     environment:
       <<: *qdrant-common-env

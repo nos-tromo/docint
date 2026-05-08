@@ -184,9 +184,6 @@ dependency updates.
   on the spot.
 - `docker compose --profile cpu build backend-cpu` isolates the
   backend rebuild if you only changed Python code.
-- Remember to pass proxy variables through `.env` if you sit behind a
-  corporate proxy — the Compose file picks them up via the
-  `x-proxy-build-args` anchor.
 
 ## Style guide
 

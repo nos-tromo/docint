@@ -20,6 +20,7 @@
 **/build/
 **/data/
 **/dist/
+**/docs/
 **/env/
 **/lib/
 **/models/
@@ -66,6 +67,7 @@ README.md
 *.png
 *.sh
 *.sqlite3
+*.tar.gz
 *.txt
 *.wav
 *.webm

@@ -87,6 +87,13 @@ dev = [
     "pytest>=9.0.3",
     "ruff==0.15.10",
 ]
+frontend = [
+    "loguru>=0.7.3",
+    "pandas>=3.0.2",
+    "python-dotenv>=1.2.2",
+    "requests>=2.33.1",
+    "streamlit>=1.56.0",
+]
 
 [build-system]
 requires = ["setuptools>=82.0.1", "wheel"]
