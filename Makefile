@@ -11,13 +11,17 @@ export DOCINT_VERSION
 volumes:
 	./scripts/create_docker_volumes.sh
 
-# Build the CPU profile (backend-cpu, frontend-cpu).
+# Build the CPU profile (backend-cpu, frontend-cpu) and pull image-only
+# services that have no build context (e.g. qdrant-cpu).
 build-cpu:
 	DOCKER_BUILDKIT=1 docker compose --profile cpu build
+	docker compose --profile cpu pull --ignore-buildable
 
-# Build the CUDA profile (backend-cuda, frontend-cuda).
+# Build the CUDA profile (backend-cuda, frontend-cuda) and pull image-only
+# services that have no build context (e.g. qdrant-cuda).
 build-cuda:
 	DOCKER_BUILDKIT=1 docker compose --profile cuda build
+	docker compose --profile cuda pull --ignore-buildable
 
 # Build CPU stack and ship as versioned .tar.gz pair (built + pulled).
 bundle-cpu:
