@@ -5,6 +5,9 @@ from __future__ import annotations
 from io import BytesIO
 from zipfile import ZipFile
 
+import pytest
+
+from docint.ui import components as components_module
 from docint.ui.components import (
     aggregate_ner,
     build_source_files_zip,
@@ -14,6 +17,7 @@ from docint.ui.components import (
     filter_entities,
     reference_metadata_inline,
     reference_metadata_text_block,
+    render_source_item,
     response_validation_summary,
     summary_diagnostics_summary,
     unique_referenced_sources,
@@ -336,3 +340,55 @@ def test_build_source_files_zip_handles_missing_hashes_gracefully() -> None:
 
     assert zip_bytes is None
     assert warnings == ["report.pdf: original file is unavailable."]
+
+
+def _silence_streamlit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub out the Streamlit primitives ``render_source_item`` touches.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(components_module.st, "markdown", lambda *_a, **_kw: None)
+    monkeypatch.setattr(components_module.st, "caption", lambda *_a, **_kw: None)
+    monkeypatch.setattr(components_module.st, "divider", lambda *_a, **_kw: None)
+
+
+def test_render_source_item_shows_entities_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default ``show_ner=True`` keeps the per-source entities/relations grid."""
+    _silence_streamlit(monkeypatch)
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        components_module,
+        "render_entities_relations",
+        lambda src: calls.append(src),
+    )
+
+    render_source_item(
+        {"filename": "alpha.pdf", "entities": [{"text": "Acme", "type": "ORG"}]},
+        "collection-a",
+    )
+
+    assert calls and calls[0]["filename"] == "alpha.pdf"
+
+
+def test_render_source_item_hides_entities_when_show_ner_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``show_ner=False`` must skip the entities/relations grid entirely."""
+    _silence_streamlit(monkeypatch)
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        components_module,
+        "render_entities_relations",
+        lambda src: calls.append(src),
+    )
+
+    render_source_item(
+        {"filename": "alpha.pdf", "entities": [{"text": "Acme", "type": "ORG"}]},
+        "collection-a",
+        show_ner=False,
+    )
+
+    assert calls == []

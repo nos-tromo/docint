@@ -142,6 +142,10 @@ def test_render_sources_panel_uses_popover_with_scrolling_container(
 ) -> None:
     """Chat source browser should avoid page growth by using a fixed-height panel.
 
+    The panel must also suppress the per-source NER block and the aggregated
+    NER overview, since entity exploration lives on the dedicated Analysis
+    entities tab.
+
     Args:
         monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
     """
@@ -166,14 +170,9 @@ def test_render_sources_panel_uses_popover_with_scrolling_container(
     monkeypatch.setattr(
         chat_module,
         "render_source_item",
-        lambda src, collection: events.append(
-            ("source", f"{src.get('filename')}::{collection}")
+        lambda src, collection, *, show_ner=True: events.append(
+            ("source", f"{src.get('filename')}::{collection}::ner={show_ner}")
         ),
-    )
-    monkeypatch.setattr(
-        chat_module,
-        "render_ner_overview",
-        lambda sources: events.append(("ner", len(sources))),
     )
 
     chat_module._render_sources_panel(
@@ -186,10 +185,48 @@ def test_render_sources_panel_uses_popover_with_scrolling_container(
 
     assert ("popover", "Sources") in events
     assert ("container", chat_module.CHAT_SOURCES_CONTAINER_HEIGHT) in events
-    assert ("source", "alpha.pdf::collection-a") in events
-    assert ("source", "beta.pdf::collection-a") in events
-    assert ("markdown", "**Information Extraction Overview**") in events
-    assert ("ner", 2) in events
+    assert ("source", "alpha.pdf::collection-a::ner=False") in events
+    assert ("source", "beta.pdf::collection-a::ner=False") in events
+    assert ("markdown", "**Information Extraction Overview**") not in events
+    assert "render_ner_overview" not in vars(chat_module), (
+        "render_ner_overview must not be imported into the chat module namespace"
+    )
+
+
+def test_render_entity_match_groups_suppresses_ner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multi-entity occurrence groups must render sources without the NER grid.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+    """
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        chat_module,
+        "render_source_item",
+        lambda src, collection, *, show_ner=True: events.append(
+            {"filename": src.get("filename"), "show_ner": show_ner}
+        ),
+    )
+    monkeypatch.setattr(chat_module.st, "markdown", lambda *_a, **_kw: None)
+    monkeypatch.setattr(chat_module.st, "caption", lambda *_a, **_kw: None)
+    monkeypatch.setattr(chat_module.st, "expander", lambda *_a, **_kw: nullcontext())
+
+    chat_module._render_entity_match_groups(
+        [
+            {
+                "entity": {"text": "Acme", "type": "ORG"},
+                "chunk_count": 1,
+                "document_count": 1,
+                "sources": [{"filename": "x.pdf"}],
+            }
+        ],
+        collection="col-a",
+        message_key="test",
+    )
+
+    assert events == [{"filename": "x.pdf", "show_ner": False}]
 
 
 def test_render_graph_debug_panel_uses_popover_with_scrolling_container(

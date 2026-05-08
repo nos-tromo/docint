@@ -1,6 +1,6 @@
 """Tests for :class:`ResultValidationResponseAgent` in the generation module."""
 
-from docint.agents.generation import ResultValidationResponseAgent
+from docint.agents.generation import MAX_SOURCE_CHARS, ResultValidationResponseAgent
 from docint.agents.types import RetrievalResult, Turn
 
 
@@ -55,7 +55,7 @@ def test_validation_agent_sets_alert_on_mismatch() -> None:
 
     assert llm.calls == 1
     assert llm.last_prompt is not None
-    assert "Query:\nquestion" in llm.last_prompt
+    assert "User query:\nquestion" in llm.last_prompt
     assert "Answer:\nanswer" in llm.last_prompt
     assert finalized.validation_checked is True
     assert finalized.validation_mismatch is True
@@ -222,3 +222,135 @@ def test_validation_agent_without_model_reports_unavailable_reason() -> None:
     assert finalized.validation_checked is False
     assert finalized.validation_mismatch is None
     assert finalized.validation_reason == "Validation model unavailable."
+
+
+def test_validation_agent_prompt_includes_reference_metadata() -> None:
+    """Reference-metadata fields must reach the validator LLM prompt.
+
+    Regression test for false-positive ungrounded verdicts on answers that cite
+    social-post metadata (Network, UUID, Timestamp, Author, ...) which lives in
+    ``source["reference_metadata"]`` rather than ``source["text"]``.
+    """
+    llm = _FakeLLM(
+        '{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}'
+    )
+    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    source = {
+        "text": "post body",
+        "filename": "table_socials.csv",
+        "row": 26,
+        "reference_metadata": {
+            "network": "Facebook",
+            "type": "posting",
+            "uuid": "2d2425aeadfd4ca5a2cddd2d3b8e27cb",
+            "timestamp": "2025-09-09 17:47:50.000000",
+            "author": "Wolfgang Krieger",
+            "author_id": "100007940942252",
+            "vanity": "krieger.advokat",
+            "text_id": "b9613b34-d488-565d-a4bf-af7b9d1de212",
+        },
+    }
+    result = RetrievalResult(answer="answer", sources=[source])
+
+    agent.finalize(result, Turn(user_input="who posted this?"))
+
+    assert llm.last_prompt is not None
+    prompt = llm.last_prompt
+    for expected in (
+        "Facebook",
+        "2d2425aeadfd4ca5a2cddd2d3b8e27cb",
+        "2025-09-09 17:47:50.000000",
+        "Wolfgang Krieger",
+        "100007940942252",
+        "krieger.advokat",
+        "b9613b34-d488-565d-a4bf-af7b9d1de212",
+        "table_socials.csv",
+        "row=26",
+        "post body",
+    ):
+        assert expected in prompt, f"missing {expected!r} in validator prompt"
+
+
+def test_validation_agent_prompt_metadata_block_not_truncated() -> None:
+    """Metadata fields must survive even when the text body exceeds the per-source cap."""
+    llm = _FakeLLM(
+        '{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}'
+    )
+    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    long_body = "x" * 5000
+    source = {
+        "text": long_body,
+        "filename": "big.csv",
+        "row": 1,
+        "reference_metadata": {
+            "network": "Facebook",
+            "uuid": "deadbeef",
+            "author": "Alice",
+        },
+    }
+    result = RetrievalResult(answer="a", sources=[source])
+
+    agent.finalize(result, Turn(user_input="q"))
+
+    assert llm.last_prompt is not None
+    prompt = llm.last_prompt
+    assert "Facebook" in prompt
+    assert "deadbeef" in prompt
+    assert "Alice" in prompt
+    # Body sliced to MAX_SOURCE_CHARS — exactly that many consecutive x's, no more.
+    assert ("x" * MAX_SOURCE_CHARS) in prompt
+    assert ("x" * (MAX_SOURCE_CHARS + 1)) not in prompt
+
+
+def test_validation_agent_prompt_handles_text_only_source() -> None:
+    """Sources without reference_metadata must still produce a well-formed prompt."""
+    llm = _FakeLLM(
+        '{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}'
+    )
+    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    result = RetrievalResult(
+        answer="a", sources=[{"text": "plain body without metadata"}]
+    )
+
+    agent.finalize(result, Turn(user_input="q"))
+
+    assert llm.last_prompt is not None
+    prompt = llm.last_prompt
+    assert "Source 1" in prompt
+    assert "plain body without metadata" in prompt
+    assert "- Network:" not in prompt
+    assert "- UUID:" not in prompt
+
+
+def test_validation_agent_prompt_includes_metadata_text_when_no_top_level_body() -> (
+    None
+):
+    """Sources whose body lives inside ``reference_metadata['text']`` must still
+    surface the body to the validator — covers transcript-style payloads where
+    the text may not be propagated as a top-level key."""
+    llm = _FakeLLM(
+        '{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}'
+    )
+    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    result = RetrievalResult(
+        answer="a",
+        sources=[
+            {
+                "filename": "seg.jsonl",
+                "row": 3,
+                "reference_metadata": {
+                    "speaker": "Alice",
+                    "language": "en",
+                    "text": "spoken segment body",
+                },
+            }
+        ],
+    )
+
+    agent.finalize(result, Turn(user_input="q"))
+
+    assert llm.last_prompt is not None
+    prompt = llm.last_prompt
+    assert "Alice" in prompt
+    assert "en" in prompt
+    assert "spoken segment body" in prompt

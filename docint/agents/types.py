@@ -56,6 +56,8 @@ class RetrievalResult:
     validation_mismatch: bool | None = None
     validation_reason: str | None = None
     summary_diagnostics: dict[str, Any] | None = None
+    retrieval_query: str | None = None
+    rewritten_query: str | None = None
 
 
 @dataclass

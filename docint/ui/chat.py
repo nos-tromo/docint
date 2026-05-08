@@ -12,7 +12,6 @@ from loguru import logger
 
 from docint.ui.components import (
     reference_metadata_text_block,
-    render_ner_overview,
     render_response_validation,
     render_source_item,
 )
@@ -314,7 +313,7 @@ def _render_entity_match_groups(
                 st.caption("Showing a truncated per-entity source list.")
             for source in list(group.get("sources") or []):
                 if isinstance(source, Mapping):
-                    render_source_item(dict(source), collection)
+                    render_source_item(dict(source), collection, show_ner=False)
 
 
 def _format_graph_debug_summary(graph_debug: dict[str, Any] | None) -> str | None:
@@ -472,6 +471,10 @@ def _render_sources_panel(
 ) -> None:
     """Render chat source details in a stable-height popover.
 
+    Per-source entities and relations are intentionally suppressed
+    (``show_ner=False``); entity exploration lives on the dedicated
+    Analysis entities tab and would only duplicate it here.
+
     Args:
         sources (Sequence[Mapping[str, Any]]): Source rows associated with a chat answer.
         collection (str): Active collection name for source downloads.
@@ -482,9 +485,7 @@ def _render_sources_panel(
     with st.popover("Sources"):
         with st.container(height=CHAT_SOURCES_CONTAINER_HEIGHT):
             for src in sources:
-                render_source_item(dict(src), collection)
-            st.markdown("**Information Extraction Overview**")
-            render_ner_overview([dict(src) for src in sources])
+                render_source_item(dict(src), collection, show_ner=False)
 
 
 def _render_graph_debug_panel(graph_debug: Mapping[str, Any]) -> None:

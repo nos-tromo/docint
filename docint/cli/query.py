@@ -22,7 +22,7 @@ from docint.utils.env_cfg import (
     set_offline_env,
 )
 from docint.utils.logger_cfg import init_logger
-from docint.utils.reference_metadata import REFERENCE_METADATA_FIELDS
+from docint.utils.reference_metadata import format_reference_metadata_block
 
 DEFAULT_CHAT_SENTINEL = "__default_chat_queries__"
 DEFAULT_ENTITY_LIMIT = 50
@@ -237,6 +237,10 @@ def _get_validation_payload(
     answer: str | None,
     sources: list[dict[str, Any]],
     summary_diagnostics: dict[str, Any] | None = None,
+    retrieval_query: str | None = None,
+    rewritten_query: str | None = None,
+    intent: str | None = None,
+    tool_used: str | None = None,
 ) -> dict[str, bool | str | None]:
     """Validate an answer against sources using the same logic as API/frontend flows.
 
@@ -246,6 +250,10 @@ def _get_validation_payload(
         answer (str | None): Generated answer text.
         sources (list[dict[str, Any]]): Retrieved or summary sources.
         summary_diagnostics (dict[str, Any] | None): Optional summary diagnostics payload.
+        retrieval_query (str | None): Query actually used for retrieval (after any rewrite/expansion).
+        rewritten_query (str | None): Rewritten query from the understanding agent, if any.
+        intent (str | None): Detected intent label, if any.
+        tool_used (str | None): Retrieval tool that produced the sources, if any.
 
     Returns:
         dict[str, bool | str | None]: Validation metadata dictionary.
@@ -266,6 +274,10 @@ def _get_validation_payload(
         answer=answer,
         sources=sources,
         summary_diagnostics=summary_diagnostics,
+        retrieval_query=retrieval_query,
+        rewritten_query=rewritten_query,
+        intent=intent,
+        tool_used=tool_used,
     )
     validated = validator.finalize(retrieval, Turn(user_input=question))
     return {
@@ -311,6 +323,10 @@ def _reference_metadata_text_block(
 ) -> str:
     """Return a multi-line text block for reference metadata.
 
+    Thin wrapper preserved so existing callers keep working; delegates to
+    :func:`docint.utils.reference_metadata.format_reference_metadata_block`,
+    which is the shared formatter also used by the response validator.
+
     Args:
         src (dict[str, Any]): Source dictionary containing optional reference metadata.
         include_text (bool): Whether to include the raw ``text`` field.
@@ -318,22 +334,7 @@ def _reference_metadata_text_block(
     Returns:
         str: Text block suitable for exports, or an empty string.
     """
-    raw = src.get("reference_metadata")
-    if not isinstance(raw, dict):
-        return ""
-
-    lines: list[str] = []
-    for key, label in REFERENCE_METADATA_FIELDS.items():
-        if not include_text and key == "text":
-            continue
-        value = raw.get(key)
-        if value is None:
-            continue
-        text = str(value).strip()
-        if not text:
-            continue
-        lines.append(f"- {label}: {text}")
-    return "\n".join(lines)
+    return format_reference_metadata_block(src, include_text=include_text)
 
 
 def _build_sources_txt(sources: list[dict[str, Any]]) -> str:
@@ -605,12 +606,17 @@ def run_query(rag: RAG, query: str, index: int, output_path: str | Path) -> None
     if isinstance(raw_sources, list):
         sources = [src for src in raw_sources if isinstance(src, dict)]
 
+    result_summary_diagnostics = result.get("summary_diagnostics")
+    if not isinstance(result_summary_diagnostics, dict):
+        result_summary_diagnostics = None
     result.update(
         _get_validation_payload(
             rag,
             question=query,
             answer=str(result.get("response") or result.get("answer") or ""),
             sources=sources,
+            summary_diagnostics=result_summary_diagnostics,
+            retrieval_query=retrieval_query if retrieval_query != query else None,
         )
     )
 

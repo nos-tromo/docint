@@ -49,6 +49,8 @@ class RAGRetrievalAgent(RetrievalAgent):
                 confidence=analysis.confidence,
                 tool_used="ner_sources",
                 latency_ms=latency,
+                retrieval_query=turn.user_input,
+                rewritten_query=analysis.rewritten_query,
             )
 
         if intent == "table":
@@ -61,6 +63,8 @@ class RAGRetrievalAgent(RetrievalAgent):
                 confidence=analysis.confidence,
                 tool_used="table_lookup",
                 latency_ms=latency,
+                retrieval_query=turn.user_input,
+                rewritten_query=analysis.rewritten_query,
             )
 
         query_text = analysis.rewritten_query or turn.user_input
@@ -82,6 +86,8 @@ class RAGRetrievalAgent(RetrievalAgent):
             confidence=analysis.confidence,
             tool_used="rag_chat",
             latency_ms=latency,
+            retrieval_query=query_text,
+            rewritten_query=analysis.rewritten_query,
         )
 
     def _filter_ner_sources(self, sources: list[dict], entities: dict) -> list[dict]:

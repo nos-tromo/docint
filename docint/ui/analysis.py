@@ -307,7 +307,7 @@ def _render_summary_section(collection: str) -> dict[str, Any]:
     if sources:
         with st.expander("Sources used for summary"):
             for src in sources:
-                render_source_item(src, collection)
+                render_source_item(src, collection, show_ner=False)
 
     return summary_state
 

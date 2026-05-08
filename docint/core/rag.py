@@ -5790,6 +5790,22 @@ class RAG:
             self.ner_sources = []
         self._parent_context_support_cache.pop(collection, None)
 
+    def ensure_session_manager(self) -> SessionManager:
+        """Ensure the SessionManager is initialized and return it.
+
+        Use when a session-store helper (``list_sessions``,
+        ``get_session_history``, ``delete_session``, ``export_session``, ...)
+        is needed without starting a chat turn or building the query engine.
+        ``start_session`` builds on top of this and additionally lazily
+        constructs the query engine.
+
+        Returns:
+            SessionManager: The initialized session manager for this RAG instance.
+        """
+        if self.sessions is None:
+            self.sessions = SessionManager(self)
+        return self.sessions
+
     def export_session(
         self, session_id: str | None = None, out_dir: str | Path = "session"
     ) -> Path:
@@ -5803,20 +5819,26 @@ class RAG:
         Returns:
             Path: The path to the exported session file.
         """
-        if self.sessions is None:
-            self.sessions = SessionManager(self)
-        return self.sessions.export_session(session_id=session_id, out_dir=out_dir)
+        return self.ensure_session_manager().export_session(
+            session_id=session_id, out_dir=out_dir
+        )
 
     def start_session(self, session_id: str | None = None) -> str:
         """Start or resume a chat session through SessionManager.
 
+        ``SessionManager.start_session`` lazily builds the query engine when
+        ``select_collection`` has reset it (see :meth:`run_query` for the same
+        pattern), so this method only needs to ensure the SessionManager is
+        wired up and delegate.
+
         Args:
             session_id (str | None): The session ID to start or resume. If None,
                 a new session is created.
+
+        Returns:
+            str: The ID of the started or resumed session.
         """
-        if self.sessions is None:
-            self.sessions = SessionManager(self)
-        return self.sessions.start_session(session_id)
+        return self.ensure_session_manager().start_session(session_id)
 
     def chat(
         self,
@@ -5843,9 +5865,7 @@ class RAG:
         Returns:
             dict[str, Any]: The chat response data.
         """
-        if self.sessions is None:
-            self.sessions = SessionManager(self)
-        return self.sessions.chat(
+        return self.ensure_session_manager().chat(
             user_msg,
             metadata_filters=metadata_filters,
             metadata_filters_active=metadata_filters_active,
@@ -5878,9 +5898,7 @@ class RAG:
         Returns:
             Any: A generator yielding response chunks.
         """
-        if self.sessions is None:
-            self.sessions = SessionManager(self)
-        return self.sessions.stream_chat(
+        return self.ensure_session_manager().stream_chat(
             user_msg,
             metadata_filters=metadata_filters,
             metadata_filters_active=metadata_filters_active,
