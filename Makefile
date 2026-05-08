@@ -1,6 +1,6 @@
 # Build-host helpers for docint.
 
-.PHONY: volumes build-cpu build-cuda up-cpu up-cuda bundle-cpu bundle-cuda
+.PHONY: volumes build-cpu build-cuda bundle-cpu bundle-cuda up-cpu up-cuda
 
 # Versioned image tag: YYYY-MM-DD-<short-sha>. Override by exporting
 # DOCINT_VERSION before invoking make. Mirrors scripts/bundle_images.sh.
@@ -21,6 +21,14 @@ build-cuda:
 	@echo "DOCINT_VERSION=$(DOCINT_VERSION)"
 	DOCKER_BUILDKIT=1 docker compose --profile cuda build
 
+# Build CPU stack and ship as versioned .tar.gz pair (built + pulled).
+bundle-cpu:
+	./scripts/bundle_images.sh cpu
+
+# Build CUDA stack and ship as versioned .tar.gz pair (built + pulled).
+bundle-cuda:
+	./scripts/bundle_images.sh cuda
+
 # Build and run the CPU profile (backend-cpu, frontend-cpu, qdrant-cpu).
 up-cpu:
       @echo "DOCINT_VERSION=$(DOCINT_VERSION)"
@@ -30,11 +38,3 @@ up-cpu:
 up-cuda:
       @echo "DOCINT_VERSION=$(DOCINT_VERSION)"
 	DOCKER_BUILDKIT=1 docker compose --profile cuda up
-
-# Build CPU stack and ship as versioned .tar.gz pair (built + pulled).
-bundle-cpu:
-	./scripts/bundle_images.sh cpu
-
-# Build CUDA stack and ship as versioned .tar.gz pair (built + pulled).
-bundle-cuda:
-	./scripts/bundle_images.sh cuda
