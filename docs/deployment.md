@@ -14,7 +14,8 @@ supported co-deployment patterns with external inference services.
 | `Dockerfile.backend.cuda` | Multi-stage backend image with CUDA PyTorch. |
 | `Dockerfile.frontend` | Lightweight Streamlit image. |
 | `scripts/create_docker_volumes.sh` | Creates the external cache volumes (idempotent). |
-| `scripts/zip_images.sh` | Builds and packages versioned image tarballs for offline distribution. |
+| `scripts/bundle_images.sh` | Builds and packages versioned image tarballs for offline distribution. |
+| `Makefile` | Convenience targets wrapping the above (`make volumes`, `make build-cpu`, `make bundle-cuda`, ...). |
 | `.env.example` | Canonical `.env` template. |
 
 ## Profiles
@@ -276,11 +277,13 @@ and copy them across with `docker-compose.yml` and `.env`.
 
 ### Producing the bundle
 
-`scripts/zip_images.sh` wraps build → pull → re-tag → save:
+`make bundle-cpu` (or `make bundle-cuda`) wraps build → pull → re-tag → save:
 
 ```bash
-./scripts/zip_images.sh cpu     # or cuda
+make bundle-cpu     # or: make bundle-cuda
 ```
+
+The underlying script is `./scripts/bundle_images.sh <profile>`.
 
 This computes `DOCINT_VERSION` as `YYYY-MM-DD-<short-sha>` (override by
 exporting it before invocation), tags the four buildable services with
@@ -292,9 +295,11 @@ that version, then writes two gzipped tarballs:
 | `docint-pulled-<profile>-<version>.tar.gz` | Externally-hosted images (Qdrant); re-tagged so the `name:tag@digest` references in `docker-compose.yml` resolve after `docker load`. |
 
 The compose file references the version through
-`image: docint-<service>:${DOCINT_VERSION:-latest}`, so it falls back to
-`:latest` for normal dev workflows and uses the pinned tag whenever the
-variable is set.
+`image: docint-<service>:${DOCINT_VERSION:-latest}`. The `Makefile`
+derives and exports `DOCINT_VERSION` (using the same `YYYY-MM-DD-<short-sha>`
+scheme), so `make build-{cpu,cuda}` and `make bundle-{cpu,cuda}` always
+produce versioned tags. The `:latest` fallback only kicks in for direct
+`docker compose build` invocations without `DOCINT_VERSION` exported.
 
 ### Loading and running the bundle
 
