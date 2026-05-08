@@ -13,12 +13,10 @@ volumes:
 
 # Build the CPU profile (backend-cpu, frontend-cpu).
 build-cpu:
-	@echo "DOCINT_VERSION=$(DOCINT_VERSION)"
 	DOCKER_BUILDKIT=1 docker compose --profile cpu build
 
 # Build the CUDA profile (backend-cuda, frontend-cuda).
 build-cuda:
-	@echo "DOCINT_VERSION=$(DOCINT_VERSION)"
 	DOCKER_BUILDKIT=1 docker compose --profile cuda build
 
 # Build CPU stack and ship as versioned .tar.gz pair (built + pulled).
@@ -31,10 +29,8 @@ bundle-cuda:
 
 # Build and run the CPU profile (backend-cpu, frontend-cpu, qdrant-cpu).
 up-cpu:
-      @echo "DOCINT_VERSION=$(DOCINT_VERSION)"
 	DOCKER_BUILDKIT=1 docker compose --profile cpu up
 
 # Build and run the CUDA profile (backend-cuda, frontend-cuda, qdrant-cuda).
 up-cuda:
-      @echo "DOCINT_VERSION=$(DOCINT_VERSION)"
 	DOCKER_BUILDKIT=1 docker compose --profile cuda up
