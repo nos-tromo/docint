@@ -1,6 +1,6 @@
 # Build-host helpers for docint.
 
-.PHONY: volumes build-cpu build-cuda bundle-cpu bundle-cuda up-cpu up-cuda
+.PHONY: volumes build-cpu build-cuda bundle-cpu bundle-cuda no-build no-build-cuda up-cpu up-cuda
 
 # Versioned image tag: YYYY-MM-DD-<short-sha>. Override by exporting
 # DOCINT_VERSION before invoking make. Mirrors scripts/bundle_images.sh.
