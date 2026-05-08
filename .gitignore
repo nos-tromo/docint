@@ -37,6 +37,7 @@
 *.png
 *.sh
 *.sqlite3
+*.tar.gz
 *.txt
 *.wav
 *.webm
@@ -85,6 +86,7 @@ wheels/*.whl
 !.env.example
 !.pre-commit-config.yaml
 !scripts/
+!scripts/bundle_images.sh
 !scripts/create_docker_volumes.sh
 !scripts/download-frontend-wheels.sh
 !**/prompts/*.txt

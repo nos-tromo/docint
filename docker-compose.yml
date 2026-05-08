@@ -1,14 +1,8 @@
+name: docint
+
 ##########################################################
 # Shared backend fragments (YAML anchors)
 ##########################################################
-x-proxy-build-args: &proxy-build-args
-  HTTP_PROXY: ${HTTP_PROXY:-}
-  HTTPS_PROXY: ${HTTPS_PROXY:-}
-  NO_PROXY: ${NO_PROXY:-}
-  http_proxy: ${http_proxy:-}
-  https_proxy: ${https_proxy:-}
-  no_proxy: ${no_proxy:-}
-
 x-env-file: &env-file
   - .env
 
@@ -17,11 +11,10 @@ services:
   # Backend – CPU
   ##########################################################
   backend-cpu:
+    image: docint-backend-cpu:${DOCINT_VERSION:-latest}
     build:
       context: .
       dockerfile: Dockerfile.backend.cpu
-      args:
-        <<: *proxy-build-args
     ports: &backend-ports
       - 8000:8000
     environment:
@@ -52,11 +45,10 @@ services:
   # Backend – CUDA
   ##########################################################
   backend-cuda:
+    image: docint-backend-cuda:${DOCINT_VERSION:-latest}
     build:
       context: .
       dockerfile: Dockerfile.backend.cuda
-      args:
-        <<: *proxy-build-args
     ports: *backend-ports
     environment:
       LOG_PATH: /var/log/docint/backend-cuda.log
@@ -83,12 +75,10 @@ services:
   # Frontend – CPU
   ##########################################################
   frontend-cpu:
+    image: docint-frontend-cpu:${DOCINT_VERSION:-latest}
     build: &frontend-build
       context: .
       dockerfile: Dockerfile.frontend
-      args:
-        <<: *proxy-build-args
-        OFFLINE_BUILD: ${OFFLINE_BUILD:-}
     ports: &frontend-ports
       - ${DOCINT_HOST_PORT:-8501}:8501
     environment:
@@ -109,6 +99,7 @@ services:
   # Frontend – CUDA
   ##########################################################
   frontend-cuda:
+    image: docint-frontend-cuda:${DOCINT_VERSION:-latest}
     build: *frontend-build
     ports: *frontend-ports
     environment: 

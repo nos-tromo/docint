@@ -346,14 +346,3 @@ Loaded by `load_response_validation_env()` (`env_cfg.py:935`).
   `HF_HUB_DISABLE_TELEMETRY=1`, `HF_HUB_DISABLE_SYMLINKS_WARNING=1`, and
   `KMP_DUPLICATE_LIB_OK=TRUE`. It also points `FASTEMBED_CACHE_PATH` at
   `HF_HUB_CACHE` when unset. See `set_offline_env()` in `env_cfg.py:12`.
-
-## Proxy & image overrides
-
-Relevant to Docker deployments; see [deployment.md](deployment.md).
-
-| Variable | Purpose |
-|---|---|
-| `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` (and lowercase variants) | Forwarded to Compose interpolation, image builds, and containers. |
-| `PYTHON_SLIM_BOOKWORM_IMAGE` | Override base image for the backend builder. |
-| `NVIDIA_CUDA_RUNTIME_IMAGE` | Override base image for the CUDA backend runtime. |
-| `INFERENCE_NET` | Name of the shared external Docker network used by co-deployed inference services (default `inference-net`). |

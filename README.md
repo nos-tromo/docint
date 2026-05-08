@@ -208,7 +208,7 @@ manual. It complements this README with topic-by-topic deep dives:
   hybrid retrieval, graph-RAG, validation
 - [UI guide](docs/ui-guide.md) — Streamlit pages and components
 - [Deployment](docs/deployment.md) — Docker profiles, volumes,
-  co-deployment with vLLM / Ollama
+  co-deployment with vLLM / Ollama, offline image bundles
 - [Development](docs/development.md) — dev workflow, pre-commit,
   pytest layout, CI, extension points
 
