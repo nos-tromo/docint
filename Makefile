@@ -1,6 +1,6 @@
 # Build-host helpers for docint.
 
-.PHONY: volumes build-cpu build-cuda bundle-cpu bundle-cuda no-build no-build-cuda up-cpu up-cuda
+.PHONY: volumes build-cpu build-cuda bundle-cpu bundle-cuda no-build-cpu no-build-cuda up-cpu up-cuda
 
 # Versioned image tag: YYYY-MM-DD-<short-sha>. Override by exporting
 # DOCINT_VERSION before invoking make. Mirrors scripts/bundle_images.sh.
@@ -32,12 +32,12 @@ bundle-cuda:
 	./scripts/bundle_images.sh cuda
 
 # Run the CPU profile (backend-cpu, frontend-cpu, qdrant-cpu) without building.
-no-build:
-	docker compose up -d --no-build
+no-build-cpu:
+	DOCKER_BUILDKIT=1 docker compose --profile cpu up -d --no-build
 
-# Run the CUDA profile (backend-cuda, frontend-cuda) without building.
+# Run the CUDA profile (backend-cuda, frontend-cuda, qdrant-cuda) without building.
 no-build-cuda:
-	docker compose --profile cuda up -d --no-build
+	DOCKER_BUILDKIT=1 docker compose --profile cuda up -d --no-build
 
 # Build and run the CPU profile (backend-cpu, frontend-cpu, qdrant-cpu).
 up-cpu:
