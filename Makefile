@@ -2,9 +2,14 @@
 
 .PHONY: volumes build-cpu build-cuda bundle-cpu bundle-cuda no-build-cpu no-build-cuda up-cpu up-cuda
 
-# Versioned image tag: YYYY-MM-DD-<short-sha>. Override by exporting
-# DOCINT_VERSION before invoking make. Mirrors scripts/bundle_images.sh.
-DOCINT_VERSION ?= $(shell date +%Y-%m-%d)-$(shell git rev-parse --short HEAD)
+# Versioned image tag.
+# On production: read from .docint-version written by bundle_images.sh.
+# On dev: compute YYYY-MM-DD[-<short-sha>] on the fly.
+# Override entirely by exporting DOCINT_VERSION before invoking make.
+DOCINT_VERSION ?= $(shell \
+    cat .docint-version 2>/dev/null || \
+    { _s=$$(git rev-parse --short HEAD 2>/dev/null); \
+      echo "$$(date +%Y-%m-%d)$${_s:+-$$_s}"; } )
 export DOCINT_VERSION
 
 # Create the external Docker volumes (one-time per host; idempotent).

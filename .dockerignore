@@ -77,6 +77,7 @@ README.md
 # Docker-specific
 *.pid
 *.sock
+.translator-version
 docker-compose.override.yml
 
 # Exceptions
