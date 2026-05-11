@@ -1,6 +1,6 @@
 # Build-host helpers for docint.
 
-.PHONY: volumes build-cpu build-cuda bundle-cpu bundle-cuda no-build-cpu no-build-cuda up-cpu up-cuda
+.PHONY: volumes build-cpu build-cuda bundle-cpu bundle-cuda no-build-cpu no-build-cuda up-cpu up-cuda stop-cpu stop-cuda
 
 # Versioned image tag.
 # On production: read from .docint-version written by bundle_images.sh.
@@ -51,3 +51,11 @@ up-cpu:
 # Build and run the CUDA profile (backend-cuda, frontend-cuda, qdrant-cuda).
 up-cuda:
 	DOCKER_BUILDKIT=1 docker compose --profile cuda up
+
+# Stop containers for the CPU profile.
+stop-cpu:
+	docker compose --profile cpu stop
+
+# Stop containers for the CUDA profile.
+stop-cuda:
+	docker compose --profile cuda stop
