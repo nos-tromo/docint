@@ -3,10 +3,17 @@ set -euo pipefail
 
 PROFILE="${1:-cpu}"
 
-# YYYY-MM-DD[-<short-sha>]; sha omitted when not in a git repo.
-# Override by exporting DOCINT_VERSION beforehand.
-_git_sha=$(git rev-parse --short HEAD 2>/dev/null || true)
-export DOCINT_VERSION="${DOCINT_VERSION:-$(date +%Y-%m-%d)${_git_sha:+-${_git_sha}}}"
+# Always compute a fresh version from git + date so repeated bundle runs
+# produce distinct tags. .docint-version (if present) is never used as input
+# here — it is only written as output for production hosts.
+# To pin a specific tag, set DOCINT_VERSION_OVERRIDE in your shell before
+# invoking make.
+if [[ -n "${DOCINT_VERSION_OVERRIDE:-}" ]]; then
+  export DOCINT_VERSION="$DOCINT_VERSION_OVERRIDE"
+else
+  _git_sha=$(git rev-parse --short HEAD 2>/dev/null || true)
+  export DOCINT_VERSION="$(date +%Y-%m-%d)${_git_sha:+-${_git_sha}}"
+fi
 echo "DOCINT_VERSION=$DOCINT_VERSION"
 
 # Persist the version so production hosts can run 'make no-build-*' without
