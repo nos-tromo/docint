@@ -38,11 +38,11 @@ bundle-cuda:
 
 # Run the CPU profile (backend-cpu, frontend-cpu, qdrant-cpu) without building.
 no-build-cpu:
-	DOCKER_BUILDKIT=1 docker compose --profile cpu up -d --no-build
+	DOCKER_BUILDKIT=1 docker compose --profile cpu up --no-build
 
 # Run the CUDA profile (backend-cuda, frontend-cuda, qdrant-cuda) without building.
 no-build-cuda:
-	DOCKER_BUILDKIT=1 docker compose --profile cuda up -d --no-build
+	DOCKER_BUILDKIT=1 docker compose --profile cuda up --no-build
 
 # Build and run the CPU profile (backend-cpu, frontend-cpu, qdrant-cpu).
 up-cpu:
