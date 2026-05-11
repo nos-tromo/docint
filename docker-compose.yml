@@ -7,8 +7,9 @@ x-no-proxy-env: &no-proxy-env
   NO_PROXY: "backend,qdrant,ollama,vllm,localhost,127.0.0.1,172.16.0.0/12,10.0.0.0/8"
   no_proxy: "backend,qdrant,ollama,vllm,localhost,127.0.0.1,172.16.0.0/12,10.0.0.0/8"
 
-  x-env-file: &env-file
+x-env-file: &env-file
   - .env
+
 services:
   ##########################################################
   # Backend – CPU
