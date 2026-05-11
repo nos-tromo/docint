@@ -1,6 +1,6 @@
 # Build-host helpers for docint.
 
-.PHONY: volumes build-cpu build-cuda bundle-cpu bundle-cuda no-build-cpu no-build-cuda up-cpu up-cuda stop-cpu stop-cuda
+.PHONY: volumes bundle-cpu bundle-cuda build-cpu build-cuda no-build-cpu no-build-cuda up-cpu up-cuda stop-cpu stop-cuda
 
 # Versioned image tag.
 # On production: read from .docint-version written by bundle_images.sh.
@@ -16,6 +16,14 @@ export DOCINT_VERSION
 volumes:
 	./scripts/create_docker_volumes.sh
 
+# Build CPU stack and ship as versioned .tar.gz pair (built + pulled).
+bundle-cpu:
+	./scripts/bundle_images.sh cpu
+
+# Build CUDA stack and ship as versioned .tar.gz pair (built + pulled).
+bundle-cuda:
+	./scripts/bundle_images.sh cuda
+
 # Build the CPU profile (backend-cpu, frontend-cpu) and pull image-only
 # services that have no build context (e.g. qdrant-cpu).
 build-cpu:
@@ -27,14 +35,6 @@ build-cpu:
 build-cuda:
 	DOCKER_BUILDKIT=1 docker compose --profile cuda build
 	docker compose --profile cuda pull --ignore-buildable
-
-# Build CPU stack and ship as versioned .tar.gz pair (built + pulled).
-bundle-cpu:
-	./scripts/bundle_images.sh cpu
-
-# Build CUDA stack and ship as versioned .tar.gz pair (built + pulled).
-bundle-cuda:
-	./scripts/bundle_images.sh cuda
 
 # Run the CPU profile (backend-cpu, frontend-cpu, qdrant-cpu) without building.
 no-build-cpu:
