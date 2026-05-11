@@ -3,9 +3,12 @@ name: docint
 ##########################################################
 # Shared backend fragments (YAML anchors)
 ##########################################################
-x-env-file: &env-file
-  - .env
+x-no-proxy-env: &no-proxy-env
+  NO_PROXY: "backend,qdrant,ollama,vllm,localhost,127.0.0.1,172.16.0.0/12,10.0.0.0/8"
+  no_proxy: "backend,qdrant,ollama,vllm,localhost,127.0.0.1,172.16.0.0/12,10.0.0.0/8"
 
+  x-env-file: &env-file
+  - .env
 services:
   ##########################################################
   # Backend – CPU
@@ -18,6 +21,7 @@ services:
     ports: &backend-ports
       - 8000:8000
     environment:
+      <<: *no-proxy-env
       LOG_PATH: /var/log/docint/backend-cpu.log
       QDRANT_HOST: http://qdrant:6333
       QDRANT_SRC_DIR: /var/lib/docint/sources
@@ -51,6 +55,7 @@ services:
       dockerfile: Dockerfile.backend.cuda
     ports: *backend-ports
     environment:
+      <<: *no-proxy-env
       LOG_PATH: /var/log/docint/backend-cuda.log
       NVIDIA_VISIBLE_DEVICES: all
       QDRANT_HOST: http://qdrant:6333
@@ -82,6 +87,7 @@ services:
     ports: &frontend-ports
       - ${DOCINT_HOST_PORT:-8501}:8501
     environment:
+      <<: *no-proxy-env
       BACKEND_HOST: http://backend:8000
       BACKEND_PUBLIC_HOST: http://localhost:8000
       LOG_PATH: /var/log/docint/frontend-cpu.log
@@ -102,7 +108,8 @@ services:
     image: docint-frontend-cuda:${DOCINT_VERSION:-latest}
     build: *frontend-build
     ports: *frontend-ports
-    environment: 
+    environment:
+      <<: *no-proxy-env
       BACKEND_HOST: http://backend:8000
       BACKEND_PUBLIC_HOST: http://localhost:8000
       LOG_PATH: /var/log/docint/frontend-cuda.log
