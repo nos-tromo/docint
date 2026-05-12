@@ -3,9 +3,6 @@
 # ==================================
 .DS_Store
 .env
-.mypy_cache
-.idea/
-.vscode/
 *.code-workspace
 *.bin
 *.bundle
@@ -17,7 +14,6 @@
 *.py[cod]
 *.so
 *Zone.Identifier
-*.egg-info/
 
 # files
 *.csv
@@ -45,12 +41,24 @@
 *.zip
 
 # directories
+.*
+**/*.egg-info/
 **/__pycache__/
+**/.claude/
+**/.idea/
+**/.mypy_cache/
+**/.pre-commit-cache/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.uv-cache/
+**/.venv/
+**/.vscode/
 **/artifacts/
 **/build/
 **/data/
 **/dist/
 **/env/
+**/legacy/
 **/lib/
 **/logs/
 **/models/
@@ -88,7 +96,6 @@ wheels/*.whl
 !scripts/
 !scripts/bundle_images.sh
 !scripts/create_docker_volumes.sh
-!scripts/download-frontend-wheels.sh
 !**/prompts/*.txt
 !**/required_exts.txt
 !AGENTS.md
