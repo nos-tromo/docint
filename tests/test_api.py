@@ -1376,7 +1376,11 @@ def test_collections_hate_speech_failure(
 def test_query_requires_collection(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """Test the query endpoint requires a collection to be selected.
+    """Empty active collection must surface as a structured HTTP 400.
+
+    Regression guard for the outer-handler antipattern that collapsed
+    a 400 into a 500. The handler must now propagate the 400 raised
+    by ``_require_active_collection`` unchanged.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -1384,7 +1388,64 @@ def test_query_requires_collection(
     """
     api_module.rag.qdrant_collection = ""
     response = client.post("/query", json={"question": "hi"})
-    assert response.status_code == 500
+    assert response.status_code == 400
+    assert "No collection selected" in response.json()["detail"]
+
+
+def test_query_returns_404_when_active_collection_missing(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Stale active collection must surface as HTTP 404 with a clean message.
+
+    Regression guard for the chat-after-delete crash: if a collection is
+    deleted out-of-band (or the API singleton holds a stale name),
+    ``_require_active_collection`` must trip and return a structured 404
+    instead of letting llama-index propagate Qdrant's raw 404.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    api_module.rag.qdrant_collection = "ghost"
+    monkeypatch.setattr(api_module.rag, "list_collections", lambda: ["alpha", "beta"])
+    response = client.post("/query", json={"question": "hi"})
+    assert response.status_code == 404
+    assert "ghost" in response.json()["detail"]
+    assert "no longer exists" in response.json()["detail"]
+    # Singleton must self-heal so the user can recover via re-select.
+    assert api_module.rag.qdrant_collection == ""
+    assert api_module.rag.index is None
+    assert api_module.rag.query_engine is None
+
+
+def test_stream_query_returns_404_when_active_collection_missing(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Stream query must gate on collection existence before opening the SSE stream.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    api_module.rag.qdrant_collection = "ghost"
+    monkeypatch.setattr(api_module.rag, "list_collections", lambda: ["alpha", "beta"])
+    response = client.post("/stream_query", json={"question": "hi"})
+    assert response.status_code == 404
+    assert "ghost" in response.json()["detail"]
+
+
+def test_stream_query_requires_collection(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Empty active collection on stream_query must surface as HTTP 400.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    api_module.rag.qdrant_collection = ""
+    response = client.post("/stream_query", json={"question": "hi"})
+    assert response.status_code == 400
     assert "No collection selected" in response.json()["detail"]
 
 

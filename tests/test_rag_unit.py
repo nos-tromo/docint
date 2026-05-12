@@ -5755,6 +5755,76 @@ def test_delete_collection_fail_fast_on_primary_failure(
     assert deleted == ["target"]
 
 
+def test_delete_collection_resets_singleton_when_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """delete_collection clears in-memory state if the deleted name was active.
+
+    Regression guard for the chat-after-delete crash: without this
+    reset, ``rag.qdrant_collection`` keeps pointing at the deleted
+    collection, the next ``/stream_query`` bypasses the empty-name
+    gate and llama-index queries Qdrant for a collection that no
+    longer exists — surfacing the raw Qdrant 404 to the user.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    sentinel_index = object()
+    sentinel_engine = object()
+    rag.index = sentinel_index
+    rag.query_engine = sentinel_engine
+    rag._image_ingestion_service = object()
+    monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+    monkeypatch.setattr(
+        RAG,
+        "_bump_summary_revision",
+        lambda self, collection=None, allow_create=True: 1,
+    )
+    monkeypatch.setattr(RAG, "reset_session_state", lambda self: None)
+
+    rag.delete_collection("active")
+
+    assert rag.qdrant_collection == ""
+    assert rag.index is None
+    assert rag.query_engine is None
+    assert rag._image_ingestion_service is None
+
+
+def test_delete_collection_preserves_singleton_when_not_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """delete_collection must leave singleton state alone for non-active deletes.
+
+    Deleting a collection other than the active one must not perturb
+    the active session's cached index/query engine — the user is
+    still working with a different collection.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="active")
+    rag._qdrant_client = MagicMock()
+    sentinel_index = object()
+    sentinel_engine = object()
+    rag.index = sentinel_index
+    rag.query_engine = sentinel_engine
+    monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+    monkeypatch.setattr(
+        RAG,
+        "_bump_summary_revision",
+        lambda self, collection=None, allow_create=True: 1,
+    )
+    monkeypatch.setattr(RAG, "reset_session_state", lambda self: None)
+
+    rag.delete_collection("other")
+
+    assert rag.qdrant_collection == "active"
+    assert rag.index is sentinel_index
+    assert rag.query_engine is sentinel_engine
+
+
 def test_verify_collection_reports_drift_and_parents(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

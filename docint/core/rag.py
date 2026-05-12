@@ -4771,6 +4771,22 @@ class RAG:
             )
             raise
 
+        # 1a. If the deleted collection was the active one, clear cached
+        #     handles so the next query does not point at a tombstone.
+        #     Without this, ``self.qdrant_collection`` would still equal
+        #     ``target`` and ``self.index`` / ``self.query_engine`` would
+        #     wrap a vector store for a collection Qdrant no longer has —
+        #     the next ``/stream_query`` would bypass the empty-name gate
+        #     and surface Qdrant's raw 404 to the user.
+        if target == self.qdrant_collection:
+            self.qdrant_collection = ""
+            self.docs.clear()
+            self.nodes.clear()
+            self.index = None
+            self.query_engine = None
+            self._image_ingestion_service = None
+            self.reset_session_state()
+
         # 1b. Best-effort delete of supplementary collections.
         for collection_name in secondary_collections:
             try:
