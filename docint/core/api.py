@@ -423,20 +423,24 @@ def collections_select(payload: SelectCollectionIn) -> dict[str, bool | str]:
         dict[str, bool | str]: A dictionary indicating success and the selected collection name.
 
     Raises:
-        HTTPException: If the collection name is missing or an error occurs while selecting the collection.
-        HTTPException: If an error occurs while selecting the collection.
+        HTTPException: 400 if the collection name is missing, 404 if the
+            collection does not exist, 500 for any other backend failure.
     """
+    name = payload.name.strip()
+    if not name:
+        logger.error("HTTPException: Collection name required")
+        raise HTTPException(status_code=400, detail="Collection name required")
     try:
-        name = payload.name.strip()
-        if not name:
-            logger.error("HTTPException: Collection name required")
-            raise HTTPException(status_code=400, detail="Collection name required")
         rag.select_collection(name)
-
-        return {"ok": True, "name": name}
-    except HTTPException as e:
-        logger.error("HTTPException: Error selecting collection: {}", e)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        logger.error("Collection '{}' could not be selected: {}", name, e)
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("Unexpected error selecting collection '{}': {}", name, e)
         raise HTTPException(status_code=500, detail=str(e))
+    return {"ok": True, "name": name}
 
 
 @app.delete("/collections/{name}", tags=["Collections"])
@@ -1178,52 +1182,50 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
             no parseable content) return HTTP 200 with ``empty=true`` instead of an error.
 
     Raises:
-        HTTPException: If the collection name is missing or data directory does not exist.
-        HTTPException: If an unrecoverable error occurs during ingestion.
+        HTTPException: 400 if the collection name is missing or the data
+            directory does not exist; 500 for any unexpected backend error.
     """
+    name = payload.collection.strip()
+    if not name:
+        logger.error("HTTPException: Collection name required")
+        raise HTTPException(status_code=400, detail="Collection name required")
+
+    data_dir = _resolve_data_dir()
+    if not data_dir.is_dir():
+        logger.error("HTTPException: Data directory does not exist: {}", data_dir)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Data directory does not exist: {data_dir}",
+        )
 
     try:
-        name = payload.collection.strip()
-        if not name:
-            logger.error("HTTPException: Collection name required")
-            raise HTTPException(status_code=400, detail="Collection name required")
-
-        data_dir = _resolve_data_dir()
-        if not data_dir.is_dir():
-            logger.error("HTTPException: Data directory does not exist: {}", data_dir)
-            raise HTTPException(
-                status_code=400,
-                detail=f"Data directory does not exist: {data_dir}",
-            )
-
-        try:
-            ingest_module.ingest_docs(
-                name,
-                data_dir,
-                hybrid=payload.hybrid if payload.hybrid is not None else True,
-            )
-        except EmptyIngestionError as exc:
-            logger.warning(
-                "Ingestion produced no content for '{}'; returning empty response.",
-                exc.collection_name,
-            )
-            return {
-                "ok": True,
-                "collection": name,
-                "data_dir": str(data_dir),
-                "hybrid": payload.hybrid if payload.hybrid is not None else True,
-                "empty": True,
-            }
-
+        ingest_module.ingest_docs(
+            name,
+            data_dir,
+            hybrid=payload.hybrid if payload.hybrid is not None else True,
+        )
+    except EmptyIngestionError as exc:
+        logger.warning(
+            "Ingestion produced no content for '{}'; returning empty response.",
+            exc.collection_name,
+        )
         return {
             "ok": True,
             "collection": name,
             "data_dir": str(data_dir),
             "hybrid": payload.hybrid if payload.hybrid is not None else True,
+            "empty": True,
         }
-    except HTTPException as e:
-        logger.error("HTTPException: Error during ingestion: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        logger.error("Unexpected error during ingestion of '{}': {}", name, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return {
+        "ok": True,
+        "collection": name,
+        "data_dir": str(data_dir),
+        "hybrid": payload.hybrid if payload.hybrid is not None else True,
+    }
 
 
 @app.post("/agent/chat/stream", tags=["Agent"])

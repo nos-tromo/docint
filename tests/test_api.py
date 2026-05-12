@@ -634,27 +634,34 @@ def test_collections_select_success(
 
 
 def test_collections_select_blank_name(client: TestClient) -> None:
-    """Test the selection of a collection with a blank name.
+    """Blank collection names must surface as a structured HTTP 400.
+
+    Regression guard: a prior handler caught ``HTTPException`` and
+    re-raised it as 500, collapsing the original 400 into a generic
+    server error. The handler must now propagate the original status.
 
     Args:
         client (TestClient): The TestClient instance.
     """
     response = client.post("/collections/select", json={"name": "   "})
-    assert response.status_code == 500
+    assert response.status_code == 400
     assert "Collection name required" in response.json()["detail"]
 
 
-def test_collections_select_raises_on_nonexistent_collection(
+def test_collections_select_returns_404_on_nonexistent_collection(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """Non-``HTTPException`` errors from ``select_collection`` surface as 500.
+    """``ValueError`` from ``select_collection`` must surface as HTTP 404.
 
-    ``/collections/select`` only catches ``HTTPException`` in its outer
-    handler. If ``rag.select_collection`` raises ``ValueError`` (collection
-    missing) or any other non-HTTP exception, it propagates to FastAPI's
-    default handler and becomes an HTTP 500. This test locks that contract
-    so any future refactor that silently swallows the error (or wraps it
-    as a 200) fails this assertion.
+    Regression guard for the post-ingest navigation bug: when the
+    sidebar (or the ingest page) POSTs ``/collections/select`` for a
+    collection that Qdrant hasn't yet exposed, ``rag.select_collection``
+    raises ``ValueError``. The handler previously only caught
+    ``HTTPException``, so the ``ValueError`` escaped as an unhandled
+    server exception, the UI logged "Failed to select collection" with
+    no usable detail, and ``st.session_state.selected_collection`` was
+    left stale. The endpoint must now translate this into a structured
+    404 so the UI can react and recover.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -662,24 +669,31 @@ def test_collections_select_raises_on_nonexistent_collection(
     """
 
     def raise_missing(name: str) -> None:
-        """Simulate the production-code ``ValueError`` path.
-
-        Args:
-            name (str): The collection name (ignored).
-
-        Raises:
-            ValueError: Always, to mimic a missing-collection scenario.
-        """
         raise ValueError(f"Collection '{name}' does not exist")
 
     monkeypatch.setattr(api_module.rag, "select_collection", raise_missing)
-    # TestClient's default raise_server_exceptions=True re-raises uncaught
-    # server-side exceptions to the caller. In production (uvicorn), FastAPI's
-    # default handler would turn this into an HTTP 500 response. Asserting the
-    # exception propagates captures the same contract — the endpoint does not
-    # silently swallow or coerce the error.
-    with pytest.raises(ValueError, match="does not exist"):
-        client.post("/collections/select", json={"name": "ghost"})
+    response = client.post("/collections/select", json={"name": "ghost"})
+    assert response.status_code == 404
+    assert "does not exist" in response.json()["detail"]
+
+
+def test_collections_select_returns_500_on_unexpected_error(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Unexpected backend exceptions must surface as HTTP 500 with detail.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+
+    def raise_unexpected(name: str) -> None:
+        raise RuntimeError("qdrant exploded")
+
+    monkeypatch.setattr(api_module.rag, "select_collection", raise_unexpected)
+    response = client.post("/collections/select", json={"name": "alpha"})
+    assert response.status_code == 500
+    assert "qdrant exploded" in response.json()["detail"]
 
 
 def test_collections_ner_success(client: TestClient) -> None:
@@ -1607,7 +1621,7 @@ def test_ingest_missing_directory(
     missing = tmp_path / "missing"
     monkeypatch.setattr(api_module, "_resolve_data_dir", lambda: missing)
     response = client.post("/ingest", json={"collection": "abc"})
-    assert response.status_code == 500
+    assert response.status_code == 400
     assert "Data directory does not exist" in response.json()["detail"]
 
 
@@ -1652,13 +1666,13 @@ def test_ingest_sync_generic_exception_propagates_as_500(
 
     monkeypatch.setattr(api_module.ingest_module, "ingest_docs", exploding_ingest)
 
-    # TestClient's default re-raises to the caller — in production, FastAPI's
-    # default handler turns an uncaught ``RuntimeError`` into HTTP 500. The
-    # assertion captures the same contract: the endpoint does NOT silently
-    # swallow or coerce a generic runtime failure into the soft-empty 200
-    # response that only ``EmptyIngestionError`` maps to.
-    with pytest.raises(RuntimeError, match="Qdrant unreachable"):
-        client.post("/ingest", json={"collection": "col", "hybrid": True})
+    # The endpoint must convert unexpected runtime failures into a
+    # structured HTTP 500 rather than propagating an unhandled exception
+    # or coercing them into the soft-empty 200 reserved for
+    # ``EmptyIngestionError``.
+    response = client.post("/ingest", json={"collection": "col", "hybrid": True})
+    assert response.status_code == 500
+    assert "Qdrant unreachable" in response.json()["detail"]
 
 
 def test_ingest_upload_empty_emits_warning_and_completes(
