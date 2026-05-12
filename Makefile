@@ -1,6 +1,6 @@
 # Build-host helpers for docint.
 
-.PHONY: volumes bundle-cpu bundle-cuda build-cpu build-cuda no-build-cpu no-build-cuda up-cpu up-cuda stop-cpu stop-cuda
+.PHONY: volumes bundle-cpu bundle-cuda build-cpu build-cuda up-cpu up-cuda stop-cpu stop-cuda logs-cpu logs-cuda
 
 # Versioned image tag.
 # On production: read from .docint-version written by bundle_images.sh.
@@ -37,20 +37,12 @@ build-cuda:
 	docker compose --profile cuda pull --ignore-buildable
 
 # Run the CPU profile (backend-cpu, frontend-cpu, qdrant-cpu) without building.
-no-build-cpu:
+up-cpu:
 	DOCKER_BUILDKIT=1 docker compose --profile cpu up --no-build
 
 # Run the CUDA profile (backend-cuda, frontend-cuda, qdrant-cuda) without building.
-no-build-cuda:
-	DOCKER_BUILDKIT=1 docker compose --profile cuda up --no-build
-
-# Build and run the CPU profile (backend-cpu, frontend-cpu, qdrant-cpu).
-up-cpu:
-	DOCKER_BUILDKIT=1 docker compose --profile cpu up
-
-# Build and run the CUDA profile (backend-cuda, frontend-cuda, qdrant-cuda).
 up-cuda:
-	DOCKER_BUILDKIT=1 docker compose --profile cuda up
+	DOCKER_BUILDKIT=1 docker compose --profile cuda up --no-build
 
 # Stop containers for the CPU profile.
 stop-cpu:
@@ -59,3 +51,11 @@ stop-cpu:
 # Stop containers for the CUDA profile.
 stop-cuda:
 	docker compose --profile cuda stop
+
+# Tail combined logs from both services in the CPU profile.
+logs-cpu:
+	docker compose --profile cpu logs -f --tail=100
+
+# Tail combined logs from both services in the CUDA profile.
+logs-cuda:
+	docker compose --profile cuda logs -f --tail=100
