@@ -1,11 +1,15 @@
 # Build-host helpers for docint.
 
-.PHONY: volumes bundle bundle-cuda build build-cuda up up-cuda stop
+.PHONY: network volumes bundle bundle-cuda build build-cuda up up-cuda stop
 
 # Versioned image tag: YYYY-MM-DD-<short-sha>. Override by exporting
 # DOCINT_VERSION before invoking make. Mirrors scripts/bundle_images.sh.
 DOCINT_VERSION ?= $(shell date +%Y-%m-%d)-$(shell git rev-parse --short HEAD)
 export DOCINT_VERSION
+
+# Create the external Docker network (one-time per host; idempotent)
+network:
+	DOCKER_BUILDKIT=1 docker network create inference-net
 
 # Create the external Docker volumes (one-time per host; idempotent).
 volumes:
