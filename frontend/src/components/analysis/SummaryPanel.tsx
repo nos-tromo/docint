@@ -2,6 +2,7 @@ import { useReducer } from 'react'
 import { streamSummary } from '@/api/analysis'
 import { Citation } from '@/components/chat/Citation'
 import { ValidationBanner } from '@/components/chat/ValidationBanner'
+import { CoverageBanner } from './CoverageBanner'
 import type { SummaryResponse } from '@/api/types'
 
 interface State {
@@ -80,11 +81,7 @@ export function SummaryPanel() {
       )}
       {state.meta && <ValidationBanner v={state.meta} />}
       {state.meta?.summary_diagnostics && (
-        <div className="text-xs text-muted-foreground">
-          Coverage {state.meta.summary_diagnostics.covered_documents}/
-          {state.meta.summary_diagnostics.total_documents} · ratio{' '}
-          {(state.meta.summary_diagnostics.coverage_ratio * 100).toFixed(0)}%
-        </div>
+        <CoverageBanner d={state.meta.summary_diagnostics} />
       )}
       {state.meta?.sources && state.meta.sources.length > 0 && (
         <div className="space-y-2">
