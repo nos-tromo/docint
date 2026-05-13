@@ -60,6 +60,7 @@
 **/env/
 **/legacy/
 **/lib/
+!frontend/src/lib/
 **/logs/
 **/models/
 **/output/
