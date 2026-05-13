@@ -110,6 +110,47 @@ def _resolve_data_dir() -> Path:
     return load_path_env().data
 
 
+def _require_active_collection() -> str:
+    """Return the active collection name, asserting it still exists in Qdrant.
+
+    Guards against two desync modes between the API singleton and Qdrant:
+
+    * The singleton has no active collection (typical first-request state) —
+      returns HTTP 400 so the UI can prompt the user to select one.
+    * The singleton's active collection has been deleted out-of-band (e.g.,
+      Qdrant volume reset, or a stale ``rag.qdrant_collection`` from before
+      ``delete_collection`` started clearing the singleton) — returns HTTP
+      404 with a clear message instead of letting the next query leak
+      Qdrant's raw "Collection X doesn't exist" 404 to the user.
+
+    Returns:
+        str: The active collection name (already validated).
+
+    Raises:
+        HTTPException: 400 if no collection is selected, 404 if the active
+            collection no longer exists in Qdrant.
+    """
+    name = rag.qdrant_collection
+    if not name:
+        raise HTTPException(status_code=400, detail="No collection selected")
+    if name not in rag.list_collections():
+        logger.warning(
+            "Active collection '{}' is missing from Qdrant; resetting singleton.",
+            name,
+        )
+        rag.qdrant_collection = ""
+        rag.index = None
+        rag.query_engine = None
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Collection '{name}' no longer exists. Please select "
+                "another collection."
+            ),
+        )
+    return name
+
+
 def _resolve_qdrant_src_dir() -> Path:
     """Return the configured Qdrant sources directory (separate from collections).
 
@@ -423,20 +464,24 @@ def collections_select(payload: SelectCollectionIn) -> dict[str, bool | str]:
         dict[str, bool | str]: A dictionary indicating success and the selected collection name.
 
     Raises:
-        HTTPException: If the collection name is missing or an error occurs while selecting the collection.
-        HTTPException: If an error occurs while selecting the collection.
+        HTTPException: 400 if the collection name is missing, 404 if the
+            collection does not exist, 500 for any other backend failure.
     """
+    name = payload.name.strip()
+    if not name:
+        logger.error("HTTPException: Collection name required")
+        raise HTTPException(status_code=400, detail="Collection name required")
     try:
-        name = payload.name.strip()
-        if not name:
-            logger.error("HTTPException: Collection name required")
-            raise HTTPException(status_code=400, detail="Collection name required")
         rag.select_collection(name)
-
-        return {"ok": True, "name": name}
-    except HTTPException as e:
-        logger.error("HTTPException: Error selecting collection: {}", e)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        logger.error("Collection '{}' could not be selected: {}", name, e)
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("Unexpected error selecting collection '{}': {}", name, e)
         raise HTTPException(status_code=500, detail=str(e))
+    return {"ok": True, "name": name}
 
 
 @app.delete("/collections/{name}", tags=["Collections"])
@@ -474,9 +519,7 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
         HTTPException: If an error occurs while processing the query.
     """
     try:
-        if not rag.qdrant_collection:
-            logger.error("HTTPException: No collection selected")
-            raise HTTPException(status_code=400, detail="No collection selected")
+        _require_active_collection()
 
         metadata_filters = build_metadata_filters(payload.metadata_filters)
         vector_store_kwargs = {}
@@ -609,9 +652,11 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
             "entity_match_groups": entity_match_groups,
             **validation,
         }
-    except HTTPException as e:
-        logger.error("HTTPException: Error processing query: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Unexpected error processing query: {}", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/stream_query", tags=["Query"])
@@ -627,8 +672,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
     Raises:
         HTTPException: If an error occurs while processing the streaming query.
     """
-    if not rag.qdrant_collection:
-        raise HTTPException(status_code=400, detail="No collection selected")
+    _require_active_collection()
 
     metadata_filters = build_metadata_filters(payload.metadata_filters)
     vector_store_kwargs = {}
@@ -1178,52 +1222,50 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
             no parseable content) return HTTP 200 with ``empty=true`` instead of an error.
 
     Raises:
-        HTTPException: If the collection name is missing or data directory does not exist.
-        HTTPException: If an unrecoverable error occurs during ingestion.
+        HTTPException: 400 if the collection name is missing or the data
+            directory does not exist; 500 for any unexpected backend error.
     """
+    name = payload.collection.strip()
+    if not name:
+        logger.error("HTTPException: Collection name required")
+        raise HTTPException(status_code=400, detail="Collection name required")
+
+    data_dir = _resolve_data_dir()
+    if not data_dir.is_dir():
+        logger.error("HTTPException: Data directory does not exist: {}", data_dir)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Data directory does not exist: {data_dir}",
+        )
 
     try:
-        name = payload.collection.strip()
-        if not name:
-            logger.error("HTTPException: Collection name required")
-            raise HTTPException(status_code=400, detail="Collection name required")
-
-        data_dir = _resolve_data_dir()
-        if not data_dir.is_dir():
-            logger.error("HTTPException: Data directory does not exist: {}", data_dir)
-            raise HTTPException(
-                status_code=400,
-                detail=f"Data directory does not exist: {data_dir}",
-            )
-
-        try:
-            ingest_module.ingest_docs(
-                name,
-                data_dir,
-                hybrid=payload.hybrid if payload.hybrid is not None else True,
-            )
-        except EmptyIngestionError as exc:
-            logger.warning(
-                "Ingestion produced no content for '{}'; returning empty response.",
-                exc.collection_name,
-            )
-            return {
-                "ok": True,
-                "collection": name,
-                "data_dir": str(data_dir),
-                "hybrid": payload.hybrid if payload.hybrid is not None else True,
-                "empty": True,
-            }
-
+        ingest_module.ingest_docs(
+            name,
+            data_dir,
+            hybrid=payload.hybrid if payload.hybrid is not None else True,
+        )
+    except EmptyIngestionError as exc:
+        logger.warning(
+            "Ingestion produced no content for '{}'; returning empty response.",
+            exc.collection_name,
+        )
         return {
             "ok": True,
             "collection": name,
             "data_dir": str(data_dir),
             "hybrid": payload.hybrid if payload.hybrid is not None else True,
+            "empty": True,
         }
-    except HTTPException as e:
-        logger.error("HTTPException: Error during ingestion: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        logger.error("Unexpected error during ingestion of '{}': {}", name, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return {
+        "ok": True,
+        "collection": name,
+        "data_dir": str(data_dir),
+        "hybrid": payload.hybrid if payload.hybrid is not None else True,
+    }
 
 
 @app.post("/agent/chat/stream", tags=["Agent"])

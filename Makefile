@@ -1,6 +1,6 @@
 # Build-host helpers for docint.
 
-.PHONY: volumes bundle-cpu bundle-cuda build-cpu build-cuda no-build-cpu no-build-cuda up-cpu up-cuda stop-cpu stop-cuda
+.PHONY: network volumes bundle bundle-cuda build build-cuda up up-cuda stop
 
 # Versioned image tag.
 # On production: read from .docint-version written by bundle_images.sh.
@@ -12,50 +12,42 @@ DOCINT_VERSION ?= $(shell \
       echo "$$(date +%Y-%m-%d)$${_s:+-$$_s}"; } )
 export DOCINT_VERSION
 
+# Create the external Docker network (one-time per host; idempotent)
+network:
+	DOCKER_BUILDKIT=1 docker network create inference-net
+
 # Create the external Docker volumes (one-time per host; idempotent).
 volumes:
 	./scripts/create_docker_volumes.sh
 
 # Build CPU stack and ship as versioned .tar.gz pair (built + pulled).
-bundle-cpu:
+bundle:
 	./scripts/bundle_images.sh cpu
 
 # Build CUDA stack and ship as versioned .tar.gz pair (built + pulled).
 bundle-cuda:
 	./scripts/bundle_images.sh cuda
 
-# Build the CPU profile (backend-cpu, frontend-cpu) and pull image-only
-# services that have no build context (e.g. qdrant-cpu).
-build-cpu:
+# Build the CPU profile (backend-cpu, frontend-cpu).
+build:
 	DOCKER_BUILDKIT=1 docker compose --profile cpu build
-	docker compose --profile cpu pull --ignore-buildable
 
-# Build the CUDA profile (backend-cuda, frontend-cuda) and pull image-only
-# services that have no build context (e.g. qdrant-cuda).
+# Build the CUDA profile (backend-cuda, frontend-cuda).
 build-cuda:
 	DOCKER_BUILDKIT=1 docker compose --profile cuda build
-	docker compose --profile cuda pull --ignore-buildable
-
-# Run the CPU profile (backend-cpu, frontend-cpu, qdrant-cpu) without building.
-no-build-cpu:
-	DOCKER_BUILDKIT=1 docker compose --profile cpu up --no-build
-
-# Run the CUDA profile (backend-cuda, frontend-cuda, qdrant-cuda) without building.
-no-build-cuda:
-	DOCKER_BUILDKIT=1 docker compose --profile cuda up --no-build
 
 # Build and run the CPU profile (backend-cpu, frontend-cpu, qdrant-cpu).
-up-cpu:
+up:
 	DOCKER_BUILDKIT=1 docker compose --profile cpu up
 
 # Build and run the CUDA profile (backend-cuda, frontend-cuda, qdrant-cuda).
 up-cuda:
 	DOCKER_BUILDKIT=1 docker compose --profile cuda up
 
-# Stop containers for the CPU profile.
-stop-cpu:
+# Stop the CPU profile containers.
+stop:
 	docker compose --profile cpu stop
 
-# Stop containers for the CUDA profile.
+# Stop the CUDA profile containers.
 stop-cuda:
 	docker compose --profile cuda stop

@@ -8,9 +8,55 @@ import requests
 import streamlit as st
 from loguru import logger
 
-from docint.utils.env_cfg import load_host_env
+from docint.utils.env_cfg import load_frontend_env, load_host_env
 
 BACKEND_HOST = load_host_env().backend_host
+COLLECTION_TIMEOUT = load_frontend_env().collection_timeout
+
+
+def _sync_backend_collection(target_col: str) -> bool:
+    """Tell the backend to activate ``target_col`` after a successful ingest.
+
+    The Streamlit sidebar only POSTs to ``/collections/select`` when the
+    dropdown value differs from ``st.session_state.selected_collection``.
+    Setting the session-state key directly on this page would skip that
+    POST, leaving the API's module-level ``RAG`` singleton on the previous
+    (or empty) collection — so any follow-up call from the Analysis or
+    Chat pages would fail with "No collection selected". This helper
+    performs the explicit handshake so the backend and the UI agree on
+    the active collection before we rerun.
+
+    Args:
+        target_col (str): Name of the freshly ingested collection.
+
+    Returns:
+        bool: ``True`` when the backend confirmed selection, ``False``
+        otherwise (caller should leave session state untouched).
+    """
+    try:
+        resp = requests.post(
+            f"{BACKEND_HOST}/collections/select",
+            json={"name": target_col},
+            timeout=COLLECTION_TIMEOUT,
+        )
+    except Exception as e:
+        logger.error("Backend error while selecting '{}': {}", target_col, e)
+        st.error(f"Backend error while activating '{target_col}': {e}")
+        return False
+
+    if resp.status_code == 200:
+        return True
+    logger.error(
+        "Failed to activate collection '{}' (HTTP {}): {}",
+        target_col,
+        resp.status_code,
+        resp.text,
+    )
+    st.error(
+        f"Ingestion succeeded, but the backend could not activate "
+        f"'{target_col}' (HTTP {resp.status_code}). Please select it manually."
+    )
+    return False
 
 
 def _normalize_file_status(raw: str | None) -> str:
@@ -505,8 +551,10 @@ def _run_ingestion(target_col: str, uploaded_files: list) -> None:
                     state="complete",
                     expanded=False,
                 )
-                if target_col:
+                if target_col and _sync_backend_collection(target_col):
                     st.session_state.selected_collection = target_col
+                    st.session_state.messages = []
+                    st.session_state.session_id = None
                     st.rerun()
             else:
                 status.update(label="Ingestion failed", state="error")
