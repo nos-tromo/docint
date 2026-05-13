@@ -38,7 +38,7 @@ from docint.utils.logger_cfg import init_logger
 
 init_logger()
 
-# Load allowed origins from environment or default to Streamlit's default ports
+# CORS allowlist for the Vite dev server during local development.
 allowed_origins = load_host_env().cors_allowed_origins.split(",")
 
 app = FastAPI(title="Document Intelligence")
