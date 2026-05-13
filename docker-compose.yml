@@ -78,51 +78,6 @@ services:
     profiles: ["cuda"]
 
   ##########################################################
-  # Frontend – CPU
-  ##########################################################
-  frontend-cpu:
-    image: docint-frontend-cpu:${DOCINT_VERSION:-latest}
-    build: &frontend-build
-      context: .
-      dockerfile: Dockerfile.frontend
-    ports: &frontend-ports
-      - ${DOCINT_HOST_PORT:-8501}:8501
-    environment:
-      <<: *no-proxy-env
-      BACKEND_HOST: http://backend:8000
-      BACKEND_PUBLIC_HOST: http://localhost:8000
-      LOG_PATH: /var/log/docint/frontend-cpu.log
-      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
-    env_file: *env-file
-    volumes: &frontend-volumes
-      - docint-logs:/var/log/docint
-    networks: &frontend-networks
-      docint-net:
-    depends_on:
-      - backend-cpu
-    profiles: ["cpu"]
-
-  ##########################################################
-  # Frontend – CUDA
-  ##########################################################
-  frontend-cuda:
-    image: docint-frontend-cuda:${DOCINT_VERSION:-latest}
-    build: *frontend-build
-    ports: *frontend-ports
-    environment:
-      <<: *no-proxy-env
-      BACKEND_HOST: http://backend:8000
-      BACKEND_PUBLIC_HOST: http://localhost:8000
-      LOG_PATH: /var/log/docint/frontend-cuda.log
-      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
-    env_file: *env-file
-    volumes: *frontend-volumes
-    networks: *frontend-networks
-    depends_on:
-      - backend-cuda
-    profiles: ["cuda"]
-
-  ##########################################################
   # Qdrant – CPU
   ##########################################################
   qdrant-cpu:

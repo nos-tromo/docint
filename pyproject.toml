@@ -41,7 +41,6 @@ dependencies = [
   "qdrant-client>=1.17.1",
   "requests>=2.33.1",
   "sqlalchemy>=2.0.49",
-  "streamlit>=1.56.0",
   # Capped below 5.0 because FlagEmbedding (via
   # llama-index-postprocessor-flag-embedding-reranker) still calls
   # ``PreTrainedTokenizerBase.prepare_for_model``, which was removed in
@@ -54,7 +53,6 @@ dependencies = [
   # tokenizer compat) ships upstream.
   "transformers>=4.44.2,<5.0",
   "uvicorn>=0.44.0",
-  "watchdog>=6.0.0",
 ]
 
 [project.urls]
@@ -87,13 +85,6 @@ dev = [
     "pytest>=9.0.3",
     "ruff==0.15.10",
 ]
-frontend = [
-    "loguru>=0.7.3",
-    "pandas>=3.0.2",
-    "python-dotenv>=1.2.2",
-    "requests>=2.33.1",
-    "streamlit>=1.56.0",
-]
 
 [build-system]
 requires = ["setuptools>=82.0.1", "wheel"]
@@ -110,7 +101,6 @@ conflicts = [
 ]
 
 [tool.uv.sources]
-docint = { workspace = true }
 torch = [
   { index = "pytorch-cu128", extra = "cuda" },
   { index = "pytorch-cpu", extra = "cpu" },
