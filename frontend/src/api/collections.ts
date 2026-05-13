@@ -21,7 +21,7 @@ export const getNerStats = (params: {
 }) => apiGet<NerStats>('/collections/ner/stats', params)
 
 export const getNer = (refresh?: boolean) =>
-  apiGet<{ entities: unknown[]; relations: unknown[] }>('/collections/ner', { refresh })
+  apiGet<{ sources: unknown[] }>('/collections/ner', { refresh })
 
 export const getHateSpeech = () =>
   apiGet<{ results: unknown[] }>('/collections/hate-speech')
