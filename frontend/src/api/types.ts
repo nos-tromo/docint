@@ -25,9 +25,9 @@ export interface Relation {
 }
 
 export interface ValidationFields {
-  validation_status?: 'ok' | 'warning' | 'failed' | string
-  validation_message?: string | null
-  validation_details?: Record<string, unknown> | null
+  validation_checked?: boolean
+  validation_mismatch?: boolean
+  validation_reason?: string | null
 }
 
 export interface ChatFinalEvent extends ValidationFields {
