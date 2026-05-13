@@ -463,7 +463,10 @@ class HostConfig:
 def load_host_env(
     default_backend_host: str = "http://localhost:8000",
     default_qdrant_host: str = "http://localhost:6333",
-    default_cors_origins: str = "http://localhost:8501,http://127.0.0.1:8501",
+    default_cors_origins: str = (
+        "http://localhost:8501,http://127.0.0.1:8501,"
+        "http://localhost:5173,http://127.0.0.1:5173"
+    ),
 ) -> HostConfig:
     """Loads host configuration from environment variables or defaults.
 
