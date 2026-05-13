@@ -1,6 +1,6 @@
 import { useEffect, useReducer, useRef } from 'react'
 import { useParams } from 'react-router-dom'
-import { streamAgentChat } from '@/api/chat'
+import { streamQuery } from '@/api/chat'
 import type { ChatFinalEvent } from '@/api/types'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSessionHistory } from '@/hooks/useSessions'
@@ -97,7 +97,7 @@ export function Chat() {
     const ac = new AbortController()
     abortRef.current = ac
     try {
-      for await (const ev of streamAgentChat(
+      for await (const ev of streamQuery(
         {
           question: message,
           session_id: currentSessionId ?? undefined,
