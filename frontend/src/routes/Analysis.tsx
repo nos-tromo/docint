@@ -1,6 +1,8 @@
 import { useState } from 'react'
-import { useNerStats } from '@/hooks/useNer'
+import { useHateSpeech, useNerStats } from '@/hooks/useNer'
 import { NerTable } from '@/components/analysis/NerTable'
+import { HateSpeechTable, type HateSpeechRow } from '@/components/analysis/HateSpeechTable'
+import { SummaryPanel } from '@/components/analysis/SummaryPanel'
 import { cn } from '@/lib/cn'
 
 const TABS = ['NER', 'Hate speech', 'Summary'] as const
@@ -9,6 +11,7 @@ type Tab = (typeof TABS)[number]
 export function Analysis() {
   const [tab, setTab] = useState<Tab>('NER')
   const stats = useNerStats({ top_k: 100, min_mentions: 1, include_relations: true })
+  const hate = useHateSpeech()
 
   return (
     <div className="p-8 space-y-4">
@@ -29,7 +32,10 @@ export function Analysis() {
         ))}
       </nav>
       {tab === 'NER' && <NerTable rows={stats.data?.top_entities ?? []} />}
-      {tab !== 'NER' && <div className="text-sm text-muted-foreground">{tab} — wired in next task.</div>}
+      {tab === 'Hate speech' && (
+        <HateSpeechTable rows={(hate.data?.results ?? []) as HateSpeechRow[]} />
+      )}
+      {tab === 'Summary' && <SummaryPanel />}
     </div>
   )
 }
