@@ -2,6 +2,7 @@ import type { ChatFinalEvent, Source } from '@/api/types'
 import { Citation } from './Citation'
 import { ValidationBanner } from './ValidationBanner'
 import { GraphDebugPanel } from './GraphDebugPanel'
+import { EntityCandidatesPanel } from './EntityCandidatesPanel'
 
 export interface ChatTurnData {
   user: string
@@ -33,6 +34,7 @@ export function ChatTurn({ turn }: { turn: ChatTurnData }) {
           </div>
         )}
         {!!turn.meta?.graph_debug && <GraphDebugPanel data={turn.meta.graph_debug} />}
+        {turn.meta && <EntityCandidatesPanel meta={turn.meta} />}
       </div>
     </article>
   )
