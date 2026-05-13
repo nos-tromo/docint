@@ -1563,6 +1563,19 @@ async def ingest_upload(
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+# --- Frontend SPA ---
+from pathlib import Path as _Path  # noqa: E402  (intentional late import)
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+
+_FRONTEND_DIST = _Path(__file__).resolve().parents[2] / "frontend" / "dist"
+if _FRONTEND_DIST.is_dir():
+    app.mount(
+        "/",
+        StaticFiles(directory=_FRONTEND_DIST, html=True),
+        name="frontend",
+    )
+
+
 @app.get("/sources/preview", tags=["Sources"])
 def preview_source(collection: str, file_hash: str) -> FileResponse:
     """Serve a previously ingested source file for preview purposes.
