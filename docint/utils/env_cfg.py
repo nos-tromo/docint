@@ -492,6 +492,34 @@ def load_host_env(
 
 
 @dataclass(frozen=True)
+class ServeConfig:
+    """Bind address for the docint console script."""
+
+    host: str
+    port: int
+
+
+def load_serve_config(
+    *,
+    default_host: str = "0.0.0.0",
+    default_port: int = 8000,
+) -> ServeConfig:
+    """Read DOCINT_HOST / DOCINT_PORT for the uvicorn entry point.
+
+    Args:
+        default_host (str): Default bind host address.
+        default_port (int): Default bind port.
+
+    Returns:
+        ServeConfig: Dataclass containing bind host and port.
+    """
+    return ServeConfig(
+        host=os.getenv("DOCINT_HOST", default_host),
+        port=int(os.getenv("DOCINT_PORT", str(default_port))),
+    )
+
+
+@dataclass(frozen=True)
 class ImageIngestionConfig:
     """Configuration for image ingestion and image-vector indexing."""
 
