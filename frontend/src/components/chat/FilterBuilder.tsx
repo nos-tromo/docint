@@ -1,6 +1,6 @@
 import { useChatFiltersStore } from '@/stores/chatFilters'
 
-const OPERATORS = ['equals', 'not_equals', 'contains', 'gte', 'lte']
+const OPERATORS = ['eq', 'neq', 'contains', 'gte', 'lte', 'in']
 
 export function FilterBuilder() {
   const s = useChatFiltersStore()

@@ -55,7 +55,7 @@ export const useChatFiltersStore = create<ChatFiltersState>((set, get) => ({
     set((s) => ({
       customRules: [
         ...s.customRules,
-        { id: crypto.randomUUID(), field: '', operator: 'equals', value: '' }
+        { id: crypto.randomUUID(), field: '', operator: 'eq', value: '' }
       ]
     })),
   updateRule: (id, patch) =>
@@ -69,9 +69,9 @@ export const useChatFiltersStore = create<ChatFiltersState>((set, get) => ({
     const s = get()
     if (!s.filterEnabled) return []
     const out: MetadataFilter[] = []
-    if (s.mimePattern) out.push({ field: 'mimetype', operator: 'matches', value: s.mimePattern })
-    if (s.dateFrom) out.push({ field: 'date', operator: 'gte', value: s.dateFrom })
-    if (s.dateTo) out.push({ field: 'date', operator: 'lte', value: s.dateTo })
+    if (s.mimePattern) out.push({ field: 'mimetype', operator: 'mime_match', value: s.mimePattern })
+    if (s.dateFrom) out.push({ field: 'date', operator: 'date_gte', value: s.dateFrom })
+    if (s.dateTo) out.push({ field: 'date', operator: 'date_lte', value: s.dateTo })
     if (s.hateSpeechOnly) out.push({ field: 'hate_speech_flagged', operator: 'eq', value: true })
     for (const r of s.customRules) {
       if (r.field && r.operator) out.push({ field: r.field, operator: r.operator, value: r.value })
