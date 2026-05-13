@@ -1563,19 +1563,6 @@ async def ingest_upload(
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-# --- Frontend SPA ---
-from pathlib import Path as _Path  # noqa: E402  (intentional late import)
-from fastapi.staticfiles import StaticFiles  # noqa: E402
-
-_FRONTEND_DIST = _Path(__file__).resolve().parents[2] / "frontend" / "dist"
-if _FRONTEND_DIST.is_dir():
-    app.mount(
-        "/",
-        StaticFiles(directory=_FRONTEND_DIST, html=True),
-        name="frontend",
-    )
-
-
 @app.get("/sources/preview", tags=["Sources"])
 def preview_source(collection: str, file_hash: str) -> FileResponse:
     """Serve a previously ingested source file for preview purposes.
@@ -1658,3 +1645,31 @@ def preview_source(collection: str, file_hash: str) -> FileResponse:
             return FileResponse(src_path)
 
     raise HTTPException(status_code=404, detail="File not found")
+
+
+# --- Frontend SPA ---
+# Mounted last so API routes win. Falls back to index.html for unknown
+# paths so client-side routes (e.g., /chat/<id>) survive a hard refresh.
+from pathlib import Path as _Path  # noqa: E402  (intentional late import)
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+from starlette.exceptions import HTTPException as _StarletteHTTPException  # noqa: E402
+
+_FRONTEND_DIST = _Path(__file__).resolve().parents[2] / "frontend" / "dist"
+
+
+class _SpaStaticFiles(StaticFiles):
+    async def get_response(self, path, scope):  # type: ignore[override]
+        try:
+            return await super().get_response(path, scope)
+        except _StarletteHTTPException as exc:
+            if exc.status_code == 404:
+                return await super().get_response("index.html", scope)
+            raise
+
+
+if _FRONTEND_DIST.is_dir():
+    app.mount(
+        "/",
+        _SpaStaticFiles(directory=_FRONTEND_DIST, html=True),
+        name="frontend",
+    )
