@@ -61,7 +61,7 @@ dependencies = [
 Repository = "https://github.com/nos-tromo/docint.git"
 
 [project.scripts]
-docint = "docint.app:run"
+docint = "docint.cli.serve:main"
 ingest = "docint.cli.ingest:main"
 query = "docint.cli.query:main"
 query-eval = "docint.cli.eval:main"
