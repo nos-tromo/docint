@@ -20,8 +20,11 @@ uv run pre-commit run --all-files
 # Start backend (needs Qdrant at localhost:6333 + an inference endpoint)
 uv run uvicorn docint.core.api:app --reload
 
-# Start Streamlit UI
-uv run docint
+# Start frontend (Vite dev server)
+cd frontend && pnpm install
+cd frontend && pnpm dev
+cd frontend && pnpm test
+cd frontend && pnpm build
 
 # CLI tools
 uv run ingest --help
@@ -34,11 +37,11 @@ docker compose --profile cpu-ollama up --build
 
 ## Architecture
 
-Document Intelligence is a RAG stack: FastAPI backend + Streamlit UI + Qdrant vector DB + pluggable inference (Ollama, OpenAI-compatible APIs, or external vLLM).
+Document Intelligence is a RAG stack: FastAPI backend + React SPA + Qdrant vector DB + pluggable inference (Ollama, OpenAI-compatible APIs, or external vLLM).
 
 **Request flow:**
 ```
-Streamlit UI (docint/ui/) → FastAPI (docint/core/api.py) → AgentOrchestrator (docint/agents/)
+React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (docint/agents/)
     → understanding → clarification → retrieval → generation
     → RAG engine (docint/core/rag.py) ↔ Qdrant vector store
 ```
@@ -65,5 +68,5 @@ Streamlit UI (docint/ui/) → FastAPI (docint/core/api.py) → AgentOrchestrator
 - **Google-style docstrings** for new/modified functions and classes.
 - **Pre-commit is mandatory**: always run `uv run pre-commit run --all-files` before finishing work (ruff check, ruff format, mypy).
 - Prefer incremental, focused commits. When changes affect both API and UI, update `README.md`.
-- Streamlit UI pages live in `docint/ui/`; keep business logic in the API/agents layer, not in UI code.
+- Frontend lives in `frontend/`. Keep business logic in the API/agents layer. Frontend dev: pnpm; tests: Vitest.
 - **Hidden collection suffixes**: `docint/core/rag.py` defines `HIDDEN_COLLECTION_SUFFIXES` (currently `("_images", "_dockv")`). `RAG.list_collections()` filters these out, which transitively hides them from `/collections/list` and makes `select_collection()` reject them. Extend the tuple rather than adding filters at the UI layer.

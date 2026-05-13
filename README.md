@@ -4,7 +4,7 @@ Document Intelligence is a document RAG stack for ingestion, retrieval,
 and chat. It ships with:
 
 - a FastAPI backend
-- a Streamlit UI
+- a React SPA served by the FastAPI backend
 - Qdrant for storage and retrieval
 - pluggable inference via any OpenAI-compatible API or an external routed vLLM service
 
@@ -45,8 +45,7 @@ and chat. It ships with:
 
 5. Open the app:
 
-   - UI: <http://localhost:8501>
-   - API: <http://localhost:8000>
+   - App: <http://localhost:8000>
    - Qdrant: <http://localhost:6333>
 
 ### Docker Notes
@@ -115,10 +114,12 @@ Docker.
    uv run uvicorn docint.core.api:app --reload
    ```
 
-6. Start the UI in another terminal:
+6. Start the frontend in another terminal (optional — for live development):
 
    ```bash
-   uv run docint
+   cd frontend
+   pnpm install
+   pnpm dev      # → http://localhost:5173 (proxies /api to :8000)
    ```
 
 ## Common Commands
@@ -216,6 +217,6 @@ manual. It complements this README with topic-by-topic deep dives:
 
 - `docint/core`: backend, ingestion, retrieval, storage, session state
 - `docint/agents`: orchestration and tool-using agent flow
-- `docint/ui`: Streamlit pages and components
+- `frontend/`: React SPA (Vite + TypeScript)
 - `docs`: in-repo documentation
 - `tests`: unit tests
