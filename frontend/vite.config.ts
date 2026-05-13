@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { fileURLToPath } from 'node:url'
@@ -24,5 +25,10 @@ export default defineConfig({
       '/ingest': 'http://localhost:8000',
       '/agent': 'http://localhost:8000'
     }
+  },
+  test: {
+    globals: true,
+    environment: 'happy-dom',
+    setupFiles: ['./src/test/setup.ts']
   }
 })
