@@ -1,8 +1,8 @@
 """Pure data-shaping helpers for NER aggregation.
 
-These functions were extracted from the Streamlit UI layer to preserve their
-test coverage after the UI was replaced by the React SPA.  They contain no
-Streamlit dependencies and are safe to call from any context.
+These functions were extracted from the legacy UI layer to preserve their
+test coverage. They contain no UI dependencies and are safe to call from
+any context.
 """
 
 from __future__ import annotations

@@ -1,10 +1,9 @@
 """Typed ingestion events for richer SSE progress and observability.
 
 Phase 5 of the streaming ingestion generalisation. Today the ingestion
-pipeline only fires a single string-shaped progress callback. The
-Streamlit UI cannot render per-stage progress (e.g. "embed batch 3/12
-of file foo.pdf") because the existing callback is opaque
-``Callable[[str], None]``.
+pipeline only fires a single string-shaped progress callback. Richer
+per-stage progress (e.g. "embed batch 3/12 of file foo.pdf") is not
+surfaced because the existing callback is opaque ``Callable[[str], None]``.
 
 This module introduces:
 

@@ -738,7 +738,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
         from :data:`LLM_VISIBLE_METADATA_KEYS` keeps the LLM view
         minimal while leaving the original ``node.metadata`` dict intact
         for every other consumer (citations, analysis section,
-        Streamlit sources panel).
+        frontend sources panel).
 
         The clone is necessary because the docstore-loaded parent may be
         cached across queries; mutating its ``excluded_llm_metadata_keys``

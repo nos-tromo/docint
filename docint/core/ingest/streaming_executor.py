@@ -20,7 +20,7 @@ Three invariants:
 
 Threading is preferred over asyncio because: (a) the sync ingestion
 path is canonical and converting to async would cascade through the
-CLI / Streamlit UI / tests; (b) embedder calls are HTTP-bound and
+CLI, frontend, and tests; (b) embedder calls are HTTP-bound and
 release the GIL inside ``httpx``; (c) NER inference releases the GIL
 via PyTorch C++.
 """
