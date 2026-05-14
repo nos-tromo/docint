@@ -19,8 +19,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend.cpu
-    ports: &backend-ports
-      - 8000:8000
+    expose:
+      - "8000"
     environment:
       <<: *no-proxy-env
       LOG_PATH: /var/log/docint/backend-cpu.log
@@ -44,6 +44,7 @@ services:
           - docint-backend
     depends_on:
       - qdrant-cpu
+    restart: unless-stopped
     profiles: ["cpu"]
 
   ##########################################################
@@ -54,7 +55,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend.cuda
-    ports: *backend-ports
+    expose:
+      - "8000"
     environment:
       <<: *no-proxy-env
       LOG_PATH: /var/log/docint/backend-cuda.log
@@ -68,6 +70,7 @@ services:
     networks: *backend-networks
     depends_on:
       - qdrant-cuda
+    restart: unless-stopped
     gpus: all
     deploy:
       resources:
@@ -75,6 +78,36 @@ services:
           devices:
             - driver: nvidia
               capabilities: [cuda]
+    profiles: ["cuda"]
+
+  ##########################################################
+  # Frontend SPA – nginx serves the React build and reverse-
+  # proxies API routes to the backend on the docint-net network.
+  ##########################################################
+  frontend-cpu:
+    image: docint-frontend:${DOCINT_VERSION:-latest}
+    build: &frontend-build
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports: &frontend-ports
+      - "${FRONTEND_PORT:-8080}:80"
+    networks: &frontend-networks
+      docint-net:
+        aliases:
+          - frontend
+    depends_on:
+      - backend-cpu
+    restart: unless-stopped
+    profiles: ["cpu"]
+
+  frontend-cuda:
+    image: docint-frontend:${DOCINT_VERSION:-latest}
+    build: *frontend-build
+    ports: *frontend-ports
+    networks: *frontend-networks
+    depends_on:
+      - backend-cuda
+    restart: unless-stopped
     profiles: ["cuda"]
 
   ##########################################################

@@ -4,7 +4,8 @@ Document Intelligence is a document RAG stack for ingestion, retrieval,
 and chat. It ships with:
 
 - a FastAPI backend
-- a React SPA served by the FastAPI backend
+- a React SPA served by an nginx sidecar that reverse-proxies API
+  requests to the backend on the internal Docker network
 - Qdrant for storage and retrieval
 - pluggable inference via any OpenAI-compatible API or an external routed vLLM service
 
@@ -45,8 +46,12 @@ and chat. It ships with:
 
 5. Open the app:
 
-   - App: <http://localhost:8000>
+   - App: <http://localhost:8080> (override with `FRONTEND_PORT` in `.env`)
    - Qdrant: <http://localhost:6333>
+
+   The backend is reachable only via the nginx sidecar — it is no longer
+   published on the host. Use `docker compose exec backend-cpu …` (or
+   `backend-cuda`) to interact with it directly.
 
 ### Docker Notes
 
