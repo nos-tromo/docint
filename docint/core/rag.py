@@ -5037,6 +5037,47 @@ class RAG:
             data_dir, self.qdrant_collection, self.qdrant_src_dir
         )
 
+    def create_collection_if_missing(self) -> None:
+        """Materialize the target Qdrant collection upfront if it does not yet exist.
+
+        Ensures the active ``qdrant_collection`` is visible in Qdrant as soon
+        as an ingest request begins, so the user can select it from the UI
+        even when subsequent embedding batches fail to persist any nodes.
+
+        When ``openai_dimensions`` is configured the vector size is taken
+        from there; otherwise a single embed probe determines it. Probe
+        failures (e.g., the embedding endpoint is unreachable) propagate
+        unchanged so the API layer can surface a meaningful error rather
+        than masking it as a silent zero-node ingest.
+
+        Returns:
+            None.
+
+        Raises:
+            ValueError: If ``qdrant_collection`` is unset.
+        """
+        if not self.qdrant_collection:
+            raise ValueError("qdrant_collection must be set to create a collection")
+        if qdrant_collection_exists(self.qdrant_client, self.qdrant_collection):
+            return
+
+        if self.openai_dimensions is not None:
+            vector_size = int(self.openai_dimensions)
+        else:
+            probe_vector = self.embed_model.get_text_embedding("ping")
+            vector_size = len(probe_vector)
+
+        vector_store = self._vector_store()
+        vector_store._create_collection(
+            collection_name=self.qdrant_collection,
+            vector_size=vector_size,
+        )
+        logger.info(
+            "Pre-created Qdrant collection '{}' (vector_size={}).",
+            self.qdrant_collection,
+            vector_size,
+        )
+
     def _finalize_empty_ingestion(
         self,
         collection: str,
@@ -5128,6 +5169,12 @@ class RAG:
                 target collection did not previously exist. Triggers cleanup of
                 the orphan SQLite KV files; uploaded source files are kept.
         """
+        # Make the target Qdrant collection visible to the user before any
+        # batch work begins, so it remains selectable even if every embedding
+        # batch later fails. A probe failure here surfaces the embedding
+        # outage immediately instead of masking it as a zero-node "success".
+        self.create_collection_if_missing()
+
         prepared_dir = self._prepare_sources_dir(
             Path(data_dir) if isinstance(data_dir, str) else data_dir
         )
@@ -5376,6 +5423,10 @@ class RAG:
                 target collection did not previously exist. Triggers cleanup of
                 the orphan SQLite KV files; uploaded source files are kept.
         """
+        # See ingest_docs: pre-create the Qdrant collection so it stays
+        # selectable in the UI even when every embedding batch fails.
+        self.create_collection_if_missing()
+
         prepared_dir = self._prepare_sources_dir(
             Path(data_dir) if isinstance(data_dir, str) else data_dir
         )

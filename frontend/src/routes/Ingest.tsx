@@ -63,6 +63,11 @@ export function Ingest() {
     try {
       for await (const ev of streamIngestUpload(state.collection, state.files, state.hybrid)) {
         dispatch({ type: 'event', v: ev as IngestEvent })
+        if (ev.event === 'error') {
+          const data = ev.data as Record<string, unknown>
+          setError(String(data.message ?? 'Ingestion failed'))
+          continue
+        }
         if (ev.event === 'ingestion_complete') {
           await selectMutation.mutateAsync(state.collection)
           setSelected(state.collection)

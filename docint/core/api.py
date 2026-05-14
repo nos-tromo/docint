@@ -1555,9 +1555,14 @@ async def ingest_upload(
             )
         except Exception as exc:  # pragma: no cover - streamed errors are logged
             logger.error("Error during streamed ingestion: {}", exc)
+            # Include the exception class + message so the user can tell at a
+            # glance whether the failure was, e.g., an embedding-endpoint
+            # outage versus a Qdrant connectivity issue versus a parse error.
             yield _format_sse(
                 "error",
-                {"message": "Ingestion failed"},
+                {
+                    "message": f"Ingestion failed: {type(exc).__name__}: {exc}",
+                },
             )
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
