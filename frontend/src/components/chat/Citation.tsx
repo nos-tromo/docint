@@ -24,7 +24,7 @@ export function Citation({ source }: { source: Source }) {
               {source.text}
             </pre>
           )}
-          {collection && (
+          {collection && source.file_hash && (
             <a
               href={sourcePreviewUrl(collection, source.file_hash)}
               target="_blank"

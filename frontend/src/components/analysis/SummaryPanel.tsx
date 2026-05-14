@@ -97,8 +97,11 @@ export function SummaryPanel() {
       {state.meta?.sources && state.meta.sources.length > 0 && (
         <div className="space-y-2">
           <div className="text-xs uppercase text-muted-foreground">Sources</div>
-          {state.meta.sources.map((s) => (
-            <Citation key={s.id} source={s} />
+          {state.meta.sources.map((s, i) => (
+            <Citation
+              key={s.id ?? `${s.filename}-${s.page ?? ''}-${s.row ?? ''}-${i}`}
+              source={s}
+            />
           ))}
         </div>
       )}
