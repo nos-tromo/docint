@@ -963,6 +963,106 @@ def test_build_gliner_ner_extractor_reuses_loaded_runtime_across_calls(
     assert load_calls == [("urchade/gliner_small-v2.1", False)]
 
 
+def test_build_gliner_ner_extractor_clamps_tokenizer_model_max_length(
+    monkeypatch,
+) -> None:
+    """Regression: GLiNER's HF tokenizer ships with ``model_max_length``
+    ~10**30 (``VERY_LARGE_INTEGER``), so its internal
+    ``transformer_tokenizer(..., truncation=True)`` calls are silently
+    a no-op. Long inputs then go through DeBERTa-large unbounded and
+    blow up CPU activation memory enough to OOM the container during
+    table-CSV ingests. The runtime builder must clamp the tokenizer
+    to the model's actual ``config.max_len`` so the existing truncation
+    flag actually enforces the architectural cap.
+    """
+
+    class _HFLikeTokenizer:
+        model_max_length = 10**30
+
+        def encode(self, text: str, *, add_special_tokens: bool = False) -> list[str]:
+            del add_special_tokens
+            return text.split()
+
+    captured: dict[str, Any] = {}
+
+    class FakeModel:
+        def __init__(self) -> None:
+            config = SimpleNamespace(max_len=768)
+            tokenizer = _HFLikeTokenizer()
+            captured["tokenizer"] = tokenizer
+            self.config = config
+            self.data_processor = SimpleNamespace(
+                transformer_tokenizer=tokenizer,
+                words_splitter=FakeWordsSplitter(),
+            )
+
+        def to(self, _device: str) -> "FakeModel":
+            return self
+
+        def predict_entities(
+            self,
+            text: str,
+            labels: list[str],
+            *,
+            threshold: float,
+        ) -> list[dict[str, object]]:
+            del text, labels, threshold
+            return []
+
+    monkeypatch.setattr(
+        ner_extractor_module,
+        "load_model_env",
+        lambda: SimpleNamespace(ner_model="gliner-community/gliner_large-v2.5"),
+    )
+    monkeypatch.setattr(
+        ner_extractor_module,
+        "load_path_env",
+        lambda: SimpleNamespace(hf_hub_cache="/tmp"),
+    )
+    monkeypatch.setattr(
+        ner_extractor_module,
+        "resolve_hf_cache_path",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    monkeypatch.setattr(
+        ner_extractor_module,
+        "_get_gliner_class",
+        lambda: SimpleNamespace(from_pretrained=lambda *_a, **_kw: FakeModel()),
+    )
+    monkeypatch.setattr(ner_extractor_module.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(
+        ner_extractor_module.torch.backends.mps, "is_available", lambda: False
+    )
+
+    ner_extractor_module.build_gliner_ner_extractor()
+
+    # 768 (config.max_len) is the post-clamp value: max_tokens + reserve = 766 + 2.
+    assert captured["tokenizer"].model_max_length == 768
+
+
+def test_clamp_gliner_tokenizer_max_length_leaves_safe_caps_alone() -> None:
+    """A tokenizer already clamped to a sane value must not be widened."""
+
+    class _AlreadySafeTokenizer:
+        model_max_length = 256
+
+    tokenizer = _AlreadySafeTokenizer()
+    ner_extractor_module._clamp_gliner_tokenizer_max_length(tokenizer, max_tokens=766)
+    assert tokenizer.model_max_length == 256
+
+
+def test_clamp_gliner_tokenizer_max_length_tolerates_missing_attribute() -> None:
+    """A tokenizer without ``model_max_length`` must not raise."""
+
+    class _BareTokenizer:
+        pass
+
+    ner_extractor_module._clamp_gliner_tokenizer_max_length(
+        _BareTokenizer(), max_tokens=766
+    )
+
+
 def test_build_gliner_ner_extractor_fails_fast_when_offline_model_missing(
     tmp_path: Path,
     monkeypatch,

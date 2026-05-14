@@ -262,15 +262,72 @@ def _get_or_load_gliner_runtime(
             model = model.to(target_device)
             logger.info("GLiNER moved to {}", target_device)
 
+        tokenizer = _get_gliner_tokenizer(model)
+        max_tokens = _resolve_gliner_context_window(model)
+        _clamp_gliner_tokenizer_max_length(tokenizer, max_tokens)
+
         runtime = _GLiNERRuntime(
             model=model,
-            max_tokens=_resolve_gliner_context_window(model),
-            tokenizer=_get_gliner_tokenizer(model),
+            max_tokens=max_tokens,
+            tokenizer=tokenizer,
             words_splitter=_get_gliner_words_splitter(model),
             lock=threading.Lock(),
         )
         _GLINER_RUNTIME_CACHE[cache_key] = runtime
         return runtime
+
+
+def _clamp_gliner_tokenizer_max_length(tokenizer: Any | None, max_tokens: int) -> None:
+    """Bound the GLiNER backbone tokenizer's ``model_max_length`` to the model.
+
+    Hugging Face DeBERTa tokenizers ship with ``model_max_length`` set to
+    ``VERY_LARGE_INTEGER`` (~10**30). GLiNER's internal inference calls
+    ``transformer_tokenizer(..., truncation=True)`` without an explicit
+    ``max_length`` argument, so with the giant default the truncation flag
+    is silently a no-op and any inputs whose BPE expansion exceeds the
+    model's actual context window go through the DeBERTa-large forward
+    pass in full. The resulting O(seq^2) attention activations push
+    resident memory past the container cgroup ceiling on CPU and the
+    kernel OOM-kills the worker (visible as a generic transport-level
+    "network error" in the SPA). It also produces the "Asking to
+    truncate to max_length but no maximum length is provided" warning
+    the transformers tokenizer emits in this state.
+
+    We clamp the tokenizer to the model's true ``config.max_len`` (the
+    same value we already use to pre-chunk input by words) so the
+    truncation flag actually enforces the architectural cap. Inputs that
+    expand past the limit because of multibyte / compound words get
+    truncated to a safe length instead of OOM-killing the process.
+
+    Args:
+        tokenizer (Any | None): GLiNER backbone tokenizer, or ``None`` when
+            unavailable.
+        max_tokens (int): Usable token count for non-special tokens
+            (``config.max_len - special-token-reserve``).
+    """
+    if tokenizer is None:
+        return
+    target = max_tokens + _GLINER_SPECIAL_TOKEN_RESERVE
+    try:
+        current = int(getattr(tokenizer, "model_max_length", target) or target)
+    except (TypeError, ValueError):
+        current = target
+    if current <= target:
+        return
+    try:
+        tokenizer.model_max_length = target
+        logger.info(
+            "Clamped GLiNER tokenizer model_max_length to {} (was {}) to keep "
+            "the DeBERTa forward pass within the model's architectural limit.",
+            target,
+            current,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to clamp GLiNER tokenizer model_max_length: {} — "
+            "truncation may silently no-op and allow OOM on long inputs.",
+            exc,
+        )
 
 
 def _load_gliner_config(model_dir: Path) -> dict[str, Any]:
