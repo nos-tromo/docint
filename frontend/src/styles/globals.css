@@ -10,8 +10,24 @@ html, body, #root {
   height: 100%;
 }
 
+/* Force Inter onto the body so descendants (form controls, datalist
+   suggestions, native widgets) inherit it. Without this, Linux/Chromium
+   falls back to DejaVu / Liberation which can look serif-ish next to
+   the Mac SF stack and shows up as the "wrong font" the user keeps
+   reporting on the ingest controls. */
 body {
-  @apply bg-background text-foreground antialiased;
+  @apply bg-background text-foreground antialiased font-sans;
+}
+
+/* Ensure native form controls inherit the body font too (browsers
+   default these to system fonts even when html/body are set). */
+input,
+button,
+select,
+textarea,
+optgroup,
+option {
+  font-family: inherit;
 }
 
 * {

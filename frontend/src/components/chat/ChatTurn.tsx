@@ -1,3 +1,5 @@
+import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import type { ChatFinalEvent, Source } from '@/api/types'
 import { Citation } from './Citation'
 import { ValidationBanner } from './ValidationBanner'
@@ -55,9 +57,13 @@ export function ChatTurn({ turn }: { turn: ChatTurnData }) {
       </div>
       <div className="rounded-md bg-zinc-950 border border-border px-4 py-3">
         <div className="text-xs text-muted-foreground mb-1">Assistant</div>
-        <div className="whitespace-pre-wrap">
-          {turn.assistant || (turn.done ? '(no answer)' : '…')}
-        </div>
+        {turn.assistant ? (
+          <div className="prose prose-invert prose-sm max-w-none prose-p:my-2 prose-pre:bg-zinc-900 prose-code:before:content-none prose-code:after:content-none">
+            <Markdown remarkPlugins={[remarkGfm]}>{turn.assistant}</Markdown>
+          </div>
+        ) : (
+          <div className="text-muted-foreground">{turn.done ? '(no answer)' : '…'}</div>
+        )}
         {turn.error && (
           <div className="mt-3 rounded-md border border-red-700 bg-red-950 px-3 py-2 text-xs text-red-200">
             <div className="font-medium">Chat error</div>

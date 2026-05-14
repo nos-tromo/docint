@@ -1,4 +1,6 @@
 import { useReducer } from 'react'
+import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { streamSummary } from '@/api/analysis'
 import { Citation } from '@/components/chat/Citation'
 import { ValidationBanner } from '@/components/chat/ValidationBanner'
@@ -86,8 +88,10 @@ export function SummaryPanel() {
 
       {state.error && <div className="text-red-400 text-sm">{state.error}</div>}
       {state.text && (
-        <div className="rounded-md border border-border bg-zinc-900 p-4 whitespace-pre-wrap text-sm">
-          {state.text}
+        <div className="rounded-md border border-border bg-zinc-900 p-4 text-sm">
+          <div className="prose prose-invert prose-sm max-w-none prose-p:my-2 prose-pre:bg-zinc-950 prose-code:before:content-none prose-code:after:content-none">
+            <Markdown remarkPlugins={[remarkGfm]}>{state.text}</Markdown>
+          </div>
         </div>
       )}
       {state.meta && <ValidationBanner v={state.meta} />}

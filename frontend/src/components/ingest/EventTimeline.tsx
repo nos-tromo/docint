@@ -12,7 +12,7 @@ const ICON: Record<string, string> = {
 
 export function EventTimeline({ events }: { events: IngestEvent[] }) {
   return (
-    <ol className="text-sm font-mono space-y-1">
+    <ol className="text-sm space-y-1">
       {events.map((e, i) => (
         <li key={i} className="flex gap-2">
           <span className="text-muted-foreground w-4">{ICON[e.event] ?? '•'}</span>

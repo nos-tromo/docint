@@ -20,9 +20,9 @@ export function Citation({ source }: { source: Source }) {
       {open && (
         <div className="mt-2 space-y-2">
           {source.text && (
-            <pre className="whitespace-pre-wrap text-xs bg-zinc-950 p-2 rounded">
+            <div className="whitespace-pre-wrap font-sans text-xs bg-zinc-950 p-2 rounded">
               {source.text}
-            </pre>
+            </div>
           )}
           {collection && source.file_hash && (
             <a
