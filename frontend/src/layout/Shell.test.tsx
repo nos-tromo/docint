@@ -20,7 +20,7 @@ function renderShell() {
 describe('Shell', () => {
   it('renders sidebar and main slot', () => {
     renderShell()
-    expect(screen.getByText(/docint/i)).toBeInTheDocument()
+    expect(screen.getByText(/document intelligence/i)).toBeInTheDocument()
     expect(screen.getByText('main content')).toBeInTheDocument()
   })
 })

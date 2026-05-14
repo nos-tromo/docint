@@ -355,10 +355,12 @@ class SessionManager:
             retrieval_mode=retrieval_mode,
         )
         normalized["graph_debug"] = graph_debug
-        self._persist_turn(session_id, user_msg, final_response, normalized)
+        turn_idx = self._persist_turn(session_id, user_msg, final_response, normalized)
         self._maybe_update_summary(session_id)
 
-        # Yield metadata
+        # Yield metadata. ``turn_idx`` is an internal join key the API layer
+        # uses to attach validation results after the stream completes; it
+        # must be stripped before forwarding to clients.
         yield {
             "response": normalized.get("response"),
             "sources": normalized.get("sources", []),
@@ -368,6 +370,7 @@ class SessionManager:
             "retrieval_query": normalized.get("retrieval_query"),
             "coverage_unit": normalized.get("coverage_unit"),
             "retrieval_mode": normalized.get("retrieval_mode"),
+            "turn_idx": turn_idx,
         }
 
     def export_session(
@@ -509,7 +512,7 @@ class SessionManager:
 
     def _persist_turn(
         self, session_id: str, user_msg: str, resp: Any, data: dict
-    ) -> None:
+    ) -> int:
         """Persist a user message and the assistant's response in the database.
 
         Args:
@@ -517,6 +520,11 @@ class SessionManager:
             user_msg (str): The user message.
             resp (Any): The assistant's response.
             data (dict): Additional data to persist.
+
+        Returns:
+            int: The 0-based index of the newly persisted turn within the
+                conversation. Used by the API layer to attach validation
+                results that complete after this row is written.
         """
         with self._session_scope() as s:
             conv = self._load_or_create_convo(s, session_id)
@@ -594,6 +602,47 @@ class SessionManager:
                     )
                 )
 
+            s.commit()
+            return next_idx
+
+    def update_turn_validation(
+        self,
+        session_id: str,
+        turn_idx: int,
+        *,
+        validation_checked: bool | None,
+        validation_mismatch: bool | None,
+        validation_reason: str | None,
+    ) -> None:
+        """Backfill validation results onto an existing turn row.
+
+        Validation runs in the API layer after ``stream_chat`` has already
+        persisted the row, so this method lets the caller attach the result
+        without restructuring the streaming contract.
+
+        Args:
+            session_id (str): Conversation id the turn belongs to.
+            turn_idx (int): 0-based turn index within the conversation.
+            validation_checked (bool | None): Validation outcome flag.
+            validation_mismatch (bool | None): Mismatch flag.
+            validation_reason (str | None): Validator-supplied explanation.
+        """
+        with self._session_scope() as s:
+            t = (
+                s.query(Turn)
+                .filter_by(conversation_id=session_id, idx=turn_idx)
+                .one_or_none()
+            )
+            if t is None:
+                logger.warning(
+                    "update_turn_validation: no turn found for session={} idx={}",
+                    session_id,
+                    turn_idx,
+                )
+                return
+            t.validation_checked = validation_checked
+            t.validation_mismatch = validation_mismatch
+            t.validation_reason = validation_reason
             s.commit()
 
     def _maybe_update_summary(self, session_id: str, every_n_turns: int = 5) -> None:
@@ -763,6 +812,10 @@ class SessionManager:
                 }
                 if t.reasoning:
                     msg_entry["reasoning"] = t.reasoning
+                if t.validation_checked is not None or t.validation_reason is not None:
+                    msg_entry["validation_checked"] = t.validation_checked
+                    msg_entry["validation_mismatch"] = t.validation_mismatch
+                    msg_entry["validation_reason"] = t.validation_reason
                 messages.append(msg_entry)
 
             return messages

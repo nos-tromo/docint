@@ -1,12 +1,20 @@
 export interface Source {
-  id: string
-  file_hash: string
+  // Backend (docint/core/rag.py::_source_from_payload) does not emit a
+  // stable per-source id, so this is optional and only present for
+  // sources that flow through node-id-aware code paths.
+  id?: string
+  file_hash?: string
   filename: string
-  page_label?: string | null
-  row_label?: string | null
-  score: number
+  filetype?: string | null
+  source?: string | null
+  page?: number | null
+  row?: number | null
+  score?: number | null
   text?: string
-  reference_metadata?: Record<string, unknown>
+  preview_text?: string
+  reference_metadata?: ReferenceMetadata
+  entities?: Entity[]
+  relations?: Relation[]
   ner?: { entities?: Entity[]; relations?: Relation[] }
 }
 
@@ -66,18 +74,17 @@ export interface ChatRequest {
 }
 
 export interface SessionSummary {
-  session_id: string
+  id: string
   title?: string | null
   created_at: string
-  updated_at: string
-  message_count: number
+  collection?: string | null
 }
 
-export interface SessionMessage {
+export interface SessionMessage extends Partial<ValidationFields> {
   role: 'user' | 'assistant'
   content: string
-  citations?: Source[]
-  created_at: string
+  sources?: Source[]
+  reasoning?: string
 }
 
 export interface DocumentRecord {
@@ -90,12 +97,112 @@ export interface DocumentRecord {
   entity_types?: string[]
 }
 
+export interface NerVariant {
+  text: string
+  type?: string
+  mentions?: number
+  score?: number | null
+}
+
+export interface NerEntityRow {
+  text: string
+  type: string
+  mentions: number
+  best_score?: number | null
+  source_count?: number
+  variant_count?: number
+  variants?: NerVariant[]
+}
+
+export type ReferenceMetadata = Record<string, unknown> & {
+  network?: string | null
+  type?: string | null
+  uuid?: string | null
+  timestamp?: string | null
+  author?: string | null
+  author_id?: string | null
+  vanity?: string | null
+  text?: string | null
+  text_id?: string | null
+  parent_text?: string | null
+  anchor_text?: string | null
+  speaker?: string | null
+  language?: string | null
+  source_file?: string | null
+}
+
+export interface NerEntityMention {
+  text: string
+  type: string
+  score?: number | null
+  key?: string
+}
+
+export interface NerSourceRow {
+  chunk_id?: string
+  chunk_text?: string
+  text?: string
+  filename?: string
+  filetype?: string | null
+  source?: string | null
+  file_hash?: string
+  page?: number | null
+  row?: number | null
+  score?: number | null
+  preview_url?: string | null
+  document_url?: string | null
+  reference_metadata?: ReferenceMetadata
+  entities?: NerEntityMention[]
+  relations?: Array<{ head?: string; label?: string; tail?: string }>
+}
+
+export interface NerTypeRow {
+  type: string
+  mentions: number
+  unique_entities: number
+}
+
+export interface NerRelationRow {
+  head: string
+  label: string
+  tail: string
+  mentions: number
+}
+
+export interface NerDocumentRow {
+  filename: string
+  entity_mentions: number
+  unique_entities: number
+  ie_source_count: number
+  entity_density: number
+}
+
 export interface NerStats {
-  totals: { entities: number; relations: number; documents: number }
-  top_entities: Array<{ text: string; type: string; count: number }>
-  entity_types: Array<{ type: string; count: number }>
-  top_relations: Array<{ subject: string; predicate: string; object: string; count: number }>
-  documents: Array<{ filename: string; entity_count: number }>
+  totals: {
+    unique_entities: number
+    entity_mentions: number
+    unique_relations: number
+  }
+  top_entities: NerEntityRow[]
+  entity_types: NerTypeRow[]
+  top_relations: NerRelationRow[]
+  documents: NerDocumentRow[]
+}
+
+export interface HateSpeechRow {
+  chunk_id?: string
+  filename?: string
+  page?: number | null
+  page_label?: string | null
+  row?: number | null
+  file_hash?: string
+  chunk_text?: string
+  text?: string
+  category?: string
+  confidence?: string
+  reason?: string
+  source_ref?: string
+  reference_metadata?: ReferenceMetadata
 }
 
 export interface IngestEvent {

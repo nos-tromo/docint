@@ -275,7 +275,7 @@ def test_stream_chat_includes_final_response_when_no_tokens(
     session_manager.session_id = "session-1"
     session_manager.chat_engine = object()
 
-    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args: None)
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args: 0)
     monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
 
     chunks = list(
@@ -296,6 +296,7 @@ def test_stream_chat_includes_final_response_when_no_tokens(
             "retrieval_query": "rewritten hello",
             "coverage_unit": "documents",
             "retrieval_mode": "rewrite_compact",
+            "turn_idx": 0,
         }
     ]
 

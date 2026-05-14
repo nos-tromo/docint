@@ -1,7 +1,7 @@
 """Turn ORM model capturing a single user/assistant exchange within a conversation."""
 
 from datetime import datetime, timezone
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from docint.core.state.base import Base
@@ -22,6 +22,9 @@ class Turn(Base):
     rewritten_query = Column(Text, nullable=True)
     model_response = Column(Text, nullable=False)
     reasoning = Column(Text, nullable=True)
+    validation_checked = Column(Boolean, nullable=True)
+    validation_mismatch = Column(Boolean, nullable=True)
+    validation_reason = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.now(timezone.utc), nullable=False)
     conversation = relationship("Conversation", back_populates="turns")
     citations = relationship(

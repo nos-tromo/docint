@@ -17,8 +17,8 @@ export function SessionZipButton() {
       const zip = new JSZip()
       const seen = new Set<string>()
       for (const m of history.data.messages) {
-        for (const c of m.citations ?? []) {
-          if (seen.has(c.file_hash)) continue
+        for (const c of m.sources ?? []) {
+          if (!c.file_hash || seen.has(c.file_hash)) continue
           seen.add(c.file_hash)
           const res = await fetch(sourcePreviewUrl(collection, c.file_hash))
           if (!res.ok) continue

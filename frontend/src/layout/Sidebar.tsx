@@ -60,7 +60,7 @@ export function Sidebar() {
 
   return (
     <aside className="w-72 border-r border-border p-4 flex flex-col gap-4 bg-zinc-950">
-      <h2 className="text-lg font-semibold tracking-tight">DocInt</h2>
+      <h2 className="text-lg font-semibold tracking-tight">Document Intelligence</h2>
 
       <nav className="flex flex-col gap-1">
         {NAV.map(({ to, label }) => (
@@ -145,23 +145,23 @@ export function Sidebar() {
         </div>
         <ul className="mt-2 flex-1 overflow-auto space-y-1">
           {sessionsData?.sessions.map((s) => {
-            const active = currentSessionId === s.session_id
+            const active = currentSessionId === s.id
             return (
-              <li key={s.session_id} className="flex items-center gap-1">
+              <li key={s.id} className="flex items-center gap-1">
                 <button
                   type="button"
-                  onClick={() => onPickSession(s.session_id)}
+                  onClick={() => onPickSession(s.id)}
                   className={cn(
                     'flex-1 text-left text-sm px-2 py-1 rounded-md truncate',
                     active ? 'bg-zinc-800' : 'hover:bg-zinc-900'
                   )}
-                  title={s.title ?? s.session_id}
+                  title={s.title ?? s.id}
                 >
-                  {s.title?.trim() || `Session ${s.session_id.slice(0, 8)}`}
+                  {s.title?.trim() || `Session ${s.id.slice(0, 8)}`}
                 </button>
                 <button
                   type="button"
-                  onClick={() => onDeleteSession(s.session_id)}
+                  onClick={() => onDeleteSession(s.id)}
                   className="text-xs text-zinc-500 hover:text-red-400 px-1"
                   aria-label="Delete session"
                 >

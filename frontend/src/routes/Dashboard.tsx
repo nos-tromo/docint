@@ -69,9 +69,11 @@ export function Dashboard() {
         <h2 className="text-lg font-medium mb-3">Recent sessions</h2>
         <ul className="space-y-1 text-sm">
           {sessionsData?.sessions.slice(0, 10).map((s) => (
-            <li key={s.session_id} className="flex justify-between">
-              <span>{s.title?.trim() || s.session_id.slice(0, 8)}</span>
-              <span className="text-muted-foreground">{s.message_count} msgs</span>
+            <li key={s.id} className="flex justify-between">
+              <span>{s.title?.trim() || s.id.slice(0, 8)}</span>
+              {s.collection && (
+                <span className="text-muted-foreground">{s.collection}</span>
+              )}
             </li>
           ))}
         </ul>
