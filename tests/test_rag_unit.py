@@ -5687,16 +5687,31 @@ def test_create_collection_if_missing_returns_when_collection_exists(
     rag.create_collection_if_missing()
 
 
-def test_create_collection_if_missing_probes_and_creates(
+def test_create_collection_if_missing_probes_and_creates_hybrid_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Probes the embed endpoint and creates the Qdrant collection up-front."""
+    """Probes the embed endpoint and creates a hybrid dense+sparse collection.
+
+    Regression: we must NOT instantiate QdrantVectorStore here — its
+    ``__init__`` eagerly loads the fastembed sparse encoder (onnxruntime
+    + tokenizer), which combined with the second store built later by
+    ingest_docs and the GLiNER weights OOM-killed CSV ingests. So this
+    test asserts we hit qdrant_client.create_collection directly with
+    LlamaIndex's named-vector schema.
+    """
     rag = RAG(qdrant_collection="fresh-collection")
     rag._qdrant_client = MagicMock()
+    rag.enable_hybrid = True
     monkeypatch.setattr(
         rag_module,
         "qdrant_collection_exists",
         lambda client, collection_name: False,
+    )
+    # Pin sparse_model to a known IDF model so we can also verify the modifier.
+    monkeypatch.setattr(
+        type(rag),
+        "sparse_model",
+        property(lambda self: "Qdrant/bm42-all-minilm-l6-v2-attentions"),
     )
 
     class _StubEmbed:
@@ -5710,17 +5725,28 @@ def test_create_collection_if_missing_probes_and_creates(
         property(lambda self: _StubEmbed()),
     )
 
-    create_calls: list[tuple[str, int]] = []
+    # Guard against any accidental _vector_store call — eager sparse load
+    # is exactly what this fix avoids.
+    def _fail_vector_store(self: RAG) -> Any:
+        raise AssertionError(
+            "create_collection_if_missing must not instantiate QdrantVectorStore"
+        )
 
-    class _StubVectorStore:
-        def _create_collection(self, *, collection_name: str, vector_size: int) -> None:
-            create_calls.append((collection_name, vector_size))
-
-    monkeypatch.setattr(RAG, "_vector_store", lambda self: _StubVectorStore())
+    monkeypatch.setattr(RAG, "_vector_store", _fail_vector_store)
 
     rag.create_collection_if_missing()
 
-    assert create_calls == [("fresh-collection", 384)]
+    rag._qdrant_client.create_collection.assert_called_once()
+    kwargs = rag._qdrant_client.create_collection.call_args.kwargs
+    assert kwargs["collection_name"] == "fresh-collection"
+    # Hybrid path: dense named vector + sparse named vector with IDF modifier.
+    assert rag_module.QDRANT_DENSE_VECTOR_NAME in kwargs["vectors_config"]
+    assert kwargs["vectors_config"][rag_module.QDRANT_DENSE_VECTOR_NAME].size == 384
+    assert rag_module.QDRANT_SPARSE_VECTOR_NAME in kwargs["sparse_vectors_config"]
+    assert (
+        kwargs["sparse_vectors_config"][rag_module.QDRANT_SPARSE_VECTOR_NAME].modifier
+        == rag_module.qdrant_models.Modifier.IDF
+    )
 
 
 def test_create_collection_if_missing_uses_configured_dimensions(
@@ -5730,6 +5756,7 @@ def test_create_collection_if_missing_uses_configured_dimensions(
     rag = RAG(qdrant_collection="dim-configured")
     rag._qdrant_client = MagicMock()
     rag.openai_dimensions = 768
+    rag.enable_hybrid = False
     monkeypatch.setattr(
         rag_module,
         "qdrant_collection_exists",
@@ -5745,17 +5772,22 @@ def test_create_collection_if_missing_uses_configured_dimensions(
         property(_fail_probe),
     )
 
-    create_calls: list[tuple[str, int]] = []
+    def _fail_vector_store(self: RAG) -> Any:
+        raise AssertionError(
+            "create_collection_if_missing must not build a vector store"
+        )
 
-    class _StubVectorStore:
-        def _create_collection(self, *, collection_name: str, vector_size: int) -> None:
-            create_calls.append((collection_name, vector_size))
-
-    monkeypatch.setattr(RAG, "_vector_store", lambda self: _StubVectorStore())
+    monkeypatch.setattr(RAG, "_vector_store", _fail_vector_store)
 
     rag.create_collection_if_missing()
 
-    assert create_calls == [("dim-configured", 768)]
+    rag._qdrant_client.create_collection.assert_called_once()
+    kwargs = rag._qdrant_client.create_collection.call_args.kwargs
+    assert kwargs["collection_name"] == "dim-configured"
+    # Non-hybrid path: bare VectorParams, no sparse config.
+    assert isinstance(kwargs["vectors_config"], rag_module.qdrant_models.VectorParams)
+    assert kwargs["vectors_config"].size == 768
+    assert "sparse_vectors_config" not in kwargs
 
 
 def test_create_collection_if_missing_propagates_probe_failure(
