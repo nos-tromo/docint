@@ -90,7 +90,7 @@ services:
       context: .
       dockerfile: Dockerfile.frontend
     ports: &frontend-ports
-      - "${FRONTEND_PORT:-8080}:80"
+      - "${DOCINT_HOST_PORT:-8080}:80"
     networks: &frontend-networks
       docint-net:
         aliases:
