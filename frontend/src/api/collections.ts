@@ -1,5 +1,5 @@
 import { apiDelete, apiGet, apiPost } from './client'
-import type { DocumentRecord, NerStats } from './types'
+import type { DocumentRecord, HateSpeechRow, NerSourceRow, NerStats } from './types'
 
 export const listCollections = () => apiGet<string[]>('/collections/list')
 
@@ -21,10 +21,10 @@ export const getNerStats = (params: {
 }) => apiGet<NerStats>('/collections/ner/stats', params)
 
 export const getNer = (refresh?: boolean) =>
-  apiGet<{ sources: unknown[] }>('/collections/ner', { refresh })
+  apiGet<{ sources: NerSourceRow[] }>('/collections/ner', { refresh })
 
 export const getHateSpeech = () =>
-  apiGet<{ results: unknown[] }>('/collections/hate-speech')
+  apiGet<{ results: HateSpeechRow[] }>('/collections/hate-speech')
 
 export const getIeStats = (collection: string) =>
   apiGet<unknown>(`/collections/${encodeURIComponent(collection)}/ie-stats`)
