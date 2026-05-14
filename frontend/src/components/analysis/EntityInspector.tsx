@@ -1,5 +1,7 @@
 import { useMemo, useState } from 'react'
 import type { NerEntityRow, NerSourceRow } from '@/api/types'
+import { downloadCsv, downloadText } from '@/lib/csv'
+import { entityFindingsToCsv, entityFindingsToText } from '@/lib/exports'
 import { EntityFinding } from './EntityFinding'
 
 interface Props {
@@ -44,6 +46,13 @@ function highlightTermsForEntity(entity: NerEntityRow): string[] {
 function entityOptionLabel(entity: NerEntityRow): string {
   const type = entity.type || 'Unlabeled'
   return `${entity.text} [${type}] · ${entity.mentions}`
+}
+
+function entityFileSlug(entity: NerEntityRow): string {
+  // Filenames for downloads — collapse runs of unsafe chars to underscores
+  // so OS file pickers don't choke on them, but keep something readable.
+  const raw = `${entity.text}_${entity.type || 'unlabeled'}`
+  return raw.replace(/[^\p{L}\p{N}._-]+/gu, '_').replace(/^_+|_+$/g, '') || 'entity'
 }
 
 function sourceContainsEntity(source: NerSourceRow, entity: NerEntityRow): boolean {
@@ -134,12 +143,42 @@ export function EntityInspector({ entities, sources }: Props) {
 
       {selected ? (
         <div className="space-y-2">
-          <div className="text-sm">
-            <span className="text-muted-foreground">Findings for </span>
-            <span className="font-medium">{selected.text}</span>
-            <span className="text-muted-foreground">
-              {' '}— {findings.length} chunk{findings.length === 1 ? '' : 's'}
-            </span>
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-sm">
+              <span className="text-muted-foreground">Findings for </span>
+              <span className="font-medium">{selected.text}</span>
+              <span className="text-muted-foreground">
+                {' '}— {findings.length} chunk{findings.length === 1 ? '' : 's'}
+              </span>
+            </div>
+            {findings.length > 0 && (
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    downloadText(
+                      `entity_${entityFileSlug(selected)}.txt`,
+                      entityFindingsToText(selected, findings)
+                    )
+                  }
+                  className="px-3 py-1 rounded-md border border-border text-sm"
+                >
+                  TXT
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    downloadCsv(
+                      `entity_${entityFileSlug(selected)}.csv`,
+                      entityFindingsToCsv(selected, findings)
+                    )
+                  }
+                  className="px-3 py-1 rounded-md border border-border text-sm"
+                >
+                  CSV
+                </button>
+              </div>
+            )}
           </div>
           {findings.length === 0 ? (
             <p className="text-sm text-muted-foreground">

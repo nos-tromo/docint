@@ -4,6 +4,8 @@ import remarkGfm from 'remark-gfm'
 import { streamSummary } from '@/api/analysis'
 import { Citation } from '@/components/chat/Citation'
 import { ValidationBanner } from '@/components/chat/ValidationBanner'
+import { downloadText } from '@/lib/csv'
+import { summaryToMarkdown } from '@/lib/exports'
 import { CoverageBanner } from './CoverageBanner'
 import type { SummaryResponse } from '@/api/types'
 
@@ -84,6 +86,21 @@ export function SummaryPanel() {
         >
           Refresh
         </button>
+        {state.text && (
+          <button
+            type="button"
+            onClick={() =>
+              downloadText(
+                'summary.md',
+                summaryToMarkdown(state.meta, state.text),
+                'text/markdown;charset=utf-8'
+              )
+            }
+            className="ml-auto px-3 py-1 rounded-md border border-border"
+          >
+            Download MD
+          </button>
+        )}
       </div>
 
       {state.error && <div className="text-red-400 text-sm">{state.error}</div>}

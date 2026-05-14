@@ -11,11 +11,19 @@ export function toCsv<T extends Record<string, unknown>>(rows: T[], columns: (ke
   return `${header}\n${body}`
 }
 
-export function downloadCsv(filename: string, csv: string): void {
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+export function downloadText(
+  filename: string,
+  content: string,
+  mime = 'text/plain;charset=utf-8'
+): void {
+  const blob = new Blob([content], { type: mime })
   const a = document.createElement('a')
   a.href = URL.createObjectURL(blob)
   a.download = filename
   a.click()
   URL.revokeObjectURL(a.href)
+}
+
+export function downloadCsv(filename: string, csv: string): void {
+  downloadText(filename, csv, 'text/csv;charset=utf-8')
 }

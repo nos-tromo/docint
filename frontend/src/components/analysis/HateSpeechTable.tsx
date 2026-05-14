@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { downloadCsv, toCsv } from '@/lib/csv'
+import { downloadCsv, downloadText } from '@/lib/csv'
+import { hateSpeechToCsv, hateSpeechToText } from '@/lib/exports'
 import type { HateSpeechRow } from '@/api/types'
 import { referenceMetadataItems } from '@/lib/referenceMetadata'
 
@@ -97,27 +98,22 @@ export function HateSpeechTable({ rows }: { rows: HateSpeechRow[] }) {
           {rows.length} flagged chunk{rows.length === 1 ? '' : 's'}. Click a row for
           the full text and reference metadata.
         </p>
-        <button
-          type="button"
-          onClick={() =>
-            downloadCsv(
-              'hate-speech.csv',
-              toCsv(rows as unknown as Record<string, unknown>[], [
-                'filename',
-                'page',
-                'row',
-                'chunk_id',
-                'category',
-                'confidence',
-                'reason',
-                'chunk_text'
-              ])
-            )
-          }
-          className="px-3 py-1 rounded-md border border-border text-sm"
-        >
-          CSV
-        </button>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => downloadText('hate-speech.txt', hateSpeechToText(rows))}
+            className="px-3 py-1 rounded-md border border-border text-sm"
+          >
+            TXT
+          </button>
+          <button
+            type="button"
+            onClick={() => downloadCsv('hate-speech.csv', hateSpeechToCsv(rows))}
+            className="px-3 py-1 rounded-md border border-border text-sm"
+          >
+            CSV
+          </button>
+        </div>
       </div>
       <ul className="space-y-2">
         {rows.map((r, i) => (
