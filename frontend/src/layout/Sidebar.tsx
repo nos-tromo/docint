@@ -25,6 +25,7 @@ export function Sidebar() {
   const setCurrentSessionId = useUiStore((s) => s.setCurrentSessionId)
 
   const onSelectCollection = async (name: string) => {
+    if (!name) return
     await selectMutation.mutateAsync(name)
     setSelected(name)
   }
@@ -81,13 +82,38 @@ export function Sidebar() {
 
       <section>
         <label className="text-xs uppercase text-muted-foreground">Collection</label>
+        {selected ? (
+          <div
+            data-testid="active-collection"
+            className="mt-1 flex items-center gap-2 rounded-md border border-emerald-700/60 bg-emerald-500/5 px-2 py-1.5"
+          >
+            <span
+              aria-hidden="true"
+              className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgb(52_211_153_/_0.8)]"
+            />
+            <span className="text-[10px] uppercase tracking-wide text-emerald-300/80">
+              Active
+            </span>
+            <span className="text-sm font-medium text-foreground truncate" title={selected}>
+              {selected}
+            </span>
+          </div>
+        ) : (
+          <p className="mt-1 text-xs text-muted-foreground">
+            No active collection — pick one to query.
+          </p>
+        )}
         <select
-          className="mt-1 w-full bg-zinc-900 border border-border rounded-md px-2 py-1 text-sm"
+          aria-label="Select collection"
+          className={cn(
+            'mt-2 w-full bg-zinc-900 border rounded-md px-2 py-1 text-sm',
+            selected ? 'border-emerald-700/40' : 'border-border'
+          )}
           value={selected ?? ''}
           onChange={(e) => onSelectCollection(e.target.value)}
         >
           <option value="" disabled>
-            — choose —
+            {selected ? 'Switch collection…' : '— choose —'}
           </option>
           {collections?.map((c) => (
             <option key={c} value={c}>

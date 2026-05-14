@@ -12,9 +12,10 @@ describe('useUiStore', () => {
     expect(useUiStore.getState().selectedCollection).toBe('c1')
   })
 
-  it('persists collection to localStorage', () => {
+  it('does not persist the active collection across reloads', () => {
     useUiStore.getState().setSelectedCollection('c1')
-    expect(JSON.parse(localStorage.getItem('docint-ui')!).state.selectedCollection).toBe('c1')
+    const persisted = JSON.parse(localStorage.getItem('docint-ui')!).state
+    expect(persisted.selectedCollection).toBeUndefined()
   })
 
   it('clears current session', () => {

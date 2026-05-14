@@ -30,10 +30,22 @@ export const useUiStore = create<UiState>()(
     }),
     {
       name: 'docint-ui',
+      // Active collection is intentionally not persisted: the backend
+      // singleton resets to "no active collection" on every restart, so
+      // carrying a stale UI selection across reloads only produces a
+      // chain of 400s until the user re-picks. Each session starts fresh
+      // and the user must deliberately lock in a collection.
       partialize: (s) => ({
-        selectedCollection: s.selectedCollection,
         currentSessionId: s.currentSessionId
-      })
+      }),
+      // v0 builds saved `selectedCollection` to localStorage. Strip it on
+      // rehydrate so existing users do not inherit a stale selection that
+      // disagrees with the freshly-started backend singleton.
+      version: 1,
+      migrate: (persisted) => {
+        const prior = (persisted ?? {}) as { currentSessionId?: string | null }
+        return { currentSessionId: prior.currentSessionId ?? null }
+      }
     }
   )
 )
