@@ -107,17 +107,26 @@ export function Chat() {
         },
         ac.signal
       )) {
-        if (ev.event === 'token') {
-          const tok = (ev.data as { token?: string }).token ?? ''
-          dispatch({ type: 'token', token: tok })
-        } else if (ev.event === 'done') {
-          const final = ev.data as ChatFinalEvent
-          dispatch({ type: 'finalize', meta: final })
-          if (!currentSessionId && final.session_id) {
-            setCurrentSessionId(final.session_id)
-          }
-          qc.invalidateQueries({ queryKey: sessionsKey })
+        // /stream_query emits untyped SSE frames (no `event:` line), so
+        // every event arrives as `'message'`. Discriminate by payload
+        // shape: `{token}` chunks streaming text, anything else is the
+        // final metadata envelope. `{error}` is the failure signal.
+        const data = ev.data as Record<string, unknown> | string
+        if (typeof data !== 'object' || data === null) continue
+        if (typeof data.token === 'string') {
+          dispatch({ type: 'token', token: data.token })
+          continue
         }
+        if (typeof data.error === 'string') {
+          dispatch({ type: 'fail' })
+          continue
+        }
+        const final = data as unknown as ChatFinalEvent
+        dispatch({ type: 'finalize', meta: final })
+        if (!currentSessionId && final.session_id) {
+          setCurrentSessionId(final.session_id)
+        }
+        qc.invalidateQueries({ queryKey: sessionsKey })
       }
     } catch {
       dispatch({ type: 'fail' })

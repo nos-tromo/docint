@@ -44,8 +44,19 @@ export function SummaryPanel() {
     dispatch({ type: 'start' })
     try {
       for await (const ev of streamSummary(refresh)) {
-        if (ev.event === 'token') dispatch({ type: 'token', v: (ev.data as { token: string }).token })
-        else if (ev.event === 'done') dispatch({ type: 'done', meta: ev.data as SummaryResponse })
+        // /summarize/stream emits untyped SSE frames; discriminate by
+        // payload shape (mirrors Chat).
+        const data = ev.data as Record<string, unknown> | string
+        if (typeof data !== 'object' || data === null) continue
+        if (typeof data.token === 'string') {
+          dispatch({ type: 'token', v: data.token })
+          continue
+        }
+        if (typeof data.error === 'string') {
+          dispatch({ type: 'fail', error: data.error })
+          continue
+        }
+        dispatch({ type: 'done', meta: data as unknown as SummaryResponse })
       }
     } catch (e) {
       dispatch({ type: 'fail', error: e instanceof Error ? e.message : String(e) })
