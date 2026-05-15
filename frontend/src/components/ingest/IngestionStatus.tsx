@@ -182,7 +182,7 @@ function Header({
         )}
       </div>
       {showTimer && (
-        <span className="font-mono tabular-nums text-xs text-muted-foreground shrink-0">
+        <span className="tabular-nums text-xs text-muted-foreground shrink-0">
           <span aria-hidden="true">⏱ </span>
           {formatDuration(elapsedMs)}
         </span>
@@ -217,22 +217,22 @@ function UploadingBody({ status }: { status: IngestStatus }) {
             : 'Uploading files'}
         </span>
         {bytesText && (
-          <span className="font-mono tabular-nums text-xs text-muted-foreground">
+          <span className="tabular-nums text-xs text-muted-foreground">
             {bytesText}
           </span>
         )}
       </div>
       {uploadingFile && (
-        <div className="text-xs text-muted-foreground font-mono truncate">
+        <div className="text-xs text-muted-foreground truncate">
           {uploadingFile}
         </div>
       )}
       <Bar value={barValue} max={barMax} tone="sky" />
       {status.totalFiles > 0 && (
         <div className="text-xs text-muted-foreground border-t border-zinc-800 pt-3 mt-3">
-          <span className="font-mono tabular-nums">{status.filesSaved}</span>
+          <span className="tabular-nums">{status.filesSaved}</span>
           {' of '}
-          <span className="font-mono tabular-nums">{status.totalFiles}</span>
+          <span className="tabular-nums">{status.totalFiles}</span>
           {' files saved'}
         </div>
       )}
@@ -250,7 +250,7 @@ function ProcessingBody({ status }: { status: IngestStatus }) {
         <div className="space-y-1.5">
           <div className="flex items-baseline justify-between gap-2">
             <span className="text-sm text-foreground">{status.stage.label}</span>
-            <span className="font-mono tabular-nums text-xs text-muted-foreground">
+            <span className="tabular-nums text-xs text-muted-foreground">
               {status.stage.current} of {status.stage.total}
             </span>
           </div>
@@ -260,7 +260,7 @@ function ProcessingBody({ status }: { status: IngestStatus }) {
             tone="amber"
           />
           {status.stage.currentItem && (
-            <div className="text-xs text-muted-foreground font-mono truncate">
+            <div className="text-xs text-muted-foreground truncate">
               {status.stage.currentItem}
             </div>
           )}
@@ -273,7 +273,7 @@ function ProcessingBody({ status }: { status: IngestStatus }) {
             <div key={task.key} className="space-y-1">
               <div className="flex items-baseline justify-between gap-2">
                 <span className="text-sm text-foreground">{task.label}</span>
-                <span className="font-mono tabular-nums text-xs text-muted-foreground">
+                <span className="tabular-nums text-xs text-muted-foreground">
                   {task.current}/{task.total}
                 </span>
               </div>
@@ -289,9 +289,9 @@ function ProcessingBody({ status }: { status: IngestStatus }) {
 
       {(status.filesSaved > 0 || status.indexed > 0) && (
         <div className="text-xs text-muted-foreground border-t border-zinc-800 pt-3">
-          <span className="font-mono tabular-nums">{status.filesSaved}</span>
+          <span className="tabular-nums">{status.filesSaved}</span>
           {' files saved · '}
-          <span className="font-mono tabular-nums">{status.indexed}</span>
+          <span className="tabular-nums">{status.indexed}</span>
           {' PDFs indexed'}
         </div>
       )}
@@ -306,7 +306,7 @@ function CompleteBody({ status }: { status: IngestStatus }) {
   if (status.totalChunks > 0) parts.push(`${status.totalChunks} chunks`)
   const summary = parts.length > 0 ? parts.join(' · ') : 'Ingestion finished'
   return (
-    <div className="mt-3 text-sm text-emerald-200 font-mono tabular-nums">
+    <div className="mt-3 text-sm text-emerald-200 tabular-nums">
       {summary}
     </div>
   )

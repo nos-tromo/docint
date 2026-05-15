@@ -32,7 +32,7 @@ export function CoverageBanner({ d }: { d: SummaryDiagnostics }) {
         )}
       </div>
       {open && d.uncovered_documents.length > 0 && (
-        <ul className="mt-2 max-h-40 overflow-auto space-y-0.5 font-mono text-[11px]">
+        <ul className="mt-2 max-h-40 overflow-auto space-y-0.5 text-[11px]">
           {d.uncovered_documents.map((f) => (
             <li key={f}>{f}</li>
           ))}

@@ -16,9 +16,12 @@ export default {
         primary: 'rgb(244 244 245)',
         'primary-foreground': 'rgb(9 9 11)'
       },
+      // Both families intentionally resolve to the same var so all text
+      // shares one font. The fallback chain lives in --app-font
+      // (src/styles/globals.css), the single place to change the app font.
       fontFamily: {
-        sans: ['Inter', 'ui-sans-serif', 'system-ui'],
-        mono: ['ui-monospace', 'SFMono-Regular']
+        sans: ['var(--app-font)'],
+        mono: ['var(--app-font)']
       }
     }
   },
