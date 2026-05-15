@@ -1,29 +1,38 @@
-import { useReducer, useState } from 'react'
+import { useMemo, useReducer, useState } from 'react'
 import { streamIngestUpload } from '@/api/ingest'
 import { useSelectCollection, useCollections, collectionsKey } from '@/hooks/useCollections'
 import { useQueryClient } from '@tanstack/react-query'
 import { useUiStore } from '@/stores/ui'
 import type { IngestEvent } from '@/api/types'
 import { Dropzone } from '@/components/ingest/Dropzone'
-import { EventTimeline } from '@/components/ingest/EventTimeline'
+import { IngestionStatus } from '@/components/ingest/IngestionStatus'
+import { deriveIngestStatus } from '@/lib/ingestStatus'
 
 interface State {
   collection: string
   files: File[]
   events: IngestEvent[]
+  /**
+   * Snapshot of file sizes taken when ingestion starts. `state.files` is
+   * cleared in `'done'` for UX reasons, so we keep the sizes around here
+   * to power the per-file upload progress bar.
+   */
+  fileSizes: Record<string, number>
   busy: boolean
 }
 type Action =
   | { type: 'set_collection'; v: string }
   | { type: 'add_files'; v: File[] }
   | { type: 'reset_files' }
-  | { type: 'start' }
+  | { type: 'start'; sizes: Record<string, number> }
   | { type: 'event'; v: IngestEvent }
   | { type: 'done' }
 
 // Progress messages like "Extracting entities: 1/2 chunks processed" and
 // "Extracting entities: 2/2 chunks processed" share a kind (digits stripped)
-// and should update one timeline line in place instead of stacking.
+// and should update one event entry in place instead of stacking. The
+// derived status snapshot does its own collapsing too, but this keeps
+// `state.events` from growing without bound on long-running ingests.
 function progressKind(ev: IngestEvent): string | null {
   if (ev.event !== 'ingestion_progress') return null
   const message = (ev.data as { message?: unknown })?.message
@@ -40,7 +49,7 @@ function reducer(s: State, a: Action): State {
     case 'reset_files':
       return { ...s, files: [] }
     case 'start':
-      return { ...s, busy: true, events: [] }
+      return { ...s, busy: true, events: [], fileSizes: a.sizes }
     case 'event': {
       const last = s.events[s.events.length - 1]
       const incomingKind = progressKind(a.v)
@@ -60,6 +69,7 @@ export function Ingest() {
     collection: '',
     files: [],
     events: [],
+    fileSizes: {},
     busy: false
   })
   const [error, setError] = useState<string | null>(null)
@@ -68,10 +78,17 @@ export function Ingest() {
   const qc = useQueryClient()
   const { data: collections } = useCollections()
 
+  const status = useMemo(
+    () => deriveIngestStatus(state.events, state.fileSizes),
+    [state.events, state.fileSizes]
+  )
+
   const submit = async () => {
     if (!state.collection || state.files.length === 0) return
     setError(null)
-    dispatch({ type: 'start' })
+    const sizes: Record<string, number> = {}
+    for (const f of state.files) sizes[f.name] = f.size
+    dispatch({ type: 'start', sizes })
     // Track whether the backend ever produced a terminal event so that
     // we can tell "ingestion finished" from "the SSE stream died". An
     // OOM-killed backend either (a) ends the stream silently, or
@@ -172,11 +189,7 @@ export function Ingest() {
       </div>
 
       {error && <div className="text-red-400 text-sm">{error}</div>}
-      {state.events.length > 0 && (
-        <div className="rounded-lg border border-border bg-zinc-900 p-4">
-          <EventTimeline events={state.events} />
-        </div>
-      )}
+      {status.phase !== 'idle' && <IngestionStatus status={status} />}
     </div>
   )
 }
