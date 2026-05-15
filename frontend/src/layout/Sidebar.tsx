@@ -82,53 +82,70 @@ export function Sidebar() {
 
       <section>
         <label className="text-xs uppercase text-muted-foreground">Collection</label>
-        {selected ? (
-          <div
-            data-testid="active-collection"
-            className="mt-1 flex items-center gap-2 rounded-md border border-emerald-700/60 bg-emerald-500/5 px-2 py-1.5"
-          >
-            <span
-              aria-hidden="true"
-              className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgb(52_211_153_/_0.8)]"
-            />
-            <span className="text-[10px] uppercase tracking-wide text-emerald-300/80">
+        <div
+          data-testid={selected ? 'active-collection' : undefined}
+          className={cn(
+            'mt-1 flex items-center gap-2 rounded-md border px-2.5 py-2 transition-colors',
+            selected ? 'border-emerald-700/60 bg-emerald-500/5' : 'border-border'
+          )}
+        >
+          <span
+            aria-hidden="true"
+            className={cn(
+              'h-2 w-2 shrink-0 rounded-full',
+              selected
+                ? 'bg-emerald-400 shadow-[0_0_6px_rgb(52_211_153_/_0.8)]'
+                : 'bg-zinc-600'
+            )}
+          />
+          {selected && (
+            <span className="text-[10px] uppercase tracking-wide text-emerald-300/80 shrink-0">
               Active
             </span>
-            <span className="text-sm font-medium text-foreground truncate" title={selected}>
-              {selected}
-            </span>
-          </div>
-        ) : (
-          <p className="mt-1 text-xs text-muted-foreground">
+          )}
+          <select
+            aria-label="Select collection"
+            className="min-w-0 flex-1 cursor-pointer bg-transparent text-sm text-foreground outline-none"
+            value={selected ?? ''}
+            onChange={(e) => onSelectCollection(e.target.value)}
+          >
+            <option value="" disabled>
+              {collections?.length ? 'Choose a collection…' : 'No collections yet'}
+            </option>
+            {collections?.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+          {selected && (
+            <button
+              type="button"
+              onClick={() => onDeleteCollection(selected)}
+              aria-label={`Delete collection ${selected}`}
+              title="Delete this collection"
+              className="shrink-0 text-zinc-500 transition-colors hover:text-red-400"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="h-3.5 w-3.5"
+                aria-hidden="true"
+              >
+                <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6" />
+                <path d="M10 11v6M14 11v6" />
+              </svg>
+            </button>
+          )}
+        </div>
+        {!selected && (
+          <p className="mt-1.5 text-xs text-muted-foreground">
             No active collection — pick one to query.
           </p>
-        )}
-        <select
-          aria-label="Select collection"
-          className={cn(
-            'mt-2 w-full bg-zinc-900 border rounded-md px-2 py-1 text-sm',
-            selected ? 'border-emerald-700/40' : 'border-border'
-          )}
-          value={selected ?? ''}
-          onChange={(e) => onSelectCollection(e.target.value)}
-        >
-          <option value="" disabled>
-            {selected ? 'Switch collection…' : '— choose —'}
-          </option>
-          {collections?.map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
-          ))}
-        </select>
-        {selected && (
-          <button
-            type="button"
-            onClick={() => onDeleteCollection(selected)}
-            className="mt-2 text-xs text-red-400 hover:text-red-300"
-          >
-            Delete this collection
-          </button>
         )}
       </section>
 
