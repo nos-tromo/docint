@@ -93,14 +93,14 @@ session).
 | Unit | Responsibility | Location |
 |------|----------------|----------|
 | `PrincipalResolver` | FastAPI dependency: read `X-Auth-User` → `user_id`; configurable dev-fallback identity. Auth track later replaces only the header source. | new module + dependency wired into `docint/core/api.py` |
-| Principal config | Header name + dev-fallback identity as an `env_cfg` dataclass (all env config lives in `docint/utils/env_cfg.py` per project convention). | `docint/utils/env_cfg.py` |
+| Principal config | Header name + dev-fallback identity as an `env_cfg` dataclass (all env config lives in `docint/utils/env_cfg.py` per project convention). The **same single configured identity value** is both the resolver's dev fallback and the migration backfill owner (Section 7) — one setting, not two. | `docint/utils/env_cfg.py` |
 | `CollectionEngineCache` | Lazy, lock-guarded `collection → (index, query_engine)`. Shared across users. Bounded LRU eviction; `get()` returns a strong ref held for the request. | new, extracted from `RAG` |
 | `SessionRuntimeCache` | Lock-guarded `session_id → (chat_engine, chat_memory)` with idle eviction. Turns still persist to SQLite as today. | new, in/near `SessionManager` |
 | `Conversation.owner` | New nullable, indexed column + ALTER migration reusing the `_ensure_*_columns` pattern; idempotent backfill to the configured default principal. | `docint/core/state/conversation.py`, `docint/core/state/base.py` |
 | Ownership enforcement | `list_sessions` / `get_session_history` / `delete_session` filter by `owner`; cross-owner access → **404** (no existence leak). New conversations stamp `owner` + `collection_name` at creation (`_load_or_create_convo`). | `docint/core/state/session_manager.py` |
-| "Bind session to collection" | `POST /collections` stops calling destructive `select_collection()`; collection choice creates a new owned session pinned to that collection. | `docint/core/api.py`, `docint/core/rag.py` |
-| Endpoint threading | Every endpoint that today reads the implicit global `rag.qdrant_collection` (chat at `api.py:508/662`; collection-scoped analysis — summarize/NER/hate-speech around `api.py:901+`) must take the collection **explicitly** (from the session, or an explicit param) and the principal. | `docint/core/api.py` |
-| Frontend touchpoints | Drop the now-defunct global collection-select/persist in `frontend/src/stores/ui.ts`; collection pick calls "create session"; `session_id` contract unchanged so the resume flow is unaffected. | `frontend/src/stores/ui.ts` + touched call sites only |
+| Remove global select | The endpoint that today performs the destructive global `select_collection()` is **removed**, not repurposed. Its two responsibilities split cleanly: chat → create an owned session pinned to the chosen collection; analysis/inspector/dashboard → pass the collection as an explicit request parameter. | `docint/core/api.py`, `docint/core/rag.py` |
+| Endpoint threading | Every endpoint that today reads the implicit global `rag.qdrant_collection` must take the principal plus an **explicit** collection, by category: **chat** endpoints (`api.py:508/662`) derive the collection from the session's `Conversation.collection_name`; **collection-scoped analysis** endpoints (summarize / NER / hate-speech, around `api.py:901+`) have no chat session and take the collection as an explicit request parameter sourced from the UI's current selection. | `docint/core/api.py` |
+| Frontend touchpoints | Drop the now-defunct global collection-select/persist in `frontend/src/stores/ui.ts`. Collection selection becomes local UI state that, on **chat** routes, creates/selects a session pinned to it, and on **analysis/inspector/dashboard** routes is sent as an explicit collection request parameter. `session_id` contract unchanged so the resume flow is unaffected. | `frontend/src/stores/ui.ts` + touched call sites only |
 
 **Risk concentration:** the caches are straightforward. The bulk of effort and regression
 risk is mechanically threading `principal` + session-resolved `collection` through every
@@ -112,6 +112,9 @@ risk is mechanically threading `principal` + session-resolved `collection` throu
   session pinned to it — `PrincipalResolver → user_id`; insert
   `Conversation(owner=user_id, collection_name=<chosen>)`; return `session_id`. There is
   no global "select" anymore.
+- **Analysis / inspector / dashboard (no chat session):** the UI's selected collection is
+  sent as an explicit request parameter on each call; these endpoints never read a
+  session or a global. Principal is still resolved and required.
 - **Query / stream_query** (`api.py:508` / `662`):
   1. Resolver → `principal`.
   2. `payload.session_id` → load `Conversation`; `owner == principal`? else **404**.
