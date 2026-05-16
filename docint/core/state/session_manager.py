@@ -740,11 +740,11 @@ class SessionManager:
                 e,
             )
 
-    def list_sessions(self, owner: str) -> list[dict[str, Any]]:
+    def list_sessions(self, owner: str | None) -> list[dict[str, Any]]:
         """List the caller's sessions ordered by creation date (descending).
 
         Args:
-            owner (str): The principal whose sessions to list.
+            owner (str | None): The principal whose sessions to list; ``None`` matches legacy un-owned (NULL) rows.
 
         Returns:
             list[dict[str, Any]]: A list of session dictionaries owned by
@@ -778,7 +778,9 @@ class SessionManager:
                 )
             return results
 
-    def get_session_history(self, session_id: str, owner: str) -> list[dict[str, Any]]:
+    def get_session_history(
+        self, session_id: str, owner: str | None
+    ) -> list[dict[str, Any]]:
         """Get the full message history for a session the caller owns.
 
         A session owned by a different principal is treated as not found
@@ -787,7 +789,7 @@ class SessionManager:
 
         Args:
             session_id (str): The ID of the session.
-            owner (str): The principal requesting the history.
+            owner (str | None): The principal requesting the history; ``None`` matches legacy un-owned rows.
 
         Returns:
             list[dict[str, Any]]: A list of message dictionaries, or an
@@ -855,7 +857,7 @@ class SessionManager:
 
             return messages
 
-    def delete_session(self, session_id: str, owner: str) -> bool:
+    def delete_session(self, session_id: str, owner: str | None) -> bool:
         """Delete a session the caller owns.
 
         A session owned by a different principal is treated as not found
@@ -864,7 +866,7 @@ class SessionManager:
 
         Args:
             session_id (str): The ID of the session to delete.
-            owner (str): The principal requesting the deletion.
+            owner (str | None): The principal requesting the deletion; ``None`` matches legacy un-owned rows.
 
         Returns:
             bool: True if deleted, False when missing or not owned by
