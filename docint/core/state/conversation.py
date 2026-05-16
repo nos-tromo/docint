@@ -21,6 +21,7 @@ class Conversation(Base):
         DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
     )
     collection_name = Column(String, nullable=True)
+    owner = Column(String, nullable=True, index=True)
     rolling_summary = Column(Text, default="", nullable=False)
     turns = relationship(
         argument="Turn",
