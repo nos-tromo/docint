@@ -6,7 +6,16 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Literal, cast
 
 from anyio import to_thread
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -26,6 +35,7 @@ from docint.agents import (
     Turn,
 )
 from docint.cli import ingest as ingest_module
+from docint.core.auth.principal import resolve_principal
 from docint.core.rag import RAG, EmptyIngestionError
 from docint.core.retrieval_filters import build_metadata_filters, build_qdrant_filter
 from docint.utils.env_cfg import (
@@ -1123,8 +1133,13 @@ def get_collection_documents() -> dict[str, list[dict]]:
 
 
 @app.get("/sessions/list", response_model=SessionListOut, tags=["Sessions"])
-def list_sessions() -> dict[str, list[dict]]:
-    """List all available chat sessions.
+def list_sessions(
+    principal: str = Depends(resolve_principal),
+) -> dict[str, list[dict]]:
+    """List the calling principal's chat sessions.
+
+    Args:
+        principal (str): The resolved request principal.
 
     Returns:
         dict[str, list[dict]]: A dictionary containing the list of sessions.
@@ -1133,7 +1148,7 @@ def list_sessions() -> dict[str, list[dict]]:
         HTTPException: If an error occurs while listing sessions.
     """
     try:
-        sessions = rag.ensure_session_manager().list_sessions()
+        sessions = rag.ensure_session_manager().list_sessions(principal)
         return {"sessions": sessions}
     except Exception as e:
         logger.error("Error listing sessions: {}", e)
@@ -1145,45 +1160,70 @@ def list_sessions() -> dict[str, list[dict]]:
     response_model=SessionHistoryOut,
     tags=["Sessions"],
 )
-def get_session_history(session_id: str) -> dict[str, list[dict]]:
-    """Get history for a specific session.
+def get_session_history(
+    session_id: str, principal: str = Depends(resolve_principal)
+) -> dict[str, list[dict]]:
+    """Get history for a session owned by the calling principal.
+
+    A session that does not exist or is owned by another principal is
+    reported as 404 (no existence leak).
 
     Args:
         session_id (str): The ID of the session.
+        principal (str): The resolved request principal.
 
     Returns:
         dict[str, list[dict]]: A dictionary containing the session messages.
 
     Raises:
-        HTTPException: If an error occurs while fetching session history.
+        HTTPException: 404 when the session is not found for this
+            principal; 500 on unexpected errors.
     """
     try:
-        messages = rag.ensure_session_manager().get_session_history(session_id)
-        return {"messages": messages}
+        messages = rag.ensure_session_manager().get_session_history(
+            session_id, principal
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error fetching history: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
+    if not messages:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    return {"messages": messages}
 
 
 @app.delete("/sessions/{session_id}", tags=["Sessions"])
-def delete_session(session_id: str) -> dict[str, bool]:
-    """Delete a session.
+def delete_session(
+    session_id: str, principal: str = Depends(resolve_principal)
+) -> dict[str, bool]:
+    """Delete a session owned by the calling principal.
+
+    A session that does not exist or is owned by another principal is
+    reported as 404 (no existence leak).
 
     Args:
         session_id (str): The ID of the session to delete.
+        principal (str): The resolved request principal.
 
     Returns:
-        dict[str, bool]: A dictionary indicating whether the deletion was successful.
+        dict[str, bool]: A dictionary indicating whether the deletion
+            was successful.
 
     Raises:
-        HTTPException: If an error occurs while deleting the session.
+        HTTPException: 404 when the session is not found for this
+            principal; 500 on unexpected errors.
     """
     try:
-        success = rag.ensure_session_manager().delete_session(session_id)
-        return {"ok": success}
+        success = rag.ensure_session_manager().delete_session(session_id, principal)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error deleting session: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
+    if not success:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    return {"ok": success}
 
 
 @app.post("/agent/chat", response_model=AgentChatOut, tags=["Agent"])
@@ -1204,7 +1244,7 @@ def agent_chat(payload: AgentChatIn) -> AgentChatOut:
     ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
 
     if ctx and rag.sessions:
-        ctx.history = rag.sessions.get_session_history(session_id)
+        ctx.history = rag.sessions.get_session_history(session_id, owner=None)
 
     turn = Turn(user_input=payload.message, session_id=session_id)
     orchestrator = _build_orchestrator()
