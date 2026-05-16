@@ -46,7 +46,7 @@ def test_conversation_stores_collection_name(session_manager: SessionManager) ->
     session_id = session_manager.start_session()
 
     # Check simple listing
-    sessions = session_manager.list_sessions()
+    sessions = session_manager.list_sessions(owner=None)
     assert len(sessions) == 1
     assert sessions[0]["collection"] == "my-collection"
 

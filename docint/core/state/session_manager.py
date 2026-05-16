@@ -47,6 +47,7 @@ class SessionManager:
     _SessionMaker: Any | None = field(default=None, init=False, repr=False)
     session_id: str | None = field(default=None, init=False)
     session_store: str = field(default="", init=False)
+    _owner: str | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """Post-initialization to set up the session store."""
@@ -67,8 +68,11 @@ class SessionManager:
         self.session_id = None
         self.chat_engine = None
         self.chat_memory = None
+        self._owner = None
 
-    def start_session(self, requested_id: str | None = None) -> str:
+    def start_session(
+        self, requested_id: str | None = None, owner: str | None = None
+    ) -> str:
         """Start a new chat session.
 
         After ``RAG.select_collection`` switches collections it deliberately
@@ -79,6 +83,9 @@ class SessionManager:
 
         Args:
             requested_id (str | None, optional): The ID of the session to start. Defaults to None.
+            owner (str | None, optional): The principal that owns this
+                session. Stamped on a newly created conversation and
+                reused by ``_persist_turn``. Defaults to None.
 
         Returns:
             str: The ID of the started session.
@@ -86,6 +93,8 @@ class SessionManager:
         if not requested_id:
             requested_id = str(uuid.uuid4())
         self.session_id = requested_id
+        if owner is not None:
+            self._owner = owner
 
         # Initialize agent context for this session
         self.agent_contexts.setdefault(
@@ -93,7 +102,7 @@ class SessionManager:
         )
 
         with self._session_scope() as s:
-            self._load_or_create_convo(s, requested_id)
+            self._load_or_create_convo(s, requested_id, self._owner)
 
         rolling = self._get_rolling_summary(requested_id)
         self.chat_memory = ChatMemoryBuffer.from_defaults(
@@ -475,12 +484,20 @@ class SessionManager:
         finally:
             session.close()
 
-    def _load_or_create_convo(self, session: Session, session_id: str) -> Conversation:
+    def _load_or_create_convo(
+        self, session: Session, session_id: str, owner: str | None = None
+    ) -> Conversation:
         """Load an existing conversation or create a new one.
+
+        A pre-existing conversation keeps its recorded owner; ``owner`` is
+        only stamped when the row is created, so a second principal cannot
+        rebind an existing session id.
 
         Args:
             session (Session): The database session.
             session_id (str): The ID of the session.
+            owner (str | None, optional): Principal to stamp on a newly
+                created conversation. Defaults to None.
 
         Returns:
             Conversation: The loaded or created conversation.
@@ -490,6 +507,8 @@ class SessionManager:
             conv = Conversation(id=session_id)
             if self.rag.qdrant_collection:
                 conv.collection_name = cast(Any, self.rag.qdrant_collection)
+            if owner is not None:
+                conv.owner = cast(Any, owner)
             session.add(conv)
             session.commit()
         return conv
@@ -527,7 +546,7 @@ class SessionManager:
                 results that complete after this row is written.
         """
         with self._session_scope() as s:
-            conv = self._load_or_create_convo(s, session_id)
+            conv = self._load_or_create_convo(s, session_id, self._owner)
 
             meta = getattr(resp, "metadata", {}) or {}
             rewritten_candidate = (
@@ -721,14 +740,23 @@ class SessionManager:
                 e,
             )
 
-    def list_sessions(self) -> list[dict[str, Any]]:
-        """List all sessions ordered by creation date (descending).
+    def list_sessions(self, owner: str) -> list[dict[str, Any]]:
+        """List the caller's sessions ordered by creation date (descending).
+
+        Args:
+            owner (str): The principal whose sessions to list.
 
         Returns:
-            list[dict[str, Any]]: A list of session dictionaries.
+            list[dict[str, Any]]: A list of session dictionaries owned by
+                ``owner``.
         """
         with self._session_scope() as s:
-            convs = s.query(Conversation).order_by(Conversation.created_at.desc()).all()
+            convs = (
+                s.query(Conversation)
+                .filter(Conversation.owner == owner)
+                .order_by(Conversation.created_at.desc())
+                .all()
+            )
             results = []
             for c in convs:
                 title = "New Chat"
@@ -750,18 +778,25 @@ class SessionManager:
                 )
             return results
 
-    def get_session_history(self, session_id: str) -> list[dict[str, Any]]:
-        """Get the full message history for a session.
+    def get_session_history(self, session_id: str, owner: str) -> list[dict[str, Any]]:
+        """Get the full message history for a session the caller owns.
+
+        A session owned by a different principal is treated as not found
+        (empty list), so the API layer can return 404 without leaking
+        whether the id exists.
 
         Args:
             session_id (str): The ID of the session.
+            owner (str): The principal requesting the history.
 
         Returns:
-            list[dict[str, Any]]: A list of message dictionaries.
+            list[dict[str, Any]]: A list of message dictionaries, or an
+                empty list when the session is missing or not owned by
+                ``owner``.
         """
         with self._session_scope() as s:
             conv = s.query(Conversation).filter_by(id=session_id).first()
-            if not conv:
+            if not conv or conv.owner != owner:
                 return []
 
             messages = []
@@ -820,18 +855,24 @@ class SessionManager:
 
             return messages
 
-    def delete_session(self, session_id: str) -> bool:
-        """Delete a session.
+    def delete_session(self, session_id: str, owner: str) -> bool:
+        """Delete a session the caller owns.
+
+        A session owned by a different principal is treated as not found
+        (returns ``False``), so the API layer can return 404 without
+        leaking whether the id exists.
 
         Args:
             session_id (str): The ID of the session to delete.
+            owner (str): The principal requesting the deletion.
 
         Returns:
-            bool: True if deleted, False otherwise.
+            bool: True if deleted, False when missing or not owned by
+                ``owner``.
         """
         with self._session_scope() as s:
             conv = s.query(Conversation).filter_by(id=session_id).first()
-            if conv:
+            if conv and conv.owner == owner:
                 s.delete(conv)
                 s.commit()
                 return True
