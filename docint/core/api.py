@@ -1188,6 +1188,8 @@ def get_session_history(
     except Exception as e:
         logger.error("Error fetching history: {}", e)
         raise HTTPException(status_code=500, detail=str(e))
+    # NOTE: empty also covers "owned but zero turns" (brand-new session),
+    # which collapses to 404 here; acceptable for Plan 1 (see Plan 2).
     if not messages:
         raise HTTPException(status_code=404, detail="Session not found.")
     return {"messages": messages}
@@ -1244,6 +1246,9 @@ def agent_chat(payload: AgentChatIn) -> AgentChatOut:
     ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
 
     if ctx and rag.sessions:
+        # Plan 1: agent_chat is not yet principal-scoped; owner=None reads only
+        # legacy un-owned rows. Under DOCINT_DEFAULT_IDENTITY, backfilled/owned
+        # convos won't match here (no history preload) until Plan 2 wires this.
         ctx.history = rag.sessions.get_session_history(session_id, owner=None)
 
     turn = Turn(user_input=payload.message, session_id=session_id)
