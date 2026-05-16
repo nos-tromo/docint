@@ -93,6 +93,7 @@ from loguru import logger
 from qdrant_client import QdrantClient
 from qdrant_client import models as qdrant_models
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
+from qdrant_client.qdrant_fastembed import IDF_EMBEDDING_MODELS
 
 from docint.core.ner import (
     EntityMergeMode,
@@ -146,6 +147,17 @@ SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
 SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
 SUMMARY_CACHE_REVISION_KEY = "summary_revision"
 HIDDEN_COLLECTION_SUFFIXES: tuple[str, ...] = ("_images", "_dockv")
+
+# Pinned to LlamaIndex's QdrantVectorStore DEFAULT_DENSE_VECTOR_NAME /
+# DEFAULT_SPARSE_VECTOR_NAME so a collection we pre-create has the same
+# named-vector schema the runtime QdrantVectorStore will later upsert
+# into. We replicate the schema here rather than instantiating
+# QdrantVectorStore because its constructor eagerly loads the fastembed
+# sparse encoder (onnxruntime + tokenizer), and doing that twice per
+# ingest pushes the container past the OOM threshold on CSV ingests
+# (see ``create_collection_if_missing``).
+QDRANT_DENSE_VECTOR_NAME = "text-dense"
+QDRANT_SPARSE_VECTOR_NAME = "text-sparse-new"
 
 # Metadata keys that stay visible to the chat LLM when the synthesizer
 # renders ``node.get_content(MetadataMode.LLM)``. Everything *not* in this
@@ -738,7 +750,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
         from :data:`LLM_VISIBLE_METADATA_KEYS` keeps the LLM view
         minimal while leaving the original ``node.metadata`` dict intact
         for every other consumer (citations, analysis section,
-        Streamlit sources panel).
+        frontend sources panel).
 
         The clone is necessary because the docstore-loaded parent may be
         cached across queries; mutating its ``excluded_llm_metadata_keys``
@@ -5037,6 +5049,84 @@ class RAG:
             data_dir, self.qdrant_collection, self.qdrant_src_dir
         )
 
+    def create_collection_if_missing(self) -> None:
+        """Materialize the target Qdrant collection upfront if it does not yet exist.
+
+        Ensures the active ``qdrant_collection`` is visible in Qdrant as soon
+        as an ingest request begins, so the user can select it from the UI
+        even when subsequent embedding batches fail to persist any nodes.
+
+        Implementation note: this calls ``qdrant_client.create_collection``
+        directly with the same dense + sparse named-vector schema that
+        :class:`QdrantVectorStore` writes — replicating LlamaIndex's
+        defaults rather than instantiating a ``QdrantVectorStore`` to
+        do it. Constructing that class eagerly loads the fastembed
+        sparse encoder (onnxruntime + tokenizer, ~150-200 MB of native
+        memory that resists GC), which in combination with the second
+        ``QdrantVectorStore`` built by ``ingest_docs`` and the GLiNER
+        weights tripped the kernel OOM killer on CSV ingests. We
+        therefore pay the schema-replication cost (defaults pinned to
+        LlamaIndex's constants) to avoid the duplicate native load.
+
+        When ``openai_dimensions`` is configured the vector size is taken
+        from there; otherwise a single embed probe determines it. Probe
+        failures (e.g., the embedding endpoint is unreachable) propagate
+        unchanged so the API layer can surface a meaningful error rather
+        than masking it as a silent zero-node ingest.
+
+        Returns:
+            None.
+
+        Raises:
+            ValueError: If ``qdrant_collection`` is unset.
+        """
+        if not self.qdrant_collection:
+            raise ValueError("qdrant_collection must be set to create a collection")
+        if qdrant_collection_exists(self.qdrant_client, self.qdrant_collection):
+            return
+
+        if self.openai_dimensions is not None:
+            vector_size = int(self.openai_dimensions)
+        else:
+            probe_vector = self.embed_model.get_text_embedding("ping")
+            vector_size = len(probe_vector)
+
+        dense_params = qdrant_models.VectorParams(
+            size=vector_size,
+            distance=qdrant_models.Distance.COSINE,
+        )
+
+        if self.enable_hybrid:
+            # Mirrors QdrantVectorStore: dense vector named "text-dense",
+            # sparse vector named "text-sparse-new" with IDF modifier when
+            # the configured sparse model is in qdrant_client's IDF set.
+            sparse_model_name = self.sparse_model
+            modifier = (
+                qdrant_models.Modifier.IDF
+                if sparse_model_name and sparse_model_name in IDF_EMBEDDING_MODELS
+                else None
+            )
+            sparse_params = qdrant_models.SparseVectorParams(
+                index=qdrant_models.SparseIndexParams(),
+                modifier=modifier,
+            )
+            self.qdrant_client.create_collection(
+                collection_name=self.qdrant_collection,
+                vectors_config={QDRANT_DENSE_VECTOR_NAME: dense_params},
+                sparse_vectors_config={QDRANT_SPARSE_VECTOR_NAME: sparse_params},
+            )
+        else:
+            self.qdrant_client.create_collection(
+                collection_name=self.qdrant_collection,
+                vectors_config=dense_params,
+            )
+        logger.info(
+            "Pre-created Qdrant collection '{}' (vector_size={}, hybrid={}).",
+            self.qdrant_collection,
+            vector_size,
+            self.enable_hybrid,
+        )
+
     def _finalize_empty_ingestion(
         self,
         collection: str,
@@ -5128,6 +5218,12 @@ class RAG:
                 target collection did not previously exist. Triggers cleanup of
                 the orphan SQLite KV files; uploaded source files are kept.
         """
+        # Make the target Qdrant collection visible to the user before any
+        # batch work begins, so it remains selectable even if every embedding
+        # batch later fails. A probe failure here surfaces the embedding
+        # outage immediately instead of masking it as a zero-node "success".
+        self.create_collection_if_missing()
+
         prepared_dir = self._prepare_sources_dir(
             Path(data_dir) if isinstance(data_dir, str) else data_dir
         )
@@ -5376,6 +5472,10 @@ class RAG:
                 target collection did not previously exist. Triggers cleanup of
                 the orphan SQLite KV files; uploaded source files are kept.
         """
+        # See ingest_docs: pre-create the Qdrant collection so it stays
+        # selectable in the UI even when every embedding batch fails.
+        self.create_collection_if_missing()
+
         prepared_dir = self._prepare_sources_dir(
             Path(data_dir) if isinstance(data_dir, str) else data_dir
         )

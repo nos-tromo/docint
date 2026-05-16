@@ -7,18 +7,14 @@ on:
   push:
     branches: [main, tests]
     paths-ignore:
-      - 'docint/app.py'
-      - 'docint/ui/**'
+      - 'frontend/**'
       - 'Dockerfile.frontend'
-      - 'tests/test_streamlit.py'
       - '.github/workflows/frontend-ci.yml'
   pull_request:
     branches: [main, tests]
     paths-ignore:
-      - 'docint/app.py'
-      - 'docint/ui/**'
+      - 'frontend/**'
       - 'Dockerfile.frontend'
-      - 'tests/test_streamlit.py'
       - '.github/workflows/frontend-ci.yml'
 
 jobs:

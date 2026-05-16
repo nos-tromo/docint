@@ -22,7 +22,6 @@
 **/dist/
 **/docs/
 **/env/
-**/lib/
 **/models/
 **/output/
 **/qdrant*/

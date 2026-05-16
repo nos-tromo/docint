@@ -168,6 +168,7 @@ def _make_rag_with_streaming_pipeline(
     monkeypatch.setattr(RAG, "_prepare_sources_dir", lambda self, p: p)
     monkeypatch.setattr(RAG, "_vector_store", lambda self: cast(Any, object()))
     monkeypatch.setattr(RAG, "_storage_context", lambda self, vs: cast(Any, object()))
+    monkeypatch.setattr(RAG, "create_collection_if_missing", lambda self: None)
     monkeypatch.setattr(
         RAG, "_build_ingestion_pipeline", lambda self, **kwargs: FakePipeline()
     )

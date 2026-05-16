@@ -38,7 +38,7 @@ from docint.utils.logger_cfg import init_logger
 
 init_logger()
 
-# Load allowed origins from environment or default to Streamlit's default ports
+# CORS allowlist for the Vite dev server during local development.
 allowed_origins = load_host_env().cors_allowed_origins.split(",")
 
 app = FastAPI(title="Document Intelligence")
@@ -824,6 +824,40 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                 retrieval_query=stream_retrieval_query,
             )
             payload_out.update(validation)
+            # Persist validation onto the row stream_chat already wrote so
+            # restored sessions see the same banner state as fresh turns.
+            # turn_idx is set only by the session-mode branch in
+            # session_manager.stream_chat; the stateless / entity branches
+            # don't persist a turn at all and so won't carry it.
+            turn_idx = payload_out.pop("turn_idx", None)
+            stream_session_id = payload_out.get("session_id")
+            if (
+                isinstance(turn_idx, int)
+                and isinstance(stream_session_id, str)
+                and stream_session_id
+                and rag.sessions is not None
+            ):
+                try:
+                    rag.sessions.update_turn_validation(
+                        session_id=stream_session_id,
+                        turn_idx=turn_idx,
+                        validation_checked=cast(
+                            "bool | None", validation.get("validation_checked")
+                        ),
+                        validation_mismatch=cast(
+                            "bool | None", validation.get("validation_mismatch")
+                        ),
+                        validation_reason=cast(
+                            "str | None", validation.get("validation_reason")
+                        ),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to persist validation for session={} idx={}: {}",
+                        stream_session_id,
+                        turn_idx,
+                        exc,
+                    )
             if payload_out:
                 yield f"data: {json.dumps(payload_out)}\n\n"
         except ValueError as exc:
@@ -1555,9 +1589,14 @@ async def ingest_upload(
             )
         except Exception as exc:  # pragma: no cover - streamed errors are logged
             logger.error("Error during streamed ingestion: {}", exc)
+            # Include the exception class + message so the user can tell at a
+            # glance whether the failure was, e.g., an embedding-endpoint
+            # outage versus a Qdrant connectivity issue versus a parse error.
             yield _format_sse(
                 "error",
-                {"message": "Ingestion failed"},
+                {
+                    "message": f"Ingestion failed: {type(exc).__name__}: {exc}",
+                },
             )
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

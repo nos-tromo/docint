@@ -4346,6 +4346,10 @@ def _patch_ingest_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rag_module, "CorePDFPipelineReader", _FakeCorePDFReader)
     monkeypatch.setattr(RAG, "reset_session_state", lambda self: None)
     monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
+    # ingest_docs now eagerly pre-creates the Qdrant collection. The shared
+    # ingest stubs short-circuit it because the production probe would
+    # AttributeError on the sentinel embed model.
+    monkeypatch.setattr(RAG, "create_collection_if_missing", lambda self: None)
     monkeypatch.setattr(
         rag_module,
         "qdrant_collection_exists",
@@ -5655,6 +5659,184 @@ def test_asingest_docs_empty_raises_and_cleans_kv_file(
     assert excinfo.value.collection_name == "silence-test"
     assert not kv_file.exists()
     assert bumps == []
+
+
+def test_create_collection_if_missing_returns_when_collection_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No probe or create call when Qdrant already has the collection."""
+    rag = RAG(qdrant_collection="already-there")
+    rag._qdrant_client = MagicMock()
+    monkeypatch.setattr(
+        rag_module,
+        "qdrant_collection_exists",
+        lambda client, collection_name: True,
+    )
+
+    def _fail_probe(self: RAG) -> Any:
+        raise AssertionError(
+            "embed_model should not be accessed when collection exists"
+        )
+
+    monkeypatch.setattr(
+        type(rag),
+        "embed_model",
+        property(_fail_probe),
+    )
+
+    rag.create_collection_if_missing()
+
+
+def test_create_collection_if_missing_probes_and_creates_hybrid_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Probes the embed endpoint and creates a hybrid dense+sparse collection.
+
+    Regression: we must NOT instantiate QdrantVectorStore here — its
+    ``__init__`` eagerly loads the fastembed sparse encoder (onnxruntime
+    + tokenizer), which combined with the second store built later by
+    ingest_docs and the GLiNER weights OOM-killed CSV ingests. So this
+    test asserts we hit qdrant_client.create_collection directly with
+    LlamaIndex's named-vector schema.
+    """
+    rag = RAG(qdrant_collection="fresh-collection")
+    rag._qdrant_client = MagicMock()
+    rag.enable_hybrid = True
+    monkeypatch.setattr(
+        rag_module,
+        "qdrant_collection_exists",
+        lambda client, collection_name: False,
+    )
+    # Pin sparse_model to a known IDF model so we can also verify the modifier.
+    monkeypatch.setattr(
+        type(rag),
+        "sparse_model",
+        property(lambda self: "Qdrant/bm42-all-minilm-l6-v2-attentions"),
+    )
+
+    class _StubEmbed:
+        def get_text_embedding(self, text: str) -> list[float]:
+            assert text == "ping"
+            return [0.0] * 384
+
+    monkeypatch.setattr(
+        type(rag),
+        "embed_model",
+        property(lambda self: _StubEmbed()),
+    )
+
+    # Guard against any accidental _vector_store call — eager sparse load
+    # is exactly what this fix avoids.
+    def _fail_vector_store(self: RAG) -> Any:
+        raise AssertionError(
+            "create_collection_if_missing must not instantiate QdrantVectorStore"
+        )
+
+    monkeypatch.setattr(RAG, "_vector_store", _fail_vector_store)
+
+    rag.create_collection_if_missing()
+
+    rag._qdrant_client.create_collection.assert_called_once()
+    kwargs = rag._qdrant_client.create_collection.call_args.kwargs
+    assert kwargs["collection_name"] == "fresh-collection"
+    # Hybrid path: dense named vector + sparse named vector with IDF modifier.
+    assert rag_module.QDRANT_DENSE_VECTOR_NAME in kwargs["vectors_config"]
+    assert kwargs["vectors_config"][rag_module.QDRANT_DENSE_VECTOR_NAME].size == 384
+    assert rag_module.QDRANT_SPARSE_VECTOR_NAME in kwargs["sparse_vectors_config"]
+    assert (
+        kwargs["sparse_vectors_config"][rag_module.QDRANT_SPARSE_VECTOR_NAME].modifier
+        == rag_module.qdrant_models.Modifier.IDF
+    )
+
+
+def test_create_collection_if_missing_uses_configured_dimensions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skip the probe when ``openai_dimensions`` is configured."""
+    rag = RAG(qdrant_collection="dim-configured")
+    rag._qdrant_client = MagicMock()
+    rag.openai_dimensions = 768
+    rag.enable_hybrid = False
+    monkeypatch.setattr(
+        rag_module,
+        "qdrant_collection_exists",
+        lambda client, collection_name: False,
+    )
+
+    def _fail_probe(self: RAG) -> Any:
+        raise AssertionError("probe should be skipped when dimensions are configured")
+
+    monkeypatch.setattr(
+        type(rag),
+        "embed_model",
+        property(_fail_probe),
+    )
+
+    def _fail_vector_store(self: RAG) -> Any:
+        raise AssertionError(
+            "create_collection_if_missing must not build a vector store"
+        )
+
+    monkeypatch.setattr(RAG, "_vector_store", _fail_vector_store)
+
+    rag.create_collection_if_missing()
+
+    rag._qdrant_client.create_collection.assert_called_once()
+    kwargs = rag._qdrant_client.create_collection.call_args.kwargs
+    assert kwargs["collection_name"] == "dim-configured"
+    # Non-hybrid path: bare VectorParams, no sparse config.
+    assert isinstance(kwargs["vectors_config"], rag_module.qdrant_models.VectorParams)
+    assert kwargs["vectors_config"].size == 768
+    assert "sparse_vectors_config" not in kwargs
+
+
+def test_create_collection_if_missing_propagates_probe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedding-endpoint outages surface unchanged so callers see real errors."""
+    rag = RAG(qdrant_collection="unreachable")
+    rag._qdrant_client = MagicMock()
+    monkeypatch.setattr(
+        rag_module,
+        "qdrant_collection_exists",
+        lambda client, collection_name: False,
+    )
+
+    class _BrokenEmbed:
+        def get_text_embedding(self, text: str) -> list[float]:
+            raise ConnectionError("embedding endpoint unreachable")
+
+    monkeypatch.setattr(
+        type(rag),
+        "embed_model",
+        property(lambda self: _BrokenEmbed()),
+    )
+
+    with pytest.raises(ConnectionError, match="embedding endpoint unreachable"):
+        rag.create_collection_if_missing()
+
+
+def test_ingest_docs_calls_create_collection_if_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ingest_docs eagerly creates the Qdrant collection before any batch work."""
+    rag = RAG(qdrant_collection="eager-create")
+    rag._qdrant_client = MagicMock()
+    rag._qdrant_src_dir = tmp_path
+    _patch_ingest_dependencies(monkeypatch)
+    rag._embed_model = cast(Any, object())
+
+    called: list[bool] = []
+
+    def _record_create(self: RAG) -> None:
+        called.append(True)
+
+    monkeypatch.setattr(RAG, "create_collection_if_missing", _record_create)
+    monkeypatch.setattr(RAG, "_bump_summary_revision", lambda self, c=None, **kw: 0)
+
+    rag.ingest_docs(tmp_path, build_query_engine=False)
+
+    assert called == [True]
 
 
 def test_delete_collection_attempts_summary_invalidation(

@@ -60,6 +60,7 @@
 **/env/
 **/legacy/
 **/lib/
+!frontend/src/lib/
 **/logs/
 **/models/
 **/output/
@@ -93,6 +94,7 @@ wheels/*.whl
 !.dockerignore
 !.env.example
 !.pre-commit-config.yaml
+!frontend/index.html
 !scripts/
 !scripts/bundle_images.sh
 !scripts/create_docker_volumes.sh

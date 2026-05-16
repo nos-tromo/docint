@@ -1,0 +1,11 @@
+import type { ReactNode } from 'react'
+import { Sidebar } from './Sidebar'
+
+export function Shell({ children }: { children: ReactNode }) {
+  return (
+    <div className="min-h-screen flex bg-background text-foreground">
+      <Sidebar />
+      <main className="flex-1 min-w-0 overflow-auto">{children}</main>
+    </div>
+  )
+}

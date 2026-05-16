@@ -463,7 +463,7 @@ class HostConfig:
 def load_host_env(
     default_backend_host: str = "http://localhost:8000",
     default_qdrant_host: str = "http://localhost:6333",
-    default_cors_origins: str = "http://localhost:8501,http://127.0.0.1:8501",
+    default_cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173",
 ) -> HostConfig:
     """Loads host configuration from environment variables or defaults.
 
@@ -485,6 +485,34 @@ def load_host_env(
         backend_public_host=os.getenv("BACKEND_PUBLIC_HOST", default_backend_host),
         qdrant_host=os.getenv("QDRANT_HOST", default_qdrant_host),
         cors_allowed_origins=os.getenv("CORS_ALLOWED_ORIGINS", default_cors_origins),
+    )
+
+
+@dataclass(frozen=True)
+class ServeConfig:
+    """Bind address for the docint console script."""
+
+    host: str
+    port: int
+
+
+def load_serve_config(
+    *,
+    default_host: str = "0.0.0.0",
+    default_port: int = 8000,
+) -> ServeConfig:
+    """Read DOCINT_HOST / DOCINT_PORT for the uvicorn entry point.
+
+    Args:
+        default_host (str): Default bind host address.
+        default_port (int): Default bind port.
+
+    Returns:
+        ServeConfig: Dataclass containing bind host and port.
+    """
+    return ServeConfig(
+        host=os.getenv("DOCINT_HOST", default_host),
+        port=int(os.getenv("DOCINT_PORT", str(default_port))),
     )
 
 

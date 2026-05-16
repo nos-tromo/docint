@@ -1,12 +1,12 @@
-"""Tests for the NER aggregation logic in the Streamlit app module."""
+"""Tests for the NER aggregation logic (ported from the Streamlit app module)."""
 
 from typing import Any
 
-from docint import app
+from docint.utils.ner_aggregate import aggregate_ner
 
 
 def test_aggregate_ner_deduplicates_and_tracks_sources() -> None:
-    """Tests that the _aggregate_ner method correctly deduplicates entities and relations,
+    """Tests that the aggregate_ner function correctly deduplicates entities and relations,
     aggregates their counts and best scores, and tracks the source files and locations.
     """
     sources: list[dict[str, Any]] = [
@@ -47,7 +47,7 @@ def test_aggregate_ner_deduplicates_and_tracks_sources() -> None:
         },
     ]
 
-    entities, relations = app._aggregate_ner(sources)
+    entities, relations = aggregate_ner(sources)
 
     assert len(entities) == 2
     acme = entities[0]
@@ -90,7 +90,7 @@ def test_aggregate_ner_condenses_orthographic_entity_variants() -> None:
         },
     ]
 
-    entities, _ = app._aggregate_ner(sources)
+    entities, _ = aggregate_ner(sources)
 
     assert len(entities) == 1
     entity = entities[0]
