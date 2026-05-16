@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [ 'python' ]
+        language: [ 'python', 'actions' ]
 
     steps:
     - name: Checkout repository
@@ -33,14 +33,18 @@ jobs:
       with:
         languages: ${{ matrix.language }}
 
-    # Setup Python environment (matching backend-ci.yml)
-    - uses: actions/setup-python@v6
+    - name: Set up Python
+      if: matrix.language == 'python'
+      uses: actions/setup-python@v6
       with:
         python-version: '3.11'
-    
-    - uses: astral-sh/setup-uv@v7
-    
+
+    - name: Set up uv
+      if: matrix.language == 'python'
+      uses: astral-sh/setup-uv@v7
+
     - name: Install dependencies
+      if: matrix.language == 'python'
       run: uv sync --group dev
 
     - name: Perform CodeQL Analysis
