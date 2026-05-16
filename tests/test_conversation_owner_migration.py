@@ -13,7 +13,6 @@ from sqlalchemy import (
 )
 
 from docint.core.state.base import (
-    Base,
     _ensure_conversation_owner_column,
     _make_session_maker,
 )
