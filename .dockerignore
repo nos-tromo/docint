@@ -30,6 +30,9 @@
 **/session/
 **/tests/
 
+# Frontend build artifacts and caches
+**/node_modules/
+
 # Environment and config files
 *.bundle
 *.conf
