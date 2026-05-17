@@ -39,6 +39,7 @@
 *.webm
 *.xls*
 *.zip
+package-lock.json
 
 # directories
 .*
@@ -52,15 +53,17 @@
 **/.ruff_cache/
 **/.uv-cache/
 **/.venv/
+**/.vite/
 **/.vscode/
 **/artifacts/
 **/build/
+**/coverage/
 **/data/
 **/dist/
 **/env/
+**/node_modules/
 **/legacy/
 **/lib/
-!frontend/src/lib/
 **/logs/
 **/models/
 **/output/
@@ -94,6 +97,9 @@ wheels/*.whl
 !.dockerignore
 !.env.example
 !.pre-commit-config.yaml
+!docs/
+!docs/**/*.md
+!frontend/src/lib/
 !frontend/index.html
 !scripts/
 !scripts/bundle_images.sh
@@ -103,5 +109,3 @@ wheels/*.whl
 !AGENTS.md
 !CLAUDE.md
 !README.md
-!docs/
-!docs/**/*.md
