@@ -103,26 +103,20 @@ function analysisChunkBlock(
 // ---------------------------------------------------------------------------
 
 function sourceLines(src: Source, index: number): string[] {
-  const lines: string[] = []
-  const locParts: string[] = []
-  if (src.page !== null && src.page !== undefined) locParts.push(`page=${src.page}`)
-  if (src.row !== null && src.row !== undefined) locParts.push(`row=${src.row}`)
-  const loc = locParts.length > 0 ? ` ${locParts.join(' ')}` : ''
-  const score =
-    src.score !== null && src.score !== undefined ? ` score=${src.score.toFixed(3)}` : ''
-  lines.push(`[${index}] ${src.filename ?? 'unknown'}${loc}${score}`)
-  // Body preview goes here once — the metadata block below intentionally
-  // excludes text/parent_text/anchor_text to avoid the double-text
-  // duplication that the latest Streamlit export fixes.
-  const preview = (src.preview_text ?? src.text ?? '').trim()
-  if (preview) lines.push(preview)
-  for (const { label, value } of referenceMetadataItems(src.reference_metadata, {
-    includeText: false
-  })) {
-    lines.push(`- ${label}: ${value}`)
+  const chunk: ChunkLike = {
+    filename: src.filename,
+    page: src.page,
+    row: src.row,
+    chunk_id: src.id,
+    // Prefer full text over preview_text (which may be truncated).
+    text: src.text ?? src.preview_text,
+    reference_metadata: src.reference_metadata
   }
-  lines.push('')
-  return lines
+  const extra: Array<[string, unknown]> = []
+  if (src.score !== null && src.score !== undefined) {
+    extra.push(['Score', src.score.toFixed(3)])
+  }
+  return analysisChunkBlock(chunk, index, extra)
 }
 
 export function chatTranscriptToText(turns: ChatTurnData[]): string {

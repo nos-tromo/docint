@@ -3,10 +3,12 @@ import type { Source } from '@/api/types'
 import { sourcePreviewUrl } from '@/api/ingest'
 import { useUiStore } from '@/stores/ui'
 import { formatScore, sourceLabel } from '@/lib/sourceLabel'
+import { referenceMetadataItems } from '@/lib/referenceMetadata'
 
 export function Citation({ source }: { source: Source }) {
   const [open, setOpen] = useState(false)
   const collection = useUiStore((s) => s.selectedCollection)
+  const refMeta = referenceMetadataItems(source.reference_metadata)
   return (
     <div className="rounded-md border border-border bg-zinc-900 px-3 py-2 text-sm">
       <button
@@ -19,6 +21,16 @@ export function Citation({ source }: { source: Source }) {
       </button>
       {open && (
         <div className="mt-2 space-y-2">
+          {refMeta.length > 0 && (
+            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+              {refMeta.map(({ label, value }) => (
+                <div key={label} className="contents">
+                  <dt className="text-muted-foreground">{label}</dt>
+                  <dd className="break-words">{value}</dd>
+                </div>
+              ))}
+            </dl>
+          )}
           {source.text && (
             <div className="whitespace-pre-wrap text-xs bg-zinc-950 p-2 rounded">
               {source.text}
