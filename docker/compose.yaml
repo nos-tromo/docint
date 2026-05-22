@@ -8,8 +8,7 @@ x-no-proxy-env: &no-proxy-env
   no_proxy: "backend,qdrant,localhost,127.0.0.1,172.16.0.0/12,10.0.0.0/8${EXTRA_NO_PROXY:-}"
 
 x-env-file: &env-file
-  - path: .env
-    required: false
+  - ../.env
 
 services:
   ##########################################################
@@ -18,8 +17,8 @@ services:
   backend-cpu:
     image: docint-backend-cpu:${DOCINT_VERSION:-latest}
     build:
-      context: .
-      dockerfile: Dockerfile.backend.cpu
+      context: ..
+      dockerfile: docker/Dockerfile.backend.cpu
     expose:
       - "8000"
     environment:
@@ -40,11 +39,12 @@ services:
       docint-net:
         aliases:
           - backend
+      data-net:
+        aliases:
+          - docint-backend
       inference-net:
         aliases:
           - docint-backend
-    depends_on:
-      - qdrant-cpu
     restart: unless-stopped
     profiles: ["cpu"]
 
@@ -54,8 +54,8 @@ services:
   backend-cuda:
     image: docint-backend-cuda:${DOCINT_VERSION:-latest}
     build:
-      context: .
-      dockerfile: Dockerfile.backend.cuda
+      context: ..
+      dockerfile: docker/Dockerfile.backend.cuda
     expose:
       - "8000"
     environment:
@@ -69,8 +69,6 @@ services:
     env_file: *env-file
     volumes: *backend-volumes
     networks: *backend-networks
-    depends_on:
-      - qdrant-cuda
     restart: unless-stopped
     gpus: all
     deploy:
@@ -88,10 +86,8 @@ services:
   frontend-cpu:
     image: docint-frontend:${DOCINT_VERSION:-latest}
     build: &frontend-build
-      context: .
-      dockerfile: Dockerfile.frontend
-    ports: &frontend-ports
-      - "${DOCINT_HOST_PORT:-8080}:80"
+      context: ..
+      dockerfile: docker/Dockerfile.frontend
     networks: &frontend-networks
       docint-net:
         aliases:
@@ -104,57 +100,10 @@ services:
   frontend-cuda:
     image: docint-frontend:${DOCINT_VERSION:-latest}
     build: *frontend-build
-    ports: *frontend-ports
     networks: *frontend-networks
     depends_on:
       - backend-cuda
     restart: unless-stopped
-    profiles: ["cuda"]
-
-  ##########################################################
-  # Qdrant – CPU
-  ##########################################################
-  qdrant-cpu:
-    image: docker.io/qdrant/qdrant:v1.17.0@sha256:f1c7272cdac52b38c1a0e89313922d940ba50afd90d593a1605dbbc214e66ffb
-    ports: &qdrant-ports
-      - 6333:6333
-      - 6334:6334
-    environment: &qdrant-common-env
-      QDRANT__TELEMETRY_DISABLED: "true"
-    env_file: *env-file
-    volumes: &qdrant-volumes
-      - qdrant-snapshots:/qdrant/snapshots
-      - qdrant-storage:/qdrant/storage
-    networks: &qdrant-networks
-      docint-net:
-        aliases:
-          - qdrant
-    restart: &qdrant-restart unless-stopped
-    profiles: ["cpu"]
-
-  ##########################################################
-  # Qdrant – CUDA
-  ##########################################################
-  qdrant-cuda:
-    image: docker.io/qdrant/qdrant:v1.17.0-gpu-nvidia@sha256:5315819b0721f5211ccb432c6949e81c56bdcf63cab33b4dec45f42126970bde
-    ports: *qdrant-ports
-    environment:
-      <<: *qdrant-common-env
-      NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics
-      NVIDIA_VISIBLE_DEVICES: all
-      QDRANT__GPU__INDEXING: "1"
-    env_file: *env-file
-    volumes: *qdrant-volumes
-    networks: *qdrant-networks
-    restart: *qdrant-restart
-    gpus: all
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     profiles: ["cuda"]
 
 ##########################################################
@@ -168,16 +117,19 @@ volumes:
     external: true
   ollama-cache:
     external: true
-  qdrant-snapshots:
   qdrant-sources:
-  qdrant-storage:
+    external: true
   sessions-storage:
+    external: true
 
 ##########################################################
 # Networks
 ##########################################################
 networks:
   docint-net:
+  data-net:
+    external: true
+    name: ${DATA_NET:-data-net}
   inference-net:
     external: true
     name: ${INFERENCE_NET:-inference-net}

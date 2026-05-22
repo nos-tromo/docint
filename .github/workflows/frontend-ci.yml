@@ -8,13 +8,13 @@ on:
     branches: [main, tests]
     paths:
       - 'frontend/**'
-      - 'Dockerfile.frontend'
+      - 'docker/Dockerfile.frontend'
       - '.github/workflows/frontend-ci.yml'
   pull_request:
     branches: [main, tests]
     paths:
       - 'frontend/**'
-      - 'Dockerfile.frontend'
+      - 'docker/Dockerfile.frontend'
       - '.github/workflows/frontend-ci.yml'
 
 jobs:
@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # Match the toolchain pinned in Dockerfile.frontend (node:20-alpine,
+      # Match the toolchain pinned in docker/Dockerfile.frontend (node:20-alpine,
       # pnpm@9.12.0) and frontend/package.json's packageManager field.
       - name: Set up pnpm
         uses: pnpm/action-setup@v6
@@ -62,7 +62,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: Dockerfile.frontend
+          file: docker/Dockerfile.frontend
           push: false
           tags: docint-frontend:ci-${{ github.sha }}
           cache-from: type=gha

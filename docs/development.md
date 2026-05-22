@@ -29,10 +29,7 @@ docint/
 ├── tests/               # pytest suite
 ├── scripts/             # Shell helpers
 ├── docs/                # This documentation tree
-├── docker-compose.yml   # Compose stack
-├── Dockerfile.backend.cpu
-├── Dockerfile.backend.cuda
-├── Dockerfile.frontend
+├── docker/              # Compose files + Dockerfiles
 ├── pyproject.toml
 ├── uv.lock
 ├── README.md
@@ -171,8 +168,8 @@ Three GitHub Actions workflows live under `.github/workflows/`:
 
 | File | Triggers | What it runs |
 |---|---|---|
-| `backend-ci.yml` | Push/PR to `main`/tests. Excludes UI-only paths. | `uv run pytest` (full suite) and a conditional Docker build of `Dockerfile.backend.cpu`. The CUDA image is not built in CI due to runner constraints. |
-| `frontend-ci.yml` | Push/PR that touches UI-only paths. | Lightweight install, pytest of `tests/test_streamlit.py`, Docker build of `Dockerfile.frontend`. |
+| `backend-ci.yml` | Push/PR to `main`/tests. Excludes UI-only paths. | `uv run pytest` (full suite) and a conditional Docker build of `docker/Dockerfile.backend.cpu`. The CUDA image is not built in CI due to runner constraints. |
+| `frontend-ci.yml` | Push/PR that touches UI-only paths. | Lightweight install, pytest of `tests/test_streamlit.py`, Docker build of `docker/Dockerfile.frontend`. |
 | `codeql.yml` | Scheduled weekly on Sunday plus push to `main`. | CodeQL SAST scan for Python. |
 
 Dependabot is configured via `.github/dependabot.yml` for Python
@@ -180,10 +177,11 @@ dependency updates.
 
 ## Docker development
 
-- `docker compose --profile cpu up --build` rebuilds the CPU backend
-  on the spot.
-- `docker compose --profile cpu build backend-cpu` isolates the
-  backend rebuild if you only changed Python code.
+- `make build` rebuilds the images for the active profile, then `make up`
+  runs them. `make up` also layers `docker/compose.override.yaml` to publish
+  host ports for local development.
+- To isolate a single-service rebuild after a Python-only change:
+  `docker compose --env-file .env -f docker/compose.yaml --profile cpu build backend-cpu`.
 
 ## Style guide
 

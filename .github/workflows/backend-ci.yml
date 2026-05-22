@@ -8,13 +8,13 @@ on:
     branches: [main, tests]
     paths-ignore:
       - 'frontend/**'
-      - 'Dockerfile.frontend'
+      - 'docker/Dockerfile.frontend'
       - '.github/workflows/frontend-ci.yml'
   pull_request:
     branches: [main, tests]
     paths-ignore:
       - 'frontend/**'
-      - 'Dockerfile.frontend'
+      - 'docker/Dockerfile.frontend'
       - '.github/workflows/frontend-ci.yml'
 
 jobs:
@@ -50,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        dockerfile: [Dockerfile.backend.cpu]  # , Dockerfile.backend.cuda]  # CUDA build is currently disabled due to GitHub Actions runner limitations
+        dockerfile: [docker/Dockerfile.backend.cpu]  # , docker/Dockerfile.backend.cuda]  # CUDA build is currently disabled due to GitHub Actions runner limitations
     steps:
       - name: Free Disk Space
         run: |
