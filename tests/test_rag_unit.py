@@ -2197,6 +2197,9 @@ def test_sparse_model_raises_import_error_when_fastembed_broken(
     rag = RAG(qdrant_collection="test")
     rag.enable_hybrid = True
     rag.sparse_model_id = "some-model"
+    # Force a non-vllm provider so the fastembed availability check is not
+    # short-circuited (vllm skips list_supported_models entirely).
+    rag.openai_inference_provider = "ollama"
     with pytest.raises(ImportError, match="fastembed is not installed"):
         rag.sparse_model
 
