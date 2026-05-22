@@ -9,7 +9,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def test_docint_compose_uses_external_vllm_profiles() -> None:
     """Docint should use provider-agnostic profiles without bundled vLLM services."""
 
-    compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    compose = (REPO_ROOT / "docker" / "compose.yaml").read_text(encoding="utf-8")
 
     assert 'profiles: ["cpu"]' in compose
     assert 'profiles: ["cuda"]' in compose
@@ -25,7 +25,7 @@ def test_docint_compose_uses_external_vllm_profiles() -> None:
 def test_docint_compose_joins_shared_INFERENCE_NET() -> None:
     """Docint should expose the backend on the shared external proxy network."""
 
-    compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    compose = (REPO_ROOT / "docker" / "compose.yaml").read_text(encoding="utf-8")
 
     assert "inference-net:" in compose
     assert "name: ${INFERENCE_NET:-inference-net}" in compose

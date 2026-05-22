@@ -17,7 +17,8 @@ uv run pytest tests/test_rag_unit.py::test_fn  # single test
 # Lint and format (ruff check, ruff format, mypy)
 uv run pre-commit run --all-files
 
-# Start backend (needs Qdrant at localhost:6333 + an inference endpoint)
+# Start backend (needs Qdrant + an inference endpoint reachable).
+# Qdrant comes from the sibling data-plane project: `cd ../data-plane && make up-dev`
 uv run uvicorn docint.core.api:app --reload
 
 # Start frontend (Vite dev server)
@@ -31,8 +32,10 @@ uv run ingest --help
 uv run query --help
 uv run load-models          # pre-download model assets
 
-# Docker (pick a profile: cpu-ollama, cpu-openai, cpu-vllm, cuda-ollama, cuda-openai, cuda-vllm)
-docker compose --profile cpu-ollama up --build
+# Docker (Makefile is PROFILE-driven; PROFILE=cpu|cuda read from .env, default cpu)
+make network   # create the external inference-net + data-net (one-time)
+make volumes   # create the external Docker volumes (one-time)
+make up        # build + run the active profile; override: make up PROFILE=cuda
 ```
 
 ## Architecture

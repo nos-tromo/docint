@@ -45,7 +45,7 @@
 .pre-commit-config.yaml
 AGENTS.md
 CLAUDE.md
-docker-compose.yml
+docker/
 Dockerfile*
 LICENSE
 README.md
