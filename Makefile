@@ -6,7 +6,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help network volumes bundle build up stop pre-commit test
+.PHONY: help network volumes build bundle up stop pre-commit test
 
 # Docker profile (cpu/cuda). Read from .env, default cpu. Override on the
 # command line: make up PROFILE=cuda
@@ -28,14 +28,14 @@ PROFILE_FLAG := --profile $(PROFILE)
 help:
 	@echo "docint — build-host helpers. Active profile: $(PROFILE)"
 	@echo
-	@echo "  make network   	create the external inference-net + data-net"
-	@echo "  make volumes   	create the external Docker volumes"
-	@echo "  make build     	build images for the $(PROFILE) profile"
-	@echo "  make up        	build + run the $(PROFILE) profile"
-	@echo "  make stop      	stop the $(PROFILE) profile containers"
-	@echo "  make bundle    	ship images as a versioned .tar.gz pair ($(PROFILE))"
-	@echo "  make pre-commit 	run pre-commit checks"
-	@echo "  make test      	run tests"
+	@echo "  make network    create the external inference-net + data-net"
+	@echo "  make volumes    create the external Docker volumes"
+	@echo "  make build      build images for the $(PROFILE) profile"
+	@echo "  make bundle     ship images as a versioned .tar.gz pair ($(PROFILE))"
+	@echo "  make up         build + run the $(PROFILE) profile"
+	@echo "  make stop       stop the $(PROFILE) profile containers"
+	@echo "  make pre-commit run pre-commit hooks (ruff + mypy)"
+	@echo "  make test       run the test suite"
 	@echo
 	@echo "Set PROFILE=cpu|cuda in .env, or override: make up PROFILE=cuda"
 
@@ -48,13 +48,13 @@ network:
 volumes:
 	./scripts/create_docker_volumes.sh
 
-# Build the stack and ship as a versioned .tar.gz pair (built + pulled).
-bundle:
-	./scripts/bundle_images.sh $(PROFILE)
-
 # Build images for the active profile.
 build:
 	DOCKER_BUILDKIT=1 $(COMPOSE) $(PROFILE_FLAG) build
+
+# Build images and ship as a versioned .tar.gz pair (built + pulled).
+bundle:
+	./scripts/bundle_images.sh $(PROFILE)
 
 # Build and run the active profile.
 up:
@@ -64,8 +64,10 @@ up:
 stop:
 	$(COMPOSE) $(PROFILE_FLAG) stop
 
+# Run pre-commit hooks (ruff + mypy).
 pre-commit:
 	uv run pre-commit run --all-files
 
+# Run the test suite.
 test:
 	uv run pytest -q
