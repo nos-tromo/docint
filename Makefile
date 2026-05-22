@@ -1,6 +1,6 @@
 # Build-host helpers for docint.
 
-.PHONY: network volumes bundle bundle-cuda build build-cuda up up-cuda stop
+.PHONY: network volumes bundle bundle-cuda build build-cuda up up-cuda stop pre-commit test
 
 # Versioned image tag.
 # On production: read from .docint-version written by bundle_images.sh.
@@ -51,3 +51,11 @@ stop:
 # Stop the CUDA profile containers.
 stop-cuda:
 	docker compose --profile cuda stop
+
+# Pre-commit checks: lint, typecheck, test.
+pre-commit:
+	uv run pre-commit run --all-files
+
+# Run the test suite (requires build).
+test:
+	uv run pytest
