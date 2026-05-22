@@ -38,11 +38,11 @@ build-cuda:
 
 # Build and run the CPU profile (backend-cpu, frontend-cpu, qdrant-cpu).
 up:
-	DOCKER_BUILDKIT=1 docker compose --profile cpu up
+	DOCKER_BUILDKIT=1 docker compose --profile cpu up --no-build
 
 # Build and run the CUDA profile (backend-cuda, frontend-cuda, qdrant-cuda).
 up-cuda:
-	DOCKER_BUILDKIT=1 docker compose --profile cuda up
+	DOCKER_BUILDKIT=1 docker compose --profile cuda up --no-build
 
 # Stop the CPU profile containers.
 stop:
