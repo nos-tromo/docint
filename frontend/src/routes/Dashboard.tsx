@@ -6,6 +6,7 @@ import { useSessions } from '@/hooks/useSessions'
 import { useUiStore } from '@/stores/ui'
 import { KpiCard } from '@/components/common/KpiCard'
 import { TopEntitiesChart } from '@/components/dashboard/TopEntitiesChart'
+import { cn } from '@/lib/cn'
 
 export function Dashboard() {
   const collection = useUiStore((s) => s.selectedCollection)
@@ -21,7 +22,24 @@ export function Dashboard() {
       <h1 className="text-2xl font-semibold">Dashboard</h1>
 
       <div className="grid grid-cols-4 gap-4">
-        <KpiCard label="Backend" value={isError ? 'offline' : 'online'} />
+        <KpiCard
+          label="Backend"
+          value={
+            <span className="flex items-center gap-2">
+              <span
+                data-testid="backend-status-dot"
+                aria-hidden="true"
+                className={cn(
+                  'h-2 w-2 shrink-0 rounded-full',
+                  isError
+                    ? 'bg-red-400 shadow-[0_0_6px_rgb(248_113_113_/_0.8)]'
+                    : 'bg-emerald-400 shadow-[0_0_6px_rgb(52_211_153_/_0.8)]'
+                )}
+              />
+              {isError ? 'offline' : 'online'}
+            </span>
+          }
+        />
         <KpiCard label="Collections" value={collections?.length ?? null} />
         <KpiCard
           label="Documents"
