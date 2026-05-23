@@ -292,7 +292,7 @@ function ProcessingBody({ status }: { status: IngestStatus }) {
           <span className="tabular-nums">{status.filesSaved}</span>
           {' files saved · '}
           <span className="tabular-nums">{status.indexed}</span>
-          {' PDFs indexed'}
+          {' files indexed'}
         </div>
       )}
     </div>

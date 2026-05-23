@@ -13,4 +13,9 @@ describe('KpiCard', () => {
     render(<KpiCard label="X" value={null} />)
     expect(screen.getByText('—')).toBeInTheDocument()
   })
+
+  it('renders a ReactNode value', () => {
+    render(<KpiCard label="Backend" value={<span data-testid="custom-node">online</span>} />)
+    expect(screen.getByTestId('custom-node')).toHaveTextContent('online')
+  })
 })
