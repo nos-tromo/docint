@@ -34,7 +34,7 @@ class CorePDFPipelineReader:
     """
 
     data_dir: Path
-    entity_extractor: Callable[[str], tuple[list[dict], list[dict]]] | None = None
+    entity_extractor: Callable[[str], tuple[list[dict[str, Any]], list[dict[str, Any]]]] | None = None
     ner_max_workers: int = 1
     source_collection: str | None = None
     image_ingestion_service: ImageIngestionService | None = None

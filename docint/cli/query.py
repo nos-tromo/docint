@@ -165,7 +165,7 @@ def _ensure_output_path(output_path: str | Path) -> Path:
     return output_path
 
 
-def _store_output(filename: str, data: dict | list, output_path: str | Path) -> None:
+def _store_output(filename: str, data: dict[str, Any] | list[Any], output_path: str | Path) -> None:
     """Store structured output data to a JSON file.
 
     Args:

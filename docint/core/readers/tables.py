@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, cast
 
-import pandas as pd  # type: ignore[import]
+import pandas as pd
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from loguru import logger
@@ -17,7 +17,7 @@ from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.metadata_sanitize import sanitize_for_json
 from docint.utils.mimetype import get_mimetype
 
-RowFilter = Callable[[dict], bool]
+RowFilter = Callable[[dict[str, Any]], bool]
 ORIGINAL_INDEX_COL = "_original_row_index"
 
 

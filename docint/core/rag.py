@@ -93,6 +93,23 @@ from llama_index.vector_stores.qdrant import QdrantVectorStore
 from loguru import logger
 from qdrant_client import QdrantClient
 from qdrant_client import models as qdrant_models
+
+# Names re-exported for test monkey-patching. Strict mypy
+# (no_implicit_reexport) ignores these without an explicit ``__all__``,
+# so list every test-reachable third-party symbol here.
+__all__ = [
+    "EmptyIngestionError",
+    "QueryBundle",
+    "RAG",
+    "ResponseMode",
+    "RetrieverQueryEngine",
+    "SparseTextEmbedding",
+    "VectorStoreQueryMode",
+    "logger",
+    "qdrant_models",
+    "torch",
+    "urllib",
+]
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from qdrant_client.qdrant_fastembed import IDF_EMBEDDING_MODELS
 
@@ -4628,7 +4645,7 @@ class RAG:
                 src_path = self.qdrant_src_dir / collection_name
                 if src_path.exists():
 
-                    def on_error(func: Callable, path: str, _exc_info: Any) -> None:
+                    def on_error(func: Callable[..., Any], path: str, _exc_info: Any) -> None:
                         """Error handler for shutil.rmtree.
 
                         Attempts to fix permissions/flags and retry operation.

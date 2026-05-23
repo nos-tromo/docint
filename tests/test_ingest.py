@@ -139,19 +139,19 @@ def test_ingest_docs_invokes_rag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 
 
 def _make_pipeline(
-    tmp_path: Path, entity_extractor: Callable[[str], tuple[list[dict], list[dict]]]
-) -> tuple[DocumentIngestionPipeline, list]:
+    tmp_path: Path, entity_extractor: Callable[[str], tuple[list[dict[str, Any]], list[dict[str, Any]]]]
+) -> tuple[DocumentIngestionPipeline, list[Any]]:
     """Helper to create a pipeline with stubbed parsers and preset nodes.
 
     Args:
         tmp_path (Path): Temporary directory path for the pipeline.
-        entity_extractor (Callable[[str], tuple[list[dict], list[dict]]]):
+        entity_extractor (Callable[[str], tuple[list[dict[str, Any]], list[dict[str, Any]]]]):
             The entity extractor function to use in the pipeline.
 
     Returns:
         tuple[DocumentIngestionPipeline, list]: The created pipeline and the list of dummy nodes
     """
-    dummy_nodes: list = []
+    dummy_nodes: list[Any] = []
     # Pipeline.__post_init__ will override entity_extractor if env vars are present.
     # We must forcibly set the extractor AFTER init.
     pipeline = DocumentIngestionPipeline(
@@ -181,7 +181,7 @@ def test_entity_extractor_attaches_metadata(tmp_path: Path) -> None:
     """
     calls: list[str] = []
 
-    def extractor(text: str) -> tuple[list[dict], list[dict]]:
+    def extractor(text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         calls.append(text)
         return ([{"text": "foo"}], [{"head": "a", "tail": "b"}])
 
@@ -784,7 +784,7 @@ def _make_streaming_pipeline(
         fine_chunk_overlap = 32
         streaming_readers_enabled = False  # overridden below
 
-    FakeIngestionConfig.streaming_readers_enabled = streaming_readers_enabled  # type: ignore[assignment]
+    FakeIngestionConfig.streaming_readers_enabled = streaming_readers_enabled
 
     monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
     monkeypatch.setattr(pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig())
@@ -814,7 +814,7 @@ def test_streaming_reader_dispatch_calls_iter_documents(
     csv_file = tmp_path / "rows.csv"
     csv_file.write_text("text\nhello\n", encoding="utf-8")
 
-    iter_calls: list[dict] = []
+    iter_calls: list[dict[str, Any]] = []
     fake_doc = Document(
         text="streamed",
         metadata={"file_hash": "abc123", "file_path": str(csv_file)},

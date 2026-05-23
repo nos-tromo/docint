@@ -200,7 +200,7 @@ class SQLiteKVStore(BaseKVStore):
     def put(
         self,
         key: str,
-        val: dict,
+        val: dict[str, Any],
         collection: str = DEFAULT_COLLECTION,
     ) -> None:
         """Store a key-value pair.
@@ -251,7 +251,7 @@ class SQLiteKVStore(BaseKVStore):
         self,
         key: str,
         collection: str = DEFAULT_COLLECTION,
-    ) -> dict | None:
+    ) -> dict[str, Any] | None:
         """Retrieve a value by key.
 
         Args:
@@ -262,7 +262,7 @@ class SQLiteKVStore(BaseKVStore):
             The stored dict, or ``None`` if the key does not exist.
         """
 
-        def _do_get() -> dict | None:
+        def _do_get() -> dict[str, Any] | None:
             row = self._conn.execute(
                 "SELECT val FROM kv_data WHERE collection = ? AND key = ?",
                 (collection, key),
@@ -321,7 +321,7 @@ class SQLiteKVStore(BaseKVStore):
     async def aput(
         self,
         key: str,
-        val: dict,
+        val: dict[str, Any],
         collection: str = DEFAULT_COLLECTION,
     ) -> None:
         """Async wrapper for :meth:`put`.
@@ -352,7 +352,7 @@ class SQLiteKVStore(BaseKVStore):
         self,
         key: str,
         collection: str = DEFAULT_COLLECTION,
-    ) -> dict | None:
+    ) -> dict[str, Any] | None:
         """Async wrapper for :meth:`get`."""
         return self.get(key, collection)
 

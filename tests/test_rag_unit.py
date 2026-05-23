@@ -4583,7 +4583,7 @@ def test_prepare_vector_nodes_uses_embedding_token_counter_when_available(
     rag._embed_model = cast(Any, FakeEmbedModel())
 
     strict_counter = lambda text: [0] * (len(text) // 2)  # noqa: E731
-    rag._embed_token_counter = strict_counter  # type: ignore[attr-defined]
+    rag._embed_token_counter = strict_counter
 
     heavy_node = TextNode(
         text="word " * 4800,  # ~24_000 chars -- char-ratio admits, counter rejects
@@ -4638,7 +4638,7 @@ def test_prepare_vector_nodes_falls_back_to_char_ratio_when_tokenizer_unavailabl
 
     rag = RAG(qdrant_collection="test")
     rag._embed_model = cast(Any, FakeEmbedModel())
-    rag._embed_token_counter = None  # type: ignore[attr-defined]
+    rag._embed_token_counter = None
 
     small_node = TextNode(
         text="short text body",
@@ -6395,7 +6395,7 @@ def test_prepare_vector_nodes_safety_net_runs_per_chunk_and_stops_on_oversize(
             return [0] * (budget * 10)
         return [0]
 
-    rag._embed_token_counter = _marker_aware_counter  # type: ignore[attr-defined]
+    rag._embed_token_counter = _marker_aware_counter
 
     test_nodes = [
         TextNode(

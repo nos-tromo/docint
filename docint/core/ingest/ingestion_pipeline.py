@@ -10,6 +10,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any, NotRequired, TypedDict
 
 from llama_index.core import Document, SimpleDirectoryReader
+
+__all__ = ["DocumentIngestionPipeline", "SimpleDirectoryReader"]
 from llama_index.core.node_parser import (
     MarkdownNodeParser,
     NodeParser,
@@ -137,7 +139,7 @@ class DocumentIngestionPipeline:
 
     # --- Named entity recognition (NER) ---
     ner_max_workers: int = field(default=4, init=False)
-    entity_extractor: Callable[[str], tuple[list[dict], list[dict]]] | None = None
+    entity_extractor: Callable[[str], tuple[list[dict[str, Any]], list[dict[str, Any]]]] | None = None
     hate_speech_enabled: bool = field(default=False, init=False)
     hate_speech_max_chars: int = field(default=1500, init=False)
     hate_speech_max_workers: int = field(default=1, init=False)
@@ -803,7 +805,7 @@ class DocumentIngestionPipeline:
         self.docling_node_parser = DoclingNodeParser()
 
     @staticmethod
-    def _extract_file_hash(data: dict | None) -> str | None:
+    def _extract_file_hash(data: dict[str, Any] | None) -> str | None:
         """Extract the file hash from the given data.
 
         Args:

@@ -216,7 +216,7 @@ def test_retries_locked_db_via_shared_helper(tmp_path: Path, monkeypatch: pytest
 
         manifest._conn = _ConnProxy(real_conn, execute_fn=flaky_execute)  # type: ignore[assignment]
         manifest.mark_started("docs", "hash-1")
-        manifest._conn = real_conn  # type: ignore[assignment]
+        manifest._conn = real_conn
 
         assert manifest.completed_files("docs") == set()
         assert "hash-1" in manifest.pending_files("docs")

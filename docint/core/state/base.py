@@ -4,7 +4,7 @@ from pathlib import Path
 
 from loguru import logger
 from sqlalchemy import Engine, create_engine, inspect, text
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 # --- Session persistence (ORM) ---
 Base = declarative_base()
@@ -58,7 +58,7 @@ def _ensure_turn_validation_columns(engine: Engine) -> None:
 
 
 # --- Session maker ---
-def _make_session_maker(db_url: str) -> sessionmaker:
+def _make_session_maker(db_url: str) -> sessionmaker[Session]:
     """Creates a new SQLAlchemy session maker.
 
     Args:

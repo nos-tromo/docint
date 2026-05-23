@@ -42,6 +42,13 @@ from typing import cast
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.schema import BaseNode, MetadataMode, NodeRelationship, TextNode
 
+# Re-export SentenceSplitter for tests that monkeypatch it.
+__all__ = [
+    "SentenceSplitter",
+    "estimate_tokens",
+    "resplit_nodes_for_embedding",
+]
+
 from docint.utils.openai_cfg import EmbeddingInputTooLongError
 
 TokenCounter = Callable[[str], list[int]]

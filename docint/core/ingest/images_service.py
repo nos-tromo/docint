@@ -38,6 +38,16 @@ from docint.utils.openai_cfg import OpenAIPipeline
 
 T = TypeVar("T")
 
+__all__ = [
+    "CLIPImageEmbeddingBackend",
+    "ImageAsset",
+    "ImageIngestionConfig",
+    "ImageIngestionService",
+    "IngestContext",
+    "StoredImageRecord",
+    "VisionJSONTagger",
+]
+
 
 @dataclass(frozen=True)
 class IngestContext:

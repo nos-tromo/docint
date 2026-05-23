@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from typing import Any
 
 from loguru import logger
 
@@ -53,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _print_human_report(report: dict) -> None:
+def _print_human_report(report: dict[str, Any]) -> None:
     """Print a compact human-readable verification report.
 
     Args:

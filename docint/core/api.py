@@ -37,6 +37,17 @@ from docint.utils.env_cfg import (
 from docint.utils.hashing import compute_file_hash
 from docint.utils.logger_cfg import init_logger
 
+# Names re-exported for test monkey-patching. Strict mypy
+# (no_implicit_reexport) ignores these without an explicit ``__all__``.
+__all__ = [
+    "ClarificationConfig",
+    "ClarificationPolicy",
+    "EmptyIngestionError",
+    "RAG",
+    "asyncio",
+    "ingest_module",
+]
+
 init_logger()
 
 # CORS allowlist for the Vite dev server during local development.
@@ -310,14 +321,14 @@ class QueryOut(BaseModel):
     """Grounded answer plus retrieval provenance for a RAG query."""
 
     answer: str
-    sources: list[dict] = []
+    sources: list[dict[str, Any]] = []
     session_id: str
     graph_debug: dict[str, Any] | None = None
     retrieval_query: str | None = None
     coverage_unit: str | None = None
     retrieval_mode: str | None = None
-    entity_match_candidates: list[dict] = []
-    entity_match_groups: list[dict] = []
+    entity_match_candidates: list[dict[str, Any]] = []
+    entity_match_groups: list[dict[str, Any]] = []
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
     validation_reason: str | None = None
@@ -341,7 +352,7 @@ class SummarizeOut(BaseModel):
     """Response payload for a collection-level summary request."""
 
     summary: str
-    sources: list[dict] = []
+    sources: list[dict[str, Any]] = []
     summary_diagnostics: SummaryDiagnosticsOut | None = None
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
@@ -368,35 +379,35 @@ class IngestOut(BaseModel):
 class SessionListOut(BaseModel):
     """List of sessions visible to the caller."""
 
-    sessions: list[dict]
+    sessions: list[dict[str, Any]]
 
 
 class SessionHistoryOut(BaseModel):
     """Ordered history of messages for a single session."""
 
-    messages: list[dict]
+    messages: list[dict[str, Any]]
 
 
 class NERStatsOut(BaseModel):
     """Aggregate statistics over extracted entities and relations."""
 
     totals: dict[str, int]
-    top_entities: list[dict] = []
-    entity_types: list[dict] = []
-    top_relations: list[dict] = []
-    documents: list[dict] = []
+    top_entities: list[dict[str, Any]] = []
+    entity_types: list[dict[str, Any]] = []
+    top_relations: list[dict[str, Any]] = []
+    documents: list[dict[str, Any]] = []
 
 
 class NERSearchOut(BaseModel):
     """Matching entities returned from a NER search query."""
 
-    results: list[dict] = []
+    results: list[dict[str, Any]] = []
 
 
 class HateSpeechOut(BaseModel):
     """Hate-speech classification results for a document or collection."""
 
-    results: list[dict] = []
+    results: list[dict[str, Any]] = []
 
 
 class AgentChatIn(BaseModel):
@@ -412,7 +423,7 @@ class AgentChatOut(BaseModel):
     status: Literal["clarification", "answer"]
     message: str | None = None
     answer: str | None = None
-    sources: list[dict] = []
+    sources: list[dict[str, Any]] = []
     session_id: str | None = None
     reason: str | None = None
     intent: str | None = None
@@ -497,7 +508,7 @@ def collections_delete(name: str) -> dict[str, bool]:
 
 
 @app.post("/query", response_model=QueryOut, tags=["Query"])
-def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
+def query(payload: QueryIn) -> dict[str, list[dict[str, Any]] | str | bool | None]:
     """Handle a query request.
 
     Args:
@@ -572,7 +583,7 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
                 )
 
         answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
-        sources: list[dict] = data.get("sources", []) if isinstance(data, dict) else []
+        sources: list[dict[str, Any]] = data.get("sources", []) if isinstance(data, dict) else []
         graph_debug = (
             data.get("graph_debug") if isinstance(data, dict) and isinstance(data.get("graph_debug"), dict) else None
         )
@@ -859,7 +870,7 @@ def summarize(refresh: bool = Query(False)) -> dict[str, Any]:
 
         data = rag.summarize_collection(refresh=refresh)
         summary = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
-        sources: list[dict] = data.get("sources", []) if isinstance(data, dict) else []
+        sources: list[dict[str, Any]] = data.get("sources", []) if isinstance(data, dict) else []
         summary_diagnostics = data.get("summary_diagnostics") if isinstance(data, dict) else None
 
         validation = _validation_payload(
@@ -938,7 +949,7 @@ async def summarize_stream(refresh: bool = Query(False)) -> StreamingResponse:
 
 
 @app.get("/collections/ner", tags=["Query"])
-def get_collection_ner(refresh: bool = False) -> dict[str, list[dict]]:
+def get_collection_ner(refresh: bool = False) -> dict[str, list[dict[str, Any]]]:
     """Get all NER data (entities and relations) for the currently selected collection.
 
     Args:
@@ -961,7 +972,7 @@ def get_collection_ner(refresh: bool = False) -> dict[str, list[dict]]:
 
 
 @app.get("/collections/hate-speech", response_model=HateSpeechOut, tags=["Query"])
-def get_collection_hate_speech() -> dict[str, list[dict]]:
+def get_collection_hate_speech() -> dict[str, list[dict[str, Any]]]:
     """Get flagged hate-speech chunks for the selected collection.
 
     Returns:
@@ -1021,7 +1032,7 @@ def search_collection_ner_entities(
     entity_type: str | None = None,
     limit: int = 100,
     entity_merge_mode: Literal["orthographic", "exact"] = Query(default="orthographic"),
-) -> dict[str, list[dict]]:
+) -> dict[str, list[dict[str, Any]]]:
     """Search entities across the selected collection.
 
     Args:
@@ -1054,7 +1065,7 @@ def search_collection_ner_entities(
 
 
 @app.get("/collections/documents", tags=["Query"])
-def get_collection_documents() -> dict[str, list[dict]]:
+def get_collection_documents() -> dict[str, list[dict[str, Any]]]:
     """Get list of documents in the currently selected collection.
 
     Returns:
@@ -1074,7 +1085,7 @@ def get_collection_documents() -> dict[str, list[dict]]:
 
 
 @app.get("/sessions/list", response_model=SessionListOut, tags=["Sessions"])
-def list_sessions() -> dict[str, list[dict]]:
+def list_sessions() -> dict[str, list[dict[str, Any]]]:
     """List all available chat sessions.
 
     Returns:
@@ -1096,7 +1107,7 @@ def list_sessions() -> dict[str, list[dict]]:
     response_model=SessionHistoryOut,
     tags=["Sessions"],
 )
-def get_session_history(session_id: str) -> dict[str, list[dict]]:
+def get_session_history(session_id: str) -> dict[str, list[dict[str, Any]]]:
     """Get history for a specific session.
 
     Args:

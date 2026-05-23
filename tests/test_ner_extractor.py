@@ -853,7 +853,7 @@ def test_build_gliner_ner_extractor_serializes_concurrent_model_access(
     )
 
     extractor = ner_extractor_module.build_gliner_ner_extractor()
-    results: list[tuple[list[dict], list[dict]]] = []
+    results: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
     errors: list[BaseException] = []
 
     def _run(text: str) -> None:

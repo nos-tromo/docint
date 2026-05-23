@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import torch
+import torch as torch  # re-exported for tests that monkeypatch ``torch.cuda``
 from loguru import logger
 
 from docint.utils.env_cfg import (
@@ -132,7 +132,7 @@ def _resolve_gliner_device(device: str | None) -> str | None:
     return None
 
 
-def build_llm_ner_extractor(model: Any, prompt: str, max_chars: int) -> Callable[[str], tuple[list[dict], list[dict]]]:
+def build_llm_ner_extractor(model: Any, prompt: str, max_chars: int) -> Callable[[str], tuple[list[dict[str, Any]], list[dict[str, Any]]]]:
     """Create an NER extractor bound to a model and prompt template.
 
     Args:
@@ -141,17 +141,17 @@ def build_llm_ner_extractor(model: Any, prompt: str, max_chars: int) -> Callable
         max_chars (int): Maximum characters from input text to send to the model.
 
     Returns:
-        Callable[[str], tuple[list[dict], list[dict]]]: The NER extraction function.
+        Callable[[str], tuple[list[dict[str, Any]], list[dict[str, Any]]]]: The NER extraction function.
     """
 
-    def _extract(text: str) -> tuple[list[dict], list[dict]]:
+    def _extract(text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Extract entities and relations from text using the bound model and prompt.
 
         Args:
             text (str): The input text to extract entities and relations from.
 
         Returns:
-            tuple[list[dict], list[dict]]: A tuple containing two lists: extracted entities and extracted relations.
+            tuple[list[dict[str, Any]], list[dict[str, Any]]]: A tuple containing two lists: extracted entities and extracted relations.
         """
         snippet = text[:max_chars]
         prompt_text = prompt.format(text=snippet)
@@ -167,7 +167,7 @@ def build_llm_ner_extractor(model: Any, prompt: str, max_chars: int) -> Callable
         entities_raw = payload.get("entities") if isinstance(payload, dict) else []
         relations_raw = payload.get("relations") if isinstance(payload, dict) else []
 
-        entities: list[dict] = []
+        entities: list[dict[str, Any]] = []
         for ent in entities_raw or []:
             if not isinstance(ent, dict):
                 continue
@@ -182,7 +182,7 @@ def build_llm_ner_extractor(model: Any, prompt: str, max_chars: int) -> Callable
                 }
             )
 
-        relations: list[dict] = []
+        relations: list[dict[str, Any]] = []
         for rel in relations_raw or []:
             if not isinstance(rel, dict):
                 continue
@@ -754,7 +754,7 @@ def build_gliner_ner_extractor(
     labels: list[str] | None = None,
     threshold: float = 0.3,
     device: str | None = None,
-) -> Callable[[str], tuple[list[dict], list[dict]]]:
+) -> Callable[[str], tuple[list[dict[str, Any]], list[dict[str, Any]]]]:
     """Create an NER extractor bound to a GLiNER model.
 
     Args:
@@ -763,7 +763,7 @@ def build_gliner_ner_extractor(
         device (str | None): Preferred execution device.
 
     Returns:
-        Callable[[str], tuple[list[dict], list[dict]]]: The NER extraction function.
+        Callable[[str], tuple[list[dict[str, Any]], list[dict[str, Any]]]]: The NER extraction function.
     """
     model_id = load_model_env().ner_model
 
@@ -795,14 +795,14 @@ def build_gliner_ner_extractor(
         device=device,
     )
 
-    def _extract(text: str) -> tuple[list[dict], list[dict]]:
+    def _extract(text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Extract entities using GLiNER.
 
         Args:
             text (str): Input text.
 
         Returns:
-            tuple[list[dict], list[dict]]: Entities and relations.
+            tuple[list[dict[str, Any]], list[dict[str, Any]]]: Entities and relations.
         """
         if not text.strip():
             return [], []
@@ -841,7 +841,7 @@ def build_gliner_ner_extractor(
             )
 
         # GLiNER is pure NER, leaving relations empty
-        relations: list[dict] = []
+        relations: list[dict[str, Any]] = []
 
         return entities, relations
 

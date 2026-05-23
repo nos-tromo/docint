@@ -31,6 +31,11 @@ from transformers import AutoTokenizer
 
 from docint.utils.env_cfg import resolve_hf_cache_path
 
+# Re-export AutoTokenizer for tests that monkeypatch
+# ``embedding_tokenizer.AutoTokenizer``. Strict mypy ignores implicit
+# re-exports without an explicit ``__all__``.
+__all__ = ["AutoTokenizer", "load_embedding_tokenizer"]
+
 
 def build_embedding_token_counter(
     repo_id: str,

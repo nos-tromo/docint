@@ -245,7 +245,7 @@ class SessionManager:
         metadata_filters_active: bool = False,
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
-    ) -> Iterator[str | dict]:
+    ) -> Iterator[str | dict[str, Any]]:
         """Handle a streaming chat message from the user.
 
         Args:
@@ -481,7 +481,7 @@ class SessionManager:
             summary_text = cast(str | None, conv.rolling_summary)
             return summary_text or ""
 
-    def _persist_turn(self, session_id: str, user_msg: str, resp: Any, data: dict) -> int:
+    def _persist_turn(self, session_id: str, user_msg: str, resp: Any, data: dict[str, Any]) -> int:
         """Persist a user message and the assistant's response in the database.
 
         Args:
