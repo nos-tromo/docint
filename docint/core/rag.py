@@ -389,14 +389,15 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
 
     @staticmethod
     def _reference_metadata(node: NodeWithScore) -> dict[str, Any]:
-        """Extract the reference metadata dict from a retrieved node, which may be nested under the
-        "reference_metadata" key in the node's metadata or may be missing entirely.
+        """Extract the reference metadata dict from a retrieved node.
+
+        May be nested under ``reference_metadata`` in the node's metadata, or missing entirely.
 
         Args:
             node (NodeWithScore): The node from which to extract reference metadata.
 
         Returns:
-            dict[str, Any]: The reference metadata dictionary, or an empty dictionary if not present.
+            dict[str, Any]: The reference metadata dictionary, or an empty dict if not present.
         """
         metadata = getattr(node, "metadata", {}) or {}
         reference_metadata = metadata.get("reference_metadata")
@@ -406,15 +407,14 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
 
     @staticmethod
     def _identity_key(node: NodeWithScore) -> str:
-        """Extract a stable identity key for a retrieved node based on its content and metadata, which can be used for deduplication.
+        """Extract a stable identity key for deduplication from a retrieved node.
 
         Args:
             node (NodeWithScore): The node from which to extract an identity key.
 
         Returns:
-            str: A string identity key that represents the content of the node, such as a text ID, a file hash and row index
-                for tabular data, or a normalized text snippet. Returns an empty string if no meaningful identity can be extracted.
-
+            str: An identity key derived from text ID, file-hash + row-index (tabular), or a
+                normalized text snippet. Empty string if no meaningful identity is available.
         """
         metadata = getattr(node, "metadata", {}) or {}
         reference_metadata = SocialSourceDiversityPostprocessor._reference_metadata(node)
@@ -437,16 +437,16 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
 
     @staticmethod
     def _diversity_bucket(node: NodeWithScore) -> str:
-        """Extract a diversity bucket key for a retrieved node based on its author and time, which can be used to limit near-duplicate results from the same source or time period.
+        """Extract an author+time diversity bucket key for limiting near-duplicate results.
 
         Args:
             node (NodeWithScore): The node from which to extract a diversity bucket key.
 
         Returns:
-            str: A string representing the diversity bucket key, combining the author and time information.
+            str: A bucket key combining lowercased author and an hour-resolution time bucket.
 
         Raises:
-            ValueError: If the timestamp format is invalid and cannot be parsed, which may indicate unexpected metadata structure.
+            ValueError: If the timestamp can't be parsed (indicates unexpected metadata shape).
         """
         metadata = getattr(node, "metadata", {}) or {}
         reference_metadata = SocialSourceDiversityPostprocessor._reference_metadata(node)
@@ -476,10 +476,10 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
 
         Args:
             nodes (list[NodeWithScore]): The list of retrieved nodes to postprocess.
-            query_bundle (QueryBundle | None): The original query bundle that led to these retrieval results, which may be used for context but is not modified by this postprocessor.
+            query_bundle (QueryBundle | None): Original query bundle for context; not modified.
 
         Returns:
-            list[NodeWithScore]: The postprocessed list of nodes, where near-duplicate social or tabular sources have been limited according to the configured diversity limit.
+            list[NodeWithScore]: Nodes after duplicate and bucket-limit filtering.
         """
         _ = query_bundle
         seen: set[str] = set()
@@ -880,7 +880,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             # still contributes to retrieval count and citations without
             # inflating the prompt past ``usable_tokens``. Using
             # ``per_hit_floor`` here would silently exceed the budget by
-            # ``per_hit_floor × remaining_hits`` tokens.
+            # ``per_hit_floor * remaining_hits`` tokens.
             if remaining_tokens <= 0:
                 budget_exhausted_hits += 1
                 expanded.append(_emit(node.node, node.score))
@@ -979,7 +979,7 @@ class VLLMRerankPostprocessor(BaseNodePostprocessor):
 
     @staticmethod
     def _node_text(node: NodeWithScore) -> str:
-        """Extract the text content from a retrieved node, trying multiple strategies to find meaningful text for reranking.
+        """Extract text content from a retrieved node, trying multiple strategies for reranking.
 
         Args:
             node (NodeWithScore): The node from which to extract text.
@@ -999,14 +999,13 @@ class VLLMRerankPostprocessor(BaseNodePostprocessor):
         return text if isinstance(text, str) else ""
 
     def _fallback_nodes(self, nodes: list[NodeWithScore]) -> list[NodeWithScore]:
-        """Fallback strategy to return original nodes in a stable order when vLLM reranking fails.
+        """Fallback strategy returning original nodes in stable order when vLLM reranking fails.
 
         Args:
             nodes (list[NodeWithScore]): The original list of nodes to return in fallback.
 
         Returns:
-            list[NodeWithScore]: The fallback list of nodes, which is a slice of the original nodes list up to the configured
-                top_n limit, ensuring at least one node is returned if available.
+            list[NodeWithScore]: A slice of ``nodes`` up to ``top_n`` (at least one if available).
         """
         return nodes[: max(1, min(int(self.top_n), len(nodes)))]
 
@@ -1019,15 +1018,16 @@ class VLLMRerankPostprocessor(BaseNodePostprocessor):
 
         Args:
             nodes (list[NodeWithScore]): The list of nodes to rerank.
-            query_bundle (QueryBundle | None): The original query bundle that led to these retrieval results, which may contain the original query string needed for reranking.
+            query_bundle (QueryBundle | None): Original query bundle; may carry the query string
+                needed for reranking.
 
         Returns:
-            list[NodeWithScore]: The reranked list of nodes, or the original order if reranking fails.
+            list[NodeWithScore]: Reranked nodes, or the original order if reranking fails.
 
         Raises:
-            ValueError: If the vLLM rerank response is malformed or does not contain usable results.
-            urllib.error.HTTPError: If the HTTP request to the vLLM rerank endpoint fails with an HTTP error.
-            urllib.error.URLError: If the HTTP request to the vLLM rerank endpoint fails with a URL error, such as a connection failure or timeout.
+            ValueError: If the vLLM rerank response is malformed or has no usable results.
+            urllib.error.HTTPError: HTTP error from the vLLM rerank endpoint.
+            urllib.error.URLError: URL error (e.g. connection failure or timeout).
         """
         if not nodes:
             return nodes
@@ -1211,7 +1211,7 @@ class VLLMSparseEncoder:
             payload (dict[str, Any]): A dictionary representing the JSON payload to be sent in the POST request.
 
         Returns:
-            Any: The decoded JSON response from the vLLM service, which may be a dictionary, list, or other JSON structure depending on the endpoint.
+            Any: The decoded JSON response (dict, list, or other JSON shape per endpoint).
         """
         request = urllib.request.Request(
             url,
@@ -1229,7 +1229,8 @@ class VLLMSparseEncoder:
             texts (list[str]): A list of input texts for which to pool token scores.
 
         Returns:
-            list[list[float]]: A list of token score lists, where each inner list corresponds to the token scores for the respective input text. The length of the outer list matches the length of the input texts, and each inner list contains float scores aligned with the tokens of the corresponding text.
+            list[list[float]]: One token-score list per input text, in input order. Each inner
+                list's scores align with the tokens of the corresponding text.
         """
         request_url = f"{_vllm_service_root(self.api_base)}/pooling"
         response_body = self._request_json(
@@ -1281,10 +1282,11 @@ class VLLMSparseEncoder:
         """Extract token ids from a vLLM tokenize response payload.
 
         Args:
-            payload (Any): The JSON-decoded response from the vLLM tokenize endpoint, which may have various structures but is expected to contain token ID information in one of several possible locations.
+            payload (Any): JSON-decoded response from the vLLM tokenize endpoint; expected to
+                carry token IDs at one of several possible locations.
 
         Returns:
-            list[int]: A list of token IDs extracted from the payload. If no valid token IDs can be found, an empty list is returned.
+            list[int]: Extracted token IDs, or an empty list if none can be found.
         """
         candidates: list[Any] = []
         if isinstance(payload, dict):
@@ -1353,16 +1355,14 @@ class VLLMSparseEncoder:
         """Aggregate token ids and scores into a Qdrant sparse vector.
 
         Args:
-            token_ids (list[int]): A list of token IDs corresponding to the input text.
-            token_scores (list[float]): A list of token scores corresponding to the input text, aligned with the token IDs.
+            token_ids (list[int]): Token IDs from the input text.
+            token_scores (list[float]): Scores aligned with ``token_ids``.
 
         Returns:
-            tuple[list[int], list[float]]: A tuple containing two lists: the first list is the aggregated token IDs for the sparse
-                vector, and the second list is the corresponding aggregated scores for those token
-                IDs. The aggregation process involves merging duplicate token IDs by taking the maximum
-                score for each unique token ID, and filtering out any token IDs that are negative or
-                have non-finite or non-positive scores. The resulting lists are ordered by token ID
-                in ascending order. If there are no valid token IDs after filtering, both lists will be empty.
+            tuple[list[int], list[float]]: Aggregated (ids, scores) for the sparse vector. Duplicate
+                token IDs are merged by max-score; negative IDs and non-finite or non-positive scores
+                are filtered out; results are sorted by token ID ascending. Both lists are empty if
+                nothing survives filtering.
         """
         if len(token_ids) != len(token_scores):
             logger.debug(
@@ -1385,10 +1385,11 @@ class VLLMSparseEncoder:
 
 @dataclass(slots=True)
 class RAG:
-    """Represents a Retrieval-Augmented Generation (RAG) model. Handles configuration,
-    initialization, and interaction with underlying components like embedding models,
-    generation models, and vector stores. Provides methods to start sessions,
-    retrieve information, and manage document ingestion.
+    """Retrieval-Augmented Generation engine.
+
+    Handles configuration, initialization, and interaction with embedding models, generation
+    models, and vector stores. Provides methods to start sessions, retrieve information, and
+    manage document ingestion.
     """
 
     # --- Constructor args ---
@@ -1590,7 +1591,7 @@ class RAG:
         worst_case_wait = self.embed_timeout_seconds * (1 + self.embed_max_retries)
         if worst_case_wait > 3600:
             logger.warning(
-                "Embedding worst-case wait is {:.0f}s (timeout={}s × (1 + "
+                "Embedding worst-case wait is {:.0f}s (timeout={}s * (1 + "
                 "max_retries={})); a single stalled batch can hang ingest for "
                 "over an hour. Lower EMBED_TIMEOUT_SECONDS or EMBED_MAX_RETRIES "
                 "if that is too lenient for your deployment.",
@@ -1796,6 +1797,7 @@ class RAG:
     @property
     def qdrant_src_dir(self) -> Path:
         """Best-effort resolution of the host directory where Qdrant stores source data.
+
         Used only as a *fallback* when we cannot reach the Qdrant API.
         Priority: explicit field -> env var -> platform default under home.
 
@@ -1974,8 +1976,8 @@ class RAG:
 
         try:
             supported_models = SparseTextEmbedding.list_supported_models()
-        except ImportError:
-            raise ImportError("fastembed is not installed, but hybrid search is enabled.")
+        except ImportError as err:
+            raise ImportError("fastembed is not installed, but hybrid search is enabled.") from err
 
         # Check if the configured ID is directly supported
         supported_ids = [m["model"] for m in supported_models]
@@ -2058,7 +2060,8 @@ class RAG:
                     if "meta tensor" not in str(exc).lower():
                         raise
                     logger.warning(
-                        "FlagEmbeddingReranker failed to initialize due to a meta-tensor device transfer issue: {}. Falling back to LLMRerank.",
+                        "FlagEmbeddingReranker failed to init (meta-tensor transfer issue: {}); "
+                        "falling back to LLMRerank.",
                         exc,
                     )
                     self._reranker = LLMRerank(
@@ -2747,10 +2750,14 @@ class RAG:
                 # llama-index's ``insert_nodes`` will not re-embed on a
                 # retry attempt — the retry simply replays the Qdrant
                 # upsert with the same point payloads.
+                # B023: the lambda is consumed synchronously by
+                # retry_with_backoff within this loop iteration, so the
+                # late-binding of ``index`` / ``prepared_vector_nodes`` is
+                # not actually a bug — bind them as defaults to silence.
                 try:
                     retry_with_backoff(
                         "qdrant_insert_nodes",
-                        lambda: index.insert_nodes(prepared_vector_nodes),
+                        lambda idx=index, nodes=prepared_vector_nodes: idx.insert_nodes(nodes),
                         max_retries=self.docstore_max_retries,
                         initial_backoff=self.docstore_retry_backoff_seconds,
                         max_backoff=self.docstore_retry_backoff_max_seconds,
@@ -2866,12 +2873,18 @@ class RAG:
             if prepared_vector_nodes:
                 index = self.index
 
-                async def _do_ainsert() -> None:
+                # B023: see sync twin — closure consumed synchronously inside
+                # aretry_with_backoff within this loop iteration; default-bind
+                # the loop vars to silence the late-binding warning.
+                async def _do_ainsert(
+                    idx: Any = index,
+                    nodes: Any = prepared_vector_nodes,
+                ) -> None:
                     # See sync twin for the retry-safety invariant —
                     # nodes are pre-embedded by
                     # ``_aprepare_vector_nodes_for_insert`` so a retry
                     # replays the upsert without re-embedding.
-                    await index.ainsert_nodes(prepared_vector_nodes)
+                    await idx.ainsert_nodes(nodes)
 
                 try:
                     await aretry_with_backoff(
@@ -3265,8 +3278,9 @@ class RAG:
         return existing
 
     def create_index(self) -> None:
-        """Materialize a VectorStoreIndex. If nodes are present in memory, create from nodes.
-        Otherwise, load from vector store.
+        """Materialize a VectorStoreIndex.
+
+        If nodes are present in memory, create from nodes; otherwise, load from vector store.
         """
         vector_store = self._vector_store()
         storage_ctx = self._storage_context(vector_store)
@@ -3486,11 +3500,13 @@ class RAG:
         """Merge request-scoped filters with internal retrieval filters.
 
         Args:
-            base_filters (MetadataFilters | None): The original filters provided at the query engine level, or None if no filters were provided.
-            extra_filters (list[MetadataFilter]): Additional filters that must be applied for retrieval, such as parent-context scoping.
+            base_filters (MetadataFilters | None): Original filters from the query engine, or None.
+            extra_filters (list[MetadataFilter]): Additional filters that must be applied for
+                retrieval, such as parent-context scoping.
 
         Returns:
-            MetadataFilters | None: A new MetadataFilters object that combines the base filters and extra filters with an AND condition, or None if there are no filters to apply.
+            MetadataFilters | None: ``base_filters`` AND ``extra_filters`` combined, or None if
+                neither produces any filter.
         """
         if not extra_filters:
             return base_filters
@@ -3511,11 +3527,11 @@ class RAG:
         """Resolve runtime retrieval mode for the vector index retriever.
 
         Args:
-            raw_mode (str | None): An optional retrieval mode string provided at call time, which takes precedence over config settings. Expected values
-                are "auto", "default", "sparse", "hybrid", or "mmr".
+            raw_mode (str | None): Optional retrieval mode string from the call site (takes
+                precedence over config). One of "auto", "default", "sparse", "hybrid", or "mmr".
 
         Returns:
-            VectorStoreQueryMode: The resolved retrieval mode to use for the current retrieval operation.
+            VectorStoreQueryMode: The resolved retrieval mode for this retrieval operation.
         """
         mode_value = str(raw_mode or self.vector_store_query_mode or "auto").strip().lower()
         if mode_value == "auto":
@@ -3545,20 +3561,22 @@ class RAG:
         """Resolve retrieval settings from config plus optional call-site overrides.
 
         Args:
-            similarity_top_k (int | None): An optional override for the number of top similar results to retrieve, which takes precedence over config settings.
-            retrieval_options (dict[str, Any] | None): An optional dictionary of runtime retrieval overrides, which may include "vector_store_query_mode", "alpha",
-                "sparse_top_k", "hybrid_top_k", and "parent_context_enabled". These options take precedence over config settings and are used to
-                dynamically adjust retrieval behavior on a per-query basis.
+            similarity_top_k (int | None): Optional override for the number of top similar results
+                (takes precedence over config).
+            retrieval_options (dict[str, Any] | None): Optional runtime overrides; recognized keys
+                are ``vector_store_query_mode``, ``alpha``, ``sparse_top_k``, ``hybrid_top_k``, and
+                ``parent_context_enabled``. Take precedence over config; used to adjust retrieval
+                behavior per query.
 
         Returns:
-            dict[str, Any]: A dictionary containing the resolved retrieval settings to apply for the current retrieval operation, including:
-                - "similarity_top_k": The effective number of top similar results to retrieve.
-                - "vector_store_query_mode": The resolved retrieval mode to use.
-                - "alpha": The hybrid fusion alpha value (if applicable).
-                - "sparse_top_k": The number of top sparse results to retrieve (if applicable).
-                - "hybrid_top_k": The number of top hybrid results to retrieve (if applicable).
-                - "parent_context_enabled": Whether parent-context expansion is enabled for this retrieval.
-                - "label": A string label summarizing the retrieval mode and parent context status, useful for logging and analytics.
+            dict[str, Any]: Resolved settings for this retrieval, with keys:
+                - ``similarity_top_k``: effective number of top similar results.
+                - ``vector_store_query_mode``: resolved retrieval mode.
+                - ``alpha``: hybrid fusion alpha (if applicable).
+                - ``sparse_top_k``: number of top sparse results (if applicable).
+                - ``hybrid_top_k``: number of top hybrid results (if applicable).
+                - ``parent_context_enabled``: whether parent-context expansion is on.
+                - ``label``: short label summarizing mode + parent-context status, for logs.
         """
         overrides = retrieval_options or {}
         resolved_mode = self._resolve_vector_store_query_mode(
@@ -3601,11 +3619,11 @@ class RAG:
         """Return the grounded QA prompt template for answer synthesis.
 
         Args:
-            social_table (bool): Whether the active collection appears to be social/table heavy, which may require special
+            social_table (bool): Whether the active collection is social/table-heavy and needs
                 instructions to preserve post-level distinctions during synthesis.
 
         Returns:
-            PromptTemplate: The constructed prompt template to use for grounded question-answering during response synthesis.
+            PromptTemplate: Prompt template for grounded QA during response synthesis.
         """
         prompt = self.grounded_text_qa_prompt
         if social_table:
@@ -3620,11 +3638,11 @@ class RAG:
         """Return the grounded refine prompt template for answer synthesis.
 
         Args:
-            social_table (bool): Whether the active collection appears to be social/table heavy, which may require special
+            social_table (bool): Whether the active collection is social/table-heavy and needs
                 instructions to preserve post-level distinctions during synthesis.
 
         Returns:
-            PromptTemplate: The constructed prompt template to use for grounded question-answering during response synthesis.
+            PromptTemplate: Prompt template for grounded refinement during response synthesis.
         """
         prompt = self.grounded_refine_prompt
         if social_table:
@@ -3642,11 +3660,11 @@ class RAG:
         ``{context_str}`` via the grounded templates
         (:meth:`_build_grounded_text_qa_template`,
         :meth:`_build_grounded_refine_template`). Both templates render
-        at ~150–200 tokens with an empty ``context_str``; the refine
+        at ~150-200 tokens with an empty ``context_str``; the refine
         path additionally includes the prior ``existing_answer``. We
         estimate both and subtract the larger one, plus
         ``openai_num_output`` and a small slack, from
-        ``openai_ctx_window × safety_margin``.
+        ``openai_ctx_window * safety_margin``.
 
         Args:
             social_table: Forwarded to the grounded template builders
@@ -3905,7 +3923,8 @@ class RAG:
         coverage_unit: str | None = None,
         retrieval_mode: str | None = None,
     ) -> dict[str, Any]:
-        """Normalize both llama_index.core.Response and AgentChatResponse into a single payload.
+        """Normalize llama_index.core.Response and AgentChatResponse into a single payload.
+
         Handles:
         - response text (result.response or result.text)
         - source_nodes (list[NodeWithScore])
@@ -3919,6 +3938,12 @@ class RAG:
                 filters were active for the retrieval.
             metadata_filter_rules (Sequence[Any] | None): Optional raw request
                 filter payloads for post-filtering auxiliary image sources.
+            retrieval_query (str | None): The query string actually used for retrieval (may
+                differ from ``query`` after rewriting).
+            coverage_unit (str | None): Unit label for coverage reporting (e.g. "rows",
+                "chunks") used in the response metadata.
+            retrieval_mode (str | None): Effective retrieval mode for this call (e.g. "hybrid",
+                "sparse"); recorded in the response metadata for diagnostics.
 
         Returns:
             dict[str, Any]: A dictionary containing:
@@ -4194,6 +4219,7 @@ class RAG:
             sources (list[dict[str, Any]]): Candidate NER-bearing source rows.
             matched_entity (dict[str, Any]): Selected entity match metadata.
             limit (int): Maximum number of source rows retained for the entity.
+            entity_merge_mode (EntityMergeMode): Entity clustering mode used for derived views.
 
         Returns:
             dict[str, Any]: Group payload containing entity metadata and sources.
@@ -4309,9 +4335,11 @@ class RAG:
 
         Args:
             prompt (str): Raw user query used to identify the target entity.
-            qdrant_filter (qdrant_models.Filter | None): Optional native Qdrant filter to constrain candidate rows.
+            qdrant_filter (qdrant_models.Filter | None): Optional native Qdrant filter to
+                constrain candidate rows.
             limit (int): Maximum number of occurrence rows to return.
             refresh (bool): Whether to bypass cached NER rows when no native filter is used.
+            entity_merge_mode (EntityMergeMode): Entity clustering mode used for derived views.
 
         Returns:
             dict[str, Any]: A response payload aligned with the normal query path.
@@ -4412,9 +4440,11 @@ class RAG:
 
         Args:
             prompt (str): Raw user query used to identify the target entities.
-            qdrant_filter (qdrant_models.Filter | None): Optional native Qdrant filter to constrain candidate rows.
+            qdrant_filter (qdrant_models.Filter | None): Optional native Qdrant filter to
+                constrain candidate rows.
             limit (int): Maximum number of source rows retained across all groups.
             refresh (bool): Whether to bypass cached NER rows when no native filter is used.
+            entity_merge_mode (EntityMergeMode): Entity clustering mode used for derived views.
 
         Returns:
             dict[str, Any]: Grouped occurrence payload.
@@ -6089,10 +6119,11 @@ class RAG:
         """Merge per-document evidence and guarantee broad document coverage.
 
         Args:
-            per_doc_sources (dict[str, list[dict[str, Any]]]): A dictionary mapping document identifiers to lists of source dictionaries.
+            per_doc_sources (dict[str, list[dict[str, Any]]]): Document ID -> source list.
 
         Returns:
-            list[dict[str, Any]]: A merged list of source dictionaries that prioritizes at least one source per document and fills remaining slots with additional evidence.
+            list[dict[str, Any]]: Merged sources prioritizing one per document, then filling the
+                remaining slots with additional evidence.
         """
         merged: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -6132,7 +6163,9 @@ class RAG:
 
         Args:
             briefs (list[str]): A list of evidence briefs for each document.
-            diagnostics (dict[str, Any]): A dictionary containing diagnostic information such as coverage ratio and uncovered documents.
+            diagnostics (dict[str, Any]): Diagnostic info (coverage ratio, uncovered documents).
+            style_prompt (str): Instructions for the synthesis style/voice; appended to the
+                final prompt to shape the model's response.
 
         Returns:
             str: A formatted string representing the final synthesis prompt.
@@ -7031,6 +7064,7 @@ class RAG:
             entity_type (str | None): Optional case-insensitive entity-type filter.
             include_relations (bool): Whether relation aggregates are included.
             refresh (bool): If ``True``, recompute from fresh collection data.
+            entity_merge_mode (EntityMergeMode): Entity clustering mode used for derived views.
 
         Returns:
             dict[str, Any]: NER stats payload.
@@ -7063,6 +7097,7 @@ class RAG:
             entity_type (str | None): Optional case-insensitive type filter.
             limit (int): Maximum number of entities to return.
             refresh (bool): If ``True``, recompute from fresh collection data.
+            entity_merge_mode (EntityMergeMode): Entity clustering mode used for derived views.
 
         Returns:
             list[dict[str, Any]]: Search result rows sorted by mention frequency.
@@ -7092,6 +7127,7 @@ class RAG:
             top_k_nodes (int): Maximum number of highest-mention entity nodes to include.
             min_edge_weight (int): Minimum edge weight threshold.
             refresh (bool): If ``True``, recompute graph from fresh collection data.
+            entity_merge_mode (EntityMergeMode): Entity clustering mode used for derived views.
 
         Returns:
             dict[str, Any]: Graph payload containing ``nodes``, ``edges``, and ``meta``.
@@ -7145,6 +7181,7 @@ class RAG:
             top_k_nodes (int): Graph node cap used to build the base graph.
             min_edge_weight (int): Graph edge threshold used to build the base graph.
             refresh (bool): If ``True``, recompute graph from fresh collection data.
+            entity_merge_mode (EntityMergeMode): Entity clustering mode used for derived views.
 
         Returns:
             dict[str, Any]: Neighborhood payload with ``center`` and ``neighbors``.

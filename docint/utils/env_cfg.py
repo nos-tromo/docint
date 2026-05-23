@@ -500,9 +500,12 @@ def load_image_ingestion_config(
         default_image_tagging_enabled (bool): Whether to generate tags for images by default.
         default_image_qdrant_collection (str): Default Qdrant collection name for storing image vectors.
         default_image_qdrant_vector_name (str): Default name of the vector field in Qdrant for image vectors.
-        default_image_cache_by_hash (bool): Whether to cache image embeddings by hash to avoid redundant computation. Default is True.
-        default_fail_on_embedding_error (bool): Whether to fail the entire ingestion if image embedding fails. Default is False.
-        default_fail_on_tagging_error (bool): Whether to fail the entire ingestion if image tagging fails. Default is False.
+        default_image_cache_by_hash (bool): Cache image embeddings by hash to avoid redundant
+            computation. Default True.
+        default_fail_on_embedding_error (bool): Fail the entire ingestion if image embedding
+            fails. Default False.
+        default_fail_on_tagging_error (bool): Fail the entire ingestion if image tagging fails.
+            Default False.
         default_retrieve_top_k (int): The number of top image matches to retrieve for a text query. Default is 5.
         default_tagging_max_image_dimension (int): Maximum pixel dimension (width or height) for
             images sent to the vision tagging endpoint. Larger images are down-scaled. Default is 1024.
@@ -752,8 +755,8 @@ def load_model_env(
         default_ner_model (str): Default NER model identifier.
         default_rerank_model (str): Default reranker model identifier.
         default_sparse_model (str): Default sparse model identifier.
-        default_text_model_str (str): Default text model identifier.
-        default_vision_model_str (str): Default vision model identifier.
+        default_text_model (str): Default text model identifier.
+        default_vision_model (str): Default vision model identifier.
 
     Returns:
         ModelConfig: Dataclass containing model configuration.
@@ -881,12 +884,13 @@ def load_openai_env(
         default_num_output (int): Default number of tokens reserved for the
             model response by the prompt helper.  Matches the llama_index
             ``LLMMetadata`` default (256).
-        default_inference_provider (Literal['ollama', 'openai', 'vllm']): Default inference server type (e.g. "ollama", "openai", "vllm"). Default is "ollama".
-        default_reuse_client (bool): Whether to reuse the OpenAI client across calls. Default is False.
+        default_inference_provider (Literal['ollama', 'openai', 'vllm']): Default inference
+            server type. Default "ollama".
+        default_reuse_client (bool): Reuse the OpenAI client across calls. Default False.
         default_seed (int): Default random seed for reproducibility.
         default_temperature (float): Default temperature for text generation.
-        default_thinking_effort (Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh']): Default reasoning effort to request when
-            thinking is enabled.
+        default_thinking_effort (Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh']):
+            Default reasoning effort to request when thinking is enabled.
         default_thinking_enabled (bool): Whether OpenAI reasoning/thinking is enabled.
         default_timeout (float): Default timeout in seconds.
         default_top_p (float): Default top_p for nucleus sampling.
@@ -995,7 +999,8 @@ def load_path_env() -> PathConfig:
     Returns:
         PathConfig: Dataclass containing path configuration.
         - artifacts (Path): Root directory for pipeline processing artifacts.
-        - docint_home_dir (Path): The root home directory for docint, used as the base for other default paths. Defaults to ~/docint.
+        - docint_home_dir (Path): Root home directory for docint, used as the base for other
+            default paths. Defaults to ~/docint.
         - data (Path): Path to the data directory.
         - logs (Path): Path to the logs file.
         - queries (Path): Path to the queries file.
@@ -1066,17 +1071,24 @@ def load_pipeline_config(
     """Build a ``PipelineConfig`` from environment variables with sensible defaults.
 
     Args:
-        default_text_coverage_threshold (float): Default characters-per-area threshold for OCR classification.
+        default_text_coverage_threshold (float): Default characters-per-area threshold for OCR
+            classification.
         default_pipeline_version (str): Default pipeline version string.
-        default_artifacts_dir (str | None): Default root directory for artifacts. If None, uses the value from ``load_path_env().artifacts``.
+        default_artifacts_dir (str | None): Default root directory for artifacts. If None, uses
+            the value from ``load_path_env().artifacts``.
         default_max_retries (int): Default maximum retry attempts per page stage.
         default_force_reprocess (bool): Default flag to force reprocessing of pages.
-        default_max_workers (int): Default maximum number of parallel workers for document processing.
-        default_enable_vision_ocr (bool): Default flag to enable vision OCR fallback for scanned pages.
-        default_vision_ocr_timeout (float): Default per-request timeout in seconds for vision OCR API calls.
-        default_vision_ocr_max_retries (int): Default maximum retries for a single vision OCR API call.
-        default_vision_ocr_max_image_dimension (int): Default maximum pixel dimension for images sent to the vision OCR endpoint.
-        default_vision_ocr_max_tokens (int): Default maximum number of tokens the vision LLM may generate per OCR request.
+        default_max_workers (int): Default maximum parallel workers for document processing.
+        default_enable_vision_ocr (bool): Default flag to enable vision OCR fallback for scanned
+            pages.
+        default_vision_ocr_timeout (float): Default per-request timeout in seconds for vision OCR
+            API calls.
+        default_vision_ocr_max_retries (int): Default maximum retries for a single vision OCR
+            API call.
+        default_vision_ocr_max_image_dimension (int): Default max pixel dimension for images sent
+            to the vision OCR endpoint.
+        default_vision_ocr_max_tokens (int): Default maximum number of tokens the vision LLM may
+            generate per OCR request.
 
     Returns:
         PipelineConfig: A fully-initialised ``PipelineConfig``.
@@ -1086,11 +1098,16 @@ def load_pipeline_config(
         - max_retries (int): Maximum retry attempts per stage on a given page.
         - force_reprocess (bool): When True, ignore existing artifacts and reprocess.
         - max_workers (int): Maximum parallel workers for document-level processing.
-        - enable_vision_ocr (bool): When True, use the vision LLM as a fallback OCR engine for scanned pages that have no extractable text layer.
-        - vision_ocr_timeout (float): Per-request timeout in seconds for vision OCR API calls (separate from the global ``OPENAI_TIMEOUT``).
+        - enable_vision_ocr (bool): When True, use the vision LLM as a fallback OCR engine for
+            scanned pages that have no extractable text layer.
+        - vision_ocr_timeout (float): Per-request timeout in seconds for vision OCR API calls
+            (separate from the global ``OPENAI_TIMEOUT``).
         - vision_ocr_max_retries (int): Maximum retries for a single vision OCR API call.
-        - vision_ocr_max_image_dimension (int): Maximum pixel dimension (width or height) for images sent to the vision OCR endpoint.  Larger renders are down-scaled proportionally before encoding.
-        - vision_ocr_max_tokens (int): Maximum number of tokens the vision LLM may generate per OCR request.  Keeps response time bounded.
+        - vision_ocr_max_image_dimension (int): Maximum pixel dimension (width or height) for
+            images sent to the vision OCR endpoint. Larger renders are down-scaled before
+            encoding.
+        - vision_ocr_max_tokens (int): Maximum number of tokens the vision LLM may generate per
+            OCR request. Keeps response time bounded.
     """
     pipeline_version = os.getenv("PIPELINE_VERSION", default_pipeline_version).strip()
     if not pipeline_version:
@@ -1169,14 +1186,19 @@ def load_retrieval_env(
     """Loads retrieval configuration from environment variables or defaults.
 
     Args:
-        default_rerank_use_fp16 (bool): Default flag to use FP16 for reranker model. Default is False.
+        default_rerank_use_fp16 (bool): Use FP16 for reranker model. Default False.
         default_retrieve_top_k (int): Default number of top documents to retrieve.
-        default_chat_response_mode (Literal["auto", "compact", "refine"]): Default response synthesizer mode for chat/query answers. Default is "auto".
-        default_vector_store_query_mode (Literal["auto", "default", "sparse", "hybrid", "mmr"]): Default retrieval mode to use for vector store queries. Default is "auto".
-        default_hybrid_alpha (float): Default dense-vs-sparse fusion weight for hybrid search. Value should be in [0.0, 1.0]. Default is 0.5.
-        default_sparse_top_k (int): Default candidate depth for sparse retrieval in hybrid/sparse modes. Default is 20.
-        default_hybrid_top_k (int): Default final candidate depth after dense/sparse fusion. Default is 20.
-        default_parent_context_enabled (bool): Default flag to enable hierarchical parent context retrieval. Default is True.
+        default_chat_response_mode (Literal["auto", "compact", "refine"]): Default response
+            synthesizer mode for chat/query answers. Default "auto".
+        default_vector_store_query_mode (Literal["auto", "default", "sparse", "hybrid", "mmr"]):
+            Default retrieval mode for vector store queries. Default "auto".
+        default_hybrid_alpha (float): Dense-vs-sparse fusion weight for hybrid search; in
+            [0.0, 1.0]. Default 0.5.
+        default_sparse_top_k (int): Candidate depth for sparse retrieval in hybrid/sparse modes.
+            Default 20.
+        default_hybrid_top_k (int): Final candidate depth after dense/sparse fusion. Default 20.
+        default_parent_context_enabled (bool): Enable hierarchical parent-context retrieval.
+            Default True.
         default_parent_context_safety_margin (float): Default fraction of
             ``OPENAI_CTX_WINDOW`` the chat-budget packer may consume when
             deciding whether to emit a full parent or a windowed slice.
@@ -1394,13 +1416,19 @@ def load_summary_env(
         default_max_docs (int): Maximum number of documents sampled for summary.
         default_per_doc_top_k (int): Maximum evidence chunks retrieved per document.
         default_final_source_cap (int): Maximum number of merged summary sources.
+        default_social_chunking_enabled (bool): Whether row-heavy social/table collections use
+            chunk/post-level summarization.
+        default_social_candidate_pool (int): Candidate retrieval depth for social/table summaries.
+        default_social_diversity_limit (int): Max sources per diversity bucket during
+            social/table summaries.
 
     Returns:
         SummaryConfig: Parsed summary precision settings.
-        - coverage_target (float): Target minimum document coverage ratio for summaries. Value is clamped to [0.0, 1.0].
+        - coverage_target (float): Target minimum document coverage ratio; clamped to [0.0, 1.0].
         - max_docs (int): Maximum number of documents to sample for summarization.
         - per_doc_top_k (int): Maximum number of evidence chunks to retrieve per document.
-        - final_source_cap (int): Maximum number of merged sources to include in the final summary answer to keep it concise and focused.
+        - final_source_cap (int): Maximum number of merged sources to include in the final
+            summary answer, to keep it concise and focused.
         - social_chunking_enabled (bool): Whether row-heavy social/table
           collections should use chunk/post-level summarization.
         - social_candidate_pool (int): Candidate retrieval depth for social/table
