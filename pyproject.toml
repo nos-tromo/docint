@@ -94,6 +94,11 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = ["docint*"]
 
+[tool.mypy]
+ignore_missing_imports = true
+no_incremental = true
+disable_error_code = ["import-untyped", "attr-defined", "assignment"]
+
 [tool.uv]
 package = true
 conflicts = [

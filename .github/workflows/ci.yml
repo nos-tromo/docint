@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    # Pinned to nos-tromo/.github@ddb514a until v1 is tagged.
+    uses: nos-tromo/.github/.github/workflows/python-app-ci.yml@ddb514ae048b7f7cf16682219dbf66a892b50bdc
+    with:
+      python-versions: '["3.11"]'
+      uv-sync-args: '--frozen --group dev --extra cpu'
+      docker-build: true
+      docker-compose-profiles: '--profile cpu'
+      frontend-build: true
+      frontend-dir: 'frontend'
+      node-version: '20'
+      pnpm-version: '9.12.0'
