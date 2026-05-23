@@ -80,10 +80,10 @@ cuda = [
 
 [dependency-groups]
 dev = [
-    "mypy>=1.20.0",
+    "mypy==1.19.0",
     "pre-commit>=4.5.1",
     "pytest>=9.0.3",
-    "ruff==0.15.10",
+    "ruff==0.15.14",
 ]
 
 [build-system]
@@ -94,10 +94,32 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = ["docint*"]
 
+[tool.ruff]
+# Mirrors nos-tromo/.github/configs/python-strict/ruff.toml. target-version
+# is the only key that may differ (docint floors at py311). Drift fails CI.
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",
+    "I",
+    "B",
+    "D",
+    "ANN",
+    "UP",
+    "RUF",
+]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
 [tool.mypy]
+# Mirrors nos-tromo/.github/configs/python-strict/mypy.ini. Drift fails CI.
+strict = true
 ignore_missing_imports = true
 no_incremental = true
-disable_error_code = ["import-untyped", "attr-defined", "assignment"]
 
 [tool.uv]
 package = true
