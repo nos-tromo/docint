@@ -441,7 +441,7 @@ def collections_list() -> list[str]:
         return rag.list_collections()
     except Exception as e:
         logger.error("HTTPException: Error listing collections: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/collections/select", response_model=SelectCollectionOut, tags=["Collections"])
@@ -468,10 +468,10 @@ def collections_select(payload: SelectCollectionIn) -> dict[str, bool | str]:
         raise
     except ValueError as e:
         logger.error("Collection '{}' could not be selected: {}", name, e)
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:
         logger.error("Unexpected error selecting collection '{}': {}", name, e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
     return {"ok": True, "name": name}
 
 
@@ -493,7 +493,7 @@ def collections_delete(name: str) -> dict[str, bool]:
         return {"ok": True}
     except Exception as e:
         logger.error("HTTPException: Error deleting collection: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/query", response_model=QueryOut, tags=["Query"])
@@ -634,7 +634,7 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
         raise
     except Exception as exc:
         logger.error("Unexpected error processing query: {}", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/stream_query", tags=["Query"])
@@ -876,7 +876,7 @@ def summarize(refresh: bool = Query(False)) -> dict[str, Any]:
         }
     except HTTPException as e:
         logger.error("HTTPException: Error generating summary: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/summarize/stream", tags=["Query"])
@@ -957,7 +957,7 @@ def get_collection_ner(refresh: bool = False) -> dict[str, list[dict]]:
         return {"sources": sources}
     except Exception as e:
         logger.error("Error fetching collection NER: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/collections/hate-speech", response_model=HateSpeechOut, tags=["Query"])
@@ -973,7 +973,7 @@ def get_collection_hate_speech() -> dict[str, list[dict]]:
         return {"results": rag.get_collection_hate_speech()}
     except Exception as e:
         logger.error("Error fetching collection hate-speech results: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/collections/ner/stats", response_model=NERStatsOut, tags=["Query"])
@@ -991,6 +991,8 @@ def get_collection_ner_stats(
         min_mentions (int): Minimum mention count for ranked outputs.
         entity_type (str | None): Optional case-insensitive entity type filter.
         include_relations (bool): Whether relation aggregates are included.
+        entity_merge_mode (Literal["orthographic", "exact"]): Entity clustering mode used for
+            derived views.
 
     Returns:
         dict[str, Any]: A dashboard-friendly NER stats payload.
@@ -1010,7 +1012,7 @@ def get_collection_ner_stats(
         )
     except Exception as e:
         logger.error("Error fetching collection NER stats: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/collections/ner/search", response_model=NERSearchOut, tags=["Query"])
@@ -1026,6 +1028,8 @@ def search_collection_ner_entities(
         q (str): Substring query applied to entity text.
         entity_type (str | None): Optional case-insensitive type filter.
         limit (int): Maximum number of rows to return.
+        entity_merge_mode (Literal["orthographic", "exact"]): Entity clustering mode used for
+            derived views.
 
     Returns:
         dict[str, list[dict]]: Dictionary containing matched entities.
@@ -1046,7 +1050,7 @@ def search_collection_ner_entities(
         }
     except Exception as e:
         logger.error("Error searching collection entities: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/collections/documents", tags=["Query"])
@@ -1066,7 +1070,7 @@ def get_collection_documents() -> dict[str, list[dict]]:
         return {"documents": docs}
     except Exception as e:
         logger.error("Error fetching collection documents: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/sessions/list", response_model=SessionListOut, tags=["Sessions"])
@@ -1084,7 +1088,7 @@ def list_sessions() -> dict[str, list[dict]]:
         return {"sessions": sessions}
     except Exception as e:
         logger.error("Error listing sessions: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get(
@@ -1109,7 +1113,7 @@ def get_session_history(session_id: str) -> dict[str, list[dict]]:
         return {"messages": messages}
     except Exception as e:
         logger.error("Error fetching history: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.delete("/sessions/{session_id}", tags=["Sessions"])
@@ -1130,7 +1134,7 @@ def delete_session(session_id: str) -> dict[str, bool]:
         return {"ok": success}
     except Exception as e:
         logger.error("Error deleting session: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/agent/chat", response_model=AgentChatOut, tags=["Agent"])
@@ -1239,7 +1243,7 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
         }
     except Exception as exc:
         logger.error("Unexpected error during ingestion of '{}': {}", name, exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return {
         "ok": True,
@@ -1318,7 +1322,7 @@ async def agent_chat_stream(payload: AgentChatIn) -> StreamingResponse:
 async def ingest_upload(
     request: Request,
     collection: str = Form(...),
-    files: list[UploadFile] = File(...),
+    files: list[UploadFile] = File(...),  # noqa: B008 — FastAPI dependency marker
     hybrid: bool | None = Form(True),
 ) -> StreamingResponse:
     """Upload files for ingestion and stream progress as SSE events.

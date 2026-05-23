@@ -2077,14 +2077,14 @@ def test_start_session_initializes_memory(monkeypatch: pytest.MonkeyPatch, tmp_p
             """Initialize the FakeMemory with an empty message list."""
             self.messages: list[object] = []
 
-        def put(self, message) -> None:
+        def put(self, message: object) -> None:
             """Add a message to the FakeMemory."""
             self.messages.append(message)
 
     class FakeChatEngine:
         """A fake chat engine class for testing purposes."""
 
-        def __init__(self, **kwargs) -> None:
+        def __init__(self, **kwargs: Any) -> None:
             """Initialize the FakeChatEngine with the provided keyword arguments.
 
             Args:
@@ -2093,7 +2093,7 @@ def test_start_session_initializes_memory(monkeypatch: pytest.MonkeyPatch, tmp_p
             self.kwargs = kwargs
 
         @classmethod
-        def from_defaults(cls, **kwargs) -> FakeChatEngine:
+        def from_defaults(cls, **kwargs: Any) -> FakeChatEngine:
             """Create a FakeChatEngine instance from default settings.
 
             Args:
@@ -2127,8 +2127,7 @@ def test_chat_rejects_empty_prompt() -> None:
 def test_sparse_model_raises_import_error_when_fastembed_broken(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Test that the sparse_model property raises ImportError when
-    SparseTextEmbedding.list_supported_models raises ImportError.
+    """sparse_model property re-raises ImportError when list_supported_models raises.
 
     Args:
         monkeypatch: The monkeypatch fixture.
@@ -2155,7 +2154,7 @@ def test_sparse_model_raises_import_error_when_fastembed_broken(
     # short-circuited (vllm skips list_supported_models entirely).
     rag.openai_inference_provider = "ollama"
     with pytest.raises(ImportError, match="fastembed is not installed"):
-        rag.sparse_model
+        _ = rag.sparse_model
 
 
 def test_filter_docs_skips_existing_hashes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2523,7 +2522,7 @@ def test_vllm_reranker_reorders_results(monkeypatch: pytest.MonkeyPatch) -> None
             _ = (exc_type, exc, tb)
 
         def read(self) -> bytes:
-            """Simulates reading the response body, returning a JSON-encoded byte string with relevance scores and indices.
+            """Simulate reading the response body; returns rerank results as JSON bytes.
 
             Returns:
                 bytes: A JSON-encoded byte string containing the reranking results.
@@ -2538,7 +2537,7 @@ def test_vllm_reranker_reorders_results(monkeypatch: pytest.MonkeyPatch) -> None
             ).encode("utf-8")
 
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> FakeResponse:
-        """A fake urlopen function that captures the request details and simulates a response from the vLLM rerank endpoint.
+        """Fake urlopen capturing the request and returning a canned vLLM rerank response.
 
         Args:
             request (urllib.request.Request): The HTTP request object sent to the rerank endpoint.
@@ -2688,7 +2687,7 @@ def test_reranker_falls_back_to_llm_on_meta_tensor_error(
         def __init__(self, top_n: int, model: str, use_fp16: bool) -> None:
             _ = (top_n, model, use_fp16)
 
-            def _raise(_pairs) -> list[float]:
+            def _raise(_pairs: object) -> list[float]:
                 raise NotImplementedError("Cannot copy out of meta tensor; no data!")
 
             self._model = types.SimpleNamespace(compute_score=_raise)
@@ -3201,7 +3200,7 @@ def test_parent_context_emits_subnode_when_budget_exhausted() -> None:
 
     Without this guard the greedy packer would keep windowing every
     remaining hit at ``per_hit_floor`` tokens, silently overshooting
-    ``usable_tokens`` by ``per_hit_floor × remaining_hits``. Regression
+    ``usable_tokens`` by ``per_hit_floor * remaining_hits``. Regression
     guard for the code-quality-review finding: a 4th oversize hit must
     fall back to its sub-node rather than emit another windowed parent.
     """
@@ -3715,8 +3714,11 @@ def test_summarize_collection_uses_post_coverage_for_social_rows(
 
 
 def test_merge_summary_sources_deduplicates_and_preserves_doc_coverage() -> None:
-    """Test that _merge_summary_sources deduplicates sources by filename while preserving coverage information.
-    This ensures that when multiple nodes from the same document are included in the summary, they are correctly merged into a single source entry without losing track of how many nodes from that document contributed to the summary.
+    """_merge_summary_sources deduplicates by filename while preserving doc coverage.
+
+    Ensures that when multiple nodes from the same document appear in the summary, they are
+    merged into a single source entry without losing track of how many nodes from that document
+    contributed.
     """
     rag = RAG(qdrant_collection="test")
     rag.summary_final_source_cap = 5
@@ -3750,7 +3752,7 @@ def test_merge_summary_sources_deduplicates_and_preserves_doc_coverage() -> None
 def test_summarize_collection_handles_no_documents(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Test that summarize_collection returns an appropriate response and diagnostics when there are no documents to summarize.
+    """summarize_collection returns sane response + diagnostics when there are no documents.
 
     Args:
         monkeypatch: The monkeypatch fixture.
@@ -3782,8 +3784,9 @@ def test_summarize_collection_handles_no_documents(
 
 
 def test_summarize_collection_requires_collection() -> None:
-    """Test that summarize_collection raises a ValueError if no collection is selected, ensuring
-    that the method cannot be called without a valid collection context.
+    """summarize_collection raises ValueError if no collection is selected.
+
+    Ensures the method cannot be called without a valid collection context.
     """
     rag = RAG(qdrant_collection="")
     with pytest.raises(ValueError, match="No collection selected"):
@@ -6020,13 +6023,13 @@ def test_vllm_sparse_encoder_converts_pooling_output(
         def __enter__(self) -> FakeResponse:
             return self
 
-        def __exit__(self, exc_type, exc, tb) -> None:
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
             return None
 
         def read(self) -> bytes:
             return json.dumps(self._payload).encode("utf-8")
 
-    def fake_urlopen(request, timeout: float = 300.0) -> FakeResponse:
+    def fake_urlopen(request: Any, timeout: float = 300.0) -> FakeResponse:
         _ = timeout
         return FakeResponse(responses[request.full_url])
 
@@ -6077,7 +6080,7 @@ def test_vector_store_uses_vllm_sparse_functions(
 
 
 # ---------------------------------------------------------------------------
-# run_query / run_query_async – context window overflow
+# run_query / run_query_async - context window overflow
 # ---------------------------------------------------------------------------
 
 
@@ -6179,7 +6182,7 @@ def test_rag_init_warns_when_embed_worst_case_wait_exceeds_one_hour(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """``RAG.__post_init__`` must WARN when ``timeout × (1 + retries) > 3600``.
+    """``RAG.__post_init__`` must WARN when ``timeout * (1 + retries) > 3600``.
 
     The original 15-minute stall bug was silent — the operator saw
     nothing until the ingest failed after 900 s. The safety-net at
