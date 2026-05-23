@@ -77,6 +77,7 @@ class ProducerConsumer(Generic[T]):
         *,
         queue_max_size: int = 4,
     ) -> None:
+        """Bind the producer callable and bounded-queue size for streamed consumption."""
         self._producer_fn = producer_fn
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=max(1, queue_max_size))
         self._thread: threading.Thread | None = None

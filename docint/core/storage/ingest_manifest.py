@@ -125,6 +125,7 @@ class IngestManifest:
         retry_backoff_seconds: float = 0.25,
         retry_backoff_max_seconds: float = 2.0,
     ) -> None:
+        """Store the SQLite path and retry/backoff knobs for transient write failures."""
         self.db_path = str(db_path)
         self.max_retries = max(0, int(max_retries))
         self.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))

@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from copy import deepcopy
-from typing import cast
+from typing import Any, cast
 
 from llama_index.core.bridge.pydantic import PrivateAttr
 from llama_index.core.node_parser import NodeParser, SentenceSplitter
@@ -35,7 +35,7 @@ class HierarchicalNodeParser(NodeParser):
         coarse_chunk_size: int = 8192,
         fine_chunk_size: int = 1024,
         fine_chunk_overlap: int = 0,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         """Initialize the HierarchicalNodeParser.
 
@@ -48,7 +48,9 @@ class HierarchicalNodeParser(NodeParser):
         self._coarse_splitter = SentenceSplitter(chunk_size=coarse_chunk_size, chunk_overlap=0)
         self._fine_splitter = SentenceSplitter(chunk_size=fine_chunk_size, chunk_overlap=fine_chunk_overlap)
 
-    def _parse_nodes(self, nodes: Sequence[BaseNode], show_progress: bool = False, **kwargs) -> list[BaseNode]:
+    def _parse_nodes(
+        self, nodes: Sequence[BaseNode], show_progress: bool = False, **kwargs: Any
+    ) -> list[BaseNode]:
         """Parse nodes into hierarchical chunks.
 
         If the input nodes are Documents (Level 0), we first create Coarse Chunks (Level 1),

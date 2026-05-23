@@ -1255,7 +1255,7 @@ def test_collections_ner_stats_failure(monkeypatch: pytest.MonkeyPatch, client: 
         client (TestClient): The TestClient instance.
     """
 
-    def raiser(**kwargs) -> dict[str, Any]:
+    def raiser(**kwargs: Any) -> dict[str, Any]:
         """Fake implementation of get_collection_ner_stats that raises an error for testing purposes.
 
         Returns:
@@ -1281,7 +1281,7 @@ def test_collections_ner_search_failure(monkeypatch: pytest.MonkeyPatch, client:
         client (TestClient): The TestClient instance.
     """
 
-    def raiser(**kwargs) -> list[dict[str, Any]]:
+    def raiser(**kwargs: Any) -> list[dict[str, Any]]:
         """Fake implementation of search_collection_ner_entities that raises an error for testing purposes.
 
         Returns:

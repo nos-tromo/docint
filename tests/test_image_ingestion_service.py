@@ -1,3 +1,5 @@
+"""Tests for the shared image-ingestion service used by document readers."""
+
 from __future__ import annotations
 
 import hashlib

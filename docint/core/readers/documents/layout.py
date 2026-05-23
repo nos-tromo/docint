@@ -49,6 +49,7 @@ class PypdfLayoutAnalyzer(LayoutAnalyzer):
     """
 
     def __init__(self, file_path: str | Path) -> None:
+        """Open the PDF at ``file_path`` and prepare a pypdf reader for layout analysis."""
         self._file_path = Path(file_path)
         self._reader = pypdf.PdfReader(self._file_path)
 

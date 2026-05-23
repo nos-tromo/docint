@@ -137,6 +137,7 @@ class CLIPImageEmbeddingBackend:
     _dimension: int = field(init=False)
 
     def __post_init__(self) -> None:
+        """Resolve the HF cache path and load the image-embedding processor + model."""
         resolved = resolve_hf_cache_path(cache_dir=self.cache_dir, repo_id=self.image_embed_model_id)
         resolved_model = str(resolved) if resolved else self.image_embed_model_id
         local_only = os.getenv("HF_HUB_OFFLINE", "0") == "1"
@@ -461,6 +462,7 @@ class ImageIngestionService:
     _tagging_backend_error: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Lazily construct a Qdrant client when one wasn't injected."""
         if self.qdrant_client is None:
             self.qdrant_client = QdrantClient(url=load_host_env().qdrant_host)
 

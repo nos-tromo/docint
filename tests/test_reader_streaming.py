@@ -16,7 +16,7 @@ import inspect
 import json
 from pathlib import Path
 from types import GeneratorType
-from typing import Any
+from typing import Any, ClassVar
 
 import pandas as pd
 import pytest
@@ -200,7 +200,7 @@ def test_image_iter_documents_yields_one_document(tmp_path: Path, monkeypatch: p
 
     class FakeRecord:
         llm_description = "a cat"
-        llm_tags = ["cat", "animal"]
+        llm_tags: ClassVar[list[str]] = ["cat", "animal"]
         image_id = "img-1"
         point_id = "pt-1"
         error = None
@@ -225,7 +225,7 @@ def test_image_load_data_matches_iter_documents(tmp_path: Path, monkeypatch: pyt
 
     class FakeRecord:
         llm_description = "a dog"
-        llm_tags: list[str] = []
+        llm_tags: ClassVar[list[str]] = []
         image_id = ""
         point_id = ""
         error = None

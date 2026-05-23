@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Never, cast
+from typing import Any, ClassVar, Never, cast
 
 import pytest
 from llama_index.core import Document
@@ -45,7 +45,7 @@ def test_main_executes_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
         order.append("collection")
         return "demo"
 
-    def fake_ingest(*args, **kwargs) -> None:
+    def fake_ingest(*args: Any, **kwargs: Any) -> None:
         """Fake ingest_docs function to track execution order."""
         order.append("ingest")
 
@@ -181,7 +181,7 @@ def test_entity_extractor_attaches_metadata(tmp_path: Path) -> None:
     """
     calls: list[str] = []
 
-    def extractor(text: str):
+    def extractor(text: str) -> tuple[list[dict], list[dict]]:
         calls.append(text)
         return ([{"text": "foo"}], [{"head": "a", "tail": "b"}])
 
@@ -295,7 +295,7 @@ def _install_transcript_pipeline_stubs(
         ingestion_batch_size = 5
         sentence_splitter_chunk_size = 512
         sentence_splitter_chunk_overlap = 64
-        supported_filetypes: list[str] = []
+        supported_filetypes: ClassVar[list[str]] = []
         hierarchical_chunking_enabled = False
         coarse_chunk_size = 1024
         fine_chunk_size = 256
@@ -451,7 +451,7 @@ def test_hate_speech_detection_attaches_flagged_metadata(monkeypatch: pytest.Mon
         ingestion_batch_size = 2
         sentence_splitter_chunk_size = 512
         sentence_splitter_chunk_overlap = 64
-        supported_filetypes: list[str] = []
+        supported_filetypes: ClassVar[list[str]] = []
         hierarchical_chunking_enabled = False
         coarse_chunk_size = 1024
         fine_chunk_size = 256
@@ -569,7 +569,7 @@ def test_hate_speech_detection_parallel_workers(monkeypatch: pytest.MonkeyPatch,
         ingestion_batch_size = 2
         sentence_splitter_chunk_size = 512
         sentence_splitter_chunk_overlap = 64
-        supported_filetypes: list[str] = []
+        supported_filetypes: ClassVar[list[str]] = []
         hierarchical_chunking_enabled = False
         coarse_chunk_size = 1024
         fine_chunk_size = 256
@@ -682,7 +682,7 @@ def test_build_streaming_yields_enrichment_batches_and_completion_hashes(
         ingestion_batch_size = 2
         sentence_splitter_chunk_size = 512
         sentence_splitter_chunk_overlap = 64
-        supported_filetypes = [".txt"]
+        supported_filetypes: ClassVar[list[str]] = [".txt"]
         hierarchical_chunking_enabled = False
         coarse_chunk_size = 1024
         fine_chunk_size = 256
@@ -774,7 +774,7 @@ def _make_streaming_pipeline(
         ingestion_batch_size = 5
         sentence_splitter_chunk_size = 512
         sentence_splitter_chunk_overlap = 64
-        supported_filetypes: list[str] = []
+        supported_filetypes: ClassVar[list[str]] = []
         hierarchical_chunking_enabled = False
         coarse_chunk_size = 1024
         fine_chunk_size = 256

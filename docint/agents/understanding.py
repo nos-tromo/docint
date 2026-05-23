@@ -94,6 +94,7 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
     """
 
     def __init__(self, llm: LLM) -> None:
+        """Bind the LLM used for semantic intent analysis."""
         self.llm = llm
 
     def analyze(self, turn: Turn, context: Any | None = None) -> IntentAnalysis:
