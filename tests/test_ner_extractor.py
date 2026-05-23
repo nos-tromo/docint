@@ -4,7 +4,7 @@ import json
 import re
 import threading
 import time
-from collections.abc import Generator
+from collections.abc import Generator, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -48,7 +48,7 @@ class FakeWordsSplitter:
 
     _PATTERN = re.compile(r"\S+")
 
-    def __call__(self, text: str):
+    def __call__(self, text: str) -> Iterator[tuple[str, int, int]]:
         """Yield (token, start, end) triples for each whitespace-delimited span.
 
         Args:
@@ -90,7 +90,7 @@ def clear_gliner_runtime_cache() -> Generator[None, None, None]:
 
 
 def test_build_gliner_ner_extractor_uses_expanded_default_labels(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Default GLiNER labels should use the expanded schema-specific set.
 
@@ -186,7 +186,7 @@ def test_build_gliner_ner_extractor_uses_expanded_default_labels(
 
 def test_build_gliner_ner_extractor_rewrites_backbone_to_local_cache(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Offline GLiNER loads should use local snapshot paths only.
 
@@ -276,8 +276,7 @@ def test_build_gliner_ner_extractor_rewrites_backbone_to_local_cache(
     )
 
     def _fake_resolve_hf_cache_path(cache_dir: Path, repo_id: str) -> Path | None:
-        """Simulate resolution of Hugging Face cache paths, returning the appropriate local snapshot
-        path for known repo IDs.
+        """Simulate HF cache path resolution; return the local snapshot path for known repo IDs.
 
         Args:
             cache_dir (Path): The base directory for Hugging Face cache (ignored in this fake).
@@ -325,7 +324,7 @@ def test_build_gliner_ner_extractor_rewrites_backbone_to_local_cache(
 
 
 def test_build_gliner_ner_extractor_respects_requested_cpu_device(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """GLiNER should stay on CPU when the caller requests ``cpu``.
 
@@ -424,7 +423,7 @@ def test_build_gliner_ner_extractor_respects_requested_cpu_device(
 
 
 def test_build_gliner_ner_extractor_moves_to_requested_cuda_device(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """GLiNER should honor an explicit CUDA device selection.
 
@@ -523,7 +522,7 @@ def test_build_gliner_ner_extractor_moves_to_requested_cuda_device(
 
 
 def test_build_gliner_ner_extractor_chunks_long_inputs_on_sentence_boundaries(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Long inputs should be split into sentence-sized GLiNER requests.
 
@@ -616,7 +615,7 @@ def test_build_gliner_ner_extractor_chunks_long_inputs_on_sentence_boundaries(
 
 
 def test_build_gliner_ner_extractor_falls_back_to_word_chunks_for_long_sentence(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An oversized sentence should fall back to word-boundary chunking.
 
@@ -744,7 +743,7 @@ def test_chunk_text_for_gliner_uses_gliner_word_count_not_bpe_count() -> None:
     class CharacterWordsSplitter:
         """Words splitter yielding one token per non-space character."""
 
-        def __call__(self, text: str):
+        def __call__(self, text: str) -> Iterator[tuple[str, int, int]]:
             """Yield (char, start, end) for each non-space character.
 
             Args:
@@ -787,7 +786,7 @@ def test_chunk_text_for_gliner_uses_gliner_word_count_not_bpe_count() -> None:
 
 
 def test_build_gliner_ner_extractor_serializes_concurrent_model_access(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Concurrent extractor calls should not trip GLiNER borrow errors.
 
@@ -879,7 +878,7 @@ def test_build_gliner_ner_extractor_serializes_concurrent_model_access(
 
 
 def test_build_gliner_ner_extractor_reuses_loaded_runtime_across_calls(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Repeated extractor construction should reuse the same GLiNER runtime."""
     load_calls: list[tuple[str, bool]] = []
@@ -950,16 +949,16 @@ def test_build_gliner_ner_extractor_reuses_loaded_runtime_across_calls(
 
 
 def test_build_gliner_ner_extractor_clamps_tokenizer_model_max_length(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression: GLiNER's HF tokenizer ships with ``model_max_length``
-    ~10**30 (``VERY_LARGE_INTEGER``), so its internal
-    ``transformer_tokenizer(..., truncation=True)`` calls are silently
-    a no-op. Long inputs then go through DeBERTa-large unbounded and
-    blow up CPU activation memory enough to OOM the container during
-    table-CSV ingests. The runtime builder must clamp the tokenizer
-    to the model's actual ``config.max_len`` so the existing truncation
-    flag actually enforces the architectural cap.
+    """Regression: GLiNER's HF tokenizer ships with an enormous model_max_length.
+
+    The bare default (~10**30, ``VERY_LARGE_INTEGER``) means its internal
+    ``transformer_tokenizer(..., truncation=True)`` calls are silently a no-op.
+    Long inputs then go through DeBERTa-large unbounded and blow up CPU activation
+    memory enough to OOM the container during table-CSV ingests. The runtime
+    builder must clamp the tokenizer to the model's actual ``config.max_len`` so
+    the existing truncation flag actually enforces the architectural cap.
     """
 
     class _HFLikeTokenizer:
@@ -1047,7 +1046,7 @@ def test_clamp_gliner_tokenizer_max_length_tolerates_missing_attribute() -> None
 
 def test_build_gliner_ner_extractor_fails_fast_when_offline_model_missing(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Offline mode should not fall through to Hugging Face repo resolution.
 

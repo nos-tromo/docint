@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -176,7 +177,7 @@ def test_reader_ingests_extracted_images_via_shared_service(tmp_path: Path) -> N
     calls: list[tuple[Any, Any]] = []
 
     class RecordingService:
-        def ingest_image(self, asset, *, context):
+        def ingest_image(self, asset: Any, *, context: Any) -> SimpleNamespace:
             calls.append((asset, context))
             return SimpleNamespace(status="stored", error=None)
 
@@ -210,18 +211,18 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(monkeypatch: pytest.MonkeyPatch
     class FakeDocStore:
         """No-op document store for testing."""
 
-        def add_documents(self, nodes, allow_update=True) -> None:
+        def add_documents(self, nodes: Any, allow_update: bool = True) -> None:
             """Accept documents without storing them."""
             return None
 
     class FakeIndex:
         """Minimal vector store index stub."""
 
-        def __init__(self, **kwargs) -> None:
+        def __init__(self, **kwargs: Any) -> None:
             """Initialise with a fake doc store."""
             self.docstore = FakeDocStore()
 
-        def insert_nodes(self, nodes) -> None:
+        def insert_nodes(self, nodes: Any) -> None:
             """Accept nodes without indexing them."""
             return None
 
@@ -231,10 +232,10 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(monkeypatch: pytest.MonkeyPatch
         def __init__(
             self,
             data_dir: Path,
-            entity_extractor=None,
+            entity_extractor: Any = None,
             ner_max_workers: int = 1,
             source_collection: str | None = None,
-            image_ingestion_service=None,
+            image_ingestion_service: Any = None,
         ) -> None:
             """Initialise and discard all arguments."""
             _ = (
@@ -246,7 +247,7 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(monkeypatch: pytest.MonkeyPatch
             )
             self.discovered_hashes = {"pdf-hash-1"}
 
-        def build(self, existing_hashes, progress_callback=None):
+        def build(self, existing_hashes: Any, progress_callback: Any = None) -> Iterator[Any]:
             """Yield nothing; the stub reader produces no batches."""
             if False:
                 yield
@@ -262,7 +263,7 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(monkeypatch: pytest.MonkeyPatch
             self.entity_extractor = None
             self.ner_max_workers = 1
 
-        def build(self, existing_hashes):
+        def build(self, existing_hashes: Any) -> Iterator[Any]:
             """Record the hashes passed into the legacy pipeline."""
             self.seen_hashes = set(existing_hashes)
             if False:
