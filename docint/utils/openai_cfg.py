@@ -418,7 +418,7 @@ class OpenAIPipeline:
             return response.choices[0].message.content or ""
         except Exception as e:
             logger.error("Error during chat inference: {}", e)
-            raise RuntimeError(f"Chat inference failed: {e}")
+            raise RuntimeError(f"Chat inference failed: {e}") from e
 
     def call_vision(self, prompt: str, img_base64: str, mime_type: str = "image/jpeg") -> str:
         """Call OpenAI (or compatible) Vision model.
@@ -467,4 +467,4 @@ class OpenAIPipeline:
             return clean
         except Exception as e:
             logger.error("Error during vision inference: {}", e)
-            raise RuntimeError(f"Vision inference failed: {e}")
+            raise RuntimeError(f"Vision inference failed: {e}") from e

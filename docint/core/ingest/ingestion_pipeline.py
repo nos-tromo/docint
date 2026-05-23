@@ -164,7 +164,7 @@ class DocumentIngestionPipeline:
             try:
                 self.entity_extractor = build_gliner_ner_extractor(device=self.device)
             except Exception:
-                logger.warning("GLiNER model unavailable – continuing without NER")
+                logger.warning("GLiNER model unavailable - continuing without NER")
                 self.entity_extractor = None
 
         hate_speech_cfg = load_hate_speech_env()
@@ -176,7 +176,7 @@ class DocumentIngestionPipeline:
                 self.hate_speech_prompt = OpenAIPipeline().load_prompt(kw="hate_speech")
             except Exception as exc:
                 logger.warning(
-                    "Hate-speech prompt unavailable – disabling detector: {}",
+                    "Hate-speech prompt unavailable - disabling detector: {}",
                     exc,
                 )
                 self.hate_speech_enabled = False

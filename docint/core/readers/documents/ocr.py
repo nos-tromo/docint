@@ -171,7 +171,7 @@ class VisionOCREngine(OCREngine):
 
         # Build a dedicated OpenAI client with the OCR-specific
         # timeout / retry settings so we don't block the pipeline for
-        # the full global ``OPENAI_TIMEOUT × (1 + OPENAI_MAX_RETRIES)``
+        # the full global ``OPENAI_TIMEOUT * (1 + OPENAI_MAX_RETRIES)``
         # duration on large or slow pages.
         _oai = load_openai_env()
         self._vision_client = _OpenAI(
@@ -210,7 +210,7 @@ class VisionOCREngine(OCREngine):
             # First attempt at configured resolution.
             img_b64 = self._encode_jpeg(pil_image)
             logger.debug(
-                "Vision OCR page {} — image {}×{}, payload ~{:.0f} KiB",
+                "Vision OCR page {} — image {}x{}, payload ~{:.0f} KiB",
                 page_index,
                 pil_image.width,
                 pil_image.height,
@@ -245,7 +245,7 @@ class VisionOCREngine(OCREngine):
                 ):
                     recovery_b64 = self._encode_jpeg(recovery_image)
                     logger.info(
-                        "Vision OCR returned empty text for page {}; retrying with higher-detail image {}×{}",
+                        "Vision OCR returned empty text for page {}; retrying with higher-detail image {}x{}",
                         page_index,
                         recovery_image.width,
                         recovery_image.height,
@@ -284,7 +284,7 @@ class VisionOCREngine(OCREngine):
                 )
             else:
                 logger.warning(
-                    "Vision OCR returned empty text for page {} (image {}×{}, payload ~{:.0f} KiB)",
+                    "Vision OCR returned empty text for page {} (image {}x{}, payload ~{:.0f} KiB)",
                     page_index,
                     pil_image.width,
                     pil_image.height,
@@ -321,7 +321,7 @@ class VisionOCREngine(OCREngine):
             new_h = max(int(pil_image.height * ratio), 1)
             pil_image = pil_image.resize((new_w, new_h))
             logger.debug(
-                "Resized OCR image for page {} to {}×{}",
+                "Resized OCR image for page {} to {}x{}",
                 page_index,
                 new_w,
                 new_h,
@@ -350,7 +350,7 @@ class VisionOCREngine(OCREngine):
 
         Uses the dedicated ``_vision_client`` which has the shorter
         OCR-specific timeout and retry count, preventing the pipeline from
-        blocking for ``OPENAI_TIMEOUT × (1 + OPENAI_MAX_RETRIES)`` on
+        blocking for ``OPENAI_TIMEOUT * (1 + OPENAI_MAX_RETRIES)`` on
         unresponsive endpoints.
 
         Args:
@@ -405,7 +405,7 @@ class VisionOCREngine(OCREngine):
             return text
         except Exception as e:
             logger.error("Error during vision OCR inference: {}", e)
-            raise RuntimeError(f"Vision OCR inference failed: {e}")
+            raise RuntimeError(f"Vision OCR inference failed: {e}") from e
 
     @classmethod
     def _looks_like_refusal(cls, text: str) -> bool:

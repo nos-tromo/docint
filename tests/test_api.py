@@ -1949,7 +1949,7 @@ def test_ingest_upload_poll_continues_when_still_connected(
             progress_callback (Any): Optional progress callback (ignored).
         """
         _ = (collection, path, hybrid, progress_callback)
-        time.sleep(0.15)  # ~3× poll interval
+        time.sleep(0.15)  # ~3x poll interval
 
     monkeypatch.setattr(api_module.ingest_module, "ingest_docs", slow_fake_ingest)
 

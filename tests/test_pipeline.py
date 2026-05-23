@@ -1110,7 +1110,7 @@ class TestOCR:
         mock_page.get_width.return_value = 612.0
         mock_page.get_height.return_value = 792.0
 
-        # Simulate a 3000×4000 rendered bitmap that exceeds the 1024 cap.
+        # Simulate a 3000x4000 rendered bitmap that exceeds the 1024 cap.
         from PIL import Image as PILImage
 
         large_img = PILImage.new("RGB", (3000, 4000), color="white")

@@ -35,14 +35,14 @@ class PypdfLayoutAnalyzer(LayoutAnalyzer):
 
     Detects three block types:
 
-    * **FIGURE** – pages containing embedded images (via ``/XObject``
-      inspection).  Bounding boxes are derived from the content-stream
+    * **FIGURE** - pages containing embedded images (via ``/XObject``
+      inspection). Bounding boxes are derived from the content-stream
       transformation matrices when available, otherwise from the image
       native dimensions.
-    * **TABLE** – contiguous text regions that match table-like
+    * **TABLE** - contiguous text regions that match table-like
       patterns (captions such as *Table 1:* followed by column-aligned
       data).
-    * **TEXT** – everything else.
+    * **TEXT** - everything else.
 
     When the project integrates a more capable backend (e.g. Docling
     layout) this class can be replaced transparently.

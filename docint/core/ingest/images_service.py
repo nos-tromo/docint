@@ -433,7 +433,7 @@ class VisionJSONTagger:
                 buf = BytesIO()
                 resized_img.save(buf, format="JPEG", quality=80)
                 logger.debug(
-                    "Capped tagging image from {}×{} to {}×{} (JPEG)",
+                    "Capped tagging image from {}x{} to {}x{} (JPEG)",
                     img_file.width,
                     img_file.height,
                     new_w,

@@ -670,7 +670,7 @@ def test_cap_image_size_passes_small_image_through() -> None:
     tagger = VisionJSONTagger.__new__(VisionJSONTagger)
     tagger.max_image_dimension = 1024
 
-    small_bytes = _make_png_bytes()  # 6×4
+    small_bytes = _make_png_bytes()  # 6x4
 
     out_bytes, out_mime = tagger._cap_image_size(small_bytes, "image/png")
 

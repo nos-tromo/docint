@@ -392,7 +392,7 @@ class CustomJSONReader(BaseReader):
                         yield payload
             return
 
-        # ``.json`` – either a single object or a list of objects.
+        # ``.json`` - either a single object or a list of objects.
         with file_path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
         if isinstance(payload, list):

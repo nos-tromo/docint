@@ -10,7 +10,7 @@ docstore I/O overlap with NER / hate-speech enrichment.
 
 Three invariants:
 
-* **Bounded queue** — capped at ``INGEST_BATCH_SIZE × 2`` by default to
+* **Bounded queue** — capped at ``INGEST_BATCH_SIZE * 2`` by default to
   bound memory under back-pressure.
 * **Single consumer** — Qdrant insert ordering matters less than
   contention; one consumer thread drains the queue serially.
