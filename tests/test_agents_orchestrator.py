@@ -1,6 +1,7 @@
 """Tests for :class:`AgentOrchestrator` turn-handling logic."""
 
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 
@@ -76,7 +77,7 @@ class _StubResponseAgent(ResponseAgent):
 class _NoopClarifier(SimpleClarificationAgent):
     """Clarifier that always requests clarification."""
 
-    def build(self, turn: TurnType, analysis) -> ClarificationRequest:  # type: ignore[override]
+    def build(self, turn: TurnType, analysis: Any) -> ClarificationRequest:  # type: ignore[override]
         """Return a clarification request regardless of input.
 
         Args:
@@ -97,7 +98,7 @@ class _AlwaysClarifyPolicy(ClarificationPolicy):
         """Initialise with a strict confidence threshold."""
         super().__init__(ClarificationConfig(confidence_threshold=1.0, require_entities=True))
 
-    def evaluate(self, analysis, clarifications_so_far: int = 0):  # type: ignore[override]
+    def evaluate(self, analysis: Any, clarifications_so_far: int = 0) -> ClarificationRequest:  # type: ignore[override]
         """Always request clarification.
 
         Args:

@@ -28,6 +28,7 @@ from docint.core.readers.documents.models import (
     DocumentManifest,
     ImageResult,
     LayoutBlock,
+    PageInfo,
     PageText,
     TableResult,
 )
@@ -119,7 +120,7 @@ class DocumentPipelineOrchestrator:
                 layout[page_info.page_index] = []
                 continue
 
-            def _analyze_layout(pi=page_info) -> dict[int, list[LayoutBlock]]:
+            def _analyze_layout(pi: PageInfo = page_info) -> dict[int, list[LayoutBlock]]:
                 """Run layout analysis for a single page and return its block map."""
                 result = analyze_document(file_path, [pi])
                 return result if result is not None else {}
@@ -161,7 +162,7 @@ class DocumentPipelineOrchestrator:
             if page_info.status == "failed":
                 continue
 
-            def _extract_text(pi=page_info) -> dict[int, PageText]:
+            def _extract_text(pi: PageInfo = page_info) -> dict[int, PageText]:
                 """Extract text for a single page via OCR or native extractors."""
                 return (
                     extract_text_for_pages(

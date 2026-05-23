@@ -852,7 +852,7 @@ def test_agent_chat_returns_validation_alert(monkeypatch: pytest.MonkeyPatch, cl
     class _StubOrchestrator:
         """Stub orchestrator that returns a canned retrieval result with validation metadata for testing purposes."""
 
-        def handle_turn(self, turn, context=None) -> OrchestratorResult:
+        def handle_turn(self, turn: Any, context: Any = None) -> OrchestratorResult:
             """Handle a turn by returning a canned retrieval result with validation metadata.
 
             Args:
@@ -1547,9 +1547,9 @@ def test_ingest_success(monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp
 
     def fake_ingest(
         collection: str,
-        path,
+        path: Any,
         hybrid: bool = True,
-        progress_callback=None,
+        progress_callback: Any = None,
     ) -> None:
         """Fake implementation of the ingest_docs function for testing purposes.
 

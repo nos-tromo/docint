@@ -3,10 +3,12 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from docint.utils import model_cfg as model_cfg_module
 
 
-def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch) -> None:
+def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """VLLM should skip provider-side local model provisioning.
 
     Args:
@@ -94,7 +96,7 @@ def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch) -> Non
     assert ("ollama", "called") not in calls
 
 
-def test_load_models_populates_embed_tokenizer_cache(tmp_path: Path, monkeypatch) -> None:
+def test_load_models_populates_embed_tokenizer_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``main()`` must pre-warm the HF cache for the embed tokenizer repo.
 
     Operators set ``EMBED_TOKENIZER_REPO=BAAI/bge-m3`` so the

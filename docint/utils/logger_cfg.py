@@ -11,7 +11,7 @@ from docint.utils.env_cfg import load_path_env
 
 
 def init_logger(
-    encoding="utf-8",
+    encoding: str = "utf-8",
     rotation: str = "5 MB",
     retention: int = 3,
     backtrace: bool = False,

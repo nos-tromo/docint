@@ -16,6 +16,7 @@ import inspect
 import json
 from pathlib import Path
 from types import GeneratorType
+from typing import Any
 
 import pandas as pd
 import pytest
@@ -206,7 +207,7 @@ def test_image_iter_documents_yields_one_document(tmp_path: Path, monkeypatch: p
         status = "ok"
 
     class FakeService:
-        def ingest_image(self, asset, context=None):
+        def ingest_image(self, asset: Any, context: Any = None) -> FakeRecord:
             return FakeRecord()
 
     reader = ImageReader(image_ingestion_service=FakeService())  # type: ignore[arg-type]
@@ -231,7 +232,7 @@ def test_image_load_data_matches_iter_documents(tmp_path: Path, monkeypatch: pyt
         status = ""
 
     class FakeService:
-        def ingest_image(self, asset, context=None):
+        def ingest_image(self, asset: Any, context: Any = None) -> FakeRecord:
             return FakeRecord()
 
     reader = ImageReader(image_ingestion_service=FakeService())  # type: ignore[arg-type]

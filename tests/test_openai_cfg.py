@@ -81,7 +81,7 @@ def test_get_openai_reasoning_effort_requires_toggle_only() -> None:
     )
 
 
-def test_openai_pipeline_call_chat_passes_reasoning_effort_for_ollama(monkeypatch, tmp_path: Path) -> None:
+def test_openai_pipeline_call_chat_passes_reasoning_effort_for_ollama(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Reasoning effort should be forwarded for non-OpenAI providers too.
 
     Args:
@@ -147,7 +147,7 @@ def test_openai_pipeline_call_chat_passes_reasoning_effort_for_ollama(monkeypatc
     assert captured["reasoning_effort"] == "high"
 
 
-def test_openai_pipeline_call_chat_passes_reasoning_effort(monkeypatch, tmp_path: Path) -> None:
+def test_openai_pipeline_call_chat_passes_reasoning_effort(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """OpenAI pipeline should forward reasoning effort on chat completions.
 
     Args:
@@ -215,7 +215,7 @@ def test_openai_pipeline_call_chat_passes_reasoning_effort(monkeypatch, tmp_path
     assert captured["messages"][0]["role"] == "system"
 
 
-def test_openai_pipeline_call_chat_omits_reasoning_effort_when_disabled(monkeypatch, tmp_path: Path) -> None:
+def test_openai_pipeline_call_chat_omits_reasoning_effort_when_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """OpenAI pipeline should omit reasoning effort when thinking is disabled.
 
     Args:
@@ -417,7 +417,7 @@ def test_call_vision_strips_reasoning_around_refusal_text(monkeypatch: pytest.Mo
 
 
 def test_budgeted_embedding_raises_on_oversize(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Oversized embedding inputs must raise loudly — no retry, no truncation.
 
@@ -472,7 +472,7 @@ def test_budgeted_embedding_raises_on_oversize(
 
 
 def test_budgeted_embedding_raises_on_vllm_oversize(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """vLLM-style context overflows must raise loudly — no retry, no truncation.
 

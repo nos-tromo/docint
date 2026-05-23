@@ -138,7 +138,9 @@ def test_ingest_docs_invokes_rag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert calls.build_query_engine is False
 
 
-def _make_pipeline(tmp_path: Path, entity_extractor) -> tuple[DocumentIngestionPipeline, list]:
+def _make_pipeline(
+    tmp_path: Path, entity_extractor: Callable[[str], tuple[list[dict], list[dict]]]
+) -> tuple[DocumentIngestionPipeline, list]:
     """Helper to create a pipeline with stubbed parsers and preset nodes.
 
     Args:
