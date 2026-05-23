@@ -31,6 +31,8 @@ class ClarificationPolicy:
 
         Args:
             analysis (IntentAnalysis): The intent analysis result.
+            clarifications_so_far (int): How many clarifications have already been issued in this
+                session; used to enforce ``ClarificationConfig.max_clarifications``.
 
         Returns:
             ClarificationRequest: Clarification decision and message.

@@ -118,8 +118,9 @@ def test_update_turn_validation_unknown_idx_logs_and_returns(
 def test_get_session_history_omits_validation_when_all_null(
     session_manager: SessionManager,
 ) -> None:
-    """Legacy turns (never updated) must not surface validation keys at all,
-    so the frontend's unvalidated-fallback keeps handling them.
+    """Legacy turns (never updated) must not surface validation keys at all.
+
+    Keeps the frontend's unvalidated-fallback path handling them.
     """
     session_id = "sess-legacy"
     _persist_dummy_turn(session_manager, session_id)

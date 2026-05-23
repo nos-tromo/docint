@@ -49,6 +49,8 @@ class AgentOrchestrator:
 
         Args:
             turn (Turn): The user turn to process.
+            context (TurnContext | None): Per-turn context (session id, clarification count,
+                ...). Defaults to a fresh context bound to the turn's session id.
 
         Returns:
             OrchestratorResult: Clarification or retrieval result for the turn.

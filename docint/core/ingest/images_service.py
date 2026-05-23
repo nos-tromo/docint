@@ -699,6 +699,7 @@ class ImageIngestionService:
         occurrence: dict[str, Any],
     ) -> None:
         """Append source occurrence metadata to an existing point payload.
+
         An "occurrences" list is maintained in the point payload to track all source
         references for a deduplicated image.
 

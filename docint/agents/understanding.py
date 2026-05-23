@@ -90,6 +90,7 @@ class SimpleUnderstandingAgent(UnderstandingAgent):
 
 class ContextualUnderstandingAgent(UnderstandingAgent):
     """Understanding agent that uses an LLM to determine intent and rewrite queries.
+
     Replaces keyword matching with semantic reasoning via the LLM.
     """
 

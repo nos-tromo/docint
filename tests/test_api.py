@@ -294,6 +294,7 @@ class DummyRAG:
             qdrant_filter: Optional native Qdrant filter.
             limit: Maximum number of occurrence rows to return.
             refresh: Whether cache refresh was requested.
+            entity_merge_mode: Entity clustering mode (recorded for assertions).
 
         Returns:
             dict[str, Any]: Canned occurrence payload.
@@ -461,13 +462,16 @@ class DummyRAG:
         """Return canned NER stats payload.
 
         Args:
-            top_k (int, optional): The number of top entities to return. Defaults to 15.
-            min_mentions (int, optional): The minimum number of mentions for an entity to be included. Defaults to 2.
+            top_k (int, optional): Number of top entities to return. Defaults to 15.
+            min_mentions (int, optional): Minimum mention count for inclusion. Defaults to 2.
             entity_type (str | None, optional): Filter entities by type. Defaults to None.
-            include_relations (bool, optional): Whether to include relation statistics. Defaults to True.
+            include_relations (bool, optional): Whether to include relation statistics.
+                Defaults to True.
+            entity_merge_mode (str): Entity clustering mode (recorded for assertions).
 
         Returns:
-            dict[str, Any]: A dictionary containing information extraction statistics, including totals, top entities, entity types, top relations, and document-level stats.
+            dict[str, Any]: NER stats payload with totals, top entities, entity types, top
+                relations, and document-level stats.
         """
         _ = (top_k, min_mentions, entity_type, include_relations)
         self.ner_stats_merge_modes.append(entity_merge_mode)
@@ -513,6 +517,7 @@ class DummyRAG:
             q (str, optional): The search query string. Defaults to "".
             entity_type (str | None, optional): Filter entities by type. Defaults to None.
             limit (int, optional): The maximum number of results to return. Defaults to 100.
+            entity_merge_mode (str): Entity clustering mode (recorded for assertions).
 
         Returns:
             list[dict[str, Any]]: A list of entity dictionaries that match the search criteria.

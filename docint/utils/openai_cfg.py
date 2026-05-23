@@ -35,7 +35,8 @@ class LocalOpenAI(LlamaIndexOpenAI):
         Args:
             context_window (int): The context window size for the model. Defaults to 4096.
             num_output (int): Tokens reserved for the model response in prompt-helper
-                calculations.  Defaults to 256 (llama_index default).
+                calculations. Defaults to 256 (llama_index default).
+            **kwargs: Forwarded to the upstream ``LlamaIndexOpenAI.__init__``.
         """
         super().__init__(**kwargs)
         self._context_window = context_window

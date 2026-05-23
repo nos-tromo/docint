@@ -61,6 +61,7 @@ class PypdfTextEngine(OCREngine):
 
     def ocr_page(self, page_index: int, *, file_path: Path | None = None) -> list[OCRSpan]:
         """Extract text from a page using pypdf (no actual OCR).
+
         This method attempts to extract text directly from the PDF page
         without performing any OCR.
 

@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 class RAGRetrievalAgent(RetrievalAgent):
     """Adapter that uses the existing RAG pipeline for retrieval/response.
+
     Depending on the intent detected in the turn, it may invoke different tools.
     """
 

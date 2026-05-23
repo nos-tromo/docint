@@ -200,9 +200,11 @@ def _estimate_sub_node_metadata_tokens(
         parent: The oversize parent node.
         char_token_ratio: Characters per token estimator (matches
             :func:`estimate_tokens`).
+        token_counter: Optional model-specific token counter; falls back to the char-ratio
+            estimator when None.
 
     Returns:
-        Estimated metadata overhead in tokens (≈0 under the current
+        Estimated metadata overhead in tokens (~0 under the current
         exclusion contract).
     """
     probe_metadata = _build_probe_sub_metadata(parent)
@@ -241,6 +243,8 @@ def _sub_node_fits_budget(
         budget_tokens: Raw context window size in tokens.
         char_token_ratio: Characters per token estimator.
         safety_margin: Budget reservation fraction.
+        token_counter: Optional model-specific token counter; falls back to the char-ratio
+            estimator when None.
 
     Returns:
         ``True`` when the rendered embed payload fits the effective
@@ -493,6 +497,8 @@ def resplit_nodes_for_embedding(
         sentence_splitter: Optional pre-built splitter, mainly useful
             for tests. When omitted, each split creates a fresh
             :class:`SentenceSplitter`.
+        token_counter: Optional model-specific token counter; falls back to the char-ratio
+            estimator when None.
 
     Returns:
         A ``(vector_nodes, docstore_nodes)`` pair.

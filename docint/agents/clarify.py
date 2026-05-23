@@ -10,6 +10,7 @@ from docint.agents.types import (
 
 class SimpleClarificationAgent(ClarificationAgent):
     """Simple clarifier that returns a generic prompt.
+
     It can also list missing required entities from the analysis.
     """
 

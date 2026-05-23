@@ -15,7 +15,8 @@ from docint.utils.env_cfg import load_ingestion_env
 
 
 class HierarchicalNodeParser(NodeParser):
-    """Splits documents into a hierarchy of nodes:
+    """Splits documents into a hierarchy of nodes.
+
     - Level 0: Document (Implicit)
     - Level 1: Coarse Chunks (Sections/Paragraphs/Large blocks)
     - Level 2: Fine Chunks (Sentence-based).
@@ -43,6 +44,7 @@ class HierarchicalNodeParser(NodeParser):
             coarse_chunk_size (int): Size of coarse chunks (Level 1).
             fine_chunk_size (int): Size of fine chunks (Level 2).
             fine_chunk_overlap (int): Overlap for fine chunks.
+            **kwargs: Forwarded to the ``NodeParser`` base class.
         """
         super().__init__(**kwargs)
         self._coarse_splitter = SentenceSplitter(chunk_size=coarse_chunk_size, chunk_overlap=0)
@@ -61,6 +63,7 @@ class HierarchicalNodeParser(NodeParser):
         Args:
             nodes (Sequence[BaseNode]): Input nodes to parse.
             show_progress (bool): Whether to show progress.
+            **kwargs: Forwarded to llama-index's parse_nodes helpers; unused locally.
 
         Returns:
             list[BaseNode]: Hierarchically chunked nodes.

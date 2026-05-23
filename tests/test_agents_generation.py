@@ -148,10 +148,10 @@ def test_validation_agent_post_coverage_can_override_relevance() -> None:
 
 
 def test_validation_agent_summary_coverage_does_not_override_grounding() -> None:
-    """Test that when summary coverage is below the target, but the LLM indicates that
-    the summary is not grounded, it sets validation_mismatch to True and uses the LLM's
-    reason. This ensures that grounding issues are still prioritized over coverage when
-    both are present.
+    """Low summary coverage must not override an LLM grounding failure.
+
+    When the LLM marks the summary as not grounded, validation_mismatch must be True with the
+    LLM's reason — grounding issues are prioritized over coverage shortfalls.
     """
     llm = _FakeLLM('{"summary_grounded": false, "sources_relevant": true, "reason":"unsupported claim"}')
     agent = ResultValidationResponseAgent(enabled=True, llm=llm)
@@ -303,9 +303,10 @@ def test_validation_agent_prompt_handles_text_only_source() -> None:
 
 
 def test_validation_agent_prompt_includes_metadata_text_when_no_top_level_body() -> None:
-    """Sources whose body lives inside ``reference_metadata['text']`` must still
-    surface the body to the validator — covers transcript-style payloads where
-    the text may not be propagated as a top-level key.
+    """Sources whose body lives inside ``reference_metadata['text']`` must still validate.
+
+    Covers transcript-style payloads where the text may not be propagated as a top-level key —
+    the validator should still see the body.
     """
     llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}')
     agent = ResultValidationResponseAgent(enabled=True, llm=llm)

@@ -209,8 +209,9 @@ def test_run_query_records_results(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     """
 
     class DummyRAG:
-        """Dummy RAG class for testing the run_query function, simulating query expansion
-        and execution with debug information.
+        """Dummy RAG class for testing run_query.
+
+        Simulates query expansion and execution with debug information.
         """
 
         def __init__(self) -> None:
@@ -218,15 +219,13 @@ def test_run_query_records_results(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
             self.seen_queries: list[str] = []
 
         def expand_query_with_graph_with_debug(self, query: str) -> tuple[str, dict[str, Any]]:
-            """Simulate query expansion with graph-assisted retrieval by returning an expanded
-            query and debug information.
+            """Simulate query expansion via graph; return (expanded_query, debug_info).
 
             Args:
                 query (str): The original query string to expand.
 
             Returns:
-                tuple[str, dict[str, Any]]: A tuple containing the expanded query string and a
-                dictionary with debug information about the expansion process.
+                tuple[str, dict[str, Any]]: Expanded query string plus a debug-info dict.
             """
             return (
                 f"{query}\n\nRelated entities for retrieval: Acme",
@@ -430,13 +429,11 @@ def test_export_hate_speech_writes_frontend_text_format(monkeypatch: pytest.Monk
         qdrant_collection = "alpha"
 
         def get_collection_hate_speech(self) -> list[dict[str, Any]]:
-            """Simulate retrieval of hate speech analysis results for a collection, returning a
-            list of flagged chunks with their associated metadata.
+            """Simulate hate-speech results for a collection; returns flagged chunks with metadata.
 
             Returns:
-                list[dict[str, Any]]: A list of dictionaries, where each dictionary represents
-                    a flagged chunk of text with metadata such as source reference, category,
-                    confidence level, reason for flagging, and reference metadata including text ID.
+                list[dict[str, Any]]: Flagged-chunk dicts with source reference, category,
+                    confidence, reason, and reference metadata (incl. text ID).
             """
             return [
                 {
@@ -454,8 +451,7 @@ def test_export_hate_speech_writes_frontend_text_format(monkeypatch: pytest.Monk
     captured: list[tuple[str, str]] = []
 
     def fake_store_text(filename: str, data: str, output_path: Path) -> None:
-        """Fake implementation of _store_text_output for testing the export_hate_speech function,
-            capturing the filename and data for assertions.
+        """Fake _store_text_output that captures filename + data for assertions.
 
         Args:
             filename (str): The name of the file being written.
@@ -534,19 +530,22 @@ def test_main_uses_collection_argument_without_prompt(
     sequence: list[str] = []
 
     class DummyRAG:
-        """Dummy RAG class for testing the main function's handling of the collection argument,
-        with a no-op unload_models method.
+        """Dummy RAG class for testing main()'s handling of the collection argument.
+
+        Provides a no-op unload_models method to verify cleanup ordering.
         """
 
         def unload_models(self) -> None:
-            """Simulate unloading of models by appending 'unload' to the sequence list, allowing
-            verification that model cleanup is performed after the main execution.
+            """Simulate model unload by appending 'unload' to the sequence list.
+
+            Lets tests verify that model cleanup runs after main execution.
             """
             sequence.append("unload")
 
     class FakePathConfig:
-        """Fake path configuration class for testing purposes, providing fixed paths for queries,
-        prompts, and results, and allowing verification of environment loading in the main function.
+        """Fake path configuration providing fixed paths for queries, prompts, and results.
+
+        Lets tests verify environment loading in the main function.
         """
 
         queries = Path("/tmp/queries.txt")
@@ -554,8 +553,7 @@ def test_main_uses_collection_argument_without_prompt(
         results = Path("/tmp/results")
 
     def fake_pipeline(col_name: str | None = None) -> DummyRAG:
-        """Simulate the RAG pipeline creation by appending the collection name to the sequence
-        list and returning a DummyRAG instance.
+        """Simulate RAG pipeline creation; record the collection name and return a DummyRAG.
 
         Args:
             col_name (str | None, optional): The name of the collection. Defaults to None.

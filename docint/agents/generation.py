@@ -18,6 +18,7 @@ MAX_SOURCE_CHARS = 1200
 
 class PassthroughResponseAgent(ResponseAgent):
     """No-op response post-processor.
+
     Returns retrieval results unchanged.
     """
 
