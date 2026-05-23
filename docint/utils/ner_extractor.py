@@ -8,9 +8,10 @@ import shutil
 import tempfile
 import threading
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import torch
 from loguru import logger
@@ -83,11 +84,7 @@ def _resolve_gliner_device(device: str | None) -> str | None:
     if not normalized or normalized == "auto":
         if torch.cuda.is_available():
             return "cuda"
-        if (
-            getattr(torch.backends, "mps", None)
-            and torch.backends.mps.is_available()
-            and torch.backends.mps.is_built()
-        ):
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available() and torch.backends.mps.is_built():
             return "mps"
         return None
 
@@ -95,11 +92,7 @@ def _resolve_gliner_device(device: str | None) -> str | None:
         return None
 
     if normalized == "mps":
-        if (
-            getattr(torch.backends, "mps", None)
-            and torch.backends.mps.is_available()
-            and torch.backends.mps.is_built()
-        ):
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available() and torch.backends.mps.is_built():
             return "mps"
         logger.warning(
             "GLiNER requested device '{}' but MPS is unavailable; continuing on CPU.",
@@ -139,9 +132,7 @@ def _resolve_gliner_device(device: str | None) -> str | None:
     return None
 
 
-def build_llm_ner_extractor(
-    model: Any, prompt: str, max_chars: int
-) -> Callable[[str], tuple[list[dict], list[dict]]]:
+def build_llm_ner_extractor(model: Any, prompt: str, max_chars: int) -> Callable[[str], tuple[list[dict], list[dict]]]:
     """Create an NER extractor bound to a model and prompt template.
 
     Args:
@@ -237,9 +228,7 @@ def _get_or_load_gliner_runtime(
     Returns:
         _GLiNERRuntime: Cached runtime bundle for inference.
     """
-    load_id, local_only = _resolve_gliner_load_target(
-        model_id=model_id, cache_dir=cache_dir
-    )
+    load_id, local_only = _resolve_gliner_load_target(model_id=model_id, cache_dir=cache_dir)
     target_device = _resolve_gliner_device(device)
     device_key = target_device or "cpu"
     cache_key = (load_id, local_only, device_key)
@@ -388,8 +377,7 @@ def _resolve_local_gliner_dependency(cache_dir: Path, dependency: str) -> Path:
     resolved = resolve_hf_cache_path(cache_dir=cache_dir, repo_id=dependency)
     if resolved is None:
         raise FileNotFoundError(
-            "GLiNER offline load requires a local snapshot for "
-            f"'{dependency}', but none was found in {cache_dir}."
+            f"GLiNER offline load requires a local snapshot for '{dependency}', but none was found in {cache_dir}."
         )
 
     return resolved
@@ -406,9 +394,7 @@ def _materialize_offline_gliner_dir(model_dir: Path, config: dict[str, Any]) -> 
         Path: Local runtime directory that contains the patched config and links to the
         original model assets.
     """
-    digest = hashlib.sha256(
-        f"{model_dir.resolve()}\0{json.dumps(config, sort_keys=True)}".encode("utf-8")
-    ).hexdigest()[:16]
+    digest = hashlib.sha256(f"{model_dir.resolve()}\0{json.dumps(config, sort_keys=True)}".encode()).hexdigest()[:16]
     runtime_dir = _GLINER_OFFLINE_DIR / digest
     runtime_dir.mkdir(parents=True, exist_ok=True)
 
@@ -448,9 +434,7 @@ def _prepare_local_gliner_model_dir(model_dir: Path, cache_dir: Path) -> Path:
         if not isinstance(value, str) or not value.strip():
             continue
 
-        resolved = _resolve_local_gliner_dependency(
-            cache_dir=cache_dir, dependency=value
-        )
+        resolved = _resolve_local_gliner_dependency(cache_dir=cache_dir, dependency=value)
         resolved_str = str(resolved)
         if value != resolved_str:
             config[field] = resolved_str
@@ -489,15 +473,11 @@ def _resolve_gliner_load_target(model_id: str, cache_dir: Path) -> tuple[str, bo
     resolved = resolve_hf_cache_path(cache_dir=cache_dir, repo_id=model_id)
     if resolved is not None:
         logger.info("Using local GLiNER model path: {}", resolved)
-        prepared = _prepare_local_gliner_model_dir(
-            model_dir=resolved, cache_dir=cache_dir
-        )
+        prepared = _prepare_local_gliner_model_dir(model_dir=resolved, cache_dir=cache_dir)
         return str(prepared), True
 
     if os.getenv("HF_HUB_OFFLINE", "0") == "1":
-        raise FileNotFoundError(
-            f"GLiNER model '{model_id}' is not available in the local cache {cache_dir}."
-        )
+        raise FileNotFoundError(f"GLiNER model '{model_id}' is not available in the local cache {cache_dir}.")
 
     return model_id, False
 
@@ -732,10 +712,7 @@ def _pack_text_segments(
             continue
 
         candidate = segment if not current else f"{current} {segment}"
-        if (
-            current
-            and _count_text_tokens(candidate, tokenizer, words_splitter) > max_tokens
-        ):
+        if current and _count_text_tokens(candidate, tokenizer, words_splitter) > max_tokens:
             chunks.append(current)
             current = segment
         else:
@@ -848,11 +825,7 @@ def build_gliner_ner_extractor(
                             "ignore",
                             message=".*truncat.*max_length.*no maximum length.*",
                         )
-                        preds.extend(
-                            runtime.model.predict_entities(
-                                chunk, labels, threshold=threshold
-                            )
-                        )
+                        preds.extend(runtime.model.predict_entities(chunk, labels, threshold=threshold))
         except Exception as e:
             logger.warning("GLiNER extraction failed: {}", e)
             return [], []

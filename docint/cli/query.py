@@ -7,9 +7,10 @@ import csv
 import json
 import re
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from time import time
-from typing import Any, Sequence
+from typing import Any
 
 from loguru import logger
 
@@ -142,7 +143,7 @@ def load_queries(
         return []
 
     logger.info("Loading queries from {}", queries_path)
-    with open(queries_path, "r", encoding="utf-8") as handle:
+    with open(queries_path, encoding="utf-8") as handle:
         return [line.strip() for line in handle if line.strip()]
 
 
@@ -175,9 +176,7 @@ def _store_output(filename: str, data: dict | list, output_path: str | Path) -> 
     resolved_output_path = _ensure_output_path(output_path)
 
     if isinstance(data, dict):
-        with open(
-            resolved_output_path / f"{filename}.json", "w", encoding="utf-8"
-        ) as handle:
+        with open(resolved_output_path / f"{filename}.json", "w", encoding="utf-8") as handle:
             json.dump(data, handle, ensure_ascii=False, indent=2)
     else:
         serializable = []
@@ -187,9 +186,7 @@ def _store_output(filename: str, data: dict | list, output_path: str | Path) -> 
             else:
                 serializable.append(str(item))
 
-        with open(
-            resolved_output_path / f"{filename}.json", "w", encoding="utf-8"
-        ) as handle:
+        with open(resolved_output_path / f"{filename}.json", "w", encoding="utf-8") as handle:
             json.dump(serializable, handle, ensure_ascii=False, indent=2)
     logger.info("Results stored in {}", resolved_output_path / f"{filename}.json")
 
@@ -208,9 +205,7 @@ def _store_text_output(filename: str, data: str, output_path: str | Path) -> Non
     logger.info("Results stored in {}", target)
 
 
-def _store_csv_output(
-    filename: str, rows: list[dict[str, Any]], output_path: str | Path
-) -> None:
+def _store_csv_output(filename: str, rows: list[dict[str, Any]], output_path: str | Path) -> None:
     """Store tabular data to a CSV file.
 
     Args:
@@ -355,12 +350,7 @@ def _build_sources_txt(sources: list[dict[str, Any]]) -> str:
         page = source.get("page")
         row = source.get("row")
         chunk_id = str(source.get("chunk_id") or "").strip() or "n/a"
-        content = str(
-            source.get("chunk_text")
-            or source.get("text")
-            or source.get("preview_text")
-            or ""
-        ).strip()
+        content = str(source.get("chunk_text") or source.get("text") or source.get("preview_text") or "").strip()
         lines.append(
             f"[{index}] {filename} page={page if page is not None else 'n/a'} "
             f"row={row if row is not None else 'n/a'} chunk_id={chunk_id}"
@@ -553,11 +543,7 @@ def _build_hate_speech_txt(findings: list[dict[str, Any]]) -> str:
     lines = ["Flagged hate-speech chunks", ""]
     for idx, chunk in enumerate(findings, start=1):
         location_label = "page" if chunk.get("page") is not None else "row"
-        location_value = (
-            chunk.get("page")
-            if chunk.get("page") is not None
-            else chunk.get("row", "n/a")
-        )
+        location_value = chunk.get("page") if chunk.get("page") is not None else chunk.get("row", "n/a")
         lines.append(
             f"[{idx}]\n"
             f"- source: {chunk.get('source_ref')}\n"
@@ -700,18 +686,14 @@ def export_entities(rag: RAG, *, output_path: Path) -> None:
         include_relations=True,
         entity_merge_mode="orthographic",
     )
-    top_entities = [
-        row for row in list(stats.get("top_entities") or []) if isinstance(row, dict)
-    ]
+    top_entities = [row for row in list(stats.get("top_entities") or []) if isinstance(row, dict)]
     collection = _sanitize_filename_fragment(str(rag.qdrant_collection or "collection"))
     _store_text_output(
         f"entities_{collection}",
         _build_entities_txt(top_entities, collection=str(rag.qdrant_collection or "")),
         output_path,
     )
-    _store_csv_output(
-        f"entities_{collection}", _build_entities_csv(top_entities), output_path
-    )
+    _store_csv_output(f"entities_{collection}", _build_entities_csv(top_entities), output_path)
 
 
 def export_hate_speech(rag: RAG, *, output_path: Path) -> None:
@@ -722,18 +704,14 @@ def export_hate_speech(rag: RAG, *, output_path: Path) -> None:
         output_path (Path): Results directory.
     """
     logger.info("Exporting hate-speech findings...")
-    findings = [
-        row for row in rag.get_collection_hate_speech() if isinstance(row, dict)
-    ]
+    findings = [row for row in rag.get_collection_hate_speech() if isinstance(row, dict)]
     collection = _sanitize_filename_fragment(str(rag.qdrant_collection or "collection"))
     _store_text_output(
         f"hate_speech_{collection}",
         _build_hate_speech_txt(findings),
         output_path,
     )
-    _store_csv_output(
-        f"hate_speech_{collection}", _build_hate_speech_csv(findings), output_path
-    )
+    _store_csv_output(f"hate_speech_{collection}", _build_hate_speech_csv(findings), output_path)
 
 
 def _should_run_chat(args: argparse.Namespace) -> bool:
@@ -806,9 +784,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         if _should_run_chat(args):
             export_chat_queries(
                 rag,
-                queries_path=_resolve_chat_queries_path(
-                    args, default_queries_path=path_config.queries
-                ),
+                queries_path=_resolve_chat_queries_path(args, default_queries_path=path_config.queries),
                 prompts_path=path_config.prompts,
                 output_path=run_output_path,
             )

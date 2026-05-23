@@ -26,7 +26,6 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 
-
 _THINK_PAIRED_RE: re.Pattern[str] = re.compile(
     r"<think\b[^>]*>(.*?)</think\s*>",
     re.IGNORECASE | re.DOTALL,

@@ -29,7 +29,8 @@ from __future__ import annotations
 
 import queue
 import threading
-from typing import Any, Callable, Generic, Iterable, Iterator, TypeVar
+from collections.abc import Callable, Iterable, Iterator
+from typing import Any, Generic, TypeVar
 
 from loguru import logger
 
@@ -130,7 +131,7 @@ class ProducerConsumer(Generic[T]):
         try:
             for item in self._producer_fn():
                 self._queue.put(item)
-        except BaseException as exc:  # noqa: BLE001 - re-raised on consume()
+        except BaseException as exc:
             self._exception = exc
         finally:
             self._queue.put(_END)

@@ -26,9 +26,7 @@ class ClarificationPolicy:
         """
         self.config = config or ClarificationConfig()
 
-    def evaluate(
-        self, analysis: IntentAnalysis, clarifications_so_far: int = 0
-    ) -> ClarificationRequest:
+    def evaluate(self, analysis: IntentAnalysis, clarifications_so_far: int = 0) -> ClarificationRequest:
         """Decide whether to ask for clarification based on the analysis.
 
         Args:

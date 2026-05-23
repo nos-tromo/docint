@@ -5,11 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import timezone
+from datetime import UTC
 from pathlib import Path
-from typing import Any, Iterator, Sequence, TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pandas as pd
 from llama_index.core import Response
@@ -37,13 +38,9 @@ class SessionManager:
     """Owns chat session state, persistence, and exports."""
 
     rag: RAG
-    chat_engine: RetrieverQueryEngine | CondenseQuestionChatEngine | None = field(
-        default=None, init=False
-    )
+    chat_engine: RetrieverQueryEngine | CondenseQuestionChatEngine | None = field(default=None, init=False)
     chat_memory: ChatMemoryBuffer | None = field(default=None, init=False)
-    agent_contexts: dict[str, AgentTurnContext] = field(
-        default_factory=dict, init=False
-    )
+    agent_contexts: dict[str, AgentTurnContext] = field(default_factory=dict, init=False)
     _SessionMaker: Any | None = field(default=None, init=False, repr=False)
     session_id: str | None = field(default=None, init=False)
     session_store: str = field(default="", init=False)
@@ -88,17 +85,13 @@ class SessionManager:
         self.session_id = requested_id
 
         # Initialize agent context for this session
-        self.agent_contexts.setdefault(
-            requested_id, AgentTurnContext(session_id=requested_id)
-        )
+        self.agent_contexts.setdefault(requested_id, AgentTurnContext(session_id=requested_id))
 
         with self._session_scope() as s:
             self._load_or_create_convo(s, requested_id)
 
         rolling = self._get_rolling_summary(requested_id)
-        self.chat_memory = ChatMemoryBuffer.from_defaults(
-            token_limit=2000, chat_history=[]
-        )
+        self.chat_memory = ChatMemoryBuffer.from_defaults(token_limit=2000, chat_history=[])
         if rolling and self.chat_memory is not None:
             self.chat_memory.put(
                 ChatMessage(
@@ -109,9 +102,7 @@ class SessionManager:
 
         engine = self.rag.query_engine
         if engine is None:
-            logger.debug(
-                "Query engine not initialized; building lazily for start_session."
-            )
+            logger.debug("Query engine not initialized; building lazily for start_session.")
             self.rag.query_engine = self.rag.build_query_engine()
             engine = self.rag.query_engine
 
@@ -131,9 +122,7 @@ class SessionManager:
         Returns:
             AgentTurnContext: The agent context for the session.
         """
-        return self.agent_contexts.setdefault(
-            session_id, AgentTurnContext(session_id=session_id)
-        )
+        return self.agent_contexts.setdefault(session_id, AgentTurnContext(session_id=session_id))
 
     def _get_session_context(self, session_id: str) -> str:
         """Build a context string from rolling summary plus recent unsummarized turns.
@@ -214,9 +203,7 @@ class SessionManager:
         if engine is None:
             # Mirror RAG.run_query's lazy fallback: a default-path chat after a
             # collection switch can legitimately see query_engine=None.
-            logger.debug(
-                "Query engine not initialized; building lazily for SessionManager.chat."
-            )
+            logger.debug("Query engine not initialized; building lazily for SessionManager.chat.")
             self.rag.query_engine = self.rag.build_query_engine()
             engine = self.rag.query_engine
 
@@ -229,12 +216,8 @@ class SessionManager:
             user_msg=user_msg,
             conversation_context=session_context,
         )
-        expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(
-            retrieval_query
-        )
-        coverage_unit = str(
-            self.rag._infer_collection_profile().get("coverage_unit") or "documents"
-        )
+        expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(retrieval_query)
+        coverage_unit = str(self.rag._infer_collection_profile().get("coverage_unit") or "documents")
         retrieval_mode = f"rewrite_{self.rag._resolve_chat_response_mode().value}"
         if bool(graph_debug.get("applied")):
             retrieval_mode += "_graph"
@@ -309,12 +292,8 @@ class SessionManager:
             user_msg=user_msg,
             conversation_context=session_context,
         )
-        expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(
-            retrieval_query
-        )
-        coverage_unit = str(
-            self.rag._infer_collection_profile().get("coverage_unit") or "documents"
-        )
+        expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(retrieval_query)
+        coverage_unit = str(self.rag._infer_collection_profile().get("coverage_unit") or "documents")
         retrieval_mode = f"rewrite_{self.rag._resolve_chat_response_mode().value}"
         if bool(graph_debug.get("applied")):
             retrieval_mode += "_graph"
@@ -325,9 +304,7 @@ class SessionManager:
             logger.error("RuntimeError: Streaming response generator is unavailable.")
             raise RuntimeError("Streaming response generator is unavailable.")
         if hasattr(response_gen, "__aiter__"):
-            logger.error(
-                "RuntimeError: Async streaming is not supported by this interface."
-            )
+            logger.error("RuntimeError: Async streaming is not supported by this interface.")
             raise RuntimeError("Async streaming is not supported by this interface.")
         if not hasattr(response_gen, "__iter__"):
             logger.error("RuntimeError: Invalid streaming response generator.")
@@ -341,9 +318,7 @@ class SessionManager:
             yield token
 
         # Create a Response object to reuse normalization logic
-        final_response = Response(
-            response=full_text, source_nodes=response.source_nodes
-        )
+        final_response = Response(response=full_text, source_nodes=response.source_nodes)
 
         normalized = self.rag._normalize_response_data(
             user_msg,
@@ -373,9 +348,7 @@ class SessionManager:
             "turn_idx": turn_idx,
         }
 
-    def export_session(
-        self, session_id: str | None = None, out_dir: str | Path = "session"
-    ) -> Path:
+    def export_session(self, session_id: str | None = None, out_dir: str | Path = "session") -> Path:
         """Export the chat session to a directory.
 
         Args:
@@ -409,7 +382,7 @@ class SessionManager:
             session_meta = {
                 "schema_version": "1.0.0",
                 "session_id": conv.id,
-                "created_at": conv.created_at.replace(tzinfo=timezone.utc).isoformat(),
+                "created_at": conv.created_at.replace(tzinfo=UTC).isoformat(),
                 "turn_count": len(conv.turns),
                 "rolling_summary": rolling_summary,
                 "models": {
@@ -436,9 +409,7 @@ class SessionManager:
                 for t in conv.turns:
                     obj = {
                         "turn_idx": t.idx,
-                        "created_at": t.created_at.replace(
-                            tzinfo=timezone.utc
-                        ).isoformat(),
+                        "created_at": t.created_at.replace(tzinfo=UTC).isoformat(),
                         "user_text": t.user_text,
                         "rewritten_query": t.rewritten_query,
                         "assistant_text": t.model_response,
@@ -510,9 +481,7 @@ class SessionManager:
             summary_text = cast(str | None, conv.rolling_summary)
             return summary_text or ""
 
-    def _persist_turn(
-        self, session_id: str, user_msg: str, resp: Any, data: dict
-    ) -> int:
+    def _persist_turn(self, session_id: str, user_msg: str, resp: Any, data: dict) -> int:
         """Persist a user message and the assistant's response in the database.
 
         Args:
@@ -531,15 +500,9 @@ class SessionManager:
 
             meta = getattr(resp, "metadata", {}) or {}
             rewritten_candidate = (
-                data.get("retrieval_query")
-                or meta.get("query_str")
-                or meta.get("compressed_query_str")
+                data.get("retrieval_query") or meta.get("query_str") or meta.get("compressed_query_str")
             )
-            rewritten = (
-                str(rewritten_candidate).strip()
-                if isinstance(rewritten_candidate, str)
-                else None
-            )
+            rewritten = str(rewritten_candidate).strip() if isinstance(rewritten_candidate, str) else None
 
             reasoning = data.get("reasoning")
             next_idx = len(conv.turns)
@@ -565,12 +528,7 @@ class SessionManager:
                     or meta_node.get("document_id")
                     or ""
                 )
-                filetype = (
-                    meta_node.get("mimetype")
-                    or meta_node.get("filetype")
-                    or meta_node.get("content_type")
-                    or ""
-                )
+                filetype = meta_node.get("mimetype") or meta_node.get("filetype") or meta_node.get("content_type") or ""
                 file_hash = meta_node.get("file_hash")
                 source_kind = meta_node.get("source", "")
                 page = meta_node.get("page_label") or meta_node.get("page") or None
@@ -578,15 +536,9 @@ class SessionManager:
                 row_index = table_meta.get("row_index")
                 node_id = None
                 if node is not None:
-                    node_id = getattr(node, "node_id", None) or getattr(
-                        node, "id_", None
-                    )
+                    node_id = getattr(node, "node_id", None) or getattr(node, "id_", None)
 
-                score = (
-                    float(getattr(src_node, "score", 0.0))
-                    if hasattr(src_node, "score")
-                    else None
-                )
+                score = float(getattr(src_node, "score", 0.0)) if hasattr(src_node, "score") else None
 
                 s.add(
                     Citation(
@@ -628,11 +580,7 @@ class SessionManager:
             validation_reason (str | None): Validator-supplied explanation.
         """
         with self._session_scope() as s:
-            t = (
-                s.query(Turn)
-                .filter_by(conversation_id=session_id, idx=turn_idx)
-                .one_or_none()
-            )
+            t = s.query(Turn).filter_by(conversation_id=session_id, idx=turn_idx).one_or_none()
             if t is None:
                 logger.warning(
                     "update_turn_validation: no turn found for session={} idx={}",
@@ -654,18 +602,12 @@ class SessionManager:
         """
         with self._session_scope() as s:
             conv = s.get(Conversation, session_id)
-            if (
-                not conv
-                or len(conv.turns) == 0
-                or (len(conv.turns) % every_n_turns) != 0
-            ):
+            if not conv or len(conv.turns) == 0 or (len(conv.turns) % every_n_turns) != 0:
                 return
 
             slice_text = []
             for turn in conv.turns[-every_n_turns:]:
-                slice_text.append(
-                    f"User: {turn.user_text}\nAssistant: {turn.model_response}"
-                )
+                slice_text.append(f"User: {turn.user_text}\nAssistant: {turn.model_response}")
             prompt = self.rag.conversation_summary_prompt + "\n\n".join(slice_text)
 
             summary_resp = self.rag.text_model.complete(prompt)
@@ -712,9 +654,7 @@ class SessionManager:
                     "row",
                 ]
                 empty_source: dict[str, list[Any]] = {col: [] for col in empty_columns}
-                pd.DataFrame(empty_source).to_parquet(
-                    out_dir / "citations.parquet", index=False
-                )
+                pd.DataFrame(empty_source).to_parquet(out_dir / "citations.parquet", index=False)
         except Exception as e:
             logger.warning(
                 "Skipping citations.parquet export (pandas/pyarrow not available?): {}",
@@ -735,9 +675,7 @@ class SessionManager:
                 if c.turns:
                     first_turn = c.turns[0]
                     title = (
-                        first_turn.user_text[:50] + "..."
-                        if len(first_turn.user_text) > 50
-                        else first_turn.user_text
+                        first_turn.user_text[:50] + "..." if len(first_turn.user_text) > 50 else first_turn.user_text
                     )
 
                 results.append(
@@ -837,9 +775,7 @@ class SessionManager:
                 return True
             return False
 
-    def _export_transcript(
-        self, out_dir: Path, conv: Conversation, rolling_summary: str
-    ) -> None:
+    def _export_transcript(self, out_dir: Path, conv: Conversation, rolling_summary: str) -> None:
         """Export the conversation transcript to a Markdown file.
 
         Args:
@@ -859,17 +795,11 @@ class SessionManager:
                 f"**Assistant**: {t.model_response}",
             ]
             if t.reasoning:
-                lines += [
-                    f"<details><summary>Reasoning</summary>\n\n{t.reasoning}\n\n</details>"
-                ]
+                lines += [f"<details><summary>Reasoning</summary>\n\n{t.reasoning}\n\n</details>"]
             if t.citations:
                 lines += ["**Citations (with source excerpts):**"]
                 for c in t.citations:
-                    loc = (
-                        f"page {c.page}"
-                        if c.page is not None
-                        else (f"row {c.row}" if c.row is not None else "")
-                    )
+                    loc = f"page {c.page}" if c.page is not None else (f"row {c.row}" if c.row is not None else "")
                     header = f"- {c.filename} {loc} (score={c.score})"
                     excerpt = None
                     if c.node_id:
@@ -924,9 +854,7 @@ class SessionManager:
                 "sha256": sha256_file(parquet_fp),
                 "bytes": parquet_fp.stat().st_size,
             }
-        (out_dir / "manifest.json").write_text(
-            json.dumps(manifest, indent=2), encoding="utf-8"
-        )
+        (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
     def _get_node_text_by_id(self, node_id: str) -> str | None:
         """Retrieve the text content of a node by its ID.
@@ -960,11 +888,7 @@ class SessionManager:
                     text = getattr(node, "text", None)
                     if isinstance(text, str) and text:
                         return text
-                    if (
-                        isinstance(node, BaseNode)
-                        and hasattr(node, "get_content")
-                        and callable(node.get_content)
-                    ):
+                    if isinstance(node, BaseNode) and hasattr(node, "get_content") and callable(node.get_content):
                         content = node.get_content()
                         if isinstance(content, str) and content:
                             return content
@@ -972,17 +896,11 @@ class SessionManager:
             pass
 
         try:
-            recs = self.rag.qdrant_client.retrieve(
-                collection_name=self.rag.qdrant_collection, ids=[node_id]
-            )
+            recs = self.rag.qdrant_client.retrieve(collection_name=self.rag.qdrant_collection, ids=[node_id])
             if recs:
                 payload = getattr(recs[0], "payload", None)
                 if isinstance(payload, dict):
-                    txt = (
-                        payload.get("text")
-                        or payload.get("chunk")
-                        or payload.get("content")
-                    )
+                    txt = payload.get("text") or payload.get("chunk") or payload.get("content")
                     if isinstance(txt, str) and txt.strip():
                         return txt.strip()
         except Exception:

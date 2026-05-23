@@ -58,21 +58,19 @@ def load_eval_queries(queries_path: Path, prompts_path: Path) -> list[dict[str, 
             return [_normalize_query_spec(item) for item in data]
         if suffix == ".jsonl":
             specs: list[dict[str, Any]] = []
-            with open(queries_path, "r", encoding="utf-8") as handle:
+            with open(queries_path, encoding="utf-8") as handle:
                 for line in handle:
                     if not line.strip():
                         continue
                     specs.append(_normalize_query_spec(json.loads(line)))
             return specs
 
-        with open(queries_path, "r", encoding="utf-8") as handle:
-            return [
-                _normalize_query_spec(line.strip()) for line in handle if line.strip()
-            ]
+        with open(queries_path, encoding="utf-8") as handle:
+            return [_normalize_query_spec(line.strip()) for line in handle if line.strip()]
 
     logger.info("No queries file found, using default summarize prompt")
     summarize_prompt_path = prompts_path / "summarize.txt"
-    with open(summarize_prompt_path, "r", encoding="utf-8") as handle:
+    with open(summarize_prompt_path, encoding="utf-8") as handle:
         return [_normalize_query_spec(handle.read().strip())]
 
 
@@ -115,14 +113,10 @@ def _match_expectations(
         dict[str, Any]: A dictionary containing the sets of expected values and boolean flags indicating whether any hits were found.
     """
     filenames = {
-        str(source.get("filename") or "").strip()
-        for source in sources
-        if str(source.get("filename") or "").strip()
+        str(source.get("filename") or "").strip() for source in sources if str(source.get("filename") or "").strip()
     }
     file_hashes = {
-        str(source.get("file_hash") or "").strip()
-        for source in sources
-        if str(source.get("file_hash") or "").strip()
+        str(source.get("file_hash") or "").strip() for source in sources if str(source.get("file_hash") or "").strip()
     }
     text_ids = {
         str((source.get("reference_metadata") or {}).get("text_id") or "").strip()
@@ -131,29 +125,17 @@ def _match_expectations(
         and str((source.get("reference_metadata") or {}).get("text_id") or "").strip()
     }
 
-    expected_filenames = {
-        str(value).strip() for value in (query_spec.get("expected_filenames") or [])
-    }
-    expected_file_hashes = {
-        str(value).strip() for value in (query_spec.get("expected_file_hashes") or [])
-    }
-    expected_text_ids = {
-        str(value).strip() for value in (query_spec.get("expected_text_ids") or [])
-    }
+    expected_filenames = {str(value).strip() for value in (query_spec.get("expected_filenames") or [])}
+    expected_file_hashes = {str(value).strip() for value in (query_spec.get("expected_file_hashes") or [])}
+    expected_text_ids = {str(value).strip() for value in (query_spec.get("expected_text_ids") or [])}
 
     return {
         "expected_filenames": sorted(expected_filenames),
         "expected_file_hashes": sorted(expected_file_hashes),
         "expected_text_ids": sorted(expected_text_ids),
-        "filename_hit": bool(
-            expected_filenames and filenames.intersection(expected_filenames)
-        ),
-        "file_hash_hit": bool(
-            expected_file_hashes and file_hashes.intersection(expected_file_hashes)
-        ),
-        "text_id_hit": bool(
-            expected_text_ids and text_ids.intersection(expected_text_ids)
-        ),
+        "filename_hit": bool(expected_filenames and filenames.intersection(expected_filenames)),
+        "file_hash_hit": bool(expected_file_hashes and file_hashes.intersection(expected_file_hashes)),
+        "text_id_hit": bool(expected_text_ids and text_ids.intersection(expected_text_ids)),
     }
 
 
@@ -176,9 +158,7 @@ def evaluate_retrieval(
     Returns:
         dict[str, Any]: A dictionary containing the collection name, tested modes, query count, a summary of results by mode, and the detailed results for each query and mode.
     """
-    selected_modes = modes or (
-        ["default", "hybrid", "sparse"] if rag.enable_hybrid else ["default"]
-    )
+    selected_modes = modes or (["default", "hybrid", "sparse"] if rag.enable_hybrid else ["default"])
     results: list[dict[str, Any]] = []
     summary_by_mode: dict[str, dict[str, Any]] = {}
 
@@ -192,11 +172,7 @@ def evaluate_retrieval(
                 retrieval_options={"vector_store_query_mode": mode},
             )
             latency_ms = round((perf_counter() - started_at) * 1000, 2)
-            sources = [
-                source
-                for source in (payload.get("sources") or [])
-                if isinstance(source, dict)
-            ]
+            sources = [source for source in (payload.get("sources") or []) if isinstance(source, dict)]
             expectations = _match_expectations(sources, query_spec)
             mode_result = {
                 "mode": mode,
@@ -233,10 +209,7 @@ def evaluate_retrieval(
             mode_summary["queries"] += 1
             mode_summary["latency_ms_total"] += latency_ms
             mode_summary["source_count_total"] += len(sources)
-            if any(
-                expectations[key]
-                for key in ("filename_hit", "file_hash_hit", "text_id_hit")
-            ):
+            if any(expectations[key] for key in ("filename_hit", "file_hash_hit", "text_id_hit")):
                 mode_summary["expected_queries"] += 1
             if expectations["filename_hit"]:
                 mode_summary["filename_hits"] += 1
@@ -261,18 +234,10 @@ def evaluate_retrieval(
         summary[mode] = {
             "queries": int(stats["queries"]),
             "avg_latency_ms": round(float(stats["latency_ms_total"]) / query_count, 2),
-            "avg_source_count": round(
-                float(stats["source_count_total"]) / query_count, 2
-            ),
-            "filename_hit_rate": round(stats["filename_hits"] / expected_queries, 4)
-            if expected_queries
-            else None,
-            "file_hash_hit_rate": round(stats["file_hash_hits"] / expected_queries, 4)
-            if expected_queries
-            else None,
-            "text_id_hit_rate": round(stats["text_id_hits"] / expected_queries, 4)
-            if expected_queries
-            else None,
+            "avg_source_count": round(float(stats["source_count_total"]) / query_count, 2),
+            "filename_hit_rate": round(stats["filename_hits"] / expected_queries, 4) if expected_queries else None,
+            "file_hash_hit_rate": round(stats["file_hash_hits"] / expected_queries, 4) if expected_queries else None,
+            "text_id_hit_rate": round(stats["text_id_hits"] / expected_queries, 4) if expected_queries else None,
         }
 
     return {

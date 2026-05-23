@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any
 
 from llama_index.core import Document
 from llama_index.core.schema import BaseNode, TextNode
@@ -75,22 +76,15 @@ class CorePDFPipelineReader:
 
         if self.ner_max_workers > 1:
             with ThreadPoolExecutor(max_workers=self.ner_max_workers) as executor:
-                futures = [
-                    executor.submit(_process_node, i, node)
-                    for i, node in enumerate(nodes)
-                ]
+                futures = [executor.submit(_process_node, i, node) for i, node in enumerate(nodes)]
                 for i, _ in enumerate(as_completed(futures)):
                     if progress_callback:
-                        progress_callback(
-                            f"Extracting entities: {i + 1}/{total_nodes} chunks processed"
-                        )
+                        progress_callback(f"Extracting entities: {i + 1}/{total_nodes} chunks processed")
         else:
             for i, node in enumerate(nodes):
                 _process_node(i, node)
                 if progress_callback:
-                    progress_callback(
-                        f"Extracting entities: {i + 1}/{total_nodes} chunks processed"
-                    )
+                    progress_callback(f"Extracting entities: {i + 1}/{total_nodes} chunks processed")
 
     @staticmethod
     def _iter_pdf_files(data_dir: Path) -> list[Path]:
@@ -106,9 +100,7 @@ class CorePDFPipelineReader:
             return [data_dir] if data_dir.suffix.lower() == ".pdf" else []
         if not data_dir.exists():
             return []
-        return sorted(
-            p for p in data_dir.rglob("*") if p.is_file() and p.suffix.lower() == ".pdf"
-        )
+        return sorted(p for p in data_dir.rglob("*") if p.is_file() and p.suffix.lower() == ".pdf")
 
     @staticmethod
     def _load_pipeline_chunks(doc_id: str, artifacts_dir: Path) -> list[dict[str, Any]]:
@@ -273,8 +265,7 @@ class CorePDFPipelineReader:
                 )
 
         logger.info(
-            "Core pipeline image ingestion for {}: "
-            "total={} stored={} cached={} failed={}",
+            "Core pipeline image ingestion for {}: total={} stored={} cached={} failed={}",
             file_path.name,
             total,
             stored,
@@ -394,17 +385,11 @@ class CorePDFPipelineReader:
 
             if file_hash in existing_hashes or file_hash in emitted_hashes:
                 if progress_callback:
-                    progress_callback(
-                        "Skipping already ingested PDF "
-                        f"({index}/{len(pdf_files)}): {pdf_path.name}"
-                    )
+                    progress_callback(f"Skipping already ingested PDF ({index}/{len(pdf_files)}): {pdf_path.name}")
                 continue
 
             if progress_callback:
-                progress_callback(
-                    "Core pipeline processing PDF "
-                    f"({index}/{len(pdf_files)}): {pdf_path.name}"
-                )
+                progress_callback(f"Core pipeline processing PDF ({index}/{len(pdf_files)}): {pdf_path.name}")
 
             try:
                 manifest = orchestrator.process(pdf_path)
@@ -457,7 +442,5 @@ class CorePDFPipelineReader:
             self._apply_ner(nodes, progress_callback=progress_callback)
             emitted_hashes.add(manifest.doc_id)
             if progress_callback:
-                progress_callback(
-                    f"Core pipeline indexed {len(nodes)} chunks: {pdf_path.name}"
-                )
+                progress_callback(f"Core pipeline indexed {len(nodes)} chunks: {pdf_path.name}")
             yield docs, nodes, manifest.doc_id

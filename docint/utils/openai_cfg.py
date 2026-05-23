@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from llama_index.core.bridge.pydantic import PrivateAttr
 from llama_index.core.base.llms.types import LLMMetadata
+from llama_index.core.bridge.pydantic import PrivateAttr
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai import OpenAI as LlamaIndexOpenAI
 from loguru import logger
@@ -29,9 +29,7 @@ class EmbeddingInputTooLongError(RuntimeError):
 class LocalOpenAI(LlamaIndexOpenAI):
     """Subclass of LlamaIndex's OpenAI that handles local models with unknown names gracefully."""
 
-    def __init__(
-        self, context_window: int = 4096, num_output: int = 256, **kwargs: Any
-    ) -> None:
+    def __init__(self, context_window: int = 4096, num_output: int = 256, **kwargs: Any) -> None:
         """Initialize the LocalOpenAI instance.
 
         Args:
@@ -142,9 +140,7 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
             )
             if match:
                 model_limit_group, input_tokens_group = groups
-                return int(match.group(model_limit_group)), int(
-                    match.group(input_tokens_group)
-                )
+                return int(match.group(model_limit_group)), int(match.group(input_tokens_group))
         return None, None
 
     @classmethod
@@ -167,13 +163,7 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
         """
         message = str(exc).lower()
         return (
-            (
-                (
-                    "maximum context length" in message
-                    or "context length is only" in message
-                )
-                and "input tokens" in message
-            )
+            (("maximum context length" in message or "context length is only" in message) and "input tokens" in message)
             or ("maximum input length" in message and "input tokens" in message)
             or "context_length_exceeded" in message
             or ("input length exceeds" in message and "context length" in message)
@@ -209,11 +199,7 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
         batch_stats = ""
         if texts:
             lens = [len(t) for t in texts]
-            batch_stats = (
-                f", batch_size={len(texts)}"
-                f", max_text_chars={max(lens)}"
-                f", total_chars={sum(lens)}"
-            )
+            batch_stats = f", batch_size={len(texts)}, max_text_chars={max(lens)}, total_chars={sum(lens)}"
         return EmbeddingInputTooLongError(
             "Embedding input exceeded context budget: "
             f"configured={self._context_window}, "
@@ -392,11 +378,9 @@ class OpenAIPipeline:
 
         prompt_path = self.prompt_dir / f"{kw}.txt"
         if not prompt_path.is_file():
-            logger.error(
-                "FileNotFoundError: Prompt file for keyword '{}' not found.", kw
-            )
+            logger.error("FileNotFoundError: Prompt file for keyword '{}' not found.", kw)
             raise FileNotFoundError(f"Prompt file for keyword '{kw}' not found.")
-        with open(prompt_path, "r", encoding="utf-8") as f:
+        with open(prompt_path, encoding="utf-8") as f:
             logger.info("Loaded prompt from '{}'", prompt_path)
             return f.read()
 
@@ -436,9 +420,7 @@ class OpenAIPipeline:
             logger.error("Error during chat inference: {}", e)
             raise RuntimeError(f"Chat inference failed: {e}")
 
-    def call_vision(
-        self, prompt: str, img_base64: str, mime_type: str = "image/jpeg"
-    ) -> str:
+    def call_vision(self, prompt: str, img_base64: str, mime_type: str = "image/jpeg") -> str:
         """Call OpenAI (or compatible) Vision model.
 
         Args:
@@ -461,9 +443,7 @@ class OpenAIPipeline:
                     "image_url": {"url": f"data:{mime_type};base64,{img_base64}"},
                 },
             ]
-            messages: list[ChatCompletionMessageParam] = [
-                {"role": "user", "content": content_parts}
-            ]
+            messages: list[ChatCompletionMessageParam] = [{"role": "user", "content": content_parts}]
 
             request_kwargs: dict[str, Any] = {}
             if self.reasoning_effort is not None:

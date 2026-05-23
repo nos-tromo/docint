@@ -9,8 +9,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 from llama_index.core.storage.kvstore.types import DEFAULT_COLLECTION, BaseKVStore
 from loguru import logger
@@ -233,9 +234,7 @@ class SQLiteKVStore(BaseKVStore):
             batch_size: Batch size override.
         """
         effective_batch_size = batch_size or self.batch_size
-        rows = [
-            (collection, k, json.dumps(v, default=_json_default)) for k, v in kv_pairs
-        ]
+        rows = [(collection, k, json.dumps(v, default=_json_default)) for k, v in kv_pairs]
 
         def _do_put_all() -> None:
             for i in range(0, len(rows), effective_batch_size):

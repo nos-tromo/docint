@@ -6,7 +6,6 @@ from loguru import logger
 from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-
 # --- Session persistence (ORM) ---
 Base = declarative_base()
 
@@ -49,9 +48,7 @@ def _ensure_turn_validation_columns(engine: Engine) -> None:
         with engine.begin() as conn:
             for name, sql_type in pending:
                 if name not in existing:
-                    conn.execute(
-                        text(f"ALTER TABLE turns ADD COLUMN {name} {sql_type}")
-                    )
+                    conn.execute(text(f"ALTER TABLE turns ADD COLUMN {name} {sql_type}"))
     except Exception as exc:
         logger.warning(
             "Skipping turns validation-column migration: {}: {}",

@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
 import pytest
 
@@ -39,9 +40,7 @@ def _slow_producer(items: list[Any], delay_seconds: float = 0.0) -> Any:
 
 def test_producer_consumer_yields_items_in_order() -> None:
     """All items produced should reach the consumer in input order."""
-    pc: ProducerConsumer[int] = ProducerConsumer(
-        _slow_producer([1, 2, 3, 4, 5]), queue_max_size=2
-    )
+    pc: ProducerConsumer[int] = ProducerConsumer(_slow_producer([1, 2, 3, 4, 5]), queue_max_size=2)
     with pc:
         result: list[int] = list(pc.consume())
     assert result == [1, 2, 3, 4, 5]
@@ -49,9 +48,7 @@ def test_producer_consumer_yields_items_in_order() -> None:
 
 def test_overlapped_helper_short_form() -> None:
     """The :func:`overlapped` helper should mirror context-manager usage."""
-    items: list[str] = list(
-        overlapped(_slow_producer(["a", "b", "c"]), queue_max_size=1)
-    )
+    items: list[str] = list(overlapped(_slow_producer(["a", "b", "c"]), queue_max_size=1))
     assert items == ["a", "b", "c"]
 
 
@@ -75,7 +72,6 @@ def test_producer_exception_surfaces_to_consumer() -> None:
 
 def test_queue_bound_keeps_producer_blocked_until_consumer_drains() -> None:
     """A bounded queue should backpressure a fast producer."""
-
     produced: list[int] = []
     drain_event = threading.Event()
 
@@ -115,8 +111,7 @@ def test_consumer_can_break_early_without_deadlock() -> None:
     """Breaking out of the consumer loop should not hang the producer."""
 
     def _producer() -> Iterator[int]:
-        for i in range(100):
-            yield i
+        yield from range(100)
 
     pc: ProducerConsumer[int] = ProducerConsumer(_producer, queue_max_size=2)
     received: list[int] = []
@@ -131,7 +126,6 @@ def test_consumer_can_break_early_without_deadlock() -> None:
 
 def test_overlap_runs_producer_on_background_thread() -> None:
     """The producer should execute on a thread distinct from the consumer."""
-
     main_thread = threading.current_thread()
     producer_thread: list[threading.Thread] = []
 

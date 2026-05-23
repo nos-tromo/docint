@@ -13,9 +13,7 @@ class SimpleClarificationAgent(ClarificationAgent):
     It can also list missing required entities from the analysis.
     """
 
-    def __init__(
-        self, prompt: str | None = None, required_entities: list[str] | None = None
-    ) -> None:
+    def __init__(self, prompt: str | None = None, required_entities: list[str] | None = None) -> None:
         """Initialize the SimpleClarificationAgent.
 
         Args:
@@ -36,9 +34,7 @@ class SimpleClarificationAgent(ClarificationAgent):
             ClarificationRequest: The constructed clarification request.
         """
         missing = [k for k in self.required_entities if k not in analysis.entities]
-        detail = (
-            f"Missing details: {', '.join(missing)}" if missing else analysis.reason
-        )
+        detail = f"Missing details: {', '.join(missing)}" if missing else analysis.reason
         message = self.prompt
         if missing:
             message = f"{self.prompt} Please provide: {', '.join(missing)}."

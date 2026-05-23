@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from loguru import logger
 
@@ -18,7 +19,6 @@ from docint.core.readers.documents.artifacts import (
     save_table,
 )
 from docint.core.readers.documents.chunking import chunk_document
-from docint.utils.env_cfg import PipelineConfig, load_pipeline_config
 from docint.core.readers.documents.extraction import extract_images, extract_tables
 from docint.core.readers.documents.layout import analyze_document
 from docint.core.readers.documents.models import (
@@ -37,6 +37,7 @@ from docint.core.readers.documents.ocr import (
     extract_text_for_pages,
 )
 from docint.core.readers.documents.triage import triage_pdf
+from docint.utils.env_cfg import PipelineConfig, load_pipeline_config
 from docint.utils.hashing import compute_file_hash
 
 
@@ -99,9 +100,7 @@ class DocumentPipelineOrchestrator:
         )
 
         # --- Stage 1: Triage ---
-        pages = self._run_with_retry(
-            "triage", lambda: triage_pdf(file_path, self.config)
-        )
+        pages = self._run_with_retry("triage", lambda: triage_pdf(file_path, self.config))
         if pages is None:
             manifest.status = "failed"
             manifest.error = "Triage failed after retries"
@@ -225,9 +224,7 @@ class DocumentPipelineOrchestrator:
             )
 
         # --- Stage 4: Table extraction ---
-        tables: list[TableResult] = (
-            self._run_with_retry("tables", lambda: extract_tables(layout)) or []
-        )
+        tables: list[TableResult] = self._run_with_retry("tables", lambda: extract_tables(layout)) or []
         for table in tables:
             save_table(doc_id, table, artifacts_dir)
         manifest.tables_found = len(tables)
@@ -269,9 +266,7 @@ class DocumentPipelineOrchestrator:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _run_with_retry(
-        self, stage: str, fn: Callable[[], Any], retries: int | None = None
-    ) -> Any:
+    def _run_with_retry(self, stage: str, fn: Callable[[], Any], retries: int | None = None) -> Any:
         """Execute *fn* with retry logic, returning ``None`` on exhaustion.
 
         Args:
@@ -295,15 +290,11 @@ class DocumentPipelineOrchestrator:
                     exc,
                 )
                 if attempt == max_tries:
-                    logger.error(
-                        "Stage '{}' failed after {} attempts", stage, max_tries
-                    )
+                    logger.error("Stage '{}' failed after {} attempts", stage, max_tries)
                     return None
 
     @staticmethod
-    def _log_summary(
-        manifest: DocumentManifest, duration_ms: int, chunks_count: int
-    ) -> None:
+    def _log_summary(manifest: DocumentManifest, duration_ms: int, chunks_count: int) -> None:
         """Emit a structured summary log for the processed document.
 
         Args:

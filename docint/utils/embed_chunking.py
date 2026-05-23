@@ -136,9 +136,9 @@ def fits_budget(
         ``True`` when the estimated token count is at or below the
         effective budget, ``False`` otherwise.
     """
-    return estimate_tokens(
-        text, char_token_ratio, token_counter=token_counter
-    ) <= effective_budget(budget_tokens, safety_margin)
+    return estimate_tokens(text, char_token_ratio, token_counter=token_counter) <= effective_budget(
+        budget_tokens, safety_margin
+    )
 
 
 def _build_probe_sub_metadata(parent: BaseNode) -> dict[str, object]:
@@ -398,18 +398,14 @@ def _split_parent_text(
     effective = effective_budget(budget_tokens, safety_margin)
     parent_raw_text = parent.get_content()
     parent_embed_text = parent.get_content(metadata_mode=MetadataMode.EMBED)
-    parent_token_estimate = estimate_tokens(
-        parent_embed_text, char_token_ratio, token_counter=token_counter
-    )
+    parent_token_estimate = estimate_tokens(parent_embed_text, char_token_ratio, token_counter=token_counter)
 
     if not _has_word_boundaries(parent_raw_text):
         # Use the raw-text estimate (not the embed-mode one) so the
         # diagnostic reflects the stream the whitespace guard actually
         # inspected. The embed-mode estimate can be an order of magnitude
         # larger for heavy-metadata nodes, which would mislead operators.
-        raw_token_estimate = estimate_tokens(
-            parent_raw_text, char_token_ratio, token_counter=token_counter
-        )
+        raw_token_estimate = estimate_tokens(parent_raw_text, char_token_ratio, token_counter=token_counter)
         raise EmbeddingInputTooLongError(
             f"node_id={parent.node_id} estimated_tokens={raw_token_estimate} "
             f"budget={effective} — content is a single token stream larger than "

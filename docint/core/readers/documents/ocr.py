@@ -31,9 +31,7 @@ class OCREngine(ABC):
     """Abstract OCR engine wrapper."""
 
     @abstractmethod
-    def ocr_page(
-        self, page_index: int, *, file_path: Path | None = None
-    ) -> list[OCRSpan]:
+    def ocr_page(self, page_index: int, *, file_path: Path | None = None) -> list[OCRSpan]:
         """Run OCR on a single page and return text spans.
 
         Args:
@@ -61,9 +59,7 @@ class PypdfTextEngine(OCREngine):
         self._file_path = Path(file_path)
         self._reader = pypdf.PdfReader(self._file_path)
 
-    def ocr_page(
-        self, page_index: int, *, file_path: Path | None = None
-    ) -> list[OCRSpan]:
+    def ocr_page(self, page_index: int, *, file_path: Path | None = None) -> list[OCRSpan]:
         """Extract text from a page using pypdf (no actual OCR).
         This method attempts to extract text directly from the PDF page
         without performing any OCR.
@@ -169,17 +165,9 @@ class VisionOCREngine(OCREngine):
         self._ocr_prompt = self._pipeline.load_prompt(kw="ocr")
 
         self._timeout = timeout if timeout is not None else self._DEFAULT_TIMEOUT
-        self._max_retries = (
-            max_retries if max_retries is not None else self._DEFAULT_MAX_RETRIES
-        )
-        self._max_image_dim = (
-            max_image_dimension
-            if max_image_dimension is not None
-            else self._DEFAULT_MAX_IMAGE_DIM
-        )
-        self._max_tokens = (
-            max_tokens if max_tokens is not None else self._DEFAULT_MAX_TOKENS
-        )
+        self._max_retries = max_retries if max_retries is not None else self._DEFAULT_MAX_RETRIES
+        self._max_image_dim = max_image_dimension if max_image_dimension is not None else self._DEFAULT_MAX_IMAGE_DIM
+        self._max_tokens = max_tokens if max_tokens is not None else self._DEFAULT_MAX_TOKENS
 
         # Build a dedicated OpenAI client with the OCR-specific
         # timeout / retry settings so we don't block the pipeline for
@@ -193,9 +181,7 @@ class VisionOCREngine(OCREngine):
             max_retries=self._max_retries,
         )
 
-    def ocr_page(
-        self, page_index: int, *, file_path: Path | None = None
-    ) -> list[OCRSpan]:
+    def ocr_page(self, page_index: int, *, file_path: Path | None = None) -> list[OCRSpan]:
         """Render *page_index* to an image and extract text via vision LLM.
 
         The page is rasterised at 120 DPI, capped to
@@ -252,18 +238,14 @@ class VisionOCREngine(OCREngine):
             # Empty-output recovery pass at a higher detail setting.
             if not (text and text.strip()):
                 recovery_dim = max(self._max_image_dim, self._EMPTY_RETRY_MAX_IMAGE_DIM)
-                recovery_image = self._cap_image(
-                    base_image.copy(), recovery_dim, page_index
-                )
+                recovery_image = self._cap_image(base_image.copy(), recovery_dim, page_index)
                 if (
                     recovery_image.size != pil_image.size
-                    or max(recovery_image.width, recovery_image.height)
-                    > self._max_image_dim
+                    or max(recovery_image.width, recovery_image.height) > self._max_image_dim
                 ):
                     recovery_b64 = self._encode_jpeg(recovery_image)
                     logger.info(
-                        "Vision OCR returned empty text for page {}; "
-                        "retrying with higher-detail image {}×{}",
+                        "Vision OCR returned empty text for page {}; retrying with higher-detail image {}×{}",
                         page_index,
                         recovery_image.width,
                         recovery_image.height,
@@ -302,8 +284,7 @@ class VisionOCREngine(OCREngine):
                 )
             else:
                 logger.warning(
-                    "Vision OCR returned empty text for page {} "
-                    "(image {}×{}, payload ~{:.0f} KiB)",
+                    "Vision OCR returned empty text for page {} (image {}×{}, payload ~{:.0f} KiB)",
                     page_index,
                     pil_image.width,
                     pil_image.height,
@@ -364,9 +345,7 @@ class VisionOCREngine(OCREngine):
         pil_image.save(buf, format="JPEG", quality=cls._JPEG_QUALITY)
         return base64.b64encode(buf.getvalue()).decode("utf-8")
 
-    def _call_vision_ocr(
-        self, img_b64: str, *, prompt_override: str | None = None
-    ) -> str:
+    def _call_vision_ocr(self, img_b64: str, *, prompt_override: str | None = None) -> str:
         """Send the base64-encoded image to the vision LLM for OCR.
 
         Uses the dedicated ``_vision_client`` which has the shorter
@@ -394,9 +373,7 @@ class VisionOCREngine(OCREngine):
                 "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
             },
         ]
-        messages: list[ChatCompletionMessageParam] = [
-            {"role": "user", "content": content_parts}
-        ]
+        messages: list[ChatCompletionMessageParam] = [{"role": "user", "content": content_parts}]
 
         try:
             request_kwargs: dict[str, object] = {}
@@ -420,15 +397,10 @@ class VisionOCREngine(OCREngine):
                     len(captured),
                 )
             if looks_like_no_image_refusal(text):
-                logger.warning(
-                    "Vision OCR reported no image despite image being attached; "
-                    "treating as empty text"
-                )
+                logger.warning("Vision OCR reported no image despite image being attached; treating as empty text")
                 return ""
             if self._looks_like_refusal(text):
-                logger.warning(
-                    "Vision OCR returned refusal-style output; treating as empty text"
-                )
+                logger.warning("Vision OCR returned refusal-style output; treating as empty text")
                 return ""
             return text
         except Exception as e:
@@ -505,9 +477,7 @@ def build_page_text(
     else:
         source_mix = "pdf_text"
 
-    avg_confidence = (
-        sum(s.confidence for s in all_spans) / len(all_spans) if all_spans else 0.0
-    )
+    avg_confidence = sum(s.confidence for s in all_spans) / len(all_spans) if all_spans else 0.0
 
     return PageText(
         page_index=page_info.page_index,
@@ -561,9 +531,7 @@ def extract_text_for_pages(
                         "Attempting vision OCR fallback for page {}",
                         page_info.page_index,
                     )
-                    ocr_spans = vision_engine.ocr_page(
-                        page_info.page_index, file_path=file_path
-                    )
+                    ocr_spans = vision_engine.ocr_page(page_info.page_index, file_path=file_path)
                 except Exception as exc:
                     logger.warning(
                         "Vision OCR fallback failed for page {}: {}",

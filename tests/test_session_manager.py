@@ -1,17 +1,17 @@
 """Tests for the session manager citation persistence."""
 
 import json
+from collections.abc import Generator
 from pathlib import Path
-from typing import Any, Generator, cast
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from docint.core.state.base import _make_session_maker
+from docint.core.state.base import Base, _make_session_maker
 from docint.core.state.session_manager import SessionManager
-from docint.core.state.base import Base
 
 
 @pytest.fixture
@@ -160,9 +160,7 @@ def test_get_session_history_enriches_sources_from_node_lookup(
     assert source["row"] == 4
 
 
-def test_export_session_omits_stale_host_dir_and_succeeds(
-    session_manager: SessionManager, tmp_path: Path
-) -> None:
+def test_export_session_omits_stale_host_dir_and_succeeds(session_manager: SessionManager, tmp_path: Path) -> None:
     """Session export should not depend on removed Qdrant collection path state.
 
     Args:
@@ -357,9 +355,7 @@ def test_chat_rewrites_retrieval_query_without_prefixing_session_context(
 
     session_manager.chat("What did she post?")
 
-    rewrite_context = session_manager.rag.rewrite_retrieval_query.call_args.kwargs[
-        "conversation_context"
-    ]
+    rewrite_context = session_manager.rag.rewrite_retrieval_query.call_args.kwargs["conversation_context"]
     assert "Tell me about Alice" in rewrite_context
     assert "Alice posted about launch" in rewrite_context
     engine.query.assert_called_once_with("What did Alice post?")

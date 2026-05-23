@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import csv
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, ClassVar, Iterator, cast
+from typing import Any, ClassVar, cast
 
 import pandas as pd  # type: ignore[import]
 from llama_index.core import Document
@@ -54,7 +55,7 @@ def _normalize_column_name(value: Any) -> str:
 
 @dataclass(slots=True)
 class TableReader(BaseReader):
-    """Reads tabular data from CSV, TSV, XLSX, or Parquet files.
+    r"""Reads tabular data from CSV, TSV, XLSX, or Parquet files.
 
     Args:
         BaseReader (_type_): _base class for all readers_
@@ -311,9 +312,7 @@ class TableReader(BaseReader):
         default_separator = ","
         candidates = [",", ";", "\t", "|"]
         try:
-            sample = file_path.read_text(encoding=self.encoding, errors="replace")[
-                :8192
-            ]
+            sample = file_path.read_text(encoding=self.encoding, errors="replace")[:8192]
         except OSError:
             return default_separator
 
@@ -332,9 +331,7 @@ class TableReader(BaseReader):
         return detected if counts[detected] > 0 else default_separator
 
     @classmethod
-    def _detect_schema_profile(
-        cls, columns: list[str] | pd.Index
-    ) -> tuple[TableSchemaProfile | None, dict[str, str]]:
+    def _detect_schema_profile(cls, columns: list[str] | pd.Index) -> tuple[TableSchemaProfile | None, dict[str, str]]:
         """Return the matching specialized schema profile for a table, if any.
 
         Args:
@@ -347,9 +344,7 @@ class TableReader(BaseReader):
             names to their original names.
         """
         original_columns = [str(column) for column in columns]
-        normalized_map = {
-            _normalize_column_name(column): column for column in original_columns
-        }
+        normalized_map = {_normalize_column_name(column): column for column in original_columns}
         normalized_headers = set(normalized_map)
         for profile in cls.schema_profiles:
             if normalized_headers == profile.normalized_headers:
@@ -419,9 +414,7 @@ class TableReader(BaseReader):
         file_path = Path(file) if not isinstance(file, Path) else file
         suffix = file_path.suffix.lower()
         extra_info_arg = kwargs.get("extra_info", {})
-        extra_info: dict[str, Any] = (
-            extra_info_arg if isinstance(extra_info_arg, dict) else {}
-        )
+        extra_info: dict[str, Any] = extra_info_arg if isinstance(extra_info_arg, dict) else {}
 
         file_hash = extra_info.get("file_hash")
         if file_hash is None:
@@ -473,12 +466,8 @@ class TableReader(BaseReader):
         df = df.reset_index(drop=True)
         effective_id_col: str | None
         if schema_profile is not None:
-            text_cols = [
-                normalized_columns[_normalize_column_name(schema_profile.text_col)]
-            ]
-            effective_id_col = normalized_columns[
-                _normalize_column_name(schema_profile.id_col)
-            ]
+            text_cols = [normalized_columns[_normalize_column_name(schema_profile.text_col)]]
+            effective_id_col = normalized_columns[_normalize_column_name(schema_profile.id_col)]
         else:
             if self.text_cols is None:
                 text_cols = self._guess_text_cols(df)
@@ -497,11 +486,7 @@ class TableReader(BaseReader):
 
         n_rows, n_cols = len(df), len(df.columns)
         columns = [c for c in df.columns if c != ORIGINAL_INDEX_COL]
-        column_types = {
-            col: str(dtype)
-            for col, dtype in df.dtypes.items()
-            if col != ORIGINAL_INDEX_COL
-        }
+        column_types = {col: str(dtype) for col, dtype in df.dtypes.items() if col != ORIGINAL_INDEX_COL}
         count = 0
 
         for i, row in df.iterrows():

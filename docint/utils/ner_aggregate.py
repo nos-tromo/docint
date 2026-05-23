@@ -7,10 +7,10 @@ any context.
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from docint.core.ner import aggregate_ner_sources, entity_cluster_key
-
 
 # ---------------------------------------------------------------------------
 # Normalisation helpers
@@ -163,9 +163,7 @@ def aggregate_ner(
             if entry is None:
                 continue
             entry["files"].add(lbl)
-            entry["occurrences"].append(
-                {"source": lbl, "score": ent.get("score"), "text": text_val}
-            )
+            entry["occurrences"].append({"source": lbl, "score": ent.get("score"), "text": text_val})
 
         for rel in relations:
             head_raw = str(rel.get("head") or "")
@@ -193,9 +191,7 @@ def aggregate_ner(
             rel_entry["files"].add(lbl)
             if rel.get("score") is not None:
                 prev = rel_entry.get("best_score")
-                rel_entry["best_score"] = (
-                    max(prev, rel["score"]) if prev is not None else rel["score"]
-                )
+                rel_entry["best_score"] = max(prev, rel["score"]) if prev is not None else rel["score"]
             rel_entry["occurrences"].append({"source": lbl, "score": rel.get("score")})
 
     entities_sorted: list[dict[str, Any]] = sorted(

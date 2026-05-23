@@ -31,9 +31,7 @@ def set_offline_env() -> None:
         # by ``model_cfg.py`` instead of trying to fetch them.
         if not os.getenv("FASTEMBED_CACHE_PATH"):
             default_hf_cache = str(Path.home() / ".cache" / "huggingface" / "hub")
-            os.environ["FASTEMBED_CACHE_PATH"] = os.getenv(
-                "HF_HUB_CACHE", default_hf_cache
-            )
+            os.environ["FASTEMBED_CACHE_PATH"] = os.getenv("HF_HUB_CACHE", default_hf_cache)
 
         logger.info("Set Hugging Face libraries to offline mode.")
     else:
@@ -58,17 +56,13 @@ def _apply_device_visibility() -> None:
     if os.getenv("CUDA_VISIBLE_DEVICES") is not None:
         return
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
-    logger.info(
-        "USE_DEVICE=cpu: set CUDA_VISIBLE_DEVICES='' to prevent GPU context init."
-    )
+    logger.info("USE_DEVICE=cpu: set CUDA_VISIBLE_DEVICES='' to prevent GPU context init.")
 
 
 _apply_device_visibility()  # Must run before any torch.cuda call
 
 
-def resolve_hf_cache_path(
-    cache_dir: Path, repo_id: str, filename: str | None = None
-) -> Path | None:
+def resolve_hf_cache_path(cache_dir: Path, repo_id: str, filename: str | None = None) -> Path | None:
     """Resolve a HuggingFace model or file path from the local HF cache.
 
     HF hub stores downloads under:
@@ -193,62 +187,43 @@ def load_embedding_env(
             try:
                 provider_default_ctx = int(raw_chat_max_model_len)
             except ValueError as exc:
-                raise ValueError(
-                    f"CHAT_MAX_MODEL_LEN must be an integer, "
-                    f"got {raw_chat_max_model_len!r}"
-                ) from exc
+                raise ValueError(f"CHAT_MAX_MODEL_LEN must be an integer, got {raw_chat_max_model_len!r}") from exc
 
     raw_ctx_tokens = os.getenv("EMBED_CTX_TOKENS")
     if raw_ctx_tokens is not None and raw_ctx_tokens.strip():
         try:
             ctx_tokens = int(raw_ctx_tokens)
         except ValueError as exc:
-            raise ValueError(
-                f"EMBED_CTX_TOKENS must be an integer, got {raw_ctx_tokens!r}"
-            ) from exc
+            raise ValueError(f"EMBED_CTX_TOKENS must be an integer, got {raw_ctx_tokens!r}") from exc
     else:
         ctx_tokens = provider_default_ctx
     if not (256 <= ctx_tokens <= 32768):
-        raise ValueError(
-            f"EMBED_CTX_TOKENS={ctx_tokens!r} is out of range — "
-            f"must be between 256 and 32768 tokens."
-        )
+        raise ValueError(f"EMBED_CTX_TOKENS={ctx_tokens!r} is out of range — must be between 256 and 32768 tokens.")
 
     raw_char_token_ratio = os.getenv("EMBED_CHAR_TOKEN_RATIO")
     if raw_char_token_ratio is not None and raw_char_token_ratio.strip():
         try:
             char_token_ratio = float(raw_char_token_ratio)
         except ValueError as exc:
-            raise ValueError(
-                f"EMBED_CHAR_TOKEN_RATIO must be a float, got {raw_char_token_ratio!r}"
-            ) from exc
+            raise ValueError(f"EMBED_CHAR_TOKEN_RATIO must be a float, got {raw_char_token_ratio!r}") from exc
     else:
         char_token_ratio = float(default_char_token_ratio)
     if char_token_ratio <= 0:
-        raise ValueError(
-            f"EMBED_CHAR_TOKEN_RATIO={char_token_ratio!r} is out of range — "
-            f"must be positive."
-        )
+        raise ValueError(f"EMBED_CHAR_TOKEN_RATIO={char_token_ratio!r} is out of range — must be positive.")
 
     raw_ctx_safety_margin = os.getenv("EMBED_CTX_SAFETY_MARGIN")
     if raw_ctx_safety_margin is not None and raw_ctx_safety_margin.strip():
         try:
             ctx_safety_margin = float(raw_ctx_safety_margin)
         except ValueError as exc:
-            raise ValueError(
-                f"EMBED_CTX_SAFETY_MARGIN must be a float, "
-                f"got {raw_ctx_safety_margin!r}"
-            ) from exc
+            raise ValueError(f"EMBED_CTX_SAFETY_MARGIN must be a float, got {raw_ctx_safety_margin!r}") from exc
     else:
         ctx_safety_margin = float(default_ctx_safety_margin)
     if not (0.0 < ctx_safety_margin <= 1.0):
-        raise ValueError(
-            f"EMBED_CTX_SAFETY_MARGIN={ctx_safety_margin!r} is out of range — "
-            f"must be within (0, 1]."
-        )
+        raise ValueError(f"EMBED_CTX_SAFETY_MARGIN={ctx_safety_margin!r} is out of range — must be within (0, 1].")
 
-    provider_timeout_default, provider_batch_default, provider_retries_default = (
-        _embed_envelope_defaults(inference_provider)
+    provider_timeout_default, provider_batch_default, provider_retries_default = _embed_envelope_defaults(
+        inference_provider
     )
 
     raw_timeout_seconds = os.getenv("EMBED_TIMEOUT_SECONDS")
@@ -256,9 +231,7 @@ def load_embedding_env(
         try:
             timeout_seconds = float(raw_timeout_seconds)
         except ValueError as exc:
-            raise ValueError(
-                f"EMBED_TIMEOUT_SECONDS must be a float, got {raw_timeout_seconds!r}"
-            ) from exc
+            raise ValueError(f"EMBED_TIMEOUT_SECONDS must be a float, got {raw_timeout_seconds!r}") from exc
     else:
         timeout_seconds = float(provider_timeout_default)
     # Guard against NaN and ±inf up front: NaN comparisons are always False, so
@@ -267,8 +240,7 @@ def load_embedding_env(
     # with the ``worst_case_wait > 3600`` operator warning also skipped).
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise ValueError(
-            f"EMBED_TIMEOUT_SECONDS={timeout_seconds!r} is out of range — "
-            f"must be a finite positive float."
+            f"EMBED_TIMEOUT_SECONDS={timeout_seconds!r} is out of range — must be a finite positive float."
         )
 
     raw_batch_size = os.getenv("EMBED_BATCH_SIZE")
@@ -276,32 +248,22 @@ def load_embedding_env(
         try:
             batch_size = int(raw_batch_size)
         except ValueError as exc:
-            raise ValueError(
-                f"EMBED_BATCH_SIZE must be an integer, got {raw_batch_size!r}"
-            ) from exc
+            raise ValueError(f"EMBED_BATCH_SIZE must be an integer, got {raw_batch_size!r}") from exc
     else:
         batch_size = provider_batch_default
     if not (1 <= batch_size <= 1024):
-        raise ValueError(
-            f"EMBED_BATCH_SIZE={batch_size!r} is out of range — "
-            f"must be between 1 and 1024."
-        )
+        raise ValueError(f"EMBED_BATCH_SIZE={batch_size!r} is out of range — must be between 1 and 1024.")
 
     raw_max_retries = os.getenv("EMBED_MAX_RETRIES")
     if raw_max_retries is not None and raw_max_retries.strip():
         try:
             max_retries = int(raw_max_retries)
         except ValueError as exc:
-            raise ValueError(
-                f"EMBED_MAX_RETRIES must be an integer, got {raw_max_retries!r}"
-            ) from exc
+            raise ValueError(f"EMBED_MAX_RETRIES must be an integer, got {raw_max_retries!r}") from exc
     else:
         max_retries = provider_retries_default
     if not (0 <= max_retries <= 10):
-        raise ValueError(
-            f"EMBED_MAX_RETRIES={max_retries!r} is out of range — "
-            f"must be between 0 and 10."
-        )
+        raise ValueError(f"EMBED_MAX_RETRIES={max_retries!r} is out of range — must be between 0 and 10.")
 
     return EmbeddingConfig(
         ctx_tokens=ctx_tokens,
@@ -363,11 +325,7 @@ def load_frontend_env(
         FrontendConfig: Dataclass containing frontend configuration.
         - collection_timeout (int): Timeout in seconds for fetching collections from the backend.
     """
-    return FrontendConfig(
-        collection_timeout=int(
-            os.getenv("FRONTEND_COLLECTION_TIMEOUT", default_collection_timeout)
-        )
-    )
+    return FrontendConfig(collection_timeout=int(os.getenv("FRONTEND_COLLECTION_TIMEOUT", default_collection_timeout)))
 
 
 @dataclass(frozen=True)
@@ -401,18 +359,11 @@ def load_graphrag_env(
         GraphRAGConfig: Parsed graph retrieval settings.
     """
     return GraphRAGConfig(
-        enabled=str(os.getenv("GRAPHRAG_ENABLED", default_enabled)).lower()
-        in {"true", "1", "yes"},
-        neighbor_hops=max(
-            1, int(os.getenv("GRAPHRAG_NEIGHBOR_HOPS", default_neighbor_hops))
-        ),
+        enabled=str(os.getenv("GRAPHRAG_ENABLED", default_enabled)).lower() in {"true", "1", "yes"},
+        neighbor_hops=max(1, int(os.getenv("GRAPHRAG_NEIGHBOR_HOPS", default_neighbor_hops))),
         top_k_nodes=max(1, int(os.getenv("GRAPHRAG_TOP_K_NODES", default_top_k_nodes))),
-        min_edge_weight=max(
-            1, int(os.getenv("GRAPHRAG_MIN_EDGE_WEIGHT", default_min_edge_weight))
-        ),
-        max_neighbors=max(
-            1, int(os.getenv("GRAPHRAG_MAX_NEIGHBORS", default_max_neighbors))
-        ),
+        min_edge_weight=max(1, int(os.getenv("GRAPHRAG_MIN_EDGE_WEIGHT", default_min_edge_weight))),
+        max_neighbors=max(1, int(os.getenv("GRAPHRAG_MAX_NEIGHBORS", default_max_neighbors))),
     )
 
 
@@ -441,12 +392,9 @@ def load_hate_speech_env(
         HateSpeechConfig: Parsed hate-speech detection configuration.
     """
     return HateSpeechConfig(
-        enabled=str(os.getenv("ENABLE_HATE_SPEECH_DETECTION", default_enabled)).lower()
-        in {"true", "1", "yes"},
+        enabled=str(os.getenv("ENABLE_HATE_SPEECH_DETECTION", default_enabled)).lower() in {"true", "1", "yes"},
         max_chars=max(256, int(os.getenv("HATE_SPEECH_MAX_CHARS", default_max_chars))),
-        max_workers=max(
-            1, int(os.getenv("HATE_SPEECH_MAX_WORKERS", default_max_workers))
-        ),
+        max_workers=max(1, int(os.getenv("HATE_SPEECH_MAX_WORKERS", default_max_workers))),
     )
 
 
@@ -574,42 +522,22 @@ def load_image_ingestion_config(
             images sent to the vision tagging endpoint. Larger images are down-scaled.
     """
     return ImageIngestionConfig(
-        enabled=str(
-            os.getenv("IMAGE_INGESTION_ENABLED", default_image_ingestion_enabled)
-        ).lower()
+        enabled=str(os.getenv("IMAGE_INGESTION_ENABLED", default_image_ingestion_enabled)).lower()
         in {"1", "true", "yes"},
-        embedding_enabled=str(
-            os.getenv("IMAGE_EMBEDDING_ENABLED", default_image_embedding_enabled)
-        ).lower()
+        embedding_enabled=str(os.getenv("IMAGE_EMBEDDING_ENABLED", default_image_embedding_enabled)).lower()
         in {"1", "true", "yes"},
-        tagging_enabled=str(
-            os.getenv("IMAGE_TAGGING_ENABLED", default_image_tagging_enabled)
-        ).lower()
+        tagging_enabled=str(os.getenv("IMAGE_TAGGING_ENABLED", default_image_tagging_enabled)).lower()
         in {"1", "true", "yes"},
-        collection_name=os.getenv(
-            "IMAGE_QDRANT_COLLECTION", default_image_qdrant_collection
-        ),
-        vector_name=os.getenv(
-            "IMAGE_QDRANT_VECTOR_NAME", default_image_qdrant_vector_name
-        ),
-        cache_by_hash=str(
-            os.getenv("IMAGE_CACHE_BY_HASH", default_image_cache_by_hash)
-        ).lower()
+        collection_name=os.getenv("IMAGE_QDRANT_COLLECTION", default_image_qdrant_collection),
+        vector_name=os.getenv("IMAGE_QDRANT_VECTOR_NAME", default_image_qdrant_vector_name),
+        cache_by_hash=str(os.getenv("IMAGE_CACHE_BY_HASH", default_image_cache_by_hash)).lower()
         in {"1", "true", "yes"},
-        fail_on_embedding_error=str(
-            os.getenv("IMAGE_FAIL_ON_EMBED_ERROR", default_fail_on_embedding_error)
-        ).lower()
+        fail_on_embedding_error=str(os.getenv("IMAGE_FAIL_ON_EMBED_ERROR", default_fail_on_embedding_error)).lower()
         in {"1", "true", "yes"},
-        fail_on_tagging_error=str(
-            os.getenv("IMAGE_FAIL_ON_TAG_ERROR", default_fail_on_tagging_error)
-        ).lower()
+        fail_on_tagging_error=str(os.getenv("IMAGE_FAIL_ON_TAG_ERROR", default_fail_on_tagging_error)).lower()
         in {"1", "true", "yes"},
         retrieve_top_k=int(os.getenv("IMAGE_RETRIEVE_TOP_K", default_retrieve_top_k)),
-        tagging_max_image_dimension=int(
-            os.getenv(
-                "IMAGE_TAGGING_MAX_IMAGE_DIM", default_tagging_max_image_dimension
-            )
-        ),
+        tagging_max_image_dimension=int(os.getenv("IMAGE_TAGGING_MAX_IMAGE_DIM", default_tagging_max_image_dimension)),
     )
 
 
@@ -657,24 +585,7 @@ def load_ingestion_env(
     default_ingestion_batch_size: int = 50,
     default_sentence_splitter_chunk_overlap: int = 64,
     default_sentence_splitter_chunk_size: int = 1024,
-    default_supported_filetypes: list[str] = [
-        ".csv",
-        ".docx",
-        ".gif",
-        ".jpeg",
-        ".jpg",
-        ".json",
-        ".jsonl",
-        ".md",
-        ".ndjson",
-        ".parquet",
-        ".pdf",
-        ".png",
-        ".tsv",
-        ".txt",
-        ".xls",
-        ".xlsx",
-    ],
+    default_supported_filetypes: list[str] | None = None,
 ) -> IngestionConfig:
     """Loads ingestion configuration from environment variables or defaults.
 
@@ -723,30 +634,38 @@ def load_ingestion_env(
         - sentence_splitter_chunk_size (int): The chunk size for sentence splitting.
         - supported_filetypes (list[str]): List of supported file extensions for ingestion.
     """
+    if default_supported_filetypes is None:
+        default_supported_filetypes = [
+            ".csv",
+            ".docx",
+            ".gif",
+            ".jpeg",
+            ".jpg",
+            ".json",
+            ".jsonl",
+            ".md",
+            ".ndjson",
+            ".parquet",
+            ".pdf",
+            ".png",
+            ".tsv",
+            ".txt",
+            ".xls",
+            ".xlsx",
+        ]
     return IngestionConfig(
-        coarse_chunk_size=int(
-            os.getenv("COARSE_CHUNK_SIZE", default_coarse_chunk_size)
-        ),
+        coarse_chunk_size=int(os.getenv("COARSE_CHUNK_SIZE", default_coarse_chunk_size)),
         docling_accelerator_num_threads=int(
             os.getenv(
                 "DOCLING_ACCELERATOR_NUM_THREADS",
                 default_docling_accelerator_num_threads,
             )
         ),
-        docstore_batch_size=int(
-            os.getenv("DOCSTORE_BATCH_SIZE", default_docstore_batch_size)
-        ),
-        ingest_benchmark_enabled=str(
-            os.getenv("INGEST_BENCHMARK_ENABLED", default_ingest_benchmark_enabled)
-        ).lower()
+        docstore_batch_size=int(os.getenv("DOCSTORE_BATCH_SIZE", default_docstore_batch_size)),
+        ingest_benchmark_enabled=str(os.getenv("INGEST_BENCHMARK_ENABLED", default_ingest_benchmark_enabled)).lower()
         in {"true", "1", "yes"},
-        ingest_fail_fast=str(
-            os.getenv("INGEST_FAIL_FAST", default_ingest_fail_fast)
-        ).lower()
-        in {"true", "1", "yes"},
-        ingest_manifest_enabled=str(
-            os.getenv("INGEST_MANIFEST_ENABLED", default_ingest_manifest_enabled)
-        ).lower()
+        ingest_fail_fast=str(os.getenv("INGEST_FAIL_FAST", default_ingest_fail_fast)).lower() in {"true", "1", "yes"},
+        ingest_manifest_enabled=str(os.getenv("INGEST_MANIFEST_ENABLED", default_ingest_manifest_enabled)).lower()
         in {"true", "1", "yes"},
         ingest_pipeline_overlap_enabled=str(
             os.getenv(
@@ -755,9 +674,7 @@ def load_ingestion_env(
             )
         ).lower()
         in {"true", "1", "yes"},
-        streaming_readers_enabled=str(
-            os.getenv("STREAMING_READERS_ENABLED", default_streaming_readers_enabled)
-        ).lower()
+        streaming_readers_enabled=str(os.getenv("STREAMING_READERS_ENABLED", default_streaming_readers_enabled)).lower()
         in {"true", "1", "yes"},
         ingest_queue_max_size=max(
             1,
@@ -785,17 +702,11 @@ def load_ingestion_env(
                 )
             ),
         ),
-        fine_chunk_overlap=int(
-            os.getenv("FINE_CHUNK_OVERLAP", default_fine_chunk_overlap)
-        ),
+        fine_chunk_overlap=int(os.getenv("FINE_CHUNK_OVERLAP", default_fine_chunk_overlap)),
         fine_chunk_size=int(os.getenv("FINE_CHUNK_SIZE", default_fine_chunk_size)),
-        hierarchical_chunking_enabled=str(
-            os.getenv("HIERARCHICAL_CHUNKING_ENABLED", "true")
-        ).lower()
+        hierarchical_chunking_enabled=str(os.getenv("HIERARCHICAL_CHUNKING_ENABLED", "true")).lower()
         in {"true", "1", "yes"},
-        ingestion_batch_size=int(
-            os.getenv("INGESTION_BATCH_SIZE", default_ingestion_batch_size)
-        ),
+        ingestion_batch_size=int(os.getenv("INGESTION_BATCH_SIZE", default_ingestion_batch_size)),
         sentence_splitter_chunk_overlap=int(
             os.getenv(
                 "SENTENCE_SPLITTER_CHUNK_OVERLAP",
@@ -803,9 +714,7 @@ def load_ingestion_env(
             )
         ),
         sentence_splitter_chunk_size=int(
-            os.getenv(
-                "SENTENCE_SPLITTER_CHUNK_SIZE", default_sentence_splitter_chunk_size
-            )
+            os.getenv("SENTENCE_SPLITTER_CHUNK_SIZE", default_sentence_splitter_chunk_size)
         ),
         supported_filetypes=default_supported_filetypes,
     )
@@ -877,9 +786,7 @@ def load_model_env(
 
     return ModelConfig(
         embed_model=os.getenv("EMBED_MODEL", default_embed_model),
-        embed_tokenizer_repo=os.getenv(
-            "EMBED_TOKENIZER_REPO", default_embed_tokenizer_repo
-        ),
+        embed_tokenizer_repo=os.getenv("EMBED_TOKENIZER_REPO", default_embed_tokenizer_repo),
         image_embed_model=os.getenv("IMAGE_EMBED_MODEL", default_image_embed_model),
         ner_model=os.getenv("NER_MODEL", default_ner_model),
         rerank_model=os.getenv("RERANK_MODEL", default_rerank_model),
@@ -920,8 +827,7 @@ def load_ner_env(
         ValueError: If an unsupported NER engine is specified.
     """
     return NERConfig(
-        enabled=str(os.getenv("NER_ENABLED", default_enabled)).lower()
-        in {"true", "1", "yes"},
+        enabled=str(os.getenv("NER_ENABLED", default_enabled)).lower() in {"true", "1", "yes"},
         max_chars=int(os.getenv("NER_MAX_CHARS", default_max_chars)),
         max_workers=int(os.getenv("NER_MAX_WORKERS", default_max_workers)),
     )
@@ -958,9 +864,7 @@ def load_openai_env(
     default_reuse_client: bool = False,
     default_seed: int = 42,
     default_temperature: float = 0.0,
-    default_thinking_effort: Literal[
-        "none", "minimal", "low", "medium", "high", "xhigh"
-    ] = "medium",
+    default_thinking_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"] = "medium",
     default_thinking_enabled: bool = False,
     default_timeout: float = 300.0,
     default_top_p: float = 0.1,
@@ -1009,29 +913,20 @@ def load_openai_env(
     Raises:
         ValueError: If an unsupported inference server is specified.
     """
-    inference_provider = os.getenv(
-        "INFERENCE_PROVIDER", default_inference_provider
-    ).lower()
+    inference_provider = os.getenv("INFERENCE_PROVIDER", default_inference_provider).lower()
     if inference_provider not in {
         "ollama",
         "openai",
         "vllm",
     }:
         raise ValueError(
-            f"Unsupported inference server: {inference_provider}. "
-            f"Supported options are: 'ollama', 'openai', 'vllm'."
+            f"Unsupported inference server: {inference_provider}. Supported options are: 'ollama', 'openai', 'vllm'."
         )
 
     raw_dimensions = os.getenv("OPENAI_DIMENSIONS")
-    dimensions = (
-        default_dimensions
-        if raw_dimensions is None or not raw_dimensions.strip()
-        else int(raw_dimensions)
-    )
+    dimensions = default_dimensions if raw_dimensions is None or not raw_dimensions.strip() else int(raw_dimensions)
 
-    thinking_effort = os.getenv(
-        "OPENAI_THINKING_EFFORT", default_thinking_effort
-    ).lower()
+    thinking_effort = os.getenv("OPENAI_THINKING_EFFORT", default_thinking_effort).lower()
     allowed_thinking_efforts = {
         "none",
         "minimal",
@@ -1055,11 +950,7 @@ def load_openai_env(
             ctx_window = max(default_ctx_window, 8192)
 
     raw_num_output = os.getenv("OPENAI_NUM_OUTPUT")
-    num_output = (
-        int(raw_num_output)
-        if raw_num_output is not None and raw_num_output.strip()
-        else default_num_output
-    )
+    num_output = int(raw_num_output) if raw_num_output is not None and raw_num_output.strip() else default_num_output
 
     return OpenAIConfig(
         api_base=os.getenv("OPENAI_API_BASE", default_api_base),
@@ -1069,17 +960,14 @@ def load_openai_env(
         max_retries=int(os.getenv("OPENAI_MAX_RETRIES", default_max_retries)),
         num_output=num_output,
         inference_provider=inference_provider,
-        reuse_client=str(os.getenv("OPENAI_REUSE_CLIENT", default_reuse_client)).lower()
-        in {"true", "1", "yes"},
+        reuse_client=str(os.getenv("OPENAI_REUSE_CLIENT", default_reuse_client)).lower() in {"true", "1", "yes"},
         seed=int(os.getenv("OPENAI_SEED", default_seed)),
         temperature=float(os.getenv("OPENAI_TEMPERATURE", default_temperature)),
         thinking_effort=cast(
             Literal["none", "minimal", "low", "medium", "high", "xhigh"],
             thinking_effort,
         ),
-        thinking_enabled=str(
-            os.getenv("OPENAI_ENABLE_THINKING", default_thinking_enabled)
-        ).lower()
+        thinking_enabled=str(os.getenv("OPENAI_ENABLE_THINKING", default_thinking_enabled)).lower()
         in {"true", "1", "yes"},
         timeout=float(os.getenv("OPENAI_TIMEOUT", default_timeout)),
         top_p=float(os.getenv("OPENAI_TOP_P", default_top_p)),
@@ -1133,18 +1021,14 @@ def load_path_env() -> PathConfig:
     default_artifacts_dir: Path = docint_home_dir / "artifacts"
 
     return PathConfig(
-        artifacts=Path(
-            os.getenv("PIPELINE_ARTIFACTS_DIR", default_artifacts_dir)
-        ).expanduser(),
+        artifacts=Path(os.getenv("PIPELINE_ARTIFACTS_DIR", default_artifacts_dir)).expanduser(),
         data=Path(os.getenv("DATA_PATH", default_data_dir)).expanduser(),
         docint_home_dir=docint_home_dir,
         logs=Path(os.getenv("LOG_PATH", default_log_dir)).expanduser(),
         queries=Path(os.getenv("QUERIES_PATH", default_query_dir)).expanduser(),
         results=Path(os.getenv("RESULTS_PATH", default_results_dir)).expanduser(),
         prompts=default_prompts_dir,
-        qdrant_sources=Path(
-            os.getenv("QDRANT_SRC_DIR", default_qdrant_sources)
-        ).expanduser(),
+        qdrant_sources=Path(os.getenv("QDRANT_SRC_DIR", default_qdrant_sources)).expanduser(),
         hf_hub_cache=Path(os.getenv("HF_HUB_CACHE", default_hf_hub_cache)).expanduser(),
     )
 
@@ -1213,34 +1097,22 @@ def load_pipeline_config(
         pipeline_version = default_pipeline_version
 
     return PipelineConfig(
-        text_coverage_threshold=float(
-            os.getenv(
-                "PIPELINE_TEXT_COVERAGE_THRESHOLD", default_text_coverage_threshold
-            )
-        ),
+        text_coverage_threshold=float(os.getenv("PIPELINE_TEXT_COVERAGE_THRESHOLD", default_text_coverage_threshold)),
         pipeline_version=pipeline_version,
         artifacts_dir=str(load_path_env().artifacts),
         max_retries=int(os.getenv("PIPELINE_MAX_RETRIES", default_max_retries)),
-        force_reprocess=os.getenv("PIPELINE_FORCE_REPROCESS", "false").lower()
-        in {"true", "1", "yes"},
+        force_reprocess=os.getenv("PIPELINE_FORCE_REPROCESS", "false").lower() in {"true", "1", "yes"},
         max_workers=int(os.getenv("PIPELINE_MAX_WORKERS", default_max_workers)),
-        enable_vision_ocr=os.getenv("PIPELINE_ENABLE_VISION_OCR", "true").lower()
-        in {"true", "1", "yes"},
-        vision_ocr_timeout=float(
-            os.getenv("PIPELINE_VISION_OCR_TIMEOUT", default_vision_ocr_timeout)
-        ),
-        vision_ocr_max_retries=int(
-            os.getenv("PIPELINE_VISION_OCR_MAX_RETRIES", default_vision_ocr_max_retries)
-        ),
+        enable_vision_ocr=os.getenv("PIPELINE_ENABLE_VISION_OCR", "true").lower() in {"true", "1", "yes"},
+        vision_ocr_timeout=float(os.getenv("PIPELINE_VISION_OCR_TIMEOUT", default_vision_ocr_timeout)),
+        vision_ocr_max_retries=int(os.getenv("PIPELINE_VISION_OCR_MAX_RETRIES", default_vision_ocr_max_retries)),
         vision_ocr_max_image_dimension=int(
             os.getenv(
                 "PIPELINE_VISION_OCR_MAX_IMAGE_DIM",
                 default_vision_ocr_max_image_dimension,
             )
         ),
-        vision_ocr_max_tokens=int(
-            os.getenv("PIPELINE_VISION_OCR_MAX_TOKENS", default_vision_ocr_max_tokens)
-        ),
+        vision_ocr_max_tokens=int(os.getenv("PIPELINE_VISION_OCR_MAX_TOKENS", default_vision_ocr_max_tokens)),
     )
 
 
@@ -1264,8 +1136,7 @@ def load_response_validation_env(
         - enabled (bool): Whether to run response validation on generated answers.
     """
     return ResponseValidationConfig(
-        enabled=str(os.getenv("RESPONSE_VALIDATION_ENABLED", default_enabled)).lower()
-        in {"true", "1", "yes"}
+        enabled=str(os.getenv("RESPONSE_VALIDATION_ENABLED", default_enabled)).lower() in {"true", "1", "yes"}
     )
 
 
@@ -1288,9 +1159,7 @@ def load_retrieval_env(
     default_rerank_use_fp16: bool = False,
     default_retrieve_top_k: int = 20,
     default_chat_response_mode: Literal["auto", "compact", "refine"] = "auto",
-    default_vector_store_query_mode: Literal[
-        "auto", "default", "sparse", "hybrid", "mmr"
-    ] = "auto",
+    default_vector_store_query_mode: Literal["auto", "default", "sparse", "hybrid", "mmr"] = "auto",
     default_hybrid_alpha: float = 0.5,
     default_sparse_top_k: int = 20,
     default_hybrid_top_k: int = 20,
@@ -1331,23 +1200,15 @@ def load_retrieval_env(
                     ``OPENAI_CTX_WINDOW`` the parent-context packer may
                     consume before windowing oversize parents.
     """
-    raw_mode = (
-        str(os.getenv("CHAT_RESPONSE_MODE", default_chat_response_mode)).strip().lower()
-    )
+    raw_mode = str(os.getenv("CHAT_RESPONSE_MODE", default_chat_response_mode)).strip().lower()
     chat_response_mode: Literal["auto", "compact", "refine"] = "auto"
     if raw_mode in {"compact", "refine"}:
         chat_response_mode = cast(Literal["compact", "refine"], raw_mode)
     elif raw_mode == "auto":
         chat_response_mode = "auto"
 
-    raw_query_mode = (
-        str(os.getenv("RETRIEVAL_VECTOR_QUERY_MODE", default_vector_store_query_mode))
-        .strip()
-        .lower()
-    )
-    vector_store_query_mode: Literal["auto", "default", "sparse", "hybrid", "mmr"] = (
-        "auto"
-    )
+    raw_query_mode = str(os.getenv("RETRIEVAL_VECTOR_QUERY_MODE", default_vector_store_query_mode)).strip().lower()
+    vector_store_query_mode: Literal["auto", "default", "sparse", "hybrid", "mmr"] = "auto"
     if raw_query_mode in {"default", "sparse", "hybrid", "mmr"}:
         vector_store_query_mode = cast(
             Literal["default", "sparse", "hybrid", "mmr"],
@@ -1357,10 +1218,7 @@ def load_retrieval_env(
         vector_store_query_mode = "auto"
 
     return RetrievalConfig(
-        rerank_use_fp16=str(
-            os.getenv("RERANK_USE_FP16", default_rerank_use_fp16)
-        ).lower()
-        in {"true", "1", "yes"},
+        rerank_use_fp16=str(os.getenv("RERANK_USE_FP16", default_rerank_use_fp16)).lower() in {"true", "1", "yes"},
         retrieve_top_k=int(os.getenv("RETRIEVE_TOP_K", default_retrieve_top_k)),
         chat_response_mode=chat_response_mode,
         vector_store_query_mode=vector_store_query_mode,
@@ -1555,12 +1413,8 @@ def load_summary_env(
     return SummaryConfig(
         coverage_target=target,
         max_docs=max(1, int(os.getenv("SUMMARY_MAX_DOCS", default_max_docs))),
-        per_doc_top_k=max(
-            1, int(os.getenv("SUMMARY_PER_DOC_TOP_K", default_per_doc_top_k))
-        ),
-        final_source_cap=max(
-            1, int(os.getenv("SUMMARY_FINAL_SOURCE_CAP", default_final_source_cap))
-        ),
+        per_doc_top_k=max(1, int(os.getenv("SUMMARY_PER_DOC_TOP_K", default_per_doc_top_k))),
+        final_source_cap=max(1, int(os.getenv("SUMMARY_FINAL_SOURCE_CAP", default_final_source_cap))),
         social_chunking_enabled=str(
             os.getenv(
                 "SUMMARY_SOCIAL_CHUNKING_ENABLED",

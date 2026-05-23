@@ -104,7 +104,7 @@ def test_sentence_boundaries() -> None:
 
 
 def test_input_nodes() -> None:
-    """Test that the parser can handle input nodes (e.g. from MarkdownParser)"""
+    """Test that the parser can handle input nodes (e.g. from MarkdownParser)."""
     # Simulate a node from Markdown parser
     # node = Document(
     #     text="Section text. Sentence inside.", metadata={"header_path": "/Section 1"}
@@ -117,9 +117,7 @@ def test_input_nodes() -> None:
 
     # IngestionPipeline calls _parse_nodes with nodes
     # Let's simulate that
-    coarse_node = Document(
-        text="Coarse content. Multiple sentences.", metadata={"section": "1"}
-    )
+    coarse_node = Document(text="Coarse content. Multiple sentences.", metadata={"section": "1"})
     # Cast to ensure it's treated as input node
 
     nodes = parser._parse_nodes([coarse_node])
@@ -140,9 +138,7 @@ def test_input_nodes() -> None:
 
     # Should treat text_node as Coarse candidate (Level 1) and split to Fine (Level 2)
     levels = [n.metadata.get("hier.level") for n in nodes]
-    assert (
-        1 in levels
-    )  # The input node itself should be preserved/returned/marked as Level 1?
+    assert 1 in levels  # The input node itself should be preserved/returned/marked as Level 1?
 
     # In my implementation:
     # else: coarse_candidates = [node] (if fits)

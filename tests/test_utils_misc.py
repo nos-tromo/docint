@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
+from loguru import logger
 
 from docint.utils.clean_text import basic_clean
 from docint.utils.env_cfg import (
@@ -23,7 +24,6 @@ from docint.utils.env_cfg import (
 )
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.logger_cfg import init_logger
-from loguru import logger
 
 
 def test_basic_clean_normalizes_whitespace() -> None:
@@ -86,9 +86,7 @@ def test_path_config_artifacts_default(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.artifacts.is_absolute()
 
 
-def test_path_config_artifacts_env_override(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_path_config_artifacts_env_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """PIPELINE_ARTIFACTS_DIR env var should override the default artifacts path.
 
     Args:
@@ -101,9 +99,7 @@ def test_path_config_artifacts_env_override(
     assert cfg.artifacts == custom
 
 
-def test_init_logger_respects_env_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_init_logger_respects_env_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """init_logger should honor LOG_PATH and create the log file.
 
     Args:
@@ -297,7 +293,7 @@ def test_load_openai_env_accepts_vllm_and_dimensions_override(
 def test_load_openai_env_uses_chat_max_model_len_for_vllm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """vLLM context window should follow CHAT_MAX_MODEL_LEN when not overridden.
+    """VLLM context window should follow CHAT_MAX_MODEL_LEN when not overridden.
 
     Args:
         monkeypatch: Fixture to set environment variables.
@@ -371,9 +367,7 @@ def test_load_session_env_defaults_to_docint_home(
     monkeypatch.delenv("SESSION_STORE", raising=False)
     monkeypatch.delenv("SESSIONS_DB_PATH", raising=False)
     cfg = load_session_env()
-    assert (
-        cfg.session_store == f"sqlite:///{Path.home() / 'docint' / 'sessions.sqlite3'}"
-    )
+    assert cfg.session_store == f"sqlite:///{Path.home() / 'docint' / 'sessions.sqlite3'}"
 
 
 def test_load_session_env_defaults_to_sessions_db_path_when_explicitly_set(
@@ -406,9 +400,7 @@ def test_load_session_env_ignores_data_path_without_sessions_override(
 
     cfg = load_session_env()
 
-    assert (
-        cfg.session_store == f"sqlite:///{Path.home() / 'docint' / 'sessions.sqlite3'}"
-    )
+    assert cfg.session_store == f"sqlite:///{Path.home() / 'docint' / 'sessions.sqlite3'}"
 
 
 def test_load_session_env_honors_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -472,12 +464,11 @@ def test_load_model_env_reads_direct_text_and_vision_model_ids(
 def test_load_model_env_uses_vllm_sparse_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """vLLM model defaults should align the sparse model with the profile.
+    """VLLM model defaults should align the sparse model with the profile.
 
     Args:
         monkeypatch: Fixture to override environment variables.
     """
-
     monkeypatch.setenv("INFERENCE_PROVIDER", "vllm")
     monkeypatch.setenv("EMBED_MODEL", "BAAI/bge-m3")
     monkeypatch.delenv("SPARSE_MODEL", raising=False)

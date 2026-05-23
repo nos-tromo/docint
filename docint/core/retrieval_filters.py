@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone
-from typing import Any, Mapping, Sequence, TypeAlias
+from collections.abc import Mapping, Sequence
+from datetime import UTC, date, datetime, time
+from typing import Any, TypeAlias
 
 from llama_index.core.vector_stores.types import (
     FilterCondition,
@@ -184,11 +185,7 @@ def _matches_rule(metadata: Mapping[str, Any], rule: dict[str, Any]) -> bool:
         expected = _normalize_scalar(rule.get("value"))
         if not isinstance(expected, (int, float)):
             return False
-        numeric_values = [
-            value
-            for value in (_coerce_numeric(value) for value in values)
-            if value is not None
-        ]
+        numeric_values = [value for value in (_coerce_numeric(value) for value in values) if value is not None]
         if not numeric_values:
             return False
         op_map = {
@@ -238,11 +235,7 @@ def _matches_rule(metadata: Mapping[str, Any], rule: dict[str, Any]) -> bool:
         if boundary is None:
             return False
         parsed_values = [
-            value
-            for value in (
-                _parse_date_value(value, upper_bound=False) for value in values
-            )
-            if value is not None
+            value for value in (_parse_date_value(value, upper_bound=False) for value in values) if value is not None
         ]
         if not parsed_values:
             return False
@@ -373,9 +366,7 @@ def _compile_rule(rule: dict[str, Any]) -> MetadataFilter | MetadataFilters | No
         "date_before",
         "date_on_or_before",
     }:
-        return _compile_date_rule(
-            field=field, operator=operator, raw_value=rule.get("value")
-        )
+        return _compile_date_rule(field=field, operator=operator, raw_value=rule.get("value"))
 
     logger.warning("Ignoring unsupported metadata filter operator '{}'.", operator)
     return None
@@ -630,7 +621,7 @@ def _parse_date_value(value: Any, *, upper_bound: bool) -> datetime | None:
         dt = datetime.combine(
             value,
             time.max if upper_bound else time.min,
-            tzinfo=timezone.utc,
+            tzinfo=UTC,
         )
     else:
         raw = str(value or "").strip()
@@ -642,7 +633,7 @@ def _parse_date_value(value: Any, *, upper_bound: bool) -> datetime | None:
                 dt = datetime.combine(
                     parsed_date,
                     time.max if upper_bound else time.min,
-                    tzinfo=timezone.utc,
+                    tzinfo=UTC,
                 )
             else:
                 dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
@@ -650,7 +641,7 @@ def _parse_date_value(value: Any, *, upper_bound: bool) -> datetime | None:
             return None
 
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     else:
-        dt = dt.astimezone(timezone.utc)
+        dt = dt.astimezone(UTC)
     return dt

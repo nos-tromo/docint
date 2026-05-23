@@ -6,10 +6,10 @@ from docint.agents.types import (
     ClarificationAgent,
     ClarificationRequest,
     OrchestratorResult,
+    ResponseAgent,
     RetrievalAgent,
     RetrievalRequest,
     RetrievalResult,
-    ResponseAgent,
     Turn,
     UnderstandingAgent,
 )
@@ -44,9 +44,7 @@ class AgentOrchestrator:
         self.responder = responder
         self.policy = policy or ClarificationPolicy()
 
-    def handle_turn(
-        self, turn: Turn, context: TurnContext | None = None
-    ) -> OrchestratorResult:
+    def handle_turn(self, turn: Turn, context: TurnContext | None = None) -> OrchestratorResult:
         """Process a turn: understand, possibly clarify, otherwise retrieve/respond.
 
         Args:
@@ -79,6 +77,4 @@ class AgentOrchestrator:
         retrieval: RetrievalResult = self.retriever.retrieve(retrieval_request)
         if self.responder is not None:
             retrieval = self.responder.finalize(retrieval, turn)
-        return OrchestratorResult(
-            clarification=None, retrieval=retrieval, analysis=analysis
-        )
+        return OrchestratorResult(clarification=None, retrieval=retrieval, analysis=analysis)

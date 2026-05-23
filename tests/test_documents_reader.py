@@ -51,7 +51,7 @@ def test_build_nodes_skips_empty_text_chunks(tmp_path: Path) -> None:
         {"chunk_id": "c3", "text": "   ", "page_range": [2]},
     ]
 
-    docs, nodes = CorePDFPipelineReader._build_nodes(
+    _docs, nodes = CorePDFPipelineReader._build_nodes(
         file_path=pdf_path,
         doc_id="hash1",
         pipeline_version="1.0.0",

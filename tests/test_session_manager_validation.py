@@ -1,6 +1,7 @@
 """Tests for validation persistence on the session manager."""
 
-from typing import Any, Generator, cast
+from collections.abc import Generator
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -164,9 +165,7 @@ def test_idempotent_column_migration_adds_missing_columns_on_legacy_db() -> None
     _ensure_turn_validation_columns(engine)  # second call must be a no-op
 
     post_columns = {c["name"] for c in inspect(engine).get_columns("turns")}
-    assert {"validation_checked", "validation_mismatch", "validation_reason"} <= (
-        post_columns
-    )
+    assert {"validation_checked", "validation_mismatch", "validation_reason"} <= (post_columns)
 
     with engine.begin() as conn:
         legacy = conn.execute(text("SELECT validation_checked FROM turns")).scalar()

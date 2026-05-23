@@ -1,8 +1,8 @@
 """CLI entry point for ingesting documents into a collection."""
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from loguru import logger
 

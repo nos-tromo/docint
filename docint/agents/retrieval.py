@@ -14,7 +14,7 @@ class RAGRetrievalAgent(RetrievalAgent):
     Depending on the intent detected in the turn, it may invoke different tools.
     """
 
-    def __init__(self, rag: "RAG"):
+    def __init__(self, rag: "RAG") -> None:
         """Initialize the RAGRetrievalAgent.
 
         Args:
@@ -71,11 +71,7 @@ class RAGRetrievalAgent(RetrievalAgent):
         data = self.rag.chat(query_text)
         latency = (time.monotonic() - start) * 1000
 
-        answer = (
-            str(data.get("response") or data.get("answer") or "")
-            if isinstance(data, dict)
-            else ""
-        )
+        answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
         sources = data.get("sources", []) if isinstance(data, dict) else []
 
         return RetrievalResult(

@@ -23,8 +23,8 @@ falls back to the character-ratio estimator.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from loguru import logger
 from transformers import AutoTokenizer
@@ -66,8 +66,7 @@ def build_embedding_token_counter(
     resolved = resolve_hf_cache_path(cache_dir, repo_id)
     if resolved is None:
         logger.warning(
-            "Embedding tokenizer cache not found for {} at {} — "
-            "run `uv run load-models` to populate it.",
+            "Embedding tokenizer cache not found for {} at {} — run `uv run load-models` to populate it.",
             repo_id,
             cache_dir,
         )

@@ -45,9 +45,7 @@ class _FakeLLM:
 
 def test_validation_agent_sets_alert_on_mismatch() -> None:
     """Grounding mismatch from the LLM should set the validation alert flag."""
-    llm = _FakeLLM(
-        '{"summary_grounded": false, "sources_relevant": true, "reason":"hallucinated fact"}'
-    )
+    llm = _FakeLLM('{"summary_grounded": false, "sources_relevant": true, "reason":"hallucinated fact"}')
     agent = ResultValidationResponseAgent(enabled=True, llm=llm)
     result = RetrievalResult(answer="answer", sources=[{"text": "source evidence"}])
 
@@ -64,9 +62,7 @@ def test_validation_agent_sets_alert_on_mismatch() -> None:
 
 def test_validation_agent_disabled_is_noop() -> None:
     """Disabled validator should not invoke the LLM or set any flags."""
-    llm = _FakeLLM(
-        '{"summary_grounded": false, "sources_relevant": false, "reason":"bad"}'
-    )
+    llm = _FakeLLM('{"summary_grounded": false, "sources_relevant": false, "reason":"bad"}')
     agent = ResultValidationResponseAgent(enabled=False, llm=llm)
     result = RetrievalResult(answer="answer", sources=[{"text": "source evidence"}])
 
@@ -80,9 +76,7 @@ def test_validation_agent_disabled_is_noop() -> None:
 
 def test_validation_agent_parses_markdown_wrapped_json() -> None:
     """Markdown-fenced JSON from the LLM should be unwrapped and parsed."""
-    llm = _FakeLLM(
-        '```json\n{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}\n```'
-    )
+    llm = _FakeLLM('```json\n{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}\n```')
     agent = ResultValidationResponseAgent(enabled=True, llm=llm)
     result = RetrievalResult(answer="answer", sources=[{"id": 1, "content": "source"}])
 
@@ -108,9 +102,7 @@ def test_validation_agent_handles_invalid_schema() -> None:
 
 def test_validation_agent_document_coverage_does_not_override_relevance() -> None:
     """Document-level coverage should not suppress a relevance mismatch."""
-    llm = _FakeLLM(
-        '{"summary_grounded": true, "sources_relevant": false, "reason":"partial source fit"}'
-    )
+    llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": false, "reason":"partial source fit"}')
     agent = ResultValidationResponseAgent(enabled=True, llm=llm)
     result = RetrievalResult(
         answer="answer",
@@ -133,9 +125,7 @@ def test_validation_agent_document_coverage_does_not_override_relevance() -> Non
 
 def test_validation_agent_post_coverage_can_override_relevance() -> None:
     """Post-level coverage may suppress overly strict relevance mismatches."""
-    llm = _FakeLLM(
-        '{"summary_grounded": true, "sources_relevant": false, "reason":"partial source fit"}'
-    )
+    llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": false, "reason":"partial source fit"}')
     agent = ResultValidationResponseAgent(enabled=True, llm=llm)
     result = RetrievalResult(
         answer="answer",
@@ -163,9 +153,7 @@ def test_validation_agent_summary_coverage_does_not_override_grounding() -> None
     reason. This ensures that grounding issues are still prioritized over coverage when
     both are present.
     """
-    llm = _FakeLLM(
-        '{"summary_grounded": false, "sources_relevant": true, "reason":"unsupported claim"}'
-    )
+    llm = _FakeLLM('{"summary_grounded": false, "sources_relevant": true, "reason":"unsupported claim"}')
     agent = ResultValidationResponseAgent(enabled=True, llm=llm)
     result = RetrievalResult(
         answer="answer",
@@ -231,9 +219,7 @@ def test_validation_agent_prompt_includes_reference_metadata() -> None:
     social-post metadata (Network, UUID, Timestamp, Author, ...) which lives in
     ``source["reference_metadata"]`` rather than ``source["text"]``.
     """
-    llm = _FakeLLM(
-        '{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}'
-    )
+    llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}')
     agent = ResultValidationResponseAgent(enabled=True, llm=llm)
     source = {
         "text": "post body",
@@ -273,9 +259,7 @@ def test_validation_agent_prompt_includes_reference_metadata() -> None:
 
 def test_validation_agent_prompt_metadata_block_not_truncated() -> None:
     """Metadata fields must survive even when the text body exceeds the per-source cap."""
-    llm = _FakeLLM(
-        '{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}'
-    )
+    llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}')
     agent = ResultValidationResponseAgent(enabled=True, llm=llm)
     long_body = "x" * 5000
     source = {
@@ -304,13 +288,9 @@ def test_validation_agent_prompt_metadata_block_not_truncated() -> None:
 
 def test_validation_agent_prompt_handles_text_only_source() -> None:
     """Sources without reference_metadata must still produce a well-formed prompt."""
-    llm = _FakeLLM(
-        '{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}'
-    )
+    llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}')
     agent = ResultValidationResponseAgent(enabled=True, llm=llm)
-    result = RetrievalResult(
-        answer="a", sources=[{"text": "plain body without metadata"}]
-    )
+    result = RetrievalResult(answer="a", sources=[{"text": "plain body without metadata"}])
 
     agent.finalize(result, Turn(user_input="q"))
 
@@ -322,15 +302,12 @@ def test_validation_agent_prompt_handles_text_only_source() -> None:
     assert "- UUID:" not in prompt
 
 
-def test_validation_agent_prompt_includes_metadata_text_when_no_top_level_body() -> (
-    None
-):
+def test_validation_agent_prompt_includes_metadata_text_when_no_top_level_body() -> None:
     """Sources whose body lives inside ``reference_metadata['text']`` must still
     surface the body to the validator — covers transcript-style payloads where
-    the text may not be propagated as a top-level key."""
-    llm = _FakeLLM(
-        '{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}'
-    )
+    the text may not be propagated as a top-level key.
+    """
+    llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}')
     agent = ResultValidationResponseAgent(enabled=True, llm=llm)
     result = RetrievalResult(
         answer="a",

@@ -190,9 +190,7 @@ class _ConnProxy:
         self._real.close()
 
 
-def test_retries_locked_db_via_shared_helper(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_retries_locked_db_via_shared_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The manifest should retry transient locked-DB errors via the shared helper."""
     sleep_calls: list[float] = []
     monkeypatch.setattr(

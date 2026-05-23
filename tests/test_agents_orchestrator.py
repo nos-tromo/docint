@@ -16,7 +16,8 @@ from docint.agents import (
     SimpleUnderstandingAgent,
     Turn,
 )
-from docint.agents.types import ResponseAgent, RetrievalAgent, Turn as TurnType
+from docint.agents.types import ResponseAgent, RetrievalAgent
+from docint.agents.types import Turn as TurnType
 
 
 @dataclass
@@ -94,9 +95,7 @@ class _AlwaysClarifyPolicy(ClarificationPolicy):
 
     def __init__(self) -> None:
         """Initialise with a strict confidence threshold."""
-        super().__init__(
-            ClarificationConfig(confidence_threshold=1.0, require_entities=True)
-        )
+        super().__init__(ClarificationConfig(confidence_threshold=1.0, require_entities=True))
 
     def evaluate(self, analysis, clarifications_so_far: int = 0):  # type: ignore[override]
         """Always request clarification.
@@ -117,9 +116,7 @@ class _NeverClarifyPolicy(ClarificationPolicy):
 
     def __init__(self) -> None:
         """Initialise with a permissive confidence threshold."""
-        super().__init__(
-            ClarificationConfig(confidence_threshold=0.0, require_entities=False)
-        )
+        super().__init__(ClarificationConfig(confidence_threshold=0.0, require_entities=False))
 
 
 @pytest.fixture

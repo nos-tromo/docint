@@ -2,8 +2,9 @@
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, AsyncIterator, Literal, cast
+from typing import Any, Literal, cast
 
 from anyio import to_thread
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -17,12 +18,12 @@ from docint.agents import (
     AgentOrchestrator,
     ClarificationConfig,
     ClarificationPolicy,
-    ResultValidationResponseAgent,
+    ContextualUnderstandingAgent,
     RAGRetrievalAgent,
+    ResultValidationResponseAgent,
     RetrievalResult,
     SimpleClarificationAgent,
     SimpleUnderstandingAgent,
-    ContextualUnderstandingAgent,
     Turn,
 )
 from docint.cli import ingest as ingest_module
@@ -71,9 +72,7 @@ def _build_orchestrator() -> AgentOrchestrator:
         AgentOrchestrator: The constructed agent orchestrator.
     """
     retrieval_agent = RAGRetrievalAgent(rag)
-    understanding: SimpleUnderstandingAgent | ContextualUnderstandingAgent = (
-        _understanding_agent
-    )
+    understanding: SimpleUnderstandingAgent | ContextualUnderstandingAgent = _understanding_agent
     validation_cfg = load_response_validation_env()
     validation_llm = None
 
@@ -106,7 +105,6 @@ def _resolve_data_dir() -> Path:
     Returns:
         Path: The path to the data directory.
     """
-
     return load_path_env().data
 
 
@@ -143,10 +141,7 @@ def _require_active_collection() -> str:
         rag.query_engine = None
         raise HTTPException(
             status_code=404,
-            detail=(
-                f"Collection '{name}' no longer exists. Please select "
-                "another collection."
-            ),
+            detail=(f"Collection '{name}' no longer exists. Please select another collection."),
         )
     return name
 
@@ -308,9 +303,7 @@ class QueryIn(BaseModel):
     session_id: str | None = None
     metadata_filters: list[MetadataFilterIn] = Field(default_factory=list)
     retrieval_mode: Literal["session", "stateless"] = "session"
-    query_mode: Literal["answer", "entity_occurrence", "entity_occurrence_multi"] = (
-        "answer"
-    )
+    query_mode: Literal["answer", "entity_occurrence", "entity_occurrence_multi"] = "answer"
 
 
 class QueryOut(BaseModel):
@@ -451,9 +444,7 @@ def collections_list() -> list[str]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post(
-    "/collections/select", response_model=SelectCollectionOut, tags=["Collections"]
-)
+@app.post("/collections/select", response_model=SelectCollectionOut, tags=["Collections"])
 def collections_select(payload: SelectCollectionIn) -> dict[str, bool | str]:
     """Select a collection to use for queries.
 
@@ -548,9 +539,7 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
             if payload.retrieval_mode == "stateless":
                 retrieval_query = payload.question
                 graph_debug: dict[str, Any] | None = None
-                expand_with_debug = getattr(
-                    rag, "expand_query_with_graph_with_debug", None
-                )
+                expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
                 if callable(expand_with_debug):
                     try:
                         expanded, debug_payload = expand_with_debug(retrieval_query)
@@ -577,23 +566,15 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
                 data = rag.chat(
                     payload.question,
                     metadata_filters=metadata_filters,
-                    metadata_filters_active=(
-                        metadata_filters is not None or bool(vector_store_kwargs)
-                    ),
+                    metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
                     metadata_filter_rules=payload.metadata_filters,
                     vector_store_kwargs=vector_store_kwargs or None,
                 )
 
-        answer = (
-            str(data.get("response") or data.get("answer") or "")
-            if isinstance(data, dict)
-            else ""
-        )
+        answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
         sources: list[dict] = data.get("sources", []) if isinstance(data, dict) else []
         graph_debug = (
-            data.get("graph_debug")
-            if isinstance(data, dict) and isinstance(data.get("graph_debug"), dict)
-            else None
+            data.get("graph_debug") if isinstance(data, dict) and isinstance(data.get("graph_debug"), dict) else None
         )
         retrieval_query_value: str | None = (
             str(data.get("retrieval_query") or "")
@@ -612,21 +593,18 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
         )
         entity_match_candidates = (
             data.get("entity_match_candidates", [])
-            if isinstance(data, dict)
-            and isinstance(data.get("entity_match_candidates"), list)
+            if isinstance(data, dict) and isinstance(data.get("entity_match_candidates"), list)
             else []
         )
         entity_match_groups = (
             data.get("entity_match_groups", [])
-            if isinstance(data, dict)
-            and isinstance(data.get("entity_match_groups"), list)
+            if isinstance(data, dict) and isinstance(data.get("entity_match_groups"), list)
             else []
         )
 
         summary_diagnostics_query = (
             data.get("summary_diagnostics")
-            if isinstance(data, dict)
-            and isinstance(data.get("summary_diagnostics"), dict)
+            if isinstance(data, dict) and isinstance(data.get("summary_diagnostics"), dict)
             else None
         )
         # `retrieval_mode` here is the session-routing mode
@@ -709,11 +687,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                         payload.question,
                         qdrant_filter=qdrant_filter,
                     )
-                answer_text = str(
-                    occurrence_data.get("response")
-                    or occurrence_data.get("answer")
-                    or ""
-                )
+                answer_text = str(occurrence_data.get("response") or occurrence_data.get("answer") or "")
                 async for event in _stream_simulated_text(answer_text):
                     event_payload = json.loads(event[6:].strip())
                     token = str(event_payload.get("token") or "")
@@ -728,19 +702,13 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                     "retrieval_query": occurrence_data.get("retrieval_query"),
                     "coverage_unit": occurrence_data.get("coverage_unit"),
                     "retrieval_mode": occurrence_data.get("retrieval_mode"),
-                    "entity_match_candidates": occurrence_data.get(
-                        "entity_match_candidates"
-                    )
-                    or [],
-                    "entity_match_groups": occurrence_data.get("entity_match_groups")
-                    or [],
+                    "entity_match_candidates": occurrence_data.get("entity_match_candidates") or [],
+                    "entity_match_groups": occurrence_data.get("entity_match_groups") or [],
                 }
             elif payload.retrieval_mode == "stateless":
                 retrieval_query = payload.question
                 graph_debug: dict[str, Any] | None = None
-                expand_with_debug = getattr(
-                    rag, "expand_query_with_graph_with_debug", None
-                )
+                expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
                 if callable(expand_with_debug):
                     try:
                         expanded, debug_payload = expand_with_debug(retrieval_query)
@@ -762,9 +730,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                 if graph_debug is not None:
                     stateless_data["graph_debug"] = graph_debug
 
-                answer_text = str(
-                    stateless_data.get("response") or stateless_data.get("answer") or ""
-                )
+                answer_text = str(stateless_data.get("response") or stateless_data.get("answer") or "")
                 async for event in _stream_simulated_text(answer_text):
                     event_payload = json.loads(event[6:].strip())
                     token = str(event_payload.get("token") or "")
@@ -784,9 +750,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                 for chunk in rag.stream_chat(
                     payload.question,
                     metadata_filters=metadata_filters,
-                    metadata_filters_active=(
-                        metadata_filters is not None or bool(vector_store_kwargs)
-                    ),
+                    metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
                     metadata_filter_rules=payload.metadata_filters,
                     vector_store_kwargs=vector_store_kwargs or None,
                 ):
@@ -810,9 +774,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                 else None
             )
             stream_retrieval_query = (
-                str(payload_out.get("retrieval_query"))
-                if payload_out.get("retrieval_query")
-                else None
+                str(payload_out.get("retrieval_query")) if payload_out.get("retrieval_query") else None
             )
             # `retrieval_mode` here is the session-routing mode, not the
             # retrieval tool, so it is not forwarded as `tool_used`.
@@ -841,15 +803,9 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                     rag.sessions.update_turn_validation(
                         session_id=stream_session_id,
                         turn_idx=turn_idx,
-                        validation_checked=cast(
-                            "bool | None", validation.get("validation_checked")
-                        ),
-                        validation_mismatch=cast(
-                            "bool | None", validation.get("validation_mismatch")
-                        ),
-                        validation_reason=cast(
-                            "str | None", validation.get("validation_reason")
-                        ),
+                        validation_checked=cast("bool | None", validation.get("validation_checked")),
+                        validation_mismatch=cast("bool | None", validation.get("validation_mismatch")),
+                        validation_reason=cast("str | None", validation.get("validation_reason")),
                     )
                 except Exception as exc:
                     logger.warning(
@@ -896,22 +852,15 @@ def summarize(refresh: bool = Query(False)) -> dict[str, Any]:
     Raises:
         HTTPException: If an error occurs while generating the summary.
     """
-
     try:
         if not rag.qdrant_collection:
             logger.error("HTTPException: No collection selected")
             raise HTTPException(status_code=400, detail="No collection selected")
 
         data = rag.summarize_collection(refresh=refresh)
-        summary = (
-            str(data.get("response") or data.get("answer") or "")
-            if isinstance(data, dict)
-            else ""
-        )
+        summary = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
         sources: list[dict] = data.get("sources", []) if isinstance(data, dict) else []
-        summary_diagnostics = (
-            data.get("summary_diagnostics") if isinstance(data, dict) else None
-        )
+        summary_diagnostics = data.get("summary_diagnostics") if isinstance(data, dict) else None
 
         validation = _validation_payload(
             question=rag.summarize_prompt,
@@ -963,9 +912,7 @@ async def summarize_stream(refresh: bool = Query(False)) -> StreamingResponse:
                     final_payload = chunk
 
             payload_out = dict(final_payload or {})
-            summary = str(
-                payload_out.get("response") or payload_out.get("answer") or ""
-            )
+            summary = str(payload_out.get("response") or payload_out.get("answer") or "")
             if not summary:
                 summary = full_summary
             sources = payload_out.get("sources")
@@ -1390,7 +1337,6 @@ async def ingest_upload(
         HTTPException: If the collection name is missing or no files are provided.
         HTTPException: If an error occurs during file upload.
     """
-
     name = collection.strip()
     if not name:
         logger.error("HTTPException: Collection name required for upload")
@@ -1487,8 +1433,7 @@ async def ingest_upload(
                     # so an exception from the worker thread still lands
                     # in the log rather than vanishing after disconnect.
                     logger.warning(
-                        "Could not enqueue ingest message for collection "
-                        "'{}' (loop unavailable after disconnect): {}",
+                        "Could not enqueue ingest message for collection '{}' (loop unavailable after disconnect): {}",
                         name,
                         exc,
                     )
@@ -1577,8 +1522,7 @@ async def ingest_upload(
                     raise msg
                 event_name = (
                     "warning"
-                    if isinstance(msg, str)
-                    and msg.strip().lower().startswith("warning:")
+                    if isinstance(msg, str) and msg.strip().lower().startswith("warning:")
                     else "ingestion_progress"
                 )
                 yield _format_sse(event_name, {"message": msg})

@@ -48,9 +48,7 @@ def save_manifest(manifest: DocumentManifest, artifacts_dir: Path) -> Path:
     return out
 
 
-def save_layout(
-    doc_id: str, page_index: int, blocks: list[LayoutBlock], artifacts_dir: Path
-) -> Path:
+def save_layout(doc_id: str, page_index: int, blocks: list[LayoutBlock], artifacts_dir: Path) -> Path:
     """Write ``layout.json`` for a single page.
 
     Args:

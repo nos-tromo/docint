@@ -18,9 +18,7 @@ class LayoutAnalyzer(ABC):
     """Abstract interface for layout analysis backends."""
 
     @abstractmethod
-    def analyze_page(
-        self, page_index: int, *, file_path: Path | None = None
-    ) -> list[LayoutBlock]:
+    def analyze_page(self, page_index: int, *, file_path: Path | None = None) -> list[LayoutBlock]:
         """Detect layout blocks on a single page.
 
         Args:
@@ -54,9 +52,7 @@ class PypdfLayoutAnalyzer(LayoutAnalyzer):
         self._file_path = Path(file_path)
         self._reader = pypdf.PdfReader(self._file_path)
 
-    def analyze_page(
-        self, page_index: int, *, file_path: Path | None = None
-    ) -> list[LayoutBlock]:
+    def analyze_page(self, page_index: int, *, file_path: Path | None = None) -> list[LayoutBlock]:
         """Return layout blocks for a single page.
 
         The method inspects embedded images and text content to produce
@@ -94,9 +90,7 @@ class PypdfLayoutAnalyzer(LayoutAnalyzer):
                 blocks.append(ib)
 
             # --- Detect tables → TABLE blocks + remaining TEXT ---
-            table_blocks, remaining_text = self._detect_tables(
-                text, page_index, page_bbox, page_width, page_height
-            )
+            table_blocks, remaining_text = self._detect_tables(text, page_index, page_bbox, page_width, page_height)
             for tb in table_blocks:
                 tb.reading_order = order
                 order += 1
@@ -204,9 +198,7 @@ class PypdfLayoutAnalyzer(LayoutAnalyzer):
             xobjects = resources.get("/XObject")
             if not xobjects:
                 return names
-            xobj_dict = (
-                xobjects.get_object() if hasattr(xobjects, "get_object") else xobjects
-            )
+            xobj_dict = xobjects.get_object() if hasattr(xobjects, "get_object") else xobjects
             for name in xobj_dict:
                 obj = xobj_dict[name]
                 resolved = obj.get_object() if hasattr(obj, "get_object") else obj
@@ -264,9 +256,7 @@ class PypdfLayoutAnalyzer(LayoutAnalyzer):
                 return placements
 
             # Tokenise and walk operators
-            placements = _extract_image_bboxes_from_stream(
-                stream_text, set(image_names)
-            )
+            placements = _extract_image_bboxes_from_stream(stream_text, set(image_names))
         except Exception as exc:
             logger.debug("Content stream parsing failed: {}", exc)
         return placements
@@ -357,9 +347,7 @@ class PypdfLayoutAnalyzer(LayoutAnalyzer):
 _NUM_RE = re.compile(r"^-?(?:\d+\.?\d*|\.\d+)$")
 
 
-def _extract_image_bboxes_from_stream(
-    stream_text: str, image_names: set[str]
-) -> dict[str, BBox]:
+def _extract_image_bboxes_from_stream(stream_text: str, image_names: set[str]) -> dict[str, BBox]:
     """Walk a raw content-stream string and extract image bounding boxes.
 
     The function tracks a simplified graphics-state stack (``q`` / ``Q``
@@ -403,7 +391,7 @@ def _extract_image_bboxes_from_stream(
                 name = buf[-1]
                 if name in image_names:
                     # CTM maps the unit square to the image rectangle
-                    a, b, c, d, e, f = ctm
+                    a, _b, _c, d, e, f = ctm
                     x0, y0 = e, f
                     x1 = a + e
                     y1 = d + f
@@ -497,9 +485,7 @@ def _find_table_end(lines: list[str], start: int) -> int:
     return end
 
 
-def analyze_document(
-    file_path: str | Path, pages: list[PageInfo]
-) -> dict[int, list[LayoutBlock]]:
+def analyze_document(file_path: str | Path, pages: list[PageInfo]) -> dict[int, list[LayoutBlock]]:
     """Run layout analysis on every page of *file_path*.
 
     Args:
@@ -517,8 +503,6 @@ def analyze_document(
             blocks = analyzer.analyze_page(page_info.page_index, file_path=file_path)
             layout[page_info.page_index] = blocks
         except Exception as exc:
-            logger.warning(
-                "Layout analysis skipped for page {}: {}", page_info.page_index, exc
-            )
+            logger.warning("Layout analysis skipped for page {}: {}", page_info.page_index, exc)
             layout[page_info.page_index] = []
     return layout

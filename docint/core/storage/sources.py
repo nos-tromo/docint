@@ -8,9 +8,7 @@ from pathlib import Path
 from loguru import logger
 
 
-def stage_sources_to_qdrant(
-    data_dir: Path, collection: str, qdrant_sources: Path
-) -> Path:
+def stage_sources_to_qdrant(data_dir: Path, collection: str, qdrant_sources: Path) -> Path:
     """Ensure source files reside under the shared sources root (separate from Qdrant's internal collections).
 
     Files/directories from ``data_dir`` are copied into ``qdrant_sources/<collection>``.
@@ -32,9 +30,7 @@ def stage_sources_to_qdrant(
             return target
     except Exception:
         # If resolve fails (e.g., permissions), continue with copy logic.
-        logger.debug(
-            "Falling back to copy for sources staging: {} -> {}", source, target
-        )
+        logger.debug("Falling back to copy for sources staging: {} -> {}", source, target)
 
     target.mkdir(parents=True, exist_ok=True)
 

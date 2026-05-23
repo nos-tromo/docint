@@ -2,7 +2,8 @@
 
 import json
 import re
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from llama_index.core.llms import LLM
 
@@ -92,7 +93,7 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
     Replaces keyword matching with semantic reasoning via the LLM.
     """
 
-    def __init__(self, llm: LLM):
+    def __init__(self, llm: LLM) -> None:
         self.llm = llm
 
     def analyze(self, turn: Turn, context: Any | None = None) -> IntentAnalysis:

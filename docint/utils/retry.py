@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import AbstractContextManager
-from typing import Awaitable, Callable, TypeVar
+from typing import TypeVar
 
 from loguru import logger
 
@@ -180,8 +181,7 @@ def retry_with_backoff(
                     raise
                 delay = min(initial * (2 ** (attempt - 1)), cap)
                 logger.warning(
-                    "Operation '{}' hit retryable error on attempt {}/{}: "
-                    "{!r}. Retrying in {:.2f}s",
+                    "Operation '{}' hit retryable error on attempt {}/{}: {!r}. Retrying in {:.2f}s",
                     operation,
                     attempt,
                     attempts,
@@ -292,8 +292,7 @@ async def aretry_with_backoff(
                 raise
             delay = min(initial * (2 ** (attempt - 1)), cap)
             logger.warning(
-                "Async operation '{}' hit retryable error on attempt "
-                "{}/{}: {!r}. Retrying in {:.2f}s",
+                "Async operation '{}' hit retryable error on attempt {}/{}: {!r}. Retrying in {:.2f}s",
                 operation,
                 attempt,
                 attempts,

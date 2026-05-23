@@ -9,11 +9,10 @@ This module provides pure helper functions for:
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from itertools import combinations
-import re
 from typing import Any, Literal
-
 
 EntityMergeMode = Literal["orthographic", "exact"]
 
@@ -325,11 +324,7 @@ def _variant_rows(row: dict[str, Any]) -> list[dict[str, Any]]:
     variants.sort(
         key=lambda item: (
             -int(item["mentions"]),
-            -(
-                float(item["best_score"])
-                if item.get("best_score") is not None
-                else -1.0
-            ),
+            -(float(item["best_score"]) if item.get("best_score") is not None else -1.0),
             str(item["text"]).lower(),
         )
     )
@@ -349,11 +344,7 @@ def _canonical_variant_text(row: dict[str, Any]) -> str:
         row["variant_map"].values(),
         key=lambda item: (
             -int(item["mentions"]),
-            -(
-                float(item["best_score"])
-                if item.get("best_score") is not None
-                else -1.0
-            ),
+            -(float(item["best_score"]) if item.get("best_score") is not None else -1.0),
             int(item["first_seen"]),
         ),
     )
@@ -487,11 +478,7 @@ def aggregate_ner_sources(
             row["sources"].add(filename)
             if ent.get("score") is not None:
                 current = row.get("best_score")
-                row["best_score"] = (
-                    max(float(current), float(ent["score"]))
-                    if current is not None
-                    else ent["score"]
-                )
+                row["best_score"] = max(float(current), float(ent["score"])) if current is not None else ent["score"]
 
             variant_map = row["variant_map"]
             if text not in variant_map:
@@ -509,9 +496,7 @@ def aggregate_ner_sources(
             if ent.get("score") is not None:
                 current = variant_row.get("best_score")
                 variant_row["best_score"] = (
-                    max(float(current), float(ent["score"]))
-                    if current is not None
-                    else ent["score"]
+                    max(float(current), float(ent["score"])) if current is not None else ent["score"]
                 )
 
             doc_entry["entity_mentions"] += 1
@@ -604,11 +589,7 @@ def aggregate_ner_sources(
             row["sources"].add(filename)
             if rel.get("score") is not None:
                 current = row.get("best_score")
-                row["best_score"] = (
-                    max(float(current), float(rel["score"]))
-                    if current is not None
-                    else rel["score"]
-                )
+                row["best_score"] = max(float(current), float(rel["score"])) if current is not None else rel["score"]
 
     relation_rows: list[dict[str, Any]] = []
     for row in relation_index.values():
@@ -646,11 +627,7 @@ def aggregate_ner_sources(
                 "ie_source_count": ie_source_count,
                 "entity_mentions": entity_mentions,
                 "unique_entities": unique_entities,
-                "entity_density": (
-                    float(entity_mentions) / float(ie_source_count)
-                    if ie_source_count > 0
-                    else 0.0
-                ),
+                "entity_density": (float(entity_mentions) / float(ie_source_count) if ie_source_count > 0 else 0.0),
                 "entity_counter": entity_counter,
             }
         )
@@ -693,9 +670,7 @@ def build_ner_stats(
 
     type_filter = str(entity_type or "").strip().lower()
     entities = (
-        [e for e in entities_all if str(e.get("type") or "").lower() == type_filter]
-        if type_filter
-        else entities_all
+        [e for e in entities_all if str(e.get("type") or "").lower() == type_filter] if type_filter else entities_all
     )
 
     allowed_keys = {str(e.get("key") or "") for e in entities}
@@ -703,8 +678,7 @@ def build_ner_stats(
         relations = [
             r
             for r in relations_all
-            if str(r.get("head_key") or "") in allowed_keys
-            or str(r.get("tail_key") or "") in allowed_keys
+            if str(r.get("head_key") or "") in allowed_keys or str(r.get("tail_key") or "") in allowed_keys
         ]
     else:
         relations = relations_all
@@ -715,9 +689,7 @@ def build_ner_stats(
         "unique_relations": len(relations) if include_relations else 0,
     }
 
-    ranked_entities = [
-        e for e in entities if int(e.get("mentions", 0) or 0) >= min_mentions
-    ]
+    ranked_entities = [e for e in entities if int(e.get("mentions", 0) or 0) >= min_mentions]
     ranked_entities.sort(
         key=lambda x: (
             -int(x.get("mentions", 0) or 0),
@@ -740,9 +712,7 @@ def build_ner_stats(
     type_rollup: dict[str, dict[str, Any]] = {}
     for ent in entities:
         label = str(ent.get("type") or "Unlabeled")
-        entry = type_rollup.setdefault(
-            label, {"type": label, "mentions": 0, "unique_entities": 0}
-        )
+        entry = type_rollup.setdefault(label, {"type": label, "mentions": 0, "unique_entities": 0})
         entry["mentions"] += int(ent.get("mentions", 0) or 0)
         entry["unique_entities"] += 1
     entity_types = sorted(
@@ -752,9 +722,7 @@ def build_ner_stats(
 
     top_relations: list[dict[str, Any]] = []
     if include_relations:
-        ranked_relations = [
-            r for r in relations if int(r.get("mentions", 0) or 0) >= min_mentions
-        ]
+        ranked_relations = [r for r in relations if int(r.get("mentions", 0) or 0) >= min_mentions]
         ranked_relations.sort(
             key=lambda x: (
                 -int(x.get("mentions", 0) or 0),
@@ -777,11 +745,7 @@ def build_ner_stats(
     for doc in documents_all:
         entity_counter = dict(doc.get("entity_counter") or {})
         if type_filter:
-            filtered_keys = [
-                k
-                for k in entity_counter
-                if k.rsplit("::", maxsplit=1)[-1] == type_filter
-            ]
+            filtered_keys = [k for k in entity_counter if k.rsplit("::", maxsplit=1)[-1] == type_filter]
             mentions = int(sum(entity_counter[k] for k in filtered_keys))
             unique_entities = len(filtered_keys)
         else:
@@ -796,14 +760,10 @@ def build_ner_stats(
                 "entity_mentions": mentions,
                 "unique_entities": unique_entities,
                 "ie_source_count": ie_source_count,
-                "entity_density": (
-                    float(mentions) / float(ie_source_count) if ie_source_count else 0.0
-                ),
+                "entity_density": (float(mentions) / float(ie_source_count) if ie_source_count else 0.0),
             }
         )
-    documents.sort(
-        key=lambda x: (-int(x["entity_mentions"]), str(x.get("filename") or "").lower())
-    )
+    documents.sort(key=lambda x: (-int(x["entity_mentions"]), str(x.get("filename") or "").lower()))
 
     return {
         "totals": totals,
@@ -866,11 +826,7 @@ def search_entities(
         )
     )
     return [
-        {
-            key: value
-            for key, value in row.items()
-            if key not in {"_match_rank", "_match_alias"}
-        }
+        {key: value for key, value in row.items() if key not in {"_match_rank", "_match_alias"}}
         | {
             "match_rank": int(row.get("_match_rank", 99)),
             "match_alias": str(row.get("_match_alias") or ""),
@@ -915,8 +871,7 @@ def build_entity_graph(
     edge_index: dict[tuple[str, str, str, str], dict[str, Any]] = {}
 
     def _add_edge(source: str, target: str, label: str, kind: str, weight: int) -> None:
-        """
-        Add an edge to the edge index.
+        """Add an edge to the edge index.
 
         Args:
             source (str): The source node ID.
@@ -985,11 +940,7 @@ def build_entity_graph(
         for left, right in combinations(scoped, 2):
             _add_edge(left, right, label="co_occurs", kind="cooccurrence", weight=1)
 
-    edges = [
-        edge
-        for edge in edge_index.values()
-        if int(edge.get("weight", 0) or 0) >= int(min_edge_weight)
-    ]
+    edges = [edge for edge in edge_index.values() if int(edge.get("weight", 0) or 0) >= int(min_edge_weight)]
     edges.sort(
         key=lambda x: (
             -int(x.get("weight", 0) or 0),
@@ -1096,8 +1047,7 @@ def graph_neighbors(
     neighborhood_edges = [
         edge
         for edge in edges
-        if str(edge.get("source") or "") in neighborhood_ids
-        and str(edge.get("target") or "") in neighborhood_ids
+        if str(edge.get("source") or "") in neighborhood_ids and str(edge.get("target") or "") in neighborhood_ids
     ]
     neighbors = []
     for node_id, depth in visited.items():
@@ -1124,9 +1074,7 @@ def graph_neighbors(
         )
     )
 
-    neighborhood_nodes = [
-        node_by_id[nid] for nid in neighborhood_ids if nid in node_by_id
-    ]
+    neighborhood_nodes = [node_by_id[nid] for nid in neighborhood_ids if nid in node_by_id]
     neighborhood_nodes.sort(
         key=lambda x: (
             -int(x.get("mentions", 0) or 0),

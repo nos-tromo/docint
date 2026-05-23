@@ -86,9 +86,7 @@ def test_resplit_passes_through_small_nodes() -> None:
         metadata={"chunk_id": "cid", "source_ref": "s"},
     )
 
-    vector_nodes, docstore_nodes = resplit_nodes_for_embedding(
-        [small_node], budget_tokens=8192
-    )
+    vector_nodes, docstore_nodes = resplit_nodes_for_embedding([small_node], budget_tokens=8192)
 
     assert vector_nodes == [small_node]
     assert docstore_nodes == [small_node]
@@ -105,9 +103,7 @@ def test_resplit_splits_oversize_into_sub_nodes() -> None:
     """
     parent = TextNode(text="x " * 40000, id_="parent-1", metadata={})
     budget_tokens = 8192
-    vector_nodes, docstore_nodes = resplit_nodes_for_embedding(
-        [parent], budget_tokens=budget_tokens
-    )
+    vector_nodes, docstore_nodes = resplit_nodes_for_embedding([parent], budget_tokens=budget_tokens)
 
     parent_ids_in_vector = [n.node_id for n in vector_nodes]
     assert parent.node_id not in parent_ids_in_vector
@@ -119,10 +115,7 @@ def test_resplit_splits_oversize_into_sub_nodes() -> None:
 
     effective = effective_budget(budget_tokens)
     for sub in sub_nodes:
-        assert (
-            estimate_tokens(sub.get_content(metadata_mode=MetadataMode.EMBED))
-            <= effective
-        )
+        assert estimate_tokens(sub.get_content(metadata_mode=MetadataMode.EMBED)) <= effective
 
 
 def test_resplit_sub_nodes_carry_parent_id_and_markers() -> None:
@@ -282,8 +275,7 @@ def _build_heavy_metadata_table_row_node(
         by an order of magnitude.
     """
     reference_metadata: dict[str, str] = {
-        f"colvalue_long_name_{i}": "V" * reference_value_chars
-        for i in range(reference_keys)
+        f"colvalue_long_name_{i}": "V" * reference_value_chars for i in range(reference_keys)
     }
     metadata: dict[str, object] = {"reference_metadata": reference_metadata}
     for i in range(extra_keys):
@@ -291,9 +283,7 @@ def _build_heavy_metadata_table_row_node(
     return TextNode(text=raw_text, id_=node_id, metadata=metadata)
 
 
-def test_resplit_splits_node_whose_embed_payload_exceeds_budget_even_though_raw_text_fits() -> (
-    None
-):
+def test_resplit_splits_node_whose_embed_payload_exceeds_budget_even_though_raw_text_fits() -> None:
     """Heavy-metadata nodes whose raw text fits MUST still be re-split when their EMBED payload overflows.
 
     Pins the bug at ``embed_chunking.py`` where the
@@ -327,9 +317,7 @@ def test_resplit_splits_node_whose_embed_payload_exceeds_budget_even_though_raw_
         "test fixture invariant: embed payload must exceed budget so the bug bites"
     )
 
-    vector_nodes, docstore_nodes = resplit_nodes_for_embedding(
-        [parent], budget_tokens=budget_tokens
-    )
+    vector_nodes, docstore_nodes = resplit_nodes_for_embedding([parent], budget_tokens=budget_tokens)
 
     vector_ids = [n.node_id for n in vector_nodes]
     assert len(vector_nodes) >= 1, (
@@ -340,9 +328,7 @@ def test_resplit_splits_node_whose_embed_payload_exceeds_budget_even_though_raw_
     assert parent.node_id not in vector_ids, (
         "oversize parent must not be embedded — sub-nodes replace it in the vector view"
     )
-    assert parent in docstore_nodes, (
-        "oversize parent must remain in the docstore for parent-context reconstruction"
-    )
+    assert parent in docstore_nodes, "oversize parent must remain in the docstore for parent-context reconstruction"
 
     effective = effective_budget(budget_tokens)
     for sub in vector_nodes:
@@ -354,9 +340,7 @@ def test_resplit_splits_node_whose_embed_payload_exceeds_budget_even_though_raw_
         assert sub.metadata["hier.parent_id"] == parent.node_id
 
 
-def test_resplit_sub_nodes_embed_payload_fits_budget_when_parent_has_heavy_metadata() -> (
-    None
-):
+def test_resplit_sub_nodes_embed_payload_fits_budget_when_parent_has_heavy_metadata() -> None:
     """Sub-nodes inherit the parent's heavy metadata; their EMBED payload MUST still fit the budget.
 
     Even when the parent is split because its raw text obviously
@@ -382,18 +366,14 @@ def test_resplit_sub_nodes_embed_payload_fits_budget_when_parent_has_heavy_metad
     raw_payload = parent.get_content()
     embed_payload = parent.get_content(metadata_mode=MetadataMode.EMBED)
     assert estimate_tokens(raw_payload) > effective_budget(budget_tokens)
-    assert len(embed_payload) - len(raw_payload) >= 3000, (
-        "fixture invariant: parent must carry a heavy metadata block"
-    )
+    assert len(embed_payload) - len(raw_payload) >= 3000, "fixture invariant: parent must carry a heavy metadata block"
 
     vector_nodes, _ = resplit_nodes_for_embedding([parent], budget_tokens=budget_tokens)
 
     effective = effective_budget(budget_tokens)
     assert len(vector_nodes) >= 2
     for sub in vector_nodes:
-        sub_embed_tokens = estimate_tokens(
-            sub.get_content(metadata_mode=MetadataMode.EMBED)
-        )
+        sub_embed_tokens = estimate_tokens(sub.get_content(metadata_mode=MetadataMode.EMBED))
         assert sub_embed_tokens <= effective, (
             f"sub-node {sub.node_id} embed payload ({sub_embed_tokens} tokens) "
             f"exceeds budget ({effective}) — splitter ignored metadata overhead"
@@ -422,9 +402,7 @@ def test_resplit_passthrough_requires_embed_payload_under_budget() -> None:
     embed_payload = small_node.get_content(metadata_mode=MetadataMode.EMBED)
     assert estimate_tokens(embed_payload) <= effective_budget(budget_tokens)
 
-    vector_nodes, docstore_nodes = resplit_nodes_for_embedding(
-        [small_node], budget_tokens=budget_tokens
-    )
+    vector_nodes, docstore_nodes = resplit_nodes_for_embedding([small_node], budget_tokens=budget_tokens)
 
     assert vector_nodes == [small_node]
     assert docstore_nodes == [small_node]
@@ -445,9 +423,7 @@ def test_estimate_tokens_prefers_token_counter_when_supplied() -> None:
     counter = lambda text: [0] * (len(text) // 2)  # noqa: E731
 
     # Counter reports 50 tokens for 100 chars; char-ratio would say 10.
-    assert (
-        estimate_tokens("x" * 100, char_token_ratio=10.0, token_counter=counter) == 50
-    )
+    assert estimate_tokens("x" * 100, char_token_ratio=10.0, token_counter=counter) == 50
     # Without the counter, fallback is the char-ratio estimator.
     assert estimate_tokens("x" * 100, char_token_ratio=10.0) == 10
 
@@ -493,14 +469,11 @@ def test_resplit_honors_token_counter_for_dense_tokenization() -> None:
     parent = TextNode(text="word " * 4000, id_="dense-parent", metadata={})
 
     budget_tokens = 8192
-    vector_nodes, _ = resplit_nodes_for_embedding(
-        [parent], budget_tokens=budget_tokens, token_counter=dense_counter
-    )
+    vector_nodes, _ = resplit_nodes_for_embedding([parent], budget_tokens=budget_tokens, token_counter=dense_counter)
 
     effective = effective_budget(budget_tokens)
     assert len(vector_nodes) >= 2, (
-        "dense tokenization must trigger a split even when raw char-ratio "
-        "estimate admits the node"
+        "dense tokenization must trigger a split even when raw char-ratio estimate admits the node"
     )
     for sub in vector_nodes:
         sub_embed = sub.get_content(metadata_mode=MetadataMode.EMBED)
@@ -546,11 +519,8 @@ def test_resplit_passes_token_counter_to_sentence_splitter(
     counter = lambda text: [0] * (len(text) // 2)  # noqa: E731
     oversize_node = TextNode(text="word " * 4000, id_="spy-parent", metadata={})
 
-    embed_chunking.resplit_nodes_for_embedding(
-        [oversize_node], budget_tokens=8192, token_counter=counter
-    )
+    embed_chunking.resplit_nodes_for_embedding([oversize_node], budget_tokens=8192, token_counter=counter)
 
     assert any(kwargs.get("tokenizer") is counter for kwargs in recorded_kwargs), (
-        "SentenceSplitter was never constructed with tokenizer=token_counter; "
-        f"observed kwargs: {recorded_kwargs!r}"
+        f"SentenceSplitter was never constructed with tokenizer=token_counter; observed kwargs: {recorded_kwargs!r}"
     )

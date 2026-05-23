@@ -18,7 +18,6 @@ def _guess_from_extension(path: Path) -> str | None:
     Returns:
         str | None: The guessed MIME type or None if it cannot be guessed.
     """
-
     guessed, _ = mimetypes.guess_type(str(path))
     return guessed
 
@@ -32,7 +31,6 @@ def get_mimetype(file_path: str | Path) -> str:
     Returns:
         str: The MIME type of the file.
     """
-
     path = Path(file_path)
 
     guessed = _guess_from_extension(path)

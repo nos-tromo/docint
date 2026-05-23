@@ -4,9 +4,10 @@ import json
 import re
 import threading
 import time
+from collections.abc import Generator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Generator, cast
+from typing import Any, cast
 
 import pytest
 
@@ -96,7 +97,6 @@ def test_build_gliner_ner_extractor_uses_expanded_default_labels(
     Args:
         monkeypatch: pytest fixture for safely patching functions and environment variables.
     """
-
     seen: dict[str, object] = {}
 
     class FakeModel:
@@ -194,7 +194,6 @@ def test_build_gliner_ner_extractor_rewrites_backbone_to_local_cache(
         tmp_path: pytest fixture providing a temporary directory for test files.
         monkeypatch: pytest fixture for safely patching functions and environment variables.
     """
-
     gliner_snapshot = tmp_path / "gliner"
     gliner_snapshot.mkdir()
     (gliner_snapshot / "tokenizer_config.json").write_text("{}", encoding="utf-8")
@@ -259,9 +258,7 @@ def test_build_gliner_ner_extractor_rewrites_backbone_to_local_cache(
         Returns:
             FakeModel: A stand-in model instance for testing purposes.
         """
-        config = json.loads(
-            (Path(model_id) / "gliner_config.json").read_text(encoding="utf-8")
-        )
+        config = json.loads((Path(model_id) / "gliner_config.json").read_text(encoding="utf-8"))
         seen["model_id"] = model_id
         seen["local_files_only"] = local_files_only
         seen["model_name"] = config["model_name"]
@@ -335,7 +332,6 @@ def test_build_gliner_ner_extractor_respects_requested_cpu_device(
     Args:
         monkeypatch: pytest fixture for safely patching functions and environment variables.
     """
-
     move_calls: list[str] = []
 
     class FakeModel:
@@ -435,7 +431,6 @@ def test_build_gliner_ner_extractor_moves_to_requested_cuda_device(
     Args:
         monkeypatch: pytest fixture for safely patching functions and environment variables.
     """
-
     move_calls: list[str] = []
 
     class FakeModel:
@@ -535,7 +530,6 @@ def test_build_gliner_ner_extractor_chunks_long_inputs_on_sentence_boundaries(
     Args:
         monkeypatch: pytest fixture for safely patching functions and environment variables.
     """
-
     seen_texts: list[str] = []
 
     class FakeModel:
@@ -610,9 +604,7 @@ def test_build_gliner_ner_extractor_chunks_long_inputs_on_sentence_boundaries(
     )
 
     extractor = ner_extractor_module.build_gliner_ner_extractor()
-    entities, relations = extractor(
-        "Alice met Bob in Berlin. Carol visited Paris yesterday. Delta leads Acme now."
-    )
+    entities, relations = extractor("Alice met Bob in Berlin. Carol visited Paris yesterday. Delta leads Acme now.")
 
     assert seen_texts == [
         "Alice met Bob in Berlin.",
@@ -631,7 +623,6 @@ def test_build_gliner_ner_extractor_falls_back_to_word_chunks_for_long_sentence(
     Args:
         monkeypatch: pytest fixture for safely patching functions and environment variables.
     """
-
     seen_texts: list[str] = []
 
     class FakeModel:
@@ -781,9 +772,7 @@ def test_chunk_text_for_gliner_uses_gliner_word_count_not_bpe_count() -> None:
     assert len(chunks) == 3, f"Expected 3 chunks, got {len(chunks)}: {chunks}"
     for chunk in chunks:
         word_count = sum(1 for _ in splitter(chunk))
-        assert word_count <= 3, (
-            f"Chunk '{chunk}' has {word_count} words, exceeds budget of 3"
-        )
+        assert word_count <= 3, f"Chunk '{chunk}' has {word_count} words, exceeds budget of 3"
 
     # Demonstrate the pre-fix failure: without words_splitter the BPE tokenizer
     # always returns 1 token regardless of text length, so the budget guard never
@@ -794,9 +783,7 @@ def test_chunk_text_for_gliner_uses_gliner_word_count_not_bpe_count() -> None:
         tokenizer=AlwaysOneBPETokenizer(),
         words_splitter=None,
     )
-    assert len(pre_fix_chunks) == 1, (
-        f"Expected 1 oversized chunk without words_splitter, got {len(pre_fix_chunks)}"
-    )
+    assert len(pre_fix_chunks) == 1, f"Expected 1 oversized chunk without words_splitter, got {len(pre_fix_chunks)}"
 
 
 def test_build_gliner_ner_extractor_serializes_concurrent_model_access(
@@ -895,7 +882,6 @@ def test_build_gliner_ner_extractor_reuses_loaded_runtime_across_calls(
     monkeypatch,
 ) -> None:
     """Repeated extractor construction should reuse the same GLiNER runtime."""
-
     load_calls: list[tuple[str, bool]] = []
 
     class FakeModel:
@@ -1031,9 +1017,7 @@ def test_build_gliner_ner_extractor_clamps_tokenizer_model_max_length(
         lambda: SimpleNamespace(from_pretrained=lambda *_a, **_kw: FakeModel()),
     )
     monkeypatch.setattr(ner_extractor_module.torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(
-        ner_extractor_module.torch.backends.mps, "is_available", lambda: False
-    )
+    monkeypatch.setattr(ner_extractor_module.torch.backends.mps, "is_available", lambda: False)
 
     ner_extractor_module.build_gliner_ner_extractor()
 
@@ -1058,9 +1042,7 @@ def test_clamp_gliner_tokenizer_max_length_tolerates_missing_attribute() -> None
     class _BareTokenizer:
         pass
 
-    ner_extractor_module._clamp_gliner_tokenizer_max_length(
-        _BareTokenizer(), max_tokens=766
-    )
+    ner_extractor_module._clamp_gliner_tokenizer_max_length(_BareTokenizer(), max_tokens=766)
 
 
 def test_build_gliner_ner_extractor_fails_fast_when_offline_model_missing(
@@ -1073,7 +1055,6 @@ def test_build_gliner_ner_extractor_fails_fast_when_offline_model_missing(
         tmp_path: pytest fixture providing a temporary directory for test files.
         monkeypatch: pytest fixture for safely patching functions and environment variables.
     """
-
     calls: list[tuple[str, bool]] = []
 
     monkeypatch.setattr(
@@ -1096,9 +1077,7 @@ def test_build_gliner_ner_extractor_fails_fast_when_offline_model_missing(
         ner_extractor_module,
         "_get_gliner_class",
         lambda: SimpleNamespace(
-            from_pretrained=lambda model_id, *, local_files_only: calls.append(
-                (model_id, local_files_only)
-            )
+            from_pretrained=lambda model_id, *, local_files_only: calls.append((model_id, local_files_only))
         ),
     )
 

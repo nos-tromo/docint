@@ -81,9 +81,7 @@ def test_get_openai_reasoning_effort_requires_toggle_only() -> None:
     )
 
 
-def test_openai_pipeline_call_chat_passes_reasoning_effort_for_ollama(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_openai_pipeline_call_chat_passes_reasoning_effort_for_ollama(monkeypatch, tmp_path: Path) -> None:
     """Reasoning effort should be forwarded for non-OpenAI providers too.
 
     Args:
@@ -108,9 +106,7 @@ def test_openai_pipeline_call_chat_passes_reasoning_effort_for_ollama(
                 Any: A fake chat completion response.
             """
             captured.update(kwargs)
-            return SimpleNamespace(
-                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
-            )
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])
 
     monkeypatch.setattr(
         "docint.utils.openai_cfg.load_model_env",
@@ -151,9 +147,7 @@ def test_openai_pipeline_call_chat_passes_reasoning_effort_for_ollama(
     assert captured["reasoning_effort"] == "high"
 
 
-def test_openai_pipeline_call_chat_passes_reasoning_effort(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_openai_pipeline_call_chat_passes_reasoning_effort(monkeypatch, tmp_path: Path) -> None:
     """OpenAI pipeline should forward reasoning effort on chat completions.
 
     Args:
@@ -178,9 +172,7 @@ def test_openai_pipeline_call_chat_passes_reasoning_effort(
                 Any: A fake chat completion response.
             """
             captured.update(kwargs)
-            return SimpleNamespace(
-                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
-            )
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])
 
     monkeypatch.setattr(
         "docint.utils.openai_cfg.load_model_env",
@@ -223,9 +215,7 @@ def test_openai_pipeline_call_chat_passes_reasoning_effort(
     assert captured["messages"][0]["role"] == "system"
 
 
-def test_openai_pipeline_call_chat_omits_reasoning_effort_when_disabled(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_openai_pipeline_call_chat_omits_reasoning_effort_when_disabled(monkeypatch, tmp_path: Path) -> None:
     """OpenAI pipeline should omit reasoning effort when thinking is disabled.
 
     Args:
@@ -250,9 +240,7 @@ def test_openai_pipeline_call_chat_omits_reasoning_effort_when_disabled(
                 Any: A fake chat completion response.
             """
             captured.update(kwargs)
-            return SimpleNamespace(
-                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
-            )
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])
 
     monkeypatch.setattr(
         "docint.utils.openai_cfg.load_model_env",
@@ -300,7 +288,7 @@ def _install_vision_pipeline(
     thinking_enabled: bool,
     response_content: str,
     captured: dict[str, Any],
-) -> "OpenAIPipeline":
+) -> OpenAIPipeline:
     """Build an ``OpenAIPipeline`` whose vision client returns a fixed response.
 
     Args:
@@ -323,11 +311,7 @@ def _install_vision_pipeline(
 
         def _create(self, **kwargs: Any) -> Any:
             captured.update(kwargs)
-            return SimpleNamespace(
-                choices=[
-                    SimpleNamespace(message=SimpleNamespace(content=response_content))
-                ]
-            )
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=response_content))])
 
     monkeypatch.setattr(
         "docint.utils.openai_cfg.load_model_env",
@@ -364,9 +348,7 @@ def _install_vision_pipeline(
     return OpenAIPipeline()
 
 
-def test_call_vision_strips_think_tags(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_call_vision_strips_think_tags(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """``call_vision`` must strip ``<think>...</think>`` before returning."""
     captured: dict[str, Any] = {}
     pipeline = _install_vision_pipeline(
@@ -383,9 +365,7 @@ def test_call_vision_strips_think_tags(
     assert result == "final description"
 
 
-def test_call_vision_forwards_reasoning_effort_for_ollama(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_call_vision_forwards_reasoning_effort_for_ollama(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Reasoning effort should be forwarded for the vision path like chat does."""
     captured: dict[str, Any] = {}
     pipeline = _install_vision_pipeline(
@@ -402,9 +382,7 @@ def test_call_vision_forwards_reasoning_effort_for_ollama(
     assert captured["reasoning_effort"] == "high"
 
 
-def test_call_vision_omits_reasoning_effort_when_disabled(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_call_vision_omits_reasoning_effort_when_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Reasoning effort must not be sent when the pipeline has thinking disabled."""
     captured: dict[str, Any] = {}
     pipeline = _install_vision_pipeline(
@@ -421,9 +399,7 @@ def test_call_vision_omits_reasoning_effort_when_disabled(
     assert "reasoning_effort" not in captured
 
 
-def test_call_vision_strips_reasoning_around_refusal_text(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_call_vision_strips_reasoning_around_refusal_text(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Reasoning is stripped but refusal detection is left to call sites."""
     captured: dict[str, Any] = {}
     pipeline = _install_vision_pipeline(
@@ -431,10 +407,7 @@ def test_call_vision_strips_reasoning_around_refusal_text(
         tmp_path,
         inference_provider="ollama",
         thinking_enabled=False,
-        response_content=(
-            "<think>I wasn't given an image</think>"
-            "I don't see any image attached to your message."
-        ),
+        response_content=("<think>I wasn't given an image</think>I don't see any image attached to your message."),
         captured=captured,
     )
 
@@ -563,7 +536,6 @@ def test_is_context_limit_error_recognizes_ollama_input_length_phrasing() -> Non
     ``_is_context_limit_error`` used to return ``False`` and the batch ingest crashed
     instead of falling back to the truncation retry loop.
     """
-
     exc = RuntimeError(
         "Error code: 400 - {'error': {'message': 'the input length exceeds the "
         "context length', 'type': 'invalid_request_error', 'param': None, "
@@ -582,11 +554,8 @@ def test_is_context_limit_error_rejects_unrelated_errors() -> None:
     phrasing must not accidentally sweep up connection errors or rate limits,
     which should continue to propagate so higher layers can retry or surface them.
     """
-
     connection_exc = RuntimeError("Connection refused by http://localhost:11434")
-    rate_limit_exc = RuntimeError(
-        "Error code: 429 - {'error': {'message': 'rate limit exceeded'}}"
-    )
+    rate_limit_exc = RuntimeError("Error code: 429 - {'error': {'message': 'rate limit exceeded'}}")
 
     from docint.utils.openai_cfg import BudgetedOpenAIEmbedding
 

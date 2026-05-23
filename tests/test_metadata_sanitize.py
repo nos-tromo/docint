@@ -82,9 +82,7 @@ def test_timedelta_coerced_to_string() -> None:
 
 def test_pandas_timestamp_uses_isoformat() -> None:
     """``pandas.Timestamp`` inherits from ``datetime.datetime`` and uses ISO format."""
-    assert sanitize_for_json(pd.Timestamp("2026-04-24 08:30:00")) == (
-        "2026-04-24T08:30:00"
-    )
+    assert sanitize_for_json(pd.Timestamp("2026-04-24 08:30:00")) == ("2026-04-24T08:30:00")
 
 
 def test_pandas_timedelta_coerced_to_string() -> None:
@@ -125,9 +123,7 @@ def test_numpy_ndarray_becomes_plain_list() -> None:
 
 def test_decimal_uses_string_for_precision() -> None:
     """``Decimal`` values must preserve precision via ``str``, not ``float``."""
-    assert sanitize_for_json(decimal.Decimal("1.2345678901234567890")) == (
-        "1.2345678901234567890"
-    )
+    assert sanitize_for_json(decimal.Decimal("1.2345678901234567890")) == ("1.2345678901234567890")
 
 
 def test_uuid_path_and_bytes_coerce_to_string() -> None:
