@@ -81,7 +81,9 @@ def test_get_openai_reasoning_effort_requires_toggle_only() -> None:
     )
 
 
-def test_openai_pipeline_call_chat_passes_reasoning_effort_for_ollama(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_openai_pipeline_call_chat_passes_reasoning_effort_for_ollama(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """Reasoning effort should be forwarded for non-OpenAI providers too.
 
     Args:
@@ -215,7 +217,9 @@ def test_openai_pipeline_call_chat_passes_reasoning_effort(monkeypatch: pytest.M
     assert captured["messages"][0]["role"] == "system"
 
 
-def test_openai_pipeline_call_chat_omits_reasoning_effort_when_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_openai_pipeline_call_chat_omits_reasoning_effort_when_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """OpenAI pipeline should omit reasoning effort when thinking is disabled.
 
     Args:

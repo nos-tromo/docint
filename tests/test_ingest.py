@@ -485,7 +485,10 @@ def test_hate_speech_detection_attaches_flagged_metadata(monkeypatch: pytest.Mon
     class FakeResponse:
         """Fake response class to simulate the output of the OpenAI API for hate-speech detection."""
 
-        text = '{"hate_speech": true, "category": "ethnicity", "confidence": "high", "reason": "Contains hateful language."}'
+        text = (
+            '{"hate_speech": true, "category": "ethnicity", "confidence": "high",'
+            ' "reason": "Contains hateful language."}'
+        )
 
     class FakeModel:
         """Fake model class to simulate the behavior of a hate-speech detection model."""

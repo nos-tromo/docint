@@ -419,10 +419,11 @@ class DummyRAG:
             refresh (bool, optional): Whether to bypass summary cache.
 
         Returns:
-            Generator[str | dict[str, Any], None, None]: A generator that yields chunks of the summary response and the final payload.
+            Generator[str | dict[str, Any], None, None]: Streams summary chunks plus the final
+                payload.
 
         Yields:
-            str | dict[str, Any]: Chunks of the summary response as they are generated, followed by the final summary payload.
+            str | dict[str, Any]: Summary chunks, then the final summary payload.
         """
         self.summary_stream_refresh_calls.append(bool(refresh))
         yield "sum"

@@ -25,7 +25,8 @@ class SimpleUnderstandingAgent(UnderstandingAgent):
         Args:
             default_intent (str, optional): The default intent to use when no keywords match. Defaults to "qa".
             default_confidence (float, optional): The default confidence level for the intent. Defaults to 0.6.
-            intent_keywords (dict[str, Iterable[str]] | None, optional): A mapping of intents to keywords for detection. Defaults to None.
+            intent_keywords (dict[str, Iterable[str]] | None, optional): Intent->keywords map for
+                detection. Defaults to None.
         """
         self.default_intent = default_intent
         self.default_confidence = default_confidence
@@ -42,7 +43,7 @@ class SimpleUnderstandingAgent(UnderstandingAgent):
             text (str): The input text to analyze for intent.
 
         Returns:
-            tuple[str, float, str | None]: A tuple containing the detected intent, confidence score, and an optional reason.
+            tuple[str, float, str | None]: Detected intent, confidence, and optional reason.
         """
         lowered = text.lower()
         for intent, kws in self.intent_keywords.items():

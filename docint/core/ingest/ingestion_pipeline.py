@@ -206,10 +206,11 @@ class DocumentIngestionPipeline:
         """Execute the full ingestion pipeline and yield batches of cleaned docs + nodes.
 
         Args:
-            existing_hashes (set[str] | None): A set of existing document hashes to filter out already processed documents.
+            existing_hashes (set[str] | None): Document hashes to filter out (already-processed
+                docs).
 
         Yields:
-            tuple[list[Document], list[BaseNode]]: A batch of cleaned documents and their corresponding nodes.
+            tuple[list[Document], list[BaseNode]]: Batches of cleaned documents and their nodes.
 
         Raises:
             RuntimeError: If the directory reader fails to initialize.
@@ -376,10 +377,11 @@ class DocumentIngestionPipeline:
 
         Args:
             docs (list[Document]): The list of documents to process.
-            existing_hashes (set[str] | None): A set of existing document hashes to filter out already processed documents.
+            existing_hashes (set[str] | None): Document hashes to filter out (already-processed
+                docs).
 
         Returns:
-            tuple[list[Document], list[BaseNode]]: A tuple containing the processed documents and their corresponding nodes.
+            tuple[list[Document], list[BaseNode]]: The processed documents and their nodes.
         """
         docs = self._attach_clean_text(docs)
         docs = self._ensure_file_hashes(docs)
@@ -891,8 +893,8 @@ class DocumentIngestionPipeline:
 
         Args:
             docs (list[Document]): Documents to process.
-            base_parser (NodeParser | None): The base parser to use for coarse chunking.
-                                             If None, uses the internal logic of HierarchicalNodeParser (defaulting to SentenceSplitter).
+            base_parser (NodeParser | None): Base parser for coarse chunking. If None, uses the
+                internal HierarchicalNodeParser logic (defaulting to SentenceSplitter).
 
         Returns:
             list[BaseNode]: The processed nodes.

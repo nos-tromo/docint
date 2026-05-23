@@ -357,10 +357,11 @@ def test_export_entities_writes_top_entity_text(monkeypatch: pytest.MonkeyPatch,
         qdrant_collection = "alpha"
 
         def get_collection_ner_stats(self, **kwargs: Any) -> dict[str, Any]:
-            """Simulate retrieval of named entity recognition statistics for a collection, returning a list of top entities with their types and mention counts.
+            """Simulate NER stats retrieval; returns top entities with type + mention counts.
 
             Returns:
-                dict[str, Any]: A dictionary containing a list of top entities, where each entity is represented as a dictionary with 'text', 'type', and 'mentions' keys.
+                dict[str, Any]: Carries a ``top_entities`` list where each entry has ``text``,
+                    ``type``, and ``mentions``.
             """
             assert kwargs["top_k"] == query_cli.DEFAULT_ENTITY_LIMIT
             assert kwargs["min_mentions"] == 1

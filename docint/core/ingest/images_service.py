@@ -766,14 +766,13 @@ class ImageIngestionService:
         elif hasattr(vectors, "get"):
             named_config = cast(Any, vectors).get(self.img_ingestion_config.vector_name)
 
+        vector_name = self.img_ingestion_config.vector_name
         if named_config is None:
-            raise ValueError(
-                f"Image collection '{collection_name}' exists but vector '{self.img_ingestion_config.vector_name}' is missing."
-            )
+            raise ValueError(f"Image collection '{collection_name}' exists but vector '{vector_name}' is missing.")
         if int(named_config.size) != int(vector_dim):
             raise ValueError(
-                f"Image collection '{collection_name}' vector '{self.img_ingestion_config.vector_name}' dimension mismatch: "
-                f"expected {vector_dim}, found {named_config.size}"
+                f"Image collection '{collection_name}' vector '{vector_name}' dimension "
+                f"mismatch: expected {vector_dim}, found {named_config.size}"
             )
 
     @staticmethod
@@ -1069,7 +1068,8 @@ class ImageIngestionService:
             source_collection (str | None): Optional source collection to resolve the target collection.
 
         Returns:
-            list[dict[str, Any]]: A list of payload dictionaries for the similar images, each including a similarity score.
+            list[dict[str, Any]]: Payload dicts for the similar images, each carrying a
+                similarity score.
         """
         if not query_text.strip():
             return []

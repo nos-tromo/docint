@@ -662,7 +662,7 @@ def build_ner_stats(
         include_relations (bool): Whether to include relation statistics in the output.
 
     Returns:
-        dict[str, Any]: Dictionary containing totals, top entities, entity type rollups, top relations, and document stats
+        dict[str, Any]: Totals, top entities, entity-type rollups, top relations, doc stats.
     """
     entities_all = list(aggregate.get("entities") or [])
     relations_all = list(aggregate.get("relations") or [])
@@ -970,7 +970,8 @@ def graph_neighbors(
         hops (int): Number of hops to include in the neighborhood.
 
     Returns:
-        dict[str, Any]: Dictionary containing the center node, its neighbors with scores and depths, the nodes and edges in the neighborhood, and metadata about the neighborhood.
+        dict[str, Any]: Center node; neighbors with scores+depths; the nodes/edges in the
+            neighborhood; and neighborhood metadata.
     """
     nodes = list(graph.get("nodes") or [])
     edges = list(graph.get("edges") or [])

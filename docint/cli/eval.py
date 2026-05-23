@@ -47,7 +47,8 @@ def load_eval_queries(queries_path: Path, prompts_path: Path) -> list[dict[str, 
         prompts_path (Path): Path to the prompts directory (used for default query if no file is found
 
     Returns:
-        list[dict[str, Any]]: List of normalized query specifications, each with a mandatory 'query' key and optional expectation keys
+        list[dict[str, Any]]: Normalized query specs, each with a mandatory 'query' key plus
+            optional expectation keys.
     """
     if queries_path.exists():
         suffix = queries_path.suffix.lower()
@@ -101,16 +102,16 @@ def _match_expectations(
 ) -> dict[str, Any]:
     """Compute simple expectation hits for a query result.
 
-    Checks whether any retrieved source matches any of the expected filenames, file hashes, or text IDs specified in the query spec.
+    Checks whether any retrieved source matches expected filenames, file hashes, or text IDs.
 
     Args:
-        sources (list[dict[str, Any]]): The list of retrieved source documents, each as a dictionary with optional 'filename',
-            'file_hash', and 'reference_metadata.text_id' fields.
-        query_spec (dict[str, Any]): The query specification dictionary, which may include 'expected_filenames',
+        sources (list[dict[str, Any]]): Retrieved source documents, each a dict with optional
+            'filename', 'file_hash', and 'reference_metadata.text_id' fields.
+        query_spec (dict[str, Any]): The query spec; may include 'expected_filenames',
             'expected_file_hashes', and 'expected_text_ids' as lists of expected values.
 
     Returns:
-        dict[str, Any]: A dictionary containing the sets of expected values and boolean flags indicating whether any hits were found.
+        dict[str, Any]: The expected-value sets plus boolean flags indicating any hits.
     """
     filenames = {
         str(source.get("filename") or "").strip() for source in sources if str(source.get("filename") or "").strip()
@@ -151,12 +152,15 @@ def evaluate_retrieval(
     publication: it preserves answers, sources, timing, and optional expectation hits.
 
     Args:
-        rag (RetrievalEvalRAG): The RAG pipeline instance to use for running queries.
-        query_specs (list[dict[str, Any]]): A list of query specifications, each as a dictionary with a mandatory 'query' key and optional expectation keys.
-        modes (list[str] | None): An optional list of retrieval modes to test. If None, defaults to ["default", "hybrid", "sparse"] if hybrid retrieval is enabled, otherwise ["default"].
+        rag (RetrievalEvalRAG): The RAG pipeline to use for running queries.
+        query_specs (list[dict[str, Any]]): Query specs (each carries a mandatory 'query' key
+            and optional expectation keys).
+        modes (list[str] | None): Retrieval modes to test. Defaults to
+            ``["default", "hybrid", "sparse"]`` if hybrid is enabled, else ``["default"]``.
 
     Returns:
-        dict[str, Any]: A dictionary containing the collection name, tested modes, query count, a summary of results by mode, and the detailed results for each query and mode.
+        dict[str, Any]: Collection name, tested modes, query count, a per-mode summary, and the
+            detailed results for each (query, mode).
     """
     selected_modes = modes or (["default", "hybrid", "sparse"] if rag.enable_hybrid else ["default"])
     results: list[dict[str, Any]] = []

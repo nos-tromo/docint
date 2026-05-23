@@ -326,7 +326,7 @@ def _compile_rule(rule: dict[str, Any]) -> MetadataFilter | MetadataFilters | No
             ``operator`` is one of the supported filter operations.
 
     Returns:
-        MetadataFilter | MetadataFilters | None: A ``MetadataFilter`` or ``MetadataFilters`` instance, or ``None`` if the rule
+        MetadataFilter | MetadataFilters | None: Compiled filter(s), or ``None`` if the rule
         cannot be compiled.
     """
     field = rule["field"]
@@ -384,7 +384,8 @@ def _compile_mime_rule(
         raw_value (Any): The raw MIME pattern value, which may include a ``/*`` suffix for wildcard matching.
 
     Returns:
-        MetadataFilter | None: A ``MetadataFilter`` instance with the appropriate operator, or ``None`` if the value is invalid.
+        MetadataFilter | None: A ``MetadataFilter`` with the right operator, or ``None`` if the
+            value is invalid.
     """
     value = str(raw_value or "").strip().lower()
     if not value:
@@ -414,7 +415,8 @@ def _compile_date_rule(
             or other type coercible to a date.
 
     Returns:
-        MetadataFilter | None: A ``MetadataFilter`` instance with the appropriate operator and ISO-8601 value, or ``None`` if the value is invalid.
+        MetadataFilter | None: A ``MetadataFilter`` with the right operator and ISO-8601 value,
+            or ``None`` if the value is invalid.
     """
     boundary = _normalize_date_value(raw_value, upper_bound=operator.endswith("before"))
     if boundary is None:
@@ -445,9 +447,9 @@ def _compile_qdrant_rule(
             supported filter operations.
 
     Returns:
-        tuple[_QdrantCondition | None, bool]: A tuple of (compiled_condition, negate), where ``compiled_condition`` is a Qdrant-compatible
-            condition or filter, and ``negate`` is a boolean indicating whether the condition should be
-            negated (i.e., added to the ``must_not`` list instead of ``must``).
+        tuple[_QdrantCondition | None, bool]: ``(compiled_condition, negate)`` where
+            ``compiled_condition`` is a Qdrant-compatible condition/filter and ``negate`` indicates
+            whether to route into ``must_not`` rather than ``must``.
     """
     field = rule["field"]
     operator = rule["operator"]

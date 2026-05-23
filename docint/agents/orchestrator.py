@@ -36,7 +36,8 @@ class AgentOrchestrator:
             clarifier (ClarificationAgent): The agent responsible for handling clarifications.
             retriever (RetrievalAgent): The agent responsible for retrieving information.
             responder (ResponseAgent | None, optional): The agent responsible for response validation/post-processing.
-            policy (ClarificationPolicy | None, optional): The policy to decide when clarification is needed. Defaults to None.
+            policy (ClarificationPolicy | None, optional): Policy deciding when clarification
+                is needed. Defaults to None.
         """
         self.understanding = understanding
         self.clarifier = clarifier
