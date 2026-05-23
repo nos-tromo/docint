@@ -3,7 +3,7 @@
 import json
 import re
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, cast
 
 from llama_index.core.llms import LLM
 
@@ -198,12 +198,12 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
                 clean_text = clean_text[4:]
 
         try:
-            return json.loads(clean_text)
+            return cast(dict[str, Any], json.loads(clean_text))
         except json.JSONDecodeError:
             # Attempt to find JSON object if mixed with text
             match = re.search(r"\{.*\}", clean_text, re.DOTALL)
             if match:
-                return json.loads(match.group(0))
+                return cast(dict[str, Any], json.loads(match.group(0)))
             return {
                 "intent": "qa",
                 "rewritten_query": None,

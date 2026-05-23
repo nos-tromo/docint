@@ -1,5 +1,7 @@
 """Tests for :class:`ResultValidationResponseAgent` in the generation module."""
 
+from typing import Any, cast
+
 from docint.agents.generation import MAX_SOURCE_CHARS, ResultValidationResponseAgent
 from docint.agents.types import RetrievalResult, Turn
 
@@ -46,7 +48,7 @@ class _FakeLLM:
 def test_validation_agent_sets_alert_on_mismatch() -> None:
     """Grounding mismatch from the LLM should set the validation alert flag."""
     llm = _FakeLLM('{"summary_grounded": false, "sources_relevant": true, "reason":"hallucinated fact"}')
-    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
     result = RetrievalResult(answer="answer", sources=[{"text": "source evidence"}])
 
     finalized = agent.finalize(result, Turn(user_input="question"))
@@ -63,7 +65,7 @@ def test_validation_agent_sets_alert_on_mismatch() -> None:
 def test_validation_agent_disabled_is_noop() -> None:
     """Disabled validator should not invoke the LLM or set any flags."""
     llm = _FakeLLM('{"summary_grounded": false, "sources_relevant": false, "reason":"bad"}')
-    agent = ResultValidationResponseAgent(enabled=False, llm=llm)
+    agent = ResultValidationResponseAgent(enabled=False, llm=cast(Any, llm))
     result = RetrievalResult(answer="answer", sources=[{"text": "source evidence"}])
 
     finalized = agent.finalize(result, Turn(user_input="question"))
@@ -77,7 +79,7 @@ def test_validation_agent_disabled_is_noop() -> None:
 def test_validation_agent_parses_markdown_wrapped_json() -> None:
     """Markdown-fenced JSON from the LLM should be unwrapped and parsed."""
     llm = _FakeLLM('```json\n{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}\n```')
-    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
     result = RetrievalResult(answer="answer", sources=[{"id": 1, "content": "source"}])
 
     finalized = agent.finalize(result, Turn(user_input="question"))
@@ -90,7 +92,7 @@ def test_validation_agent_parses_markdown_wrapped_json() -> None:
 def test_validation_agent_handles_invalid_schema() -> None:
     """Invalid JSON schema should mark validation as unavailable."""
     llm = _FakeLLM('{"reason":"missing booleans"}')
-    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
     result = RetrievalResult(answer="answer", sources=[{"content": "source"}])
 
     finalized = agent.finalize(result, Turn(user_input="question"))
@@ -103,7 +105,7 @@ def test_validation_agent_handles_invalid_schema() -> None:
 def test_validation_agent_document_coverage_does_not_override_relevance() -> None:
     """Document-level coverage should not suppress a relevance mismatch."""
     llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": false, "reason":"partial source fit"}')
-    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
     result = RetrievalResult(
         answer="answer",
         sources=[{"text": "source"}],
@@ -126,7 +128,7 @@ def test_validation_agent_document_coverage_does_not_override_relevance() -> Non
 def test_validation_agent_post_coverage_can_override_relevance() -> None:
     """Post-level coverage may suppress overly strict relevance mismatches."""
     llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": false, "reason":"partial source fit"}')
-    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
     result = RetrievalResult(
         answer="answer",
         sources=[{"text": "source"}],
@@ -154,7 +156,7 @@ def test_validation_agent_summary_coverage_does_not_override_grounding() -> None
     LLM's reason — grounding issues are prioritized over coverage shortfalls.
     """
     llm = _FakeLLM('{"summary_grounded": false, "sources_relevant": true, "reason":"unsupported claim"}')
-    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
     result = RetrievalResult(
         answer="answer",
         sources=[{"text": "source"}],
@@ -177,7 +179,7 @@ def test_validation_agent_summary_coverage_does_not_override_grounding() -> None
 def test_validation_agent_empty_response_skips_validation() -> None:
     """Empty validator output should mark validation as not checked without error."""
     llm = _FakeLLM("")
-    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
     result = RetrievalResult(answer="answer", sources=[{"text": "source evidence"}])
 
     finalized = agent.finalize(result, Turn(user_input="question"))
@@ -190,7 +192,7 @@ def test_validation_agent_empty_response_skips_validation() -> None:
 def test_validation_agent_non_json_response_skips_validation() -> None:
     """Non-JSON validator output should be treated as validation unavailable."""
     llm = _FakeLLM("not-json")
-    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
     result = RetrievalResult(answer="answer", sources=[{"text": "source evidence"}])
 
     finalized = agent.finalize(result, Turn(user_input="question"))
@@ -220,7 +222,7 @@ def test_validation_agent_prompt_includes_reference_metadata() -> None:
     ``source["reference_metadata"]`` rather than ``source["text"]``.
     """
     llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}')
-    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
     source = {
         "text": "post body",
         "filename": "table_socials.csv",
@@ -260,7 +262,7 @@ def test_validation_agent_prompt_includes_reference_metadata() -> None:
 def test_validation_agent_prompt_metadata_block_not_truncated() -> None:
     """Metadata fields must survive even when the text body exceeds the per-source cap."""
     llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}')
-    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
     long_body = "x" * 5000
     source = {
         "text": long_body,
@@ -289,7 +291,7 @@ def test_validation_agent_prompt_metadata_block_not_truncated() -> None:
 def test_validation_agent_prompt_handles_text_only_source() -> None:
     """Sources without reference_metadata must still produce a well-formed prompt."""
     llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}')
-    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
     result = RetrievalResult(answer="a", sources=[{"text": "plain body without metadata"}])
 
     agent.finalize(result, Turn(user_input="q"))
@@ -309,7 +311,7 @@ def test_validation_agent_prompt_includes_metadata_text_when_no_top_level_body()
     the validator should still see the body.
     """
     llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}')
-    agent = ResultValidationResponseAgent(enabled=True, llm=llm)
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
     result = RetrievalResult(
         answer="a",
         sources=[

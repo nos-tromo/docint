@@ -588,9 +588,9 @@ class SessionManager:
                     turn_idx,
                 )
                 return
-            t.validation_checked = validation_checked
-            t.validation_mismatch = validation_mismatch
-            t.validation_reason = validation_reason
+            t.validation_checked = validation_checked  # type: ignore[assignment]
+            t.validation_mismatch = validation_mismatch  # type: ignore[assignment]
+            t.validation_reason = validation_reason  # type: ignore[assignment]
             s.commit()
 
     def _maybe_update_summary(self, session_id: str, every_n_turns: int = 5) -> None:

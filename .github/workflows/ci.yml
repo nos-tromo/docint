@@ -15,10 +15,9 @@ concurrency:
 
 jobs:
   ci:
-    # Pinned to v2.1 (strict-config alignment + nos-tromo style tuning:
-    # line-length=120, ANN401 ignored). Canonical at
-    # nos-tromo/.github/configs/python-strict/.
-    uses: nos-tromo/.github/.github/workflows/python-app-ci.yml@v2.1
+    # Pinned to v2.2 (local mypy hook so strict mode sees project deps).
+    # Canonical at nos-tromo/.github/configs/python-strict/.
+    uses: nos-tromo/.github/.github/workflows/python-app-ci.yml@v2.2
     with:
       python-versions: '["3.11"]'
       uv-sync-args: '--frozen --group dev --extra cpu'

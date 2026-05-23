@@ -8,7 +8,7 @@ from sqlalchemy.orm import relationship
 from docint.core.state.base import Base
 
 
-class Conversation(Base):
+class Conversation(Base):  # type: ignore[misc]
     """Represents a user conversation session.
 
     Args:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, time
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, cast
 
 from llama_index.core.vector_stores.types import (
     FilterCondition,
@@ -355,7 +355,7 @@ def _compile_rule(rule: dict[str, Any]) -> MetadataFilter | MetadataFilters | No
             values = [scalar] if scalar is not None else []
         if not values:
             return None
-        return MetadataFilter(key=field, value=values, operator=FilterOperator.IN)
+        return MetadataFilter(key=field, value=cast(Any, values), operator=FilterOperator.IN)
 
     if operator == "mime_match":
         return _compile_mime_rule(field=field, raw_value=rule.get("value"))
@@ -459,7 +459,7 @@ def _compile_qdrant_rule(
         if value is None:
             return None, False
         return (
-            models.FieldCondition(key=field, match=models.MatchValue(value=value)),
+            models.FieldCondition(key=field, match=models.MatchValue(value=cast(Any, value))),
             operator == "neq",
         )
 
@@ -481,7 +481,7 @@ def _compile_qdrant_rule(
         if not values:
             return None, False
         return (
-            models.FieldCondition(key=field, match=models.MatchAny(any=values)),
+            models.FieldCondition(key=field, match=models.MatchAny(any=cast(Any, values))),
             False,
         )
 

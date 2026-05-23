@@ -61,17 +61,17 @@ def load_clip_model(model_id: str, cache_folder: Path) -> None:
                 pretrained_model_name_or_path=str(resolved),
                 local_files_only=True,
             )
-            AutoProcessor.from_pretrained(
+            AutoProcessor.from_pretrained(  # type: ignore[no-untyped-call]
                 pretrained_model_name_or_path=str(resolved),
                 local_files_only=True,
             )
         except Exception as e:
             logger.warning("Failed to load CLIP from local cache: {}. Retrying with download...", e)
             CLIPModel.from_pretrained(pretrained_model_name_or_path=model_id)
-            AutoProcessor.from_pretrained(pretrained_model_name_or_path=model_id)
+            AutoProcessor.from_pretrained(pretrained_model_name_or_path=model_id)  # type: ignore[no-untyped-call]
     else:
         CLIPModel.from_pretrained(pretrained_model_name_or_path=model_id)
-        AutoProcessor.from_pretrained(pretrained_model_name_or_path=model_id)
+        AutoProcessor.from_pretrained(pretrained_model_name_or_path=model_id)  # type: ignore[no-untyped-call]
     logger.info("Loaded CLIP model: {}", model_id)
 
 

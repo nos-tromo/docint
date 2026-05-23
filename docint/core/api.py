@@ -40,10 +40,10 @@ from docint.utils.logger_cfg import init_logger
 # Names re-exported for test monkey-patching. Strict mypy
 # (no_implicit_reexport) ignores these without an explicit ``__all__``.
 __all__ = [
+    "RAG",
     "ClarificationConfig",
     "ClarificationPolicy",
     "EmptyIngestionError",
-    "RAG",
     "asyncio",
     "ingest_module",
 ]

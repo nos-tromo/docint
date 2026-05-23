@@ -98,9 +98,9 @@ from qdrant_client import models as qdrant_models
 # (no_implicit_reexport) ignores these without an explicit ``__all__``,
 # so list every test-reachable third-party symbol here.
 __all__ = [
+    "RAG",
     "EmptyIngestionError",
     "QueryBundle",
-    "RAG",
     "ResponseMode",
     "RetrieverQueryEngine",
     "SparseTextEmbedding",
@@ -606,9 +606,9 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
         if not parent_id:
             return None
         try:
-            return self.docstore.get_node(parent_id, raise_error=False)
+            return cast(BaseNode | None, self.docstore.get_node(parent_id, raise_error=False))
         except AttributeError:
-            return self.docstore.get_document(parent_id, raise_error=False)
+            return cast(BaseNode | None, self.docstore.get_document(parent_id, raise_error=False))
         except Exception as exc:
             logger.warning("Failed to load parent node '{}' from docstore: {}", parent_id, exc)
             return None
@@ -1160,7 +1160,7 @@ class LazyRerankerPostprocessor(BaseNodePostprocessor):
             list[NodeWithScore]: Reranked (and typically top-n trimmed)
                 nodes as produced by the underlying postprocessor.
         """
-        return self.rag.reranker._postprocess_nodes(nodes, query_bundle)
+        return cast(list[NodeWithScore], self.rag.reranker._postprocess_nodes(nodes, query_bundle))
 
 
 def _vllm_service_root(api_base: str) -> str:
@@ -2774,7 +2774,7 @@ class RAG:
                 try:
                     retry_with_backoff(
                         "qdrant_insert_nodes",
-                        lambda idx=index, nodes=prepared_vector_nodes: idx.insert_nodes(nodes),
+                        lambda idx=index, nodes=prepared_vector_nodes: idx.insert_nodes(nodes),  # type: ignore[misc]
                         max_retries=self.docstore_max_retries,
                         initial_backoff=self.docstore_retry_backoff_seconds,
                         max_backoff=self.docstore_retry_backoff_max_seconds,

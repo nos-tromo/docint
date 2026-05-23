@@ -37,7 +37,7 @@ from __future__ import annotations
 import math
 import uuid
 from collections.abc import Callable
-from typing import cast
+from typing import Any, cast
 
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.schema import BaseNode, MetadataMode, NodeRelationship, TextNode
@@ -438,7 +438,7 @@ def _split_parent_text(
     candidate_sizes = [chunk_budget_tokens, max(1, chunk_budget_tokens // 2)]
     last_chunks: list[str] = [parent_raw_text]
     for chunk_size in candidate_sizes:
-        splitter_kwargs: dict[str, object] = {
+        splitter_kwargs: dict[str, Any] = {
             "chunk_size": chunk_size,
             "chunk_overlap": 0,
         }

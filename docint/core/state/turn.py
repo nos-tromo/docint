@@ -8,7 +8,7 @@ from sqlalchemy.orm import relationship
 from docint.core.state.base import Base
 
 
-class Turn(Base):
+class Turn(Base):  # type: ignore[misc]
     """Represents a user turn within a conversation.
 
     Args:

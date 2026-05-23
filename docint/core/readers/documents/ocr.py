@@ -381,7 +381,7 @@ class VisionOCREngine(OCREngine):
             if self._pipeline.reasoning_effort is not None:
                 request_kwargs["reasoning_effort"] = self._pipeline.reasoning_effort
 
-            response = self._vision_client.chat.completions.create(
+            response = self._vision_client.chat.completions.create(  # type: ignore[call-overload]
                 model=vision_model_id,
                 messages=messages,
                 max_tokens=self._max_tokens,

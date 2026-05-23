@@ -477,9 +477,9 @@ def test_resplit_honors_token_counter_for_dense_tokenization() -> None:
     )
     for sub in vector_nodes:
         sub_embed = sub.get_content(metadata_mode=MetadataMode.EMBED)
-        assert len(dense_counter(sub_embed)) <= effective, (
+        assert len(dense_counter(sub_embed)) <= effective, (  # type: ignore[no-untyped-call]
             f"sub-node {sub.node_id} has "
-            f"{len(dense_counter(sub_embed))} counter-measured tokens, "
+            f"{len(dense_counter(sub_embed))} counter-measured tokens, "  # type: ignore[no-untyped-call]
             f"exceeds effective budget {effective}"
         )
 

@@ -151,7 +151,7 @@ class CLIPImageEmbeddingBackend:
         resolved = resolve_hf_cache_path(cache_dir=self.cache_dir, repo_id=self.image_embed_model_id)
         resolved_model = str(resolved) if resolved else self.image_embed_model_id
         local_only = os.getenv("HF_HUB_OFFLINE", "0") == "1"
-        self.processor = AutoProcessor.from_pretrained(
+        self.processor = AutoProcessor.from_pretrained(  # type: ignore[no-untyped-call]
             pretrained_model_name_or_path=resolved_model,
             cache_dir=str(self.cache_dir),
             local_files_only=local_only,
@@ -185,7 +185,7 @@ class CLIPImageEmbeddingBackend:
         with torch.no_grad():
             features = self.model.get_image_features(**inputs)
             features = features / features.norm(dim=-1, keepdim=True)
-        return features[0].detach().cpu().tolist()
+        return cast(list[float], features[0].detach().cpu().tolist())
 
     def embed_text(self, text: str) -> list[float]:
         """Embed query text with CLIP text tower.
@@ -201,7 +201,7 @@ class CLIPImageEmbeddingBackend:
         with torch.no_grad():
             features = self.model.get_text_features(**inputs)
             features = features / features.norm(dim=-1, keepdim=True)
-        return features[0].detach().cpu().tolist()
+        return cast(list[float], features[0].detach().cpu().tolist())
 
 
 class ImageTaggingBackend(Protocol):

@@ -11,7 +11,7 @@ import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch as torch  # re-exported for tests that monkeypatch ``torch.cuda``
 from loguru import logger
@@ -57,14 +57,14 @@ def _parse_ner_payload(raw: str) -> dict[str, Any]:
         dict[str, Any]: The parsed payload dictionary.
     """
     try:
-        return json.loads(raw)
+        return cast(dict[str, Any], json.loads(raw))
     except Exception:
         pass
     try:
         start = raw.find("{")
         end = raw.rfind("}")
         if start != -1 and end != -1 and end > start:
-            return json.loads(raw[start : end + 1])
+            return cast(dict[str, Any], json.loads(raw[start : end + 1]))
     except Exception:
         return {}
     return {}
@@ -132,7 +132,9 @@ def _resolve_gliner_device(device: str | None) -> str | None:
     return None
 
 
-def build_llm_ner_extractor(model: Any, prompt: str, max_chars: int) -> Callable[[str], tuple[list[dict[str, Any]], list[dict[str, Any]]]]:
+def build_llm_ner_extractor(
+    model: Any, prompt: str, max_chars: int
+) -> Callable[[str], tuple[list[dict[str, Any]], list[dict[str, Any]]]]:
     """Create an NER extractor bound to a model and prompt template.
 
     Args:
@@ -151,7 +153,7 @@ def build_llm_ner_extractor(model: Any, prompt: str, max_chars: int) -> Callable
             text (str): The input text to extract entities and relations from.
 
         Returns:
-            tuple[list[dict[str, Any]], list[dict[str, Any]]]: A tuple containing two lists: extracted entities and extracted relations.
+            tuple[list[dict[str, Any]], list[dict[str, Any]]]: Extracted (entities, relations).
         """
         snippet = text[:max_chars]
         prompt_text = prompt.format(text=snippet)
@@ -210,7 +212,7 @@ def _get_gliner_class() -> type[Any]:
 
     from gliner import GLiNER
 
-    return GLiNER
+    return cast(type[Any], GLiNER)
 
 
 def _get_or_load_gliner_runtime(
@@ -335,7 +337,7 @@ def _load_gliner_config(model_dir: Path) -> dict[str, Any]:
     if not config_path.is_file():
         raise FileNotFoundError(f"No GLiNER config file found in {model_dir}")
 
-    return json.loads(config_path.read_text(encoding="utf-8"))
+    return cast(dict[str, Any], json.loads(config_path.read_text(encoding="utf-8")))
 
 
 def _link_or_copy_path(source: Path, destination: Path) -> None:

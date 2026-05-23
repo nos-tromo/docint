@@ -87,9 +87,7 @@ class RAGRetrievalAgent(RetrievalAgent):
             rewritten_query=analysis.rewritten_query,
         )
 
-    def _filter_ner_sources(
-        self, sources: list[dict[str, Any]], entities: dict[str, Any]
-    ) -> list[dict[str, Any]]:
+    def _filter_ner_sources(self, sources: list[dict[str, Any]], entities: dict[str, Any]) -> list[dict[str, Any]]:
         """Filter NER sources using simple entity/page heuristics.
 
         Args:

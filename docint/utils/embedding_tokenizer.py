@@ -34,7 +34,7 @@ from docint.utils.env_cfg import resolve_hf_cache_path
 # Re-export AutoTokenizer for tests that monkeypatch
 # ``embedding_tokenizer.AutoTokenizer``. Strict mypy ignores implicit
 # re-exports without an explicit ``__all__``.
-__all__ = ["AutoTokenizer", "load_embedding_tokenizer"]
+__all__ = ["AutoTokenizer", "build_embedding_token_counter"]
 
 
 def build_embedding_token_counter(
@@ -78,7 +78,7 @@ def build_embedding_token_counter(
         return None
 
     try:
-        tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer = AutoTokenizer.from_pretrained(  # type: ignore[no-untyped-call]
             str(resolved),
             local_files_only=True,
             use_fast=True,

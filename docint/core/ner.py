@@ -916,7 +916,7 @@ def build_entity_graph(
         ):
             for candidate in candidates:
                 if candidate in node_map:
-                    return candidate
+                    return str(candidate)
         return None
 
     for rel in relations:

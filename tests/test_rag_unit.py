@@ -4597,7 +4597,7 @@ def test_prepare_vector_nodes_uses_embedding_token_counter_when_available(
     assert estimate_tokens(raw_payload, rag.embed_char_token_ratio) <= budget, (
         "fixture invariant: char-ratio estimator must admit the raw payload"
     )
-    assert len(strict_counter(raw_payload)) > budget, (
+    assert len(strict_counter(raw_payload)) > budget, (  # type: ignore[no-untyped-call]
         "fixture invariant: the strict counter must reject the raw payload"
     )
 
@@ -4606,8 +4606,8 @@ def test_prepare_vector_nodes_uses_embedding_token_counter_when_available(
     assert len(prepared_vector) >= 2, "strict token counter must trigger a split into multiple sub-nodes"
     assert captured_texts, "embed model must be called at least once"
     for text in captured_texts:
-        assert len(strict_counter(text)) <= budget, (
-            f"embed call received a {len(strict_counter(text))}-token payload "
+        assert len(strict_counter(text)) <= budget, (  # type: ignore[no-untyped-call]
+            f"embed call received a {len(strict_counter(text))}-token payload "  # type: ignore[no-untyped-call]
             f"that exceeds the {budget}-token counter-measured budget"
         )
 
@@ -5777,9 +5777,9 @@ def test_delete_collection_resets_singleton_when_active(
     rag._qdrant_client = MagicMock()
     sentinel_index = object()
     sentinel_engine = object()
-    rag.index = sentinel_index
-    rag.query_engine = sentinel_engine
-    rag._image_ingestion_service = object()
+    rag.index = sentinel_index  # type: ignore[assignment]
+    rag.query_engine = sentinel_engine  # type: ignore[assignment]
+    rag._image_ingestion_service = object()  # type: ignore[assignment]
     monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
     monkeypatch.setattr(
         RAG,
@@ -5812,8 +5812,8 @@ def test_delete_collection_preserves_singleton_when_not_active(
     rag._qdrant_client = MagicMock()
     sentinel_index = object()
     sentinel_engine = object()
-    rag.index = sentinel_index
-    rag.query_engine = sentinel_engine
+    rag.index = sentinel_index  # type: ignore[assignment]
+    rag.query_engine = sentinel_engine  # type: ignore[assignment]
     monkeypatch.setattr(RAG, "_invalidate_ner_cache", lambda self, collection: None)
     monkeypatch.setattr(
         RAG,

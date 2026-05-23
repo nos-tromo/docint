@@ -213,7 +213,7 @@ def test_chat_uses_request_scoped_filtered_engine(
         "sources": [],
     }
     session_manager.session_id = "session-1"
-    session_manager.chat_engine = object()
+    session_manager.chat_engine = object()  # type: ignore[assignment]
 
     monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args: None)
     monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
@@ -269,9 +269,9 @@ def test_stream_chat_includes_final_response_when_no_tokens(
         "coverage_unit": "documents",
         "retrieval_mode": "rewrite_compact",
     }
-    session_manager.rag.index = object()
+    session_manager.rag.index = object()  # type: ignore[assignment]
     session_manager.session_id = "session-1"
-    session_manager.chat_engine = object()
+    session_manager.chat_engine = object()  # type: ignore[assignment]
 
     monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args: 0)
     monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
@@ -349,7 +349,7 @@ def test_chat_rewrites_retrieval_query_without_prefixing_session_context(
         "sources": [],
     }
     session_manager.session_id = "rewrite-session"
-    session_manager.chat_engine = object()
+    session_manager.chat_engine = object()  # type: ignore[assignment]
 
     monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
 

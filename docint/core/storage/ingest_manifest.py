@@ -27,12 +27,15 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TypeVar
 
 from loguru import logger
 
 from docint.utils.retry import retry_with_backoff
+
+T = TypeVar("T")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ingest_manifest (
@@ -147,7 +150,7 @@ class IngestManifest:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _execute(self, operation: str, fn: Any) -> Any:
+    def _execute(self, operation: str, fn: Callable[[], T]) -> T:
         """Run *fn* under the instance lock with locked-DB retries.
 
         Args:
