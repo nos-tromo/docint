@@ -21,7 +21,7 @@ from docint.utils.env_cfg import (
 # isort: on
 
 import ollama
-from docling.models.inference_engines.image_classification.transformers_engine import (
+from docling.models.inference_engines.image_classification.transformers_engine import (  # type: ignore[attr-defined]
     TransformersImageClassificationEngineOptions,
 )
 from docling.models.stages.code_formula.code_formula_model import CodeFormulaModel

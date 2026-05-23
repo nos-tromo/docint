@@ -1738,7 +1738,7 @@ def test_ingest_upload_empty_emits_warning_and_completes(
     assert "Ingestion failed" not in body
 
     # select_collection must NOT have been called — DummyRAG.selected stays empty.
-    assert api_module.rag.selected == []
+    assert cast(Any, api_module.rag).selected == []
 
 
 def test_ingest_upload_success_does_not_warm_query_engine(
@@ -2048,7 +2048,7 @@ def test_ingest_sync_empty_returns_empty_flag(
     assert body["data_dir"] == str(tmp_path)
 
     # Collection was never created, so no select_collection should have fired.
-    assert api_module.rag.selected == []
+    assert cast(Any, api_module.rag).selected == []
 
 
 def test_ingest_sync_success_does_not_warm_query_engine(
@@ -2122,7 +2122,7 @@ def test_ingest_sync_success_does_not_warm_query_engine(
         "lazily."
     )
     # select_collection must also not run eagerly — DummyRAG.selected stays empty.
-    assert api_module.rag.selected == []
+    assert cast(Any, api_module.rag).selected == []
 
 
 def test_query_forwards_retrieval_query_to_validation_payload(

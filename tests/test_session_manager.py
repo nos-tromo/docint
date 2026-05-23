@@ -202,13 +202,13 @@ def test_chat_uses_request_scoped_filtered_engine(
     filtered_engine.query.return_value = filtered_response
 
     session_manager.rag.query_engine = MagicMock()
-    session_manager.rag.build_query_engine.return_value = filtered_engine
-    session_manager.rag.rewrite_retrieval_query.return_value = "rewritten hello"
-    session_manager.rag.expand_query_with_graph_with_debug.return_value = (
+    session_manager.rag.build_query_engine.return_value = filtered_engine  # type: ignore[attr-defined]
+    session_manager.rag.rewrite_retrieval_query.return_value = "rewritten hello"  # type: ignore[attr-defined]
+    session_manager.rag.expand_query_with_graph_with_debug.return_value = (  # type: ignore[attr-defined]
         "expanded hello",
         {},
     )
-    session_manager.rag._normalize_response_data.return_value = {
+    session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
         "response": "Hi",
         "sources": [],
     }
@@ -225,9 +225,9 @@ def test_chat_uses_request_scoped_filtered_engine(
         metadata_filter_rules=[{"field": "mimetype", "operator": "mime_match"}],
     )
 
-    session_manager.rag.build_query_engine.assert_called_once()
+    session_manager.rag.build_query_engine.assert_called_once()  # type: ignore[attr-defined]
     filtered_engine.query.assert_called_once_with("expanded hello")
-    session_manager.rag._normalize_response_data.assert_called_once_with(
+    session_manager.rag._normalize_response_data.assert_called_once_with(  # type: ignore[attr-defined]
         "hello",
         filtered_response,
         metadata_filters_active=True,
@@ -255,13 +255,13 @@ def test_stream_chat_includes_final_response_when_no_tokens(
     streaming_response.source_nodes = []
     streaming_engine.query.return_value = streaming_response
 
-    session_manager.rag.build_query_engine.return_value = streaming_engine
-    session_manager.rag.rewrite_retrieval_query.return_value = "rewritten hello"
-    session_manager.rag.expand_query_with_graph_with_debug.return_value = (
+    session_manager.rag.build_query_engine.return_value = streaming_engine  # type: ignore[attr-defined]
+    session_manager.rag.rewrite_retrieval_query.return_value = "rewritten hello"  # type: ignore[attr-defined]
+    session_manager.rag.expand_query_with_graph_with_debug.return_value = (  # type: ignore[attr-defined]
         "expanded hello",
         {},
     )
-    session_manager.rag._normalize_response_data.return_value = {
+    session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
         "response": "Fallback answer",
         "sources": [],
         "reasoning": None,
@@ -339,12 +339,12 @@ def test_chat_rewrites_retrieval_query_without_prefixing_session_context(
     filtered_response = MagicMock()
     engine.query.return_value = filtered_response
     session_manager.rag.query_engine = engine
-    session_manager.rag.rewrite_retrieval_query.return_value = "What did Alice post?"
-    session_manager.rag.expand_query_with_graph_with_debug.return_value = (
+    session_manager.rag.rewrite_retrieval_query.return_value = "What did Alice post?"  # type: ignore[attr-defined]
+    session_manager.rag.expand_query_with_graph_with_debug.return_value = (  # type: ignore[attr-defined]
         "What did Alice post?",
         {"applied": False},
     )
-    session_manager.rag._normalize_response_data.return_value = {
+    session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
         "response": "Grounded answer",
         "sources": [],
     }
@@ -355,7 +355,7 @@ def test_chat_rewrites_retrieval_query_without_prefixing_session_context(
 
     session_manager.chat("What did she post?")
 
-    rewrite_context = session_manager.rag.rewrite_retrieval_query.call_args.kwargs["conversation_context"]
+    rewrite_context = session_manager.rag.rewrite_retrieval_query.call_args.kwargs["conversation_context"]  # type: ignore[attr-defined]
     assert "Tell me about Alice" in rewrite_context
     assert "Alice posted about launch" in rewrite_context
     engine.query.assert_called_once_with("What did Alice post?")

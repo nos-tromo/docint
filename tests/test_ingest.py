@@ -7,6 +7,7 @@ from typing import Any, ClassVar, Never, cast
 
 import pytest
 from llama_index.core import Document
+from llama_index.core.schema import TextNode
 
 import docint.cli.ingest as ingest
 import docint.core.ingest.ingestion_pipeline as pipeline_module
@@ -367,7 +368,7 @@ def test_nextext_transcript_routed_to_per_segment_nodes(
     nodes = pl._create_nodes_without_enrichment(docs)
 
     assert len(nodes) == 3, f"Expected 3 nodes (one per segment), got {len(nodes)}"
-    node_texts = [n.text for n in nodes]
+    node_texts = [cast(TextNode, n).text for n in nodes]
     for text in segment_texts:
         assert text in node_texts, f"Segment text {text!r} missing from nodes — concatenation occurred"
 
@@ -422,7 +423,7 @@ def test_nextext_transcript_kind_wins_over_json_extension(
         f"Expected 3 per-segment nodes; got {len(nodes)} — dispatcher likely "
         "routed transcript_segment docs through the JSON path."
     )
-    node_texts = [n.text for n in nodes]
+    node_texts = [cast(TextNode, n).text for n in nodes]
     for text in segment_texts:
         assert text in node_texts, (
             f"Segment text {text!r} missing from nodes — transcript path was not used (likely mis-routed to json_docs)."

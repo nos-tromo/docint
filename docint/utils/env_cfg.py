@@ -1055,9 +1055,12 @@ class PipelineConfig:
     vision_ocr_max_tokens: int
 
 
+PIPELINE_VERSION = "1.0.0"
+
+
 def load_pipeline_config(
     default_text_coverage_threshold: float = 0.01,
-    default_pipeline_version: str = "1.0.0",
+    default_pipeline_version: str = PIPELINE_VERSION,
     default_artifacts_dir: str | None = None,
     default_max_retries: int = 2,
     default_force_reprocess: bool = False,

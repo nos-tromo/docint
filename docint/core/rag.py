@@ -111,7 +111,7 @@ __all__ = [
     "urllib",
 ]
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
-from qdrant_client.qdrant_fastembed import IDF_EMBEDDING_MODELS
+from qdrant_client.qdrant_fastembed import IDF_EMBEDDING_MODELS  # type: ignore[attr-defined]
 
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
