@@ -106,7 +106,6 @@ class DocumentIngestionPipeline:
 
     # --- Constructor args ---
     data_dir: Path
-    device: str
     ner_model: OpenAI | None
     progress_callback: Callable[[str], None] | None
     hate_speech_model: OpenAI | None = None

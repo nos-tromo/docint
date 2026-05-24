@@ -6,10 +6,6 @@
 ### backend is reached only via the nginx sidecar, never host-published.
 
 services:
-  frontend-cpu:
-    ports:
-      - "${DOCINT_HOST_PORT:-8080}:80"
-
-  frontend-cuda:
+  frontend:
     ports:
       - "${DOCINT_HOST_PORT:-8080}:80"

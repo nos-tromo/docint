@@ -32,16 +32,7 @@ and chat. It ships with:
    make volumes    # external Docker volumes
    ```
 
-3. Pick one profile by setting `PROFILE` in `.env`:
-
-   | Profile | Use when |
-   | --- | --- |
-   | `cpu` | CPU-only machine |
-   | `cuda` | NVIDIA GPU machine |
-
-   `PROFILE` defaults to `cpu`; override per-invocation as `make up PROFILE=cuda`.
-
-4. Build and start the stack:
+3. Build and start the stack:
 
    ```bash
    make build
@@ -52,14 +43,13 @@ and chat. It ships with:
    published for local development. The base `docker/compose.yaml` is the
    production shape and publishes no host ports.
 
-5. Open the app:
+4. Open the app:
 
    - App: <http://localhost:8080> (override with `FRONTEND_PORT` in `.env`)
 
    The backend is reachable only via the nginx sidecar — it is no longer
    published on the host. Use `docker compose --env-file .env -f
-   docker/compose.yaml exec backend-cpu …` (or `backend-cuda`) to interact
-   with it directly.
+   docker/compose.yaml exec backend …` to interact with it directly.
 
    Qdrant is **not** served by this stack — it is provided by the sibling
    `data-plane` project. Start it once with `cd ../data-plane && make up`
@@ -67,8 +57,10 @@ and chat. It ships with:
 
 ### Docker Notes
 
-- Set `INFERENCE_PROVIDER` and `OPENAI_API_BASE` in `.env` — profiles select
-  hardware only and do not set a provider.
+- docint ships a single CPU-only image. All ML inference (chat,
+  embeddings, rerank, NER, CLIP) is delegated to the external
+  [vllm-service](https://github.com/nos-tromo/vllm-service) stack.
+- Set `INFERENCE_PROVIDER` and `OPENAI_API_BASE` in `.env`.
 - The `openai` provider requires `OPENAI_API_KEY` in `.env`.
 - The `vllm` provider requires `OPENAI_API_BASE` in `.env`.
   Deploy the standalone vLLM app first, then start Docint. You can use [vllm-service](https://github.com/nos-tromo/vllm-service) to serve text, vision, embedding, reranking and audio endpoints.

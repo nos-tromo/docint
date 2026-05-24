@@ -5,10 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Install dependencies (torch/torchvision are optional extras held only
-# for transitive llama-index pulls — Phase 3 will drop them entirely)
-uv sync --extra cpu
-uv sync --extra cuda
+# Install dependencies (single env, no extras — docint is CPU-only Python;
+# all ML inference is delegated to vllm-service over HTTP).
+uv sync
 
 # Run tests
 uv run pytest
@@ -33,15 +32,17 @@ uv run ingest --help
 uv run query --help
 uv run load-models          # pre-download model assets
 
-# Docker (Makefile is PROFILE-driven; PROFILE=cpu|cuda read from .env, default cpu)
+# Docker — single CPU image, no profile toggle.
 make network   # create the external inference-net + data-net (one-time)
 make volumes   # create the external Docker volumes (one-time)
-make up        # build + run the active profile; override: make up PROFILE=cuda
+make up        # build + run docint
 ```
 
 ## Architecture
 
 Document Intelligence is a RAG stack: FastAPI backend + React SPA + Qdrant vector DB + pluggable inference (Ollama, OpenAI-compatible APIs, or external vLLM).
+
+**All ML inference is remote.** docint ships no GPU code and no local model runtime: chat/embeddings go through the OpenAI-compatible API, reranking through `{RERANK_API_BASE}/rerank`, NER through `{NER_API_BASE}/gliner`, and CLIP image+text embedding through `{CLIP_API_BASE}/clip/*`. All four default to the LiteLLM router alias of the full vllm-service stack; standalone CPU profiles (`ner-only`, `rerank-only`, `clip-only`) live in `vllm-service/docker/compose.*-only.yaml` and let non-CUDA dev hosts override the relevant `*_API_BASE` independently. The runtime container is a single Debian-slim image (no CUDA, no `[cuda]` extra).
 
 **Request flow:**
 ```

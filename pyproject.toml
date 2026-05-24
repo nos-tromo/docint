@@ -54,16 +54,6 @@ query-eval = "docint.cli.eval:main"
 verify = "docint.cli.verify:main"
 load-models = "docint.utils.model_cfg:main"
 
-[project.optional-dependencies]
-cpu = [
-  "torch>=2.11.0",
-  "torchvision>=0.26.0",
-]
-cuda = [
-  "torch>=2.11.0",
-  "torchvision>=0.26.0",
-]
-
 [dependency-groups]
 dev = [
     "mypy==1.19.0",
@@ -109,26 +99,3 @@ no_incremental = true
 
 [tool.uv]
 package = true
-conflicts = [
-  [{ extra = "cpu" }, { extra = "cuda" }],
-]
-
-[tool.uv.sources]
-torch = [
-  { index = "pytorch-cu128", extra = "cuda" },
-  { index = "pytorch-cpu", extra = "cpu" },
-]
-torchvision = [
-  { index = "pytorch-cu128", extra = "cuda" },
-  { index = "pytorch-cpu", extra = "cpu" },
-]
-
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true

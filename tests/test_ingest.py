@@ -157,7 +157,6 @@ def _make_pipeline(
     # We must forcibly set the extractor AFTER init.
     pipeline = DocumentIngestionPipeline(
         data_dir=tmp_path,
-        device="cpu",
         clean_fn=lambda x: x,
         ner_model=None,
         progress_callback=None,
@@ -310,7 +309,6 @@ def _install_transcript_pipeline_stubs(
 
     pl = DocumentIngestionPipeline(
         data_dir=tmp_path,
-        device="cpu",
         ner_model=None,
         progress_callback=None,
     )
@@ -514,7 +512,6 @@ def test_hate_speech_detection_attaches_flagged_metadata(monkeypatch: pytest.Mon
 
     pipeline = DocumentIngestionPipeline(
         data_dir=tmp_path,
-        device="cpu",
         ner_model=None,
         progress_callback=None,
         hate_speech_model=cast(Any, FakeModel()),
@@ -624,7 +621,6 @@ def test_hate_speech_detection_parallel_workers(monkeypatch: pytest.MonkeyPatch,
 
     pipeline = DocumentIngestionPipeline(
         data_dir=tmp_path,
-        device="cpu",
         ner_model=None,
         progress_callback=None,
         hate_speech_model=cast(Any, FakeModel()),
@@ -698,7 +694,6 @@ def test_build_streaming_yields_enrichment_batches_and_completion_hashes(
 
     pipeline = DocumentIngestionPipeline(
         data_dir=tmp_path,
-        device="cpu",
         ner_model=None,
         progress_callback=None,
     )
@@ -794,7 +789,6 @@ def _make_streaming_pipeline(
 
     return DocumentIngestionPipeline(
         data_dir=tmp_path,
-        device="cpu",
         ner_model=None,
         progress_callback=None,
     )
