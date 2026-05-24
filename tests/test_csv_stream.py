@@ -35,6 +35,7 @@ def _parse(body: bytes) -> list[list[str]]:
 
 
 def test_stream_csv_emits_bom_and_header() -> None:
+    """Stream csv emits bom and header."""
     chunks = list(stream_csv([], ["a", "b"]))
     assert chunks
     assert chunks[0].startswith(UTF8_BOM)
@@ -43,12 +44,14 @@ def test_stream_csv_emits_bom_and_header() -> None:
 
 
 def test_stream_csv_writes_rows_in_column_order() -> None:
+    """Stream csv writes rows in column order."""
     rows = [{"b": "2", "a": "1"}, {"a": "x", "b": "y"}]
     parsed = _parse(_collect(stream_csv(rows, ["a", "b"])))
     assert parsed == [["a", "b"], ["1", "2"], ["x", "y"]]
 
 
 def test_stream_csv_rfc4180_quoting() -> None:
+    """Stream csv rfc4180 quoting."""
     rows = [
         {"a": 'has "quotes"', "b": "has,comma"},
         {"a": "newline\nhere", "b": "ok"},
@@ -59,16 +62,19 @@ def test_stream_csv_rfc4180_quoting() -> None:
 
 
 def test_stream_csv_coerces_none_to_empty_string() -> None:
+    """Stream csv coerces none to empty string."""
     parsed = _parse(_collect(stream_csv([{"a": None, "b": "x"}], ["a", "b"])))
     assert parsed[1] == ["", "x"]
 
 
 def test_stream_csv_coerces_list_with_semicolon_join() -> None:
+    """Stream csv coerces list with semicolon join."""
     parsed = _parse(_collect(stream_csv([{"types": ["PERSON", "ORG"]}], ["types"])))
     assert parsed[1] == ["PERSON;ORG"]
 
 
 def test_stream_csv_emits_chunks_at_boundary() -> None:
+    """Stream csv emits chunks at boundary."""
     rows = [{"a": str(i), "b": str(i * 2)} for i in range(130)]
     chunks = list(stream_csv(rows, ["a", "b"], rows_per_chunk=64))
     # 1 chunk for BOM+header, 2 chunks for 64+64 rows, 1 trailing chunk for 2.
@@ -80,6 +86,7 @@ def test_stream_csv_emits_chunks_at_boundary() -> None:
 
 
 def test_stream_csv_first_chunk_arrives_before_full_iteration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stream csv first chunk arrives before full iteration."""
     yielded: list[int] = []
 
     def slow_rows() -> Iterator[dict[str, Any]]:
@@ -97,6 +104,8 @@ def test_stream_csv_first_chunk_arrives_before_full_iteration(monkeypatch: pytes
 
 
 def test_stream_csv_emits_error_row_on_iterator_failure() -> None:
+    """Stream csv emits error row on iterator failure."""
+
     def failing_rows() -> Iterator[dict[str, Any]]:
         yield {"a": 1, "b": 2}
         raise RuntimeError("boom")
@@ -109,6 +118,7 @@ def test_stream_csv_emits_error_row_on_iterator_failure() -> None:
 
 
 def test_entity_stats_row_handles_missing_fields() -> None:
+    """Entity stats row handles missing fields."""
     row = entity_stats_row({"text": "Alice", "type": "PERSON", "mentions": 5}, rank=1)
     assert row == {"rank": 1, "entity": "Alice", "type": "PERSON", "mentions": 5}
 
@@ -117,11 +127,13 @@ def test_entity_stats_row_handles_missing_fields() -> None:
 
 
 def test_entity_stats_row_accepts_count_alias() -> None:
+    """Entity stats row accepts count alias."""
     row = entity_stats_row({"text": "X", "type": "Y", "count": 11}, rank=2)
     assert row["mentions"] == 11
 
 
 def test_ner_source_row_pulls_reference_metadata() -> None:
+    """Ner source row pulls reference metadata."""
     chunk = {
         "filename": "doc.pdf",
         "page": 3,
@@ -143,6 +155,7 @@ def test_ner_source_row_pulls_reference_metadata() -> None:
 
 
 def test_ner_source_row_falls_back_to_source_ref_and_text() -> None:
+    """Ner source row falls back to source ref and text."""
     chunk = {"source_ref": "transcript.json", "text": "fallback text"}
     row = ner_source_row(chunk, entity_label="X")
     assert row["source"] == "transcript.json"
@@ -150,6 +163,7 @@ def test_ner_source_row_falls_back_to_source_ref_and_text() -> None:
 
 
 def test_hate_speech_row_full_payload() -> None:
+    """Hate speech row full payload."""
     chunk = {
         "filename": "doc.pdf",
         "page": 3,
@@ -168,6 +182,7 @@ def test_hate_speech_row_full_payload() -> None:
 
 
 def test_document_row_preserves_entity_types_list() -> None:
+    """Document row preserves entity types list."""
     doc = {
         "filename": "a.pdf",
         "mimetype": "application/pdf",
@@ -183,6 +198,7 @@ def test_document_row_preserves_entity_types_list() -> None:
 
 
 def test_column_constants_match_documented_schemas() -> None:
+    """Column constants match documented schemas."""
     # Guard against accidental column drift that would break the CLI <-> HTTP
     # parity contract.
     assert ENTITY_STATS_COLUMNS == ("rank", "entity", "type", "mentions")

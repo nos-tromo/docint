@@ -1,9 +1,6 @@
 import type { ChatTurnData } from '@/components/chat/ChatTurn'
 import type {
   ChatFinalEvent,
-  HateSpeechRow,
-  NerEntityRow,
-  NerSourceRow,
   ReferenceMetadata,
   Source,
   SummaryResponse
@@ -158,39 +155,10 @@ export function summaryToMarkdown(meta: SummaryResponse | null, text: string): s
   return out.join('\n').trimEnd() + '\n'
 }
 
-// ---------------------------------------------------------------------------
-// Entity / hate-speech (analysis-chunk format)
-// ---------------------------------------------------------------------------
-
-export function entityFindingsToText(
-  entity: NerEntityRow,
-  chunks: NerSourceRow[]
-): string {
-  const label = `${entity.text} [${entity.type || 'Unlabeled'}]`
-  const out: string[] = [`Entity Findings: ${label}`, '']
-  chunks.forEach((c, i) => out.push(...analysisChunkBlock(c, i + 1)))
-  return out.join('\n').trimEnd() + '\n'
-}
-
-export function hateSpeechToText(rows: HateSpeechRow[]): string {
-  const out: string[] = ['Hate-Speech Findings', '']
-  rows.forEach((r, i) =>
-    out.push(
-      ...analysisChunkBlock(r, i + 1, [
-        ['Category', r.category],
-        ['Confidence', r.confidence],
-        ['Reason', r.reason]
-      ])
-    )
-  )
-  return out.join('\n').trimEnd() + '\n'
-}
-
-// CSV exports for entity findings and hate-speech findings are streamed
-// directly from the backend (`/collections/{name}/export/*.csv`) so the
-// browser no longer accumulates the whole collection in memory. The
-// canonical schemas live in `docint/utils/csv_stream.py` and the frontend
-// uses anchor links built by `csvExportHref` in `src/api/collections.ts`.
+// Entity-findings and hate-speech downloads are streamed directly from
+// the backend (`/collections/{name}/export/*.csv`). Schemas live in
+// `docint/utils/csv_stream.py`; the frontend uses anchor links built by
+// `csvExportHref` in `src/api/collections.ts`.
 
 // Re-export for tests/UI callers.
 export { TXT_EXPORT_SEPARATOR }

@@ -26,6 +26,7 @@ class FakeQdrant:
     """
 
     def __init__(self, points: list[FakePoint]) -> None:
+        """Seed the fake collection with a fixed list of points."""
         self.points = points
         self.calls: list[dict[str, Any]] = []
 
@@ -39,6 +40,7 @@ class FakeQdrant:
         with_payload: bool,
         with_vectors: bool,
     ) -> tuple[list[FakePoint], Any]:
+        """Record the call and return the requested slice + next offset."""
         self.calls.append(
             {
                 "collection_name": collection_name,
@@ -61,6 +63,7 @@ def _points(n: int) -> list[FakePoint]:
 
 
 def test_iter_scroll_yields_all_pages_in_order() -> None:
+    """Iter scroll yields all pages in order."""
     client = FakeQdrant(_points(550))
     pages = list(iter_scroll(client, collection_name="c", page_size=200))
     assert [len(p) for p in pages] == [200, 200, 150]
@@ -69,6 +72,7 @@ def test_iter_scroll_yields_all_pages_in_order() -> None:
 
 
 def test_iter_scroll_stops_on_empty_page() -> None:
+    """Iter scroll stops on empty page."""
     client = FakeQdrant([])
     pages = list(iter_scroll(client, collection_name="c", page_size=100))
     assert pages == []
@@ -76,6 +80,7 @@ def test_iter_scroll_stops_on_empty_page() -> None:
 
 
 def test_iter_scroll_respects_max_pages() -> None:
+    """Iter scroll respects max pages."""
     client = FakeQdrant(_points(1000))
     pages = list(iter_scroll(client, collection_name="c", page_size=100, max_pages=3))
     assert len(pages) == 3
@@ -83,6 +88,8 @@ def test_iter_scroll_respects_max_pages() -> None:
 
 
 def test_iter_scroll_warns_and_stops_by_default() -> None:
+    """Iter scroll warns and stops by default."""
+
     class BoomClient:
         def scroll(self, **_: Any) -> Any:
             raise RuntimeError("boom")
@@ -92,6 +99,8 @@ def test_iter_scroll_warns_and_stops_by_default() -> None:
 
 
 def test_iter_scroll_raises_when_configured() -> None:
+    """Iter scroll raises when configured."""
+
     class BoomClient:
         def scroll(self, **_: Any) -> Any:
             raise RuntimeError("boom")
@@ -101,6 +110,7 @@ def test_iter_scroll_raises_when_configured() -> None:
 
 
 def test_iter_scroll_passes_scroll_filter_through() -> None:
+    """Iter scroll passes scroll filter through."""
     client = FakeQdrant(_points(10))
     sentinel = object()
     list(iter_scroll(client, collection_name="c", scroll_filter=sentinel, page_size=5))
@@ -109,12 +119,14 @@ def test_iter_scroll_passes_scroll_filter_through() -> None:
 
 
 def test_iter_scroll_defaults_with_vectors_false() -> None:
+    """Iter scroll defaults with vectors false."""
     client = FakeQdrant(_points(3))
     list(iter_scroll(client, collection_name="c"))
     assert client.calls[0]["with_vectors"] is False
 
 
 def test_paginate_scroll_round_trips_cursor() -> None:
+    """Paginate scroll round trips cursor."""
     client = FakeQdrant(_points(75))
     points, cursor = paginate_scroll(client, collection_name="c", cursor=None, limit=30)
     assert [p.id for p in points] == list(range(30))
@@ -131,12 +143,14 @@ def test_paginate_scroll_round_trips_cursor() -> None:
 
 
 def test_paginate_scroll_accepts_none_cursor() -> None:
+    """Paginate scroll accepts none cursor."""
     client = FakeQdrant(_points(5))
     points, _ = paginate_scroll(client, collection_name="c", cursor=None, limit=10)
     assert [p.id for p in points] == [0, 1, 2, 3, 4]
 
 
 def test_paginate_scroll_accepts_extra_cursor_payload() -> None:
+    """Paginate scroll accepts extra cursor payload."""
     client = FakeQdrant(_points(10))
     token = encode_cursor(3, extra={"flushed": ["a"]})
     points, _ = paginate_scroll(client, collection_name="c", cursor=token, limit=2)

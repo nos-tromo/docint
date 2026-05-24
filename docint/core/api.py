@@ -405,12 +405,6 @@ class NERSearchOut(BaseModel):
     results: list[dict[str, Any]] = []
 
 
-class HateSpeechOut(BaseModel):
-    """Hate-speech classification results for a document or collection."""
-
-    results: list[dict[str, Any]] = []
-
-
 class AgentChatIn(BaseModel):
     """Request payload for a single agent chat turn."""
 
@@ -949,9 +943,15 @@ async def summarize_stream(refresh: bool = Query(False)) -> StreamingResponse:
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
-@app.get("/collections/ner", tags=["Query"])
+@app.get("/collections/ner", tags=["Query"], deprecated=True)
 def get_collection_ner(refresh: bool = False) -> dict[str, list[dict[str, Any]]]:
     """Get all NER data (entities and relations) for the currently selected collection.
+
+    Deprecated: scrolls the entire collection in one response and is the
+    pre-pagination path. Prefer ``GET /collections/ner/sources`` (paginated,
+    optionally server-filtered by entity) and ``GET /collections/ner/stats``
+    for the entity dropdown. Retained to keep external consumers working
+    until they migrate.
 
     Args:
         refresh (bool): If ``True``, bypass in-memory cache and re-fetch from storage.
