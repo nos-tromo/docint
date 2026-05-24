@@ -729,7 +729,6 @@ class ModelConfig:
 
     embed_model: str
     embed_tokenizer_repo: str
-    image_embed_model: str
     ner_model: str
     rerank_model: str
     sparse_model: str
@@ -739,7 +738,6 @@ class ModelConfig:
 
 def load_model_env(
     default_embed_model: str = "bge-m3",
-    default_image_embed_model: str = "openai/clip-vit-base-patch32",
     default_ner_model: str = "gliner-community/gliner_large-v2.5",
     default_rerank_model: str = "BAAI/bge-reranker-v2-m3",
     default_sparse_model: str = "Qdrant/all_miniLM_L6_v2_with_attentions",
@@ -751,7 +749,6 @@ def load_model_env(
     Args:
         default_embed_model(str): Default embedding model identifier for
             Ollama-compatible embeddings.
-        default_image_embed_model (str): Default image embedding model identifier.
         default_ner_model (str): Default NER model identifier.
         default_rerank_model (str): Default reranker model identifier.
         default_sparse_model (str): Default sparse model identifier.
@@ -764,7 +761,6 @@ def load_model_env(
         - embed_tokenizer_repo (str): HF repo id of the tokenizer used
           for offline token counting at ingestion time. Empty when
           tokenization happens on the provider side (e.g. ``openai``).
-        - image_embed_model (str): The image embedding model identifier.
         - ner_model (str): The NER model identifier.
         - rerank_model (str): The reranker model identifier.
         - sparse_model (str): The sparse model identifier.
@@ -790,7 +786,6 @@ def load_model_env(
     return ModelConfig(
         embed_model=os.getenv("EMBED_MODEL", default_embed_model),
         embed_tokenizer_repo=os.getenv("EMBED_TOKENIZER_REPO", default_embed_tokenizer_repo),
-        image_embed_model=os.getenv("IMAGE_EMBED_MODEL", default_image_embed_model),
         ner_model=os.getenv("NER_MODEL", default_ner_model),
         rerank_model=os.getenv("RERANK_MODEL", default_rerank_model),
         sparse_model=os.getenv("SPARSE_MODEL", default_sparse_model),
@@ -884,6 +879,54 @@ def load_ner_client_env(
         api_key=api_key,
         threshold=float(os.getenv("NER_THRESHOLD", default_threshold)),
         timeout=float(os.getenv("NER_TIMEOUT", default_timeout)),
+    )
+
+
+@dataclass(frozen=True)
+class CLIPClientConfig:
+    """Dataclass for the remote CLIP image+text embedding service HTTP client."""
+
+    api_base: str
+    api_key: str | None
+    timeout: float
+
+
+def load_clip_client_env(
+    default_api_base: str = "http://vllm-router:4000",
+    default_timeout: float = 30.0,
+) -> "CLIPClientConfig":
+    """Load the remote CLIP client configuration from the environment.
+
+    docint reaches CLIP over HTTP. The client POSTs to
+    ``{api_base}/clip/embed_image`` (multipart or JSON-base64) and
+    ``{api_base}/clip/embed_text``, and GETs ``{api_base}/clip/dimension``
+    at startup to probe the projection size. The default ``api_base``
+    matches the LiteLLM router alias used by the full vllm-service
+    stack; for the clip-only deployment shape, override with
+    ``CLIP_API_BASE=http://clip-embed:8000``.
+
+    Args:
+        default_api_base: Fallback base URL when ``CLIP_API_BASE`` is
+            unset. Typically the full-stack vllm-router alias.
+        default_timeout: Fallback request timeout in seconds.
+
+    Returns:
+        CLIPClientConfig: Resolved configuration.
+
+        - ``api_base``: Base URL; the client appends ``/clip/*`` itself.
+        - ``api_key``: Bearer token sent as ``Authorization: Bearer ...``
+          when set; omitted when ``None``. The clip-only shape requires
+          no auth (trust ``inference-net``); the full vllm-service shape
+          requires the router's ``OPENAI_API_KEY`` master key —
+          operators set ``CLIP_API_KEY=$OPENAI_API_KEY`` explicitly.
+        - ``timeout``: Per-request HTTP timeout in seconds.
+    """
+    raw_key = os.getenv("CLIP_API_KEY")
+    api_key = raw_key.strip() if raw_key and raw_key.strip() else None
+    return CLIPClientConfig(
+        api_base=os.getenv("CLIP_API_BASE", default_api_base).rstrip("/"),
+        api_key=api_key,
+        timeout=float(os.getenv("CLIP_TIMEOUT", default_timeout)),
     )
 
 

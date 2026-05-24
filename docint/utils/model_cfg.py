@@ -24,41 +24,11 @@ import ollama
 from dotenv import load_dotenv
 from huggingface_hub import snapshot_download
 from loguru import logger
-from transformers import AutoProcessor, CLIPModel
 
 from docint.utils.logger_cfg import init_logger
 
 load_dotenv()
 init_logger()
-
-
-def load_clip_model(model_id: str, cache_folder: Path) -> None:
-    """Preloads the CLIP model to the HuggingFace cache.
-
-    Args:
-        model_id (str): The name of the CLIP model to load.
-        cache_folder (Path): The path to the HuggingFace cache folder.
-    """
-    resolved = resolve_hf_cache_path(cache_dir=cache_folder, repo_id=model_id)
-    if resolved:
-        logger.info("Found local cache for CLIP at {}", resolved)
-        try:
-            CLIPModel.from_pretrained(
-                pretrained_model_name_or_path=str(resolved),
-                local_files_only=True,
-            )
-            AutoProcessor.from_pretrained(  # type: ignore[no-untyped-call]
-                pretrained_model_name_or_path=str(resolved),
-                local_files_only=True,
-            )
-        except Exception as e:
-            logger.warning("Failed to load CLIP from local cache: {}. Retrying with download...", e)
-            CLIPModel.from_pretrained(pretrained_model_name_or_path=model_id)
-            AutoProcessor.from_pretrained(pretrained_model_name_or_path=model_id)  # type: ignore[no-untyped-call]
-    else:
-        CLIPModel.from_pretrained(pretrained_model_name_or_path=model_id)
-        AutoProcessor.from_pretrained(pretrained_model_name_or_path=model_id)  # type: ignore[no-untyped-call]
-    logger.info("Loaded CLIP model: {}", model_id)
 
 
 def load_hf_model(model_id: str, cache_folder: Path, kw: str, trust_remote_code: bool = False) -> None:
@@ -129,13 +99,10 @@ def main() -> None:
     for model_id in model_config.__dataclass_fields__.keys():
         logger.info("{}: {}", model_id, getattr(model_config, model_id))
 
-    # Load the app's models
-    # CLIP (used by Picture Classifier and Layout Model)
-    load_clip_model(model_id=model_config.image_embed_model, cache_folder=path_config.hf_hub_cache)
-
-    # NER is no longer loaded here: docint now calls the remote GLiNER
-    # service hosted by vllm-service over HTTP. Model preloading happens
-    # in the vllm-service `ner` (or `gliner-ner`) container, not here.
+    # NER and CLIP are no longer loaded here: docint now calls the
+    # remote GLiNER and CLIP services hosted by vllm-service over HTTP.
+    # Model preloading happens in the vllm-service `ner` / `clip` (or
+    # `gliner-ner` / `clip-embed`) containers, not here.
 
     # Hugging Face
     hf_assets: list[tuple[str, str]] = [

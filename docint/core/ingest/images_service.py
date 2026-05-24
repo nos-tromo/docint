@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -14,23 +13,20 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Protocol, TypeVar, cast
 
-import torch
 from llama_index.core.schema import ImageNode
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from loguru import logger
 from PIL import Image
 from qdrant_client import QdrantClient, models
-from transformers import AutoProcessor, CLIPModel
 
 from docint.core.storage.utils import qdrant_collection_exists
+from docint.utils.clip_client import RemoteCLIPBackend
 from docint.utils.env_cfg import (
     ImageIngestionConfig,
     ModelConfig,
     load_host_env,
     load_image_ingestion_config,
     load_model_env,
-    load_path_env,
-    resolve_hf_cache_path,
 )
 from docint.utils.llm_sanitize import looks_like_no_image_refusal, strip_reasoning
 from docint.utils.mimetype import get_mimetype
@@ -39,11 +35,11 @@ from docint.utils.openai_cfg import OpenAIPipeline
 T = TypeVar("T")
 
 __all__ = [
-    "CLIPImageEmbeddingBackend",
     "ImageAsset",
     "ImageIngestionConfig",
     "ImageIngestionService",
     "IngestContext",
+    "RemoteCLIPBackend",
     "StoredImageRecord",
     "VisionJSONTagger",
 ]
@@ -133,75 +129,6 @@ class ImageEmbeddingBackend(Protocol):
 
     def embed_text(self, text: str) -> list[float]:
         """Return a dense embedding for text queries."""
-
-
-@dataclass
-class CLIPImageEmbeddingBackend:
-    """Image embedding backend based on CLIP from ``transformers``."""
-
-    image_embed_model_id: str
-    cache_dir: Path
-    device: str = field(default="cpu")
-    model: Any = field(init=False)
-    processor: Any = field(init=False)
-    _dimension: int = field(init=False)
-
-    def __post_init__(self) -> None:
-        """Resolve the HF cache path and load the image-embedding processor + model."""
-        resolved = resolve_hf_cache_path(cache_dir=self.cache_dir, repo_id=self.image_embed_model_id)
-        resolved_model = str(resolved) if resolved else self.image_embed_model_id
-        local_only = os.getenv("HF_HUB_OFFLINE", "0") == "1"
-        self.processor = AutoProcessor.from_pretrained(  # type: ignore[no-untyped-call]
-            pretrained_model_name_or_path=resolved_model,
-            cache_dir=str(self.cache_dir),
-            local_files_only=local_only,
-        )
-        self.model = CLIPModel.from_pretrained(
-            pretrained_model_name_or_path=resolved_model,
-            cache_dir=str(self.cache_dir),
-            local_files_only=local_only,
-        )
-        self.model.eval()
-        self.model.to(self.device)
-        self._dimension = int(self.model.config.projection_dim)
-
-    @property
-    def dimension(self) -> int:
-        """Return CLIP projection dimensionality."""
-        return self._dimension
-
-    def embed(self, image_bytes: bytes) -> list[float]:
-        """Embed image bytes with CLIP image tower.
-
-        Args:
-            image_bytes (bytes): Raw bytes of the image to embed.
-
-        Returns:
-            list[float]: A list of floats representing the normalized image embedding vector.
-        """
-        image = Image.open(BytesIO(image_bytes)).convert("RGB")
-        inputs = self.processor(images=image, return_tensors="pt")
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        with torch.no_grad():
-            features = self.model.get_image_features(**inputs)
-            features = features / features.norm(dim=-1, keepdim=True)
-        return cast(list[float], features[0].detach().cpu().tolist())
-
-    def embed_text(self, text: str) -> list[float]:
-        """Embed query text with CLIP text tower.
-
-        Args:
-            text (str): The input text to embed.
-
-        Returns:
-            list[float]: A list of floats representing the normalized text embedding vector.
-        """
-        inputs = self.processor(text=[text], return_tensors="pt", padding=True, truncation=True)
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        with torch.no_grad():
-            features = self.model.get_text_features(**inputs)
-            features = features / features.norm(dim=-1, keepdim=True)
-        return cast(list[float], features[0].detach().cpu().tolist())
 
 
 class ImageTaggingBackend(Protocol):
@@ -532,19 +459,14 @@ class ImageIngestionService:
             return None
         if not self.img_ingestion_config.embedding_enabled:
             return None
-        cache_dir = load_path_env().hf_hub_cache
         try:
-            self.embedding_backend = CLIPImageEmbeddingBackend(
-                image_embed_model_id=self.model_config.image_embed_model,
-                cache_dir=cache_dir,
-                device=self.device,
-            )
+            self.embedding_backend = RemoteCLIPBackend()
         except Exception as exc:
             self._embedding_backend_error = str(exc)
             if self.img_ingestion_config.fail_on_embedding_error:
                 raise
             logger.warning(
-                "Image embedding backend unavailable (continuing without image vectors): {}",
+                "Remote CLIP backend unavailable (continuing without image vectors): {}",
                 exc,
             )
             return None
