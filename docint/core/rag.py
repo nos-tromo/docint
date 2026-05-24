@@ -4887,10 +4887,12 @@ class RAG:
         do it. Constructing that class eagerly loads the fastembed
         sparse encoder (onnxruntime + tokenizer, ~150-200 MB of native
         memory that resists GC), which in combination with the second
-        ``QdrantVectorStore`` built by ``ingest_docs`` and the GLiNER
-        weights tripped the kernel OOM killer on CSV ingests. We
-        therefore pay the schema-replication cost (defaults pinned to
-        LlamaIndex's constants) to avoid the duplicate native load.
+        ``QdrantVectorStore`` built by ``ingest_docs`` and the in-process
+        GLiNER weights (now removed — NER is a remote service hosted by
+        ``vllm-service``) tripped the kernel OOM killer on CSV ingests.
+        The duplicate-load risk is smaller post-GLiNER, but we still pay
+        the schema-replication cost (defaults pinned to LlamaIndex's
+        constants) to avoid the duplicate native load from fastembed.
 
         When ``openai_dimensions`` is configured the vector size is taken
         from there; otherwise a single embed probe determines it. Probe

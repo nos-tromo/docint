@@ -35,9 +35,7 @@ from docint.utils.env_cfg import (
     load_ner_env,
 )
 from docint.utils.hashing import compute_file_hash
-from docint.utils.ner_extractor import (
-    build_gliner_ner_extractor,
-)
+from docint.utils.ner_client import build_remote_ner_extractor
 from docint.utils.openai_cfg import OpenAIPipeline
 
 CleanFn = Callable[[str], str]
@@ -162,11 +160,11 @@ class DocumentIngestionPipeline:
         self.ner_max_workers = ner_cfg.max_workers
 
         if ner_enabled:
-            logger.info("Initializing GLiNER NER extractor")
+            logger.info("Initializing remote NER extractor")
             try:
-                self.entity_extractor = build_gliner_ner_extractor(device=self.device)
+                self.entity_extractor = build_remote_ner_extractor()
             except Exception:
-                logger.warning("GLiNER model unavailable - continuing without NER")
+                logger.warning("Remote NER client init failed - continuing without NER")
                 self.entity_extractor = None
 
         hate_speech_cfg = load_hate_speech_env()

@@ -598,7 +598,7 @@ dependencies = [
     { name = "fastembed" },
     { name = "fastparquet" },
     { name = "flagembedding" },
-    { name = "gliner" },
+    { name = "httpx" },
     { name = "huggingface-hub" },
     { name = "llama-index" },
     { name = "llama-index-embeddings-huggingface" },
@@ -660,7 +660,7 @@ requires-dist = [
     { name = "fastembed-gpu", marker = "extra == 'cuda'" },
     { name = "fastparquet", specifier = ">=2026.3.0" },
     { name = "flagembedding", specifier = ">=1.4.0" },
-    { name = "gliner", specifier = ">=0.2.23" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "huggingface-hub", specifier = ">=0.26,<1.0" },
     { name = "llama-index", specifier = ">=0.14.20" },
     { name = "llama-index-embeddings-huggingface", specifier = ">=0.7.0" },
@@ -1023,26 +1023,6 @@ wheels = [
 [package.optional-dependencies]
 http = [
     { name = "aiohttp" },
-]
-
-[[package]]
-name = "gliner"
-version = "0.2.24"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "huggingface-hub" },
-    { name = "onnxruntime" },
-    { name = "sentencepiece" },
-    { name = "torch", version = "2.11.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'extra-6-docint-cpu') or (extra == 'extra-6-docint-cpu' and extra == 'extra-6-docint-cuda')" },
-    { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-6-docint-cpu' and extra == 'extra-6-docint-cuda') or (extra != 'extra-6-docint-cpu' and extra != 'extra-6-docint-cuda')" },
-    { name = "torch", version = "2.11.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform != 'darwin' and extra == 'extra-6-docint-cpu') or (extra == 'extra-6-docint-cpu' and extra == 'extra-6-docint-cuda')" },
-    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "extra == 'extra-6-docint-cuda'" },
-    { name = "tqdm" },
-    { name = "transformers" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/2b/6d/677d50855311e4a1286204c5ef2ef5672d01688246a303bde5326311bdad/gliner-0.2.24.tar.gz", hash = "sha256:191a37d1b3d297927c37ae890ce904e9d4e9d3f4c8e19715e77a9876e5f8a575", size = 160568, upload-time = "2025-11-26T18:20:32.867Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f1/50/6aae23929bd019300ef13fb79d60609215c53d4541963eaffc438e62f77e/gliner-0.2.24-py3-none-any.whl", hash = "sha256:efe614e05b31d06d848373aef8270f567e34fe1b4e96f816a8c70cef24908a6c", size = 151880, upload-time = "2025-11-26T18:20:28.801Z" },
 ]
 
 [[package]]

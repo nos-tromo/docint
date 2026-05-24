@@ -2286,11 +2286,14 @@ def test_device_uses_use_device_override(
     assert rag.device == "cpu"
 
 
-def test_build_ingestion_pipeline_passes_configured_device_to_gliner(
+def test_build_ingestion_pipeline_wires_remote_ner_extractor(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Non-OpenAI ingestion should forward the resolved device to GLiNER.
+    """Enabled NER should wire the remote extractor onto the pipeline.
+
+    The remote extractor talks to vllm-service over HTTP, so docint no
+    longer threads a device argument through the build call.
 
     Args:
         monkeypatch: The monkeypatch fixture.
@@ -2299,25 +2302,16 @@ def test_build_ingestion_pipeline_passes_configured_device_to_gliner(
     monkeypatch.setenv("USE_DEVICE", "cpu")
     monkeypatch.setenv("NER_ENABLED", "true")
 
-    captured: dict[str, Any] = {}
+    call_count = 0
 
-    def _fake_build_gliner_ner_extractor(
-        labels: list[str] | None = None,
-        threshold: float = 0.3,
-        device: str | None = None,
-    ) -> object:
-        """Capture GLiNER device selection during pipeline construction.
-
-        Args:
-            labels: Requested GLiNER labels.
-            threshold: Requested GLiNER threshold.
-            device: Requested execution device.
+    def _fake_build_remote_ner_extractor() -> object:
+        """Capture remote-extractor construction during pipeline build.
 
         Returns:
             object: Placeholder extractor object.
         """
-        del labels, threshold
-        captured["device"] = device
+        nonlocal call_count
+        call_count += 1
         return object()
 
     rag = RAG(qdrant_collection="test")
@@ -2331,8 +2325,8 @@ def test_build_ingestion_pipeline_passes_configured_device_to_gliner(
     )
     monkeypatch.setattr(
         pipeline_module,
-        "build_gliner_ner_extractor",
-        _fake_build_gliner_ner_extractor,
+        "build_remote_ner_extractor",
+        _fake_build_remote_ner_extractor,
     )
     monkeypatch.setattr(
         rag_module,
@@ -2343,7 +2337,7 @@ def test_build_ingestion_pipeline_passes_configured_device_to_gliner(
     pipeline = rag._build_ingestion_pipeline()
 
     assert pipeline.entity_extractor is not None
-    assert captured["device"] == "cpu"
+    assert call_count == 1
     assert getattr(rag._image_ingestion_service, "device", None) == "cpu"
 
 
