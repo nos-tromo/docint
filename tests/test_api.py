@@ -1,5 +1,6 @@
 """Tests for the FastAPI application endpoints."""
 
+import io
 import types
 from collections.abc import Generator
 from pathlib import Path
@@ -2541,3 +2542,132 @@ def test_select_does_not_warm_documents_or_hate_speech_caches(client: TestClient
 
     assert getattr(rag, "warm_calls", 0) == 0
     assert rag.ner_refresh_calls == []
+
+
+# ---------------------------------------------------------------------------
+# /collections/documents/count
+# ---------------------------------------------------------------------------
+
+
+def test_documents_count_returns_size_of_document_list(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The count endpoint returns ``len(list_documents())`` for the active collection."""
+    _select_alpha(client)
+    rag = cast(DummyRAG, api_module.rag)
+    rag.documents = [{"filename": f"d{i}.pdf"} for i in range(7)]
+
+    # The endpoint calls rag.get_document_count(); the dummy doesn't have one,
+    # so wire a thin lambda for this test.
+    monkeypatch.setattr(rag, "get_document_count", lambda: len(rag.documents), raising=False)
+
+    response = client.get("/collections/documents/count")
+    assert response.status_code == 200
+    assert response.json() == {"count": 7}
+
+
+def test_documents_count_requires_active_collection(client: TestClient) -> None:
+    """Count endpoint must reject calls with no active collection."""
+    api_module.rag.qdrant_collection = ""
+    response = client.get("/collections/documents/count")
+    assert response.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# /sessions/{session_id}/sources.zip
+# ---------------------------------------------------------------------------
+
+
+def test_session_sources_zip_streams_unique_files(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Session-ZIP bundles every unique cited file exactly once and streams as application/zip."""
+    import zipfile as _zipfile
+
+    src_a = tmp_path / "a.pdf"
+    src_b = tmp_path / "b.pdf"
+    src_a.write_bytes(b"hello from a")
+    src_b.write_bytes(b"hello from b")
+
+    def fake_history(self: Any, sid: str) -> list[dict[str, Any]]:
+        assert sid == "sess-1"
+        return [
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": "a",
+                "sources": [
+                    {"file_hash": "h-a", "filename": "a.pdf", "collection": "alpha"},
+                    {"file_hash": "h-b", "filename": "b.pdf", "collection": "alpha"},
+                    # Duplicate hash must not produce a second entry.
+                    {"file_hash": "h-a", "filename": "a.pdf", "collection": "alpha"},
+                ],
+            },
+        ]
+
+    def fake_resolve(
+        collection: str,
+        file_hash: str,
+        *,
+        filename_hint: str | None = None,
+    ) -> Path | None:
+        return {"h-a": src_a, "h-b": src_b}.get(file_hash)
+
+    monkeypatch.setattr(DummySessionManager, "get_session_history", fake_history, raising=False)
+    monkeypatch.setattr(api_module, "_resolve_source_file_path", fake_resolve)
+
+    response = client.get("/sessions/sess-1/sources.zip")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/zip")
+    assert "session-sess-1-sources.zip" in response.headers["content-disposition"]
+
+    archive = _zipfile.ZipFile(io.BytesIO(response.content))
+    assert sorted(archive.namelist()) == ["a.pdf", "b.pdf"]
+    assert archive.read("a.pdf") == b"hello from a"
+    assert archive.read("b.pdf") == b"hello from b"
+
+
+def test_session_sources_zip_returns_404_when_no_files(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty or unresolvable sessions surface as HTTP 404, not an empty ZIP."""
+    monkeypatch.setattr(
+        DummySessionManager,
+        "get_session_history",
+        lambda self, sid: [{"role": "user", "content": "q"}],
+        raising=False,
+    )
+    response = client.get("/sessions/empty/sources.zip")
+    assert response.status_code == 404
+
+
+def test_session_sources_zip_skips_unresolved_files(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Files the backend can't resolve are dropped silently, not failed loudly."""
+    import zipfile as _zipfile
+
+    src = tmp_path / "kept.pdf"
+    src.write_bytes(b"kept")
+
+    monkeypatch.setattr(
+        DummySessionManager,
+        "get_session_history",
+        lambda self, sid: [
+            {
+                "role": "assistant",
+                "content": "a",
+                "sources": [
+                    {"file_hash": "kept", "filename": "kept.pdf", "collection": "alpha"},
+                    {"file_hash": "missing", "filename": "missing.pdf", "collection": "alpha"},
+                ],
+            }
+        ],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_resolve_source_file_path",
+        lambda collection, file_hash, **_: src if file_hash == "kept" else None,
+    )
+
+    response = client.get("/sessions/partial/sources.zip")
+    assert response.status_code == 200
+    archive = _zipfile.ZipFile(io.BytesIO(response.content))
+    assert archive.namelist() == ["kept.pdf"]

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useCollections } from '@/hooks/useCollections'
-import { useDocuments } from '@/hooks/useDocuments'
+import { useDocumentsCount } from '@/hooks/useDocuments'
 import { useNerStats } from '@/hooks/useNer'
 import { useSessions } from '@/hooks/useSessions'
 import { useUiStore } from '@/stores/ui'
@@ -11,7 +11,7 @@ import { cn } from '@/lib/cn'
 export function Dashboard() {
   const collection = useUiStore((s) => s.selectedCollection)
   const { data: collections, isError } = useCollections()
-  const { data: documents } = useDocuments()
+  const { data: documentsCount } = useDocumentsCount()
   const { data: sessionsData } = useSessions()
   const [topK, setTopK] = useState(15)
   const [minMentions, setMinMentions] = useState(2)
@@ -43,7 +43,7 @@ export function Dashboard() {
         <KpiCard label="Collections" value={collections?.length ?? null} />
         <KpiCard
           label="Documents"
-          value={collection ? documents?.documents.length ?? null : '—'}
+          value={collection ? documentsCount?.count ?? null : '—'}
           hint={collection ? `in ${collection}` : 'select a collection'}
         />
         <KpiCard label="Sessions" value={sessionsData?.sessions.length ?? null} />

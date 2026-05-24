@@ -23,6 +23,9 @@ export const getDocumentsPage = (params: { cursor?: string | null; limit?: numbe
     limit: params.limit ?? 50
   })
 
+export const getDocumentsCount = () =>
+  apiGet<{ count: number }>('/collections/documents/count')
+
 export const getNerStats = (params: {
   top_k?: number
   min_mentions?: number

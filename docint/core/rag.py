@@ -7054,6 +7054,23 @@ class RAG:
         next_cursor = encode_cursor(end) if end < len(cached) else None
         return page, next_cursor
 
+    def get_document_count(self) -> int:
+        """Return the number of unique documents in the active collection.
+
+        Hits :attr:`_documents_cache` first; on a cache miss runs the full
+        :meth:`list_documents` scan and stores the result so subsequent
+        callers (e.g. the dashboard KPI and the paginated inspector) share
+        the same materialized list. Returns ``0`` when no collection is
+        selected.
+        """
+        if not self.qdrant_collection:
+            return 0
+        cached = self._documents_cache.get(self.qdrant_collection)
+        if cached is None:
+            cached = self.list_documents()
+            self._documents_cache[self.qdrant_collection] = cached
+        return len(cached)
+
     def get_collection_ner(self, refresh: bool = False) -> list[dict[str, Any]]:
         """Fetch all nodes from the current collection and return their NER metadata.
 

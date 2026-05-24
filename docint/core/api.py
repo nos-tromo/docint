@@ -1,7 +1,9 @@
 """FastAPI app exposing chat, ingestion, collection, and citation endpoints."""
 
 import asyncio
+import io
 import json
+import zipfile
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -171,6 +173,85 @@ def _resolve_qdrant_src_dir() -> Path:
     if path_config.qdrant_sources is None:
         raise RuntimeError("Qdrant sources directory is not configured")
     return path_config.qdrant_sources
+
+
+def _resolve_source_file_path(
+    collection: str,
+    file_hash: str,
+    *,
+    filename_hint: str | None = None,
+) -> Path | None:
+    """Resolve a ``(collection, file_hash)`` pair to an on-disk source file.
+
+    Mirrors the lookup chain used by :func:`preview_source`: scroll Qdrant
+    for a matching payload to recover the original ``file_path``, then fall
+    back to the data directory and the ``qdrant-sources`` mount under
+    ``<collection>/<filename>``. ``filename_hint`` lets callers (e.g. the
+    session ZIP endpoint) skip the Qdrant scroll when the citation row
+    already carries the filename.
+    """
+    file_path_str: str | None = None
+    try:
+        points, _ = rag.qdrant_client.scroll(
+            collection_name=collection,
+            scroll_filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="file_hash",
+                        match=models.MatchValue(value=file_hash),
+                    )
+                ]
+            ),
+            limit=1,
+            with_payload=True,
+        )
+        if not points:
+            points, _ = rag.qdrant_client.scroll(
+                collection_name=collection,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="metadata.file_hash",
+                            match=models.MatchValue(value=file_hash),
+                        )
+                    ]
+                ),
+                limit=1,
+                with_payload=True,
+            )
+        if points:
+            payload = points[0].payload or {}
+            file_path_str = (
+                payload.get("file_path")
+                or payload.get("path")
+                or (payload.get("metadata") or {}).get("file_path")
+                or (payload.get("origin") or {}).get("file_path")
+            )
+    except Exception as exc:
+        logger.warning("Failed to resolve source file for {}/{}: {}", collection, file_hash, exc)
+
+    candidates: list[Path] = []
+    filename: str | None
+    if file_path_str:
+        candidates.append(Path(file_path_str))
+        filename = Path(file_path_str).name
+    else:
+        filename = filename_hint
+
+    if filename:
+        try:
+            candidates.append(_resolve_data_dir() / filename)
+        except Exception:
+            pass
+        try:
+            candidates.append(_resolve_qdrant_src_dir() / collection / filename)
+        except Exception:
+            pass
+
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
 
 
 def _format_sse(event: str, data: dict[str, Any]) -> str:
@@ -1204,6 +1285,23 @@ def get_collection_documents(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+@app.get("/collections/documents/count", tags=["Query"])
+def get_collection_documents_count() -> dict[str, int]:
+    """Return the number of unique documents in the active collection.
+
+    Backed by the same per-collection cache as ``/collections/documents``
+    pagination, so the first call after a collection switch pays the
+    Qdrant scroll once and the dashboard KPI then reads from cache.
+    """
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+    try:
+        return {"count": rag.get_document_count()}
+    except Exception as e:
+        logger.error("Error fetching collection document count: {}", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
 def _validate_export_collection(name: str) -> None:
     """Validate that ``name`` matches the active collection and is visible.
 
@@ -1431,6 +1529,109 @@ def get_session_history(session_id: str) -> dict[str, list[dict[str, Any]]]:
     except Exception as e:
         logger.error("Error fetching history: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+def _collect_session_source_files(session_id: str) -> list[tuple[str, Path]]:
+    """Return the unique source files referenced by a session's citations.
+
+    Each entry is ``(filename_in_zip, path_on_disk)``. Files that can't be
+    resolved on disk are skipped — the ZIP is best-effort and surfaces only
+    files the backend can still serve. Collection is resolved from each
+    source's ``collection`` field when present and falls back to the
+    currently active collection so behaviour matches ``/sources/preview``.
+
+    Args:
+        session_id (str): The session whose citations should be packaged.
+
+    Returns:
+        list[tuple[str, Path]]: Pairs ready for :meth:`zipfile.ZipFile.write`.
+    """
+    messages = rag.ensure_session_manager().get_session_history(session_id)
+    active_collection = rag.qdrant_collection
+    selected: dict[str, tuple[str, Path]] = {}
+    used_arcnames: set[str] = set()
+    for message in messages:
+        for source in message.get("sources") or []:
+            if not isinstance(source, dict):
+                continue
+            file_hash = source.get("file_hash")
+            if not file_hash or file_hash in selected:
+                continue
+            collection = str(source.get("collection") or active_collection or "")
+            if not collection:
+                continue
+            filename = str(source.get("filename") or "")
+            path = _resolve_source_file_path(
+                collection,
+                str(file_hash),
+                filename_hint=filename or None,
+            )
+            if path is None:
+                continue
+
+            arcname = filename or path.name
+            base = arcname
+            counter = 1
+            while arcname in used_arcnames:
+                stem, dot, ext = base.partition(".")
+                arcname = f"{stem}_{counter}{dot}{ext}" if dot else f"{base}_{counter}"
+                counter += 1
+            used_arcnames.add(arcname)
+            selected[str(file_hash)] = (arcname, path)
+    return list(selected.values())
+
+
+@app.get("/sessions/{session_id}/sources.zip", tags=["Sessions"])
+def export_session_sources_zip(session_id: str) -> StreamingResponse:
+    """Stream a ZIP bundle of every source file cited in a session.
+
+    Resolves each citation's ``file_hash`` to an on-disk file using the same
+    lookup chain as ``/sources/preview``, deduplicates by hash, and writes the
+    files into an in-memory ZIP (typical sessions cite tens of files, not
+    thousands). Sources whose underlying file can't be found are skipped
+    rather than failing the whole download.
+
+    Args:
+        session_id (str): The session ID to package.
+
+    Returns:
+        StreamingResponse: ``application/zip`` payload with an
+        ``attachment; filename="session-<id>-sources.zip"`` header.
+
+    Raises:
+        HTTPException: 404 if the session has no resolvable sources.
+    """
+    try:
+        files = _collect_session_source_files(session_id)
+    except Exception as e:
+        logger.error("Error assembling session sources for {}: {}", session_id, e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    if not files:
+        raise HTTPException(status_code=404, detail="No source files found for this session")
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for arcname, path in files:
+            try:
+                zf.write(path, arcname=arcname)
+            except OSError as exc:
+                logger.warning("Skipping unreadable source {}: {}", path, exc)
+    buffer.seek(0)
+
+    def iter_chunks(chunk_size: int = 64 * 1024) -> Iterator[bytes]:
+        while True:
+            chunk = buffer.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="session-{session_id}-sources.zip"',
+        "X-Accel-Buffering": "no",
+        "Cache-Control": "no-store",
+    }
+    return StreamingResponse(iter_chunks(), media_type="application/zip", headers=headers)
 
 
 @app.delete("/sessions/{session_id}", tags=["Sessions"])
@@ -1881,71 +2082,7 @@ def preview_source(collection: str, file_hash: str) -> FileResponse:
     Raises:
         HTTPException: If an error occurs while retrieving the source preview.
     """
-    file_path_str = None
-    qdrant_src_dir = _resolve_qdrant_src_dir()
-
-    # 1. Try to resolve filename via Qdrant
-    try:
-        points, _ = rag.qdrant_client.scroll(
-            collection_name=collection,
-            scroll_filter=models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="file_hash",
-                        match=models.MatchValue(value=file_hash),
-                    )
-                ]
-            ),
-            limit=1,
-            with_payload=True,
-        )
-
-        if not points:
-            # Fallback: try checking 'metadata.file_hash' just in case
-            points, _ = rag.qdrant_client.scroll(
-                collection_name=collection,
-                scroll_filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="metadata.file_hash",
-                            match=models.MatchValue(value=file_hash),
-                        )
-                    ]
-                ),
-                limit=1,
-                with_payload=True,
-            )
-
-        if points:
-            payload = points[0].payload or {}
-            file_path_str = (
-                payload.get("file_path")
-                or payload.get("path")
-                or (payload.get("metadata") or {}).get("file_path")
-                or (payload.get("origin") or {}).get("file_path")
-            )
-    except Exception as e:
-        logger.warning("Failed to query Qdrant for file preview: {}", e)
-
-    # 2. If we found a path from Qdrant, try to use it
-    if file_path_str:
-        path = Path(file_path_str)
-        if path.exists() and path.is_file():
-            return FileResponse(path)
-
-        # Fallback: Check if the file exists in the default data directory
-        filename = path.name
-        data_dir = _resolve_data_dir()
-        alt_path = data_dir / filename
-
-        if alt_path.exists() and alt_path.is_file():
-            logger.info("Found file at alternative path: {}", alt_path)
-            return FileResponse(alt_path)
-
-        # Check sources root first, then legacy collection path
-        src_path = qdrant_src_dir / collection / filename
-        if src_path.exists() and src_path.is_file():
-            logger.info("Found file at sources path: {}", src_path)
-            return FileResponse(src_path)
-
-    raise HTTPException(status_code=404, detail="File not found")
+    path = _resolve_source_file_path(collection, file_hash)
+    if path is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(path)
