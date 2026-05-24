@@ -96,19 +96,13 @@ def chunk_document(
             if block.type in {BlockType.TITLE, BlockType.HEADER}:
                 title_text = block.text.strip()
                 if title_text:
-                    section_path = _update_section_path(
-                        section_path, title_text, block.type
-                    )
+                    section_path = _update_section_path(section_path, title_text, block.type)
 
             # Determine related tables/images for this block
             page_tables = table_by_page.get(page_idx, [])
             page_images = image_by_page.get(page_idx, [])
-            related_table_ids = [
-                t.table_id for t in page_tables if t.bbox.overlaps(block.bbox)
-            ]
-            related_image_ids = [
-                img.image_id for img in page_images if img.bbox.overlaps(block.bbox)
-            ]
+            related_table_ids = [t.table_id for t in page_tables if t.bbox.overlaps(block.bbox)]
+            related_image_ids = [img.image_id for img in page_images if img.bbox.overlaps(block.bbox)]
 
             # Get the text to chunk
             text = block.text.strip()
@@ -154,9 +148,7 @@ def chunk_document(
                         current_text = sentence
                     current_sentences = [sentence]
                 else:
-                    current_text = (
-                        current_text + " " + sentence if current_text else sentence
-                    )
+                    current_text = current_text + " " + sentence if current_text else sentence
                     current_sentences.append(sentence)
 
             # Emit remaining text
@@ -253,4 +245,4 @@ def _update_section_path(
         # Titles reset to top level
         return [new_heading]
     # Headers nest under the current path
-    return current_path + [new_heading]
+    return [*current_path, new_heading]

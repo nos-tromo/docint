@@ -18,7 +18,6 @@ from docint.core.readers.documents.artifacts import (
     save_table,
 )
 from docint.core.readers.documents.chunking import chunk_document
-from docint.utils.env_cfg import PipelineConfig, load_pipeline_config
 from docint.core.readers.documents.extraction import extract_images, extract_tables
 from docint.core.readers.documents.layout import (
     PypdfLayoutAnalyzer,
@@ -46,6 +45,7 @@ from docint.core.readers.documents.orchestrator import (
     DocumentPipelineOrchestrator,
 )
 from docint.core.readers.documents.triage import triage_pdf
+from docint.utils.env_cfg import PipelineConfig, load_pipeline_config
 from docint.utils.hashing import compute_file_hash
 
 # ---------------------------------------------------------------------------
@@ -151,9 +151,7 @@ class TestPageInfo:
 
     def test_default_status(self) -> None:
         """New PageInfo should default to 'pending' with no error."""
-        p = PageInfo(
-            page_index=0, has_text_layer=True, text_coverage=1.0, needs_ocr=False
-        )
+        p = PageInfo(page_index=0, has_text_layer=True, text_coverage=1.0, needs_ocr=False)
         assert p.status == "pending"
         assert p.error is None
 
@@ -211,17 +209,13 @@ class TestPipelineConfig:
         assert cfg.force_reprocess is True
         assert cfg.pipeline_version == "2.1.0"
 
-    def test_empty_pipeline_version_falls_back_to_default(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_empty_pipeline_version_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Empty ``PIPELINE_VERSION`` should fall back to default version."""
         monkeypatch.setenv("PIPELINE_VERSION", "   ")
         cfg = load_pipeline_config(default_pipeline_version="9.9.9")
         assert cfg.pipeline_version == "9.9.9"
 
-    def test_artifacts_dir_from_env(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_artifacts_dir_from_env(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """PIPELINE_ARTIFACTS_DIR env var should propagate into PipelineConfig.
 
         Args:
@@ -416,9 +410,7 @@ class TestChunking:
             text=long_text,
         )
         layout = {0: [block]}
-        page_texts = {
-            0: PageText(page_index=0, full_text=long_text, source_mix="pdf_text")
-        }
+        page_texts = {0: PageText(page_index=0, full_text=long_text, source_mix="pdf_text")}
         chunks = chunk_document("doc789", layout, page_texts, [], [], chunk_size=200)
         assert len(chunks) > 1
         for chunk in chunks:
@@ -441,7 +433,7 @@ class TestChunking:
         c1 = chunk_document("same-doc", layout, page_texts, [], [])
         c2 = chunk_document("same-doc", layout, page_texts, [], [])
         assert len(c1) == len(c2)
-        for a, b in zip(c1, c2):
+        for a, b in zip(c1, c2, strict=False):
             assert a.chunk_id == b.chunk_id
 
     def test_ocr_source_mix_propagated(self) -> None:
@@ -456,9 +448,7 @@ class TestChunking:
             text="OCR extracted text content.",
         )
         layout = {0: [block]}
-        page_texts = {
-            0: PageText(page_index=0, full_text="", source_mix="ocr", confidence=0.8)
-        }
+        page_texts = {0: PageText(page_index=0, full_text="", source_mix="ocr", confidence=0.8)}
         chunks = chunk_document("ocr-doc", layout, page_texts, [], [])
         assert len(chunks) >= 1
         assert chunks[0].source_mix == "ocr"
@@ -690,9 +680,7 @@ class TestLayoutAnalysis:
 
         # Simulate XObject with an /Image
         mock_image_obj = MagicMock()
-        mock_image_obj.get.side_effect = lambda k, d="": (
-            "/Image" if k == "/Subtype" else d
-        )
+        mock_image_obj.get.side_effect = lambda k, d="": "/Image" if k == "/Subtype" else d
         mock_image_obj.get_object.return_value = mock_image_obj
 
         mock_xobj_dict = {"/Im1": mock_image_obj}
@@ -700,9 +688,7 @@ class TestLayoutAnalysis:
         mock_xobj.get_object.return_value = mock_xobj_dict
 
         mock_resources = MagicMock()
-        mock_resources.get.side_effect = lambda k, d=None: (
-            mock_xobj if k == "/XObject" else d
-        )
+        mock_resources.get.side_effect = lambda k, d=None: mock_xobj if k == "/XObject" else d
         mock_page.get.side_effect = lambda k, d=None: (
             mock_resources if k == "/Resources" else (None if k == "/Contents" else d)
         )
@@ -743,9 +729,7 @@ class TestLayoutAnalysis:
         # No images
         mock_resources = MagicMock()
         mock_resources.get.return_value = None
-        mock_page.get.side_effect = lambda k, d=None: (
-            mock_resources if k == "/Resources" else d
-        )
+        mock_page.get.side_effect = lambda k, d=None: mock_resources if k == "/Resources" else d
 
         mock_reader = MagicMock()
         mock_reader.pages = [mock_page]
@@ -778,9 +762,7 @@ class TestLayoutAnalysis:
         mock_page.extract_text.return_value = "Just plain text. Nothing special."
         mock_resources = MagicMock()
         mock_resources.get.return_value = None
-        mock_page.get.side_effect = lambda k, d=None: (
-            mock_resources if k == "/Resources" else d
-        )
+        mock_page.get.side_effect = lambda k, d=None: mock_resources if k == "/Resources" else d
 
         mock_reader = MagicMock()
         mock_reader.pages = [mock_page]
@@ -806,9 +788,7 @@ class TestLayoutAnalysis:
         mock_page.extract_text.return_value = ""
         mock_resources = MagicMock()
         mock_resources.get.return_value = None
-        mock_page.get.side_effect = lambda k, d=None: (
-            mock_resources if k == "/Resources" else d
-        )
+        mock_page.get.side_effect = lambda k, d=None: mock_resources if k == "/Resources" else d
 
         mock_reader = MagicMock()
         mock_reader.pages = [mock_page]
@@ -825,12 +805,7 @@ class TestLayoutAnalysis:
     def test_mixed_content_page(self) -> None:
         """A page with images, tables, and text should produce all block types."""
         mixed_text = (
-            "Introduction paragraph.\n"
-            "Table 1: Key metrics\n"
-            "Metric   Value\n"
-            "Loss     0.5\n"
-            "\n"
-            "Some concluding remarks."
+            "Introduction paragraph.\nTable 1: Key metrics\nMetric   Value\nLoss     0.5\n\nSome concluding remarks."
         )
 
         mock_page = MagicMock()
@@ -844,17 +819,13 @@ class TestLayoutAnalysis:
 
         # Simulate image XObject
         mock_image_obj = MagicMock()
-        mock_image_obj.get.side_effect = lambda k, d="": (
-            "/Image" if k == "/Subtype" else d
-        )
+        mock_image_obj.get.side_effect = lambda k, d="": "/Image" if k == "/Subtype" else d
         mock_image_obj.get_object.return_value = mock_image_obj
         mock_xobj_dict = {"/Im1": mock_image_obj}
         mock_xobj = MagicMock()
         mock_xobj.get_object.return_value = mock_xobj_dict
         mock_resources = MagicMock()
-        mock_resources.get.side_effect = lambda k, d=None: (
-            mock_xobj if k == "/XObject" else d
-        )
+        mock_resources.get.side_effect = lambda k, d=None: mock_xobj if k == "/XObject" else d
         mock_page.get.side_effect = lambda k, d=None: (
             mock_resources if k == "/Resources" else (None if k == "/Contents" else d)
         )
@@ -889,14 +860,7 @@ class TestContentStreamParsing:
 
     def test_extract_with_scaling(self) -> None:
         """Should handle scale + translate combos correctly."""
-        stream = (
-            "q\n"
-            "1 0 0 1 196.559 397.582 cm\n"
-            ".6 0 0 .6 0 0 cm\n"
-            "364.8 0 0 537.36 0 0 cm\n"
-            "/Im1 Do\n"
-            "Q\n"
-        )
+        stream = "q\n1 0 0 1 196.559 397.582 cm\n.6 0 0 .6 0 0 cm\n364.8 0 0 537.36 0 0 cm\n/Im1 Do\nQ\n"
         result = _extract_image_bboxes_from_stream(stream, {"/Im1"})
         assert "/Im1" in result
         bbox = result["/Im1"]
@@ -914,10 +878,7 @@ class TestContentStreamParsing:
 
     def test_multiple_images(self) -> None:
         """Multiple images on one page should all get bboxes."""
-        stream = (
-            "q\n200 0 0 300 50 100 cm\n/Im1 Do\nQ\n"
-            "q\n150 0 0 200 400 500 cm\n/Im2 Do\nQ\n"
-        )
+        stream = "q\n200 0 0 300 50 100 cm\n/Im1 Do\nQ\nq\n150 0 0 200 400 500 cm\n/Im2 Do\nQ\n"
         result = _extract_image_bboxes_from_stream(stream, {"/Im1", "/Im2"})
         assert len(result) == 2
         assert "/Im1" in result
@@ -931,7 +892,6 @@ class TestTableDetection:
 
     def test_find_table_end_basic(self) -> None:
         """Table end should be found after tabular rows."""
-
         lines = [
             "Table 1: Results",
             "A    B    C",
@@ -958,7 +918,6 @@ class TestTableDetection:
 
     def test_detect_tables_removes_table_from_text(self) -> None:
         """Table regions should be excluded from the remaining text."""
-
         text = (
             "Introduction.\n"
             "Table 1: Data\n"
@@ -967,9 +926,7 @@ class TestTableDetection:
             "\n"
             "Conclusion paragraph with enough text to not look like a table row."
         )
-        table_blocks, remaining = PypdfLayoutAnalyzer._detect_tables(
-            text, 0, BBox(0, 0, 612, 792), 612.0, 792.0
-        )
+        table_blocks, remaining = PypdfLayoutAnalyzer._detect_tables(text, 0, BBox(0, 0, 612, 792), 612.0, 792.0)
         assert len(table_blocks) == 1
         assert "Table 1:" in table_blocks[0].text
         assert "Introduction" in remaining
@@ -978,11 +935,8 @@ class TestTableDetection:
 
     def test_no_table_returns_full_text(self) -> None:
         """Without table captions, all text should remain."""
-
         text = "Just regular text without any tables."
-        table_blocks, remaining = PypdfLayoutAnalyzer._detect_tables(
-            text, 0, BBox(0, 0, 612, 792), 612.0, 792.0
-        )
+        table_blocks, remaining = PypdfLayoutAnalyzer._detect_tables(text, 0, BBox(0, 0, 612, 792), 612.0, 792.0)
         assert len(table_blocks) == 0
         assert remaining == text
 
@@ -1024,9 +978,7 @@ class TestMatrixMultiplication:
 class TestOCR:
     """Tests for OCR page-text assembly."""
 
-    def test_build_page_text_pdf_only(
-        self, sample_page_info: PageInfo, sample_layout_block: LayoutBlock
-    ) -> None:
+    def test_build_page_text_pdf_only(self, sample_page_info: PageInfo, sample_layout_block: LayoutBlock) -> None:
         """Page with layout blocks only should yield source_mix='pdf_text'."""
         result = build_page_text(sample_page_info, [sample_layout_block], [])
         assert result.source_mix == "pdf_text"
@@ -1048,9 +1000,7 @@ class TestOCR:
         assert "OCR text" in result.full_text
         assert result.confidence == 0.75
 
-    def test_build_page_text_mixed(
-        self, sample_page_info: PageInfo, sample_layout_block: LayoutBlock
-    ) -> None:
+    def test_build_page_text_mixed(self, sample_page_info: PageInfo, sample_layout_block: LayoutBlock) -> None:
         """Page with both layout blocks and OCR spans should yield source_mix='mixed'."""
         ocr_spans = [
             OCRSpan(
@@ -1160,7 +1110,7 @@ class TestOCR:
         mock_page.get_width.return_value = 612.0
         mock_page.get_height.return_value = 792.0
 
-        # Simulate a 3000×4000 rendered bitmap that exceeds the 1024 cap.
+        # Simulate a 3000x4000 rendered bitmap that exceeds the 1024 cap.
         from PIL import Image as PILImage
 
         large_img = PILImage.new("RGB", (3000, 4000), color="white")
@@ -1472,9 +1422,7 @@ class TestOCR:
 
             response = MagicMock()
             response.choices = [MagicMock()]
-            response.choices[
-                0
-            ].message.content = "<think>analyzing layout</think>ACTUAL_OCR_TEXT"
+            response.choices[0].message.content = "<think>analyzing layout</think>ACTUAL_OCR_TEXT"
 
             engine = VisionOCREngine(
                 "/fake/doc.pdf",
@@ -1532,9 +1480,7 @@ class TestOCR:
 
             reasoning_only = MagicMock()
             reasoning_only.choices = [MagicMock()]
-            reasoning_only.choices[
-                0
-            ].message.content = "<think>lots of reasoning and nothing else</think>"
+            reasoning_only.choices[0].message.content = "<think>lots of reasoning and nothing else</think>"
 
             recovered = MagicMock()
             recovered.choices = [MagicMock()]
@@ -1596,9 +1542,7 @@ class TestOCR:
 
             refusal = MagicMock()
             refusal.choices = [MagicMock()]
-            refusal.choices[
-                0
-            ].message.content = "I don't see any image attached to your message."
+            refusal.choices[0].message.content = "I don't see any image attached to your message."
 
             recovered = MagicMock()
             recovered.choices = [MagicMock()]
@@ -1688,9 +1632,7 @@ class TestOCR:
 class TestOrchestrator:
     """Tests for the document pipeline orchestrator."""
 
-    def test_process_with_mocked_pdf(
-        self, pipeline_config: PipelineConfig, tmp_path: Path
-    ) -> None:
+    def test_process_with_mocked_pdf(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
         """Processing a mocked PDF should produce a completed manifest with artifacts."""
         # Create a dummy file for hashing
         pdf_file = tmp_path / "test.pdf"
@@ -1734,11 +1676,8 @@ class TestOrchestrator:
         artifacts_dir = Path(pipeline_config.artifacts_dir)
         assert (artifacts_dir / doc_id / "manifest.json").exists()
 
-    def test_idempotent_rerun(
-        self, pipeline_config: PipelineConfig, tmp_path: Path
-    ) -> None:
+    def test_idempotent_rerun(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
         """Second run should reuse artifacts when pipeline version matches."""
-
         # Disable force to test idempotency
         config = PipelineConfig(
             text_coverage_threshold=pipeline_config.text_coverage_threshold,
@@ -1791,11 +1730,8 @@ class TestOrchestrator:
         assert manifest2.status == "completed"
         assert manifest2.doc_id == manifest1.doc_id
 
-    def test_page_failure_isolation(
-        self, pipeline_config: PipelineConfig, tmp_path: Path
-    ) -> None:
+    def test_page_failure_isolation(self, pipeline_config: PipelineConfig, tmp_path: Path) -> None:
         """A failing page should not crash the whole document."""
-
         pdf_file = tmp_path / "test.pdf"
         pdf_file.write_bytes(b"%PDF-1.4 failure isolation test")
 
@@ -1839,7 +1775,7 @@ class TestOrchestrator:
 
         call_count = 0
 
-        def flaky_fn():
+        def flaky_fn() -> str:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -1887,17 +1823,13 @@ class TestOrchestrator:
 
         # Image XObject so layout produces a FIGURE block
         mock_image_obj = MagicMock()
-        mock_image_obj.get.side_effect = lambda k, d="": (
-            "/Image" if k == "/Subtype" else d
-        )
+        mock_image_obj.get.side_effect = lambda k, d="": "/Image" if k == "/Subtype" else d
         mock_image_obj.get_object.return_value = mock_image_obj
         mock_xobj_dict = {"/Im1": mock_image_obj}
         mock_xobj = MagicMock()
         mock_xobj.get_object.return_value = mock_xobj_dict
         mock_resources = MagicMock()
-        mock_resources.get.side_effect = lambda k, d=None: (
-            mock_xobj if k == "/XObject" else d
-        )
+        mock_resources.get.side_effect = lambda k, d=None: mock_xobj if k == "/XObject" else d
         mock_page.get.side_effect = lambda k, d=None: (
             mock_resources if k == "/Resources" else (None if k == "/Contents" else d)
         )
@@ -1941,14 +1873,9 @@ class TestOrchestrator:
         artifacts_dir = Path(config.artifacts_dir)
         chunks_path = artifacts_dir / doc_id / "chunks.jsonl"
         assert chunks_path.exists(), "Expected chunks.jsonl to be created"
-        lines = [
-            line for line in chunks_path.read_text().strip().split("\n") if line.strip()
-        ]
+        lines = [line for line in chunks_path.read_text().strip().split("\n") if line.strip()]
         assert len(lines) >= 1
         import json
 
         chunk_data = json.loads(lines[0])
-        assert (
-            "vision OCR" in chunk_data["text"].lower()
-            or "scanned" in chunk_data["text"].lower()
-        )
+        assert "vision OCR" in chunk_data["text"].lower() or "scanned" in chunk_data["text"].lower()

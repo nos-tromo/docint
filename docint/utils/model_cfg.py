@@ -21,15 +21,15 @@ from docint.utils.env_cfg import (
 # isort: on
 
 import ollama
+from docling.models.inference_engines.image_classification.transformers_engine import (  # type: ignore[attr-defined]
+    TransformersImageClassificationEngineOptions,
+)
 from docling.models.stages.code_formula.code_formula_model import CodeFormulaModel
 from docling.models.stages.layout.layout_model import LayoutModel
 from docling.models.stages.ocr.rapid_ocr_model import RapidOcrModel
 from docling.models.stages.picture_classifier.document_picture_classifier import (
     DocumentPictureClassifier,
     DocumentPictureClassifierOptions,
-)
-from docling.models.inference_engines.image_classification.transformers_engine import (
-    TransformersImageClassificationEngineOptions,
 )
 from docling.models.stages.table_structure.table_structure_model import (
     TableStructureModel,
@@ -61,19 +61,17 @@ def load_clip_model(model_id: str, cache_folder: Path) -> None:
                 pretrained_model_name_or_path=str(resolved),
                 local_files_only=True,
             )
-            AutoProcessor.from_pretrained(
+            AutoProcessor.from_pretrained(  # type: ignore[no-untyped-call]
                 pretrained_model_name_or_path=str(resolved),
                 local_files_only=True,
             )
         except Exception as e:
-            logger.warning(
-                "Failed to load CLIP from local cache: {}. Retrying with download...", e
-            )
+            logger.warning("Failed to load CLIP from local cache: {}. Retrying with download...", e)
             CLIPModel.from_pretrained(pretrained_model_name_or_path=model_id)
-            AutoProcessor.from_pretrained(pretrained_model_name_or_path=model_id)
+            AutoProcessor.from_pretrained(pretrained_model_name_or_path=model_id)  # type: ignore[no-untyped-call]
     else:
         CLIPModel.from_pretrained(pretrained_model_name_or_path=model_id)
-        AutoProcessor.from_pretrained(pretrained_model_name_or_path=model_id)
+        AutoProcessor.from_pretrained(pretrained_model_name_or_path=model_id)  # type: ignore[no-untyped-call]
     logger.info("Loaded CLIP model: {}", model_id)
 
 
@@ -106,9 +104,7 @@ def load_docling_models() -> None:
         logger.info("Loaded Code/Formula model")
 
         # 5. Picture Classifier (Standard HF cache)
-        opts = DocumentPictureClassifierOptions(
-            engine_options=TransformersImageClassificationEngineOptions()
-        )
+        opts = DocumentPictureClassifierOptions(engine_options=TransformersImageClassificationEngineOptions())
         DocumentPictureClassifier.download_models(repo_id=opts.repo_id, progress=True)
         logger.info("Loaded Picture Classifier model")
 
@@ -139,9 +135,7 @@ def load_gliner_model(model_id: str, cache_folder: Path) -> None:
     logger.info("Loaded GLiNER model: {}", model_id)
 
 
-def load_hf_model(
-    model_id: str, cache_folder: Path, kw: str, trust_remote_code: bool = False
-) -> None:
+def load_hf_model(model_id: str, cache_folder: Path, kw: str, trust_remote_code: bool = False) -> None:
     """Ensure a Hugging Face model snapshot is available in the local cache.
 
     Args:
@@ -164,9 +158,7 @@ def load_hf_model(
     logger.info("Loaded {} model: {}", kw, model_id)
 
 
-def load_ollama_model(
-    model_id: str, kw: str, host: str = "http://localhost:11434"
-) -> None:
+def load_ollama_model(model_id: str, kw: str, host: str = "http://localhost:11434") -> None:
     """Loads the specified model using Ollama.
 
     Args:
@@ -213,17 +205,13 @@ def main() -> None:
 
     # Load the app's models
     # CLIP (used by Picture Classifier and Layout Model)
-    load_clip_model(
-        model_id=model_config.image_embed_model, cache_folder=path_config.hf_hub_cache
-    )
+    load_clip_model(model_id=model_config.image_embed_model, cache_folder=path_config.hf_hub_cache)
 
     # Docling
     load_docling_models()
 
     # GLiNER
-    load_gliner_model(
-        model_id=model_config.ner_model, cache_folder=path_config.hf_hub_cache
-    )
+    load_gliner_model(model_id=model_config.ner_model, cache_folder=path_config.hf_hub_cache)
 
     # Hugging Face
     hf_assets: list[tuple[str, str]] = [

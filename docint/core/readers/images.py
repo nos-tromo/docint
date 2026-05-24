@@ -1,8 +1,9 @@
 """Image reader that delegates to the shared image ingestion service."""
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
@@ -22,9 +23,7 @@ from docint.utils.mimetype import get_mimetype
 class ImageReader(BaseReader):
     """Image reader that routes image ingestion through the shared image service."""
 
-    image_ingestion_service: ImageIngestionService = field(
-        default_factory=ImageIngestionService
-    )
+    image_ingestion_service: ImageIngestionService = field(default_factory=ImageIngestionService)
     source_collection: str | None = None
 
     def _enrich_document(
@@ -110,9 +109,7 @@ class ImageReader(BaseReader):
         file_path = Path(file) if not isinstance(file, Path) else file
         extra_info = kwargs.get("extra_info", {})
 
-        file_hash = (
-            extra_info.get("file_hash") if isinstance(extra_info, dict) else None
-        )
+        file_hash = extra_info.get("file_hash") if isinstance(extra_info, dict) else None
         if file_hash is None:
             file_hash = compute_file_hash(file_path)
 
@@ -131,11 +128,7 @@ class ImageReader(BaseReader):
         )
         text = record.llm_description.strip()
         if record.llm_tags:
-            text = (
-                f"{text}\n\nTags: {', '.join(record.llm_tags)}"
-                if text
-                else f"Tags: {', '.join(record.llm_tags)}"
-            )
+            text = f"{text}\n\nTags: {', '.join(record.llm_tags)}" if text else f"Tags: {', '.join(record.llm_tags)}"
         if not text:
             text = f"Image file: {file_path.name}"
 

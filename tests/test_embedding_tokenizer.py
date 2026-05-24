@@ -23,8 +23,9 @@ contract.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import pytest
 from _pytest.logging import LogCaptureFixture
@@ -85,9 +86,7 @@ class _StubTokenizer:
         """
         self.ids_with_special = ids_with_special or [1, 2, 3, 4]
         self.ids_without_special = (
-            ids_without_special
-            if ids_without_special is not None
-            else self.ids_with_special[1:-1]
+            ids_without_special if ids_without_special is not None else self.ids_with_special[1:-1]
         )
         self.calls: list[dict[str, Any]] = []
 
@@ -133,9 +132,7 @@ def test_build_token_counter_returns_callable_when_tokenizer_loads(
         classmethod(lambda cls, *args, **kwargs: stub),
     )
 
-    counter = embedding_tokenizer.build_embedding_token_counter(
-        "BAAI/bge-m3", Path("/tmp/cache")
-    )
+    counter = embedding_tokenizer.build_embedding_token_counter("BAAI/bge-m3", Path("/tmp/cache"))
 
     assert callable(counter)
     # mypy-friendly: tell the type checker counter is not None here.
@@ -162,9 +159,7 @@ def test_build_token_counter_returns_none_when_cache_missing(
         lambda cache_dir, repo_id: None,
     )
 
-    result = embedding_tokenizer.build_embedding_token_counter(
-        "BAAI/bge-m3", Path("/tmp/cache")
-    )
+    result = embedding_tokenizer.build_embedding_token_counter("BAAI/bge-m3", Path("/tmp/cache"))
 
     assert result is None
     combined = "\n".join(str(r.msg) for r in loguru_caplog.records)
@@ -212,9 +207,7 @@ def test_build_token_counter_returns_none_when_autotokenizer_raises(
         classmethod(lambda cls, *args, **kwargs: _raise(*args, **kwargs)),
     )
 
-    result = embedding_tokenizer.build_embedding_token_counter(
-        "BAAI/bge-m3", Path("/tmp/cache")
-    )
+    result = embedding_tokenizer.build_embedding_token_counter("BAAI/bge-m3", Path("/tmp/cache"))
 
     assert result is None
     assert any(record.levelno >= logging.WARNING for record in loguru_caplog.records), (
@@ -249,15 +242,11 @@ def test_token_counter_includes_special_tokens(
         classmethod(lambda cls, *args, **kwargs: stub),
     )
 
-    counter = embedding_tokenizer.build_embedding_token_counter(
-        "BAAI/bge-m3", Path("/tmp/cache")
-    )
+    counter = embedding_tokenizer.build_embedding_token_counter("BAAI/bge-m3", Path("/tmp/cache"))
 
     assert counter is not None
     ids = counter("any text")
 
     assert len(ids) == 5, "token counter must return the add_special_tokens=True length"
     assert stub.calls, "tokenizer.encode was never called"
-    assert stub.calls[-1]["add_special_tokens"] is True, (
-        f"expected add_special_tokens=True, got {stub.calls[-1]!r}"
-    )
+    assert stub.calls[-1]["add_special_tokens"] is True, f"expected add_special_tokens=True, got {stub.calls[-1]!r}"

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from copy import deepcopy
-from typing import Sequence, cast
+from typing import Any, cast
 
 from llama_index.core.bridge.pydantic import PrivateAttr
 from llama_index.core.node_parser import NodeParser, SentenceSplitter
@@ -14,10 +15,11 @@ from docint.utils.env_cfg import load_ingestion_env
 
 
 class HierarchicalNodeParser(NodeParser):
-    """Splits documents into a hierarchy of nodes:
+    """Splits documents into a hierarchy of nodes.
+
     - Level 0: Document (Implicit)
     - Level 1: Coarse Chunks (Sections/Paragraphs/Large blocks)
-    - Level 2: Fine Chunks (Sentence-based)
+    - Level 2: Fine Chunks (Sentence-based).
 
     Fine chunks are linked to their parent coarse chunk via metadata.
     """
@@ -34,7 +36,7 @@ class HierarchicalNodeParser(NodeParser):
         coarse_chunk_size: int = 8192,
         fine_chunk_size: int = 1024,
         fine_chunk_overlap: int = 0,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         """Initialize the HierarchicalNodeParser.
 
@@ -42,18 +44,13 @@ class HierarchicalNodeParser(NodeParser):
             coarse_chunk_size (int): Size of coarse chunks (Level 1).
             fine_chunk_size (int): Size of fine chunks (Level 2).
             fine_chunk_overlap (int): Overlap for fine chunks.
+            **kwargs: Forwarded to the ``NodeParser`` base class.
         """
         super().__init__(**kwargs)
-        self._coarse_splitter = SentenceSplitter(
-            chunk_size=coarse_chunk_size, chunk_overlap=0
-        )
-        self._fine_splitter = SentenceSplitter(
-            chunk_size=fine_chunk_size, chunk_overlap=fine_chunk_overlap
-        )
+        self._coarse_splitter = SentenceSplitter(chunk_size=coarse_chunk_size, chunk_overlap=0)
+        self._fine_splitter = SentenceSplitter(chunk_size=fine_chunk_size, chunk_overlap=fine_chunk_overlap)
 
-    def _parse_nodes(
-        self, nodes: Sequence[BaseNode], show_progress: bool = False, **kwargs
-    ) -> list[BaseNode]:
+    def _parse_nodes(self, nodes: Sequence[BaseNode], show_progress: bool = False, **kwargs: Any) -> list[BaseNode]:
         """Parse nodes into hierarchical chunks.
 
         If the input nodes are Documents (Level 0), we first create Coarse Chunks (Level 1),
@@ -64,6 +61,7 @@ class HierarchicalNodeParser(NodeParser):
         Args:
             nodes (Sequence[BaseNode]): Input nodes to parse.
             show_progress (bool): Whether to show progress.
+            **kwargs: Forwarded to llama-index's parse_nodes helpers; unused locally.
 
         Returns:
             list[BaseNode]: Hierarchically chunked nodes.
@@ -79,7 +77,8 @@ class HierarchicalNodeParser(NodeParser):
             # 1. If the node is large, split into Coarse Chunks.
             # 2. If the node is already "coarse" (e.g. from Markdown parser), use it directly.
 
-            # However, to be consistent, let's assume `nodes` passed here are what we want to be parents of the fine chunks.
+            # However, to be consistent, let's assume `nodes` passed here are what we want to
+            # be parents of the fine chunks.
             # But `_create_nodes` in ingestion pipeline handles different document types.
             # For "plain text", we get a Document. We should split it into Coarse.
             # For "markdown", we might get Nodes (sections). We should treat as Coarse (or split if huge).
@@ -96,13 +95,11 @@ class HierarchicalNodeParser(NodeParser):
                 # Level 0 -> Level 1
                 # Use coarse splitter to get Level 1 chunks
                 doc_node = cast(Document, node)
-                coarse_candidates = self._coarse_splitter.get_nodes_from_documents(
-                    [doc_node]
-                )
+                coarse_candidates = self._coarse_splitter.get_nodes_from_documents([doc_node])
             else:
                 # Already a node (Level 1 candidate).
                 # Check if it's too big? If so, split it further?
-                # For simplicity, let's treat it as a Coarse Chunk, but ensure it respects coarse_chunk_size if possible.
+                # For simplicity, treat it as a Coarse Chunk but respect coarse_chunk_size.
                 # If we re-split a Node, we lose its original identity if we aren't careful.
                 # But here we assume the incoming nodes (e.g. Markdown sections) describe the "structure".
                 # If a section is huge, we probably WANT to split it.
@@ -117,9 +114,7 @@ class HierarchicalNodeParser(NodeParser):
 
                     # Create a temp doc to split
                     temp_doc = Document(text=node.get_content(), metadata=node.metadata)
-                    coarse_candidates = self._coarse_splitter.get_nodes_from_documents(
-                        [temp_doc]
-                    )
+                    coarse_candidates = self._coarse_splitter.get_nodes_from_documents([temp_doc])
                 else:
                     # It's fine as a coarse chunk
                     coarse_candidates = [node]
@@ -151,9 +146,7 @@ class HierarchicalNodeParser(NodeParser):
                     metadata=deepcopy(coarse_node.metadata),
                 )
 
-                fine_nodes = self._fine_splitter.get_nodes_from_documents(
-                    [temp_coarse_doc]
-                )
+                fine_nodes = self._fine_splitter.get_nodes_from_documents([temp_coarse_doc])
 
                 for fine_node in fine_nodes:
                     fine_node.metadata["hier.level"] = 2
@@ -166,9 +159,7 @@ class HierarchicalNodeParser(NodeParser):
                         fine_node.metadata["hier.doc_id"] = coarse_node.ref_doc_id
 
                     # Ensure relationships
-                    fine_node.relationships[NodeRelationship.PARENT] = (
-                        coarse_node.as_related_node_info()
-                    )
+                    fine_node.relationships[NodeRelationship.PARENT] = coarse_node.as_related_node_info()
 
                     # Add to result
                     all_nodes.append(fine_node)

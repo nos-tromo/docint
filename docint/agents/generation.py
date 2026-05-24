@@ -2,7 +2,7 @@
 
 import json
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
 
@@ -18,6 +18,7 @@ MAX_SOURCE_CHARS = 1200
 
 class PassthroughResponseAgent(ResponseAgent):
     """No-op response post-processor.
+
     Returns retrieval results unchanged.
     """
 
@@ -103,9 +104,7 @@ class ResultValidationResponseAgent(ResponseAgent):
             summary_grounded = parsed.get("summary_grounded")
             sources_relevant = parsed.get("sources_relevant")
 
-            if not isinstance(summary_grounded, bool) or not isinstance(
-                sources_relevant, bool
-            ):
+            if not isinstance(summary_grounded, bool) or not isinstance(sources_relevant, bool):
                 self._set_validation_unavailable(
                     result,
                     reason="Validation model returned invalid schema.",
@@ -113,9 +112,7 @@ class ResultValidationResponseAgent(ResponseAgent):
                 return result
 
             mismatch = not (summary_grounded and sources_relevant)
-            coverage_ratio, coverage_target, coverage_unit = (
-                self._extract_coverage_metrics(result.summary_diagnostics)
-            )
+            coverage_ratio, coverage_target, coverage_unit = self._extract_coverage_metrics(result.summary_diagnostics)
             if (
                 coverage_ratio is not None
                 and coverage_target is not None
@@ -129,11 +126,7 @@ class ResultValidationResponseAgent(ResponseAgent):
 
             result.validation_checked = True
             result.validation_mismatch = mismatch
-            result.validation_reason = (
-                str(parsed.get("reason", "Validation mismatch detected"))
-                if mismatch
-                else None
-            )
+            result.validation_reason = str(parsed.get("reason", "Validation mismatch detected")) if mismatch else None
             return result
         except json.JSONDecodeError:
             self._set_validation_unavailable(
@@ -241,10 +234,7 @@ class ResultValidationResponseAgent(ResponseAgent):
         """
         lines = [f"User query:\n{user_query}"]
         effective_retrieval = retrieval_query or rewritten_query
-        if (
-            effective_retrieval
-            and effective_retrieval.strip().casefold() != user_query.strip().casefold()
-        ):
+        if effective_retrieval and effective_retrieval.strip().casefold() != user_query.strip().casefold():
             lines.append(f"Retrieval query (after rewrite):\n{effective_retrieval}")
         meta_parts: list[str] = []
         if intent:
@@ -255,9 +245,7 @@ class ResultValidationResponseAgent(ResponseAgent):
             lines.append("Routing: " + ", ".join(meta_parts))
         return "\n\n".join(lines) + "\n\n"
 
-    def _summary_diagnostics_to_text(
-        self, summary_diagnostics: dict[str, Any] | None
-    ) -> str:
+    def _summary_diagnostics_to_text(self, summary_diagnostics: dict[str, Any] | None) -> str:
         """Render optional summary diagnostics for validator context.
 
         Args:
@@ -315,9 +303,7 @@ class ResultValidationResponseAgent(ResponseAgent):
         except (TypeError, ValueError):
             return (None, None, None)
         coverage_unit = (
-            str(coverage_unit_raw).strip().lower()
-            if isinstance(coverage_unit_raw, (str, int, float))
-            else None
+            str(coverage_unit_raw).strip().lower() if isinstance(coverage_unit_raw, (str, int, float)) else None
         )
         return (coverage_ratio, coverage_target, coverage_unit)
 
@@ -360,9 +346,7 @@ class ResultValidationResponseAgent(ResponseAgent):
             # have a top-level body to render separately; otherwise let it
             # through so sources that carry their text inside
             # ``reference_metadata["text"]`` still surface a body.
-            metadata_block = format_reference_metadata_block(
-                source, include_text=not text
-            )
+            metadata_block = format_reference_metadata_block(source, include_text=not text)
 
             parts: list[str] = [header]
             if metadata_block:
@@ -385,11 +369,11 @@ class ResultValidationResponseAgent(ResponseAgent):
         """
         clean_text = self._extract_json_candidate(text)
         try:
-            return json.loads(clean_text)
+            return cast(dict[str, Any], json.loads(clean_text))
         except json.JSONDecodeError:
             match = re.search(r"\{.*?\}", clean_text, re.DOTALL)
             if match:
-                return json.loads(match.group(0))
+                return cast(dict[str, Any], json.loads(match.group(0)))
             raise
 
     def _extract_json_candidate(self, text: str) -> str:

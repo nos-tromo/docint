@@ -2,8 +2,9 @@
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, AsyncIterator, Literal, cast
+from typing import Any, Literal, cast
 
 from anyio import to_thread
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -17,12 +18,12 @@ from docint.agents import (
     AgentOrchestrator,
     ClarificationConfig,
     ClarificationPolicy,
-    ResultValidationResponseAgent,
+    ContextualUnderstandingAgent,
     RAGRetrievalAgent,
+    ResultValidationResponseAgent,
     RetrievalResult,
     SimpleClarificationAgent,
     SimpleUnderstandingAgent,
-    ContextualUnderstandingAgent,
     Turn,
 )
 from docint.cli import ingest as ingest_module
@@ -35,6 +36,17 @@ from docint.utils.env_cfg import (
 )
 from docint.utils.hashing import compute_file_hash
 from docint.utils.logger_cfg import init_logger
+
+# Names re-exported for test monkey-patching. Strict mypy
+# (no_implicit_reexport) ignores these without an explicit ``__all__``.
+__all__ = [
+    "RAG",
+    "ClarificationConfig",
+    "ClarificationPolicy",
+    "EmptyIngestionError",
+    "asyncio",
+    "ingest_module",
+]
 
 init_logger()
 
@@ -71,9 +83,7 @@ def _build_orchestrator() -> AgentOrchestrator:
         AgentOrchestrator: The constructed agent orchestrator.
     """
     retrieval_agent = RAGRetrievalAgent(rag)
-    understanding: SimpleUnderstandingAgent | ContextualUnderstandingAgent = (
-        _understanding_agent
-    )
+    understanding: SimpleUnderstandingAgent | ContextualUnderstandingAgent = _understanding_agent
     validation_cfg = load_response_validation_env()
     validation_llm = None
 
@@ -106,7 +116,6 @@ def _resolve_data_dir() -> Path:
     Returns:
         Path: The path to the data directory.
     """
-
     return load_path_env().data
 
 
@@ -143,10 +152,7 @@ def _require_active_collection() -> str:
         rag.query_engine = None
         raise HTTPException(
             status_code=404,
-            detail=(
-                f"Collection '{name}' no longer exists. Please select "
-                "another collection."
-            ),
+            detail=(f"Collection '{name}' no longer exists. Please select another collection."),
         )
     return name
 
@@ -308,23 +314,21 @@ class QueryIn(BaseModel):
     session_id: str | None = None
     metadata_filters: list[MetadataFilterIn] = Field(default_factory=list)
     retrieval_mode: Literal["session", "stateless"] = "session"
-    query_mode: Literal["answer", "entity_occurrence", "entity_occurrence_multi"] = (
-        "answer"
-    )
+    query_mode: Literal["answer", "entity_occurrence", "entity_occurrence_multi"] = "answer"
 
 
 class QueryOut(BaseModel):
     """Grounded answer plus retrieval provenance for a RAG query."""
 
     answer: str
-    sources: list[dict] = []
+    sources: list[dict[str, Any]] = []
     session_id: str
     graph_debug: dict[str, Any] | None = None
     retrieval_query: str | None = None
     coverage_unit: str | None = None
     retrieval_mode: str | None = None
-    entity_match_candidates: list[dict] = []
-    entity_match_groups: list[dict] = []
+    entity_match_candidates: list[dict[str, Any]] = []
+    entity_match_groups: list[dict[str, Any]] = []
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
     validation_reason: str | None = None
@@ -348,7 +352,7 @@ class SummarizeOut(BaseModel):
     """Response payload for a collection-level summary request."""
 
     summary: str
-    sources: list[dict] = []
+    sources: list[dict[str, Any]] = []
     summary_diagnostics: SummaryDiagnosticsOut | None = None
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
@@ -375,35 +379,35 @@ class IngestOut(BaseModel):
 class SessionListOut(BaseModel):
     """List of sessions visible to the caller."""
 
-    sessions: list[dict]
+    sessions: list[dict[str, Any]]
 
 
 class SessionHistoryOut(BaseModel):
     """Ordered history of messages for a single session."""
 
-    messages: list[dict]
+    messages: list[dict[str, Any]]
 
 
 class NERStatsOut(BaseModel):
     """Aggregate statistics over extracted entities and relations."""
 
     totals: dict[str, int]
-    top_entities: list[dict] = []
-    entity_types: list[dict] = []
-    top_relations: list[dict] = []
-    documents: list[dict] = []
+    top_entities: list[dict[str, Any]] = []
+    entity_types: list[dict[str, Any]] = []
+    top_relations: list[dict[str, Any]] = []
+    documents: list[dict[str, Any]] = []
 
 
 class NERSearchOut(BaseModel):
     """Matching entities returned from a NER search query."""
 
-    results: list[dict] = []
+    results: list[dict[str, Any]] = []
 
 
 class HateSpeechOut(BaseModel):
     """Hate-speech classification results for a document or collection."""
 
-    results: list[dict] = []
+    results: list[dict[str, Any]] = []
 
 
 class AgentChatIn(BaseModel):
@@ -419,7 +423,7 @@ class AgentChatOut(BaseModel):
     status: Literal["clarification", "answer"]
     message: str | None = None
     answer: str | None = None
-    sources: list[dict] = []
+    sources: list[dict[str, Any]] = []
     session_id: str | None = None
     reason: str | None = None
     intent: str | None = None
@@ -448,12 +452,10 @@ def collections_list() -> list[str]:
         return rag.list_collections()
     except Exception as e:
         logger.error("HTTPException: Error listing collections: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@app.post(
-    "/collections/select", response_model=SelectCollectionOut, tags=["Collections"]
-)
+@app.post("/collections/select", response_model=SelectCollectionOut, tags=["Collections"])
 def collections_select(payload: SelectCollectionIn) -> dict[str, bool | str]:
     """Select a collection to use for queries.
 
@@ -477,10 +479,10 @@ def collections_select(payload: SelectCollectionIn) -> dict[str, bool | str]:
         raise
     except ValueError as e:
         logger.error("Collection '{}' could not be selected: {}", name, e)
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:
         logger.error("Unexpected error selecting collection '{}': {}", name, e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
     return {"ok": True, "name": name}
 
 
@@ -502,11 +504,11 @@ def collections_delete(name: str) -> dict[str, bool]:
         return {"ok": True}
     except Exception as e:
         logger.error("HTTPException: Error deleting collection: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/query", response_model=QueryOut, tags=["Query"])
-def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
+def query(payload: QueryIn) -> dict[str, list[dict[str, Any]] | str | bool | None]:
     """Handle a query request.
 
     Args:
@@ -548,9 +550,7 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
             if payload.retrieval_mode == "stateless":
                 retrieval_query = payload.question
                 graph_debug: dict[str, Any] | None = None
-                expand_with_debug = getattr(
-                    rag, "expand_query_with_graph_with_debug", None
-                )
+                expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
                 if callable(expand_with_debug):
                     try:
                         expanded, debug_payload = expand_with_debug(retrieval_query)
@@ -577,23 +577,15 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
                 data = rag.chat(
                     payload.question,
                     metadata_filters=metadata_filters,
-                    metadata_filters_active=(
-                        metadata_filters is not None or bool(vector_store_kwargs)
-                    ),
+                    metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
                     metadata_filter_rules=payload.metadata_filters,
                     vector_store_kwargs=vector_store_kwargs or None,
                 )
 
-        answer = (
-            str(data.get("response") or data.get("answer") or "")
-            if isinstance(data, dict)
-            else ""
-        )
-        sources: list[dict] = data.get("sources", []) if isinstance(data, dict) else []
+        answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
+        sources: list[dict[str, Any]] = data.get("sources", []) if isinstance(data, dict) else []
         graph_debug = (
-            data.get("graph_debug")
-            if isinstance(data, dict) and isinstance(data.get("graph_debug"), dict)
-            else None
+            data.get("graph_debug") if isinstance(data, dict) and isinstance(data.get("graph_debug"), dict) else None
         )
         retrieval_query_value: str | None = (
             str(data.get("retrieval_query") or "")
@@ -612,21 +604,18 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
         )
         entity_match_candidates = (
             data.get("entity_match_candidates", [])
-            if isinstance(data, dict)
-            and isinstance(data.get("entity_match_candidates"), list)
+            if isinstance(data, dict) and isinstance(data.get("entity_match_candidates"), list)
             else []
         )
         entity_match_groups = (
             data.get("entity_match_groups", [])
-            if isinstance(data, dict)
-            and isinstance(data.get("entity_match_groups"), list)
+            if isinstance(data, dict) and isinstance(data.get("entity_match_groups"), list)
             else []
         )
 
         summary_diagnostics_query = (
             data.get("summary_diagnostics")
-            if isinstance(data, dict)
-            and isinstance(data.get("summary_diagnostics"), dict)
+            if isinstance(data, dict) and isinstance(data.get("summary_diagnostics"), dict)
             else None
         )
         # `retrieval_mode` here is the session-routing mode
@@ -656,7 +645,7 @@ def query(payload: QueryIn) -> dict[str, list[dict] | str | bool | None]:
         raise
     except Exception as exc:
         logger.error("Unexpected error processing query: {}", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/stream_query", tags=["Query"])
@@ -709,11 +698,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                         payload.question,
                         qdrant_filter=qdrant_filter,
                     )
-                answer_text = str(
-                    occurrence_data.get("response")
-                    or occurrence_data.get("answer")
-                    or ""
-                )
+                answer_text = str(occurrence_data.get("response") or occurrence_data.get("answer") or "")
                 async for event in _stream_simulated_text(answer_text):
                     event_payload = json.loads(event[6:].strip())
                     token = str(event_payload.get("token") or "")
@@ -728,19 +713,13 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                     "retrieval_query": occurrence_data.get("retrieval_query"),
                     "coverage_unit": occurrence_data.get("coverage_unit"),
                     "retrieval_mode": occurrence_data.get("retrieval_mode"),
-                    "entity_match_candidates": occurrence_data.get(
-                        "entity_match_candidates"
-                    )
-                    or [],
-                    "entity_match_groups": occurrence_data.get("entity_match_groups")
-                    or [],
+                    "entity_match_candidates": occurrence_data.get("entity_match_candidates") or [],
+                    "entity_match_groups": occurrence_data.get("entity_match_groups") or [],
                 }
             elif payload.retrieval_mode == "stateless":
                 retrieval_query = payload.question
                 graph_debug: dict[str, Any] | None = None
-                expand_with_debug = getattr(
-                    rag, "expand_query_with_graph_with_debug", None
-                )
+                expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
                 if callable(expand_with_debug):
                     try:
                         expanded, debug_payload = expand_with_debug(retrieval_query)
@@ -762,9 +741,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                 if graph_debug is not None:
                     stateless_data["graph_debug"] = graph_debug
 
-                answer_text = str(
-                    stateless_data.get("response") or stateless_data.get("answer") or ""
-                )
+                answer_text = str(stateless_data.get("response") or stateless_data.get("answer") or "")
                 async for event in _stream_simulated_text(answer_text):
                     event_payload = json.loads(event[6:].strip())
                     token = str(event_payload.get("token") or "")
@@ -784,9 +761,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                 for chunk in rag.stream_chat(
                     payload.question,
                     metadata_filters=metadata_filters,
-                    metadata_filters_active=(
-                        metadata_filters is not None or bool(vector_store_kwargs)
-                    ),
+                    metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
                     metadata_filter_rules=payload.metadata_filters,
                     vector_store_kwargs=vector_store_kwargs or None,
                 ):
@@ -810,9 +785,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                 else None
             )
             stream_retrieval_query = (
-                str(payload_out.get("retrieval_query"))
-                if payload_out.get("retrieval_query")
-                else None
+                str(payload_out.get("retrieval_query")) if payload_out.get("retrieval_query") else None
             )
             # `retrieval_mode` here is the session-routing mode, not the
             # retrieval tool, so it is not forwarded as `tool_used`.
@@ -841,15 +814,9 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                     rag.sessions.update_turn_validation(
                         session_id=stream_session_id,
                         turn_idx=turn_idx,
-                        validation_checked=cast(
-                            "bool | None", validation.get("validation_checked")
-                        ),
-                        validation_mismatch=cast(
-                            "bool | None", validation.get("validation_mismatch")
-                        ),
-                        validation_reason=cast(
-                            "str | None", validation.get("validation_reason")
-                        ),
+                        validation_checked=cast("bool | None", validation.get("validation_checked")),
+                        validation_mismatch=cast("bool | None", validation.get("validation_mismatch")),
+                        validation_reason=cast("str | None", validation.get("validation_reason")),
                     )
                 except Exception as exc:
                     logger.warning(
@@ -896,22 +863,15 @@ def summarize(refresh: bool = Query(False)) -> dict[str, Any]:
     Raises:
         HTTPException: If an error occurs while generating the summary.
     """
-
     try:
         if not rag.qdrant_collection:
             logger.error("HTTPException: No collection selected")
             raise HTTPException(status_code=400, detail="No collection selected")
 
         data = rag.summarize_collection(refresh=refresh)
-        summary = (
-            str(data.get("response") or data.get("answer") or "")
-            if isinstance(data, dict)
-            else ""
-        )
-        sources: list[dict] = data.get("sources", []) if isinstance(data, dict) else []
-        summary_diagnostics = (
-            data.get("summary_diagnostics") if isinstance(data, dict) else None
-        )
+        summary = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
+        sources: list[dict[str, Any]] = data.get("sources", []) if isinstance(data, dict) else []
+        summary_diagnostics = data.get("summary_diagnostics") if isinstance(data, dict) else None
 
         validation = _validation_payload(
             question=rag.summarize_prompt,
@@ -927,7 +887,7 @@ def summarize(refresh: bool = Query(False)) -> dict[str, Any]:
         }
     except HTTPException as e:
         logger.error("HTTPException: Error generating summary: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/summarize/stream", tags=["Query"])
@@ -963,9 +923,7 @@ async def summarize_stream(refresh: bool = Query(False)) -> StreamingResponse:
                     final_payload = chunk
 
             payload_out = dict(final_payload or {})
-            summary = str(
-                payload_out.get("response") or payload_out.get("answer") or ""
-            )
+            summary = str(payload_out.get("response") or payload_out.get("answer") or "")
             if not summary:
                 summary = full_summary
             sources = payload_out.get("sources")
@@ -991,7 +949,7 @@ async def summarize_stream(refresh: bool = Query(False)) -> StreamingResponse:
 
 
 @app.get("/collections/ner", tags=["Query"])
-def get_collection_ner(refresh: bool = False) -> dict[str, list[dict]]:
+def get_collection_ner(refresh: bool = False) -> dict[str, list[dict[str, Any]]]:
     """Get all NER data (entities and relations) for the currently selected collection.
 
     Args:
@@ -1010,11 +968,11 @@ def get_collection_ner(refresh: bool = False) -> dict[str, list[dict]]:
         return {"sources": sources}
     except Exception as e:
         logger.error("Error fetching collection NER: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/collections/hate-speech", response_model=HateSpeechOut, tags=["Query"])
-def get_collection_hate_speech() -> dict[str, list[dict]]:
+def get_collection_hate_speech() -> dict[str, list[dict[str, Any]]]:
     """Get flagged hate-speech chunks for the selected collection.
 
     Returns:
@@ -1026,7 +984,7 @@ def get_collection_hate_speech() -> dict[str, list[dict]]:
         return {"results": rag.get_collection_hate_speech()}
     except Exception as e:
         logger.error("Error fetching collection hate-speech results: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/collections/ner/stats", response_model=NERStatsOut, tags=["Query"])
@@ -1044,6 +1002,8 @@ def get_collection_ner_stats(
         min_mentions (int): Minimum mention count for ranked outputs.
         entity_type (str | None): Optional case-insensitive entity type filter.
         include_relations (bool): Whether relation aggregates are included.
+        entity_merge_mode (Literal["orthographic", "exact"]): Entity clustering mode used for
+            derived views.
 
     Returns:
         dict[str, Any]: A dashboard-friendly NER stats payload.
@@ -1063,7 +1023,7 @@ def get_collection_ner_stats(
         )
     except Exception as e:
         logger.error("Error fetching collection NER stats: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/collections/ner/search", response_model=NERSearchOut, tags=["Query"])
@@ -1072,13 +1032,15 @@ def search_collection_ner_entities(
     entity_type: str | None = None,
     limit: int = 100,
     entity_merge_mode: Literal["orthographic", "exact"] = Query(default="orthographic"),
-) -> dict[str, list[dict]]:
+) -> dict[str, list[dict[str, Any]]]:
     """Search entities across the selected collection.
 
     Args:
         q (str): Substring query applied to entity text.
         entity_type (str | None): Optional case-insensitive type filter.
         limit (int): Maximum number of rows to return.
+        entity_merge_mode (Literal["orthographic", "exact"]): Entity clustering mode used for
+            derived views.
 
     Returns:
         dict[str, list[dict]]: Dictionary containing matched entities.
@@ -1099,11 +1061,11 @@ def search_collection_ner_entities(
         }
     except Exception as e:
         logger.error("Error searching collection entities: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/collections/documents", tags=["Query"])
-def get_collection_documents() -> dict[str, list[dict]]:
+def get_collection_documents() -> dict[str, list[dict[str, Any]]]:
     """Get list of documents in the currently selected collection.
 
     Returns:
@@ -1119,11 +1081,11 @@ def get_collection_documents() -> dict[str, list[dict]]:
         return {"documents": docs}
     except Exception as e:
         logger.error("Error fetching collection documents: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/sessions/list", response_model=SessionListOut, tags=["Sessions"])
-def list_sessions() -> dict[str, list[dict]]:
+def list_sessions() -> dict[str, list[dict[str, Any]]]:
     """List all available chat sessions.
 
     Returns:
@@ -1137,7 +1099,7 @@ def list_sessions() -> dict[str, list[dict]]:
         return {"sessions": sessions}
     except Exception as e:
         logger.error("Error listing sessions: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get(
@@ -1145,7 +1107,7 @@ def list_sessions() -> dict[str, list[dict]]:
     response_model=SessionHistoryOut,
     tags=["Sessions"],
 )
-def get_session_history(session_id: str) -> dict[str, list[dict]]:
+def get_session_history(session_id: str) -> dict[str, list[dict[str, Any]]]:
     """Get history for a specific session.
 
     Args:
@@ -1162,7 +1124,7 @@ def get_session_history(session_id: str) -> dict[str, list[dict]]:
         return {"messages": messages}
     except Exception as e:
         logger.error("Error fetching history: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.delete("/sessions/{session_id}", tags=["Sessions"])
@@ -1183,7 +1145,7 @@ def delete_session(session_id: str) -> dict[str, bool]:
         return {"ok": success}
     except Exception as e:
         logger.error("Error deleting session: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/agent/chat", response_model=AgentChatOut, tags=["Agent"])
@@ -1292,7 +1254,7 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
         }
     except Exception as exc:
         logger.error("Unexpected error during ingestion of '{}': {}", name, exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return {
         "ok": True,
@@ -1371,7 +1333,7 @@ async def agent_chat_stream(payload: AgentChatIn) -> StreamingResponse:
 async def ingest_upload(
     request: Request,
     collection: str = Form(...),
-    files: list[UploadFile] = File(...),
+    files: list[UploadFile] = File(...),  # noqa: B008 — FastAPI dependency marker
     hybrid: bool | None = Form(True),
 ) -> StreamingResponse:
     """Upload files for ingestion and stream progress as SSE events.
@@ -1390,7 +1352,6 @@ async def ingest_upload(
         HTTPException: If the collection name is missing or no files are provided.
         HTTPException: If an error occurs during file upload.
     """
-
     name = collection.strip()
     if not name:
         logger.error("HTTPException: Collection name required for upload")
@@ -1487,8 +1448,7 @@ async def ingest_upload(
                     # so an exception from the worker thread still lands
                     # in the log rather than vanishing after disconnect.
                     logger.warning(
-                        "Could not enqueue ingest message for collection "
-                        "'{}' (loop unavailable after disconnect): {}",
+                        "Could not enqueue ingest message for collection '{}' (loop unavailable after disconnect): {}",
                         name,
                         exc,
                     )
@@ -1577,8 +1537,7 @@ async def ingest_upload(
                     raise msg
                 event_name = (
                     "warning"
-                    if isinstance(msg, str)
-                    and msg.strip().lower().startswith("warning:")
+                    if isinstance(msg, str) and msg.strip().lower().startswith("warning:")
                     else "ingestion_progress"
                 )
                 yield _format_sse(event_name, {"message": msg})

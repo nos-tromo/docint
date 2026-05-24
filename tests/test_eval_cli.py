@@ -3,7 +3,6 @@
 from pathlib import Path
 from typing import Any
 
-
 import docint.cli.eval as eval_cli
 
 
@@ -47,9 +46,7 @@ def test_evaluate_retrieval_compares_modes_and_expectations() -> None:
             *,
             retrieval_options: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
-            mode = str(
-                (retrieval_options or {}).get("vector_store_query_mode") or "default"
-            )
+            mode = str((retrieval_options or {}).get("vector_store_query_mode") or "default")
             self.calls.append((prompt, mode))
             return {
                 "response": f"{mode}:{prompt}",
@@ -57,9 +54,7 @@ def test_evaluate_retrieval_compares_modes_and_expectations() -> None:
                     {
                         "filename": "a.pdf" if mode == "hybrid" else "b.pdf",
                         "file_hash": "ha" if mode == "hybrid" else "hb",
-                        "reference_metadata": {
-                            "text_id": "t1" if mode == "hybrid" else "t2"
-                        },
+                        "reference_metadata": {"text_id": "t1" if mode == "hybrid" else "t2"},
                     }
                 ],
                 "vector_query_mode": mode,

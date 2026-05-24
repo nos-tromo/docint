@@ -1,3 +1,5 @@
+"""Tests for the shared image-ingestion service used by document readers."""
+
 from __future__ import annotations
 
 import hashlib
@@ -16,8 +18,8 @@ from docint.core.ingest.images_service import (
     ImageAsset,
     ImageIngestionConfig,
     ImageIngestionService,
-    VisionJSONTagger,
     IngestContext,
+    VisionJSONTagger,
 )
 
 """Unit tests for the image ingestion service.
@@ -73,9 +75,7 @@ class FakeEmbeddingBackend:
 class FakeTaggingBackend:
     """Deterministic image tagger for tests."""
 
-    def describe_and_tag(
-        self, image_bytes: bytes, mime_type: str
-    ) -> tuple[str, list[str]]:
+    def describe_and_tag(self, image_bytes: bytes, mime_type: str) -> tuple[str, list[str]]:
         """Return a fixed description and tag list for any image.
 
         Args:
@@ -112,9 +112,7 @@ class FakeQdrantClient:
             raise RuntimeError("missing")
         return self.collections[collection_name]
 
-    def create_collection(
-        self, collection_name: str, vectors_config: dict[str, Any]
-    ) -> None:
+    def create_collection(self, collection_name: str, vectors_config: dict[str, Any]) -> None:
         """Register a new collection with the given vector configuration.
 
         Args:
@@ -160,9 +158,7 @@ class FakeQdrantClient:
                 return [SimpleNamespace(id=point_id, payload=dict(payload))], None
         return [], None
 
-    def set_payload(
-        self, collection_name: str, payload: dict[str, Any], points: list[str]
-    ) -> None:
+    def set_payload(self, collection_name: str, payload: dict[str, Any], points: list[str]) -> None:
         """Merge *payload* into the stored record for each point.
 
         Args:
@@ -299,10 +295,7 @@ def test_parse_tag_payload_strips_think_before_json() -> None:
 
 def test_parse_tag_payload_returns_empty_when_reasoning_only() -> None:
     """A response that is only a reasoning block must not poison the store."""
-    raw = (
-        "The user wants a strict JSON with keys 'description' and 'tags'. "
-        "I should produce JSON only.\n</think>"
-    )
+    raw = "The user wants a strict JSON with keys 'description' and 'tags'. I should produce JSON only.\n</think>"
 
     description, tags = VisionJSONTagger.parse_tag_payload(raw)
 
@@ -322,11 +315,7 @@ def test_parse_tag_payload_returns_empty_when_json_missing() -> None:
 
 def test_parse_tag_payload_brace_extractor_handles_prose_wrapped_json() -> None:
     """A JSON object embedded in prose should still be parsed."""
-    raw = (
-        "Here you go: "
-        + json.dumps({"description": "A diagram.", "tags": ["one", "two"]})
-        + " — hope this helps!"
-    )
+    raw = "Here you go: " + json.dumps({"description": "A diagram.", "tags": ["one", "two"]}) + " — hope this helps!"
 
     description, tags = VisionJSONTagger.parse_tag_payload(raw)
 
@@ -390,9 +379,7 @@ def test_describe_and_tag_strips_reasoning_wrapped_json() -> None:
     """Reasoning-wrapped JSON should still produce clean description and tags."""
     tagger = VisionJSONTagger.__new__(VisionJSONTagger)
     payload = json.dumps({"description": "A cat.", "tags": ["animal", "cat"]})
-    tagger.pipeline = cast(
-        Any, _StubPipeline(response=f"<think>user wants JSON</think>{payload}")
-    )
+    tagger.pipeline = cast(Any, _StubPipeline(response=f"<think>user wants JSON</think>{payload}"))
     tagger.max_image_dimension = 1024
     tagger.prompt_template = "Return strict JSON."
 
@@ -407,9 +394,7 @@ def test_describe_and_tag_discards_pure_reasoning_response() -> None:
     tagger = VisionJSONTagger.__new__(VisionJSONTagger)
     tagger.pipeline = cast(
         Any,
-        _StubPipeline(
-            response="The user wants a strict JSON with keys description and tags.</think>"
-        ),
+        _StubPipeline(response="The user wants a strict JSON with keys description and tags.</think>"),
     )
     tagger.max_image_dimension = 1024
     tagger.prompt_template = "Return strict JSON."
@@ -687,7 +672,7 @@ def test_cap_image_size_passes_small_image_through() -> None:
     tagger = VisionJSONTagger.__new__(VisionJSONTagger)
     tagger.max_image_dimension = 1024
 
-    small_bytes = _make_png_bytes()  # 6×4
+    small_bytes = _make_png_bytes()  # 6x4
 
     out_bytes, out_mime = tagger._cap_image_size(small_bytes, "image/png")
 
@@ -703,9 +688,7 @@ def test_query_similar_images_by_text_returns_empty_when_collection_missing() ->
             raise AssertionError("embed_text should not be called")
 
     service, _, _ = _build_service()
-    service.qdrant_client = cast(
-        Any, SimpleNamespace(collection_exists=lambda collection_name: False)
-    )
+    service.qdrant_client = cast(Any, SimpleNamespace(collection_exists=lambda collection_name: False))
     service.embedding_backend = cast(Any, NoEmbedBackend())
 
     matches = service.query_similar_images_by_text(
@@ -725,9 +708,7 @@ def test_query_similar_images_returns_empty_when_collection_missing() -> None:
             raise AssertionError("embed should not be called")
 
     service, _, _ = _build_service()
-    service.qdrant_client = cast(
-        Any, SimpleNamespace(collection_exists=lambda collection_name: False)
-    )
+    service.qdrant_client = cast(Any, SimpleNamespace(collection_exists=lambda collection_name: False))
     service.embedding_backend = cast(Any, NoImageEmbedBackend())
 
     matches = service.query_similar_images(

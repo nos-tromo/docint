@@ -1,6 +1,9 @@
 """Tests for the CorePDFPipelineReader document hash and node-building logic."""
 
 from pathlib import Path
+from typing import cast
+
+from llama_index.core.schema import TextNode
 
 from docint.core.readers.documents import CorePDFPipelineReader
 
@@ -51,7 +54,7 @@ def test_build_nodes_skips_empty_text_chunks(tmp_path: Path) -> None:
         {"chunk_id": "c3", "text": "   ", "page_range": [2]},
     ]
 
-    docs, nodes = CorePDFPipelineReader._build_nodes(
+    _docs, nodes = CorePDFPipelineReader._build_nodes(
         file_path=pdf_path,
         doc_id="hash1",
         pipeline_version="1.0.0",
@@ -59,7 +62,7 @@ def test_build_nodes_skips_empty_text_chunks(tmp_path: Path) -> None:
     )
 
     assert len(nodes) == 1
-    assert nodes[0].text == "Real content."
+    assert cast(TextNode, nodes[0]).text == "Real content."
 
 
 def test_iter_pdf_files_single_file(tmp_path: Path) -> None:

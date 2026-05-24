@@ -8,7 +8,7 @@ import os
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
@@ -20,10 +20,9 @@ from llama_index.vector_stores.qdrant import QdrantVectorStore
 from loguru import logger
 from PIL import Image
 from qdrant_client import QdrantClient, models
-
-from docint.core.storage.utils import qdrant_collection_exists
 from transformers import AutoProcessor, CLIPModel
 
+from docint.core.storage.utils import qdrant_collection_exists
 from docint.utils.env_cfg import (
     ImageIngestionConfig,
     ModelConfig,
@@ -38,6 +37,16 @@ from docint.utils.mimetype import get_mimetype
 from docint.utils.openai_cfg import OpenAIPipeline
 
 T = TypeVar("T")
+
+__all__ = [
+    "CLIPImageEmbeddingBackend",
+    "ImageAsset",
+    "ImageIngestionConfig",
+    "ImageIngestionService",
+    "IngestContext",
+    "StoredImageRecord",
+    "VisionJSONTagger",
+]
 
 
 @dataclass(frozen=True)
@@ -138,12 +147,11 @@ class CLIPImageEmbeddingBackend:
     _dimension: int = field(init=False)
 
     def __post_init__(self) -> None:
-        resolved = resolve_hf_cache_path(
-            cache_dir=self.cache_dir, repo_id=self.image_embed_model_id
-        )
+        """Resolve the HF cache path and load the image-embedding processor + model."""
+        resolved = resolve_hf_cache_path(cache_dir=self.cache_dir, repo_id=self.image_embed_model_id)
         resolved_model = str(resolved) if resolved else self.image_embed_model_id
         local_only = os.getenv("HF_HUB_OFFLINE", "0") == "1"
-        self.processor = AutoProcessor.from_pretrained(
+        self.processor = AutoProcessor.from_pretrained(  # type: ignore[no-untyped-call]
             pretrained_model_name_or_path=resolved_model,
             cache_dir=str(self.cache_dir),
             local_files_only=local_only,
@@ -177,7 +185,7 @@ class CLIPImageEmbeddingBackend:
         with torch.no_grad():
             features = self.model.get_image_features(**inputs)
             features = features / features.norm(dim=-1, keepdim=True)
-        return features[0].detach().cpu().tolist()
+        return cast(list[float], features[0].detach().cpu().tolist())
 
     def embed_text(self, text: str) -> list[float]:
         """Embed query text with CLIP text tower.
@@ -188,22 +196,18 @@ class CLIPImageEmbeddingBackend:
         Returns:
             list[float]: A list of floats representing the normalized text embedding vector.
         """
-        inputs = self.processor(
-            text=[text], return_tensors="pt", padding=True, truncation=True
-        )
+        inputs = self.processor(text=[text], return_tensors="pt", padding=True, truncation=True)
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
         with torch.no_grad():
             features = self.model.get_text_features(**inputs)
             features = features / features.norm(dim=-1, keepdim=True)
-        return features[0].detach().cpu().tolist()
+        return cast(list[float], features[0].detach().cpu().tolist())
 
 
 class ImageTaggingBackend(Protocol):
     """Protocol for LLM-based image caption/tag generation."""
 
-    def describe_and_tag(
-        self, image_bytes: bytes, mime_type: str
-    ) -> tuple[str, list[str]]:
+    def describe_and_tag(self, image_bytes: bytes, mime_type: str) -> tuple[str, list[str]]:
         """Return ``(description, tags)`` for the image."""
 
 
@@ -280,8 +284,7 @@ class VisionJSONTagger:
         if not json_parsed and cleaned:
             preview = cleaned[:120].replace("\n", " ")
             logger.warning(
-                "Image tagger returned non-JSON output; discarding description "
-                "(preview={!r})",
+                "Image tagger returned non-JSON output; discarding description (preview={!r})",
                 preview,
             )
 
@@ -342,13 +345,9 @@ class VisionJSONTagger:
         return None
 
     # MIME types commonly supported by vision APIs.
-    _SUPPORTED_MIME_TYPES: frozenset[str] = frozenset(
-        {"image/jpeg", "image/png", "image/gif", "image/webp"}
-    )
+    _SUPPORTED_MIME_TYPES: frozenset[str] = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
 
-    def describe_and_tag(
-        self, image_bytes: bytes, mime_type: str
-    ) -> tuple[str, list[str]]:
+    def describe_and_tag(self, image_bytes: bytes, mime_type: str) -> tuple[str, list[str]]:
         """Generate image description/tags via OpenAI-compatible vision API.
 
         If the image is not in a format natively supported by most vision
@@ -379,8 +378,7 @@ class VisionJSONTagger:
             # consecutive WARNINGs for the same input.
             tagging_input_hash = sha256(image_bytes).hexdigest()[:12]
             logger.warning(
-                "Vision tagger reported no image (tagging-input hash={}, mime={}); "
-                "storing empty description/tags",
+                "Vision tagger reported no image (tagging-input hash={}, mime={}); storing empty description/tags",
                 tagging_input_hash,
                 mime_type,
             )
@@ -446,7 +444,7 @@ class VisionJSONTagger:
                 buf = BytesIO()
                 resized_img.save(buf, format="JPEG", quality=80)
                 logger.debug(
-                    "Capped tagging image from {}×{} to {}×{} (JPEG)",
+                    "Capped tagging image from {}x{} to {}x{} (JPEG)",
                     img_file.width,
                     img_file.height,
                     new_w,
@@ -463,21 +461,18 @@ class ImageIngestionService:
     """Store image embeddings and metadata into a dedicated Qdrant collection."""
 
     device: str = field(default="cpu")
-    img_ingestion_config: ImageIngestionConfig = field(
-        default_factory=load_image_ingestion_config
-    )
+    img_ingestion_config: ImageIngestionConfig = field(default_factory=load_image_ingestion_config)
     model_config: ModelConfig = field(default_factory=load_model_env)
     qdrant_client: QdrantClient | None = None
     vector_store: QdrantVectorStore | None = None
     embedding_backend: ImageEmbeddingBackend | None = None
     tagging_backend: ImageTaggingBackend | None = None
-    _vector_stores: dict[str, QdrantVectorStore] = field(
-        default_factory=dict, init=False, repr=False
-    )
+    _vector_stores: dict[str, QdrantVectorStore] = field(default_factory=dict, init=False, repr=False)
     _embedding_backend_error: str | None = field(default=None, init=False, repr=False)
     _tagging_backend_error: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Lazily construct a Qdrant client when one wasn't injected."""
         if self.qdrant_client is None:
             self.qdrant_client = QdrantClient(url=load_host_env().qdrant_host)
 
@@ -497,9 +492,7 @@ class ImageIngestionService:
         if "{collection}" in template:
             if source_collection and source_collection.strip():
                 return template.format(collection=source_collection.strip())
-            raise ValueError(
-                "IMAGE_QDRANT_COLLECTION uses '{collection}' but source collection is missing."
-            )
+            raise ValueError("IMAGE_QDRANT_COLLECTION uses '{collection}' but source collection is missing.")
         return template
 
     def _get_vector_store(self, collection_name: str) -> QdrantVectorStore:
@@ -702,8 +695,7 @@ class ImageIngestionService:
             "source_type": asset.source_type,
             "source_collection": context.source_collection,
             "source_doc_id": asset.source_doc_id,
-            "source_path": asset.source_path
-            or (str(asset.image_path) if asset.image_path else None),
+            "source_path": asset.source_path or (str(asset.image_path) if asset.image_path else None),
             "page_number": asset.page_number,
             "bbox": asset.bbox,
         }
@@ -717,6 +709,7 @@ class ImageIngestionService:
         occurrence: dict[str, Any],
     ) -> None:
         """Append source occurrence metadata to an existing point payload.
+
         An "occurrences" list is maintained in the point payload to track all source
         references for a deduplicated image.
 
@@ -783,22 +776,13 @@ class ImageIngestionService:
         elif hasattr(vectors, "get"):
             named_config = cast(Any, vectors).get(self.img_ingestion_config.vector_name)
 
+        vector_name = self.img_ingestion_config.vector_name
         if named_config is None:
-            raise ValueError(
-                "Image collection '{}' exists but vector '{}' is missing.".format(
-                    collection_name,
-                    self.img_ingestion_config.vector_name,
-                )
-            )
+            raise ValueError(f"Image collection '{collection_name}' exists but vector '{vector_name}' is missing.")
         if int(named_config.size) != int(vector_dim):
             raise ValueError(
-                "Image collection '{}' vector '{}' dimension mismatch: "
-                "expected {}, found {}".format(
-                    collection_name,
-                    self.img_ingestion_config.vector_name,
-                    vector_dim,
-                    named_config.size,
-                )
+                f"Image collection '{collection_name}' vector '{vector_name}' dimension "
+                f"mismatch: expected {vector_dim}, found {named_config.size}"
             )
 
     @staticmethod
@@ -822,9 +806,7 @@ class ImageIngestionService:
                 return fn()
             except Exception as exc:
                 last_error = exc
-                logger.warning(
-                    "Image inference attempt {}/{} failed: {}", attempt, attempts, exc
-                )
+                logger.warning("Image inference attempt {}/{} failed: {}", attempt, attempts, exc)
         if last_error is None:
             raise RuntimeError("Image inference failed without error details.")
         raise last_error
@@ -898,11 +880,7 @@ class ImageIngestionService:
                 )
                 description = str(existing_payload.get("llm_description") or "")
                 existing_tags = existing_payload.get("llm_tags")
-                tags_list = (
-                    [str(tag) for tag in existing_tags]
-                    if isinstance(existing_tags, list)
-                    else []
-                )
+                tags_list = [str(tag) for tag in existing_tags] if isinstance(existing_tags, list) else []
                 return StoredImageRecord(
                     point_id=existing_point_id,
                     image_id=image_id,
@@ -932,10 +910,7 @@ class ImageIngestionService:
         embedding_backend = self._get_embedding_backend()
         if embedding_backend is None and self._embedding_backend_error:
             embed_error = self._embedding_backend_error
-        if (
-            self.img_ingestion_config.embedding_enabled
-            and embedding_backend is not None
-        ):
+        if self.img_ingestion_config.embedding_enabled and embedding_backend is not None:
             try:
                 embedding = self._run_with_retries(
                     lambda: embedding_backend.embed(image_bytes),
@@ -963,8 +938,7 @@ class ImageIngestionService:
             "source_type": asset.source_type,
             "source_collection": context.source_collection,
             "source_doc_id": asset.source_doc_id,
-            "source_path": asset.source_path
-            or (str(asset.image_path) if asset.image_path else None),
+            "source_path": asset.source_path or (str(asset.image_path) if asset.image_path else None),
             "page_number": asset.page_number,
             "bbox": asset.bbox,
             "mime_type": mime_type,
@@ -972,7 +946,7 @@ class ImageIngestionService:
             "file_type": mime_type,
             "width": width,
             "height": height,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
             "llm_description": description,
             "llm_tags": tags,
             "vector_name": self.img_ingestion_config.vector_name,
@@ -1104,7 +1078,8 @@ class ImageIngestionService:
             source_collection (str | None): Optional source collection to resolve the target collection.
 
         Returns:
-            list[dict[str, Any]]: A list of payload dictionaries for the similar images, each including a similarity score.
+            list[dict[str, Any]]: Payload dicts for the similar images, each carrying a
+                similarity score.
         """
         if not query_text.strip():
             return []
@@ -1127,9 +1102,7 @@ class ImageIngestionService:
         from llama_index.core.vector_stores.types import VectorStoreQuery
 
         vector_store = self._get_vector_store(target_collection)
-        result = vector_store.query(
-            VectorStoreQuery(query_embedding=query_embedding, similarity_top_k=top_k)
-        )
+        result = vector_store.query(VectorStoreQuery(query_embedding=query_embedding, similarity_top_k=top_k))
         output: list[dict[str, Any]] = []
         nodes = result.nodes or []
         similarities = result.similarities or []

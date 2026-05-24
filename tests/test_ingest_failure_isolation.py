@@ -65,7 +65,7 @@ def _capture_loguru(caplog: pytest.LogCaptureFixture) -> Any:
     "exc",
     [
         OSError("disk full"),
-        IOError("io"),
+        OSError("io"),
         ConnectionError("transient"),
         TimeoutError("slow"),
     ],
@@ -108,7 +108,7 @@ def _make_rag_with_streaming_pipeline(
     yields: list[tuple[list[Any], list[TextNode], set[str]]],
     *,
     fail_fast: bool,
-) -> tuple[RAG, list[Any], "Any"]:
+) -> tuple[RAG, list[Any], Any]:
     """Construct a RAG instance whose streaming pipeline yields *yields*.
 
     Returns (rag, persist_calls, fake_manifest). Each entry in
@@ -169,12 +169,8 @@ def _make_rag_with_streaming_pipeline(
     monkeypatch.setattr(RAG, "_vector_store", lambda self: cast(Any, object()))
     monkeypatch.setattr(RAG, "_storage_context", lambda self, vs: cast(Any, object()))
     monkeypatch.setattr(RAG, "create_collection_if_missing", lambda self: None)
-    monkeypatch.setattr(
-        RAG, "_build_ingestion_pipeline", lambda self, **kwargs: FakePipeline()
-    )
-    monkeypatch.setattr(
-        RAG, "_build_ingest_manifest", lambda self, *a, **k: fake_manifest
-    )
+    monkeypatch.setattr(RAG, "_build_ingestion_pipeline", lambda self, **kwargs: FakePipeline())
+    monkeypatch.setattr(RAG, "_build_ingest_manifest", lambda self, *a, **k: fake_manifest)
     monkeypatch.setattr(RAG, "_get_existing_file_hashes", lambda self: set())
 
     class _StubCorePDFReader:
@@ -238,9 +234,7 @@ def test_skip_and_continue_logs_failed_ingest_batch_and_marks_failed(
         ([], [_node("ok-3", "h3", "ok-3")], {"h3"}),
     ]
 
-    rag, persist_calls, fake = _make_rag_with_streaming_pipeline(
-        monkeypatch, yields, fail_fast=False
-    )
+    rag, persist_calls, fake = _make_rag_with_streaming_pipeline(monkeypatch, yields, fail_fast=False)
 
     cleanup = _capture_loguru(caplog)
     try:
@@ -275,9 +269,7 @@ def test_fail_fast_aborts_on_first_failure(
         ([], [_node("ok-3", "h3", "ok-3")], {"h3"}),
     ]
 
-    rag, persist_calls, fake = _make_rag_with_streaming_pipeline(
-        monkeypatch, yields, fail_fast=True
-    )
+    rag, persist_calls, fake = _make_rag_with_streaming_pipeline(monkeypatch, yields, fail_fast=True)
 
     with pytest.raises(ConnectionError, match="connection reset"):
         rag.ingest_docs(Path("/tmp/_unused"), build_query_engine=False)
@@ -289,18 +281,14 @@ def test_fail_fast_aborts_on_first_failure(
     assert any(c == "bench" and h == "h2" for c, h, _ in fake.failed)
 
 
-def test_skip_and_continue_async_path(
-    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_skip_and_continue_async_path(caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch) -> None:
     """The async ingest path should mirror sync skip-and-continue semantics."""
     yields: list[tuple[list[Any], list[TextNode], set[str]]] = [
         ([], [_node("ok-1", "h1", "ok-1")], {"h1"}),
         ([], [_node("bad", "h2", "fail-me")], set()),
     ]
 
-    rag, persist_calls, fake = _make_rag_with_streaming_pipeline(
-        monkeypatch, yields, fail_fast=False
-    )
+    rag, persist_calls, fake = _make_rag_with_streaming_pipeline(monkeypatch, yields, fail_fast=False)
 
     apersist_calls: list[Any] = []
 

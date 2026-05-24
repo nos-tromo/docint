@@ -1,15 +1,22 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.3
+    rev: v0.15.14
     hooks:
       - id: ruff-check
         args: ["--fix", "--exit-non-zero-on-fix"]
       - id: ruff-format
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.19.0
+  # mypy is a local hook so it uses the project venv — strict mode needs
+  # to see every dep's decorators/base classes (FastAPI, llama-index,
+  # qdrant, pytest, etc.); pre-commit's isolated env can't keep up.
+  # Pinned to mypy==<canonical> in dev deps; canonical at
+  # nos-tromo/.github/configs/python-strict/precommit-versions.yaml.
+  - repo: local
     hooks:
       - id: mypy
-        args: ["--ignore-missing-imports", "--no-incremental"]
-        additional_dependencies:
-          - pydantic
-          - types-requests
+        name: mypy
+        entry: uv run mypy
+        language: system
+        types: [python]
+        require_serial: true
+        pass_filenames: false
+        args: ["."]

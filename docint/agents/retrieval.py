@@ -1,7 +1,7 @@
 """Retrieval agents that bridge to RAG."""
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from docint.agents.types import RetrievalAgent, RetrievalRequest, RetrievalResult
 
@@ -11,10 +11,11 @@ if TYPE_CHECKING:
 
 class RAGRetrievalAgent(RetrievalAgent):
     """Adapter that uses the existing RAG pipeline for retrieval/response.
+
     Depending on the intent detected in the turn, it may invoke different tools.
     """
 
-    def __init__(self, rag: "RAG"):
+    def __init__(self, rag: "RAG") -> None:
         """Initialize the RAGRetrievalAgent.
 
         Args:
@@ -71,11 +72,7 @@ class RAGRetrievalAgent(RetrievalAgent):
         data = self.rag.chat(query_text)
         latency = (time.monotonic() - start) * 1000
 
-        answer = (
-            str(data.get("response") or data.get("answer") or "")
-            if isinstance(data, dict)
-            else ""
-        )
+        answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
         sources = data.get("sources", []) if isinstance(data, dict) else []
 
         return RetrievalResult(
@@ -90,7 +87,7 @@ class RAGRetrievalAgent(RetrievalAgent):
             rewritten_query=analysis.rewritten_query,
         )
 
-    def _filter_ner_sources(self, sources: list[dict], entities: dict) -> list[dict]:
+    def _filter_ner_sources(self, sources: list[dict[str, Any]], entities: dict[str, Any]) -> list[dict[str, Any]]:
         """Filter NER sources using simple entity/page heuristics.
 
         Args:
@@ -106,7 +103,7 @@ class RAGRetrievalAgent(RetrievalAgent):
         query = str(entities.get("query") or "").lower()
         page = str(entities.get("page") or "").strip()
 
-        def match(src: dict) -> bool:
+        def match(src: dict[str, Any]) -> bool:
             """Determine if a source matches the given page or query.
 
             Args:

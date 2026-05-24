@@ -8,11 +8,12 @@ import shutil
 import tempfile
 import threading
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, cast
 
-import torch
+import torch as torch  # re-exported for tests that monkeypatch ``torch.cuda``
 from loguru import logger
 
 from docint.utils.env_cfg import (
@@ -56,14 +57,14 @@ def _parse_ner_payload(raw: str) -> dict[str, Any]:
         dict[str, Any]: The parsed payload dictionary.
     """
     try:
-        return json.loads(raw)
+        return cast(dict[str, Any], json.loads(raw))
     except Exception:
         pass
     try:
         start = raw.find("{")
         end = raw.rfind("}")
         if start != -1 and end != -1 and end > start:
-            return json.loads(raw[start : end + 1])
+            return cast(dict[str, Any], json.loads(raw[start : end + 1]))
     except Exception:
         return {}
     return {}
@@ -83,11 +84,7 @@ def _resolve_gliner_device(device: str | None) -> str | None:
     if not normalized or normalized == "auto":
         if torch.cuda.is_available():
             return "cuda"
-        if (
-            getattr(torch.backends, "mps", None)
-            and torch.backends.mps.is_available()
-            and torch.backends.mps.is_built()
-        ):
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available() and torch.backends.mps.is_built():
             return "mps"
         return None
 
@@ -95,11 +92,7 @@ def _resolve_gliner_device(device: str | None) -> str | None:
         return None
 
     if normalized == "mps":
-        if (
-            getattr(torch.backends, "mps", None)
-            and torch.backends.mps.is_available()
-            and torch.backends.mps.is_built()
-        ):
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available() and torch.backends.mps.is_built():
             return "mps"
         logger.warning(
             "GLiNER requested device '{}' but MPS is unavailable; continuing on CPU.",
@@ -141,7 +134,7 @@ def _resolve_gliner_device(device: str | None) -> str | None:
 
 def build_llm_ner_extractor(
     model: Any, prompt: str, max_chars: int
-) -> Callable[[str], tuple[list[dict], list[dict]]]:
+) -> Callable[[str], tuple[list[dict[str, Any]], list[dict[str, Any]]]]:
     """Create an NER extractor bound to a model and prompt template.
 
     Args:
@@ -150,17 +143,17 @@ def build_llm_ner_extractor(
         max_chars (int): Maximum characters from input text to send to the model.
 
     Returns:
-        Callable[[str], tuple[list[dict], list[dict]]]: The NER extraction function.
+        Callable[[str], tuple[list[dict[str, Any]], list[dict[str, Any]]]]: The NER extraction function.
     """
 
-    def _extract(text: str) -> tuple[list[dict], list[dict]]:
+    def _extract(text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Extract entities and relations from text using the bound model and prompt.
 
         Args:
             text (str): The input text to extract entities and relations from.
 
         Returns:
-            tuple[list[dict], list[dict]]: A tuple containing two lists: extracted entities and extracted relations.
+            tuple[list[dict[str, Any]], list[dict[str, Any]]]: Extracted (entities, relations).
         """
         snippet = text[:max_chars]
         prompt_text = prompt.format(text=snippet)
@@ -176,7 +169,7 @@ def build_llm_ner_extractor(
         entities_raw = payload.get("entities") if isinstance(payload, dict) else []
         relations_raw = payload.get("relations") if isinstance(payload, dict) else []
 
-        entities: list[dict] = []
+        entities: list[dict[str, Any]] = []
         for ent in entities_raw or []:
             if not isinstance(ent, dict):
                 continue
@@ -191,7 +184,7 @@ def build_llm_ner_extractor(
                 }
             )
 
-        relations: list[dict] = []
+        relations: list[dict[str, Any]] = []
         for rel in relations_raw or []:
             if not isinstance(rel, dict):
                 continue
@@ -219,7 +212,7 @@ def _get_gliner_class() -> type[Any]:
 
     from gliner import GLiNER
 
-    return GLiNER
+    return cast(type[Any], GLiNER)
 
 
 def _get_or_load_gliner_runtime(
@@ -237,9 +230,7 @@ def _get_or_load_gliner_runtime(
     Returns:
         _GLiNERRuntime: Cached runtime bundle for inference.
     """
-    load_id, local_only = _resolve_gliner_load_target(
-        model_id=model_id, cache_dir=cache_dir
-    )
+    load_id, local_only = _resolve_gliner_load_target(model_id=model_id, cache_dir=cache_dir)
     target_device = _resolve_gliner_device(device)
     device_key = target_device or "cpu"
     cache_key = (load_id, local_only, device_key)
@@ -346,7 +337,7 @@ def _load_gliner_config(model_dir: Path) -> dict[str, Any]:
     if not config_path.is_file():
         raise FileNotFoundError(f"No GLiNER config file found in {model_dir}")
 
-    return json.loads(config_path.read_text(encoding="utf-8"))
+    return cast(dict[str, Any], json.loads(config_path.read_text(encoding="utf-8")))
 
 
 def _link_or_copy_path(source: Path, destination: Path) -> None:
@@ -388,8 +379,7 @@ def _resolve_local_gliner_dependency(cache_dir: Path, dependency: str) -> Path:
     resolved = resolve_hf_cache_path(cache_dir=cache_dir, repo_id=dependency)
     if resolved is None:
         raise FileNotFoundError(
-            "GLiNER offline load requires a local snapshot for "
-            f"'{dependency}', but none was found in {cache_dir}."
+            f"GLiNER offline load requires a local snapshot for '{dependency}', but none was found in {cache_dir}."
         )
 
     return resolved
@@ -406,9 +396,7 @@ def _materialize_offline_gliner_dir(model_dir: Path, config: dict[str, Any]) -> 
         Path: Local runtime directory that contains the patched config and links to the
         original model assets.
     """
-    digest = hashlib.sha256(
-        f"{model_dir.resolve()}\0{json.dumps(config, sort_keys=True)}".encode("utf-8")
-    ).hexdigest()[:16]
+    digest = hashlib.sha256(f"{model_dir.resolve()}\0{json.dumps(config, sort_keys=True)}".encode()).hexdigest()[:16]
     runtime_dir = _GLINER_OFFLINE_DIR / digest
     runtime_dir.mkdir(parents=True, exist_ok=True)
 
@@ -448,9 +436,7 @@ def _prepare_local_gliner_model_dir(model_dir: Path, cache_dir: Path) -> Path:
         if not isinstance(value, str) or not value.strip():
             continue
 
-        resolved = _resolve_local_gliner_dependency(
-            cache_dir=cache_dir, dependency=value
-        )
+        resolved = _resolve_local_gliner_dependency(cache_dir=cache_dir, dependency=value)
         resolved_str = str(resolved)
         if value != resolved_str:
             config[field] = resolved_str
@@ -489,15 +475,11 @@ def _resolve_gliner_load_target(model_id: str, cache_dir: Path) -> tuple[str, bo
     resolved = resolve_hf_cache_path(cache_dir=cache_dir, repo_id=model_id)
     if resolved is not None:
         logger.info("Using local GLiNER model path: {}", resolved)
-        prepared = _prepare_local_gliner_model_dir(
-            model_dir=resolved, cache_dir=cache_dir
-        )
+        prepared = _prepare_local_gliner_model_dir(model_dir=resolved, cache_dir=cache_dir)
         return str(prepared), True
 
     if os.getenv("HF_HUB_OFFLINE", "0") == "1":
-        raise FileNotFoundError(
-            f"GLiNER model '{model_id}' is not available in the local cache {cache_dir}."
-        )
+        raise FileNotFoundError(f"GLiNER model '{model_id}' is not available in the local cache {cache_dir}.")
 
     return model_id, False
 
@@ -732,10 +714,7 @@ def _pack_text_segments(
             continue
 
         candidate = segment if not current else f"{current} {segment}"
-        if (
-            current
-            and _count_text_tokens(candidate, tokenizer, words_splitter) > max_tokens
-        ):
+        if current and _count_text_tokens(candidate, tokenizer, words_splitter) > max_tokens:
             chunks.append(current)
             current = segment
         else:
@@ -777,7 +756,7 @@ def build_gliner_ner_extractor(
     labels: list[str] | None = None,
     threshold: float = 0.3,
     device: str | None = None,
-) -> Callable[[str], tuple[list[dict], list[dict]]]:
+) -> Callable[[str], tuple[list[dict[str, Any]], list[dict[str, Any]]]]:
     """Create an NER extractor bound to a GLiNER model.
 
     Args:
@@ -786,7 +765,7 @@ def build_gliner_ner_extractor(
         device (str | None): Preferred execution device.
 
     Returns:
-        Callable[[str], tuple[list[dict], list[dict]]]: The NER extraction function.
+        Callable[[str], tuple[list[dict[str, Any]], list[dict[str, Any]]]]: The NER extraction function.
     """
     model_id = load_model_env().ner_model
 
@@ -818,14 +797,14 @@ def build_gliner_ner_extractor(
         device=device,
     )
 
-    def _extract(text: str) -> tuple[list[dict], list[dict]]:
+    def _extract(text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Extract entities using GLiNER.
 
         Args:
             text (str): Input text.
 
         Returns:
-            tuple[list[dict], list[dict]]: Entities and relations.
+            tuple[list[dict[str, Any]], list[dict[str, Any]]]: Entities and relations.
         """
         if not text.strip():
             return [], []
@@ -848,11 +827,7 @@ def build_gliner_ner_extractor(
                             "ignore",
                             message=".*truncat.*max_length.*no maximum length.*",
                         )
-                        preds.extend(
-                            runtime.model.predict_entities(
-                                chunk, labels, threshold=threshold
-                            )
-                        )
+                        preds.extend(runtime.model.predict_entities(chunk, labels, threshold=threshold))
         except Exception as e:
             logger.warning("GLiNER extraction failed: {}", e)
             return [], []
@@ -868,7 +843,7 @@ def build_gliner_ner_extractor(
             )
 
         # GLiNER is pure NER, leaving relations empty
-        relations: list[dict] = []
+        relations: list[dict[str, Any]] = []
 
         return entities, relations
 
