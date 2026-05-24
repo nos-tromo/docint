@@ -1,10 +1,18 @@
-import { useState } from 'react'
-import { downloadCsv, downloadText } from '@/lib/csv'
-import { hateSpeechToCsv, hateSpeechToText } from '@/lib/exports'
+import { useRef, useState } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
+import { csvExportHref } from '@/api/collections'
 import type { HateSpeechRow } from '@/api/types'
 import { referenceMetadataItems } from '@/lib/referenceMetadata'
 
 export type { HateSpeechRow }
+
+interface Props {
+  rows: HateSpeechRow[]
+  isFetching?: boolean
+  hasNextPage?: boolean
+  onLoadMore?: () => void
+  collection: string
+}
 
 function locationParts(r: HateSpeechRow): string {
   const parts: string[] = []
@@ -87,41 +95,85 @@ function HateSpeechRowDetail({ row, index }: { row: HateSpeechRow; index: number
   )
 }
 
-export function HateSpeechTable({ rows }: { rows: HateSpeechRow[] }) {
+export function HateSpeechTable({
+  rows,
+  isFetching,
+  hasNextPage,
+  onLoadMore,
+  collection
+}: Props) {
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 72,
+    overscan: 8
+  })
+
   if (!rows.length) {
-    return <div className="text-sm text-muted-foreground">No flagged content.</div>
+    return (
+      <div className="text-sm text-muted-foreground">
+        {isFetching ? 'Loading flagged content…' : 'No flagged content.'}
+      </div>
+    )
   }
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
-          {rows.length} flagged chunk{rows.length === 1 ? '' : 's'}. Click a row for
-          the full text and reference metadata.
+          {rows.length} flagged chunk{rows.length === 1 ? '' : 's'}
+          {hasNextPage ? '+' : ''}. Click a row for the full text and reference metadata.
         </p>
-        <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={() => downloadText('hate-speech.txt', hateSpeechToText(rows))}
-            className="px-3 py-1 rounded-md border border-border text-sm"
-          >
-            TXT
-          </button>
-          <button
-            type="button"
-            onClick={() => downloadCsv('hate-speech.csv', hateSpeechToCsv(rows))}
-            className="px-3 py-1 rounded-md border border-border text-sm"
-          >
-            CSV
-          </button>
-        </div>
+        {collection && (
+          <div className="flex gap-2">
+            <a
+              href={csvExportHref(collection, 'hate-speech')}
+              download
+              className="px-3 py-1 rounded-md border border-border text-sm"
+            >
+              CSV
+            </a>
+          </div>
+        )}
       </div>
-      <ul className="space-y-2">
-        {rows.map((r, i) => (
-          <li key={r.chunk_id ?? i}>
-            <HateSpeechRowDetail row={r} index={i + 1} />
-          </li>
-        ))}
-      </ul>
+      <div
+        ref={scrollRef}
+        className="max-h-[70vh] overflow-y-auto"
+        data-testid="hate-speech-scroll"
+      >
+        <ul
+          className="relative"
+          style={{ height: `${virtualizer.getTotalSize()}px` }}
+        >
+          {virtualizer.getVirtualItems().map((vRow) => {
+            const r = rows[vRow.index]
+            return (
+              <li
+                key={r.chunk_id ?? vRow.index}
+                data-index={vRow.index}
+                ref={virtualizer.measureElement}
+                className="absolute left-0 right-0 pb-2"
+                style={{ transform: `translateY(${vRow.start}px)` }}
+              >
+                <HateSpeechRowDetail row={r} index={vRow.index + 1} />
+              </li>
+            )
+          })}
+        </ul>
+        {hasNextPage && onLoadMore && (
+          <div className="flex justify-center pt-2">
+            <button
+              type="button"
+              onClick={onLoadMore}
+              disabled={isFetching}
+              className="px-3 py-1 rounded-md border border-border text-sm disabled:opacity-50"
+            >
+              {isFetching ? 'Loading…' : 'Load more'}
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   )
 }

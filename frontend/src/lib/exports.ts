@@ -12,8 +12,6 @@ import {
   referenceMetadataItems,
   referenceMetadataValue
 } from './referenceMetadata'
-import { toCsv } from './csv'
-
 // Width matches docint/ui/analysis.py::TXT_EXPORT_SEPARATOR — the latest
 // Streamlit export style. Kept exactly so cross-version diffing stays
 // usable.
@@ -188,108 +186,11 @@ export function hateSpeechToText(rows: HateSpeechRow[]): string {
   return out.join('\n').trimEnd() + '\n'
 }
 
-// ---------------------------------------------------------------------------
-// CSV (matches the latest analysis.py columns)
-// ---------------------------------------------------------------------------
-
-const ENTITY_CSV_COLUMNS = [
-  'entity',
-  'source',
-  'page',
-  'row',
-  'chunk_id',
-  'chunk_text',
-  'network',
-  'ref_type',
-  'uuid',
-  'timestamp',
-  'author',
-  'author_id',
-  'vanity',
-  'text_id',
-  'anchor_text',
-  'parent_text'
-] as const
-
-const HATE_CSV_COLUMNS = [
-  'source',
-  'page',
-  'row',
-  'chunk_id',
-  'category',
-  'confidence',
-  'reason',
-  'chunk_text',
-  'network',
-  'ref_type',
-  'uuid',
-  'timestamp',
-  'author',
-  'author_id',
-  'vanity',
-  'text_id',
-  'anchor_text',
-  'parent_text'
-] as const
-
-function refField(meta: ReferenceMetadata | undefined, key: string): unknown {
-  if (!meta) return ''
-  // `ref_type` is the CSV column name for the reference_metadata `type`
-  // key (matches the Streamlit schema).
-  const lookup = key === 'ref_type' ? 'type' : key
-  const raw = (meta as Record<string, unknown>)[lookup]
-  return raw ?? ''
-}
-
-export function entityFindingsToCsv(
-  entity: NerEntityRow,
-  chunks: NerSourceRow[]
-): string {
-  const label = `${entity.text} [${entity.type || 'Unlabeled'}]`
-  const rows = chunks.map((c) => ({
-    entity: label,
-    source: c.filename ?? '',
-    page: c.page ?? '',
-    row: c.row ?? '',
-    chunk_id: c.chunk_id ?? '',
-    chunk_text: c.chunk_text ?? c.text ?? '',
-    network: refField(c.reference_metadata, 'network'),
-    ref_type: refField(c.reference_metadata, 'ref_type'),
-    uuid: refField(c.reference_metadata, 'uuid'),
-    timestamp: refField(c.reference_metadata, 'timestamp'),
-    author: refField(c.reference_metadata, 'author'),
-    author_id: refField(c.reference_metadata, 'author_id'),
-    vanity: refField(c.reference_metadata, 'vanity'),
-    text_id: refField(c.reference_metadata, 'text_id'),
-    anchor_text: refField(c.reference_metadata, 'anchor_text'),
-    parent_text: refField(c.reference_metadata, 'parent_text')
-  })) as unknown as Array<Record<string, unknown>>
-  return toCsv(rows, ENTITY_CSV_COLUMNS as unknown as string[])
-}
-
-export function hateSpeechToCsv(rows: HateSpeechRow[]): string {
-  const out = rows.map((r) => ({
-    source: r.filename ?? r.source_ref ?? '',
-    page: r.page ?? '',
-    row: r.row ?? '',
-    chunk_id: r.chunk_id ?? '',
-    category: r.category ?? '',
-    confidence: r.confidence ?? '',
-    reason: r.reason ?? '',
-    chunk_text: r.chunk_text ?? r.text ?? '',
-    network: refField(r.reference_metadata, 'network'),
-    ref_type: refField(r.reference_metadata, 'ref_type'),
-    uuid: refField(r.reference_metadata, 'uuid'),
-    timestamp: refField(r.reference_metadata, 'timestamp'),
-    author: refField(r.reference_metadata, 'author'),
-    author_id: refField(r.reference_metadata, 'author_id'),
-    vanity: refField(r.reference_metadata, 'vanity'),
-    text_id: refField(r.reference_metadata, 'text_id'),
-    anchor_text: refField(r.reference_metadata, 'anchor_text'),
-    parent_text: refField(r.reference_metadata, 'parent_text')
-  })) as unknown as Array<Record<string, unknown>>
-  return toCsv(out, HATE_CSV_COLUMNS as unknown as string[])
-}
+// CSV exports for entity findings and hate-speech findings are streamed
+// directly from the backend (`/collections/{name}/export/*.csv`) so the
+// browser no longer accumulates the whole collection in memory. The
+// canonical schemas live in `docint/utils/csv_stream.py` and the frontend
+// uses anchor links built by `csvExportHref` in `src/api/collections.ts`.
 
 // Re-export for tests/UI callers.
 export { TXT_EXPORT_SEPARATOR }

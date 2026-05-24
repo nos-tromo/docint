@@ -1,36 +1,24 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import type { NerEntityRow, NerSourceRow } from '@/api/types'
-import { downloadCsv, downloadText } from '@/lib/csv'
-import { entityFindingsToCsv, entityFindingsToText } from '@/lib/exports'
+import { csvExportHref } from '@/api/collections'
 import { EntityFinding } from './EntityFinding'
 
 interface Props {
   entities: NerEntityRow[]
-  sources: NerSourceRow[]
+  selectedKey: string | null
+  onSelectEntity: (key: string | null) => void
+  findings: NerSourceRow[]
+  isFetchingFindings?: boolean
+  hasNextPage?: boolean
+  onLoadMore?: () => void
+  collection: string
+  keyOf: (e: NerEntityRow) => string
 }
 
-function compactLookup(text: string): string {
-  // Mirrors the backend's _compact_lookup so we match the same way the
-  // aggregator did when it grouped variants under a cluster key.
-  return text
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, '')
-    .trim()
-}
-
-function matchTerms(entity: NerEntityRow): { exact: Set<string>; compact: Set<string> } {
-  const exact = new Set<string>()
-  const compact = new Set<string>()
-  const seed = (t: string) => {
-    const lower = t.trim().toLowerCase()
-    if (!lower) return
-    exact.add(lower)
-    const c = compactLookup(lower)
-    if (c) compact.add(c)
-  }
-  seed(entity.text)
-  for (const v of entity.variants ?? []) seed(v.text ?? '')
-  return { exact, compact }
+function entityOptionLabel(entity: NerEntityRow): string {
+  const type = entity.type || 'Unlabeled'
+  return `${entity.text} [${type}] · ${entity.mentions}`
 }
 
 function highlightTermsForEntity(entity: NerEntityRow): string[] {
@@ -43,40 +31,17 @@ function highlightTermsForEntity(entity: NerEntityRow): string[] {
   return Array.from(terms)
 }
 
-function entityOptionLabel(entity: NerEntityRow): string {
-  const type = entity.type || 'Unlabeled'
-  return `${entity.text} [${type}] · ${entity.mentions}`
-}
-
-function entityFileSlug(entity: NerEntityRow): string {
-  // Filenames for downloads — collapse runs of unsafe chars to underscores
-  // so OS file pickers don't choke on them, but keep something readable.
-  const raw = `${entity.text}_${entity.type || 'unlabeled'}`
-  return raw.replace(/[^\p{L}\p{N}._-]+/gu, '_').replace(/^_+|_+$/g, '') || 'entity'
-}
-
-function sourceContainsEntity(source: NerSourceRow, entity: NerEntityRow): boolean {
-  const { exact, compact } = matchTerms(entity)
-  const typeLower = (entity.type || '').toLowerCase()
-  const candidates = source.entities ?? []
-  for (const cand of candidates) {
-    const candText = (cand.text ?? '').trim().toLowerCase()
-    if (!candText) continue
-    const candType = (cand.type ?? '').toLowerCase()
-    // Require the entity type to match so e.g. PER "Apple" doesn't match
-    // ORG "Apple" — same behavior as the backend's cluster key.
-    if (typeLower && candType && candType !== typeLower) continue
-    if (exact.has(candText)) return true
-    const candCompact = compactLookup(candText)
-    if (candCompact && compact.has(candCompact)) return true
-  }
-  return false
-}
-
-export function EntityInspector({ entities, sources }: Props) {
-  const [typeFilter, setTypeFilter] = useState('')
-  const [selectedKey, setSelectedKey] = useState<string | null>(null)
-
+export function EntityInspector({
+  entities,
+  selectedKey,
+  onSelectEntity,
+  findings,
+  isFetchingFindings,
+  hasNextPage,
+  onLoadMore,
+  collection,
+  keyOf
+}: Props) {
   const entityList = useMemo(
     () => entities.filter((e) => (e.text ?? '').trim().length > 0),
     [entities]
@@ -85,23 +50,53 @@ export function EntityInspector({ entities, sources }: Props) {
     () => Array.from(new Set(entityList.map((e) => e.type || 'Unlabeled'))).sort(),
     [entityList]
   )
+  // The dropdown's type filter is owned locally — it doesn't affect the
+  // server fetch, only which entities the user can pick from.
+  const typeFilterRef = useRef<HTMLSelectElement>(null)
   const filtered = useMemo(() => {
-    if (!typeFilter) return entityList
-    return entityList.filter((e) => (e.type || 'Unlabeled') === typeFilter)
-  }, [entityList, typeFilter])
+    const t = typeFilterRef.current?.value || ''
+    if (!t) return entityList
+    return entityList.filter((e) => (e.type || 'Unlabeled') === t)
+  }, [entityList])
 
-  const keyOf = (e: NerEntityRow) => `${e.text}::${e.type}`
-  const selected =
-    filtered.find((e) => keyOf(e) === selectedKey) ?? filtered[0] ?? null
+  const selected = useMemo(() => {
+    if (selectedKey) {
+      const hit = entityList.find((e) => keyOf(e) === selectedKey)
+      if (hit) return hit
+    }
+    return filtered[0] ?? null
+  }, [entityList, filtered, keyOf, selectedKey])
 
-  const findings = useMemo(() => {
-    if (!selected) return [] as NerSourceRow[]
-    return sources.filter((s) => sourceContainsEntity(s, selected))
-  }, [sources, selected])
+  // When the entity list arrives, seed selection so the dropdown has a
+  // sensible default and the parent fires the source fetch.
+  useEffect(() => {
+    if (!selectedKey && selected) {
+      onSelectEntity(keyOf(selected))
+    }
+  }, [keyOf, onSelectEntity, selected, selectedKey])
+
+  // --- virtualized findings list ---
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const virtualizer = useVirtualizer({
+    count: findings.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 96,
+    overscan: 8
+  })
 
   if (entityList.length === 0) {
-    return <div className="text-sm text-muted-foreground">No entities found in this collection.</div>
+    return (
+      <div className="text-sm text-muted-foreground">No entities found in this collection.</div>
+    )
   }
+
+  const exportParams =
+    selected && selectedKey
+      ? {
+          entity_text: selected.text,
+          entity_type: selected.type
+        }
+      : undefined
 
   return (
     <div className="space-y-4">
@@ -109,11 +104,9 @@ export function EntityInspector({ entities, sources }: Props) {
         <label className="flex flex-col gap-1 text-sm">
           <span className="text-xs uppercase text-muted-foreground">Entity category</span>
           <select
-            value={typeFilter}
-            onChange={(e) => {
-              setTypeFilter(e.target.value)
-              setSelectedKey(null)
-            }}
+            ref={typeFilterRef}
+            defaultValue=""
+            onChange={() => onSelectEntity(null)}
             className="bg-zinc-900 border border-border rounded-md px-2 py-1"
           >
             <option value="">All</option>
@@ -128,7 +121,7 @@ export function EntityInspector({ entities, sources }: Props) {
           <span className="text-xs uppercase text-muted-foreground">Entity</span>
           <select
             value={selected ? keyOf(selected) : ''}
-            onChange={(e) => setSelectedKey(e.target.value)}
+            onChange={(e) => onSelectEntity(e.target.value || null)}
             className="bg-zinc-900 border border-border rounded-md px-2 py-1"
           >
             {filtered.length === 0 && <option value="">No entities</option>}
@@ -149,55 +142,72 @@ export function EntityInspector({ entities, sources }: Props) {
               <span className="font-medium">{selected.text}</span>
               <span className="text-muted-foreground">
                 {' '}— {findings.length} chunk{findings.length === 1 ? '' : 's'}
+                {hasNextPage ? '+' : ''}
+                {isFetchingFindings ? ' (loading…)' : ''}
               </span>
             </div>
-            {findings.length > 0 && (
+            {exportParams && (
               <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() =>
-                    downloadText(
-                      `entity_${entityFileSlug(selected)}.txt`,
-                      entityFindingsToText(selected, findings)
-                    )
-                  }
-                  className="px-3 py-1 rounded-md border border-border text-sm"
-                >
-                  TXT
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    downloadCsv(
-                      `entity_${entityFileSlug(selected)}.csv`,
-                      entityFindingsToCsv(selected, findings)
-                    )
-                  }
+                <a
+                  href={csvExportHref(collection, 'ner-sources', exportParams)}
+                  download
                   className="px-3 py-1 rounded-md border border-border text-sm"
                 >
                   CSV
-                </button>
+                </a>
               </div>
             )}
           </div>
           {findings.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              No chunks were matched for the selected entity.
+              {isFetchingFindings
+                ? 'Loading findings…'
+                : 'No chunks were matched for the selected entity.'}
             </p>
           ) : (
-            <ul className="space-y-2">
-              {findings.map((source, i) => (
-                <li key={source.chunk_id ?? i}>
-                  <EntityFinding
-                    index={i + 1}
-                    source={source}
-                    highlightTerms={highlightTermsForEntity(selected)}
-                    selectedTypeLower={(selected.type || '').toLowerCase()}
-                    defaultOpen={findings.length === 1}
-                  />
-                </li>
-              ))}
-            </ul>
+            <div
+              ref={scrollRef}
+              className="max-h-[60vh] overflow-y-auto"
+              data-testid="ner-findings-scroll"
+            >
+              <ul
+                className="relative space-y-2"
+                style={{ height: `${virtualizer.getTotalSize()}px` }}
+              >
+                {virtualizer.getVirtualItems().map((vRow) => {
+                  const source = findings[vRow.index]
+                  return (
+                    <li
+                      key={source.chunk_id ?? vRow.index}
+                      data-index={vRow.index}
+                      ref={virtualizer.measureElement}
+                      className="absolute left-0 right-0"
+                      style={{ transform: `translateY(${vRow.start}px)` }}
+                    >
+                      <EntityFinding
+                        index={vRow.index + 1}
+                        source={source}
+                        highlightTerms={highlightTermsForEntity(selected)}
+                        selectedTypeLower={(selected.type || '').toLowerCase()}
+                        defaultOpen={findings.length === 1}
+                      />
+                    </li>
+                  )
+                })}
+              </ul>
+              {hasNextPage && onLoadMore && (
+                <div className="flex justify-center pt-2">
+                  <button
+                    type="button"
+                    onClick={onLoadMore}
+                    disabled={isFetchingFindings}
+                    className="px-3 py-1 rounded-md border border-border text-sm disabled:opacity-50"
+                  >
+                    {isFetchingFindings ? 'Loading…' : 'Load more'}
+                  </button>
+                </div>
+              )}
+            </div>
           )}
         </div>
       ) : (

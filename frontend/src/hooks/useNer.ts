@@ -1,5 +1,10 @@
-import { useQuery } from '@tanstack/react-query'
-import { getHateSpeech, getIeStats, getNer, getNerStats } from '@/api/collections'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
+import {
+  getHateSpeechPage,
+  getIeStats,
+  getNerSourcesPage,
+  getNerStats
+} from '@/api/collections'
 import { useUiStore } from '@/stores/ui'
 
 export function useNerStats(params: Parameters<typeof getNerStats>[0]) {
@@ -11,20 +16,37 @@ export function useNerStats(params: Parameters<typeof getNerStats>[0]) {
   })
 }
 
-export function useNer(refresh?: boolean) {
+/**
+ * Paginated source rows for one entity. ``entityKey`` is the
+ * ``${text}::${type}`` shorthand emitted by ``EntityInspector.keyOf`` so the
+ * hook fires only when a concrete entity is selected — this is the lazy
+ * counterpart to the deleted ``useNer`` hook that previously triggered a
+ * full-collection scroll on every collection switch.
+ */
+export function useNerSources(entityKey: string | null) {
   const collection = useUiStore((s) => s.selectedCollection)
-  return useQuery({
-    queryKey: ['ner', collection, refresh ?? false],
-    queryFn: () => getNer(refresh),
-    enabled: !!collection
+  return useInfiniteQuery({
+    queryKey: ['ner-sources', collection, entityKey],
+    queryFn: ({ pageParam }) =>
+      getNerSourcesPage({
+        cursor: pageParam as string | null,
+        limit: 50,
+        entity_key: entityKey ?? undefined
+      }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => last.next_cursor,
+    enabled: !!collection && !!entityKey
   })
 }
 
-export function useHateSpeech() {
+export function useHateSpeechPages() {
   const collection = useUiStore((s) => s.selectedCollection)
-  return useQuery({
-    queryKey: ['hate-speech', collection],
-    queryFn: getHateSpeech,
+  return useInfiniteQuery({
+    queryKey: ['hate-speech-pages', collection],
+    queryFn: ({ pageParam }) =>
+      getHateSpeechPage({ cursor: pageParam as string | null, limit: 50 }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => last.next_cursor,
     enabled: !!collection
   })
 }

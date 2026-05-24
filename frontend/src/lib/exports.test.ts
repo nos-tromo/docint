@@ -2,9 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   TXT_EXPORT_SEPARATOR,
   chatTranscriptToText,
-  entityFindingsToCsv,
   entityFindingsToText,
-  hateSpeechToCsv,
   hateSpeechToText,
   summaryToMarkdown
 } from './exports'
@@ -185,40 +183,6 @@ describe('entity findings TXT export', () => {
   })
 })
 
-describe('entity findings CSV export', () => {
-  it('emits the Streamlit-aligned column set with parent_text and anchor_text', () => {
-    const entity: NerEntityRow = {
-      text: 'Alice',
-      type: 'PER',
-      mentions: 1
-    } as unknown as NerEntityRow
-    const chunks: NerSourceRow[] = [
-      {
-        chunk_id: 'c1',
-        filename: 'doc.pdf',
-        page: 1,
-        chunk_text: 'Alice spoke.',
-        reference_metadata: {
-          type: 'post',
-          parent_text: 'parent chunk',
-          anchor_text: 'Alice'
-        }
-      }
-    ]
-    const csv = entityFindingsToCsv(entity, chunks)
-    const [header, row] = csv.split('\n')
-    expect(header).toBe(
-      'entity,source,page,row,chunk_id,chunk_text,network,ref_type,uuid,timestamp,author,author_id,vanity,text_id,anchor_text,parent_text'
-    )
-    expect(row).toContain('Alice [PER]')
-    expect(row).toContain('doc.pdf')
-    // ref_type is the CSV column name for reference_metadata.type.
-    expect(row).toContain(',post,')
-    expect(row).toContain('Alice') // anchor_text column populated
-    expect(row).toContain('parent chunk')
-  })
-})
-
 describe('hate-speech TXT export', () => {
   it('renders findings with extras, metadata, and sectioned text', () => {
     const rows: HateSpeechRow[] = [
@@ -248,26 +212,3 @@ describe('hate-speech TXT export', () => {
   })
 })
 
-describe('hate-speech CSV export', () => {
-  it('emits the Streamlit column schema', () => {
-    const rows: HateSpeechRow[] = [
-      {
-        chunk_id: 'c1',
-        filename: 'bad.txt',
-        page: 2,
-        chunk_text: 'offensive line',
-        category: 'slur',
-        confidence: 'high',
-        reason: 'matches lexicon',
-        reference_metadata: { anchor_text: 'span', parent_text: 'parent' }
-      }
-    ]
-    const [header, row] = hateSpeechToCsv(rows).split('\n')
-    expect(header).toBe(
-      'source,page,row,chunk_id,category,confidence,reason,chunk_text,network,ref_type,uuid,timestamp,author,author_id,vanity,text_id,anchor_text,parent_text'
-    )
-    expect(row).toContain('bad.txt')
-    expect(row).toContain('span')
-    expect(row).toContain('parent')
-  })
-})

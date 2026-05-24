@@ -23,13 +23,13 @@ const rows: HateSpeechRow[] = [
 
 describe('HateSpeechTable', () => {
   it('renders a summary line for each finding', () => {
-    render(<HateSpeechTable rows={rows} />)
+    render(<HateSpeechTable rows={rows} collection="alpha" />)
     expect(screen.getByText(/harassment/i)).toBeInTheDocument()
     expect(screen.getByText(/Targets a protected group/)).toBeInTheDocument()
   })
 
   it('reveals the chunk text and reference metadata when a row is expanded', async () => {
-    render(<HateSpeechTable rows={rows} />)
+    render(<HateSpeechTable rows={rows} collection="alpha" />)
     await userEvent.click(screen.getByText(/harassment/i))
     expect(screen.getByText(/Body of the flagged passage/)).toBeInTheDocument()
     expect(screen.getByText('Carol')).toBeInTheDocument()
@@ -40,7 +40,17 @@ describe('HateSpeechTable', () => {
   })
 
   it('shows the empty state when nothing was flagged', () => {
-    render(<HateSpeechTable rows={[]} />)
+    render(<HateSpeechTable rows={[]} collection="alpha" />)
     expect(screen.getByText(/no flagged content/i)).toBeInTheDocument()
+  })
+
+  it('renders a streaming CSV download link to the right collection-scoped endpoint', () => {
+    render(<HateSpeechTable rows={rows} collection="alpha" />)
+    const link = screen.getByRole('link', { name: 'CSV' })
+    expect(link).toHaveAttribute(
+      'href',
+      expect.stringContaining('/collections/alpha/export/hate-speech.csv')
+    )
+    expect(link).toHaveAttribute('download')
   })
 })

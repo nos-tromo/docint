@@ -1,23 +1,53 @@
-import { useState } from 'react'
-import { useHateSpeech, useNer, useNerStats } from '@/hooks/useNer'
+import { useEffect, useMemo, useState } from 'react'
+import { useHateSpeechPages, useNerSources, useNerStats } from '@/hooks/useNer'
 import { useUiStore } from '@/stores/ui'
 import { EntityInspector } from '@/components/analysis/EntityInspector'
 import { HateSpeechTable } from '@/components/analysis/HateSpeechTable'
 import { SummaryPanel } from '@/components/analysis/SummaryPanel'
+import { warmCollectionNer } from '@/api/collections'
 import { cn } from '@/lib/cn'
 
 const TABS = ['NER', 'Hate speech', 'Summary'] as const
 type Tab = (typeof TABS)[number]
 
+const keyOf = (text: string | null | undefined, type: string | null | undefined) =>
+  `${text ?? ''}::${type ?? ''}`
+
 export function Analysis() {
   const [tab, setTab] = useState<Tab>('NER')
   const collection = useUiStore((s) => s.selectedCollection)
-  // Stats give us the entity dropdown (aggregated, ranked); /collections/ner
-  // gives us the raw mention rows we filter client-side to show the chunks
-  // for the picked entity, mirroring the deleted Streamlit drill-down.
+
   const stats = useNerStats({ top_k: 500, min_mentions: 1, include_relations: false })
-  const sources = useNer()
-  const hate = useHateSpeech()
+
+  // Background-warm the NER aggregate as soon as a collection is selected;
+  // fire-and-forget so the slow scroll happens off the main interaction.
+  useEffect(() => {
+    if (!collection) return
+    warmCollectionNer().catch(() => {
+      /* warm is best-effort */
+    })
+  }, [collection])
+
+  const entities = useMemo(() => stats.data?.top_entities ?? [], [stats.data])
+  const [selectedEntityKey, setSelectedEntityKey] = useState<string | null>(null)
+
+  // Reset selection when the collection changes so we don't keep an entity
+  // key that doesn't exist in the new collection's aggregate.
+  useEffect(() => {
+    setSelectedEntityKey(null)
+  }, [collection])
+
+  const ner = useNerSources(selectedEntityKey)
+  const findings = useMemo(
+    () => (ner.data?.pages ?? []).flatMap((p) => p.items),
+    [ner.data]
+  )
+
+  const hate = useHateSpeechPages()
+  const hateRows = useMemo(
+    () => (hate.data?.pages ?? []).flatMap((p) => p.items),
+    [hate.data]
+  )
 
   return (
     <div className="p-8 space-y-4">
@@ -43,18 +73,31 @@ export function Analysis() {
             <p className="text-sm text-muted-foreground">
               Select a collection to inspect entities.
             </p>
-          ) : sources.isLoading || stats.isLoading ? (
+          ) : stats.isLoading ? (
             <p className="text-sm text-muted-foreground">Loading entities…</p>
           ) : (
             <EntityInspector
-              entities={stats.data?.top_entities ?? []}
-              sources={sources.data?.sources ?? []}
+              entities={entities}
+              selectedKey={selectedEntityKey}
+              onSelectEntity={setSelectedEntityKey}
+              findings={findings}
+              isFetchingFindings={ner.isFetching}
+              hasNextPage={!!ner.hasNextPage}
+              onLoadMore={() => ner.fetchNextPage()}
+              collection={collection}
+              keyOf={(e) => keyOf(e.text, e.type)}
             />
           )}
         </div>
       )}
       {tab === 'Hate speech' && (
-        <HateSpeechTable rows={hate.data?.results ?? []} />
+        <HateSpeechTable
+          rows={hateRows}
+          isFetching={hate.isFetching}
+          hasNextPage={!!hate.hasNextPage}
+          onLoadMore={() => hate.fetchNextPage()}
+          collection={collection ?? ''}
+        />
       )}
       {tab === 'Summary' && <SummaryPanel />}
     </div>
