@@ -65,11 +65,6 @@ def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch: pytest
     )
     monkeypatch.setattr(
         model_cfg_module,
-        "load_docling_models",
-        lambda: calls.append(("docling", "docling")),
-    )
-    monkeypatch.setattr(
-        model_cfg_module,
         "load_hf_model",
         lambda model_id, cache_folder, kw, trust_remote_code=False: calls.append((kw, model_id)),
     )
@@ -147,11 +142,6 @@ def test_load_models_populates_embed_tokenizer_cache(tmp_path: Path, monkeypatch
         model_cfg_module,
         "load_clip_model",
         lambda model_id, cache_folder: calls.append(("clip", model_id)),
-    )
-    monkeypatch.setattr(
-        model_cfg_module,
-        "load_docling_models",
-        lambda: calls.append(("docling", "docling")),
     )
 
     captured_hf_calls: list[dict[str, object]] = []
