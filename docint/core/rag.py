@@ -35,6 +35,7 @@ from docint.utils.env_cfg import (
     ModelConfig,
     OpenAIConfig,
     PathConfig,
+    RerankClientConfig,
     RetrievalConfig,
     RuntimeConfig,
     SessionConfig,
@@ -48,11 +49,11 @@ from docint.utils.env_cfg import (
     load_ner_env,
     load_openai_env,
     load_path_env,
+    load_rerank_client_env,
     load_retrieval_env,
     load_runtime_env,
     load_session_env,
     load_summary_env,
-    resolve_hf_cache_path,
 )
 # isort: on
 
@@ -65,7 +66,6 @@ from llama_index.core import (
     VectorStoreIndex,
 )
 from llama_index.core.embeddings import BaseEmbedding
-from llama_index.core.postprocessor import LLMRerank
 from llama_index.core.postprocessor.types import BaseNodePostprocessor
 from llama_index.core.prompts import PromptTemplate
 from llama_index.core.query_engine import RetrieverQueryEngine
@@ -88,7 +88,6 @@ from llama_index.core.vector_stores.types import (
     VectorStoreQueryMode,
 )
 from llama_index.llms.openai import OpenAI
-from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from loguru import logger
 from qdrant_client import QdrantClient
@@ -1473,7 +1472,6 @@ class RAG:
     # --- Reranking / retrieval ---
     retrieve_similarity_top_k: int = field(default=20, init=False)
     rerank_top_n: int = field(default=5, init=False)
-    rerank_use_fp16: bool = field(default=False, init=False)
     chat_response_mode: str = field(default="auto", init=False)
     vector_store_query_mode: str = field(default="auto", init=False)
     hybrid_alpha: float = field(default=0.5, init=False)
@@ -1693,7 +1691,6 @@ class RAG:
         )
 
         # --- Retrieval config ---
-        self.rerank_use_fp16 = self.retrieval_config.rerank_use_fp16
         self.retrieve_similarity_top_k = self.retrieval_config.retrieve_top_k
         self.chat_response_mode = self.retrieval_config.chat_response_mode
         self.vector_store_query_mode = self.retrieval_config.vector_store_query_mode
@@ -2027,64 +2024,48 @@ class RAG:
 
     @property
     def reranker(self) -> BaseNodePostprocessor:
-        """Lazily initialize the configured reranker postprocessor.
+        """Lazily initialize the remote rerank-endpoint postprocessor.
+
+        Reranking is always remote — the consumer points at either the
+        full vllm-service stack (LiteLLM router forwards ``/v1/rerank``
+        to the vLLM rerank backend) or the standalone ``rerank-only``
+        deployment (``http://rerank-cpu:8000``; same Jina-shape
+        contract). Override the endpoint independently of chat/embed
+        with ``RERANK_API_BASE`` / ``RERANK_API_KEY``.
+
+        Transport failures degrade gracefully — when ``/rerank`` is
+        unreachable or returns an unexpected payload,
+        :class:`VLLMRerankPostprocessor._postprocess_nodes` catches the
+        error and returns the original retrieval order (top_n nodes
+        unranked).
 
         Returns:
-            BaseNodePostprocessor: The initialized reranker.
+            BaseNodePostprocessor: A configured
+            :class:`VLLMRerankPostprocessor`.
 
         Raises:
-            ValueError: If rerank_model_id is None.
-            NotImplementedError: If FlagEmbeddingReranker fails for an unsupported operation unrelated to meta tensors.
-            RuntimeError: If FlagEmbeddingReranker fails for an unsupported runtime condition unrelated to meta tensors.
+            ValueError: If ``rerank_model_id`` is ``None``.
         """
         if self.rerank_model_id is None:
             raise ValueError("rerank_model_id cannot be None")
         if self._reranker is None:
-            provider = self.openai_inference_provider.lower()
-            if provider == "vllm":
-                self._reranker = VLLMRerankPostprocessor(
-                    api_base=self.openai_api_base or "",
-                    api_key=self.openai_api_key,
-                    model=self.rerank_model_id,
-                    timeout=self.openai_timeout,
-                    top_n=self.rerank_top_n,
-                )
-                logger.info(
-                    "Initializing vLLM reranker endpoint client with model: {}",
-                    self.rerank_model_id,
-                )
-            else:
-                # Resolve to local cache path for offline compatibility
-                cache_dir = self.hf_hub_cache or Path.home() / ".cache" / "huggingface" / "hub"
-                resolved = resolve_hf_cache_path(cache_dir, self.rerank_model_id)
-                resolved_model = str(resolved) if resolved else self.rerank_model_id
-                if resolved:
-                    logger.info("Using local reranker model path: {}", resolved_model)
-                flag_reranker = FlagEmbeddingReranker(
-                    top_n=self.rerank_top_n,
-                    model=resolved_model,
-                    use_fp16=self.rerank_use_fp16,
-                )
-                try:
-                    flag_reranker._model.compute_score([("healthcheck", "healthcheck")])
-                    self._reranker = flag_reranker
-                    logger.info(
-                        "Initializing FlagEmbeddingReranker with model: {} for provider {}",
-                        self.rerank_model_id,
-                        provider,
-                    )
-                except (NotImplementedError, RuntimeError) as exc:
-                    if "meta tensor" not in str(exc).lower():
-                        raise
-                    logger.warning(
-                        "FlagEmbeddingReranker failed to init (meta-tensor transfer issue: {}); "
-                        "falling back to LLMRerank.",
-                        exc,
-                    )
-                    self._reranker = LLMRerank(
-                        top_n=self.rerank_top_n,
-                        llm=self.text_model,
-                    )
+            rerank_cfg: RerankClientConfig = load_rerank_client_env(
+                default_api_base=self.openai_api_base or "",
+                default_api_key=self.openai_api_key,
+                default_timeout=self.openai_timeout,
+            )
+            self._reranker = VLLMRerankPostprocessor(
+                api_base=rerank_cfg.api_base,
+                api_key=rerank_cfg.api_key,
+                model=self.rerank_model_id,
+                timeout=rerank_cfg.timeout,
+                top_n=self.rerank_top_n,
+            )
+            logger.info(
+                "Initializing remote reranker endpoint client at {} with model: {}",
+                rerank_cfg.api_base,
+                self.rerank_model_id,
+            )
         return self._reranker
 
     def _create_text_model(self, *, enable_reasoning: bool = False) -> OpenAI:

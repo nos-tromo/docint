@@ -197,7 +197,6 @@ def test_load_retrieval_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     Args:
         monkeypatch: Fixture to clear environment variables.
     """
-    monkeypatch.delenv("RERANK_USE_FP16", raising=False)
     monkeypatch.delenv("RETRIEVE_TOP_K", raising=False)
     monkeypatch.delenv("CHAT_RESPONSE_MODE", raising=False)
     monkeypatch.delenv("RETRIEVAL_VECTOR_QUERY_MODE", raising=False)
@@ -208,7 +207,6 @@ def test_load_retrieval_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
 
     cfg = load_retrieval_env()
 
-    assert cfg.rerank_use_fp16 is False
     assert cfg.retrieve_top_k == 20
     assert cfg.chat_response_mode == "auto"
     assert cfg.vector_store_query_mode == "auto"
@@ -226,7 +224,6 @@ def test_load_retrieval_env_parses_chat_response_mode(
     Args:
         monkeypatch: Fixture to set environment variables.
     """
-    monkeypatch.setenv("RERANK_USE_FP16", "true")
     monkeypatch.setenv("RETRIEVE_TOP_K", "11")
     monkeypatch.setenv("CHAT_RESPONSE_MODE", "refine")
     monkeypatch.setenv("RETRIEVAL_VECTOR_QUERY_MODE", "hybrid")
@@ -237,7 +234,6 @@ def test_load_retrieval_env_parses_chat_response_mode(
 
     cfg = load_retrieval_env()
 
-    assert cfg.rerank_use_fp16 is True
     assert cfg.retrieve_top_k == 11
     assert cfg.chat_response_mode == "refine"
     assert cfg.vector_store_query_mode == "hybrid"

@@ -888,6 +888,64 @@ def load_ner_client_env(
 
 
 @dataclass(frozen=True)
+class RerankClientConfig:
+    """Dataclass for the remote rerank service HTTP client."""
+
+    api_base: str
+    api_key: str | None
+    timeout: float
+
+
+def load_rerank_client_env(
+    default_api_base: str,
+    default_api_key: str | None,
+    default_timeout: float,
+) -> "RerankClientConfig":
+    """Load the remote rerank client configuration from the environment.
+
+    docint always reaches rerank over HTTP. The client POSTs to
+    ``{api_base}/rerank`` with a Jina-shape body
+    ``{model, query, documents, top_n}``. Defaults mirror the OpenAI
+    client settings — the full vllm-service router exposes
+    ``/v1/rerank`` as a LiteLLM pass-through against the same base. For
+    the rerank-only deployment shape (CPU container hosted by
+    vllm-service), override with ``RERANK_API_BASE=http://rerank-cpu:8000``.
+
+    Args:
+        default_api_base (str): Fallback base URL when ``RERANK_API_BASE`` is
+            unset. Typically the active ``OPENAI_API_BASE``.
+        default_api_key (str | None): Fallback Bearer token when
+            ``RERANK_API_KEY`` is unset. ``None`` (or empty) disables auth.
+        default_timeout (float): Fallback request timeout in seconds.
+
+    Returns:
+        RerankClientConfig: Resolved configuration.
+
+        - ``api_base``: Base URL; the postprocessor appends ``/rerank``
+          itself.
+        - ``api_key``: Bearer token sent as ``Authorization: Bearer ...``
+          when set; omitted entirely when ``None``. The rerank-only shape
+          requires no auth (trust ``inference-net``); the full vllm-service
+          router requires the master key — operators leave the env unset
+          to inherit ``default_api_key``, or set ``RERANK_API_KEY``
+          explicitly.
+        - ``timeout``: Per-request HTTP timeout in seconds.
+    """
+    raw_key = os.getenv("RERANK_API_KEY")
+    if raw_key is not None and raw_key.strip():
+        api_key: str | None = raw_key.strip()
+    elif default_api_key and default_api_key.strip():
+        api_key = default_api_key.strip()
+    else:
+        api_key = None
+    return RerankClientConfig(
+        api_base=os.getenv("RERANK_API_BASE", default_api_base).rstrip("/"),
+        api_key=api_key,
+        timeout=float(os.getenv("RERANK_TIMEOUT", default_timeout)),
+    )
+
+
+@dataclass(frozen=True)
 class OpenAIConfig:
     """Dataclass for OpenAI-compatible API configuration."""
 
@@ -1215,7 +1273,6 @@ def load_response_validation_env(
 class RetrievalConfig:
     """Dataclass for RAG (Retrieval-Augmented Generation) configuration."""
 
-    rerank_use_fp16: bool
     retrieve_top_k: int
     chat_response_mode: Literal["auto", "compact", "refine"]
     vector_store_query_mode: Literal["auto", "default", "sparse", "hybrid", "mmr"]
@@ -1227,7 +1284,6 @@ class RetrievalConfig:
 
 
 def load_retrieval_env(
-    default_rerank_use_fp16: bool = False,
     default_retrieve_top_k: int = 20,
     default_chat_response_mode: Literal["auto", "compact", "refine"] = "auto",
     default_vector_store_query_mode: Literal["auto", "default", "sparse", "hybrid", "mmr"] = "auto",
@@ -1240,7 +1296,6 @@ def load_retrieval_env(
     """Loads retrieval configuration from environment variables or defaults.
 
     Args:
-        default_rerank_use_fp16 (bool): Use FP16 for reranker model. Default False.
         default_retrieve_top_k (int): Default number of top documents to retrieve.
         default_chat_response_mode (Literal["auto", "compact", "refine"]): Default response
             synthesizer mode for chat/query answers. Default "auto".
@@ -1261,7 +1316,6 @@ def load_retrieval_env(
 
     Returns:
         RetrievalConfig: Dataclass containing retrieval configuration.
-        - rerank_use_fp16 (bool): Whether to use FP16 for the reranker model.
         - retrieve_top_k (int): The number of top documents to retrieve for RAG
         - chat_response_mode (Literal["auto", "compact", "refine"]): The
           response synthesizer mode for chat/query answers.
@@ -1294,7 +1348,6 @@ def load_retrieval_env(
         vector_store_query_mode = "auto"
 
     return RetrievalConfig(
-        rerank_use_fp16=str(os.getenv("RERANK_USE_FP16", default_rerank_use_fp16)).lower() in {"true", "1", "yes"},
         retrieve_top_k=int(os.getenv("RETRIEVE_TOP_K", default_retrieve_top_k)),
         chat_response_mode=chat_response_mode,
         vector_store_query_mode=vector_store_query_mode,
