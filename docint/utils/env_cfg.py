@@ -837,6 +837,57 @@ def load_ner_env(
 
 
 @dataclass(frozen=True)
+class NERClientConfig:
+    """Dataclass for the remote NER service HTTP client."""
+
+    api_base: str
+    api_key: str | None
+    threshold: float
+    timeout: float
+
+
+def load_ner_client_env(
+    default_api_base: str = "http://vllm-router:4000",
+    default_threshold: float = 0.3,
+    default_timeout: float = 30.0,
+) -> NERClientConfig:
+    """Load the remote NER client configuration from the environment.
+
+    The client POSTs to ``{api_base}/gliner`` with the GLiNER-native body
+    shape ``{text, labels, threshold}``. The default ``api_base`` matches
+    the LiteLLM router alias used by the full vllm-service stack; for the
+    ner-only deployment shape, override with
+    ``NER_API_BASE=http://gliner-ner:8000``.
+
+    Args:
+        default_api_base (str): Default base URL of the NER service.
+        default_threshold (float): Default GLiNER confidence threshold.
+        default_timeout (float): Default per-request HTTP timeout (seconds).
+
+    Returns:
+        NERClientConfig: Resolved configuration.
+
+        - ``api_base``: Base URL; the client appends ``/gliner`` itself.
+        - ``api_key``: Bearer token sent as ``Authorization: Bearer ...``
+          when set; omitted entirely when ``None``. The ner-only shape
+          requires no auth (trust ``inference-net``); the full vllm-service
+          shape requires the router's ``OPENAI_API_KEY`` master key —
+          operators set ``NER_API_KEY=$OPENAI_API_KEY`` explicitly in that
+          case to avoid hidden coupling between the two env vars.
+        - ``threshold``: GLiNER confidence cutoff passed per request.
+        - ``timeout``: Per-request HTTP timeout in seconds.
+    """
+    raw_key = os.getenv("NER_API_KEY")
+    api_key = raw_key.strip() if raw_key and raw_key.strip() else None
+    return NERClientConfig(
+        api_base=os.getenv("NER_API_BASE", default_api_base).rstrip("/"),
+        api_key=api_key,
+        threshold=float(os.getenv("NER_THRESHOLD", default_threshold)),
+        timeout=float(os.getenv("NER_TIMEOUT", default_timeout)),
+    )
+
+
+@dataclass(frozen=True)
 class OpenAIConfig:
     """Dataclass for OpenAI-compatible API configuration."""
 

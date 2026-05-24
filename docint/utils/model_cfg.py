@@ -35,7 +35,6 @@ from docling.models.stages.table_structure.table_structure_model import (
     TableStructureModel,
 )
 from dotenv import load_dotenv
-from gliner import GLiNER
 from huggingface_hub import snapshot_download
 from loguru import logger
 from transformers import AutoProcessor, CLIPModel
@@ -110,29 +109,6 @@ def load_docling_models() -> None:
 
     except Exception as e:
         logger.warning("Failed to download Docling models: {}", e)
-
-
-def load_gliner_model(model_id: str, cache_folder: Path) -> None:
-    """Loads the GLiNER model.
-
-    Args:
-        model_id (str): The name of the GLiNER model to load.
-        cache_folder (Path): The path to the HuggingFace cache folder.
-    """
-    resolved = resolve_hf_cache_path(cache_dir=cache_folder, repo_id=model_id)
-    if resolved:
-        logger.info("Found local cache for GLiNER at {}", resolved)
-        try:
-            GLiNER.from_pretrained(model_id=str(resolved), local_files_only=True)
-        except Exception as e:
-            logger.warning(
-                "Failed to load GLiNER from local cache: {}. Retrying with download...",
-                e,
-            )
-            GLiNER.from_pretrained(model_id=model_id)
-    else:
-        GLiNER.from_pretrained(model_id=model_id)
-    logger.info("Loaded GLiNER model: {}", model_id)
 
 
 def load_hf_model(model_id: str, cache_folder: Path, kw: str, trust_remote_code: bool = False) -> None:
@@ -210,8 +186,9 @@ def main() -> None:
     # Docling
     load_docling_models()
 
-    # GLiNER
-    load_gliner_model(model_id=model_config.ner_model, cache_folder=path_config.hf_hub_cache)
+    # NER is no longer loaded here: docint now calls the remote GLiNER
+    # service hosted by vllm-service over HTTP. Model preloading happens
+    # in the vllm-service `ner` (or `gliner-ner`) container, not here.
 
     # Hugging Face
     hf_assets: list[tuple[str, str]] = [
