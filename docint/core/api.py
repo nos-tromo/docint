@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -29,6 +29,7 @@ from docint.agents import (
 from docint.cli import ingest as ingest_module
 from docint.core.rag import RAG, EmptyIngestionError
 from docint.core.retrieval_filters import build_metadata_filters, build_qdrant_filter
+from docint.utils.cursor import InvalidCursorError
 from docint.utils.env_cfg import (
     load_host_env,
     load_path_env,
@@ -971,19 +972,119 @@ def get_collection_ner(refresh: bool = False) -> dict[str, list[dict[str, Any]]]
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@app.get("/collections/hate-speech", response_model=HateSpeechOut, tags=["Query"])
-def get_collection_hate_speech() -> dict[str, list[dict[str, Any]]]:
-    """Get flagged hate-speech chunks for the selected collection.
+@app.get("/collections/hate-speech", tags=["Query"])
+def get_collection_hate_speech(
+    cursor: str | None = None,
+    limit: int = Query(default=0, ge=0, le=500),
+    category: str | None = None,
+    min_confidence: str | None = None,
+) -> dict[str, Any]:
+    """Return flagged hate-speech chunks for the selected collection.
+
+    The endpoint operates in two modes:
+
+    * **Legacy (default)**: ``cursor`` omitted and ``limit=0`` — returns the
+      full list under ``{"results": [...]}``, matching the original shape.
+    * **Paginated**: any of ``cursor`` / ``limit`` / ``category`` /
+      ``min_confidence`` supplied — returns ``{"items": [...], "next_cursor":
+      ...}`` and uses the in-memory hate-speech cache for slicing.
+
+    Args:
+        cursor (str | None): Opaque cursor token from a previous paginated call.
+        limit (int): Page size (1-500). ``0`` selects legacy mode.
+        category (str | None): Optional case-insensitive category filter.
+        min_confidence (str | None): Optional confidence floor (``low`` <
+            ``medium`` < ``high``).
 
     Returns:
-        dict[str, list[dict]]: A dictionary containing the list of hate-speech findings.
+        dict[str, Any]: Either the legacy ``{"results": ...}`` payload or a
+        paginated ``{"items": ..., "next_cursor": ...}`` envelope.
+    """
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+
+    paginated = cursor is not None or limit > 0 or category is not None or min_confidence is not None
+    try:
+        if not paginated:
+            return {"results": rag.get_collection_hate_speech()}
+        items, next_cursor = rag.iter_hate_speech(
+            cursor=cursor,
+            limit=limit or 50,
+            category=category,
+            min_confidence=min_confidence,
+        )
+        return {"items": items, "next_cursor": next_cursor}
+    except InvalidCursorError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        logger.error("Error fetching collection hate-speech results: {}", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/collections/ner/sources", tags=["Query"])
+def get_collection_ner_sources(
+    cursor: str | None = None,
+    limit: int = Query(default=50, ge=1, le=500),
+    entity_key: str | None = None,
+    entity_text: str | None = None,
+    entity_type: str | None = None,
+) -> dict[str, Any]:
+    """Return one page of NER-bearing source rows for the selected collection.
+
+    Always paginated — there is no full-list mode. When an entity filter is
+    supplied the matcher mirrors the SPA's ``sourceContainsEntity`` (same
+    exact-text and compact-lookup rules) so results align with the UI's
+    client-side filter prior to pagination.
+
+    Args:
+        cursor (str | None): Opaque cursor token from a previous call.
+        limit (int): Records per page (1-500).
+        entity_key (str | None): ``"<text>::<type>"`` shorthand (matches the
+            SPA's ``EntityInspector.keyOf``).
+        entity_text (str | None): Explicit entity surface form.
+        entity_type (str | None): Explicit entity type/label.
+
+    Returns:
+        dict[str, Any]: ``{"items": [...], "next_cursor": ...}``.
     """
     if not rag.qdrant_collection:
         raise HTTPException(status_code=400, detail="No collection selected")
     try:
-        return {"results": rag.get_collection_hate_speech()}
+        items, next_cursor = rag.iter_collection_ner_sources(
+            cursor=cursor,
+            limit=limit,
+            entity_key=entity_key,
+            entity_text=entity_text,
+            entity_type=entity_type,
+        )
+        return {"items": items, "next_cursor": next_cursor}
+    except InvalidCursorError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
-        logger.error("Error fetching collection hate-speech results: {}", e)
+        logger.error("Error fetching collection NER sources: {}", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/collections/ner/warm", tags=["Query"])
+async def warm_collection_ner() -> dict[str, Any]:
+    """Pre-warm the NER aggregate cache for the selected collection.
+
+    Runs :meth:`docint.core.rag.RAG._get_collection_ner_aggregate` on a
+    worker thread so the first ``/collections/ner/stats`` call after a
+    collection switch doesn't pay the full Qdrant scroll cost on a user
+    interaction. Safe to call concurrently — the underlying cache uses
+    a per-collection key and tolerates repeat-loads.
+
+    Returns:
+        dict[str, Any]: ``{"ok": True}`` once warming completes.
+    """
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+    try:
+        await to_thread.run_sync(rag._get_collection_ner_aggregate)
+        return {"ok": True}
+    except Exception as e:
+        logger.error("Error warming collection NER aggregate: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
@@ -1065,23 +1166,228 @@ def search_collection_ner_entities(
 
 
 @app.get("/collections/documents", tags=["Query"])
-def get_collection_documents() -> dict[str, list[dict[str, Any]]]:
-    """Get list of documents in the currently selected collection.
+def get_collection_documents(
+    cursor: str | None = None,
+    limit: int = Query(default=0, ge=0, le=500),
+) -> dict[str, Any]:
+    """Return documents in the currently selected collection.
+
+    The endpoint operates in two modes for backward compatibility:
+
+    * **Legacy (default)**: ``cursor`` omitted and ``limit=0`` — returns the
+      full list under ``{"documents": [...]}``, matching the original shape.
+    * **Paginated**: any of ``cursor`` / ``limit`` supplied — returns
+      ``{"items": [...], "next_cursor": ...}`` and uses the in-memory
+      document cache for slicing.
+
+    Args:
+        cursor (str | None): Opaque cursor token from a previous paginated call.
+        limit (int): Page size (1-500). ``0`` selects legacy mode.
 
     Returns:
-        dict[str, list[dict]]: A dictionary containing the list of documents.
-
-    Raises:
-        HTTPException: If no collection is selected or an error occurs.
+        dict[str, Any]: Either the legacy ``{"documents": ...}`` payload or a
+        paginated ``{"items": ..., "next_cursor": ...}`` envelope.
     """
     if not rag.qdrant_collection:
         raise HTTPException(status_code=400, detail="No collection selected")
+
+    paginated = cursor is not None or limit > 0
     try:
-        docs = rag.list_documents()
-        return {"documents": docs}
+        if not paginated:
+            return {"documents": rag.list_documents()}
+        items, next_cursor = rag.iter_documents(cursor=cursor, limit=limit or 50)
+        return {"items": items, "next_cursor": next_cursor}
+    except InvalidCursorError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error("Error fetching collection documents: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+def _validate_export_collection(name: str) -> None:
+    """Validate that ``name`` matches the active collection and is visible.
+
+    Args:
+        name (str): Collection name from the export URL path.
+
+    Raises:
+        HTTPException: 400 if no collection is selected, 404 if the requested
+            collection is hidden or unknown, 409 if a different collection is
+            currently active (the SPA must call ``/collections/select`` first).
+    """
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+    if name != rag.qdrant_collection:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Active collection is '{rag.qdrant_collection}'; "
+                f"call /collections/select for '{name}' before exporting."
+            ),
+        )
+    try:
+        visible = rag.list_collections()
+    except Exception:
+        visible = [rag.qdrant_collection]
+    if name not in visible:
+        raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
+
+
+def _csv_attachment_headers(stem: str) -> dict[str, str]:
+    """Build streaming CSV response headers, including RFC 6266 filename."""
+    from urllib.parse import quote
+
+    safe_stem = stem.replace('"', "_")
+    ascii_only = "".join(ch if ord(ch) < 128 else "_" for ch in safe_stem)
+    filename = f"{ascii_only}.csv"
+    star = quote(f"{safe_stem}.csv", safe="")
+    return {
+        "Content-Disposition": f"attachment; filename=\"{filename}\"; filename*=UTF-8''{star}",
+        "X-Accel-Buffering": "no",
+        "Cache-Control": "no-store",
+    }
+
+
+@app.get("/collections/{name}/export/documents.csv", tags=["Query"])
+def export_documents_csv(name: str) -> StreamingResponse:
+    """Stream the documents table as CSV.
+
+    The endpoint reads from :meth:`docint.core.rag.RAG.list_documents` (cached
+    after the first call) and emits one row per document. Output matches the
+    CLI's ``query --documents`` schema column-for-column.
+    """
+    from docint.utils.csv_stream import DOCUMENT_COLUMNS, document_row, stream_csv
+
+    _validate_export_collection(name)
+    docs = rag.list_documents()
+
+    def row_iter() -> Iterator[dict[str, Any]]:
+        for doc in docs:
+            yield document_row(doc)
+
+    return StreamingResponse(
+        stream_csv(row_iter(), DOCUMENT_COLUMNS),
+        media_type="text/csv; charset=utf-8",
+        headers=_csv_attachment_headers(f"{name}-documents"),
+    )
+
+
+@app.get("/collections/{name}/export/entities.csv", tags=["Query"])
+def export_entities_csv(
+    name: str,
+    top_k: int = Query(default=50, ge=1, le=100_000),
+    min_mentions: int = Query(default=1, ge=1),
+    entity_type: str | None = None,
+    entity_merge_mode: Literal["orthographic", "exact"] = Query(default="orthographic"),
+) -> StreamingResponse:
+    """Stream the top entities by mention frequency as CSV.
+
+    Mirrors the CLI's ``query --entities`` export (``rank,entity,type,mentions``).
+    Defaults match the CLI's ``DEFAULT_ENTITY_LIMIT`` so the two paths produce
+    identical output for the same collection.
+    """
+    from docint.utils.csv_stream import ENTITY_STATS_COLUMNS, entity_stats_row, stream_csv
+
+    _validate_export_collection(name)
+    stats = rag.get_collection_ner_stats(
+        top_k=top_k,
+        min_mentions=min_mentions,
+        entity_type=entity_type,
+        include_relations=False,
+        entity_merge_mode=entity_merge_mode,
+    )
+    entities = list(stats.get("top_entities") or [])
+
+    def row_iter() -> Iterator[dict[str, Any]]:
+        for idx, entity in enumerate(entities, start=1):
+            yield entity_stats_row(entity, rank=idx)
+
+    return StreamingResponse(
+        stream_csv(row_iter(), ENTITY_STATS_COLUMNS),
+        media_type="text/csv; charset=utf-8",
+        headers=_csv_attachment_headers(f"{name}-entities"),
+    )
+
+
+@app.get("/collections/{name}/export/ner-sources.csv", tags=["Query"])
+def export_ner_sources_csv(
+    name: str,
+    entity_key: str | None = None,
+    entity_text: str | None = None,
+    entity_type: str | None = None,
+) -> StreamingResponse:
+    """Stream entity findings (per-source rows) as CSV.
+
+    Output schema matches ``entityFindingsToCsv`` in
+    ``frontend/src/lib/exports.ts``. Filtering uses the same matcher as the
+    paginated ``/collections/ner/sources`` endpoint, so the export reflects
+    exactly what the SPA's entity inspector shows.
+    """
+    from docint.utils.csv_stream import NER_SOURCE_COLUMNS, ner_source_row, stream_csv
+
+    _validate_export_collection(name)
+
+    if entity_key and not (entity_text or entity_type):
+        if "::" in entity_key:
+            entity_text, entity_type = entity_key.split("::", 1)
+        else:
+            entity_text = entity_key
+
+    label_type = entity_type or "Unlabeled"
+    entity_label = f"{entity_text} [{label_type}]" if entity_text else ""
+
+    def row_iter() -> Iterator[dict[str, Any]]:
+        cursor: str | None = None
+        while True:
+            page, cursor = rag.iter_collection_ner_sources(
+                cursor=cursor,
+                limit=500,
+                entity_text=entity_text,
+                entity_type=entity_type,
+            )
+            for source in page:
+                yield ner_source_row(source, entity_label=entity_label)
+            if cursor is None:
+                break
+
+    return StreamingResponse(
+        stream_csv(row_iter(), NER_SOURCE_COLUMNS),
+        media_type="text/csv; charset=utf-8",
+        headers=_csv_attachment_headers(f"{name}-ner-sources"),
+    )
+
+
+@app.get("/collections/{name}/export/hate-speech.csv", tags=["Query"])
+def export_hate_speech_csv(
+    name: str,
+    category: str | None = None,
+    min_confidence: str | None = None,
+) -> StreamingResponse:
+    """Stream the hate-speech findings table as CSV.
+
+    Output schema matches ``hateSpeechToCsv`` in
+    ``frontend/src/lib/exports.ts``. Filtering uses the same logic as the
+    paginated ``/collections/hate-speech`` endpoint.
+    """
+    from docint.core.rag import _filter_hate_speech
+    from docint.utils.csv_stream import HATE_SPEECH_COLUMNS, hate_speech_row, stream_csv
+
+    _validate_export_collection(name)
+    findings = _filter_hate_speech(
+        rag.get_collection_hate_speech(),
+        category=category,
+        min_confidence=min_confidence,
+    )
+
+    def row_iter() -> Iterator[dict[str, Any]]:
+        for finding in findings:
+            yield hate_speech_row(finding)
+
+    return StreamingResponse(
+        stream_csv(row_iter(), HATE_SPEECH_COLUMNS),
+        media_type="text/csv; charset=utf-8",
+        headers=_csv_attachment_headers(f"{name}-hate-speech"),
+    )
 
 
 @app.get("/sessions/list", response_model=SessionListOut, tags=["Sessions"])

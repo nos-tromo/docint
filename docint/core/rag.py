@@ -135,10 +135,12 @@ from docint.core.storage.ingest_manifest import (
     IngestManifest,
     NullIngestManifest,
 )
+from docint.core.storage.scroll import iter_scroll
 from docint.core.storage.sources import stage_sources_to_qdrant
 from docint.core.storage.sqlite_kvstore import SQLiteKVStore
 from docint.core.storage.utils import qdrant_collection_exists
 from docint.utils.batching import chunk_nodes
+from docint.utils.cursor import decode_cursor, encode_cursor
 from docint.utils.embed_chunking import (
     effective_budget,
     estimate_tokens,
@@ -164,6 +166,88 @@ SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
 SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
 SUMMARY_CACHE_REVISION_KEY = "summary_revision"
 HIDDEN_COLLECTION_SUFFIXES: tuple[str, ...] = ("_images", "_dockv")
+
+# Confidence values stored on hate-speech findings, ordered weakest → strongest.
+_HATE_SPEECH_CONFIDENCE_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 2}
+
+
+def _compact_entity_form(text: str) -> str:
+    r"""Build the compact lookup form used by the frontend entity matcher.
+
+    Mirrors ``compactLookup`` in ``frontend/src/components/analysis/EntityInspector.tsx``:
+    keep unicode letters and digits, drop everything else, lowercase the result.
+    Python's :meth:`str.isalnum` is unicode-aware so this matches the
+    ``[^\p{L}\p{N}]+`` regex used in the SPA.
+    """
+    return "".join(ch for ch in str(text or "").lower() if ch.isalnum())
+
+
+def _filter_sources_by_entity(
+    sources: list[dict[str, Any]],
+    *,
+    target_text: str,
+    target_type: str,
+) -> list[dict[str, Any]]:
+    """Return only sources whose entity list contains the target entity.
+
+    Mirrors ``sourceContainsEntity`` from the SPA: matches on lowercase text
+    or compact-lookup form within the same entity type, so callers see the
+    same finding set the UI computed client-side before pagination existed.
+    """
+    target_text_lower = str(target_text or "").strip().lower()
+    if not target_text_lower:
+        return list(sources)
+
+    target_compact = _compact_entity_form(target_text_lower)
+    target_type_lower = str(target_type or "").strip().lower()
+
+    matches: list[dict[str, Any]] = []
+    for source in sources:
+        candidates = source.get("entities") or []
+        if not isinstance(candidates, list):
+            continue
+        for cand in candidates:
+            if not isinstance(cand, dict):
+                continue
+            cand_text = str(cand.get("text") or "").strip().lower()
+            if not cand_text:
+                continue
+            cand_type = str(cand.get("type") or "").strip().lower()
+            if target_type_lower and cand_type and cand_type != target_type_lower:
+                continue
+            if cand_text == target_text_lower:
+                matches.append(source)
+                break
+            if target_compact and _compact_entity_form(cand_text) == target_compact:
+                matches.append(source)
+                break
+    return matches
+
+
+def _filter_hate_speech(
+    findings: list[dict[str, Any]],
+    *,
+    category: str | None,
+    min_confidence: str | None,
+) -> list[dict[str, Any]]:
+    """Apply category and confidence filters to hate-speech findings."""
+    category_lower = (category or "").strip().lower() or None
+    min_rank = _HATE_SPEECH_CONFIDENCE_ORDER.get((min_confidence or "").strip().lower())
+
+    filtered: list[dict[str, Any]] = []
+    for row in findings:
+        if category_lower and str(row.get("category") or "").strip().lower() != category_lower:
+            continue
+        if min_rank is not None:
+            row_rank = _HATE_SPEECH_CONFIDENCE_ORDER.get(
+                str(row.get("confidence") or "").strip().lower(),
+                _HATE_SPEECH_CONFIDENCE_ORDER["low"],
+            )
+            if row_rank < min_rank:
+                continue
+        filtered.append(row)
+    return filtered
+
 
 # Pinned to LlamaIndex's QdrantVectorStore DEFAULT_DENSE_VECTOR_NAME /
 # DEFAULT_SPARSE_VECTOR_NAME so a collection we pre-create has the same
@@ -1440,6 +1524,10 @@ class RAG:
     ner_graph_cache: dict[tuple[str, str, int, int], dict[str, Any]] = field(
         default_factory=dict, init=False, repr=False
     )
+
+    # --- Pagination caches (server-side slicing for HTTP endpoints) ---
+    _documents_cache: dict[str, list[dict[str, Any]]] = field(default_factory=dict, init=False, repr=False)
+    _hate_speech_cache: dict[str, list[dict[str, Any]]] = field(default_factory=dict, init=False, repr=False)
 
     # --- OpenAI parameters ---
     openai_api_base: str | None = field(default=None, init=False)
@@ -4062,29 +4150,14 @@ class RAG:
             return []
 
         sources: list[dict[str, Any]] = []
-        offset = None
-        while True:
-            try:
-                points, offset = self.qdrant_client.scroll(
-                    collection_name=self.qdrant_collection,
-                    limit=100,
-                    offset=offset,
-                    scroll_filter=qdrant_filter,
-                    with_payload=True,
-                    with_vectors=False,
-                )
-            except Exception as exc:
-                logger.error(
-                    "Failed to scroll collection '{}' for NER sources: {}",
-                    self.qdrant_collection,
-                    exc,
-                )
-                break
-
-            if not points:
-                break
-
-            for point in points:
+        for page in iter_scroll(
+            self.qdrant_client,
+            collection_name=self.qdrant_collection,
+            scroll_filter=qdrant_filter,
+            page_size=100,
+            error_context="NER sources",
+        ):
+            for point in page:
                 payload = getattr(point, "payload", None)
                 if not isinstance(payload, dict):
                     continue
@@ -4100,9 +4173,6 @@ class RAG:
                 )
                 source["chunk_text"] = str(source.get("text") or "")
                 sources.append(source)
-
-            if offset is None:
-                break
 
         return sources
 
@@ -5658,16 +5728,19 @@ class RAG:
             self.sessions.reset_runtime()
 
     def _invalidate_ner_cache(self, collection: str | None = None) -> None:
-        """Invalidate cached NER payloads for one or all collections.
+        """Invalidate cached NER, document, and hate-speech payloads.
 
         Args:
-            collection (str | None): Optional collection name. If omitted, clears all NER caches.
+            collection (str | None): Optional collection name. If omitted, clears
+                all per-collection caches across the instance.
         """
         if collection is None:
             self.ner_sources = []
             self.ner_aggregate_cache.clear()
             self.ner_graph_cache.clear()
             self._parent_context_support_cache.clear()
+            self._documents_cache.clear()
+            self._hate_speech_cache.clear()
             return
 
         stale_aggregate_keys = [key for key in self.ner_aggregate_cache if key[0] == collection]
@@ -5682,6 +5755,8 @@ class RAG:
         if collection == self.qdrant_collection:
             self.ner_sources = []
         self._parent_context_support_cache.pop(collection, None)
+        self._documents_cache.pop(collection, None)
+        self._hate_speech_cache.pop(collection, None)
 
     def ensure_session_manager(self) -> SessionManager:
         """Ensure the SessionManager is initialized and return it.
@@ -6924,9 +6999,6 @@ class RAG:
                 if isinstance(end_sec, (int, float)):
                     entry["max_duration"] = max(entry["max_duration"], float(end_sec))
 
-            if offset is None:
-                break
-
         results = []
         for _, data in docs_map.items():
             data["page_count"] = len(data.pop("pages"))
@@ -6942,6 +7014,45 @@ class RAG:
             results.append(data)
 
         return sorted(results, key=lambda x: str(x["filename"]))
+
+    def iter_documents(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Return one paginated slice of document records.
+
+        The first call after a cache miss runs :meth:`list_documents` to build
+        the per-collection result; subsequent calls slice the cached list. The
+        cache is invalidated by :meth:`_invalidate_ner_cache`, so collection
+        switches and ingest operations refresh the data automatically.
+
+        Args:
+            cursor (str | None): Opaque cursor token from a previous call.
+            limit (int): Records per page (clamped to ``[1, 500]``).
+
+        Returns:
+            tuple[list[dict[str, Any]], str | None]: The page of records and
+            the next cursor token, or ``None`` if there are no further pages.
+        """
+        if not self.qdrant_collection:
+            return [], None
+
+        decoded = decode_cursor(cursor)
+        raw_offset = decoded.get("o")
+        offset = int(raw_offset) if raw_offset is not None else 0
+        page_size = max(1, min(int(limit), 500))
+
+        cached = self._documents_cache.get(self.qdrant_collection)
+        if cached is None:
+            cached = self.list_documents()
+            self._documents_cache[self.qdrant_collection] = cached
+
+        end = offset + page_size
+        page = cached[offset:end]
+        next_cursor = encode_cursor(end) if end < len(cached) else None
+        return page, next_cursor
 
     def get_collection_ner(self, refresh: bool = False) -> list[dict[str, Any]]:
         """Fetch all nodes from the current collection and return their NER metadata.
@@ -6964,6 +7075,69 @@ class RAG:
         self.ner_sources = self._load_collection_ner_sources()
         return self.ner_sources
 
+    def iter_collection_ner_sources(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        entity_text: str | None = None,
+        entity_type: str | None = None,
+        entity_key: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Return one paginated slice of NER-bearing sources.
+
+        Sources come from :meth:`get_collection_ner` (cached on
+        ``self.ner_sources``), so the first call after a cache miss pays the
+        Qdrant scroll cost and subsequent calls only filter and slice.
+
+        Entity filtering mirrors the SPA's ``sourceContainsEntity``: the same
+        match-by-text-or-compact-form rules apply, scoped to the same entity
+        type when both sides specify one.
+
+        Args:
+            cursor (str | None): Opaque cursor token from a previous call.
+            limit (int): Records per page (clamped to ``[1, 500]``).
+            entity_text (str | None): Entity surface form to filter by. When
+                set without ``entity_type``, type is not constrained.
+            entity_type (str | None): Entity type/label (e.g. ``"PERSON"``).
+            entity_key (str | None): Raw ``"<text>::<type>"`` key, accepted as
+                a shorthand for ``entity_text``/``entity_type``. The SPA's
+                ``EntityInspector.keyOf`` produces this format.
+
+        Returns:
+            tuple[list[dict[str, Any]], str | None]: The page of source rows
+            and the next cursor token, or ``None`` when exhausted.
+        """
+        if not self.qdrant_collection:
+            return [], None
+
+        decoded = decode_cursor(cursor)
+        raw_offset = decoded.get("o")
+        offset = int(raw_offset) if raw_offset is not None else 0
+        page_size = max(1, min(int(limit), 500))
+
+        sources = self.get_collection_ner()
+
+        if entity_key and not (entity_text or entity_type):
+            if "::" in entity_key:
+                entity_text, entity_type = entity_key.split("::", 1)
+            else:
+                entity_text = entity_key
+
+        if entity_text:
+            filtered = _filter_sources_by_entity(
+                sources,
+                target_text=entity_text,
+                target_type=entity_type or "",
+            )
+        else:
+            filtered = list(sources)
+
+        end = offset + page_size
+        page = filtered[offset:end]
+        next_cursor = encode_cursor(end) if end < len(filtered) else None
+        return page, next_cursor
+
     def get_collection_hate_speech(self) -> list[dict[str, Any]]:
         """Return flagged hate-speech chunks from the selected collection.
 
@@ -6976,28 +7150,13 @@ class RAG:
             return []
 
         findings: list[dict[str, Any]] = []
-        offset = None
-        while True:
-            try:
-                points, offset = self.qdrant_client.scroll(
-                    collection_name=self.qdrant_collection,
-                    limit=100,
-                    offset=offset,
-                    with_payload=True,
-                    with_vectors=False,
-                )
-            except Exception as exc:
-                logger.error(
-                    "Failed to fetch hate-speech rows from '{}': {}",
-                    self.qdrant_collection,
-                    exc,
-                )
-                break
-
-            if not points:
-                break
-
-            for point in points:
+        for page in iter_scroll(
+            self.qdrant_client,
+            collection_name=self.qdrant_collection,
+            page_size=100,
+            error_context="hate-speech rows",
+        ):
+            for point in page:
                 payload = getattr(point, "payload", None)
                 if not isinstance(payload, dict):
                     continue
@@ -7026,11 +7185,56 @@ class RAG:
                 )
                 findings.append(source)
 
-            if offset is None:
-                break
-
         findings.sort(key=operator.itemgetter("source_ref", "chunk_id"))
         return findings
+
+    def iter_hate_speech(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        category: str | None = None,
+        min_confidence: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Return one paginated slice of hate-speech findings.
+
+        Filtering accepts a ``category`` (case-insensitive equality) and a
+        ``min_confidence`` ordering — rows below the requested confidence
+        level (``low`` < ``medium`` < ``high``) are dropped. The cache is
+        invalidated alongside other per-collection caches via
+        :meth:`_invalidate_ner_cache`.
+
+        Args:
+            cursor (str | None): Opaque cursor token from a previous call.
+            limit (int): Records per page (clamped to ``[1, 500]``).
+            category (str | None): If set, only return findings with this
+                category.
+            min_confidence (str | None): Confidence threshold; matches are
+                returned in the original sort order from
+                :meth:`get_collection_hate_speech`.
+
+        Returns:
+            tuple[list[dict[str, Any]], str | None]: The page of findings
+            and the next cursor token, or ``None`` when exhausted.
+        """
+        if not self.qdrant_collection:
+            return [], None
+
+        decoded = decode_cursor(cursor)
+        raw_offset = decoded.get("o")
+        offset = int(raw_offset) if raw_offset is not None else 0
+        page_size = max(1, min(int(limit), 500))
+
+        cached = self._hate_speech_cache.get(self.qdrant_collection)
+        if cached is None:
+            cached = self.get_collection_hate_speech()
+            self._hate_speech_cache[self.qdrant_collection] = cached
+
+        filtered = _filter_hate_speech(cached, category=category, min_confidence=min_confidence)
+        end = offset + page_size
+        page = filtered[offset:end]
+        next_cursor = encode_cursor(end) if end < len(filtered) else None
+        return page, next_cursor
 
     def _get_collection_ner_aggregate(
         self,

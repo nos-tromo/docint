@@ -91,6 +91,7 @@ class DummyRAG:
         self.ner_stats_merge_modes: list[str] = []
         self.ner_search_merge_modes: list[str] = []
         self.hate_speech_rows: list[dict[str, Any]] = []
+        self.documents: list[dict[str, Any]] = []
         self.summary_refresh_calls: list[bool] = []
         self.summary_stream_refresh_calls: list[bool] = []
         self.summary_payload: dict[str, Any] = {
@@ -450,6 +451,73 @@ class DummyRAG:
             and page number.
         """
         return self.hate_speech_rows
+
+    def list_documents(self) -> list[dict[str, Any]]:
+        """Return the canned list of documents for the active collection."""
+        return self.documents
+
+    def iter_documents(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Stub paginated document iterator that slices a fixed list."""
+        from docint.utils.cursor import decode_cursor, encode_cursor
+
+        offset = int(decode_cursor(cursor).get("o") or 0)
+        rows = getattr(self, "documents", [])
+        end = offset + max(1, int(limit))
+        page = rows[offset:end]
+        next_cursor = encode_cursor(end) if end < len(rows) else None
+        return page, next_cursor
+
+    def iter_hate_speech(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        category: str | None = None,
+        min_confidence: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Stub paginated hate-speech iterator that slices ``hate_speech_rows``."""
+        from docint.utils.cursor import decode_cursor, encode_cursor
+
+        offset = int(decode_cursor(cursor).get("o") or 0)
+        rows = self.hate_speech_rows
+        end = offset + max(1, int(limit))
+        page = rows[offset:end]
+        next_cursor = encode_cursor(end) if end < len(rows) else None
+        return page, next_cursor
+
+    def iter_collection_ner_sources(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        entity_key: str | None = None,
+        entity_text: str | None = None,
+        entity_type: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Stub paginated NER source iterator that slices ``ner_sources``."""
+        from docint.utils.cursor import decode_cursor, encode_cursor
+
+        self.last_ner_sources_filter = {
+            "entity_key": entity_key,
+            "entity_text": entity_text,
+            "entity_type": entity_type,
+        }
+        offset = int(decode_cursor(cursor).get("o") or 0)
+        rows = self.ner_sources
+        end = offset + max(1, int(limit))
+        page = rows[offset:end]
+        next_cursor = encode_cursor(end) if end < len(rows) else None
+        return page, next_cursor
+
+    def _get_collection_ner_aggregate(self, **_: Any) -> dict[str, Any]:
+        """Stub aggregate warm-up that returns an empty payload."""
+        self.warm_calls = getattr(self, "warm_calls", 0) + 1
+        return {"entities": [], "relations": []}
 
     def get_collection_ner_stats(
         self,
@@ -2203,3 +2271,273 @@ def test_stream_query_context_window_overflow_surfaces_descriptive_error(
 
     assert "OPENAI_CTX_WINDOW" in text
     assert "Internal server error" not in text
+
+
+# ---------------------------------------------------------------------------
+# Paginated reads: /collections/documents, /collections/hate-speech,
+# /collections/ner/sources, /collections/ner/warm
+# ---------------------------------------------------------------------------
+
+
+def _select_alpha(client: TestClient) -> None:
+    """Drive the API into a state with the canned 'alpha' collection active."""
+    response = client.post("/collections/select", json={"name": "alpha"})
+    assert response.status_code == 200, response.text
+
+
+def test_documents_legacy_mode_returns_full_list(client: TestClient) -> None:
+    """Without cursor or limit, /collections/documents returns the legacy envelope."""
+    _select_alpha(client)
+    rag = cast(DummyRAG, api_module.rag)
+    rag.documents = [{"filename": f"doc{i}.pdf"} for i in range(3)]
+
+    response = client.get("/collections/documents")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload == {"documents": rag.documents}
+
+
+def test_documents_paginated_mode_round_trips_cursor(client: TestClient) -> None:
+    """Cursor + limit drives the paginated envelope and round-trips correctly."""
+    _select_alpha(client)
+    rag = cast(DummyRAG, api_module.rag)
+    rag.documents = [{"filename": f"doc{i:03d}.pdf"} for i in range(25)]
+
+    page1 = client.get("/collections/documents", params={"limit": 10}).json()
+    assert len(page1["items"]) == 10
+    assert page1["next_cursor"] is not None
+    assert page1["items"][0]["filename"] == "doc000.pdf"
+
+    page2 = client.get(
+        "/collections/documents",
+        params={"limit": 10, "cursor": page1["next_cursor"]},
+    ).json()
+    assert page2["items"][0]["filename"] == "doc010.pdf"
+    assert page2["next_cursor"] is not None
+
+    page3 = client.get(
+        "/collections/documents",
+        params={"limit": 10, "cursor": page2["next_cursor"]},
+    ).json()
+    assert len(page3["items"]) == 5
+    assert page3["next_cursor"] is None
+
+
+def test_documents_invalid_cursor_returns_400(client: TestClient) -> None:
+    """Malformed cursor tokens must surface as HTTP 400, not 500."""
+    _select_alpha(client)
+    response = client.get(
+        "/collections/documents",
+        params={"cursor": "not-a-valid-token", "limit": 10},
+    )
+    assert response.status_code == 400
+
+
+def test_documents_no_collection_selected_returns_400(client: TestClient) -> None:
+    """The paginated endpoint must require an active collection like the legacy one."""
+    api_module.rag.qdrant_collection = ""
+    response = client.get("/collections/documents", params={"limit": 10})
+    assert response.status_code == 400
+
+
+def test_hate_speech_legacy_mode_returns_results_envelope(client: TestClient) -> None:
+    """Without cursor/limit/filter args the response keeps the legacy ``results`` shape."""
+    _select_alpha(client)
+    rag = cast(DummyRAG, api_module.rag)
+    rag.hate_speech_rows = [{"chunk_id": "c1", "category": "X"}]
+
+    response = client.get("/collections/hate-speech")
+    assert response.status_code == 200
+    assert response.json() == {"results": [{"chunk_id": "c1", "category": "X"}]}
+
+
+def test_hate_speech_paginated_mode(client: TestClient) -> None:
+    """Passing ``limit`` switches the response to the paginated envelope."""
+    _select_alpha(client)
+    rag = cast(DummyRAG, api_module.rag)
+    rag.hate_speech_rows = [{"chunk_id": f"c{i}"} for i in range(7)]
+
+    payload = client.get("/collections/hate-speech", params={"limit": 3}).json()
+    assert payload["items"] == rag.hate_speech_rows[:3]
+    assert payload["next_cursor"] is not None
+
+
+def test_ner_sources_paginates_and_forwards_filters(client: TestClient) -> None:
+    """Paginated NER sources slice the cached list and forward filter args."""
+    _select_alpha(client)
+    rag = cast(DummyRAG, api_module.rag)
+    rag.ner_sources = [{"chunk_id": f"c{i}", "entities": []} for i in range(8)]
+
+    response = client.get(
+        "/collections/ner/sources",
+        params={"limit": 5, "entity_key": "Acme::ORG"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["items"] == rag.ner_sources[:5]
+    assert payload["next_cursor"] is not None
+
+    forwarded = rag.last_ner_sources_filter
+    assert forwarded["entity_key"] == "Acme::ORG"
+
+
+def test_ner_sources_invalid_cursor_returns_400(client: TestClient) -> None:
+    """Malformed cursors on the paginated NER endpoint must return HTTP 400."""
+    _select_alpha(client)
+    response = client.get("/collections/ner/sources", params={"cursor": "$$$"})
+    assert response.status_code == 400
+
+
+def test_ner_warm_kicks_aggregate(client: TestClient) -> None:
+    """POST /collections/ner/warm triggers exactly one aggregate-build."""
+    _select_alpha(client)
+    response = client.post("/collections/ner/warm")
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    rag = cast(DummyRAG, api_module.rag)
+    assert getattr(rag, "warm_calls", 0) == 1
+
+
+def test_ner_warm_requires_collection(client: TestClient) -> None:
+    """Warming with no active collection must surface HTTP 400."""
+    api_module.rag.qdrant_collection = ""
+    response = client.post("/collections/ner/warm")
+    assert response.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Streaming CSV exports: /collections/{name}/export/*.csv
+# ---------------------------------------------------------------------------
+
+
+def _parse_csv_body(body: bytes) -> list[list[str]]:
+    """Decode a streamed CSV body (BOM-tolerant) into rows."""
+    import csv
+    import io
+
+    text = body.decode("utf-8-sig")
+    return list(csv.reader(io.StringIO(text)))
+
+
+def test_export_documents_csv_streams(client: TestClient) -> None:
+    """Document export streams a UTF-8 BOM-prefixed CSV with RFC 6266 headers."""
+    _select_alpha(client)
+    rag = cast(DummyRAG, api_module.rag)
+    rag.documents = [
+        {
+            "filename": "doc1.pdf",
+            "mimetype": "application/pdf",
+            "file_hash": "abc",
+            "node_count": 3,
+            "page_count": 2,
+            "entity_types": ["PERSON", "ORG"],
+        }
+    ]
+
+    response = client.get("/collections/alpha/export/documents.csv")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    disp = response.headers["content-disposition"]
+    assert "alpha-documents.csv" in disp
+    assert "filename*=UTF-8''alpha-documents.csv" in disp
+
+    rows = _parse_csv_body(response.content)
+    assert rows[0] == [
+        "filename",
+        "mimetype",
+        "file_hash",
+        "node_count",
+        "page_count",
+        "max_rows",
+        "max_duration",
+        "entity_types",
+    ]
+    assert rows[1][0] == "doc1.pdf"
+    assert rows[1][-1] == "PERSON;ORG"
+
+
+def test_export_rejects_collection_mismatch(client: TestClient) -> None:
+    """The URL path's collection name must match the active collection (409 otherwise)."""
+    _select_alpha(client)
+    response = client.get("/collections/beta/export/documents.csv")
+    assert response.status_code == 409
+
+
+def test_export_entities_csv_uses_ner_stats(client: TestClient) -> None:
+    """Entity export streams the rank/entity/type/mentions schema from get_collection_ner_stats."""
+    _select_alpha(client)
+    response = client.get("/collections/alpha/export/entities.csv")
+    assert response.status_code == 200
+    rows = _parse_csv_body(response.content)
+    assert rows[0] == ["rank", "entity", "type", "mentions"]
+    assert rows[1] == ["1", "Acme", "ORG", "3"]
+
+
+def test_export_ner_sources_csv_filters_by_entity(client: TestClient) -> None:
+    """NER-source export honors entity_text + entity_type filters and embeds the entity label."""
+    _select_alpha(client)
+    rag = cast(DummyRAG, api_module.rag)
+    rag.ner_sources = [
+        {
+            "chunk_id": "c1",
+            "filename": "doc1.pdf",
+            "chunk_text": "Acme makes widgets",
+            "entities": [{"text": "Acme", "type": "ORG"}],
+        }
+    ]
+    response = client.get(
+        "/collections/alpha/export/ner-sources.csv",
+        params={"entity_text": "Acme", "entity_type": "ORG"},
+    )
+    assert response.status_code == 200
+    rows = _parse_csv_body(response.content)
+    assert rows[0][0] == "entity"
+    assert rows[1][0] == "Acme [ORG]"
+    assert rows[1][1] == "doc1.pdf"
+
+
+def test_export_hate_speech_csv_passes_through_rows(client: TestClient) -> None:
+    """Hate-speech export streams the per-finding schema with reference_metadata fields."""
+    _select_alpha(client)
+    rag = cast(DummyRAG, api_module.rag)
+    rag.hate_speech_rows = [
+        {
+            "chunk_id": "c1",
+            "filename": "doc.pdf",
+            "category": "Hateful",
+            "confidence": "high",
+            "reason": "tagged",
+            "chunk_text": "bad text",
+            "page": 2,
+        }
+    ]
+    response = client.get("/collections/alpha/export/hate-speech.csv")
+    assert response.status_code == 200
+    rows = _parse_csv_body(response.content)
+    assert rows[0][0] == "source"
+    assert rows[1][0] == "doc.pdf"
+    assert rows[1][4] == "Hateful"
+
+
+def test_export_requires_active_collection(client: TestClient) -> None:
+    """Export endpoints reject calls when no collection is active (HTTP 400)."""
+    api_module.rag.qdrant_collection = ""
+    response = client.get("/collections/alpha/export/documents.csv")
+    assert response.status_code == 400
+
+
+def test_select_does_not_warm_documents_or_hate_speech_caches(client: TestClient) -> None:
+    """Select must remain light — paginated caches populate lazily.
+
+    Companion to test_collections_select_success's NER guard. Documents and
+    hate-speech caches must not be eagerly populated by /collections/select;
+    they populate on first GET to the paginated endpoint.
+    """
+    rag = cast(DummyRAG, api_module.rag)
+    rag.documents = [{"filename": "x.pdf"}]
+    rag.hate_speech_rows = [{"chunk_id": "c1"}]
+
+    _select_alpha(client)
+
+    assert getattr(rag, "warm_calls", 0) == 0
+    assert rag.ner_refresh_calls == []
