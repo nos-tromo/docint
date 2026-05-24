@@ -39,6 +39,7 @@
 *.webm
 *.xls*
 *.zip
+*.tsbuildinfo
 package-lock.json
 
 # directories
