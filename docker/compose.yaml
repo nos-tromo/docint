@@ -12,30 +12,33 @@ x-env-file: &env-file
 
 services:
   ##########################################################
-  # Backend – CPU
+  # Backend
+  #
+  # Single image, CPU-only Python. All ML inference (chat,
+  # embeddings, rerank, NER, CLIP) is delegated over HTTP to
+  # the external vllm-service stack — see CLAUDE.md.
   ##########################################################
-  backend-cpu:
-    image: docint-backend-cpu:${DOCINT_VERSION:-latest}
+  backend:
+    image: docint-backend:${DOCINT_VERSION:-latest}
     build:
       context: ..
-      dockerfile: docker/Dockerfile.backend.cpu
+      dockerfile: docker/Dockerfile.backend
     expose:
       - "8000"
     environment:
       <<: *no-proxy-env
-      LOG_PATH: /var/log/docint/backend-cpu.log
+      LOG_PATH: /var/log/docint/backend.log
       QDRANT_HOST: http://qdrant:6333
       QDRANT_SRC_DIR: /var/lib/docint/sources
       SESSIONS_DB_PATH: /var/lib/docint/sessions/sessions.sqlite3
-      USE_DEVICE: ${USE_DEVICE:-cpu}
     env_file: *env-file
-    volumes: &backend-volumes
+    volumes:
       - docint-logs:/var/log/docint
       - docling-cache:/root/.cache/docling
       - huggingface-cache:/root/.cache/huggingface/hub
       - qdrant-sources:/var/lib/docint/sources
       - sessions-storage:/var/lib/docint/sessions
-    networks: &backend-networks
+    networks:
       docint-net:
         aliases:
           - backend
@@ -46,65 +49,23 @@ services:
         aliases:
           - docint-backend
     restart: unless-stopped
-    profiles: ["cpu"]
-
-  ##########################################################
-  # Backend – CUDA
-  ##########################################################
-  backend-cuda:
-    image: docint-backend-cuda:${DOCINT_VERSION:-latest}
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.backend.cuda
-    expose:
-      - "8000"
-    environment:
-      <<: *no-proxy-env
-      LOG_PATH: /var/log/docint/backend-cuda.log
-      NVIDIA_VISIBLE_DEVICES: all
-      QDRANT_HOST: http://qdrant:6333
-      QDRANT_SRC_DIR: /var/lib/docint/sources
-      SESSIONS_DB_PATH: /var/lib/docint/sessions/sessions.sqlite3
-      USE_DEVICE: ${USE_DEVICE:-auto}
-    env_file: *env-file
-    volumes: *backend-volumes
-    networks: *backend-networks
-    restart: unless-stopped
-    gpus: all
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              capabilities: [cuda]
-    profiles: ["cuda"]
 
   ##########################################################
   # Frontend SPA – nginx serves the React build and reverse-
   # proxies API routes to the backend on the docint-net network.
   ##########################################################
-  frontend-cpu:
+  frontend:
     image: docint-frontend:${DOCINT_VERSION:-latest}
-    build: &frontend-build
+    build:
       context: ..
       dockerfile: docker/Dockerfile.frontend
-    networks: &frontend-networks
+    networks:
       docint-net:
         aliases:
           - frontend
     depends_on:
-      - backend-cpu
+      - backend
     restart: unless-stopped
-    profiles: ["cpu"]
-
-  frontend-cuda:
-    image: docint-frontend:${DOCINT_VERSION:-latest}
-    build: *frontend-build
-    networks: *frontend-networks
-    depends_on:
-      - backend-cuda
-    restart: unless-stopped
-    profiles: ["cuda"]
 
 ##########################################################
 # Volumes

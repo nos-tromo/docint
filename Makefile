@@ -1,16 +1,12 @@
 # Build-host helpers for docint.
 #
-# The Docker profile (cpu/cuda) is read from PROFILE in .env, so plain
-# `make up` follows the host's hardware. Override per-invocation with
-# `make up PROFILE=cuda`.
+# docint is a CPU-only Python app. All ML inference (chat, embeddings,
+# rerank, NER, CLIP) is delegated over HTTP to the external vllm-service
+# stack — see CLAUDE.md. There is no PROFILE / CUDA toggle here anymore.
 
 .DEFAULT_GOAL := help
 
 .PHONY: help network volumes build bundle up stop pre-commit test
-
-# Docker profile (cpu/cuda). Read from .env, default cpu. Override on the
-# command line: make up PROFILE=cuda
-PROFILE ?= $(or $(strip $(shell test -f .env && grep -E '^PROFILE=' .env | cut -d= -f2)),cpu)
 
 # Versioned image tag.
 # On production: read from .docint-version written by bundle_images.sh.
@@ -22,22 +18,19 @@ DOCINT_VERSION ?= $(shell \
       echo "$$(date +%Y-%m-%d)$${_s:+-$$_s}"; } )
 export DOCINT_VERSION
 
-COMPOSE      := docker compose --env-file .env -f docker/compose.yaml -f docker/compose.override.yaml
-PROFILE_FLAG := --profile $(PROFILE)
+COMPOSE := docker compose --env-file .env -f docker/compose.yaml -f docker/compose.override.yaml
 
 help:
-	@echo "docint — build-host helpers. Active profile: $(PROFILE)"
+	@echo "docint — build-host helpers."
 	@echo
 	@echo "  make network    create the external inference-net + data-net"
 	@echo "  make volumes    create the external Docker volumes"
-	@echo "  make build      build images for the $(PROFILE) profile"
-	@echo "  make bundle     ship images as a versioned .tar.gz pair ($(PROFILE))"
-	@echo "  make up         build + run the $(PROFILE) profile"
-	@echo "  make stop       stop the $(PROFILE) profile containers"
+	@echo "  make build      build images"
+	@echo "  make bundle     ship images as a versioned .tar.gz pair"
+	@echo "  make up         build + run docint"
+	@echo "  make stop       stop docint containers"
 	@echo "  make pre-commit run pre-commit hooks (ruff + mypy)"
 	@echo "  make test       run the test suite"
-	@echo
-	@echo "Set PROFILE=cpu|cuda in .env, or override: make up PROFILE=cuda"
 
 # Create the external Docker networks (one-time per host; idempotent).
 network:
@@ -48,21 +41,21 @@ network:
 volumes:
 	./scripts/create_docker_volumes.sh
 
-# Build images for the active profile.
+# Build images.
 build:
-	DOCKER_BUILDKIT=1 $(COMPOSE) $(PROFILE_FLAG) build
+	DOCKER_BUILDKIT=1 $(COMPOSE) build
 
 # Build images and ship as a versioned .tar.gz pair (built + pulled).
 bundle:
-	./scripts/bundle_images.sh $(PROFILE)
+	./scripts/bundle_images.sh
 
-# Build and run the active profile.
+# Build and run docint.
 up:
-	DOCKER_BUILDKIT=1 $(COMPOSE) $(PROFILE_FLAG) up
+	DOCKER_BUILDKIT=1 $(COMPOSE) up
 
-# Stop the active profile's containers.
+# Stop docint containers.
 stop:
-	$(COMPOSE) $(PROFILE_FLAG) stop
+	$(COMPOSE) stop
 
 # Run pre-commit hooks (ruff + mypy).
 pre-commit:

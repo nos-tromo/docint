@@ -60,11 +60,6 @@ def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch: pytest
     )
     monkeypatch.setattr(
         model_cfg_module,
-        "load_clip_model",
-        lambda model_id, cache_folder: calls.append(("clip", model_id)),
-    )
-    monkeypatch.setattr(
-        model_cfg_module,
         "load_hf_model",
         lambda model_id, cache_folder, kw, trust_remote_code=False: calls.append((kw, model_id)),
     )
@@ -76,7 +71,6 @@ def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch: pytest
 
     model_cfg_module.main()
 
-    assert ("clip", "openai/clip-vit-base-patch32") in calls
     assert ("sparse", "Qdrant/all_miniLM_L6_v2_with_attentions") in calls
     assert ("rerank", "BAAI/bge-reranker-v2-m3") in calls
     assert ("embedding", "BAAI/bge-m3") in calls
@@ -138,12 +132,6 @@ def test_load_models_populates_embed_tokenizer_cache(tmp_path: Path, monkeypatch
         "load_openai_env",
         lambda: SimpleNamespace(inference_provider="ollama", api_base="http://localhost:11434/v1"),
     )
-    monkeypatch.setattr(
-        model_cfg_module,
-        "load_clip_model",
-        lambda model_id, cache_folder: calls.append(("clip", model_id)),
-    )
-
     captured_hf_calls: list[dict[str, object]] = []
 
     def _fake_load_hf_model(
