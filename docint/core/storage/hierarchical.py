@@ -47,8 +47,21 @@ class HierarchicalNodeParser(NodeParser):
             **kwargs: Forwarded to the ``NodeParser`` base class.
         """
         super().__init__(**kwargs)
-        self._coarse_splitter = SentenceSplitter(chunk_size=coarse_chunk_size, chunk_overlap=0)
-        self._fine_splitter = SentenceSplitter(chunk_size=fine_chunk_size, chunk_overlap=fine_chunk_overlap)
+        # ``basic_clean`` normalizes paragraph gaps to a single blank line
+        # (``\n\n``), but llama-index's SentenceSplitter defaults to a triple
+        # newline as the paragraph separator — so without an override it
+        # cannot see paragraph boundaries in cleaned text and is forced to
+        # split mid-paragraph.
+        self._coarse_splitter = SentenceSplitter(
+            chunk_size=coarse_chunk_size,
+            chunk_overlap=0,
+            paragraph_separator="\n\n",
+        )
+        self._fine_splitter = SentenceSplitter(
+            chunk_size=fine_chunk_size,
+            chunk_overlap=fine_chunk_overlap,
+            paragraph_separator="\n\n",
+        )
 
     def _parse_nodes(self, nodes: Sequence[BaseNode], show_progress: bool = False, **kwargs: Any) -> list[BaseNode]:
         """Parse nodes into hierarchical chunks.

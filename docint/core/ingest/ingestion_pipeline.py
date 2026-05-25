@@ -25,6 +25,7 @@ from loguru import logger
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.readers.images import ImageReader
 from docint.core.readers.json import CustomJSONReader
+from docint.core.readers.rtf import RTFReader
 from docint.core.readers.tables import TableReader
 from docint.core.storage.hierarchical import HierarchicalNodeParser
 from docint.utils.batching import chunk_nodes
@@ -190,6 +191,7 @@ class DocumentIngestionPipeline:
         self.sentence_splitter = SentenceSplitter(
             chunk_size=sentence_splitter_chunk_size,
             chunk_overlap=sentence_splitter_chunk_overlap,
+            paragraph_separator="\n\n",
         )
         self.reader_required_exts = ingestion_cfg.supported_filetypes
         if ingestion_cfg.hierarchical_chunking_enabled:
@@ -536,7 +538,7 @@ class DocumentIngestionPipeline:
                 json_docs.append(d)
             elif file_type.endswith(("docx", "pdf")) or ext in {"docx", "pdf"}:
                 document_docs.append(d)
-            elif file_type.startswith("text/") or ext in {"txt", "md", "rst"}:
+            elif file_type.startswith("text/") or ext in {"txt", "md", "rst", "rtf"}:
                 text_docs.append(d)
             else:
                 logger.warning(
@@ -794,6 +796,7 @@ class DocumentIngestionPipeline:
                 ),
                 ".xls": table_reader,
                 ".xlsx": table_reader,
+                ".rtf": RTFReader(),
             },
         )
 
