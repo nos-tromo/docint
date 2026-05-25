@@ -1,4 +1,4 @@
-"""Tests for paragraph-aware chunking in :class:`HierarchicalNodeParser`.
+r"""Tests for paragraph-aware chunking in :class:`HierarchicalNodeParser`.
 
 These cover two coupled defaults that combined to squash multi-paragraph
 plain-text documents into a single fine node:
@@ -6,8 +6,8 @@ plain-text documents into a single fine node:
 1. ``fine_chunk_size`` defaulted to 8192 tokens, so any document under roughly
    30KB fit in one fine chunk regardless of internal structure.
 2. The underlying ``SentenceSplitter`` used llama-index's default
-   ``paragraph_separator="\\n\\n\\n"``, so after ``basic_clean`` (which
-   collapses ``\\n{3,}`` → ``\\n\\n``) the splitter could not see paragraph
+   ``paragraph_separator="\n\n\n"``, so after ``basic_clean`` (which
+   collapses ``\n{3,}`` → ``\n\n``) the splitter could not see paragraph
    boundaries at all and was forced to break mid-paragraph.
 """
 
@@ -21,16 +21,16 @@ from docint.utils.env_cfg import load_ingestion_env
 # Six paragraphs each large enough to exceed the new default ``fine_chunk_size``
 # when combined. Each paragraph is ~400 tokens of identical filler so the
 # splitter cannot find a "more natural" cut than the inter-paragraph break.
-_PARAGRAPH = (
-    "Paragraph body. " + "This sentence pads the paragraph to a respectable length. " * 30
-)
+_PARAGRAPH = "Paragraph body. " + "This sentence pads the paragraph to a respectable length. " * 30
 _SIX_PARAGRAPH_DOC = "\n\n".join(f"Paragraph {i}.\n{_PARAGRAPH}" for i in range(1, 7))
 
 
 def test_default_fine_chunk_size_splits_multi_paragraph_text() -> None:
-    """With the default config a multi-paragraph doc must produce more than one
-    fine node — otherwise the hierarchy degenerates to a single chunk and
-    retrieval cannot localize to a paragraph."""
+    """Default config must split a multi-paragraph doc into multiple fine nodes.
+
+    Otherwise the hierarchy degenerates to a single chunk and retrieval
+    cannot localize to a paragraph.
+    """
     cfg = load_ingestion_env()
     parser = HierarchicalNodeParser(
         coarse_chunk_size=cfg.coarse_chunk_size,
@@ -48,9 +48,11 @@ def test_default_fine_chunk_size_splits_multi_paragraph_text() -> None:
 
 
 def test_hierarchical_parser_respects_double_newline_paragraph_breaks() -> None:
-    """When the document carries ``\\n\\n`` paragraph breaks, fine nodes must
-    align with those breaks: no fine node may straddle a paragraph boundary in
-    the middle of its body — that break is the natural cut point."""
+    r"""Fine nodes must align with ``\n\n`` paragraph breaks in the document.
+
+    No fine node may straddle a paragraph boundary in the middle of its
+    body — that break is the natural cut point.
+    """
     # chunk_size just over one paragraph: forces a split between paragraphs
     # but never inside one, so any straddling boundary is a bug in the
     # splitter configuration.
@@ -67,6 +69,5 @@ def test_hierarchical_parser_respects_double_newline_paragraph_breaks() -> None:
     for n in fine_nodes:
         body = n.get_content().strip()
         assert "\n\n" not in body, (
-            f"fine node straddles a paragraph boundary (paragraph_separator "
-            f"override missing?): {body[:200]!r}…"
+            f"fine node straddles a paragraph boundary (paragraph_separator override missing?): {body[:200]!r}…"
         )
