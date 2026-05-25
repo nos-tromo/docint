@@ -651,6 +651,7 @@ def load_ingestion_env(
             ".parquet",
             ".pdf",
             ".png",
+            ".rtf",
             ".tsv",
             ".txt",
             ".xls",
