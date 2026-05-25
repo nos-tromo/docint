@@ -18,14 +18,14 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends \
 RUN --mount=type=cache,target=${UV_CACHE_DIR} \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --locked --no-install-project --extra cpu
+    uv sync --locked --no-install-project
 
 # Copy the project into the image
 COPY . /app
 
 # Sync the project
 RUN --mount=type=cache,target=${UV_CACHE_DIR} \
-    uv sync --locked --extra cpu
+    uv sync --locked
 
 # ---- Runtime: only runtime libs and the prebuilt venv ----
 FROM $UV_IMAGE

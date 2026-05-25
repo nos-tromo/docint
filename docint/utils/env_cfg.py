@@ -41,27 +41,6 @@ def set_offline_env() -> None:
 set_offline_env()  # Apply offline settings at module load time
 
 
-def _apply_device_visibility() -> None:
-    """Hide CUDA devices when the backend is configured for CPU-only work.
-
-    When ``USE_DEVICE=cpu`` the process should never initialise a CUDA
-    context.  Setting ``CUDA_VISIBLE_DEVICES=""`` before any PyTorch import
-    prevents accidental GPU memory allocation that can destabilise co-located
-    GPU services (e.g. vLLM workers sharing the same physical GPUs).
-    """
-    requested = os.getenv("USE_DEVICE", "auto").strip().lower()
-    if requested != "cpu":
-        return
-    # Only override when not already set by the operator.
-    if os.getenv("CUDA_VISIBLE_DEVICES") is not None:
-        return
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
-    logger.info("USE_DEVICE=cpu: set CUDA_VISIBLE_DEVICES='' to prevent GPU context init.")
-
-
-_apply_device_visibility()  # Must run before any torch.cuda call
-
-
 def resolve_hf_cache_path(cache_dir: Path, repo_id: str, filename: str | None = None) -> Path | None:
     """Resolve a HuggingFace model or file path from the local HF cache.
 
@@ -1467,41 +1446,6 @@ def _parse_parent_context_safety_margin(*, default: float) -> float:
         )
         return default
     return parsed
-
-
-@dataclass(frozen=True)
-class RuntimeConfig:
-    """Dataclass for local runtime device preferences."""
-
-    use_device: str
-
-
-def load_runtime_env(default_use_device: str = "auto") -> RuntimeConfig:
-    """Load local runtime settings from environment variables.
-
-    Args:
-        default_use_device (str): Preferred device for local auxiliary models.
-            Supported values are ``auto``, ``cpu``, ``mps``, ``cuda``, and
-            ``cuda:<index>``.
-
-    Returns:
-        RuntimeConfig: Parsed runtime configuration.
-    """
-    normalized_default = default_use_device.strip().lower() or "auto"
-    requested_device = str(os.getenv("USE_DEVICE", normalized_default)).strip().lower()
-    if not requested_device:
-        requested_device = normalized_default
-
-    is_supported = requested_device in {
-        "auto",
-        "cpu",
-        "cuda",
-        "mps",
-    } or requested_device.startswith("cuda:")
-    if not is_supported:
-        requested_device = normalized_default
-
-    return RuntimeConfig(use_device=requested_device)
 
 
 @dataclass(frozen=True)

@@ -2268,38 +2268,20 @@ def test_build_ingestion_pipeline_non_openai_keeps_gliner_ner_path(
     assert len(created) == 1
 
 
-def test_device_uses_use_device_override(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """RAG device selection should honor the explicit runtime override.
-
-    Args:
-        monkeypatch: The monkeypatch fixture.
-    """
-    monkeypatch.setenv("USE_DEVICE", "cpu")
-    monkeypatch.setattr(rag_module.torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(rag_module.torch.backends.mps, "is_available", lambda: False)
-    monkeypatch.setattr(rag_module.torch.backends.mps, "is_built", lambda: False)
-
-    rag = RAG(qdrant_collection="test")
-
-    assert rag.device == "cpu"
-
-
 def test_build_ingestion_pipeline_wires_remote_ner_extractor(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Enabled NER should wire the remote extractor onto the pipeline.
 
-    The remote extractor talks to vllm-service over HTTP, so docint no
-    longer threads a device argument through the build call.
+    All ML inference (NER, CLIP, embed, rerank) goes over HTTP after the
+    Phase 3 collapse, so docint no longer threads a device argument
+    through the build call.
 
     Args:
         monkeypatch: The monkeypatch fixture.
         tmp_path: The temporary path fixture.
     """
-    monkeypatch.setenv("USE_DEVICE", "cpu")
     monkeypatch.setenv("NER_ENABLED", "true")
 
     call_count = 0
@@ -2331,14 +2313,14 @@ def test_build_ingestion_pipeline_wires_remote_ner_extractor(
     monkeypatch.setattr(
         rag_module,
         "ImageIngestionService",
-        lambda device: types.SimpleNamespace(device=device),
+        lambda: types.SimpleNamespace(),
     )
 
     pipeline = rag._build_ingestion_pipeline()
 
     assert pipeline.entity_extractor is not None
     assert call_count == 1
-    assert getattr(rag._image_ingestion_service, "device", None) == "cpu"
+    assert rag._image_ingestion_service is not None
 
 
 def test_sparse_model_returns_id_when_directly_supported(

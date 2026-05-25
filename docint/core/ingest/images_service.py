@@ -387,7 +387,6 @@ class VisionJSONTagger:
 class ImageIngestionService:
     """Store image embeddings and metadata into a dedicated Qdrant collection."""
 
-    device: str = field(default="cpu")
     img_ingestion_config: ImageIngestionConfig = field(default_factory=load_image_ingestion_config)
     model_config: ModelConfig = field(default_factory=load_model_env)
     qdrant_client: QdrantClient | None = None
