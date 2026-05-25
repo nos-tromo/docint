@@ -1117,7 +1117,6 @@ class PathConfig:
     artifacts: Path
     data: Path
     docint_home_dir: Path
-    logs: Path
     queries: Path
     results: Path
     prompts: Path
@@ -1134,7 +1133,6 @@ def load_path_env() -> PathConfig:
         - docint_home_dir (Path): Root home directory for docint, used as the base for other
             default paths. Defaults to ~/docint.
         - data (Path): Path to the data directory.
-        - logs (Path): Path to the logs file.
         - queries (Path): Path to the queries file.
         - results (Path): Path to the results directory.
         - prompts (Path): Path to the prompts directory.
@@ -1151,8 +1149,6 @@ def load_path_env() -> PathConfig:
 
     utils_dir: Path = Path(__file__).parent.resolve()
     default_prompts_dir: Path = utils_dir / "prompts"
-    project_root: Path = utils_dir.parents[1]
-    default_log_dir = project_root / ".logs" / "docint.log"
 
     default_qdrant_sources: Path = docint_home_dir / "qdrant_sources"
     default_artifacts_dir: Path = docint_home_dir / "artifacts"
@@ -1161,7 +1157,6 @@ def load_path_env() -> PathConfig:
         artifacts=Path(os.getenv("PIPELINE_ARTIFACTS_DIR", default_artifacts_dir)).expanduser(),
         data=Path(os.getenv("DATA_PATH", default_data_dir)).expanduser(),
         docint_home_dir=docint_home_dir,
-        logs=Path(os.getenv("LOG_PATH", default_log_dir)).expanduser(),
         queries=Path(os.getenv("QUERIES_PATH", default_query_dir)).expanduser(),
         results=Path(os.getenv("RESULTS_PATH", default_results_dir)).expanduser(),
         prompts=default_prompts_dir,

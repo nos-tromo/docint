@@ -10,6 +10,17 @@ x-no-proxy-env: &no-proxy-env
 x-env-file: &env-file
   - ../.env
 
+##########################################################
+# Shared logging — the local driver rotates and compresses
+# per-container; tail with `docker compose logs -f <svc>`.
+##########################################################
+x-logging: &default-logging
+  driver: "local"
+  options:
+    max-size: "50m"
+    max-file: "5"
+    compress: "true"
+
 services:
   ##########################################################
   # Backend
@@ -23,17 +34,16 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.backend
+    logging: *default-logging
     expose:
       - "8000"
     environment:
       <<: *no-proxy-env
-      LOG_PATH: /var/log/docint/backend.log
       QDRANT_HOST: http://qdrant:6333
       QDRANT_SRC_DIR: /var/lib/docint/sources
       SESSIONS_DB_PATH: /var/lib/docint/sessions/sessions.sqlite3
     env_file: *env-file
     volumes:
-      - docint-logs:/var/log/docint
       - docling-cache:/root/.cache/docling
       - huggingface-cache:/root/.cache/huggingface/hub
       - qdrant-sources:/var/lib/docint/sources
@@ -59,6 +69,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.frontend
+    logging: *default-logging
     networks:
       docint-net:
         aliases:
@@ -71,7 +82,6 @@ services:
 # Volumes
 ##########################################################
 volumes:
-  docint-logs:
   docling-cache:
     external: true
   huggingface-cache:

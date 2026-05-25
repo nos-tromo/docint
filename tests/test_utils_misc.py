@@ -96,22 +96,13 @@ def test_path_config_artifacts_env_override(monkeypatch: pytest.MonkeyPatch, tmp
     assert cfg.artifacts == custom
 
 
-def test_init_logger_respects_env_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """init_logger should honor LOG_PATH and create the log file.
-
-    Args:
-        tmp_path (Path): Temporary directory.
-        monkeypatch (pytest.MonkeyPatch): Fixture to override environment.
-    """
-    log_file = tmp_path / "logs" / "docint.log"
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("LOG_PATH", str(log_file))
-
-    resolved = init_logger(rotation="1 MB", retention=1)
-    logger.debug("create log entry for file")
-
-    assert resolved == log_file
-    assert log_file.exists()
+def test_init_logger_honors_log_level(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """init_logger should install a stderr sink whose level honors LOG_LEVEL."""
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    init_logger()
+    logger.debug("debug-level message")
+    captured = capsys.readouterr()
+    assert "debug-level message" in captured.err
 
 
 def test_load_summary_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
