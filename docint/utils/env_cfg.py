@@ -583,7 +583,7 @@ def load_ingestion_env(
     default_docstore_retry_backoff_seconds: float = 0.25,
     default_docstore_retry_backoff_max_seconds: float = 2.0,
     default_fine_chunk_overlap: int = 0,
-    default_fine_chunk_size: int = 8192,
+    default_fine_chunk_size: int = 1024,
     default_hierarchical_chunking_enabled: bool = True,
     default_ingestion_batch_size: int = 50,
     default_sentence_splitter_chunk_overlap: int = 64,

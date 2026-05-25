@@ -190,6 +190,7 @@ class DocumentIngestionPipeline:
         self.sentence_splitter = SentenceSplitter(
             chunk_size=sentence_splitter_chunk_size,
             chunk_overlap=sentence_splitter_chunk_overlap,
+            paragraph_separator="\n\n",
         )
         self.reader_required_exts = ingestion_cfg.supported_filetypes
         if ingestion_cfg.hierarchical_chunking_enabled:
