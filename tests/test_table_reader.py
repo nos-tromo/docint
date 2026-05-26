@@ -50,9 +50,7 @@ def test_table_reader_autodetects_comma_csv(tmp_path: Path) -> None:
     assert docs[0].metadata["ft"]["csv"]["sep"] == ","
 
 
-def test_table_reader_uses_explicit_csv_separator(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_table_reader_uses_explicit_csv_separator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Explicit ``csv_sep`` overrides auto-detection.
 
     Args:
@@ -217,9 +215,7 @@ def test_table_reader_preserves_generic_behavior_for_non_matching_schema(
     assert "reference_metadata" not in docs[0].metadata
 
 
-def test_table_reader_sanitizes_excel_time_column(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_table_reader_sanitizes_excel_time_column(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Excel-sourced ``datetime.time`` cells sanitize to ISO strings.
 
     Reproduces the ingestion crash reported in the ``testdata-1`` run:

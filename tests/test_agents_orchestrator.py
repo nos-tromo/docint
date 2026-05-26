@@ -1,6 +1,7 @@
 """Tests for :class:`AgentOrchestrator` turn-handling logic."""
 
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 
@@ -16,7 +17,8 @@ from docint.agents import (
     SimpleUnderstandingAgent,
     Turn,
 )
-from docint.agents.types import ResponseAgent, RetrievalAgent, Turn as TurnType
+from docint.agents.types import ResponseAgent, RetrievalAgent
+from docint.agents.types import Turn as TurnType
 
 
 @dataclass
@@ -24,7 +26,7 @@ class _DummyRetrievalResult:
     """Minimal retrieval result dataclass for testing."""
 
     answer: str
-    sources: list[dict]
+    sources: list[dict[str, Any]]
 
 
 class _StubRetrievalAgent(RetrievalAgent):
@@ -75,7 +77,7 @@ class _StubResponseAgent(ResponseAgent):
 class _NoopClarifier(SimpleClarificationAgent):
     """Clarifier that always requests clarification."""
 
-    def build(self, turn: TurnType, analysis) -> ClarificationRequest:  # type: ignore[override]
+    def build(self, turn: TurnType, analysis: Any) -> ClarificationRequest:
         """Return a clarification request regardless of input.
 
         Args:
@@ -94,11 +96,9 @@ class _AlwaysClarifyPolicy(ClarificationPolicy):
 
     def __init__(self) -> None:
         """Initialise with a strict confidence threshold."""
-        super().__init__(
-            ClarificationConfig(confidence_threshold=1.0, require_entities=True)
-        )
+        super().__init__(ClarificationConfig(confidence_threshold=1.0, require_entities=True))
 
-    def evaluate(self, analysis, clarifications_so_far: int = 0):  # type: ignore[override]
+    def evaluate(self, analysis: Any, clarifications_so_far: int = 0) -> ClarificationRequest:
         """Always request clarification.
 
         Args:
@@ -117,9 +117,7 @@ class _NeverClarifyPolicy(ClarificationPolicy):
 
     def __init__(self) -> None:
         """Initialise with a permissive confidence threshold."""
-        super().__init__(
-            ClarificationConfig(confidence_threshold=0.0, require_entities=False)
-        )
+        super().__init__(ClarificationConfig(confidence_threshold=0.0, require_entities=False))
 
 
 @pytest.fixture

@@ -51,9 +51,7 @@ def test_get_missing_key(store: SQLiteKVStore) -> None:
     assert store.get("nonexistent") is None
 
 
-def test_put_coerces_datetime_time_value(
-    store: SQLiteKVStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_put_coerces_datetime_time_value(store: SQLiteKVStore, monkeypatch: pytest.MonkeyPatch) -> None:
     """Exercise the sink-side ``_json_default`` fallback for ``put``.
 
     The primary fix lives in :mod:`docint.core.readers.tables` where
@@ -74,9 +72,7 @@ def test_put_coerces_datetime_time_value(
     assert store.get("k1") == {"t": "08:30:00"}
 
 
-def test_put_all_coerces_datetime_time_value(
-    store: SQLiteKVStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_put_all_coerces_datetime_time_value(store: SQLiteKVStore, monkeypatch: pytest.MonkeyPatch) -> None:
     """Exercise the sink-side ``_json_default`` fallback for ``put_all``.
 
     Mirrors :func:`test_put_coerces_datetime_time_value` for the batch
@@ -283,9 +279,7 @@ class _ConnProxy:
         self._real.commit()
 
 
-def test_put_retries_locked_db_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_put_retries_locked_db_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Retry transient ``database is locked`` errors during ``put``.
 
     Replaces ``store._conn`` with a proxy whose ``execute`` raises a
@@ -337,9 +331,7 @@ def test_put_retries_locked_db_error(
     assert sleep_calls == [0.1]
 
 
-def test_put_raises_non_retryable_sqlite_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_put_raises_non_retryable_sqlite_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Propagate non-locked ``OperationalError`` without retrying.
 
     Args:

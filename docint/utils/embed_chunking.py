@@ -37,10 +37,17 @@ from __future__ import annotations
 import math
 import uuid
 from collections.abc import Callable
-from typing import cast
+from typing import Any, cast
 
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.schema import BaseNode, MetadataMode, NodeRelationship, TextNode
+
+# Re-export SentenceSplitter for tests that monkeypatch it.
+__all__ = [
+    "SentenceSplitter",
+    "estimate_tokens",
+    "resplit_nodes_for_embedding",
+]
 
 from docint.utils.openai_cfg import EmbeddingInputTooLongError
 
@@ -136,9 +143,9 @@ def fits_budget(
         ``True`` when the estimated token count is at or below the
         effective budget, ``False`` otherwise.
     """
-    return estimate_tokens(
-        text, char_token_ratio, token_counter=token_counter
-    ) <= effective_budget(budget_tokens, safety_margin)
+    return estimate_tokens(text, char_token_ratio, token_counter=token_counter) <= effective_budget(
+        budget_tokens, safety_margin
+    )
 
 
 def _build_probe_sub_metadata(parent: BaseNode) -> dict[str, object]:
@@ -200,9 +207,11 @@ def _estimate_sub_node_metadata_tokens(
         parent: The oversize parent node.
         char_token_ratio: Characters per token estimator (matches
             :func:`estimate_tokens`).
+        token_counter: Optional model-specific token counter; falls back to the char-ratio
+            estimator when None.
 
     Returns:
-        Estimated metadata overhead in tokens (≈0 under the current
+        Estimated metadata overhead in tokens (~0 under the current
         exclusion contract).
     """
     probe_metadata = _build_probe_sub_metadata(parent)
@@ -241,6 +250,8 @@ def _sub_node_fits_budget(
         budget_tokens: Raw context window size in tokens.
         char_token_ratio: Characters per token estimator.
         safety_margin: Budget reservation fraction.
+        token_counter: Optional model-specific token counter; falls back to the char-ratio
+            estimator when None.
 
     Returns:
         ``True`` when the rendered embed payload fits the effective
@@ -398,18 +409,14 @@ def _split_parent_text(
     effective = effective_budget(budget_tokens, safety_margin)
     parent_raw_text = parent.get_content()
     parent_embed_text = parent.get_content(metadata_mode=MetadataMode.EMBED)
-    parent_token_estimate = estimate_tokens(
-        parent_embed_text, char_token_ratio, token_counter=token_counter
-    )
+    parent_token_estimate = estimate_tokens(parent_embed_text, char_token_ratio, token_counter=token_counter)
 
     if not _has_word_boundaries(parent_raw_text):
         # Use the raw-text estimate (not the embed-mode one) so the
         # diagnostic reflects the stream the whitespace guard actually
         # inspected. The embed-mode estimate can be an order of magnitude
         # larger for heavy-metadata nodes, which would mislead operators.
-        raw_token_estimate = estimate_tokens(
-            parent_raw_text, char_token_ratio, token_counter=token_counter
-        )
+        raw_token_estimate = estimate_tokens(parent_raw_text, char_token_ratio, token_counter=token_counter)
         raise EmbeddingInputTooLongError(
             f"node_id={parent.node_id} estimated_tokens={raw_token_estimate} "
             f"budget={effective} — content is a single token stream larger than "
@@ -431,7 +438,7 @@ def _split_parent_text(
     candidate_sizes = [chunk_budget_tokens, max(1, chunk_budget_tokens // 2)]
     last_chunks: list[str] = [parent_raw_text]
     for chunk_size in candidate_sizes:
-        splitter_kwargs: dict[str, object] = {
+        splitter_kwargs: dict[str, Any] = {
             "chunk_size": chunk_size,
             "chunk_overlap": 0,
         }
@@ -497,6 +504,8 @@ def resplit_nodes_for_embedding(
         sentence_splitter: Optional pre-built splitter, mainly useful
             for tests. When omitted, each split creates a fresh
             :class:`SentenceSplitter`.
+        token_counter: Optional model-specific token counter; falls back to the char-ratio
+            estimator when None.
 
     Returns:
         A ``(vector_nodes, docstore_nodes)`` pair.

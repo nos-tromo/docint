@@ -7,8 +7,8 @@ from pathlib import Path
 import pypdf
 from loguru import logger
 
-from docint.utils.env_cfg import PipelineConfig
 from docint.core.readers.documents.models import PageInfo
+from docint.utils.env_cfg import PipelineConfig
 
 
 def triage_pdf(file_path: str | Path, config: PipelineConfig) -> list[PageInfo]:

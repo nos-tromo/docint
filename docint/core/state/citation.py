@@ -12,7 +12,7 @@ from sqlalchemy.orm import relationship
 from docint.core.state.base import Base
 
 
-class Citation(Base):
+class Citation(Base):  # type: ignore[misc]
     """Represents a citation within a turn of a conversation.
 
     Args:

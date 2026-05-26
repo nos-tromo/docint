@@ -28,7 +28,6 @@ def compute_file_hash(
         FileNotFoundError: If the file does not exist.
         ValueError: If the specified hash algorithm is unsupported.
     """
-
     file_path = Path(path) if not isinstance(path, Path) else path
     if not file_path.is_file():
         logger.error("FileNotFoundError: File not found for hashing: {}", file_path)

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone
-from typing import Any, Mapping, Sequence, TypeAlias
+from collections.abc import Mapping, Sequence
+from datetime import UTC, date, datetime, time
+from typing import Any, TypeAlias, cast
 
 from llama_index.core.vector_stores.types import (
     FilterCondition,
@@ -184,11 +185,7 @@ def _matches_rule(metadata: Mapping[str, Any], rule: dict[str, Any]) -> bool:
         expected = _normalize_scalar(rule.get("value"))
         if not isinstance(expected, (int, float)):
             return False
-        numeric_values = [
-            value
-            for value in (_coerce_numeric(value) for value in values)
-            if value is not None
-        ]
+        numeric_values = [value for value in (_coerce_numeric(value) for value in values) if value is not None]
         if not numeric_values:
             return False
         op_map = {
@@ -238,11 +235,7 @@ def _matches_rule(metadata: Mapping[str, Any], rule: dict[str, Any]) -> bool:
         if boundary is None:
             return False
         parsed_values = [
-            value
-            for value in (
-                _parse_date_value(value, upper_bound=False) for value in values
-            )
-            if value is not None
+            value for value in (_parse_date_value(value, upper_bound=False) for value in values) if value is not None
         ]
         if not parsed_values:
             return False
@@ -333,7 +326,7 @@ def _compile_rule(rule: dict[str, Any]) -> MetadataFilter | MetadataFilters | No
             ``operator`` is one of the supported filter operations.
 
     Returns:
-        MetadataFilter | MetadataFilters | None: A ``MetadataFilter`` or ``MetadataFilters`` instance, or ``None`` if the rule
+        MetadataFilter | MetadataFilters | None: Compiled filter(s), or ``None`` if the rule
         cannot be compiled.
     """
     field = rule["field"]
@@ -362,7 +355,7 @@ def _compile_rule(rule: dict[str, Any]) -> MetadataFilter | MetadataFilters | No
             values = [scalar] if scalar is not None else []
         if not values:
             return None
-        return MetadataFilter(key=field, value=values, operator=FilterOperator.IN)
+        return MetadataFilter(key=field, value=cast(Any, values), operator=FilterOperator.IN)
 
     if operator == "mime_match":
         return _compile_mime_rule(field=field, raw_value=rule.get("value"))
@@ -373,9 +366,7 @@ def _compile_rule(rule: dict[str, Any]) -> MetadataFilter | MetadataFilters | No
         "date_before",
         "date_on_or_before",
     }:
-        return _compile_date_rule(
-            field=field, operator=operator, raw_value=rule.get("value")
-        )
+        return _compile_date_rule(field=field, operator=operator, raw_value=rule.get("value"))
 
     logger.warning("Ignoring unsupported metadata filter operator '{}'.", operator)
     return None
@@ -393,7 +384,8 @@ def _compile_mime_rule(
         raw_value (Any): The raw MIME pattern value, which may include a ``/*`` suffix for wildcard matching.
 
     Returns:
-        MetadataFilter | None: A ``MetadataFilter`` instance with the appropriate operator, or ``None`` if the value is invalid.
+        MetadataFilter | None: A ``MetadataFilter`` with the right operator, or ``None`` if the
+            value is invalid.
     """
     value = str(raw_value or "").strip().lower()
     if not value:
@@ -423,7 +415,8 @@ def _compile_date_rule(
             or other type coercible to a date.
 
     Returns:
-        MetadataFilter | None: A ``MetadataFilter`` instance with the appropriate operator and ISO-8601 value, or ``None`` if the value is invalid.
+        MetadataFilter | None: A ``MetadataFilter`` with the right operator and ISO-8601 value,
+            or ``None`` if the value is invalid.
     """
     boundary = _normalize_date_value(raw_value, upper_bound=operator.endswith("before"))
     if boundary is None:
@@ -454,9 +447,9 @@ def _compile_qdrant_rule(
             supported filter operations.
 
     Returns:
-        tuple[_QdrantCondition | None, bool]: A tuple of (compiled_condition, negate), where ``compiled_condition`` is a Qdrant-compatible
-            condition or filter, and ``negate`` is a boolean indicating whether the condition should be
-            negated (i.e., added to the ``must_not`` list instead of ``must``).
+        tuple[_QdrantCondition | None, bool]: ``(compiled_condition, negate)`` where
+            ``compiled_condition`` is a Qdrant-compatible condition/filter and ``negate`` indicates
+            whether to route into ``must_not`` rather than ``must``.
     """
     field = rule["field"]
     operator = rule["operator"]
@@ -466,7 +459,7 @@ def _compile_qdrant_rule(
         if value is None:
             return None, False
         return (
-            models.FieldCondition(key=field, match=models.MatchValue(value=value)),
+            models.FieldCondition(key=field, match=models.MatchValue(value=cast(Any, value))),
             operator == "neq",
         )
 
@@ -488,7 +481,7 @@ def _compile_qdrant_rule(
         if not values:
             return None, False
         return (
-            models.FieldCondition(key=field, match=models.MatchAny(any=values)),
+            models.FieldCondition(key=field, match=models.MatchAny(any=cast(Any, values))),
             False,
         )
 
@@ -630,7 +623,7 @@ def _parse_date_value(value: Any, *, upper_bound: bool) -> datetime | None:
         dt = datetime.combine(
             value,
             time.max if upper_bound else time.min,
-            tzinfo=timezone.utc,
+            tzinfo=UTC,
         )
     else:
         raw = str(value or "").strip()
@@ -642,7 +635,7 @@ def _parse_date_value(value: Any, *, upper_bound: bool) -> datetime | None:
                 dt = datetime.combine(
                     parsed_date,
                     time.max if upper_bound else time.min,
-                    tzinfo=timezone.utc,
+                    tzinfo=UTC,
                 )
             else:
                 dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
@@ -650,7 +643,7 @@ def _parse_date_value(value: Any, *, upper_bound: bool) -> datetime | None:
             return None
 
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     else:
-        dt = dt.astimezone(timezone.utc)
+        dt = dt.astimezone(UTC)
     return dt

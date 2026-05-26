@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import AbstractContextManager
-from typing import Awaitable, Callable, TypeVar
+from typing import TypeVar
 
 from loguru import logger
 
@@ -88,7 +89,7 @@ def is_transient_qdrant_error(exc: BaseException) -> bool:
         return True
 
     try:
-        from qdrant_client.http.exceptions import (  # type: ignore[import-not-found]
+        from qdrant_client.http.exceptions import (
             ResponseHandlingException,
             UnexpectedResponse,
         )
@@ -107,7 +108,7 @@ def is_transient_qdrant_error(exc: BaseException) -> bool:
         pass
 
     try:
-        import httpx  # type: ignore[import-not-found]
+        import httpx
 
         if isinstance(
             exc,
@@ -180,8 +181,7 @@ def retry_with_backoff(
                     raise
                 delay = min(initial * (2 ** (attempt - 1)), cap)
                 logger.warning(
-                    "Operation '{}' hit retryable error on attempt {}/{}: "
-                    "{!r}. Retrying in {:.2f}s",
+                    "Operation '{}' hit retryable error on attempt {}/{}: {!r}. Retrying in {:.2f}s",
                     operation,
                     attempt,
                     attempts,
@@ -242,7 +242,7 @@ def is_hard_ingest_error(exc: BaseException) -> bool:
     if isinstance(exc, (_json.JSONDecodeError, UnicodeDecodeError)):
         return True
     try:
-        import pandas as _pd  # type: ignore[import, import-not-found]
+        import pandas as _pd
 
         if isinstance(exc, _pd.errors.ParserError):
             return True
@@ -292,8 +292,7 @@ async def aretry_with_backoff(
                 raise
             delay = min(initial * (2 ** (attempt - 1)), cap)
             logger.warning(
-                "Async operation '{}' hit retryable error on attempt "
-                "{}/{}: {!r}. Retrying in {:.2f}s",
+                "Async operation '{}' hit retryable error on attempt {}/{}: {!r}. Retrying in {:.2f}s",
                 operation,
                 attempt,
                 attempts,

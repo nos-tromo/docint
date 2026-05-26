@@ -27,12 +27,15 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TypeVar
 
 from loguru import logger
 
 from docint.utils.retry import retry_with_backoff
+
+T = TypeVar("T")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ingest_manifest (
@@ -125,6 +128,7 @@ class IngestManifest:
         retry_backoff_seconds: float = 0.25,
         retry_backoff_max_seconds: float = 2.0,
     ) -> None:
+        """Store the SQLite path and retry/backoff knobs for transient write failures."""
         self.db_path = str(db_path)
         self.max_retries = max(0, int(max_retries))
         self.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
@@ -146,7 +150,7 @@ class IngestManifest:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _execute(self, operation: str, fn: Any) -> Any:
+    def _execute(self, operation: str, fn: Callable[[], T]) -> T:
         """Run *fn* under the instance lock with locked-DB retries.
 
         Args:

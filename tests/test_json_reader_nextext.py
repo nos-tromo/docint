@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import math
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import pytest
 from _pytest.logging import LogCaptureFixture
@@ -290,10 +291,7 @@ def test_nextext_detection_accepts_ts_keys_only(tmp_path: Path) -> None:
     from docint.core.readers.json import CustomJSONReader as _CJR
 
     is_nextext = _CJR._detect_nextext_transcript(jsonl)
-    assert is_nextext, (
-        "_detect_nextext_transcript should accept start_ts/end_ts without "
-        "start_seconds/end_seconds"
-    )
+    assert is_nextext, "_detect_nextext_transcript should accept start_ts/end_ts without start_seconds/end_seconds"
 
 
 def test_nextext_detection_accepts_seconds_keys_only(tmp_path: Path) -> None:
@@ -311,9 +309,7 @@ def test_nextext_detection_accepts_seconds_keys_only(tmp_path: Path) -> None:
     from docint.core.readers.json import CustomJSONReader as _CJR
 
     is_nextext = _CJR._detect_nextext_transcript(jsonl)
-    assert is_nextext, (
-        "_detect_nextext_transcript should accept start_seconds/end_seconds"
-    )
+    assert is_nextext, "_detect_nextext_transcript should accept start_seconds/end_seconds"
 
 
 def test_nextext_detection_rejects_missing_text(tmp_path: Path) -> None:
@@ -336,9 +332,7 @@ def test_nextext_detection_rejects_missing_text(tmp_path: Path) -> None:
     from docint.core.readers.json import CustomJSONReader as _CJR
 
     is_nextext = _CJR._detect_nextext_transcript(jsonl)
-    assert not is_nextext, (
-        "_detect_nextext_transcript must reject payloads that lack a 'text' key"
-    )
+    assert not is_nextext, "_detect_nextext_transcript must reject payloads that lack a 'text' key"
 
 
 def test_nextext_segment_emits_one_document_per_line(tmp_path: Path) -> None:
@@ -392,10 +386,8 @@ def test_nextext_segment_emits_one_document_per_line(tmp_path: Path) -> None:
         "Second segment text.",
         "Third and final segment.",
     ]
-    for idx, (doc, expected_text) in enumerate(zip(documents, expected_texts)):
-        assert doc.text == expected_text, (
-            f"Document {idx}: expected prose text {expected_text!r}, got {doc.text!r}"
-        )
+    for idx, (doc, expected_text) in enumerate(zip(documents, expected_texts, strict=False)):
+        assert doc.text == expected_text, f"Document {idx}: expected prose text {expected_text!r}, got {doc.text!r}"
         assert doc.metadata["sentence_index"] == idx
         assert doc.metadata["docint_doc_kind"] == "transcript_segment", (
             f"Document {idx}: missing docint_doc_kind == 'transcript_segment'"
@@ -443,9 +435,7 @@ def test_nextext_reference_metadata_populated(tmp_path: Path) -> None:
     assert ref["text"] == "Hallo Welt."
     assert ref["text_id"] == f"{source_file}:0"
     assert ref["timestamp"] == "00:00:12"
-    assert "start_ts" not in ref, (
-        "start_ts must not appear in reference_metadata; it duplicated `timestamp`"
-    )
+    assert "start_ts" not in ref, "start_ts must not appear in reference_metadata; it duplicated `timestamp`"
     assert "end_ts" not in ref, (
         "end_ts must not appear in reference_metadata; the citation view drops it "
         "intentionally — flat metadata still carries it for LLM context"
@@ -483,9 +473,7 @@ def test_nextext_segment_without_speaker_omits_key(tmp_path: Path) -> None:
     assert len(documents) == 1
     ref = documents[0].metadata.get("reference_metadata")
     assert isinstance(ref, dict), "reference_metadata must be a dict"
-    assert "speaker" not in ref, (
-        "speaker key must be absent from reference_metadata when not in segment"
-    )
+    assert "speaker" not in ref, "speaker key must be absent from reference_metadata when not in segment"
 
 
 @pytest.mark.parametrize(
@@ -538,8 +526,7 @@ def test_nextext_derives_missing_timestamp_strings(
     ref = meta.get("reference_metadata")
     assert isinstance(ref, dict), "reference_metadata must be a dict"
     assert ref["timestamp"] == expected_start_ts, (
-        f"Expected reference_metadata.timestamp={expected_start_ts!r}, "
-        f"got {ref.get('timestamp')!r}"
+        f"Expected reference_metadata.timestamp={expected_start_ts!r}, got {ref.get('timestamp')!r}"
     )
     assert "start_ts" not in ref, (
         "start_ts must not appear in reference_metadata even when derived from "
@@ -552,9 +539,7 @@ def test_nextext_derives_missing_timestamp_strings(
     assert meta["start_ts"] == expected_start_ts, (
         f"Expected flat start_ts={expected_start_ts!r}, got {meta.get('start_ts')!r}"
     )
-    assert meta["end_ts"] == expected_end_ts, (
-        f"Expected flat end_ts={expected_end_ts!r}, got {meta.get('end_ts')!r}"
-    )
+    assert meta["end_ts"] == expected_end_ts, f"Expected flat end_ts={expected_end_ts!r}, got {meta.get('end_ts')!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -634,9 +619,9 @@ def test_nextext_max_segments_cap_enforced(
 
     assert len(documents) == 2
     assert [doc.text for doc in documents] == ["first", "second"]
-    assert any(
-        "segment cap reached" in record.getMessage() for record in loguru_caplog.records
-    ), "expected a truncation warning when the cap is hit"
+    assert any("segment cap reached" in record.getMessage() for record in loguru_caplog.records), (
+        "expected a truncation warning when the cap is hit"
+    )
 
 
 @pytest.mark.parametrize(
@@ -648,9 +633,7 @@ def test_nextext_max_segments_cap_enforced(
         (3725.9, "01:02:06"),
     ],
 )
-def test_format_timestamp_rounds_fractional_seconds(
-    seconds: float, expected: str
-) -> None:
+def test_format_timestamp_rounds_fractional_seconds(seconds: float, expected: str) -> None:
     """Fractional-second inputs round (not truncate) to the nearest whole second.
 
     Args:
@@ -663,9 +646,7 @@ def test_format_timestamp_rounds_fractional_seconds(
 
 
 @pytest.mark.parametrize("bad_value", [math.inf, -math.inf, math.nan, -1.0])
-def test_format_timestamp_handles_non_finite_and_negative(
-    bad_value: float, loguru_caplog: LogCaptureFixture
-) -> None:
+def test_format_timestamp_handles_non_finite_and_negative(bad_value: float, loguru_caplog: LogCaptureFixture) -> None:
     """Non-finite and negative inputs return ``"00:00:00"`` and emit a warning.
 
     Args:
@@ -675,10 +656,9 @@ def test_format_timestamp_handles_non_finite_and_negative(
     from docint.core.readers.json import _format_timestamp
 
     assert _format_timestamp(bad_value) == "00:00:00"
-    assert any(
-        "non-finite or negative timestamp" in record.getMessage()
-        for record in loguru_caplog.records
-    ), f"expected a warning for {bad_value!r}"
+    assert any("non-finite or negative timestamp" in record.getMessage() for record in loguru_caplog.records), (
+        f"expected a warning for {bad_value!r}"
+    )
 
 
 @pytest.mark.parametrize(

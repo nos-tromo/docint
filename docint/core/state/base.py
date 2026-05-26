@@ -51,9 +51,7 @@ def _ensure_turn_validation_columns(engine: Engine) -> None:
         with engine.begin() as conn:
             for name, sql_type in pending:
                 if name not in existing:
-                    conn.execute(
-                        text(f"ALTER TABLE turns ADD COLUMN {name} {sql_type}")
-                    )
+                    conn.execute(text(f"ALTER TABLE turns ADD COLUMN {name} {sql_type}"))
     except Exception as exc:
         logger.warning(
             "Skipping turns validation-column migration: {}: {}",
@@ -106,7 +104,7 @@ def _ensure_conversation_owner_column(engine: Engine) -> None:
 
 
 # --- Session maker ---
-def _make_session_maker(db_url: str) -> sessionmaker:
+def _make_session_maker(db_url: str) -> sessionmaker[Session]:
     """Creates a new SQLAlchemy session maker.
 
     Args:

@@ -105,7 +105,7 @@ export function Sidebar() {
           )}
           <select
             aria-label="Select collection"
-            className="min-w-0 flex-1 cursor-pointer bg-transparent text-sm text-foreground outline-none"
+            className="min-w-0 flex-1 cursor-pointer bg-zinc-950 text-sm text-foreground outline-hidden"
             value={selected ?? ''}
             onChange={(e) => onSelectCollection(e.target.value)}
           >

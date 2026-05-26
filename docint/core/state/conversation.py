@@ -1,6 +1,6 @@
 """Conversation ORM model grouping turns within a user session."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import Column, DateTime, String, Text
 from sqlalchemy.orm import relationship
@@ -8,7 +8,7 @@ from sqlalchemy.orm import relationship
 from docint.core.state.base import Base
 
 
-class Conversation(Base):
+class Conversation(Base):  # type: ignore[misc]
     """Represents a user conversation session.
 
     Args:
@@ -17,9 +17,7 @@ class Conversation(Base):
 
     __tablename__ = "conversations"
     id = Column(String, primary_key=True)  # external session id
-    created_at = Column(
-        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
-    )
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
     collection_name = Column(String, nullable=True)
     owner = Column(String, nullable=True, index=True)
     rolling_summary = Column(Text, default="", nullable=False)

@@ -1,6 +1,7 @@
 # Deployment
 
-Docint ships a `docker-compose.yml` and three Dockerfiles covering CPU
+Docint ships its Docker assets under `docker/`: a base `compose.yaml`, a
+`compose.override.yaml` dev overlay, and three Dockerfiles covering CPU
 and CUDA backends plus a dedicated frontend image. This document
 explains the profiles, services, volumes, and networks, and the two
 supported co-deployment patterns with external inference services.
@@ -9,38 +10,62 @@ supported co-deployment patterns with external inference services.
 
 | File | Role |
 |---|---|
-| `docker-compose.yml` | Services, profiles, volumes, networks. |
-| `Dockerfile.backend.cpu` | Multi-stage backend image with CPU PyTorch. |
-| `Dockerfile.backend.cuda` | Multi-stage backend image with CUDA PyTorch. |
-| `Dockerfile.frontend` | Lightweight Streamlit image. |
-| `scripts/create_docker_volumes.sh` | Creates the external cache volumes (idempotent). |
+| `docker/compose.yaml` | Services, profiles, volumes, networks — production shape, no host ports published. |
+| `docker/compose.override.yaml` | Dev overlay that publishes host ports; layered automatically by `make up`. |
+| `docker/Dockerfile.backend.cpu` | Multi-stage backend image with CPU PyTorch. |
+| `docker/Dockerfile.backend.cuda` | Multi-stage backend image with CUDA PyTorch. |
+| `docker/Dockerfile.frontend` | Lightweight Streamlit image. |
+| `.dockerignore` | Build-context excludes; stays at the repo root so it applies to every image build. |
+| `scripts/create_docker_volumes.sh` | Creates the external cache and state volumes (idempotent). |
 | `scripts/bundle_images.sh` | Builds and packages versioned image tarballs for offline distribution. |
-| `Makefile` | Convenience targets wrapping the above (`make volumes`, `make build-cpu`, `make bundle-cuda`, ...). |
+| `Makefile` | The blessed entry point — convenience targets wrapping the above (`make network`, `make volumes`, `make build`, `make up`, `make stop`, `make bundle`). |
 | `.env.example` | Canonical `.env` template. |
+
+The `Makefile` is the entry point for every Docker workflow: it points
+`docker compose` at `docker/compose.yaml` for you. A bare `docker compose`
+run from the repo root no longer finds the compose file. When a raw
+command is needed, the equivalent form is `docker compose --env-file .env
+-f docker/compose.yaml [-f docker/compose.override.yaml] [--profile <p>]
+<cmd>`.
 
 ## Profiles
 
-`docker-compose.yml` uses Compose profiles to select the backend
-variant and the matching Qdrant image.
+`docker/compose.yaml` uses Compose profiles to select the backend and
+frontend hardware variant.
 
-| Profile | Services enabled | Qdrant image |
-|---|---|---|
-| `cpu`  | `backend-cpu`, `qdrant-cpu`, `frontend-cpu`   | `qdrant/qdrant:v1.17.0` |
-| `cuda` | `backend-cuda`, `qdrant-cuda`, `frontend-cuda` | `qdrant/qdrant:v1.17.0-gpu-nvidia` |
+| Profile | Services enabled |
+|---|---|
+| `cpu`  | `backend-cpu`, `frontend-cpu`   |
+| `cuda` | `backend-cuda`, `frontend-cuda` |
 
-Start the stack with:
+The profile is read from `PROFILE` in `.env` (default `cpu`), so the
+`make` targets follow the host's hardware. Override per-invocation on
+the command line:
 
 ```bash
-docker compose --profile cpu up --build
-# or
-docker compose --profile cuda up --build
+make up               # uses PROFILE from .env
+make up PROFILE=cuda  # override
 ```
+
+`make up` builds and runs the active profile, layering
+`docker/compose.override.yaml` so host ports are published for local
+development. The underlying invocation is `docker compose --env-file .env
+-f docker/compose.yaml -f docker/compose.override.yaml --profile
+<cpu|cuda> up`. The base `docker/compose.yaml` on its own is the
+production shape and publishes no host ports.
+
+> Qdrant is **not** part of this compose project. It is owned by the
+> sibling `data-plane` project (`../data-plane/`), which runs Neo4j and
+> Qdrant for the whole nos-tromo stack. See
+> [Vector store: the `data-plane` project](#vector-store-the-data-plane-project)
+> below.
 
 ## Services
 
 ### `backend-cpu` / `backend-cuda`
 
-- Build from `Dockerfile.backend.cpu` or `Dockerfile.backend.cuda`.
+- Build from `docker/Dockerfile.backend.cpu` or
+  `docker/Dockerfile.backend.cuda`.
 - Publish port `8000`.
 - Share the same volume set via the `x-backend-cpu` YAML anchor.
 - Receive the following environment variables at runtime (on top of
@@ -57,13 +82,14 @@ docker compose --profile cuda up --build
 
 - The CUDA variant also declares `deploy.resources.reservations.devices`
   for NVIDIA GPUs and requires the NVIDIA Container Toolkit on the host.
-- Both services attach to the `docint-net` network and to
-  `inference-net` with the alias `docint-backend` so co-deployed
-  services can reach them.
+- Both services attach to the `docint-net` network, to `inference-net`
+  with the alias `docint-backend` so co-deployed services can reach
+  them, and to `data-net` so they can reach the `data-plane` project's
+  Qdrant at `http://qdrant:6333`.
 
 ### `frontend-cpu` / `frontend-cuda`
 
-- Built from `Dockerfile.frontend` (Streamlit + `loguru`, `pandas`,
+- Built from `docker/Dockerfile.frontend` (Streamlit + `loguru`, `pandas`,
   `requests`).
 - Runs `streamlit run docint/app.py --server.address 0.0.0.0` on
   port `8501` (host port configurable via `DOCINT_HOST_PORT`).
@@ -76,18 +102,31 @@ docker compose --profile cuda up --build
 - `depends_on` the matching backend (`backend-cpu` / `backend-cuda`),
   so Compose starts the backend container first.
 
-### `qdrant-cpu` / `qdrant-cuda`
+## Vector store: the `data-plane` project
 
-- Publishes ports `6333` (REST) and `6334` (gRPC).
-- Persists data to the `qdrant-storage` and `qdrant-snapshots` volumes.
-- Disables telemetry via `QDRANT__TELEMETRY_DISABLED=true`.
-- The CUDA variant enables `QDRANT__GPU__INDEXING=1` and maps NVIDIA
-  devices.
+Docint uses Qdrant as its vector store, but it no longer runs its own
+Qdrant container. Qdrant (and Neo4j) are owned by the sibling
+`data-plane` project at `../data-plane/`, which serves them to the whole
+nos-tromo stack over the shared `data-net` network.
+
+- The backend reaches Qdrant at `http://qdrant:6333` over `data-net` —
+  the `qdrant` hostname is a network alias published by `data-plane`, so
+  `QDRANT_HOST=http://qdrant:6333` works unchanged.
+- Bring Qdrant up before starting docint:
+
+  ```bash
+  cd ../data-plane && make up        # Neo4j + Qdrant on data-net
+  cd ../data-plane && make up-dev    # also publishes Qdrant on localhost:6333
+  ```
+
+  Use `make up-dev` when running docint's Python services outside Docker
+  so the host can reach Qdrant at `http://localhost:6333`.
 
 ## Volumes
 
-All backend caches are declared `external: true` so model artifacts
-survive container rebuilds. The helper script
+Backend caches and backend filesystem state are declared
+`external: true` so they survive container rebuilds and are **not**
+destroyed by `docker compose down -v`. The helper script
 `./scripts/create_docker_volumes.sh` creates them idempotently.
 
 | Volume | Scope | Purpose |
@@ -96,27 +135,33 @@ survive container rebuilds. The helper script
 | `docling-cache` | external | Docling model cache. |
 | `huggingface-cache` | external | HF Hub cache (embedding, reranker, NER, image models). |
 | `ollama-cache` | external | Ollama model cache, used when Ollama is co-deployed. |
-| `qdrant-storage` | internal | Qdrant's own storage directory. |
-| `qdrant-snapshots` | internal | Qdrant snapshot directory. |
-| `qdrant-sources` | internal | Raw source files staged for `/sources/preview`. |
-| `sessions-storage` | internal | SQLite session database. |
+| `qdrant-sources` | external | Raw source files staged for `/sources/preview`. |
+| `sessions-storage` | external | SQLite session database. |
 
 ## Networks
 
-- `docint-net` — internal bridge network shared by `backend-*`,
-  `frontend-*`, and the Qdrant service.
+- `docint-net` — internal bridge network shared by `backend-*` and
+  `frontend-*`.
 - `inference-net` — **external** network declared with
   `name: ${INFERENCE_NET:-inference-net}`. The backend attaches to it
-  with the alias `docint-backend`. Create the network first if you
-  want to share it with an external inference stack:
+  with the alias `docint-backend` and reaches the vLLM router over it.
+- `data-net` — **external** network declared with
+  `name: ${DATA_NET:-data-net}`. The backend attaches to it to reach
+  the `data-plane` project's Qdrant at `http://qdrant:6333`.
 
-  ```bash
-  docker network create inference-net
-  ```
+Both external networks must exist before starting the stack. `make
+network` creates both idempotently:
+
+```bash
+make network
+# equivalent to:
+docker network create inference-net
+docker network create data-net
+```
 
 ## Dockerfiles
 
-### `Dockerfile.backend.cpu` / `Dockerfile.backend.cuda`
+### `docker/Dockerfile.backend.cpu` / `docker/Dockerfile.backend.cuda`
 
 Multi-stage builds:
 
@@ -133,7 +178,7 @@ Multi-stage builds:
    as a build arg, the builder runs `uv run load-models` so the final
    image embeds the HF / Docling caches.
 
-### `Dockerfile.frontend`
+### `docker/Dockerfile.frontend`
 
 Single-stage image that installs a minimal Streamlit runtime
 (`streamlit`, `loguru`, `pandas`, `requests`, `python-dotenv`). It is
@@ -202,7 +247,8 @@ To run both on a single host with a shared network:
 4. Start Docint normally:
 
    ```bash
-   docker compose --profile cuda up --build
+   make build
+   make up PROFILE=cuda
    ```
 
 For a remote vLLM router, drop `INFERENCE_NET` and point
@@ -242,7 +288,8 @@ Ollama serves `bge-m3` with `num_ctx=2048` by default, independent of the
 model's 8192-token capacity. `/api/show` does not advertise the runtime value,
 so Docint cannot probe it — operators must align the two sides explicitly.
 
-Default on the `cpu-ollama` / `cuda-ollama` profiles: `EMBED_CTX_TOKENS=2048`.
+Recommended default when serving embeddings through Ollama:
+`EMBED_CTX_TOKENS=2048`.
 The pre-embed re-splitter bounds every outbound payload to
 `int(2048 × EMBED_CTX_SAFETY_MARGIN) = 1945` tokens, which ollama accepts
 unconditionally. Ingest completes — slower than an 8192 budget would imply
@@ -272,46 +319,52 @@ section.
 ## Distributable image bundles
 
 For air-gapped hosts, customer deployments, or any environment without
-Docker Hub access, build a versioned tarball pair on a connected machine
-and copy them across with `docker-compose.yml` and `.env`.
+Docker Hub access, build a versioned tarball on a connected machine and
+copy it across with the `docker/` directory and `.env`.
 
 ### Producing the bundle
 
-`make bundle-cpu` (or `make bundle-cuda`) wraps build → pull → re-tag → save:
+`make bundle` wraps build → pull → re-tag → save for the active profile:
 
 ```bash
-make bundle-cpu     # or: make bundle-cuda
+make bundle               # uses PROFILE from .env
+make bundle PROFILE=cuda  # override
 ```
 
 The underlying script is `./scripts/bundle_images.sh <profile>`.
 
 This computes `DOCINT_VERSION` as `YYYY-MM-DD-<short-sha>` (override by
-exporting it before invocation), tags the four buildable services with
-that version, then writes two gzipped tarballs:
+exporting it before invocation), tags the buildable services with that
+version, then writes the gzipped tarballs:
 
 | File | Contents |
 |---|---|
 | `docint-built-<profile>-<version>.tar.gz` | Locally-built `docint-backend-*` and `docint-frontend-*` images. |
-| `docint-pulled-<profile>-<version>.tar.gz` | Externally-hosted images (Qdrant); re-tagged so the `name:tag@digest` references in `docker-compose.yml` resolve after `docker load`. |
+| `docint-pulled-<profile>-<version>.tar.gz` | Externally-hosted images, re-tagged so the `name:tag@digest` references in `docker/compose.yaml` resolve after `docker load`. Only written when the compose project has registry-only images — docint's no longer does (Qdrant moved to the `data-plane` project), so on a standard build this file is omitted. |
 
 The compose file references the version through
 `image: docint-<service>:${DOCINT_VERSION:-latest}`. The `Makefile`
 derives and exports `DOCINT_VERSION` (using the same `YYYY-MM-DD-<short-sha>`
-scheme), so `make build-{cpu,cuda}` and `make bundle-{cpu,cuda}` always
-produce versioned tags. The `:latest` fallback only kicks in for direct
-`docker compose build` invocations without `DOCINT_VERSION` exported.
+scheme), so `make build` and `make bundle` always produce versioned
+tags. The `:latest` fallback only kicks in for direct `docker compose
+-f docker/compose.yaml build` invocations without `DOCINT_VERSION`
+exported.
 
 ### Loading and running the bundle
 
-Ship three things to the target host: the two tarballs, the matching
-`docker-compose.yml`, and a `.env` file. Then:
+Ship the tarball(s) produced above, the matching `docker/` directory,
+and a `.env` file to the target host. Then:
 
 ```bash
 docker load -i docint-built-cpu-<version>.tar.gz
+# only if a pulled tarball was produced:
 docker load -i docint-pulled-cpu-<version>.tar.gz
 export DOCINT_VERSION=<version>
-docker compose --profile cpu up --no-build
+docker compose --env-file .env -f docker/compose.yaml --profile cpu up --no-build
 ```
+
+The bundle target host runs the production shape — `docker/compose.yaml`
+without the dev override — so no host ports are published.
 
 The version is embedded in the tarball filenames, so the operator just
 reads it off the file. Verify with `docker images | grep docint` before
@@ -332,10 +385,14 @@ reads it off the file. Verify with `docker images | grep docint` before
 ## Teardown
 
 ```bash
-docker compose --profile cpu down          # stop and remove containers
-docker compose --profile cpu down --volumes # also remove internal volumes
+make stop                                  # stop the active profile's containers
+# remove containers, or also drop internal volumes:
+docker compose --env-file .env -f docker/compose.yaml --profile cpu down
+docker compose --env-file .env -f docker/compose.yaml --profile cpu down --volumes
 ```
 
-Note that `external` volumes (`docling-cache`, `huggingface-cache`,
-`ollama-cache`) are **not** removed by `--volumes` — delete them
-explicitly with `docker volume rm` if you want a clean slate.
+Note that the `external` volumes (`docling-cache`, `huggingface-cache`,
+`ollama-cache`, `qdrant-sources`, `sessions-storage`) are **not**
+removed by `--volumes` — so `down -v` no longer destroys staged source
+files or the SQLite session database. Delete them explicitly with
+`docker volume rm` if you want a clean slate.

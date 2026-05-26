@@ -1,15 +1,17 @@
 """Tests for the CLI ingest entry point and ingestion pipeline."""
 
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, cast
+from typing import Any, ClassVar, Never, cast
 
 import pytest
+from llama_index.core import Document
+from llama_index.core.schema import TextNode
 
 import docint.cli.ingest as ingest
 import docint.core.ingest.ingestion_pipeline as pipeline_module
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
-from llama_index.core import Document
 
 
 def test_get_collection(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -44,7 +46,7 @@ def test_main_executes_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
         order.append("collection")
         return "demo"
 
-    def fake_ingest(*args, **kwargs) -> None:
+    def fake_ingest(*args: Any, **kwargs: Any) -> None:
         """Fake ingest_docs function to track execution order."""
         order.append("ingest")
 
@@ -77,9 +79,7 @@ def test_main_executes_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "ingest" in order
 
 
-def test_ingest_docs_invokes_rag(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_ingest_docs_invokes_rag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Test that ingest_docs invokes RAG with correct parameters.
 
     Args:
@@ -114,8 +114,7 @@ def test_ingest_docs_invokes_rag(
             build_query_engine: bool = True,
             progress_callback: Callable[[str], None] | None = None,
         ) -> None:
-            """
-            Placeholder ingest_docs method for the test double.
+            """Placeholder ingest_docs method for the test double.
 
             Args:
                 path (Path): The directory or file path containing documents to ingest.
@@ -141,24 +140,23 @@ def test_ingest_docs_invokes_rag(
 
 
 def _make_pipeline(
-    tmp_path: Path, entity_extractor
-) -> tuple[DocumentIngestionPipeline, list]:
+    tmp_path: Path, entity_extractor: Callable[[str], tuple[list[dict[str, Any]], list[dict[str, Any]]]]
+) -> tuple[DocumentIngestionPipeline, list[Any]]:
     """Helper to create a pipeline with stubbed parsers and preset nodes.
 
     Args:
         tmp_path (Path): Temporary directory path for the pipeline.
-        entity_extractor (Callable[[str], tuple[list[dict], list[dict]]]):
+        entity_extractor (Callable[[str], tuple[list[dict[str, Any]], list[dict[str, Any]]]]):
             The entity extractor function to use in the pipeline.
 
     Returns:
         tuple[DocumentIngestionPipeline, list]: The created pipeline and the list of dummy nodes
     """
-    dummy_nodes: list = []
+    dummy_nodes: list[Any] = []
     # Pipeline.__post_init__ will override entity_extractor if env vars are present.
     # We must forcibly set the extractor AFTER init.
     pipeline = DocumentIngestionPipeline(
         data_dir=tmp_path,
-        device="cpu",
         clean_fn=lambda x: x,
         ner_model=None,
         progress_callback=None,
@@ -167,15 +165,9 @@ def _make_pipeline(
     pipeline.entity_extractor = entity_extractor
 
     # Minimal parser stubs to satisfy _create_nodes preconditions
-    pipeline.md_node_parser = cast(
-        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
-    )
-    pipeline.docling_node_parser = cast(
-        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
-    )
-    pipeline.sentence_splitter = cast(
-        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
-    )
+    pipeline.md_node_parser = cast(Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes))
+    pipeline.docling_node_parser = cast(Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes))
+    pipeline.sentence_splitter = cast(Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes))
     # Disable hierarchical node parser to ensure flat chunking (which uses the mocked splitters)
     pipeline.hierarchical_node_parser = None
     return pipeline, dummy_nodes
@@ -189,7 +181,7 @@ def test_entity_extractor_attaches_metadata(tmp_path: Path) -> None:
     """
     calls: list[str] = []
 
-    def extractor(text: str):
+    def extractor(text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         calls.append(text)
         return ([{"text": "foo"}], [{"head": "a", "tail": "b"}])
 
@@ -213,7 +205,7 @@ def test_entity_extractor_handles_exceptions(tmp_path: Path) -> None:
         tmp_path (Path): Temporary directory path for the test.
     """
 
-    def bad_extractor(text: str):
+    def bad_extractor(text: str) -> Never:
         """Placeholder extractor that raises an exception.
 
         Args:
@@ -303,7 +295,7 @@ def _install_transcript_pipeline_stubs(
         ingestion_batch_size = 5
         sentence_splitter_chunk_size = 512
         sentence_splitter_chunk_overlap = 64
-        supported_filetypes: list[str] = []
+        supported_filetypes: ClassVar[list[str]] = []
         hierarchical_chunking_enabled = False
         coarse_chunk_size = 1024
         fine_chunk_size = 256
@@ -311,19 +303,12 @@ def _install_transcript_pipeline_stubs(
         streaming_readers_enabled = False
 
     monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
-    monkeypatch.setattr(
-        pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig()
-    )
-    monkeypatch.setattr(
-        DocumentIngestionPipeline, "_load_doc_readers", lambda self: None
-    )
-    monkeypatch.setattr(
-        DocumentIngestionPipeline, "_load_node_parsers", lambda self: None
-    )
+    monkeypatch.setattr(pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig())
+    monkeypatch.setattr(DocumentIngestionPipeline, "_load_doc_readers", lambda self: None)
+    monkeypatch.setattr(DocumentIngestionPipeline, "_load_node_parsers", lambda self: None)
 
     pl = DocumentIngestionPipeline(
         data_dir=tmp_path,
-        device="cpu",
         ner_model=None,
         progress_callback=None,
     )
@@ -332,15 +317,9 @@ def _install_transcript_pipeline_stubs(
     # Stub parsers that would require model downloads.  For the transcript
     # routing test we rely on the real SentenceSplitter (no model) so only
     # the non-transcript paths need stubbing.
-    pl.md_node_parser = cast(
-        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: [])
-    )
-    pl.docling_node_parser = cast(
-        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: [])
-    )
-    pl.sentence_splitter = cast(
-        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: [])
-    )
+    pl.md_node_parser = cast(Any, SimpleNamespace(get_nodes_from_documents=lambda docs: []))
+    pl.docling_node_parser = cast(Any, SimpleNamespace(get_nodes_from_documents=lambda docs: []))
+    pl.sentence_splitter = cast(Any, SimpleNamespace(get_nodes_from_documents=lambda docs: []))
     pl.hierarchical_node_parser = None
     return pl
 
@@ -387,11 +366,9 @@ def test_nextext_transcript_routed_to_per_segment_nodes(
     nodes = pl._create_nodes_without_enrichment(docs)
 
     assert len(nodes) == 3, f"Expected 3 nodes (one per segment), got {len(nodes)}"
-    node_texts = [n.text for n in nodes]
+    node_texts = [cast(TextNode, n).text for n in nodes]
     for text in segment_texts:
-        assert text in node_texts, (
-            f"Segment text {text!r} missing from nodes — concatenation occurred"
-        )
+        assert text in node_texts, f"Segment text {text!r} missing from nodes — concatenation occurred"
 
 
 def test_nextext_transcript_kind_wins_over_json_extension(
@@ -444,17 +421,14 @@ def test_nextext_transcript_kind_wins_over_json_extension(
         f"Expected 3 per-segment nodes; got {len(nodes)} — dispatcher likely "
         "routed transcript_segment docs through the JSON path."
     )
-    node_texts = [n.text for n in nodes]
+    node_texts = [cast(TextNode, n).text for n in nodes]
     for text in segment_texts:
         assert text in node_texts, (
-            f"Segment text {text!r} missing from nodes — transcript path was "
-            "not used (likely mis-routed to json_docs)."
+            f"Segment text {text!r} missing from nodes — transcript path was not used (likely mis-routed to json_docs)."
         )
 
 
-def test_hate_speech_detection_attaches_flagged_metadata(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_hate_speech_detection_attaches_flagged_metadata(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Enabled hate-speech detection should attach structured flags to node metadata.
 
     Args:
@@ -476,7 +450,7 @@ def test_hate_speech_detection_attaches_flagged_metadata(
         ingestion_batch_size = 2
         sentence_splitter_chunk_size = 512
         sentence_splitter_chunk_overlap = 64
-        supported_filetypes: list[str] = []
+        supported_filetypes: ClassVar[list[str]] = []
         hierarchical_chunking_enabled = False
         coarse_chunk_size = 1024
         fine_chunk_size = 256
@@ -510,7 +484,10 @@ def test_hate_speech_detection_attaches_flagged_metadata(
     class FakeResponse:
         """Fake response class to simulate the output of the OpenAI API for hate-speech detection."""
 
-        text = '{"hate_speech": true, "category": "ethnicity", "confidence": "high", "reason": "Contains hateful language."}'
+        text = (
+            '{"hate_speech": true, "category": "ethnicity", "confidence": "high",'
+            ' "reason": "Contains hateful language."}'
+        )
 
     class FakeModel:
         """Fake model class to simulate the behavior of a hate-speech detection model."""
@@ -529,32 +506,21 @@ def test_hate_speech_detection_attaches_flagged_metadata(
             return FakeResponse()
 
     monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
-    monkeypatch.setattr(
-        pipeline_module, "load_hate_speech_env", lambda: FakeHateSpeechConfig()
-    )
-    monkeypatch.setattr(
-        pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig()
-    )
+    monkeypatch.setattr(pipeline_module, "load_hate_speech_env", lambda: FakeHateSpeechConfig())
+    monkeypatch.setattr(pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig())
     monkeypatch.setattr(pipeline_module, "OpenAIPipeline", FakeOpenAIPipeline)
 
     pipeline = DocumentIngestionPipeline(
         data_dir=tmp_path,
-        device="cpu",
         ner_model=None,
         progress_callback=None,
         hate_speech_model=cast(Any, FakeModel()),
     )
     dummy_nodes: list[Any] = []
     pipeline.entity_extractor = None
-    pipeline.md_node_parser = cast(
-        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
-    )
-    pipeline.docling_node_parser = cast(
-        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
-    )
-    pipeline.sentence_splitter = cast(
-        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
-    )
+    pipeline.md_node_parser = cast(Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes))
+    pipeline.docling_node_parser = cast(Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes))
+    pipeline.sentence_splitter = cast(Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes))
     pipeline.hierarchical_node_parser = None
     dummy_nodes.append(
         SimpleNamespace(
@@ -564,9 +530,7 @@ def test_hate_speech_detection_attaches_flagged_metadata(
         )
     )
 
-    nodes = pipeline._create_nodes(
-        [Document(text="Doc", metadata={"file_path": "doc.pdf"})]
-    )
+    nodes = pipeline._create_nodes([Document(text="Doc", metadata={"file_path": "doc.pdf"})])
 
     assert len(nodes) == 1
     detection = nodes[0].metadata.get("hate_speech")
@@ -578,9 +542,7 @@ def test_hate_speech_detection_attaches_flagged_metadata(
     assert "Dangerous text" in detection["chunk_text"]
 
 
-def test_hate_speech_detection_parallel_workers(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_hate_speech_detection_parallel_workers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Multi-worker hate-speech detection should process all nodes concurrently.
 
     Args:
@@ -608,7 +570,7 @@ def test_hate_speech_detection_parallel_workers(
         ingestion_batch_size = 2
         sentence_splitter_chunk_size = 512
         sentence_splitter_chunk_overlap = 64
-        supported_filetypes: list[str] = []
+        supported_filetypes: ClassVar[list[str]] = []
         hierarchical_chunking_enabled = False
         coarse_chunk_size = 1024
         fine_chunk_size = 256
@@ -634,10 +596,7 @@ def test_hate_speech_detection_parallel_workers(
     class FakeResponse:
         """Fake LLM response indicating hate speech detected."""
 
-        text = (
-            '{"hate_speech": true, "category": "ethnicity",'
-            ' "confidence": "high", "reason": "offensive"}'
-        )
+        text = '{"hate_speech": true, "category": "ethnicity", "confidence": "high", "reason": "offensive"}'
 
     class FakeModel:
         """Fake model that counts invocations."""
@@ -656,31 +615,20 @@ def test_hate_speech_detection_parallel_workers(
             return FakeResponse()
 
     monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
-    monkeypatch.setattr(
-        pipeline_module, "load_hate_speech_env", lambda: FakeHateSpeechConfig()
-    )
-    monkeypatch.setattr(
-        pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig()
-    )
+    monkeypatch.setattr(pipeline_module, "load_hate_speech_env", lambda: FakeHateSpeechConfig())
+    monkeypatch.setattr(pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig())
     monkeypatch.setattr(pipeline_module, "OpenAIPipeline", FakeOpenAIPipeline)
 
     pipeline = DocumentIngestionPipeline(
         data_dir=tmp_path,
-        device="cpu",
         ner_model=None,
         progress_callback=None,
         hate_speech_model=cast(Any, FakeModel()),
     )
     pipeline.entity_extractor = None
-    pipeline.md_node_parser = cast(
-        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
-    )
-    pipeline.docling_node_parser = cast(
-        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
-    )
-    pipeline.sentence_splitter = cast(
-        Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes)
-    )
+    pipeline.md_node_parser = cast(Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes))
+    pipeline.docling_node_parser = cast(Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes))
+    pipeline.sentence_splitter = cast(Any, SimpleNamespace(get_nodes_from_documents=lambda docs: dummy_nodes))
     pipeline.hierarchical_node_parser = None
 
     dummy_nodes: list[Any] = [
@@ -701,9 +649,7 @@ def test_hate_speech_detection_parallel_workers(
         ),
     ]
 
-    nodes = pipeline._create_nodes(
-        [Document(text="Doc", metadata={"file_path": "doc.pdf"})]
-    )
+    nodes = pipeline._create_nodes([Document(text="Doc", metadata={"file_path": "doc.pdf"})])
 
     assert call_count == 3
     assert pipeline.hate_speech_max_workers == 2
@@ -736,7 +682,7 @@ def test_build_streaming_yields_enrichment_batches_and_completion_hashes(
         ingestion_batch_size = 2
         sentence_splitter_chunk_size = 512
         sentence_splitter_chunk_overlap = 64
-        supported_filetypes = [".txt"]
+        supported_filetypes: ClassVar[list[str]] = [".txt"]
         hierarchical_chunking_enabled = False
         coarse_chunk_size = 1024
         fine_chunk_size = 256
@@ -744,13 +690,10 @@ def test_build_streaming_yields_enrichment_batches_and_completion_hashes(
         streaming_readers_enabled = False
 
     monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
-    monkeypatch.setattr(
-        pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig()
-    )
+    monkeypatch.setattr(pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig())
 
     pipeline = DocumentIngestionPipeline(
         data_dir=tmp_path,
-        device="cpu",
         ner_model=None,
         progress_callback=None,
     )
@@ -759,19 +702,12 @@ def test_build_streaming_yields_enrichment_batches_and_completion_hashes(
         Document(text="a", metadata={"file_hash": "hash-a"}),
         Document(text="b", metadata={"file_hash": "hash-b"}),
     ]
-    nodes_input = [
-        cast(Any, SimpleNamespace(text=f"n{i}", metadata={"file_hash": "hash-a"}))
-        for i in range(5)
-    ]
+    nodes_input = [cast(Any, SimpleNamespace(text=f"n{i}", metadata={"file_hash": "hash-a"})) for i in range(5)]
 
     enrich_calls: list[tuple[int, int, int]] = []
 
-    monkeypatch.setattr(
-        DocumentIngestionPipeline, "_load_doc_readers", lambda self: None
-    )
-    monkeypatch.setattr(
-        DocumentIngestionPipeline, "_load_node_parsers", lambda self: None
-    )
+    monkeypatch.setattr(DocumentIngestionPipeline, "_load_doc_readers", lambda self: None)
+    monkeypatch.setattr(DocumentIngestionPipeline, "_load_node_parsers", lambda self: None)
     monkeypatch.setattr(
         DocumentIngestionPipeline,
         "_iter_loaded_documents",
@@ -837,29 +773,22 @@ def _make_streaming_pipeline(
         ingestion_batch_size = 5
         sentence_splitter_chunk_size = 512
         sentence_splitter_chunk_overlap = 64
-        supported_filetypes: list[str] = []
+        supported_filetypes: ClassVar[list[str]] = []
         hierarchical_chunking_enabled = False
         coarse_chunk_size = 1024
         fine_chunk_size = 256
         fine_chunk_overlap = 32
         streaming_readers_enabled = False  # overridden below
 
-    FakeIngestionConfig.streaming_readers_enabled = streaming_readers_enabled  # type: ignore[assignment]
+    FakeIngestionConfig.streaming_readers_enabled = streaming_readers_enabled
 
     monkeypatch.setattr(pipeline_module, "load_ner_env", lambda: FakeNERConfig())
-    monkeypatch.setattr(
-        pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig()
-    )
-    monkeypatch.setattr(
-        DocumentIngestionPipeline, "_load_doc_readers", lambda self: None
-    )
-    monkeypatch.setattr(
-        DocumentIngestionPipeline, "_load_node_parsers", lambda self: None
-    )
+    monkeypatch.setattr(pipeline_module, "load_ingestion_env", lambda: FakeIngestionConfig())
+    monkeypatch.setattr(DocumentIngestionPipeline, "_load_doc_readers", lambda self: None)
+    monkeypatch.setattr(DocumentIngestionPipeline, "_load_node_parsers", lambda self: None)
 
     return DocumentIngestionPipeline(
         data_dir=tmp_path,
-        device="cpu",
         ner_model=None,
         progress_callback=None,
     )
@@ -875,14 +804,12 @@ def test_streaming_reader_dispatch_calls_iter_documents(
         monkeypatch: The pytest monkeypatch fixture.
         tmp_path: Temporary directory provided by pytest.
     """
-    pipeline = _make_streaming_pipeline(
-        monkeypatch, tmp_path, streaming_readers_enabled=True
-    )
+    pipeline = _make_streaming_pipeline(monkeypatch, tmp_path, streaming_readers_enabled=True)
 
     csv_file = tmp_path / "rows.csv"
     csv_file.write_text("text\nhello\n", encoding="utf-8")
 
-    iter_calls: list[dict] = []
+    iter_calls: list[dict[str, Any]] = []
     fake_doc = Document(
         text="streamed",
         metadata={"file_hash": "abc123", "file_path": str(csv_file)},
@@ -928,9 +855,7 @@ def test_streaming_reader_dispatch_falls_back_when_disabled(
         monkeypatch: The pytest monkeypatch fixture.
         tmp_path: Temporary directory provided by pytest.
     """
-    pipeline = _make_streaming_pipeline(
-        monkeypatch, tmp_path, streaming_readers_enabled=False
-    )
+    pipeline = _make_streaming_pipeline(monkeypatch, tmp_path, streaming_readers_enabled=False)
 
     csv_file = tmp_path / "rows.csv"
     csv_file.write_text("text\nhello\n", encoding="utf-8")
@@ -952,9 +877,7 @@ def test_streaming_reader_dispatch_falls_back_when_disabled(
         load_file_calls.append(input_file)
         return [fallback_doc]
 
-    monkeypatch.setattr(
-        pipeline_module.SimpleDirectoryReader, "load_file", staticmethod(fake_load_file)
-    )
+    monkeypatch.setattr(pipeline_module.SimpleDirectoryReader, "load_file", staticmethod(fake_load_file))
 
     pipeline.dir_reader = cast(
         Any,
@@ -973,9 +896,7 @@ def test_streaming_reader_dispatch_falls_back_when_disabled(
 
     result = list(pipeline._iter_loaded_documents())
 
-    assert iter_calls == [], (
-        "iter_documents must NOT be called when streaming is disabled"
-    )
+    assert iter_calls == [], "iter_documents must NOT be called when streaming is disabled"
     assert len(load_file_calls) == 1
     assert load_file_calls[0] == csv_file
     assert len(result) == 1

@@ -9,8 +9,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 from llama_index.core.storage.kvstore.types import DEFAULT_COLLECTION, BaseKVStore
 from loguru import logger
@@ -199,7 +200,7 @@ class SQLiteKVStore(BaseKVStore):
     def put(
         self,
         key: str,
-        val: dict,
+        val: dict[str, Any],
         collection: str = DEFAULT_COLLECTION,
     ) -> None:
         """Store a key-value pair.
@@ -233,9 +234,7 @@ class SQLiteKVStore(BaseKVStore):
             batch_size: Batch size override.
         """
         effective_batch_size = batch_size or self.batch_size
-        rows = [
-            (collection, k, json.dumps(v, default=_json_default)) for k, v in kv_pairs
-        ]
+        rows = [(collection, k, json.dumps(v, default=_json_default)) for k, v in kv_pairs]
 
         def _do_put_all() -> None:
             for i in range(0, len(rows), effective_batch_size):
@@ -252,7 +251,7 @@ class SQLiteKVStore(BaseKVStore):
         self,
         key: str,
         collection: str = DEFAULT_COLLECTION,
-    ) -> dict | None:
+    ) -> dict[str, Any] | None:
         """Retrieve a value by key.
 
         Args:
@@ -263,7 +262,7 @@ class SQLiteKVStore(BaseKVStore):
             The stored dict, or ``None`` if the key does not exist.
         """
 
-        def _do_get() -> dict | None:
+        def _do_get() -> dict[str, Any] | None:
             row = self._conn.execute(
                 "SELECT val FROM kv_data WHERE collection = ? AND key = ?",
                 (collection, key),
@@ -322,7 +321,7 @@ class SQLiteKVStore(BaseKVStore):
     async def aput(
         self,
         key: str,
-        val: dict,
+        val: dict[str, Any],
         collection: str = DEFAULT_COLLECTION,
     ) -> None:
         """Async wrapper for :meth:`put`.
@@ -353,7 +352,7 @@ class SQLiteKVStore(BaseKVStore):
         self,
         key: str,
         collection: str = DEFAULT_COLLECTION,
-    ) -> dict | None:
+    ) -> dict[str, Any] | None:
         """Async wrapper for :meth:`get`."""
         return self.get(key, collection)
 

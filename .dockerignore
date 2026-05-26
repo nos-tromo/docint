@@ -30,6 +30,9 @@
 **/session/
 **/tests/
 
+# Frontend build artifacts and caches
+**/node_modules/
+
 # Environment and config files
 *.bundle
 *.conf
@@ -42,7 +45,7 @@
 .pre-commit-config.yaml
 AGENTS.md
 CLAUDE.md
-docker-compose.yml
+docker/
 Dockerfile*
 LICENSE
 README.md

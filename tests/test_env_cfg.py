@@ -48,7 +48,7 @@ def test_model_config_embed_tokenizer_repo_default_for_ollama(
 def test_model_config_embed_tokenizer_repo_default_for_vllm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """vLLM default must also be ``BAAI/bge-m3``.
+    """VLLM default must also be ``BAAI/bge-m3``.
 
     The vLLM profile likewise uses bge-m3 for embeddings, so the
     worker-side tokenizer repo must match.
@@ -152,7 +152,7 @@ def test_embedding_config_default_timeout_for_ollama(
 def test_embedding_config_default_timeout_for_vllm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """vLLM default embed timeout must be 600 s (10 minutes).
+    """VLLM default embed timeout must be 600 s (10 minutes).
 
     vLLM is substantially faster than CPU ollama but slower than hosted
     OpenAI; 10 minutes gives headroom for large batches on a warmed
@@ -217,7 +217,7 @@ def test_embedding_config_default_batch_size_for_ollama(
 def test_embedding_config_default_batch_size_for_vllm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """vLLM default embed batch size must be 64.
+    """VLLM default embed batch size must be 64.
 
     vLLM handles larger batches efficiently via continuous batching;
     64 is a reasonable middle ground between throughput and memory use.

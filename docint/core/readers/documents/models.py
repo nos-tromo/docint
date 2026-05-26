@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class BlockType(str, Enum):
+class BlockType(StrEnum):
     """Types of layout blocks detected in a document page."""
 
     TITLE = "title"
@@ -48,12 +48,7 @@ class BBox:
         Returns:
             bool: True if the two bounding boxes overlap, False otherwise.
         """
-        return not (
-            self.x1 <= other.x0
-            or other.x1 <= self.x0
-            or self.y1 <= other.y0
-            or other.y1 <= self.y0
-        )
+        return not (self.x1 <= other.x0 or other.x1 <= self.x0 or self.y1 <= other.y0 or other.y1 <= self.y0)
 
 
 @dataclass

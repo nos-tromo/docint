@@ -1,0 +1,11 @@
+### Dev override — publishes the docint frontend (the React SPA) on the host.
+###
+### NOT auto-loaded: it lives in docker/ and the Makefile passes explicit -f
+### flags. `make up` layers this on top of docker/compose.yaml so the SPA is
+### reachable in dev. docker/compose.yaml alone is the production shape — the
+### backend is reached only via the nginx sidecar, never host-published.
+
+services:
+  frontend:
+    ports:
+      - "${DOCINT_HOST_PORT:-8080}:80"

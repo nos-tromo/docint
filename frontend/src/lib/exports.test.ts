@@ -50,9 +50,12 @@ describe('chatTranscriptToText', () => {
       'VALIDATION: checked=true, mismatch=false, reason=all clear'
     )
     expect(text).toContain('SOURCES:')
+    expect(text).toContain(TXT_EXPORT_SEPARATOR)
     // Both references survive — regression we fixed earlier.
-    expect(text).toContain('[1] doc.pdf page=3')
-    expect(text).toContain('[2] doc.pdf page=7')
+    expect(text).toContain('[1] doc.pdf')
+    expect(text).toContain('- Page: 3')
+    expect(text).toContain('[2] doc.pdf')
+    expect(text).toContain('- Page: 7')
     expect(text).toContain('first snippet')
     expect(text).toContain('second snippet')
   })
@@ -98,7 +101,9 @@ describe('summaryToMarkdown', () => {
     expect(md.startsWith('# Summary')).toBe(true)
     expect(md).toContain('## Overview')
     expect(md).toContain('## Sources')
-    expect(md).toContain('[1] a.pdf page=1')
+    expect(md).toContain(TXT_EXPORT_SEPARATOR)
+    expect(md).toContain('[1] a.pdf')
+    expect(md).toContain('- Page: 1')
   })
 
   it('falls back to streamed text when meta is null', () => {

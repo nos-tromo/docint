@@ -6,9 +6,7 @@ from docint.utils.ner_aggregate import aggregate_ner
 
 
 def test_aggregate_ner_deduplicates_and_tracks_sources() -> None:
-    """Tests that the aggregate_ner function correctly deduplicates entities and relations,
-    aggregates their counts and best scores, and tracks the source files and locations.
-    """
+    """aggregate_ner dedupes entities/relations, sums counts, and tracks source files+locations."""
     sources: list[dict[str, Any]] = [
         {
             "filename": "docA.pdf",

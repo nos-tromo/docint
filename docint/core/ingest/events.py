@@ -32,7 +32,8 @@ text events continue to work unchanged.
 
 from __future__ import annotations
 
-from typing import Callable, Literal, NotRequired, TypedDict
+from collections.abc import Callable
+from typing import Literal, NotRequired, TypedDict
 
 IngestionStage = Literal[
     "read",
@@ -91,7 +92,7 @@ def format_progress_message(event: IngestionEvent) -> str:
         A short single-line message suitable for log output and the
         legacy SSE ``ingestion_progress`` event.
     """
-    if "message" in event and event["message"]:
+    if event.get("message"):
         return str(event["message"])
 
     stage = event.get("stage", "ingest")

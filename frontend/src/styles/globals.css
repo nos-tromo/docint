@@ -1,6 +1,5 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@config "../../tailwind.config.ts";
 
 :root {
   color-scheme: dark;
@@ -34,6 +33,14 @@ textarea,
 optgroup,
 option {
   font-family: inherit;
+}
+
+/* Explicitly theme native <option> popup on Linux/GTK where the OS
+   theme overrides transparent/inherited colours, causing unreadable
+   light-text-on-light-background in the dropdown list. */
+option {
+  background-color: rgb(9 9 11);
+  color: rgb(244 244 245);
 }
 
 * {

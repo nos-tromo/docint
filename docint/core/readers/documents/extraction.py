@@ -80,9 +80,7 @@ def extract_images(
             image_path: str | None = None
 
             if file_path and output_dir:
-                image_path = _try_extract_embedded_image(
-                    Path(file_path), page_idx, image_id, Path(output_dir)
-                )
+                image_path = _try_extract_embedded_image(Path(file_path), page_idx, image_id, Path(output_dir))
 
             images.append(
                 ImageResult(
@@ -100,9 +98,7 @@ def extract_images(
     return images
 
 
-def _try_extract_embedded_image(
-    file_path: Path, page_index: int, image_id: str, output_dir: Path
-) -> str | None:
+def _try_extract_embedded_image(file_path: Path, page_index: int, image_id: str, output_dir: Path) -> str | None:
     """Best-effort extraction of embedded images via ``pypdf``.
 
     Uses ``pypdf``'s ``page.images`` API which returns decoded image
@@ -141,9 +137,7 @@ def _try_extract_embedded_image(
     return None
 
 
-def _try_extract_xobject_image(
-    page: object, image_id: str, output_dir: Path
-) -> str | None:
+def _try_extract_xobject_image(page: object, image_id: str, output_dir: Path) -> str | None:
     """Attempt to extract an image from page XObjects using Pillow.
 
     Args:

@@ -14,8 +14,13 @@ updates:
       - dependency-name: "numpy"
         versions: [">= 2.4.0"]
 
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+
   - package-ecosystem: "docker"
-    directory: "/"
+    directory: "/docker"
     schedule:
       interval: "weekly"
 
