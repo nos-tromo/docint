@@ -46,8 +46,8 @@ services:
     volumes:
       - docling-cache:/root/.cache/docling
       - huggingface-cache:/root/.cache/huggingface/hub
-      - qdrant-sources:/var/lib/docint/sources
       - sessions-storage:/var/lib/docint/sessions
+      - source-preview-cache:/var/lib/docint/sources
     networks:
       docint-net:
         aliases:
@@ -88,9 +88,9 @@ volumes:
     external: true
   ollama-cache:
     external: true
-  qdrant-sources:
-    external: true
   sessions-storage:
+    external: true
+  source-preview-cache:
     external: true
 
 ##########################################################

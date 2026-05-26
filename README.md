@@ -87,8 +87,8 @@ cannot destroy staged sources or the session database:
 - `docling-cache`
 - `huggingface-cache`
 - `ollama-cache`
-- `qdrant-sources`
 - `sessions-storage`
+- `source-preview-cache`
 
 The helper script creates them with `docker volume create`.
 

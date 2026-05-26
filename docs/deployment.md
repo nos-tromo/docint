@@ -135,8 +135,8 @@ destroyed by `docker compose down -v`. The helper script
 | `docling-cache` | external | Docling model cache. |
 | `huggingface-cache` | external | HF Hub cache (embedding, reranker, NER, image models). |
 | `ollama-cache` | external | Ollama model cache, used when Ollama is co-deployed. |
-| `qdrant-sources` | external | Raw source files staged for `/sources/preview`. |
 | `sessions-storage` | external | SQLite session database. |
+| `source-preview-cache` | external | Raw source files staged for `/sources/preview`. |
 
 ## Networks
 
@@ -392,7 +392,7 @@ docker compose --env-file .env -f docker/compose.yaml --profile cpu down --volum
 ```
 
 Note that the `external` volumes (`docling-cache`, `huggingface-cache`,
-`ollama-cache`, `qdrant-sources`, `sessions-storage`) are **not**
+`ollama-cache`, `sessions-storage`, `source-preview-cache`) are **not**
 removed by `--volumes` — so `down -v` no longer destroys staged source
 files or the SQLite session database. Delete them explicitly with
 `docker volume rm` if you want a clean slate.
