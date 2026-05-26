@@ -8,7 +8,7 @@ These instructions apply to the entire `docint` repository unless a directory in
 
 - **Monorepo layout** — all Python code lives under `docint/` (there is no separate `backend/` or `frontend/` directory). The single `pyproject.toml` at the project root describes the package and its dependencies.
 - The package exposes a **FastAPI** application (`docint/core/api.py`), **CLI** entry points (`ingest`, `query`, `load-models`), a **Streamlit** UI (`docint/app.py`), and an agentic orchestration layer (`docint/agents/`).
-- Docker and `docker-compose.yml` are provided for running the full stack; during development we usually run the services directly (see `README.md`).
+- Docker and `docker/compose.yaml` are provided for running the full stack; during development we usually run the services directly (see `README.md`).
 
 ### Key directories
 
@@ -56,6 +56,6 @@ These instructions apply to the entire `docint` repository unless a directory in
   uv run pre-commit run --all-files   # ruff check, ruff format, mypy
   ```
 
-- Docker changes: if you modify Dockerfiles or `docker-compose.yml`, ensure the relevant service still builds locally (`docker compose build <service>`).
+- Docker changes: the Dockerfiles and compose files live under `docker/`; if you modify them, ensure the relevant service still builds locally (`docker compose --env-file .env -f docker/compose.yaml build <service>`).
 
 When in doubt, err on the side of clarifying comments or doc updates so future contributors can follow the workflow without digging through history.

@@ -6,7 +6,7 @@ imports of the form ``from docint.core.readers.documents.config import …``
 continue to work.
 """
 
-from docint.utils.env_cfg import (  # noqa: F401
+from docint.utils.env_cfg import (
     PIPELINE_VERSION,
     PipelineConfig,
     load_pipeline_config,

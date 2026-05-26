@@ -39,6 +39,7 @@
 *.webm
 *.xls*
 *.zip
+*.tsbuildinfo
 package-lock.json
 
 # directories
@@ -70,6 +71,7 @@ package-lock.json
 **/qdrant*/
 **/results/
 **/session/
+**/superpowers/
 **/uploads/
 **/venv/
 **/workbench/

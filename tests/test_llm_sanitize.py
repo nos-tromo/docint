@@ -68,10 +68,7 @@ def test_strip_reasoning_unclosed_open_tag() -> None:
 
 def test_strip_reasoning_harmony_analysis_and_final_channels() -> None:
     """When a Harmony final channel is present its body becomes the clean text."""
-    text = (
-        "<|channel|>analysis<|message|>hidden reasoning<|end|>"
-        "<|channel|>final<|message|>visible answer<|end|>"
-    )
+    text = "<|channel|>analysis<|message|>hidden reasoning<|end|><|channel|>final<|message|>visible answer<|end|>"
 
     clean, reasoning = strip_reasoning(text)
 
@@ -85,9 +82,7 @@ def test_strip_reasoning_harmony_analysis_only() -> None:
 
     clean, reasoning = strip_reasoning(text)
 
-    assert (
-        clean == "prologue  epilogue".strip() or clean == "prologue   epilogue".strip()
-    )
+    assert clean == "prologue  epilogue".strip() or clean == "prologue   epilogue".strip()
     assert "hidden" not in clean
     assert reasoning == "hidden"
 

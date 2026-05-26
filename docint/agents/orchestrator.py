@@ -6,10 +6,10 @@ from docint.agents.types import (
     ClarificationAgent,
     ClarificationRequest,
     OrchestratorResult,
+    ResponseAgent,
     RetrievalAgent,
     RetrievalRequest,
     RetrievalResult,
-    ResponseAgent,
     Turn,
     UnderstandingAgent,
 )
@@ -36,7 +36,8 @@ class AgentOrchestrator:
             clarifier (ClarificationAgent): The agent responsible for handling clarifications.
             retriever (RetrievalAgent): The agent responsible for retrieving information.
             responder (ResponseAgent | None, optional): The agent responsible for response validation/post-processing.
-            policy (ClarificationPolicy | None, optional): The policy to decide when clarification is needed. Defaults to None.
+            policy (ClarificationPolicy | None, optional): Policy deciding when clarification
+                is needed. Defaults to None.
         """
         self.understanding = understanding
         self.clarifier = clarifier
@@ -44,13 +45,13 @@ class AgentOrchestrator:
         self.responder = responder
         self.policy = policy or ClarificationPolicy()
 
-    def handle_turn(
-        self, turn: Turn, context: TurnContext | None = None
-    ) -> OrchestratorResult:
+    def handle_turn(self, turn: Turn, context: TurnContext | None = None) -> OrchestratorResult:
         """Process a turn: understand, possibly clarify, otherwise retrieve/respond.
 
         Args:
             turn (Turn): The user turn to process.
+            context (TurnContext | None): Per-turn context (session id, clarification count,
+                ...). Defaults to a fresh context bound to the turn's session id.
 
         Returns:
             OrchestratorResult: Clarification or retrieval result for the turn.
@@ -79,6 +80,4 @@ class AgentOrchestrator:
         retrieval: RetrievalResult = self.retriever.retrieve(retrieval_request)
         if self.responder is not None:
             retrieval = self.responder.finalize(retrieval, turn)
-        return OrchestratorResult(
-            clarification=None, retrieval=retrieval, analysis=analysis
-        )
+        return OrchestratorResult(clarification=None, retrieval=retrieval, analysis=analysis)

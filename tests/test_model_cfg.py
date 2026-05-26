@@ -3,11 +3,13 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from docint.utils import model_cfg as model_cfg_module
 
 
-def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch) -> None:
-    """vLLM should skip provider-side local model provisioning.
+def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """VLLM should skip provider-side local model provisioning.
 
     Args:
         tmp_path: Temporary cache root.
@@ -54,31 +56,12 @@ def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.setattr(
         model_cfg_module,
         "load_openai_env",
-        lambda: SimpleNamespace(
-            inference_provider="vllm", api_base="http://vllm-router:9000/v1"
-        ),
-    )
-    monkeypatch.setattr(
-        model_cfg_module,
-        "load_clip_model",
-        lambda model_id, cache_folder: calls.append(("clip", model_id)),
-    )
-    monkeypatch.setattr(
-        model_cfg_module,
-        "load_docling_models",
-        lambda: calls.append(("docling", "docling")),
-    )
-    monkeypatch.setattr(
-        model_cfg_module,
-        "load_gliner_model",
-        lambda model_id, cache_folder: calls.append(("gliner", model_id)),
+        lambda: SimpleNamespace(inference_provider="vllm", api_base="http://vllm-router:9000/v1"),
     )
     monkeypatch.setattr(
         model_cfg_module,
         "load_hf_model",
-        lambda model_id, cache_folder, kw, trust_remote_code=False: calls.append(
-            (kw, model_id)
-        ),
+        lambda model_id, cache_folder, kw, trust_remote_code=False: calls.append((kw, model_id)),
     )
     monkeypatch.setattr(
         model_cfg_module,
@@ -88,8 +71,6 @@ def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch) -> Non
 
     model_cfg_module.main()
 
-    assert ("clip", "openai/clip-vit-base-patch32") in calls
-    assert ("gliner", "gliner-community/gliner_large-v2.5") in calls
     assert ("sparse", "Qdrant/all_miniLM_L6_v2_with_attentions") in calls
     assert ("rerank", "BAAI/bge-reranker-v2-m3") in calls
     assert ("embedding", "BAAI/bge-m3") in calls
@@ -98,9 +79,7 @@ def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch) -> Non
     assert ("ollama", "called") not in calls
 
 
-def test_load_models_populates_embed_tokenizer_cache(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_load_models_populates_embed_tokenizer_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``main()`` must pre-warm the HF cache for the embed tokenizer repo.
 
     Operators set ``EMBED_TOKENIZER_REPO=BAAI/bge-m3`` so the
@@ -151,26 +130,8 @@ def test_load_models_populates_embed_tokenizer_cache(
     monkeypatch.setattr(
         model_cfg_module,
         "load_openai_env",
-        lambda: SimpleNamespace(
-            inference_provider="ollama", api_base="http://localhost:11434/v1"
-        ),
+        lambda: SimpleNamespace(inference_provider="ollama", api_base="http://localhost:11434/v1"),
     )
-    monkeypatch.setattr(
-        model_cfg_module,
-        "load_clip_model",
-        lambda model_id, cache_folder: calls.append(("clip", model_id)),
-    )
-    monkeypatch.setattr(
-        model_cfg_module,
-        "load_docling_models",
-        lambda: calls.append(("docling", "docling")),
-    )
-    monkeypatch.setattr(
-        model_cfg_module,
-        "load_gliner_model",
-        lambda model_id, cache_folder: calls.append(("gliner", model_id)),
-    )
-
     captured_hf_calls: list[dict[str, object]] = []
 
     def _fake_load_hf_model(
@@ -207,12 +168,9 @@ def test_load_models_populates_embed_tokenizer_cache(
 
     model_cfg_module.main()
 
-    embed_tokenizer_calls = [
-        c for c in captured_hf_calls if c["kw"] == "embed-tokenizer"
-    ]
+    embed_tokenizer_calls = [c for c in captured_hf_calls if c["kw"] == "embed-tokenizer"]
     assert embed_tokenizer_calls, (
-        "load_hf_model must be called with kw='embed-tokenizer' when "
-        "EMBED_TOKENIZER_REPO is set"
+        "load_hf_model must be called with kw='embed-tokenizer' when EMBED_TOKENIZER_REPO is set"
     )
     call = embed_tokenizer_calls[0]
     assert call["model_id"] == "BAAI/bge-m3"

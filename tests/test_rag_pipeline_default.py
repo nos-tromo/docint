@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -10,8 +11,8 @@ from typing import Any
 import pytest
 
 import docint.core.rag as rag_module
-from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.rag import RAG
+from docint.core.readers.documents import CorePDFPipelineReader
 from docint.utils.hashing import compute_file_hash
 
 
@@ -56,9 +57,7 @@ def test_reader_build_nodes_sets_expected_metadata(tmp_path: Path) -> None:
     assert str(uuid.UUID(nodes[0].node_id)) == nodes[0].node_id
 
 
-def test_reader_skips_existing_hashes(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_reader_skips_existing_hashes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Already-ingested PDFs should be skipped before pipeline processing."""
     pdf_path = tmp_path / "already.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n")
@@ -178,7 +177,7 @@ def test_reader_ingests_extracted_images_via_shared_service(tmp_path: Path) -> N
     calls: list[tuple[Any, Any]] = []
 
     class RecordingService:
-        def ingest_image(self, asset, *, context):
+        def ingest_image(self, asset: Any, *, context: Any) -> SimpleNamespace:
             calls.append((asset, context))
             return SimpleNamespace(status="stored", error=None)
 
@@ -206,26 +205,24 @@ def test_reader_ingests_extracted_images_via_shared_service(tmp_path: Path) -> N
     assert context.source_collection == "att-2"
 
 
-def test_rag_excludes_pdfs_from_legacy_ingestion(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_rag_excludes_pdfs_from_legacy_ingestion(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """RAG should pass discovered PDF hashes into legacy pipeline filters."""
 
     class FakeDocStore:
         """No-op document store for testing."""
 
-        def add_documents(self, nodes, allow_update=True) -> None:
+        def add_documents(self, nodes: Any, allow_update: bool = True) -> None:
             """Accept documents without storing them."""
             return None
 
     class FakeIndex:
         """Minimal vector store index stub."""
 
-        def __init__(self, **kwargs) -> None:
+        def __init__(self, **kwargs: Any) -> None:
             """Initialise with a fake doc store."""
             self.docstore = FakeDocStore()
 
-        def insert_nodes(self, nodes) -> None:
+        def insert_nodes(self, nodes: Any) -> None:
             """Accept nodes without indexing them."""
             return None
 
@@ -235,10 +232,10 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(
         def __init__(
             self,
             data_dir: Path,
-            entity_extractor=None,
+            entity_extractor: Any = None,
             ner_max_workers: int = 1,
             source_collection: str | None = None,
-            image_ingestion_service=None,
+            image_ingestion_service: Any = None,
         ) -> None:
             """Initialise and discard all arguments."""
             _ = (
@@ -250,7 +247,7 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(
             )
             self.discovered_hashes = {"pdf-hash-1"}
 
-        def build(self, existing_hashes, progress_callback=None):
+        def build(self, existing_hashes: Any, progress_callback: Any = None) -> Iterator[Any]:
             """Yield nothing; the stub reader produces no batches."""
             if False:
                 yield
@@ -266,7 +263,7 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(
             self.entity_extractor = None
             self.ner_max_workers = 1
 
-        def build(self, existing_hashes):
+        def build(self, existing_hashes: Any) -> Iterator[Any]:
             """Record the hashes passed into the legacy pipeline."""
             self.seen_hashes = set(existing_hashes)
             if False:
@@ -306,9 +303,7 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(
     assert "pdf-hash-1" in fake_pipeline.seen_hashes
 
 
-def test_reader_yields_and_ingests_images_when_no_text_chunks(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_reader_yields_and_ingests_images_when_no_text_chunks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Image-only PDFs (e.g. screenshots) must still ingest images and yield.
 
     Previously, the reader's ``build`` method would ``continue`` past
@@ -411,7 +406,7 @@ def test_reader_yields_and_ingests_images_when_no_text_chunks(
 
     # The reader should still yield one batch (with empty nodes).
     assert len(batches) == 1
-    docs, nodes, returned_hash = batches[0]
+    _docs, nodes, returned_hash = batches[0]
     assert returned_hash == doc_id
     assert nodes == []
 

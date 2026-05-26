@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import math
 import random
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any
 
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
@@ -81,8 +81,7 @@ def _format_timestamp(seconds: float | int) -> str:
     seconds_float = float(seconds)
     if not math.isfinite(seconds_float) or seconds_float < 0:
         logger.warning(
-            "Refusing to format non-finite or negative timestamp: {!r}; "
-            "returning '00:00:00'",
+            "Refusing to format non-finite or negative timestamp: {!r}; returning '00:00:00'",
             seconds,
         )
         return "00:00:00"
@@ -393,7 +392,7 @@ class CustomJSONReader(BaseReader):
                         yield payload
             return
 
-        # ``.json`` – either a single object or a list of objects.
+        # ``.json`` - either a single object or a list of objects.
         with file_path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
         if isinstance(payload, list):
@@ -592,8 +591,7 @@ class CustomJSONReader(BaseReader):
 
         if truncated:
             logger.warning(
-                "[CustomJSONReader] Nextext segment cap reached: truncated "
-                "{} at {} segments (file={})",
+                "[CustomJSONReader] Nextext segment cap reached: truncated {} at {} segments (file={})",
                 file_path,
                 NEXTEXT_MAX_SEGMENTS,
                 file_path,
@@ -676,14 +674,10 @@ class CustomJSONReader(BaseReader):
                 "ValueError: Expected a .json / .jsonl / .ndjson file but got: {}",
                 file_path.suffix,
             )
-            raise ValueError(
-                f"Expected a .json, .jsonl, or .ndjson file but got: {file_path.suffix}"
-            )
+            raise ValueError(f"Expected a .json, .jsonl, or .ndjson file but got: {file_path.suffix}")
 
         provided_info = kwargs.get("extra_info", {})
-        file_hash = (
-            provided_info.get("file_hash") if isinstance(provided_info, dict) else None
-        )
+        file_hash = provided_info.get("file_hash") if isinstance(provided_info, dict) else None
         if file_hash is None:
             file_hash = compute_file_hash(file_path)
 
@@ -725,11 +719,10 @@ class CustomJSONReader(BaseReader):
 
         # JSONReader has no streaming API; consume its eager list and
         # yield sequentially so callers see the same lazy interface.
-        for doc in self.json_reader.load_data(
+        yield from self.json_reader.load_data(
             input_file=file_path_str,
             extra_info=base_extra_info,
-        ):
-            yield doc
+        )
 
     def load_data(self, file: str | Path, **kwargs: Any) -> list[Document]:
         """Eager-list shim over :meth:`iter_documents` for legacy callers.

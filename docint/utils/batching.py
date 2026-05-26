@@ -9,7 +9,8 @@ cross-cutting helpers live alongside :mod:`docint.utils.retry`.
 
 from __future__ import annotations
 
-from typing import Sequence, TypeVar
+from collections.abc import Sequence
+from typing import TypeVar
 
 T = TypeVar("T")
 
@@ -29,6 +30,4 @@ def chunk_nodes(items: Sequence[T], batch_size: int) -> list[list[T]]:
         return []
     effective = max(1, int(batch_size))
     materialised = list(items)
-    return [
-        materialised[i : i + effective] for i in range(0, len(materialised), effective)
-    ]
+    return [materialised[i : i + effective] for i in range(0, len(materialised), effective)]

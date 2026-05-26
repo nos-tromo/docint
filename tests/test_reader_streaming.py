@@ -16,6 +16,7 @@ import inspect
 import json
 from pathlib import Path
 from types import GeneratorType
+from typing import Any, ClassVar
 
 import pandas as pd
 import pytest
@@ -77,7 +78,7 @@ def test_custom_json_iter_documents_matches_load_data_for_nextext(
     streamed = list(reader.iter_documents(jsonl))
 
     assert len(eager) == len(streamed) == 4
-    for a, b in zip(eager, streamed):
+    for a, b in zip(eager, streamed, strict=False):
         assert a.text == b.text
         assert a.metadata.get("sentence_index") == b.metadata.get("sentence_index")
         assert a.metadata.get("file_hash") == b.metadata.get("file_hash")
@@ -143,11 +144,9 @@ def test_table_iter_documents_matches_load_data(tmp_path: Path) -> None:
     streamed = list(reader.iter_documents(csv))
 
     assert len(eager) == len(streamed) == 8
-    for a, b in zip(eager, streamed):
+    for a, b in zip(eager, streamed, strict=False):
         assert a.text == b.text
-        assert a.metadata.get("table", {}).get("row_index") == b.metadata.get(
-            "table", {}
-        ).get("row_index")
+        assert a.metadata.get("table", {}).get("row_index") == b.metadata.get("table", {}).get("row_index")
 
 
 def test_table_iter_documents_streams_lazily(tmp_path: Path) -> None:
@@ -192,9 +191,7 @@ def test_table_iter_documents_unsupported_suffix(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_image_iter_documents_yields_one_document(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_image_iter_documents_yields_one_document(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """ImageReader.iter_documents should yield exactly one document for a file."""
     from docint.core.readers.images import ImageReader
 
@@ -203,14 +200,14 @@ def test_image_iter_documents_yields_one_document(
 
     class FakeRecord:
         llm_description = "a cat"
-        llm_tags = ["cat", "animal"]
+        llm_tags: ClassVar[list[str]] = ["cat", "animal"]
         image_id = "img-1"
         point_id = "pt-1"
         error = None
         status = "ok"
 
     class FakeService:
-        def ingest_image(self, asset, context=None):
+        def ingest_image(self, asset: Any, context: Any = None) -> FakeRecord:
             return FakeRecord()
 
     reader = ImageReader(image_ingestion_service=FakeService())  # type: ignore[arg-type]
@@ -219,9 +216,7 @@ def test_image_iter_documents_yields_one_document(
     assert "cat" in docs[0].text
 
 
-def test_image_load_data_matches_iter_documents(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_image_load_data_matches_iter_documents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The list shim should produce the same single document the iterator yields."""
     from docint.core.readers.images import ImageReader
 
@@ -230,14 +225,14 @@ def test_image_load_data_matches_iter_documents(
 
     class FakeRecord:
         llm_description = "a dog"
-        llm_tags: list[str] = []
+        llm_tags: ClassVar[list[str]] = []
         image_id = ""
         point_id = ""
         error = None
         status = ""
 
     class FakeService:
-        def ingest_image(self, asset, context=None):
+        def ingest_image(self, asset: Any, context: Any = None) -> FakeRecord:
             return FakeRecord()
 
     reader = ImageReader(image_ingestion_service=FakeService())  # type: ignore[arg-type]

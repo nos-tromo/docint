@@ -18,8 +18,10 @@ extra context a new user needs to understand what they just started.
   - any OpenAI-compatible endpoint (Ollama, vLLM, the public OpenAI API, …),
   - configured via `INFERENCE_PROVIDER`, `OPENAI_API_BASE`, and
     `OPENAI_API_KEY` (see [configuration.md](configuration.md)).
-- **Qdrant** — bundled in the `docker compose` profiles, or installed
-  separately for local dev.
+- **Qdrant** — provided by the sibling `data-plane` project
+  (`../data-plane/`), not by this stack. Start it with
+  `cd ../data-plane && make up` (Docker) or `make up-dev` (also
+  publishes Qdrant on `localhost:6333` for local dev).
 
 ## Quick start with Docker
 
@@ -44,15 +46,16 @@ extra context a new user needs to understand what they just started.
    TEXT_MODEL=gpt-4o
    ```
 
-2. **Create the shared cache volumes** (idempotent):
+2. **Create the shared external volumes** (idempotent):
 
    ```bash
    ./scripts/create_docker_volumes.sh
    ```
 
    This creates the external volumes `docling-cache`, `huggingface-cache`,
-   and `ollama-cache` so model artifacts persist across container
-   rebuilds.
+   `ollama-cache`, `qdrant-sources`, and `sessions-storage` so model
+   artifacts and backend state persist across container rebuilds and are
+   not destroyed by `docker compose down -v`.
 
 3. **Pick a profile and start the stack:**
 
@@ -61,15 +64,25 @@ extra context a new user needs to understand what they just started.
    | `cpu`  | Development laptops, CI, CPU-only servers. |
    | `cuda` | Machines with an NVIDIA GPU + NVIDIA Container Toolkit. |
 
+   Set `PROFILE` in `.env` (default `cpu`), then build and start via the
+   `Makefile` — the blessed entry point, which points Compose at
+   `docker/compose.yaml` for you:
+
    ```bash
-   docker compose --profile cpu up --build
+   make build
+   make up               # or: make up PROFILE=cuda
    ```
+
+   `make up` layers `docker/compose.override.yaml` to publish host ports
+   for local development.
 
 4. **Open the app:**
 
    - Streamlit UI — <http://localhost:8501>
    - FastAPI backend — <http://localhost:8000>
-   - Qdrant REST — <http://localhost:6333>
+
+   Qdrant is not served by this stack — it comes from the `data-plane`
+   project (see Prerequisites above).
 
 For the complete deployment reference (services, volumes, networks, vLLM
 co-deployment) see [deployment.md](deployment.md).
@@ -87,7 +100,9 @@ through Docker.
 
 2. **Ensure external services are running locally:**
 
-   - Qdrant at `http://localhost:6333`.
+   - Qdrant at `http://localhost:6333` — start the `data-plane`
+     project with `cd ../data-plane && make up-dev`, which publishes
+     Qdrant on the host port.
    - An OpenAI-compatible endpoint (Ollama, vLLM, OpenAI, …).
 
 3. **Install dependencies:**

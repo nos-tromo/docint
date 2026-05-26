@@ -10,7 +10,7 @@ docstore I/O overlap with NER / hate-speech enrichment.
 
 Three invariants:
 
-* **Bounded queue** — capped at ``INGEST_BATCH_SIZE × 2`` by default to
+* **Bounded queue** — capped at ``INGEST_BATCH_SIZE * 2`` by default to
   bound memory under back-pressure.
 * **Single consumer** — Qdrant insert ordering matters less than
   contention; one consumer thread drains the queue serially.
@@ -29,7 +29,8 @@ from __future__ import annotations
 
 import queue
 import threading
-from typing import Any, Callable, Generic, Iterable, Iterator, TypeVar
+from collections.abc import Callable, Iterable, Iterator
+from typing import Any, Generic, TypeVar
 
 from loguru import logger
 
@@ -76,6 +77,7 @@ class ProducerConsumer(Generic[T]):
         *,
         queue_max_size: int = 4,
     ) -> None:
+        """Bind the producer callable and bounded-queue size for streamed consumption."""
         self._producer_fn = producer_fn
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=max(1, queue_max_size))
         self._thread: threading.Thread | None = None
@@ -130,7 +132,7 @@ class ProducerConsumer(Generic[T]):
         try:
             for item in self._producer_fn():
                 self._queue.put(item)
-        except BaseException as exc:  # noqa: BLE001 - re-raised on consume()
+        except BaseException as exc:
             self._exception = exc
         finally:
             self._queue.put(_END)

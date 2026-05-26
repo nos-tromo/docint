@@ -17,10 +17,11 @@ import time
 import urllib.error
 import urllib.request
 from collections import defaultdict
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence, cast
+from typing import Any, cast
 
 # isort: off
 # Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
@@ -34,8 +35,8 @@ from docint.utils.env_cfg import (
     ModelConfig,
     OpenAIConfig,
     PathConfig,
+    RerankClientConfig,
     RetrievalConfig,
-    RuntimeConfig,
     SessionConfig,
     SummaryConfig,
     load_embedding_env,
@@ -47,15 +48,13 @@ from docint.utils.env_cfg import (
     load_ner_env,
     load_openai_env,
     load_path_env,
+    load_rerank_client_env,
     load_retrieval_env,
-    load_runtime_env,
     load_session_env,
     load_summary_env,
-    resolve_hf_cache_path,
 )
 # isort: on
 
-import torch
 from fastembed import SparseTextEmbedding
 from llama_index.core import (
     Response,
@@ -64,7 +63,6 @@ from llama_index.core import (
     VectorStoreIndex,
 )
 from llama_index.core.embeddings import BaseEmbedding
-from llama_index.core.postprocessor import LLMRerank
 from llama_index.core.postprocessor.types import BaseNodePostprocessor
 from llama_index.core.prompts import PromptTemplate
 from llama_index.core.query_engine import RetrieverQueryEngine
@@ -87,14 +85,32 @@ from llama_index.core.vector_stores.types import (
     VectorStoreQueryMode,
 )
 from llama_index.llms.openai import OpenAI
-from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from loguru import logger
 from qdrant_client import QdrantClient
 from qdrant_client import models as qdrant_models
-from qdrant_client.async_qdrant_client import AsyncQdrantClient
-from qdrant_client.qdrant_fastembed import IDF_EMBEDDING_MODELS
 
+# Names re-exported for test monkey-patching. Strict mypy
+# (no_implicit_reexport) ignores these without an explicit ``__all__``,
+# so list every test-reachable third-party symbol here.
+__all__ = [
+    "RAG",
+    "EmptyIngestionError",
+    "QueryBundle",
+    "ResponseMode",
+    "RetrieverQueryEngine",
+    "SparseTextEmbedding",
+    "VectorStoreQueryMode",
+    "logger",
+    "qdrant_models",
+    "urllib",
+]
+from qdrant_client.async_qdrant_client import AsyncQdrantClient
+from qdrant_client.qdrant_fastembed import IDF_EMBEDDING_MODELS  # type: ignore[attr-defined]
+
+from docint.core.ingest.images_service import ImageIngestionService
+from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
+from docint.core.ingest.streaming_executor import overlapped
 from docint.core.ner import (
     EntityMergeMode,
     aggregate_ner_sources,
@@ -107,9 +123,6 @@ from docint.core.ner import (
     normalize_entity_merge_mode,
     search_entities,
 )
-from docint.core.ingest.images_service import ImageIngestionService
-from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
-from docint.core.ingest.streaming_executor import overlapped
 from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.retrieval_filters import matches_metadata_filters
 from docint.core.state.session_manager import SessionManager
@@ -117,15 +130,10 @@ from docint.core.storage.ingest_manifest import (
     IngestManifest,
     NullIngestManifest,
 )
+from docint.core.storage.sources import stage_sources_to_qdrant
 from docint.core.storage.sqlite_kvstore import SQLiteKVStore
 from docint.core.storage.utils import qdrant_collection_exists
-from docint.core.storage.sources import stage_sources_to_qdrant
 from docint.utils.batching import chunk_nodes
-from docint.utils.retry import (
-    aretry_with_backoff,
-    is_transient_qdrant_error,
-    retry_with_backoff,
-)
 from docint.utils.embed_chunking import (
     effective_budget,
     estimate_tokens,
@@ -141,7 +149,11 @@ from docint.utils.openai_cfg import (
     get_openai_reasoning_effort,
 )
 from docint.utils.reference_metadata import REFERENCE_METADATA_FIELDS
-
+from docint.utils.retry import (
+    aretry_with_backoff,
+    is_transient_qdrant_error,
+    retry_with_backoff,
+)
 
 SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
 SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
@@ -219,9 +231,7 @@ LLM_VISIBLE_METADATA_KEYS: frozenset[str] = frozenset(
 # absolute ``file_path`` strings with usernames or tenant IDs. Filtering
 # on emission means such additions cannot silently leak into the LLM
 # prompt (or, via the provider, into external log storage).
-LLM_VISIBLE_ORIGIN_SUBKEYS: frozenset[str] = frozenset(
-    {"filename", "mimetype", "filetype", "page_number"}
-)
+LLM_VISIBLE_ORIGIN_SUBKEYS: frozenset[str] = frozenset({"filename", "mimetype", "filetype", "page_number"})
 
 # Hard ceiling for any single metadata string that reaches the LLM.
 # Legitimate locators (filenames, timestamps, speaker names, ISO
@@ -235,7 +245,7 @@ LLM_METADATA_VALUE_MAX_CHARS: int = 1024
 
 
 def _sanitize_metadata_value_for_llm(value: Any) -> Any:
-    """Clamp length and strip control characters from a metadata leaf.
+    r"""Clamp length and strip control characters from a metadata leaf.
 
     Recurses through ``dict`` / ``list`` / ``tuple`` so nested locators
     (``origin``, ``table``, ``reference_metadata``) are scrubbed in
@@ -376,9 +386,7 @@ class EmptyIngestionError(Exception):
                 default referencing ``collection_name`` is used when omitted.
         """
         self.collection_name = collection_name
-        super().__init__(
-            message or f"No content was ingested into '{collection_name}'."
-        )
+        super().__init__(message or f"No content was ingested into '{collection_name}'.")
 
 
 class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
@@ -393,14 +401,15 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
 
     @staticmethod
     def _reference_metadata(node: NodeWithScore) -> dict[str, Any]:
-        """Extract the reference metadata dict from a retrieved node, which may be nested under the
-        "reference_metadata" key in the node's metadata or may be missing entirely.
+        """Extract the reference metadata dict from a retrieved node.
+
+        May be nested under ``reference_metadata`` in the node's metadata, or missing entirely.
 
         Args:
             node (NodeWithScore): The node from which to extract reference metadata.
 
         Returns:
-            dict[str, Any]: The reference metadata dictionary, or an empty dictionary if not present.
+            dict[str, Any]: The reference metadata dictionary, or an empty dict if not present.
         """
         metadata = getattr(node, "metadata", {}) or {}
         reference_metadata = metadata.get("reference_metadata")
@@ -410,29 +419,24 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
 
     @staticmethod
     def _identity_key(node: NodeWithScore) -> str:
-        """Extract a stable identity key for a retrieved node based on its content and metadata, which can be used for deduplication.
+        """Extract a stable identity key for deduplication from a retrieved node.
 
         Args:
             node (NodeWithScore): The node from which to extract an identity key.
 
         Returns:
-            str: A string identity key that represents the content of the node, such as a text ID, a file hash and row index
-                for tabular data, or a normalized text snippet. Returns an empty string if no meaningful identity can be extracted.
-
+            str: An identity key derived from text ID, file-hash + row-index (tabular), or a
+                normalized text snippet. Empty string if no meaningful identity is available.
         """
         metadata = getattr(node, "metadata", {}) or {}
-        reference_metadata = SocialSourceDiversityPostprocessor._reference_metadata(
-            node
-        )
+        reference_metadata = SocialSourceDiversityPostprocessor._reference_metadata(node)
         text_id = str(reference_metadata.get("text_id") or "").strip()
         if text_id:
             return f"text_id:{text_id}"
 
         file_hash = str(metadata.get("file_hash") or "").strip()
         table_meta = metadata.get("table") or {}
-        row_index = (
-            table_meta.get("row_index") if isinstance(table_meta, dict) else None
-        )
+        row_index = table_meta.get("row_index") if isinstance(table_meta, dict) else None
         if file_hash and row_index is not None:
             return f"row:{file_hash}:{row_index}"
 
@@ -445,21 +449,19 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
 
     @staticmethod
     def _diversity_bucket(node: NodeWithScore) -> str:
-        """Extract a diversity bucket key for a retrieved node based on its author and time, which can be used to limit near-duplicate results from the same source or time period.
+        """Extract an author+time diversity bucket key for limiting near-duplicate results.
 
         Args:
             node (NodeWithScore): The node from which to extract a diversity bucket key.
 
         Returns:
-            str: A string representing the diversity bucket key, combining the author and time information.
+            str: A bucket key combining lowercased author and an hour-resolution time bucket.
 
         Raises:
-            ValueError: If the timestamp format is invalid and cannot be parsed, which may indicate unexpected metadata structure.
+            ValueError: If the timestamp can't be parsed (indicates unexpected metadata shape).
         """
         metadata = getattr(node, "metadata", {}) or {}
-        reference_metadata = SocialSourceDiversityPostprocessor._reference_metadata(
-            node
-        )
+        reference_metadata = SocialSourceDiversityPostprocessor._reference_metadata(node)
         author = str(
             reference_metadata.get("author_id")
             or reference_metadata.get("author")
@@ -472,7 +474,7 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
         if timestamp_raw:
             try:
                 parsed = datetime.fromisoformat(timestamp_raw.replace("Z", "+00:00"))
-                time_bucket = parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H")
+                time_bucket = parsed.astimezone(UTC).strftime("%Y-%m-%dT%H")
             except ValueError:
                 time_bucket = timestamp_raw[:13]
         return f"{author.lower()}::{time_bucket}"
@@ -486,10 +488,10 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
 
         Args:
             nodes (list[NodeWithScore]): The list of retrieved nodes to postprocess.
-            query_bundle (QueryBundle | None): The original query bundle that led to these retrieval results, which may be used for context but is not modified by this postprocessor.
+            query_bundle (QueryBundle | None): Original query bundle for context; not modified.
 
         Returns:
-            list[NodeWithScore]: The postprocessed list of nodes, where near-duplicate social or tabular sources have been limited according to the configured diversity limit.
+            list[NodeWithScore]: Nodes after duplicate and bucket-limit filtering.
         """
         _ = query_bundle
         seen: set[str] = set()
@@ -599,18 +601,16 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
         if not parent_id:
             return None
         try:
-            return self.docstore.get_node(parent_id, raise_error=False)
+            return cast(BaseNode | None, self.docstore.get_node(parent_id, raise_error=False))
         except AttributeError:
-            return self.docstore.get_document(parent_id, raise_error=False)
+            return cast(BaseNode | None, self.docstore.get_document(parent_id, raise_error=False))
         except Exception as exc:
-            logger.warning(
-                "Failed to load parent node '{}' from docstore: {}", parent_id, exc
-            )
+            logger.warning("Failed to load parent node '{}' from docstore: {}", parent_id, exc)
             return None
 
     @staticmethod
     def _find_match_offset(parent_text: str, sub_text: str) -> int:
-        """Return the offset of *sub_text* inside *parent_text*, or ``-1``.
+        r"""Return the offset of *sub_text* inside *parent_text*, or ``-1``.
 
         First tries an exact substring search. On miss, whitespace-
         normalizes both strings (``\\s+`` → single space, stripped) while
@@ -666,9 +666,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
         return idx_map[norm_offset]
 
     @staticmethod
-    def _snap_to_whitespace(
-        text: str, start: int, end: int, scan: int = 80
-    ) -> tuple[int, int]:
+    def _snap_to_whitespace(text: str, start: int, end: int, scan: int = 80) -> tuple[int, int]:
         """Expand or shrink a window's edges to the nearest whitespace boundary.
 
         Readable slices should not split words mid-token. The scan is
@@ -699,9 +697,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
                     break
         return start, end
 
-    def _window_parent_text(
-        self, parent_text: str, sub_text: str, budget_chars: int
-    ) -> str | None:
+    def _window_parent_text(self, parent_text: str, sub_text: str, budget_chars: int) -> str | None:
         """Return a ~``budget_chars``-sized window of *parent_text* around *sub_text*.
 
         When the sub-node text itself already exceeds ``budget_chars`` —
@@ -738,7 +734,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
 
     @staticmethod
     def _emit_with_llm_exclusion(source: BaseNode) -> TextNode:
-        """Clone *source* into a ``TextNode`` whose LLM view hides noisy metadata.
+        r"""Clone *source* into a ``TextNode`` whose LLM view hides noisy metadata.
 
         The synthesiser splices each emitted node into the chat prompt
         via ``get_content(MetadataMode.LLM)``, which renders
@@ -778,9 +774,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
         # (and therefore into upstream LLM-provider logs).
         raw_origin = metadata.get("origin")
         if isinstance(raw_origin, dict):
-            metadata["origin"] = {
-                k: v for k, v in raw_origin.items() if k in LLM_VISIBLE_ORIGIN_SUBKEYS
-            }
+            metadata["origin"] = {k: v for k, v in raw_origin.items() if k in LLM_VISIBLE_ORIGIN_SUBKEYS}
 
         # Clamp + scrub whitelisted metadata values. Protects against a
         # bulky string sliding in via a social-table ``reference_mapping``
@@ -801,9 +795,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             text=source.get_content(metadata_mode=MetadataMode.NONE),
             metadata=metadata,
             excluded_llm_metadata_keys=excluded,
-            excluded_embed_metadata_keys=list(
-                getattr(source, "excluded_embed_metadata_keys", []) or []
-            ),
+            excluded_embed_metadata_keys=list(getattr(source, "excluded_embed_metadata_keys", []) or []),
         )
         return clone
 
@@ -852,9 +844,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
                 A ``NodeWithScore`` whose underlying node hides noisy
                 metadata from ``get_content(MetadataMode.LLM)``.
             """
-            return NodeWithScore(
-                node=self._emit_with_llm_exclusion(base_node), score=score
-            )
+            return NodeWithScore(node=self._emit_with_llm_exclusion(base_node), score=score)
 
         def _llm_tokens(base_node: BaseNode) -> int:
             """Estimate the token cost of *base_node*'s rendered LLM payload.
@@ -902,7 +892,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             # still contributes to retrieval count and citations without
             # inflating the prompt past ``usable_tokens``. Using
             # ``per_hit_floor`` here would silently exceed the budget by
-            # ``per_hit_floor × remaining_hits`` tokens.
+            # ``per_hit_floor * remaining_hits`` tokens.
             if remaining_tokens <= 0:
                 budget_exhausted_hits += 1
                 expanded.append(_emit(node.node, node.score))
@@ -922,19 +912,12 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             # short-circuit above caps the overshoot at a single hit.
             budget_tokens = max(self.per_hit_floor, remaining_tokens)
             budget_chars = max(1, int(budget_tokens * self.char_token_ratio))
-            sub_text = (
-                getattr(getattr(node, "node", None), "text", "")
-                or getattr(node, "text", "")
-                or ""
-            )
-            windowed_text = self._window_parent_text(
-                parent_text, sub_text, budget_chars
-            )
+            sub_text = getattr(getattr(node, "node", None), "text", "") or getattr(node, "text", "") or ""
+            windowed_text = self._window_parent_text(parent_text, sub_text, budget_chars)
 
             if windowed_text is None:
                 logger.debug(
-                    "parent_context_fallback_subnode: parent_id={} "
-                    "sub_node_id={} sub_chars={} parent_chars={}",
+                    "parent_context_fallback_subnode: parent_id={} sub_node_id={} sub_chars={} parent_chars={}",
                     parent_id,
                     getattr(getattr(node, "node", None), "node_id", ""),
                     len(sub_text),
@@ -956,9 +939,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             windowed_emit = _emit(windowed_node, node.score)
             # Render once — the LLM payload is what both the log line and
             # the budget debit need, so compute it here and reuse.
-            windowed_llm_payload = windowed_emit.node.get_content(
-                metadata_mode=MetadataMode.LLM
-            )
+            windowed_llm_payload = windowed_emit.node.get_content(metadata_mode=MetadataMode.LLM)
             windowed_hits += 1
             logger.info(
                 "parent_context_windowed: parent_id={} parent_full_chars={} "
@@ -974,19 +955,13 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
             # carries after ``MetadataMode.LLM`` rendering.
             remaining_tokens = max(
                 0,
-                remaining_tokens
-                - estimate_tokens(windowed_llm_payload, self.char_token_ratio),
+                remaining_tokens - estimate_tokens(windowed_llm_payload, self.char_token_ratio),
             )
             expanded.append(windowed_emit)
 
-        if (
-            budget_enforced
-            and parent_hits > 0
-            and (windowed_hits > 0 or budget_exhausted_hits > 0)
-        ):
+        if budget_enforced and parent_hits > 0 and (windowed_hits > 0 or budget_exhausted_hits > 0):
             logger.info(
-                "parent_context_summary: windowed_hits={}/{} "
-                "budget_exhausted_hits={} usable_tokens={}",
+                "parent_context_summary: windowed_hits={}/{} budget_exhausted_hits={} usable_tokens={}",
                 windowed_hits,
                 parent_hits,
                 budget_exhausted_hits,
@@ -1016,7 +991,7 @@ class VLLMRerankPostprocessor(BaseNodePostprocessor):
 
     @staticmethod
     def _node_text(node: NodeWithScore) -> str:
-        """Extract the text content from a retrieved node, trying multiple strategies to find meaningful text for reranking.
+        """Extract text content from a retrieved node, trying multiple strategies for reranking.
 
         Args:
             node (NodeWithScore): The node from which to extract text.
@@ -1036,14 +1011,13 @@ class VLLMRerankPostprocessor(BaseNodePostprocessor):
         return text if isinstance(text, str) else ""
 
     def _fallback_nodes(self, nodes: list[NodeWithScore]) -> list[NodeWithScore]:
-        """Fallback strategy to return original nodes in a stable order when vLLM reranking fails.
+        """Fallback strategy returning original nodes in stable order when vLLM reranking fails.
 
         Args:
             nodes (list[NodeWithScore]): The original list of nodes to return in fallback.
 
         Returns:
-            list[NodeWithScore]: The fallback list of nodes, which is a slice of the original nodes list up to the configured
-                top_n limit, ensuring at least one node is returned if available.
+            list[NodeWithScore]: A slice of ``nodes`` up to ``top_n`` (at least one if available).
         """
         return nodes[: max(1, min(int(self.top_n), len(nodes)))]
 
@@ -1056,15 +1030,16 @@ class VLLMRerankPostprocessor(BaseNodePostprocessor):
 
         Args:
             nodes (list[NodeWithScore]): The list of nodes to rerank.
-            query_bundle (QueryBundle | None): The original query bundle that led to these retrieval results, which may contain the original query string needed for reranking.
+            query_bundle (QueryBundle | None): Original query bundle; may carry the query string
+                needed for reranking.
 
         Returns:
-            list[NodeWithScore]: The reranked list of nodes, or the original order if reranking fails.
+            list[NodeWithScore]: Reranked nodes, or the original order if reranking fails.
 
         Raises:
-            ValueError: If the vLLM rerank response is malformed or does not contain usable results.
-            urllib.error.HTTPError: If the HTTP request to the vLLM rerank endpoint fails with an HTTP error.
-            urllib.error.URLError: If the HTTP request to the vLLM rerank endpoint fails with a URL error, such as a connection failure or timeout.
+            ValueError: If the vLLM rerank response is malformed or has no usable results.
+            urllib.error.HTTPError: HTTP error from the vLLM rerank endpoint.
+            urllib.error.URLError: URL error (e.g. connection failure or timeout).
         """
         if not nodes:
             return nodes
@@ -1180,7 +1155,7 @@ class LazyRerankerPostprocessor(BaseNodePostprocessor):
             list[NodeWithScore]: Reranked (and typically top-n trimmed)
                 nodes as produced by the underlying postprocessor.
         """
-        return self.rag.reranker._postprocess_nodes(nodes, query_bundle)
+        return cast(list[NodeWithScore], self.rag.reranker._postprocess_nodes(nodes, query_bundle))
 
 
 def _vllm_service_root(api_base: str) -> str:
@@ -1192,7 +1167,6 @@ def _vllm_service_root(api_base: str) -> str:
     Returns:
         str: The vLLM service root without the trailing ``/v1`` suffix.
     """
-
     normalized = api_base.rstrip("/")
     return normalized.removesuffix("/v1")
 
@@ -1215,7 +1189,6 @@ class VLLMSparseEncoder:
         Returns:
             BatchSparseEncoding: Sparse indices and values aligned with the input order.
         """
-
         if not texts:
             return [], []
 
@@ -1237,7 +1210,6 @@ class VLLMSparseEncoder:
         Returns:
             dict[str, str]: The headers for the vLLM request.
         """
-
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -1251,9 +1223,8 @@ class VLLMSparseEncoder:
             payload (dict[str, Any]): A dictionary representing the JSON payload to be sent in the POST request.
 
         Returns:
-            Any: The decoded JSON response from the vLLM service, which may be a dictionary, list, or other JSON structure depending on the endpoint.
+            Any: The decoded JSON response (dict, list, or other JSON shape per endpoint).
         """
-
         request = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -1270,9 +1241,9 @@ class VLLMSparseEncoder:
             texts (list[str]): A list of input texts for which to pool token scores.
 
         Returns:
-            list[list[float]]: A list of token score lists, where each inner list corresponds to the token scores for the respective input text. The length of the outer list matches the length of the input texts, and each inner list contains float scores aligned with the tokens of the corresponding text.
+            list[list[float]]: One token-score list per input text, in input order. Each inner
+                list's scores align with the tokens of the corresponding text.
         """
-
         request_url = f"{_vllm_service_root(self.api_base)}/pooling"
         response_body = self._request_json(
             request_url,
@@ -1283,9 +1254,7 @@ class VLLMSparseEncoder:
             },
         )
 
-        response_data = (
-            response_body.get("data") if isinstance(response_body, dict) else None
-        )
+        response_data = response_body.get("data") if isinstance(response_body, dict) else None
         if not isinstance(response_data, list):
             raise ValueError("vLLM sparse pooling response did not contain a data list")
 
@@ -1295,9 +1264,7 @@ class VLLMSparseEncoder:
             pooled_scores.append(self._coerce_token_scores(raw_scores))
 
         if len(pooled_scores) != len(texts):
-            raise ValueError(
-                "vLLM sparse pooling response count did not match the input batch size"
-            )
+            raise ValueError("vLLM sparse pooling response count did not match the input batch size")
         return pooled_scores
 
     def _tokenize(self, text: str) -> list[int]:
@@ -1309,7 +1276,6 @@ class VLLMSparseEncoder:
         Returns:
             list[int]: A list of token IDs corresponding to the input text.
         """
-
         request_url = f"{_vllm_service_root(self.api_base)}/tokenize"
         response_body = self._request_json(
             request_url,
@@ -1328,12 +1294,12 @@ class VLLMSparseEncoder:
         """Extract token ids from a vLLM tokenize response payload.
 
         Args:
-            payload (Any): The JSON-decoded response from the vLLM tokenize endpoint, which may have various structures but is expected to contain token ID information in one of several possible locations.
+            payload (Any): JSON-decoded response from the vLLM tokenize endpoint; expected to
+                carry token IDs at one of several possible locations.
 
         Returns:
-            list[int]: A list of token IDs extracted from the payload. If no valid token IDs can be found, an empty list is returned.
+            list[int]: Extracted token IDs, or an empty list if none can be found.
         """
-
         candidates: list[Any] = []
         if isinstance(payload, dict):
             candidates.extend(
@@ -1353,11 +1319,7 @@ class VLLMSparseEncoder:
                 if nested:
                     return nested
                 continue
-            if (
-                isinstance(candidate, list)
-                and candidate
-                and all(isinstance(item, int) for item in candidate)
-            ):
+            if isinstance(candidate, list) and candidate and all(isinstance(item, int) for item in candidate):
                 return [int(item) for item in candidate]
             if isinstance(candidate, list) and not candidate:
                 return []
@@ -1374,7 +1336,6 @@ class VLLMSparseEncoder:
         Returns:
             list[float]: A list of float scores corresponding to each token.
         """
-
         if not isinstance(raw_scores, list):
             raise ValueError("vLLM sparse pooling item did not contain a score list")
 
@@ -1385,9 +1346,7 @@ class VLLMSparseEncoder:
                 continue
 
             if isinstance(item, list | tuple):
-                numeric_values = [
-                    float(value) for value in item if isinstance(value, int | float)
-                ]
+                numeric_values = [float(value) for value in item if isinstance(value, int | float)]
                 if not numeric_values:
                     continue
                 if len(numeric_values) == 1:
@@ -1408,18 +1367,15 @@ class VLLMSparseEncoder:
         """Aggregate token ids and scores into a Qdrant sparse vector.
 
         Args:
-            token_ids (list[int]): A list of token IDs corresponding to the input text.
-            token_scores (list[float]): A list of token scores corresponding to the input text, aligned with the token IDs.
+            token_ids (list[int]): Token IDs from the input text.
+            token_scores (list[float]): Scores aligned with ``token_ids``.
 
         Returns:
-            tuple[list[int], list[float]]: A tuple containing two lists: the first list is the aggregated token IDs for the sparse
-                vector, and the second list is the corresponding aggregated scores for those token
-                IDs. The aggregation process involves merging duplicate token IDs by taking the maximum
-                score for each unique token ID, and filtering out any token IDs that are negative or
-                have non-finite or non-positive scores. The resulting lists are ordered by token ID
-                in ascending order. If there are no valid token IDs after filtering, both lists will be empty.
+            tuple[list[int], list[float]]: Aggregated (ids, scores) for the sparse vector. Duplicate
+                token IDs are merged by max-score; negative IDs and non-finite or non-positive scores
+                are filtered out; results are sorted by token ID ascending. Both lists are empty if
+                nothing survives filtering.
         """
-
         if len(token_ids) != len(token_scores):
             logger.debug(
                 "vLLM sparse token length mismatch: {} token ids vs {} scores",
@@ -1441,10 +1397,11 @@ class VLLMSparseEncoder:
 
 @dataclass(slots=True)
 class RAG:
-    """Represents a Retrieval-Augmented Generation (RAG) model. Handles configuration,
-    initialization, and interaction with underlying components like embedding models,
-    generation models, and vector stores. Provides methods to start sessions,
-    retrieve information, and manage document ingestion.
+    """Retrieval-Augmented Generation engine.
+
+    Handles configuration, initialization, and interaction with embedding models, generation
+    models, and vector stores. Provides methods to start sessions, retrieve information, and
+    manage document ingestion.
     """
 
     # --- Constructor args ---
@@ -1452,40 +1409,17 @@ class RAG:
     enable_hybrid: bool = field(default=True)
 
     # --- Environment config ---
-    host_config: HostConfig = field(
-        default_factory=load_host_env, init=False, repr=False
-    )
-    ingestion_config: IngestionConfig = field(
-        default_factory=load_ingestion_env, init=False, repr=False
-    )
-    model_config: ModelConfig = field(
-        default_factory=load_model_env, init=False, repr=False
-    )
+    host_config: HostConfig = field(default_factory=load_host_env, init=False, repr=False)
+    ingestion_config: IngestionConfig = field(default_factory=load_ingestion_env, init=False, repr=False)
+    model_config: ModelConfig = field(default_factory=load_model_env, init=False, repr=False)
     ner_config: NERConfig = field(default_factory=load_ner_env, init=False, repr=False)
-    openai_config: OpenAIConfig = field(
-        default_factory=load_openai_env, init=False, repr=False
-    )
-    embedding_config: EmbeddingConfig = field(
-        default_factory=load_embedding_env, init=False, repr=False
-    )
-    path_config: PathConfig = field(
-        default_factory=load_path_env, init=False, repr=False
-    )
-    runtime_config: RuntimeConfig = field(
-        default_factory=load_runtime_env, init=False, repr=False
-    )
-    graphrag_config: GraphRAGConfig = field(
-        default_factory=load_graphrag_env, init=False, repr=False
-    )
-    retrieval_config: RetrievalConfig = field(
-        default_factory=load_retrieval_env, init=False, repr=False
-    )
-    summary_config: SummaryConfig = field(
-        default_factory=load_summary_env, init=False, repr=False
-    )
-    session_config: SessionConfig = field(
-        default_factory=load_session_env, init=False, repr=False
-    )
+    openai_config: OpenAIConfig = field(default_factory=load_openai_env, init=False, repr=False)
+    embedding_config: EmbeddingConfig = field(default_factory=load_embedding_env, init=False, repr=False)
+    path_config: PathConfig = field(default_factory=load_path_env, init=False, repr=False)
+    graphrag_config: GraphRAGConfig = field(default_factory=load_graphrag_env, init=False, repr=False)
+    retrieval_config: RetrievalConfig = field(default_factory=load_retrieval_env, init=False, repr=False)
+    summary_config: SummaryConfig = field(default_factory=load_summary_env, init=False, repr=False)
+    session_config: SessionConfig = field(default_factory=load_session_env, init=False, repr=False)
 
     # --- Models ---
     embed_model_id: str | None = field(default=None, init=False)
@@ -1496,9 +1430,7 @@ class RAG:
     # --- Named entity recognition ---
     ner_enabled: bool = field(default=False, init=False)
     ner_sources: list[dict[str, Any]] = field(default_factory=list, init=False)
-    ner_aggregate_cache: dict[tuple[str, str], dict[str, Any]] = field(
-        default_factory=dict, init=False, repr=False
-    )
+    ner_aggregate_cache: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     ner_graph_cache: dict[tuple[str, str, int, int], dict[str, Any]] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -1526,9 +1458,7 @@ class RAG:
     embed_timeout_seconds: float = field(default=1800.0, init=False)
     embed_batch_size: int = field(default=16, init=False)
     embed_max_retries: int = field(default=1, init=False)
-    _embed_token_counter: Callable[[str], list[int]] | None = field(
-        default=None, init=False, repr=False
-    )
+    _embed_token_counter: Callable[[str], list[int]] | None = field(default=None, init=False, repr=False)
 
     # --- Path setup ---
     data_dir: Path | None = field(default=None, init=False)
@@ -1537,7 +1467,6 @@ class RAG:
     # --- Reranking / retrieval ---
     retrieve_similarity_top_k: int = field(default=20, init=False)
     rerank_top_n: int = field(default=5, init=False)
-    rerank_use_fp16: bool = field(default=False, init=False)
     chat_response_mode: str = field(default="auto", init=False)
     vector_store_query_mode: str = field(default="auto", init=False)
     hybrid_alpha: float = field(default=0.5, init=False)
@@ -1590,25 +1519,14 @@ class RAG:
     grounded_refine_prompt: str = field(default="", init=False)
 
     # --- Runtime (lazy caches / not in repr) ---
-    _device: str | None = field(default=None, init=False, repr=False)
     _embed_model: BaseEmbedding | None = field(default=None, init=False, repr=False)
     _text_model: OpenAI | None = field(default=None, init=False, repr=False)
-    _post_retrieval_text_model: OpenAI | None = field(
-        default=None, init=False, repr=False
-    )
-    _reranker: BaseNodePostprocessor | None = field(
-        default=None, init=False, repr=False
-    )
+    _post_retrieval_text_model: OpenAI | None = field(default=None, init=False, repr=False)
+    _reranker: BaseNodePostprocessor | None = field(default=None, init=False, repr=False)
     _qdrant_client: QdrantClient | None = field(default=None, init=False, repr=False)
-    _qdrant_aclient: AsyncQdrantClient | None = field(
-        default=None, init=False, repr=False
-    )
-    _parent_context_support_cache: dict[str, bool] = field(
-        default_factory=dict, init=False, repr=False
-    )
-    _image_ingestion_service: ImageIngestionService | None = field(
-        default=None, init=False, repr=False
-    )
+    _qdrant_aclient: AsyncQdrantClient | None = field(default=None, init=False, repr=False)
+    _parent_context_support_cache: dict[str, bool] = field(default_factory=dict, init=False, repr=False)
+    _image_ingestion_service: ImageIngestionService | None = field(default=None, init=False, repr=False)
 
     # -- Ingested data ---
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
@@ -1634,17 +1552,11 @@ class RAG:
         self.ingest_benchmark_enabled = self.ingestion_config.ingest_benchmark_enabled
         self.ingest_fail_fast = self.ingestion_config.ingest_fail_fast
         self.ingest_manifest_enabled = self.ingestion_config.ingest_manifest_enabled
-        self.ingest_pipeline_overlap_enabled = (
-            self.ingestion_config.ingest_pipeline_overlap_enabled
-        )
+        self.ingest_pipeline_overlap_enabled = self.ingestion_config.ingest_pipeline_overlap_enabled
         self.ingest_queue_max_size = self.ingestion_config.ingest_queue_max_size
         self.docstore_max_retries = self.ingestion_config.docstore_max_retries
-        self.docstore_retry_backoff_seconds = (
-            self.ingestion_config.docstore_retry_backoff_seconds
-        )
-        self.docstore_retry_backoff_max_seconds = (
-            self.ingestion_config.docstore_retry_backoff_max_seconds
-        )
+        self.docstore_retry_backoff_seconds = self.ingestion_config.docstore_retry_backoff_seconds
+        self.docstore_retry_backoff_max_seconds = self.ingestion_config.docstore_retry_backoff_max_seconds
 
         # --- Model config ---
         self.embed_model_id = self.model_config.embed_model
@@ -1688,7 +1600,7 @@ class RAG:
         worst_case_wait = self.embed_timeout_seconds * (1 + self.embed_max_retries)
         if worst_case_wait > 3600:
             logger.warning(
-                "Embedding worst-case wait is {:.0f}s (timeout={}s × (1 + "
+                "Embedding worst-case wait is {:.0f}s (timeout={}s * (1 + "
                 "max_retries={})); a single stalled batch can hang ingest for "
                 "over an hour. Lower EMBED_TIMEOUT_SECONDS or EMBED_MAX_RETRIES "
                 "if that is too lenient for your deployment.",
@@ -1720,8 +1632,7 @@ class RAG:
             )
         else:
             logger.info(
-                "Embedding tokenizer loaded from {} (repo={!r}) — using "
-                "exact token counts for pre-embed fit checks.",
+                "Embedding tokenizer loaded from {} (repo={!r}) — using exact token counts for pre-embed fit checks.",
                 self.path_config.hf_hub_cache,
                 self.model_config.embed_tokenizer_repo,
             )
@@ -1740,21 +1651,13 @@ class RAG:
         if self.prompt_dir:
             self.summarize_prompt_path = self.prompt_dir / "summarize.txt"
             self.summarize_social_prompt_path = self.prompt_dir / "summarize_social.txt"
-            self.conversation_summary_prompt_path = (
-                self.prompt_dir / "conversation_summary.txt"
-            )
-            self.rewrite_retrieval_prompt_path = (
-                self.prompt_dir / "rewrite_retrieval.txt"
-            )
+            self.conversation_summary_prompt_path = self.prompt_dir / "conversation_summary.txt"
+            self.rewrite_retrieval_prompt_path = self.prompt_dir / "rewrite_retrieval.txt"
             self.grounded_text_qa_prompt_path = self.prompt_dir / "grounded_qa.txt"
             self.grounded_refine_prompt_path = self.prompt_dir / "grounded_refine.txt"
         if self.summarize_prompt_path is None:
-            logger.error(
-                "ValueError: summarize_prompt_path is not set. Cannot load summarize prompt."
-            )
-            raise ValueError(
-                "summarize_prompt_path is not set. Cannot load summarize prompt."
-            )
+            logger.error("ValueError: summarize_prompt_path is not set. Cannot load summarize prompt.")
+            raise ValueError("summarize_prompt_path is not set. Cannot load summarize prompt.")
         self.summarize_prompt = self._load_prompt_text(
             self.summarize_prompt_path,
             default=DEFAULT_SUMMARIZE_PROMPT,
@@ -1782,7 +1685,6 @@ class RAG:
         )
 
         # --- Retrieval config ---
-        self.rerank_use_fp16 = self.retrieval_config.rerank_use_fp16
         self.retrieve_similarity_top_k = self.retrieval_config.retrieve_top_k
         self.chat_response_mode = self.retrieval_config.chat_response_mode
         self.vector_store_query_mode = self.retrieval_config.vector_store_query_mode
@@ -1790,9 +1692,7 @@ class RAG:
         self.sparse_top_k = self.retrieval_config.sparse_top_k
         self.hybrid_top_k = self.retrieval_config.hybrid_top_k
         self.parent_context_enabled = self.retrieval_config.parent_context_enabled
-        self.parent_context_safety_margin = (
-            self.retrieval_config.parent_context_safety_margin
-        )
+        self.parent_context_safety_margin = self.retrieval_config.parent_context_safety_margin
         self.rerank_top_n = int(self.retrieve_similarity_top_k // 4)
         self.graphrag_enabled = self.graphrag_config.enabled
         self.graphrag_neighbor_hops = self.graphrag_config.neighbor_hops
@@ -1905,6 +1805,7 @@ class RAG:
     @property
     def qdrant_src_dir(self) -> Path:
         """Best-effort resolution of the host directory where Qdrant stores source data.
+
         Used only as a *fallback* when we cannot reach the Qdrant API.
         Priority: explicit field -> env var -> platform default under home.
 
@@ -1924,107 +1825,11 @@ class RAG:
             else:
                 home = os.getenv("HOME") or os.getenv("USERPROFILE")
                 if home:
-                    self._qdrant_src_dir = (
-                        Path(home) / ".qdrant" / "storage" / "sources"
-                    )
+                    self._qdrant_src_dir = Path(home) / ".qdrant" / "storage" / "sources"
         if self._qdrant_src_dir is None:
             logger.error("ValueError: Qdrant source host directory is not set.")
             raise ValueError("Qdrant source host directory is not set.")
         return self._qdrant_src_dir
-
-    def _resolve_requested_device(self, requested_device: str) -> str | None:
-        """Resolve an explicit runtime device preference.
-
-        Args:
-            requested_device (str): Normalized ``USE_DEVICE`` preference.
-
-        Returns:
-            str | None: Resolved device string, or ``None`` when auto-detection
-            should be used instead.
-        """
-        if requested_device == "cpu":
-            logger.info("Using configured CPU device for local workloads.")
-            return "cpu"
-
-        if requested_device == "mps":
-            if (
-                getattr(torch.backends, "mps", None)
-                and torch.backends.mps.is_available()
-                and torch.backends.mps.is_built()
-            ):
-                logger.info("Using configured MPS device for local workloads.")
-                return "mps"
-            logger.warning(
-                "Configured device '{}' is unavailable; falling back to auto detection.",
-                requested_device,
-            )
-            return None
-
-        if requested_device == "cuda" or requested_device.startswith("cuda:"):
-            if not torch.cuda.is_available():
-                logger.warning(
-                    "Configured device '{}' is unavailable; falling back to auto detection.",
-                    requested_device,
-                )
-                return None
-
-            if requested_device.startswith("cuda:"):
-                try:
-                    device_index = int(requested_device.split(":", maxsplit=1)[1])
-                except ValueError:
-                    logger.warning(
-                        "Configured device '{}' is invalid; falling back to auto detection.",
-                        requested_device,
-                    )
-                    return None
-                if device_index < 0 or device_index >= torch.cuda.device_count():
-                    logger.warning(
-                        "Configured device '{}' is unavailable; falling back to auto detection.",
-                        requested_device,
-                    )
-                    return None
-
-            logger.info(
-                "Using configured CUDA device '{}' for local workloads.",
-                requested_device,
-            )
-            return requested_device
-
-        logger.warning(
-            "Unsupported USE_DEVICE value '{}'; falling back to auto detection.",
-            requested_device,
-        )
-        return None
-
-    @property
-    def device(self) -> str:
-        """Returns the device being used for computation.
-
-        Returns:
-            str: The device being used ("cpu", "cuda", or "mps").
-        """
-        if self._device is None:
-            requested_device = self.runtime_config.use_device
-            if requested_device != "auto":
-                resolved_device = self._resolve_requested_device(requested_device)
-                if resolved_device is not None:
-                    self._device = resolved_device
-                    return self._device
-
-            if torch.cuda.is_available():
-                self._device = "cuda"
-                logger.info("Using CUDA for GPU acceleration.")
-            elif (
-                getattr(torch.backends, "mps", None)
-                and torch.backends.mps.is_available()
-                and torch.backends.mps.is_built()
-            ):
-                self._device = "mps"
-                logger.info("Using MPS for GPU acceleration.")
-            else:
-                self._device = "cpu"
-                logger.info("Using CPU for computation.")
-        return self._device
 
     @property
     def embed_model(self) -> BaseEmbedding:
@@ -2085,10 +1890,8 @@ class RAG:
 
         try:
             supported_models = SparseTextEmbedding.list_supported_models()
-        except ImportError:
-            raise ImportError(
-                "fastembed is not installed, but hybrid search is enabled."
-            )
+        except ImportError as err:
+            raise ImportError("fastembed is not installed, but hybrid search is enabled.") from err
 
         # Check if the configured ID is directly supported
         supported_ids = [m["model"] for m in supported_models]
@@ -2113,10 +1916,7 @@ class RAG:
                     self.sparse_model_id,
                     supported_ids,
                 )
-                raise ValueError(
-                    f"Sparse model {self.sparse_model_id!r} not supported. "
-                    f"Supported: {supported_ids}"
-                )
+                raise ValueError(f"Sparse model {self.sparse_model_id!r} not supported. Supported: {supported_ids}")
 
         # Return the canonical fastembed model name.  fastembed will resolve
         # local files via FASTEMBED_CACHE_PATH (set by env_cfg to HF_HUB_CACHE).
@@ -2124,65 +1924,48 @@ class RAG:
 
     @property
     def reranker(self) -> BaseNodePostprocessor:
-        """Lazily initialize the configured reranker postprocessor.
+        """Lazily initialize the remote rerank-endpoint postprocessor.
+
+        Reranking is always remote — the consumer points at either the
+        full vllm-service stack (LiteLLM router forwards ``/v1/rerank``
+        to the vLLM rerank backend) or the standalone ``rerank-only``
+        deployment (``http://rerank-cpu:8000``; same Jina-shape
+        contract). Override the endpoint independently of chat/embed
+        with ``RERANK_API_BASE`` / ``RERANK_API_KEY``.
+
+        Transport failures degrade gracefully — when ``/rerank`` is
+        unreachable or returns an unexpected payload,
+        :class:`VLLMRerankPostprocessor._postprocess_nodes` catches the
+        error and returns the original retrieval order (top_n nodes
+        unranked).
 
         Returns:
-            BaseNodePostprocessor: The initialized reranker.
+            BaseNodePostprocessor: A configured
+            :class:`VLLMRerankPostprocessor`.
 
         Raises:
-            ValueError: If rerank_model_id is None.
-            NotImplementedError: If FlagEmbeddingReranker fails for an unsupported operation unrelated to meta tensors.
-            RuntimeError: If FlagEmbeddingReranker fails for an unsupported runtime condition unrelated to meta tensors.
+            ValueError: If ``rerank_model_id`` is ``None``.
         """
         if self.rerank_model_id is None:
             raise ValueError("rerank_model_id cannot be None")
         if self._reranker is None:
-            provider = self.openai_inference_provider.lower()
-            if provider == "vllm":
-                self._reranker = VLLMRerankPostprocessor(
-                    api_base=self.openai_api_base or "",
-                    api_key=self.openai_api_key,
-                    model=self.rerank_model_id,
-                    timeout=self.openai_timeout,
-                    top_n=self.rerank_top_n,
-                )
-                logger.info(
-                    "Initializing vLLM reranker endpoint client with model: {}",
-                    self.rerank_model_id,
-                )
-            else:
-                # Resolve to local cache path for offline compatibility
-                cache_dir = (
-                    self.hf_hub_cache or Path.home() / ".cache" / "huggingface" / "hub"
-                )
-                resolved = resolve_hf_cache_path(cache_dir, self.rerank_model_id)
-                resolved_model = str(resolved) if resolved else self.rerank_model_id
-                if resolved:
-                    logger.info("Using local reranker model path: {}", resolved_model)
-                flag_reranker = FlagEmbeddingReranker(
-                    top_n=self.rerank_top_n,
-                    model=resolved_model,
-                    use_fp16=self.rerank_use_fp16,
-                )
-                try:
-                    flag_reranker._model.compute_score([("healthcheck", "healthcheck")])
-                    self._reranker = flag_reranker
-                    logger.info(
-                        "Initializing FlagEmbeddingReranker with model: {} for provider {}",
-                        self.rerank_model_id,
-                        provider,
-                    )
-                except (NotImplementedError, RuntimeError) as exc:
-                    if "meta tensor" not in str(exc).lower():
-                        raise
-                    logger.warning(
-                        "FlagEmbeddingReranker failed to initialize due to a meta-tensor device transfer issue: {}. Falling back to LLMRerank.",
-                        exc,
-                    )
-                    self._reranker = LLMRerank(
-                        top_n=self.rerank_top_n,
-                        llm=self.text_model,
-                    )
+            rerank_cfg: RerankClientConfig = load_rerank_client_env(
+                default_api_base=self.openai_api_base or "",
+                default_api_key=self.openai_api_key,
+                default_timeout=self.openai_timeout,
+            )
+            self._reranker = VLLMRerankPostprocessor(
+                api_base=rerank_cfg.api_base,
+                api_key=rerank_cfg.api_key,
+                model=self.rerank_model_id,
+                timeout=rerank_cfg.timeout,
+                top_n=self.rerank_top_n,
+            )
+            logger.info(
+                "Initializing remote reranker endpoint client at {} with model: {}",
+                rerank_cfg.api_base,
+                self.rerank_model_id,
+            )
         return self._reranker
 
     def _create_text_model(self, *, enable_reasoning: bool = False) -> OpenAI:
@@ -2257,9 +2040,7 @@ class RAG:
             return self.text_model
 
         if self._post_retrieval_text_model is None:
-            self._post_retrieval_text_model = self._create_text_model(
-                enable_reasoning=True
-            )
+            self._post_retrieval_text_model = self._create_text_model(enable_reasoning=True)
         return self._post_retrieval_text_model
 
     @property
@@ -2336,9 +2117,7 @@ class RAG:
             StorageContext: The created storage context.
         """
         kv_store = self._build_kv_store()
-        doc_store = KVDocumentStore(
-            kvstore=kv_store, batch_size=self.docstore_batch_size
-        )
+        doc_store = KVDocumentStore(kvstore=kv_store, batch_size=self.docstore_batch_size)
 
         return StorageContext.from_defaults(
             vector_store=vector_store,
@@ -2369,9 +2148,7 @@ class RAG:
             retry_backoff_max_seconds=self.docstore_retry_backoff_max_seconds,
         )
 
-    def _build_ingest_manifest(
-        self, collection: str | None = None
-    ) -> IngestManifest | NullIngestManifest:
+    def _build_ingest_manifest(self, collection: str | None = None) -> IngestManifest | NullIngestManifest:
         """Build the per-collection ingestion manifest.
 
         Returns a :class:`NullIngestManifest` no-op stub when
@@ -2423,9 +2200,7 @@ class RAG:
             raise ValueError("data_dir cannot be None for ingestion pipeline.")
 
         hate_speech_enabled = load_hate_speech_env().enabled
-        use_llm_ner = self.ner_enabled and self.openai_inference_provider.lower() in {
-            "openai"
-        }
+        use_llm_ner = self.ner_enabled and self.openai_inference_provider.lower() in {"openai"}
 
         shared_text_model: OpenAI | None = None
         if use_llm_ner or hate_speech_enabled:
@@ -2435,12 +2210,11 @@ class RAG:
         hate_speech_model = shared_text_model if hate_speech_enabled else None
 
         if self._image_ingestion_service is None:
-            self._image_ingestion_service = ImageIngestionService(device=self.device)
+            self._image_ingestion_service = ImageIngestionService()
 
         return DocumentIngestionPipeline(
             data_dir=self.data_dir,
             ner_model=ner_model,
-            device=self.device,
             progress_callback=progress_callback,
             hate_speech_model=hate_speech_model,
             openai_inference_provider=self.openai_inference_provider,
@@ -2469,12 +2243,10 @@ class RAG:
         if not query.strip() or not self.qdrant_collection:
             return []
         if self._image_ingestion_service is None:
-            self._image_ingestion_service = ImageIngestionService(device=self.device)
+            self._image_ingestion_service = ImageIngestionService()
 
         try:
-            image_collection = self._image_ingestion_service._resolve_collection_name(
-                self.qdrant_collection
-            )
+            image_collection = self._image_ingestion_service._resolve_collection_name(self.qdrant_collection)
         except Exception:
             return []
         if not qdrant_collection_exists(self.qdrant_client, image_collection):
@@ -2510,11 +2282,7 @@ class RAG:
             tags = [str(tag) for tag in tags_raw] if isinstance(tags_raw, list) else []
             text_value = description
             if tags:
-                text_value = (
-                    f"{description}\n\nTags: {', '.join(tags)}"
-                    if description
-                    else f"Tags: {', '.join(tags)}"
-                )
+                text_value = f"{description}\n\nTags: {', '.join(tags)}" if description else f"Tags: {', '.join(tags)}"
 
             source_path = payload.get("source_path")
             file_name = (
@@ -2532,8 +2300,7 @@ class RAG:
                 page_number = None
 
             src: dict[str, Any] = {
-                "text": text_value
-                or f"Image match: {image_id or file_name or 'unknown'}",
+                "text": text_value or f"Image match: {image_id or file_name or 'unknown'}",
                 "preview_text": (text_value or "").strip()[:280],
                 "filename": file_name,
                 "filetype": file_type,
@@ -2544,10 +2311,7 @@ class RAG:
             }
             if file_hash:
                 src["file_hash"] = file_hash
-                preview_url = (
-                    f"/sources/preview?collection={self.qdrant_collection}"
-                    f"&file_hash={file_hash}"
-                )
+                preview_url = f"/sources/preview?collection={self.qdrant_collection}&file_hash={file_hash}"
                 src["preview_url"] = preview_url
                 src["document_url"] = preview_url
             if page_number is not None:
@@ -2589,9 +2353,7 @@ class RAG:
             return [n for n in nodes if n.metadata.get("docint_hier_type") != "coarse"]
         return nodes
 
-    def _resplit_vector_nodes(
-        self, nodes: list[BaseNode]
-    ) -> tuple[list[BaseNode], list[BaseNode]]:
+    def _resplit_vector_nodes(self, nodes: list[BaseNode]) -> tuple[list[BaseNode], list[BaseNode]]:
         """Apply the pre-embed re-splitter to the vector-indexable nodes.
 
         Args:
@@ -2639,7 +2401,7 @@ class RAG:
                 configured embedding budget.
         """
         budget = effective_budget(self.embed_ctx_tokens, self.embed_ctx_safety_margin)
-        for node, text in zip(nodes_to_embed, texts_to_embed):
+        for node, text in zip(nodes_to_embed, texts_to_embed, strict=False):
             if fits_budget(
                 text,
                 budget_tokens=self.embed_ctx_tokens,
@@ -2653,9 +2415,7 @@ class RAG:
                 self.embed_char_token_ratio,
                 token_counter=self._embed_token_counter,
             )
-            counter_state = (
-                "tokenizer" if self._embed_token_counter is not None else "char-ratio"
-            )
+            counter_state = "tokenizer" if self._embed_token_counter is not None else "char-ratio"
             raise EmbeddingInputTooLongError(
                 "Pre-embed safety net caught an oversize payload: "
                 f"node_id={node.node_id} embed_payload_chars={len(text)} "
@@ -2737,7 +2497,7 @@ class RAG:
                 list[list[float]],
                 get_embeddings(chunk_texts),
             )
-            for node, embedding in zip(embed_batch, chunk_embeddings):
+            for node, embedding in zip(embed_batch, chunk_embeddings, strict=False):
                 node.embedding = embedding
 
         return vector_nodes, docstore_nodes
@@ -2789,7 +2549,7 @@ class RAG:
                 list[list[float]],
                 await aget_embeddings(chunk_texts),
             )
-            for node, embedding in zip(embed_batch, chunk_embeddings):
+            for node, embedding in zip(embed_batch, chunk_embeddings, strict=False):
                 node.embedding = embedding
 
         return vector_nodes, docstore_nodes
@@ -2825,9 +2585,7 @@ class RAG:
                 view from the re-split step.
         """
         candidate_ids = {id(node) for node in vector_candidates}
-        non_vector_candidates = [
-            node for node in batch if id(node) not in candidate_ids
-        ]
+        non_vector_candidates = [node for node in batch if id(node) not in candidate_ids]
         return non_vector_candidates + list(docstore_nodes)
 
     def _persist_node_batches(self, nodes: list[BaseNode]) -> None:
@@ -2865,9 +2623,7 @@ class RAG:
                 prepared_vector_nodes,
                 prepared_docstore_nodes,
             ) = self._prepare_vector_nodes_for_insert(vector_candidates)
-            persisted_batch = self._docstore_batch_for_persist(
-                batch, vector_candidates, prepared_docstore_nodes
-            )
+            persisted_batch = self._docstore_batch_for_persist(batch, vector_candidates, prepared_docstore_nodes)
             if persisted_batch:
                 try:
                     self.index.docstore.add_documents(
@@ -2876,8 +2632,7 @@ class RAG:
                     )
                 except Exception as exc:
                     logger.error(
-                        "failed_persist_nodes | batch={}/{} collection={!r} "
-                        "error={!r} node_ids={}",
+                        "failed_persist_nodes | batch={}/{} collection={!r} error={!r} node_ids={}",
                         batch_no,
                         len(batches),
                         self.qdrant_collection,
@@ -2892,10 +2647,14 @@ class RAG:
                 # llama-index's ``insert_nodes`` will not re-embed on a
                 # retry attempt — the retry simply replays the Qdrant
                 # upsert with the same point payloads.
+                # B023: the lambda is consumed synchronously by
+                # retry_with_backoff within this loop iteration, so the
+                # late-binding of ``index`` / ``prepared_vector_nodes`` is
+                # not actually a bug — bind them as defaults to silence.
                 try:
                     retry_with_backoff(
                         "qdrant_insert_nodes",
-                        lambda: index.insert_nodes(prepared_vector_nodes),
+                        lambda idx=index, nodes=prepared_vector_nodes: idx.insert_nodes(nodes),  # type: ignore[misc]
                         max_retries=self.docstore_max_retries,
                         initial_backoff=self.docstore_retry_backoff_seconds,
                         max_backoff=self.docstore_retry_backoff_max_seconds,
@@ -2903,8 +2662,7 @@ class RAG:
                     )
                 except Exception as exc:
                     logger.error(
-                        "orphaned_kv_nodes | batch={}/{} collection={!r} "
-                        "error={!r} max_attempts={} node_ids={}",
+                        "orphaned_kv_nodes | batch={}/{} collection={!r} error={!r} max_attempts={} node_ids={}",
                         batch_no,
                         len(batches),
                         self.qdrant_collection,
@@ -2992,9 +2750,7 @@ class RAG:
                 prepared_vector_nodes,
                 prepared_docstore_nodes,
             ) = await self._aprepare_vector_nodes_for_insert(vector_candidates)
-            persisted_batch = self._docstore_batch_for_persist(
-                batch, vector_candidates, prepared_docstore_nodes
-            )
+            persisted_batch = self._docstore_batch_for_persist(batch, vector_candidates, prepared_docstore_nodes)
             if persisted_batch:
                 try:
                     self.index.docstore.add_documents(
@@ -3003,8 +2759,7 @@ class RAG:
                     )
                 except Exception as exc:
                     logger.error(
-                        "failed_persist_nodes | batch={}/{} collection={!r} "
-                        "error={!r} node_ids={}",
+                        "failed_persist_nodes | batch={}/{} collection={!r} error={!r} node_ids={}",
                         batch_no,
                         len(batches),
                         self.qdrant_collection,
@@ -3015,12 +2770,18 @@ class RAG:
             if prepared_vector_nodes:
                 index = self.index
 
-                async def _do_ainsert() -> None:
+                # B023: see sync twin — closure consumed synchronously inside
+                # aretry_with_backoff within this loop iteration; default-bind
+                # the loop vars to silence the late-binding warning.
+                async def _do_ainsert(
+                    idx: Any = index,
+                    nodes: Any = prepared_vector_nodes,
+                ) -> None:
                     # See sync twin for the retry-safety invariant —
                     # nodes are pre-embedded by
                     # ``_aprepare_vector_nodes_for_insert`` so a retry
                     # replays the upsert without re-embedding.
-                    await index.ainsert_nodes(prepared_vector_nodes)
+                    await idx.ainsert_nodes(nodes)
 
                 try:
                     await aretry_with_backoff(
@@ -3033,8 +2794,7 @@ class RAG:
                     )
                 except Exception as exc:
                     logger.error(
-                        "orphaned_kv_nodes | batch={}/{} collection={!r} "
-                        "error={!r} max_attempts={} node_ids={}",
+                        "orphaned_kv_nodes | batch={}/{} collection={!r} error={!r} max_attempts={} node_ids={}",
                         batch_no,
                         len(batches),
                         self.qdrant_collection,
@@ -3054,7 +2814,6 @@ class RAG:
         Returns:
             str | None: The extracted file hash, or None if not found.
         """
-
         if not isinstance(data, dict):
             return None
 
@@ -3183,10 +2942,7 @@ class RAG:
         """
         origin = payload.get("origin") or {}
         filename = (
-            origin.get("filename")
-            or payload.get("file_name")
-            or payload.get("filename")
-            or payload.get("file_path")
+            origin.get("filename") or payload.get("file_name") or payload.get("filename") or payload.get("file_path")
         )
         filetype = (
             origin.get("filetype")
@@ -3196,14 +2952,8 @@ class RAG:
             or payload.get("file_type")
             or payload.get("file_format")
         )
-        source_kind = (
-            payload.get("source") or payload.get("source_type") or payload.get("reader")
-        )
-        file_hash = (
-            origin.get("file_hash")
-            or payload.get("file_hash")
-            or RAG._extract_file_hash(payload)
-        )
+        source_kind = payload.get("source") or payload.get("source_type") or payload.get("reader")
+        file_hash = origin.get("file_hash") or payload.get("file_hash") or RAG._extract_file_hash(payload)
 
         page = (
             payload.get("page")
@@ -3255,14 +3005,10 @@ class RAG:
         except Exception:
             row_index = None
 
-        resolved_text = (
-            text_value if text_value is not None else RAG._extract_payload_text(payload)
-        )
+        resolved_text = text_value if text_value is not None else RAG._extract_payload_text(payload)
         preview_url: str | None = None
         if file_hash:
-            preview_url = (
-                f"/sources/preview?collection={collection}&file_hash={file_hash}"
-            )
+            preview_url = f"/sources/preview?collection={collection}&file_hash={file_hash}"
 
         src: dict[str, Any] = {
             "text": resolved_text,
@@ -3340,8 +3086,7 @@ class RAG:
                             payload.setdefault("text", text_value.strip())
                         payload.setdefault(
                             "node_id",
-                            getattr(node, "node_id", None)
-                            or getattr(node, "id_", None),
+                            getattr(node, "node_id", None) or getattr(node, "id_", None),
                         )
                         break
         except Exception:
@@ -3349,9 +3094,7 @@ class RAG:
 
         if payload is None:
             try:
-                recs = self.qdrant_client.retrieve(
-                    collection_name=self.qdrant_collection, ids=[node_id]
-                )
+                recs = self.qdrant_client.retrieve(collection_name=self.qdrant_collection, ids=[node_id])
                 if recs:
                     candidate = getattr(recs[0], "payload", None)
                     if isinstance(candidate, dict):
@@ -3373,15 +3116,12 @@ class RAG:
         Returns:
             set[str]: A set of existing file hashes.
         """
-
         existing: set[str] = set()
 
         try:
             _ = self.qdrant_client
         except Exception as exc:
-            logger.warning(
-                "Unable to initialize Qdrant client for hash lookup: {}", exc
-            )
+            logger.warning("Unable to initialize Qdrant client for hash lookup: {}", exc)
             return existing
 
         offset: Any = None
@@ -3435,8 +3175,9 @@ class RAG:
         return existing
 
     def create_index(self) -> None:
-        """Materialize a VectorStoreIndex. If nodes are present in memory, create from nodes.
-        Otherwise, load from vector store.
+        """Materialize a VectorStoreIndex.
+
+        If nodes are present in memory, create from nodes; otherwise, load from vector store.
         """
         vector_store = self._vector_store()
         storage_ctx = self._storage_context(vector_store)
@@ -3574,7 +3315,7 @@ class RAG:
         if timestamp_raw:
             try:
                 parsed = datetime.fromisoformat(timestamp_raw.replace("Z", "+00:00"))
-                time_bucket = parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H")
+                time_bucket = parsed.astimezone(UTC).strftime("%Y-%m-%dT%H")
             except ValueError:
                 time_bucket = timestamp_raw[:13]
         return f"{author.lower()}::{time_bucket}"
@@ -3584,10 +3325,7 @@ class RAG:
         """Infer coverage unit from normalized source metadata."""
         for source in sources:
             reference_metadata = source.get("reference_metadata")
-            if (
-                isinstance(reference_metadata, dict)
-                and str(reference_metadata.get("text_id") or "").strip()
-            ):
+            if isinstance(reference_metadata, dict) and str(reference_metadata.get("text_id") or "").strip():
                 return "posts"
         return "chunks"
 
@@ -3595,24 +3333,17 @@ class RAG:
         """Infer whether the active collection is social/table heavy."""
         docs = self.list_documents()
         payloads = self._sample_collection_payloads(limit=96)
-        social_payloads = [
-            payload for payload in payloads if self._is_social_payload(payload)
-        ]
+        social_payloads = [payload for payload in payloads if self._is_social_payload(payload)]
         table_docs = [doc for doc in docs if "max_rows" in doc]
         is_social_table = bool(social_payloads) and (
-            len(docs) <= 3
-            or len(table_docs) == len(docs)
-            or len(social_payloads) >= max(3, len(payloads) // 3)
+            len(docs) <= 3 or len(table_docs) == len(docs) or len(social_payloads) >= max(3, len(payloads) // 3)
         )
         coverage_unit = "documents"
         if is_social_table:
             coverage_unit = "posts"
             for payload in social_payloads:
                 reference_metadata = self._extract_reference_metadata(payload) or {}
-                if (
-                    not isinstance(reference_metadata, dict)
-                    or not str(reference_metadata.get("text_id") or "").strip()
-                ):
+                if not isinstance(reference_metadata, dict) or not str(reference_metadata.get("text_id") or "").strip():
                     coverage_unit = "chunks"
                     break
         return {
@@ -3666,11 +3397,13 @@ class RAG:
         """Merge request-scoped filters with internal retrieval filters.
 
         Args:
-            base_filters (MetadataFilters | None): The original filters provided at the query engine level, or None if no filters were provided.
-            extra_filters (list[MetadataFilter]): Additional filters that must be applied for retrieval, such as parent-context scoping.
+            base_filters (MetadataFilters | None): Original filters from the query engine, or None.
+            extra_filters (list[MetadataFilter]): Additional filters that must be applied for
+                retrieval, such as parent-context scoping.
 
         Returns:
-            MetadataFilters | None: A new MetadataFilters object that combines the base filters and extra filters with an AND condition, or None if there are no filters to apply.
+            MetadataFilters | None: ``base_filters`` AND ``extra_filters`` combined, or None if
+                neither produces any filter.
         """
         if not extra_filters:
             return base_filters
@@ -3691,15 +3424,13 @@ class RAG:
         """Resolve runtime retrieval mode for the vector index retriever.
 
         Args:
-            raw_mode (str | None): An optional retrieval mode string provided at call time, which takes precedence over config settings. Expected values
-                are "auto", "default", "sparse", "hybrid", or "mmr".
+            raw_mode (str | None): Optional retrieval mode string from the call site (takes
+                precedence over config). One of "auto", "default", "sparse", "hybrid", or "mmr".
 
         Returns:
-            VectorStoreQueryMode: The resolved retrieval mode to use for the current retrieval operation.
+            VectorStoreQueryMode: The resolved retrieval mode for this retrieval operation.
         """
-        mode_value = (
-            str(raw_mode or self.vector_store_query_mode or "auto").strip().lower()
-        )
+        mode_value = str(raw_mode or self.vector_store_query_mode or "auto").strip().lower()
         if mode_value == "auto":
             mode_value = "hybrid" if self.enable_hybrid else "default"
 
@@ -3710,10 +3441,7 @@ class RAG:
             "mmr": VectorStoreQueryMode.MMR,
         }
         resolved = mode_map.get(mode_value, VectorStoreQueryMode.DEFAULT)
-        if (
-            resolved in {VectorStoreQueryMode.HYBRID, VectorStoreQueryMode.SPARSE}
-            and not self.enable_hybrid
-        ):
+        if resolved in {VectorStoreQueryMode.HYBRID, VectorStoreQueryMode.SPARSE} and not self.enable_hybrid:
             logger.warning(
                 "Retrieval mode '{}' requested without hybrid support; falling back to dense retrieval.",
                 mode_value,
@@ -3730,20 +3458,22 @@ class RAG:
         """Resolve retrieval settings from config plus optional call-site overrides.
 
         Args:
-            similarity_top_k (int | None): An optional override for the number of top similar results to retrieve, which takes precedence over config settings.
-            retrieval_options (dict[str, Any] | None): An optional dictionary of runtime retrieval overrides, which may include "vector_store_query_mode", "alpha",
-                "sparse_top_k", "hybrid_top_k", and "parent_context_enabled". These options take precedence over config settings and are used to
-                dynamically adjust retrieval behavior on a per-query basis.
+            similarity_top_k (int | None): Optional override for the number of top similar results
+                (takes precedence over config).
+            retrieval_options (dict[str, Any] | None): Optional runtime overrides; recognized keys
+                are ``vector_store_query_mode``, ``alpha``, ``sparse_top_k``, ``hybrid_top_k``, and
+                ``parent_context_enabled``. Take precedence over config; used to adjust retrieval
+                behavior per query.
 
         Returns:
-            dict[str, Any]: A dictionary containing the resolved retrieval settings to apply for the current retrieval operation, including:
-                - "similarity_top_k": The effective number of top similar results to retrieve.
-                - "vector_store_query_mode": The resolved retrieval mode to use.
-                - "alpha": The hybrid fusion alpha value (if applicable).
-                - "sparse_top_k": The number of top sparse results to retrieve (if applicable).
-                - "hybrid_top_k": The number of top hybrid results to retrieve (if applicable).
-                - "parent_context_enabled": Whether parent-context expansion is enabled for this retrieval.
-                - "label": A string label summarizing the retrieval mode and parent context status, useful for logging and analytics.
+            dict[str, Any]: Resolved settings for this retrieval, with keys:
+                - ``similarity_top_k``: effective number of top similar results.
+                - ``vector_store_query_mode``: resolved retrieval mode.
+                - ``alpha``: hybrid fusion alpha (if applicable).
+                - ``sparse_top_k``: number of top sparse results (if applicable).
+                - ``hybrid_top_k``: number of top hybrid results (if applicable).
+                - ``parent_context_enabled``: whether parent-context expansion is on.
+                - ``label``: short label summarizing mode + parent-context status, for logs.
         """
         overrides = retrieval_options or {}
         resolved_mode = self._resolve_vector_store_query_mode(
@@ -3786,11 +3516,11 @@ class RAG:
         """Return the grounded QA prompt template for answer synthesis.
 
         Args:
-            social_table (bool): Whether the active collection appears to be social/table heavy, which may require special
+            social_table (bool): Whether the active collection is social/table-heavy and needs
                 instructions to preserve post-level distinctions during synthesis.
 
         Returns:
-            PromptTemplate: The constructed prompt template to use for grounded question-answering during response synthesis.
+            PromptTemplate: Prompt template for grounded QA during response synthesis.
         """
         prompt = self.grounded_text_qa_prompt
         if social_table:
@@ -3805,11 +3535,11 @@ class RAG:
         """Return the grounded refine prompt template for answer synthesis.
 
         Args:
-            social_table (bool): Whether the active collection appears to be social/table heavy, which may require special
+            social_table (bool): Whether the active collection is social/table-heavy and needs
                 instructions to preserve post-level distinctions during synthesis.
 
         Returns:
-            PromptTemplate: The constructed prompt template to use for grounded question-answering during response synthesis.
+            PromptTemplate: Prompt template for grounded refinement during response synthesis.
         """
         prompt = self.grounded_refine_prompt
         if social_table:
@@ -3827,11 +3557,11 @@ class RAG:
         ``{context_str}`` via the grounded templates
         (:meth:`_build_grounded_text_qa_template`,
         :meth:`_build_grounded_refine_template`). Both templates render
-        at ~150–200 tokens with an empty ``context_str``; the refine
+        at ~150-200 tokens with an empty ``context_str``; the refine
         path additionally includes the prior ``existing_answer``. We
         estimate both and subtract the larger one, plus
         ``openai_num_output`` and a small slack, from
-        ``openai_ctx_window × safety_margin``.
+        ``openai_ctx_window * safety_margin``.
 
         Args:
             social_table: Forwarded to the grounded template builders
@@ -3921,9 +3651,7 @@ class RAG:
                 )
             )
 
-        merged_filters = self._merge_metadata_filters(
-            metadata_filters, internal_filters
-        )
+        merged_filters = self._merge_metadata_filters(metadata_filters, internal_filters)
 
         retriever_kwargs: dict[str, Any] = {
             "similarity_top_k": retrieval_settings["similarity_top_k"],
@@ -3935,9 +3663,7 @@ class RAG:
             retriever_kwargs["alpha"] = retrieval_settings["alpha"]
             retriever_kwargs["sparse_top_k"] = retrieval_settings["sparse_top_k"]
             retriever_kwargs["hybrid_top_k"] = retrieval_settings["hybrid_top_k"]
-        elif (
-            retrieval_settings["vector_store_query_mode"] == VectorStoreQueryMode.SPARSE
-        ):
+        elif retrieval_settings["vector_store_query_mode"] == VectorStoreQueryMode.SPARSE:
             retriever_kwargs["sparse_top_k"] = retrieval_settings["sparse_top_k"]
         if vector_store_kwargs:
             retriever_kwargs["vector_store_kwargs"] = vector_store_kwargs
@@ -3971,9 +3697,7 @@ class RAG:
             retrieval_options=retrieval_options,
         )
         response_mode = self._resolve_chat_response_mode()
-        node_postprocessors: list[BaseNodePostprocessor] = [
-            LazyRerankerPostprocessor(rag=self)
-        ]
+        node_postprocessors: list[BaseNodePostprocessor] = [LazyRerankerPostprocessor(rag=self)]
         if retrieval_settings["parent_context_enabled"] and self.index is not None:
             usable_tokens, per_hit_floor = self._compute_parent_context_budget(
                 social_table=bool(profile.get("is_social_table")),
@@ -3995,9 +3719,7 @@ class RAG:
             )
         if bool(profile.get("is_social_table")):
             node_postprocessors.append(
-                SocialSourceDiversityPostprocessor(
-                    diversity_limit=max(1, int(self.social_summary_diversity_limit))
-                )
+                SocialSourceDiversityPostprocessor(diversity_limit=max(1, int(self.social_summary_diversity_limit)))
             )
 
         return RetrieverQueryEngine.from_args(
@@ -4010,12 +3732,8 @@ class RAG:
             node_postprocessors=node_postprocessors,
             streaming=streaming,
             response_mode=response_mode,
-            text_qa_template=self._build_grounded_text_qa_template(
-                social_table=bool(profile.get("is_social_table"))
-            ),
-            refine_template=self._build_grounded_refine_template(
-                social_table=bool(profile.get("is_social_table"))
-            ),
+            text_qa_template=self._build_grounded_text_qa_template(social_table=bool(profile.get("is_social_table"))),
+            refine_template=self._build_grounded_refine_template(social_table=bool(profile.get("is_social_table"))),
         )
 
     def _source_from_node_with_score(self, nws: Any) -> dict[str, Any] | None:
@@ -4068,12 +3786,7 @@ class RAG:
                 continue
             seen.add(dedupe_key)
 
-            label = (
-                source.get("filename")
-                or source.get("file_hash")
-                or source.get("source")
-                or "source"
-            )
+            label = source.get("filename") or source.get("file_hash") or source.get("source") or "source"
             location_parts: list[str] = []
             page = source.get("page")
             row = source.get("row")
@@ -4107,11 +3820,12 @@ class RAG:
         coverage_unit: str | None = None,
         retrieval_mode: str | None = None,
     ) -> dict[str, Any]:
-        """Normalize both llama_index.core.Response and AgentChatResponse into a single payload.
+        """Normalize llama_index.core.Response and AgentChatResponse into a single payload.
+
         Handles:
         - response text (result.response or result.text)
         - source_nodes (list[NodeWithScore])
-        - metadata differences
+        - metadata differences.
 
         Args:
             query (str): The original query string.
@@ -4121,6 +3835,12 @@ class RAG:
                 filters were active for the retrieval.
             metadata_filter_rules (Sequence[Any] | None): Optional raw request
                 filter payloads for post-filtering auxiliary image sources.
+            retrieval_query (str | None): The query string actually used for retrieval (may
+                differ from ``query`` after rewriting).
+            coverage_unit (str | None): Unit label for coverage reporting (e.g. "rows",
+                "chunks") used in the response metadata.
+            retrieval_mode (str | None): Effective retrieval mode for this call (e.g. "hybrid",
+                "sparse"); recorded in the response metadata for diagnostics.
 
         Returns:
             dict[str, Any]: A dictionary containing:
@@ -4256,9 +3976,7 @@ class RAG:
                     payload=payload,
                 )
                 source["chunk_id"] = str(
-                    payload.get("node_id")
-                    or payload.get("id_")
-                    or str(getattr(point, "id", "") or "")
+                    payload.get("node_id") or payload.get("id_") or str(getattr(point, "id", "") or "")
                 )
                 source["chunk_text"] = str(source.get("text") or "")
                 sources.append(source)
@@ -4364,12 +4082,9 @@ class RAG:
         strong_matches = [
             row
             for row in entity_matches
-            if int(row["match_rank"]) == best_rank
-            and str(row.get("match_alias") or "").strip().lower() == top_alias
+            if int(row["match_rank"]) == best_rank and str(row.get("match_alias") or "").strip().lower() == top_alias
         ]
-        return strong_matches or [
-            row for row in entity_matches if int(row["match_rank"]) == best_rank
-        ]
+        return strong_matches or [row for row in entity_matches if int(row["match_rank"]) == best_rank]
 
     @staticmethod
     def _entity_candidate_payload(entity_match: dict[str, Any]) -> dict[str, Any]:
@@ -4401,6 +4116,7 @@ class RAG:
             sources (list[dict[str, Any]]): Candidate NER-bearing source rows.
             matched_entity (dict[str, Any]): Selected entity match metadata.
             limit (int): Maximum number of source rows retained for the entity.
+            entity_merge_mode (EntityMergeMode): Entity clustering mode used for derived views.
 
         Returns:
             dict[str, Any]: Group payload containing entity metadata and sources.
@@ -4516,9 +4232,11 @@ class RAG:
 
         Args:
             prompt (str): Raw user query used to identify the target entity.
-            qdrant_filter (qdrant_models.Filter | None): Optional native Qdrant filter to constrain candidate rows.
+            qdrant_filter (qdrant_models.Filter | None): Optional native Qdrant filter to
+                constrain candidate rows.
             limit (int): Maximum number of occurrence rows to return.
             refresh (bool): Whether to bypass cached NER rows when no native filter is used.
+            entity_merge_mode (EntityMergeMode): Entity clustering mode used for derived views.
 
         Returns:
             dict[str, Any]: A response payload aligned with the normal query path.
@@ -4541,10 +4259,7 @@ class RAG:
             return {
                 "query": query,
                 "reasoning": None,
-                "response": (
-                    f"I couldn't find a named-entity match for '{query}' in the "
-                    "active collection."
-                ),
+                "response": (f"I couldn't find a named-entity match for '{query}' in the active collection."),
                 "sources": [],
                 "retrieval_query": query,
                 "coverage_unit": "entity_mentions",
@@ -4571,9 +4286,7 @@ class RAG:
                 "vector_query_mode": "entity_occurrence",
                 "retrieval_profile": "entity_occurrence_ambiguous",
                 "parent_context_enabled": False,
-                "entity_match_candidates": [
-                    self._entity_candidate_payload(match) for match in strong_matches
-                ],
+                "entity_match_candidates": [self._entity_candidate_payload(match) for match in strong_matches],
                 "entity_match_groups": [],
             }
 
@@ -4624,9 +4337,11 @@ class RAG:
 
         Args:
             prompt (str): Raw user query used to identify the target entities.
-            qdrant_filter (qdrant_models.Filter | None): Optional native Qdrant filter to constrain candidate rows.
+            qdrant_filter (qdrant_models.Filter | None): Optional native Qdrant filter to
+                constrain candidate rows.
             limit (int): Maximum number of source rows retained across all groups.
             refresh (bool): Whether to bypass cached NER rows when no native filter is used.
+            entity_merge_mode (EntityMergeMode): Entity clustering mode used for derived views.
 
         Returns:
             dict[str, Any]: Grouped occurrence payload.
@@ -4649,10 +4364,7 @@ class RAG:
             return {
                 "query": query,
                 "reasoning": None,
-                "response": (
-                    f"I couldn't find a named-entity match for '{query}' in the "
-                    "active collection."
-                ),
+                "response": (f"I couldn't find a named-entity match for '{query}' in the active collection."),
                 "sources": [],
                 "retrieval_query": query,
                 "coverage_unit": "entity_mentions",
@@ -4677,9 +4389,7 @@ class RAG:
         ]
         groups = [group for group in groups if list(group.get("sources") or [])]
 
-        flattened_sources = self._flatten_occurrence_groups(
-            groups, limit=per_group_limit
-        )
+        flattened_sources = self._flatten_occurrence_groups(groups, limit=per_group_limit)
         total_chunks = sum(int(group.get("chunk_count", 0) or 0) for group in groups)
         total_documents = len(
             {
@@ -4704,9 +4414,7 @@ class RAG:
             "vector_query_mode": "entity_occurrence_multi",
             "retrieval_profile": "entity_occurrence_multi",
             "parent_context_enabled": False,
-            "entity_match_candidates": [
-                self._entity_candidate_payload(match) for match in strong_matches
-            ],
+            "entity_match_candidates": [self._entity_candidate_payload(match) for match in strong_matches],
             "entity_match_groups": groups,
         }
 
@@ -4817,7 +4525,7 @@ class RAG:
                 src_path = self.qdrant_src_dir / collection_name
                 if src_path.exists():
 
-                    def on_error(func: Callable, path: str, _exc_info: Any) -> None:
+                    def on_error(func: Callable[..., Any], path: str, _exc_info: Any) -> None:
                         """Error handler for shutil.rmtree.
 
                         Attempts to fix permissions/flags and retry operation.
@@ -4939,9 +4647,7 @@ class RAG:
         doc_store: KVDocumentStore | None = None
         if db_path.exists():
             kv_store = self._build_kv_store(collection=target)
-            doc_store = KVDocumentStore(
-                kvstore=kv_store, batch_size=self.docstore_batch_size
-            )
+            doc_store = KVDocumentStore(kvstore=kv_store, batch_size=self.docstore_batch_size)
             kv_docs = doc_store.docs
         else:
             logger.warning(
@@ -5045,9 +4751,7 @@ class RAG:
         """
         if not self.qdrant_collection:
             return data_dir
-        return stage_sources_to_qdrant(
-            data_dir, self.qdrant_collection, self.qdrant_src_dir
-        )
+        return stage_sources_to_qdrant(data_dir, self.qdrant_collection, self.qdrant_src_dir)
 
     def create_collection_if_missing(self) -> None:
         """Materialize the target Qdrant collection upfront if it does not yet exist.
@@ -5063,10 +4767,12 @@ class RAG:
         do it. Constructing that class eagerly loads the fastembed
         sparse encoder (onnxruntime + tokenizer, ~150-200 MB of native
         memory that resists GC), which in combination with the second
-        ``QdrantVectorStore`` built by ``ingest_docs`` and the GLiNER
-        weights tripped the kernel OOM killer on CSV ingests. We
-        therefore pay the schema-replication cost (defaults pinned to
-        LlamaIndex's constants) to avoid the duplicate native load.
+        ``QdrantVectorStore`` built by ``ingest_docs`` and the in-process
+        GLiNER weights (now removed — NER is a remote service hosted by
+        ``vllm-service``) tripped the kernel OOM killer on CSV ingests.
+        The duplicate-load risk is smaller post-GLiNER, but we still pay
+        the schema-replication cost (defaults pinned to LlamaIndex's
+        constants) to avoid the duplicate native load from fastembed.
 
         When ``openai_dimensions`` is configured the vector size is taken
         from there; otherwise a single embed probe determines it. Probe
@@ -5102,9 +4808,7 @@ class RAG:
             # the configured sparse model is in qdrant_client's IDF set.
             sparse_model_name = self.sparse_model
             modifier = (
-                qdrant_models.Modifier.IDF
-                if sparse_model_name and sparse_model_name in IDF_EMBEDDING_MODELS
-                else None
+                qdrant_models.Modifier.IDF if sparse_model_name and sparse_model_name in IDF_EMBEDDING_MODELS else None
             )
             sparse_params = qdrant_models.SparseVectorParams(
                 index=qdrant_models.SparseIndexParams(),
@@ -5162,8 +4866,7 @@ class RAG:
             except Exception as exc:
                 logger.warning("Empty-ingestion progress callback failed: {}", exc)
         logger.warning(
-            "No documents produced during ingestion of '{}'; cleaning up "
-            "empty KV store and companion collections.",
+            "No documents produced during ingestion of '{}'; cleaning up empty KV store and companion collections.",
             collection,
         )
 
@@ -5224,9 +4927,7 @@ class RAG:
         # outage immediately instead of masking it as a zero-node "success".
         self.create_collection_if_missing()
 
-        prepared_dir = self._prepare_sources_dir(
-            Path(data_dir) if isinstance(data_dir, str) else data_dir
-        )
+        prepared_dir = self._prepare_sources_dir(Path(data_dir) if isinstance(data_dir, str) else data_dir)
         self.data_dir = prepared_dir
         ingest_started_at = time.monotonic()
         core_docs = 0
@@ -5300,9 +5001,7 @@ class RAG:
                     try:
                         self._persist_node_batches(nodes)
                     except Exception as exc:
-                        per_batch = (
-                            {file_hash} if file_hash else set(manifest_in_flight)
-                        )
+                        per_batch = {file_hash} if file_hash else set(manifest_in_flight)
                         _handle_batch_failure(per_batch, exc)
                         manifest_in_flight -= per_batch
                         continue
@@ -5319,13 +5018,9 @@ class RAG:
 
             # Process batches from the pipeline generator, persisting nodes as
             # soon as each enrichment micro-batch completes when supported.
-            if hasattr(pipeline, "build_streaming") and callable(
-                getattr(pipeline, "build_streaming")
-            ):
+            if hasattr(pipeline, "build_streaming") and callable(pipeline.build_streaming):
                 if self.ingest_pipeline_overlap_enabled:
-                    streaming_iter: Iterable[
-                        tuple[list[Document], list[BaseNode], set[str]]
-                    ] = overlapped(
+                    streaming_iter: Iterable[tuple[list[Document], list[BaseNode], set[str]]] = overlapped(
                         lambda: pipeline.build_streaming(processed_hashes),
                         queue_max_size=self.ingest_queue_max_size,
                     )
@@ -5347,9 +5042,7 @@ class RAG:
                             manifest_in_flight -= batch_hashes
                             continue
                         streaming_nodes += len(nodes)
-                        persist_batches += len(
-                            chunk_nodes(nodes, self.docstore_batch_size)
-                        )
+                        persist_batches += len(chunk_nodes(nodes, self.docstore_batch_size))
                         enrich_batches += 1
                     if completed_hashes:
                         processed_hashes.update(completed_hashes)
@@ -5363,9 +5056,7 @@ class RAG:
                     if nodes:
                         self._persist_node_batches(nodes)
                         streaming_nodes += len(nodes)
-                        persist_batches += len(
-                            chunk_nodes(nodes, self.docstore_batch_size)
-                        )
+                        persist_batches += len(chunk_nodes(nodes, self.docstore_batch_size))
         except Exception as exc:
             # Generator-level exception or fail-fast escape: mark every
             # remaining in-flight file failed and abort.
@@ -5375,9 +5066,7 @@ class RAG:
         finally:
             manifest.close()
             if ingest_failures:
-                aggregated = sorted(
-                    {fh for hashes, _ in ingest_failures for fh in hashes}
-                )
+                aggregated = sorted({fh for hashes, _ in ingest_failures for fh in hashes})
                 logger.warning(
                     "Ingest finished with {} failed batch(es) "
                     "(skip-and-continue): collection={!r} failed_file_hashes={}",
@@ -5430,11 +5119,9 @@ class RAG:
 
         if self.query_engine is not None:
             logger.info(
-                "Effective retrieval k={} | top_n={} | embed_device={} | rerank_device={}",
+                "Effective retrieval k={} | top_n={} (embed/rerank served remotely)",
                 eff_k,
                 self.rerank_top_n,
-                self.device,
-                self.device,
             )
         if self.ingest_benchmark_enabled:
             self._log_ingest_benchmark_summary(
@@ -5476,9 +5163,7 @@ class RAG:
         # selectable in the UI even when every embedding batch fails.
         self.create_collection_if_missing()
 
-        prepared_dir = self._prepare_sources_dir(
-            Path(data_dir) if isinstance(data_dir, str) else data_dir
-        )
+        prepared_dir = self._prepare_sources_dir(Path(data_dir) if isinstance(data_dir, str) else data_dir)
         self.data_dir = prepared_dir
         ingest_started_at = time.monotonic()
         core_docs = 0
@@ -5543,9 +5228,7 @@ class RAG:
                     try:
                         await self._apersist_node_batches(nodes)
                     except Exception as exc:
-                        per_batch = (
-                            {file_hash} if file_hash else set(manifest_in_flight)
-                        )
+                        per_batch = {file_hash} if file_hash else set(manifest_in_flight)
                         _handle_batch_failure(per_batch, exc)
                         manifest_in_flight -= per_batch
                         continue
@@ -5560,12 +5243,8 @@ class RAG:
 
             # Process batches, persisting nodes as soon as each enrichment
             # micro-batch completes when supported.
-            if hasattr(pipeline, "build_streaming") and callable(
-                getattr(pipeline, "build_streaming")
-            ):
-                for docs, nodes, completed_hashes in pipeline.build_streaming(
-                    processed_hashes
-                ):
+            if hasattr(pipeline, "build_streaming") and callable(pipeline.build_streaming):
+                for docs, nodes, completed_hashes in pipeline.build_streaming(processed_hashes):
                     if docs:
                         streaming_docs += len(docs)
                     batch_hashes = _extract_node_file_hashes(nodes)
@@ -5581,9 +5260,7 @@ class RAG:
                             manifest_in_flight -= batch_hashes
                             continue
                         streaming_nodes += len(nodes)
-                        persist_batches += len(
-                            chunk_nodes(nodes, self.docstore_batch_size)
-                        )
+                        persist_batches += len(chunk_nodes(nodes, self.docstore_batch_size))
                         enrich_batches += 1
                     if completed_hashes:
                         processed_hashes.update(completed_hashes)
@@ -5597,9 +5274,7 @@ class RAG:
                     if nodes:
                         await self._apersist_node_batches(nodes)
                         streaming_nodes += len(nodes)
-                        persist_batches += len(
-                            chunk_nodes(nodes, self.docstore_batch_size)
-                        )
+                        persist_batches += len(chunk_nodes(nodes, self.docstore_batch_size))
         except Exception as exc:
             for fh in manifest_in_flight:
                 manifest.mark_failed(self.qdrant_collection, fh, repr(exc))
@@ -5607,9 +5282,7 @@ class RAG:
         finally:
             manifest.close()
             if ingest_failures:
-                aggregated = sorted(
-                    {fh for hashes, _ in ingest_failures for fh in hashes}
-                )
+                aggregated = sorted({fh for hashes, _ in ingest_failures for fh in hashes})
                 logger.warning(
                     "Async ingest finished with {} failed batch(es) "
                     "(skip-and-continue): collection={!r} failed_file_hashes={}",
@@ -5660,11 +5333,9 @@ class RAG:
 
         if self.query_engine is not None:
             logger.info(
-                "Effective retrieval k={} | top_n={} | embed_device={} | rerank_device={}",
+                "Effective retrieval k={} | top_n={} (embed/rerank served remotely)",
                 eff_k,
                 self.rerank_top_n,
-                self.device,
-                self.device,
             )
         if self.ingest_benchmark_enabled:
             self._log_ingest_benchmark_summary(
@@ -5754,21 +5425,15 @@ class RAG:
         normalized = self._normalize_response_data(
             prompt,
             result,
-            metadata_filters_active=(
-                metadata_filters is not None or bool(vector_store_kwargs)
-            ),
+            metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
             metadata_filter_rules=metadata_filter_rules,
         )
         retrieval_settings = self._resolve_runtime_retrieval_settings(
             retrieval_options=retrieval_options,
         )
-        normalized["vector_query_mode"] = retrieval_settings[
-            "vector_store_query_mode"
-        ].value
+        normalized["vector_query_mode"] = retrieval_settings["vector_store_query_mode"].value
         normalized["retrieval_profile"] = retrieval_settings["label"]
-        normalized["parent_context_enabled"] = retrieval_settings[
-            "parent_context_enabled"
-        ]
+        normalized["parent_context_enabled"] = retrieval_settings["parent_context_enabled"]
         return normalized
 
     async def run_query_async(
@@ -5818,9 +5483,7 @@ class RAG:
             # removed, so the default engine can be None on first use.
             # ``build_query_engine`` raises on its own failure modes;
             # no second None guard is needed here.
-            logger.debug(
-                "Query engine not initialized; building lazily for run_query_async."
-            )
+            logger.debug("Query engine not initialized; building lazily for run_query_async.")
             self.query_engine = self.build_query_engine()
             engine = self.query_engine
         try:
@@ -5845,21 +5508,15 @@ class RAG:
         normalized = self._normalize_response_data(
             prompt,
             result,
-            metadata_filters_active=(
-                metadata_filters is not None or bool(vector_store_kwargs)
-            ),
+            metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
             metadata_filter_rules=metadata_filter_rules,
         )
         retrieval_settings = self._resolve_runtime_retrieval_settings(
             retrieval_options=retrieval_options,
         )
-        normalized["vector_query_mode"] = retrieval_settings[
-            "vector_store_query_mode"
-        ].value
+        normalized["vector_query_mode"] = retrieval_settings["vector_store_query_mode"].value
         normalized["retrieval_profile"] = retrieval_settings["label"]
-        normalized["parent_context_enabled"] = retrieval_settings[
-            "parent_context_enabled"
-        ]
+        normalized["parent_context_enabled"] = retrieval_settings["parent_context_enabled"]
         return normalized
 
     # --- Session integration ---
@@ -5891,9 +5548,7 @@ class RAG:
             self._parent_context_support_cache.clear()
             return
 
-        stale_aggregate_keys = [
-            key for key in self.ner_aggregate_cache if key[0] == collection
-        ]
+        stale_aggregate_keys = [key for key in self.ner_aggregate_cache if key[0] == collection]
         for aggregate_key in stale_aggregate_keys:
             self.ner_aggregate_cache.pop(aggregate_key, None)
         stale_graph_keys: list[tuple[str, str, int, int]] = [
@@ -5922,9 +5577,7 @@ class RAG:
             self.sessions = SessionManager(self)
         return self.sessions
 
-    def export_session(
-        self, session_id: str | None = None, out_dir: str | Path = "session"
-    ) -> Path:
+    def export_session(self, session_id: str | None = None, out_dir: str | Path = "session") -> Path:
         """Delegate session export to SessionManager.
 
         Args:
@@ -5935,9 +5588,7 @@ class RAG:
         Returns:
             Path: The path to the exported session file.
         """
-        return self.ensure_session_manager().export_session(
-            session_id=session_id, out_dir=out_dir
-        )
+        return self.ensure_session_manager().export_session(session_id=session_id, out_dir=out_dir)
 
     def start_session(self, session_id: str | None = None) -> str:
         """Start or resume a chat session through SessionManager.
@@ -6022,9 +5673,7 @@ class RAG:
             vector_store_kwargs=vector_store_kwargs,
         )
 
-    def expand_query_with_graph_with_debug(
-        self, query: str
-    ) -> tuple[str, dict[str, Any]]:
+    def expand_query_with_graph_with_debug(self, query: str) -> tuple[str, dict[str, Any]]:
         """Optionally expand a query and return GraphRAG debug metadata.
 
         Args:
@@ -6076,9 +5725,7 @@ class RAG:
                 return query, debug
 
             selected_anchors = [ent for _, ent in anchors[:2]]
-            anchor_texts = [
-                str(ent.get("text") or "").strip() for ent in selected_anchors
-            ]
+            anchor_texts = [str(ent.get("text") or "").strip() for ent in selected_anchors]
             debug["anchor_entities"] = [txt for txt in anchor_texts if txt]
             anchor_text_set = set(debug["anchor_entities"])
             neighbor_texts: list[str] = []
@@ -6167,9 +5814,7 @@ class RAG:
         except Exception:
             return src_filename.lower() == filename.lower()
 
-    def _summary_document_filters(
-        self, *, filename: str, file_hash: str | None
-    ) -> MetadataFilters:
+    def _summary_document_filters(self, *, filename: str, file_hash: str | None) -> MetadataFilters:
         """Build metadata filters that scope retrieval to one document."""
         filters: list[MetadataFilter | MetadataFilters] = [
             MetadataFilter(key="filename", value=filename, operator=FilterOperator.EQ),
@@ -6177,16 +5822,10 @@ class RAG:
             MetadataFilter(key="file_path", value=filename, operator=FilterOperator.EQ),
         ]
         if file_hash:
-            filters.append(
-                MetadataFilter(
-                    key="file_hash", value=file_hash, operator=FilterOperator.EQ
-                )
-            )
+            filters.append(MetadataFilter(key="file_hash", value=file_hash, operator=FilterOperator.EQ))
         return MetadataFilters(filters=filters, condition=FilterCondition.OR)
 
-    def _summary_payload_fallback_nodes(
-        self, *, filename: str, file_hash: str | None
-    ) -> list[NodeWithScore]:
+    def _summary_payload_fallback_nodes(self, *, filename: str, file_hash: str | None) -> list[NodeWithScore]:
         """Build synthetic summary nodes by scrolling stored payloads.
 
         This fallback bypasses query embeddings entirely, so summary generation
@@ -6273,26 +5912,19 @@ class RAG:
 
         return matched_nodes
 
-    def _retrieve_summary_nodes_for_document(
-        self, *, filename: str, file_hash: str | None
-    ) -> list[Any]:
+    def _retrieve_summary_nodes_for_document(self, *, filename: str, file_hash: str | None) -> list[Any]:
         """Retrieve top evidence nodes for a single document."""
         if self.index is None:
             self.create_index()
         if self.index is None:
             return []
 
-        query = (
-            f"Extract factual highlights and notable findings from '{filename}'. "
-            "Focus on substantive content."
-        )
+        query = f"Extract factual highlights and notable findings from '{filename}'. Focus on substantive content."
         top_k = max(1, self.summary_per_doc_top_k)
         try:
             retriever = self.index.as_retriever(
                 similarity_top_k=top_k,
-                filters=self._summary_document_filters(
-                    filename=filename, file_hash=file_hash
-                ),
+                filters=self._summary_document_filters(filename=filename, file_hash=file_hash),
             )
             nodes = retriever.retrieve(query)
             if isinstance(nodes, list):
@@ -6314,17 +5946,13 @@ class RAG:
                 source = self._source_from_node_with_score(nws)
                 if source is None:
                     continue
-                if self._summary_source_matches_document(
-                    source, filename=filename, file_hash=file_hash
-                ):
+                if self._summary_source_matches_document(source, filename=filename, file_hash=file_hash):
                     matched_nodes.append(nws)
                 if len(matched_nodes) >= top_k:
                     break
             return matched_nodes
         except Exception as exc:
-            logger.warning(
-                "Fallback summary retrieval failed for '{}': {}", filename, exc
-            )
+            logger.warning("Fallback summary retrieval failed for '{}': {}", filename, exc)
             return self._summary_payload_fallback_nodes(
                 filename=filename,
                 file_hash=file_hash,
@@ -6355,9 +5983,7 @@ class RAG:
             ]
         )
 
-    def _summary_document_brief(
-        self, *, filename: str, sources: list[dict[str, Any]]
-    ) -> str:
+    def _summary_document_brief(self, *, filename: str, sources: list[dict[str, Any]]) -> str:
         """Build one compact, evidence-first brief for a document.
 
         Args:
@@ -6369,9 +5995,7 @@ class RAG:
         """
         snippets: list[str] = []
         for source in sources:
-            raw_text = str(
-                source.get("preview_text") or source.get("text") or ""
-            ).strip()
+            raw_text = str(source.get("preview_text") or source.get("text") or "").strip()
             if not raw_text:
                 continue
             compact = re.sub(r"\s+", " ", raw_text)
@@ -6382,23 +6006,19 @@ class RAG:
         if not snippets:
             return f"- Document: {filename}\n  - Evidence: (none)"
 
-        evidence_lines = "\n".join(
-            f"  - Evidence {idx}: {snippet}"
-            for idx, snippet in enumerate(snippets, start=1)
-        )
+        evidence_lines = "\n".join(f"  - Evidence {idx}: {snippet}" for idx, snippet in enumerate(snippets, start=1))
         key_points = " ; ".join(snippets)
         return f"- Document: {filename}\n  - Key points: {key_points}\n{evidence_lines}"
 
-    def _merge_summary_sources(
-        self, per_doc_sources: dict[str, list[dict[str, Any]]]
-    ) -> list[dict[str, Any]]:
+    def _merge_summary_sources(self, per_doc_sources: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
         """Merge per-document evidence and guarantee broad document coverage.
 
         Args:
-            per_doc_sources (dict[str, list[dict[str, Any]]]): A dictionary mapping document identifiers to lists of source dictionaries.
+            per_doc_sources (dict[str, list[dict[str, Any]]]): Document ID -> source list.
 
         Returns:
-            list[dict[str, Any]]: A merged list of source dictionaries that prioritizes at least one source per document and fills remaining slots with additional evidence.
+            list[dict[str, Any]]: Merged sources prioritizing one per document, then filling the
+                remaining slots with additional evidence.
         """
         merged: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -6438,7 +6058,9 @@ class RAG:
 
         Args:
             briefs (list[str]): A list of evidence briefs for each document.
-            diagnostics (dict[str, Any]): A dictionary containing diagnostic information such as coverage ratio and uncovered documents.
+            diagnostics (dict[str, Any]): Diagnostic info (coverage ratio, uncovered documents).
+            style_prompt (str): Instructions for the synthesis style/voice; appended to the
+                final prompt to shape the model's response.
 
         Returns:
             str: A formatted string representing the final synthesis prompt.
@@ -6465,9 +6087,7 @@ class RAG:
     def _prepare_document_summary_context(self) -> dict[str, Any]:
         """Prepare document-level summary context for standard collections."""
         targets = self._summary_document_targets()
-        target_filenames = [
-            str(doc.get("filename") or "") for doc in targets if doc.get("filename")
-        ]
+        target_filenames = [str(doc.get("filename") or "") for doc in targets if doc.get("filename")]
         per_doc_sources: dict[str, list[dict[str, Any]]] = {}
         briefs: list[str] = []
         candidate_count = 0
@@ -6490,9 +6110,7 @@ class RAG:
                 source = self._source_from_node_with_score(nws)
                 if source is None:
                     continue
-                if not self._summary_source_matches_document(
-                    source, filename=filename, file_hash=file_hash
-                ):
+                if not self._summary_source_matches_document(source, filename=filename, file_hash=file_hash):
                     continue
                 key = self._summary_source_key(source)
                 if key in seen_doc_keys:
@@ -6513,14 +6131,10 @@ class RAG:
                 )
 
         covered_filenames = list(per_doc_sources.keys())
-        uncovered = [
-            filename for filename in target_filenames if filename not in per_doc_sources
-        ]
+        uncovered = [filename for filename in target_filenames if filename not in per_doc_sources]
         total_documents = len(target_filenames)
         covered_documents = len(covered_filenames)
-        coverage_ratio = (
-            covered_documents / total_documents if total_documents > 0 else 0.0
-        )
+        coverage_ratio = covered_documents / total_documents if total_documents > 0 else 0.0
         diagnostics = {
             "total_documents": total_documents,
             "covered_documents": covered_documents,
@@ -6627,9 +6241,7 @@ class RAG:
                 break
             for point in points:
                 payload = getattr(point, "payload", None)
-                if not isinstance(payload, dict) or not self._is_social_payload(
-                    payload
-                ):
+                if not isinstance(payload, dict) or not self._is_social_payload(payload):
                     continue
                 source = self._source_from_payload(
                     collection=self.qdrant_collection,
@@ -6663,12 +6275,8 @@ class RAG:
                 f"timestamp={ref.get('timestamp')}" if ref.get("timestamp") else "",
                 f"row={source.get('row')}" if source.get("row") is not None else "",
             ]
-            metadata_line = (
-                ", ".join(bit for bit in metadata_bits if bit) or "metadata=n/a"
-            )
-            raw_text = str(
-                source.get("text") or source.get("preview_text") or ""
-            ).strip()
+            metadata_line = ", ".join(bit for bit in metadata_bits if bit) or "metadata=n/a"
+            raw_text = str(source.get("text") or source.get("preview_text") or "").strip()
             compact = re.sub(r"\s+", " ", raw_text)[:280] if raw_text else "(no text)"
             briefs.append(f"- Source {index}: {metadata_line}\n  - Evidence: {compact}")
         return briefs
@@ -6686,9 +6294,7 @@ class RAG:
             candidate_sources.append(source)
 
         if not candidate_sources:
-            for payload in self._sample_collection_payloads(
-                limit=self.social_summary_candidate_pool
-            ):
+            for payload in self._sample_collection_payloads(limit=self.social_summary_candidate_pool):
                 if not self._is_social_payload(payload):
                     continue
                 candidate_sources.append(
@@ -6698,12 +6304,8 @@ class RAG:
                     )
                 )
 
-        deduped_sources, sampled_sources = self._select_social_summary_sources(
-            candidate_sources
-        )
-        coverage_unit = self._coverage_unit_for_sources(
-            sampled_sources or deduped_sources or candidate_sources
-        )
+        deduped_sources, sampled_sources = self._select_social_summary_sources(candidate_sources)
+        coverage_unit = self._coverage_unit_for_sources(sampled_sources or deduped_sources or candidate_sources)
         total_units = self._count_social_coverage_units(coverage_unit)
         covered_units = len(sampled_sources)
         coverage_ratio = covered_units / total_units if total_units > 0 else 0.0
@@ -6814,9 +6416,7 @@ class RAG:
         Returns:
             int: Monotonic revision value; defaults to 0 when unavailable.
         """
-        kv_store = self._summary_kv_store(
-            collection=collection, allow_create=allow_create
-        )
+        kv_store = self._summary_kv_store(collection=collection, allow_create=allow_create)
         if kv_store is None:
             return 0
 
@@ -6852,9 +6452,7 @@ class RAG:
         Returns:
             int: The updated revision.
         """
-        kv_store = self._summary_kv_store(
-            collection=collection, allow_create=allow_create
-        )
+        kv_store = self._summary_kv_store(collection=collection, allow_create=allow_create)
         if kv_store is None:
             return 0
 
@@ -6874,9 +6472,7 @@ class RAG:
             return current_revision
         return next_revision
 
-    def _load_cached_collection_summary(
-        self, *, refresh: bool
-    ) -> dict[str, Any] | None:
+    def _load_cached_collection_summary(self, *, refresh: bool) -> dict[str, Any] | None:
         """Load a cached summary if revision and prompt fingerprint still match.
 
         Args:
@@ -6954,7 +6550,7 @@ class RAG:
         cache_payload = {
             "revision": revision,
             "prompt_fingerprint": prompt_fingerprint,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": datetime.now(UTC).isoformat(),
             "response": str(payload.get("response") or ""),
             "sources": sources,
             "summary_diagnostics": summary_diagnostics,
@@ -7000,13 +6596,9 @@ class RAG:
         if total_documents == 0:
             summary_text = "No documents available in the selected collection."
         elif covered_documents == 0:
-            summary_text = (
-                "Unable to extract grounded evidence from the selected collection."
-            )
+            summary_text = "Unable to extract grounded evidence from the selected collection."
         else:
-            completion = self.post_retrieval_text_model.complete(
-                context["synthesis_prompt"]
-            )
+            completion = self.post_retrieval_text_model.complete(context["synthesis_prompt"])
             summary_text = str(getattr(completion, "text", "") or "").strip()
 
         payload = {
@@ -7062,9 +6654,7 @@ class RAG:
             return
 
         if covered_documents == 0:
-            full_text = (
-                "Unable to extract grounded evidence from the selected collection."
-            )
+            full_text = "Unable to extract grounded evidence from the selected collection."
             payload = {
                 "query": self.summarize_prompt,
                 "reasoning": None,
@@ -7079,9 +6669,7 @@ class RAG:
 
         full_text = ""
         running_text = ""
-        for chunk in self.post_retrieval_text_model.stream_complete(
-            context["synthesis_prompt"]
-        ):
+        for chunk in self.post_retrieval_text_model.stream_complete(context["synthesis_prompt"]):
             delta = getattr(chunk, "delta", None)
             if isinstance(delta, str) and delta:
                 token = delta
@@ -7130,9 +6718,7 @@ class RAG:
                     with_vectors=False,
                 )
             except Exception as exc:
-                logger.error(
-                    "Failed to scroll collection '{}': {}", self.qdrant_collection, exc
-                )
+                logger.error("Failed to scroll collection '{}': {}", self.qdrant_collection, exc)
                 break
 
             if not points:
@@ -7161,8 +6747,7 @@ class RAG:
                             or payload.get("file_format")
                             or origin.get("mimetype")
                         ),
-                        "file_hash": payload.get("file_hash")
-                        or origin.get("file_hash"),
+                        "file_hash": payload.get("file_hash") or origin.get("file_hash"),
                         "node_count": 0,
                         "pages": set(),
                         "max_rows": 0,
@@ -7182,11 +6767,7 @@ class RAG:
                             if t:
                                 entry["entity_types"].add(t)
 
-                page = (
-                    payload.get("page")
-                    or payload.get("page_number")
-                    or origin.get("page_no")
-                )
+                page = payload.get("page") or payload.get("page_number") or origin.get("page_no")
 
                 # Try getting page from doc_items (Docling structure)
                 if page is None:
@@ -7217,9 +6798,7 @@ class RAG:
                         entry["max_rows"] = max(entry["max_rows"], int(rows))
 
                 # Transcript duration logic (Nextext segment end timestamps).
-                end_sec = payload.get("end_seconds") or (
-                    payload.get("extra_metadata") or {}
-                ).get("end_seconds")
+                end_sec = payload.get("end_seconds") or (payload.get("extra_metadata") or {}).get("end_seconds")
                 if isinstance(end_sec, (int, float)):
                     entry["max_duration"] = max(entry["max_duration"], float(end_sec))
 
@@ -7302,19 +6881,13 @@ class RAG:
                     continue
 
                 detection = payload.get("hate_speech")
-                if not isinstance(detection, dict) or not bool(
-                    detection.get("hate_speech")
-                ):
+                if not isinstance(detection, dict) or not bool(detection.get("hate_speech")):
                     continue
 
                 source = self._source_from_payload(
                     collection=self.qdrant_collection,
                     payload=payload,
-                    text_value=str(
-                        detection.get("chunk_text")
-                        or self._extract_payload_text(payload)
-                        or ""
-                    ),
+                    text_value=str(detection.get("chunk_text") or self._extract_payload_text(payload) or ""),
                 )
                 source["chunk_id"] = str(
                     detection.get("chunk_id")
@@ -7327,10 +6900,7 @@ class RAG:
                 source["confidence"] = str(detection.get("confidence") or "low")
                 source["reason"] = str(detection.get("reason") or "")
                 source["source_ref"] = str(
-                    detection.get("source_ref")
-                    or source.get("filename")
-                    or payload.get("file_path")
-                    or ""
+                    detection.get("source_ref") or source.get("filename") or payload.get("file_path") or ""
                 )
                 findings.append(source)
 
@@ -7389,6 +6959,7 @@ class RAG:
             entity_type (str | None): Optional case-insensitive entity-type filter.
             include_relations (bool): Whether relation aggregates are included.
             refresh (bool): If ``True``, recompute from fresh collection data.
+            entity_merge_mode (EntityMergeMode): Entity clustering mode used for derived views.
 
         Returns:
             dict[str, Any]: NER stats payload.
@@ -7421,6 +6992,7 @@ class RAG:
             entity_type (str | None): Optional case-insensitive type filter.
             limit (int): Maximum number of entities to return.
             refresh (bool): If ``True``, recompute from fresh collection data.
+            entity_merge_mode (EntityMergeMode): Entity clustering mode used for derived views.
 
         Returns:
             list[dict[str, Any]]: Search result rows sorted by mention frequency.
@@ -7450,6 +7022,7 @@ class RAG:
             top_k_nodes (int): Maximum number of highest-mention entity nodes to include.
             min_edge_weight (int): Minimum edge weight threshold.
             refresh (bool): If ``True``, recompute graph from fresh collection data.
+            entity_merge_mode (EntityMergeMode): Entity clustering mode used for derived views.
 
         Returns:
             dict[str, Any]: Graph payload containing ``nodes``, ``edges``, and ``meta``.
@@ -7503,6 +7076,7 @@ class RAG:
             top_k_nodes (int): Graph node cap used to build the base graph.
             min_edge_weight (int): Graph edge threshold used to build the base graph.
             refresh (bool): If ``True``, recompute graph from fresh collection data.
+            entity_merge_mode (EntityMergeMode): Entity clustering mode used for derived views.
 
         Returns:
             dict[str, Any]: Neighborhood payload with ``center`` and ``neighbors``.
@@ -7535,6 +7109,4 @@ class RAG:
         self.dir_reader = None
 
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
         logger.info("Models unloaded and memory cleared.")

@@ -1,14 +1,15 @@
 """Tests for session manager collection-scoped conversations."""
 
-from typing import Generator, cast
+from collections.abc import Generator
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from docint.core.state.session_manager import SessionManager
 from docint.core.state.base import Base
+from docint.core.state.session_manager import SessionManager
 
 
 @pytest.fixture
@@ -39,9 +40,7 @@ def test_conversation_stores_collection_name(session_manager: SessionManager) ->
         session_manager (SessionManager): The session manager fixture.
     """
     session_manager.rag.qdrant_collection = "my-collection"
-    session_manager.rag.query_engine = (
-        MagicMock()
-    )  # Mock engine to avoid RuntimeError in start_session
+    session_manager.rag.query_engine = MagicMock()  # Mock engine to avoid RuntimeError in start_session
 
     session_id = session_manager.start_session()
 

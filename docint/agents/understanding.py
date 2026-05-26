@@ -2,7 +2,8 @@
 
 import json
 import re
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any, cast
 
 from llama_index.core.llms import LLM
 
@@ -24,7 +25,8 @@ class SimpleUnderstandingAgent(UnderstandingAgent):
         Args:
             default_intent (str, optional): The default intent to use when no keywords match. Defaults to "qa".
             default_confidence (float, optional): The default confidence level for the intent. Defaults to 0.6.
-            intent_keywords (dict[str, Iterable[str]] | None, optional): A mapping of intents to keywords for detection. Defaults to None.
+            intent_keywords (dict[str, Iterable[str]] | None, optional): Intent->keywords map for
+                detection. Defaults to None.
         """
         self.default_intent = default_intent
         self.default_confidence = default_confidence
@@ -41,7 +43,7 @@ class SimpleUnderstandingAgent(UnderstandingAgent):
             text (str): The input text to analyze for intent.
 
         Returns:
-            tuple[str, float, str | None]: A tuple containing the detected intent, confidence score, and an optional reason.
+            tuple[str, float, str | None]: Detected intent, confidence, and optional reason.
         """
         lowered = text.lower()
         for intent, kws in self.intent_keywords.items():
@@ -89,10 +91,12 @@ class SimpleUnderstandingAgent(UnderstandingAgent):
 
 class ContextualUnderstandingAgent(UnderstandingAgent):
     """Understanding agent that uses an LLM to determine intent and rewrite queries.
+
     Replaces keyword matching with semantic reasoning via the LLM.
     """
 
-    def __init__(self, llm: LLM):
+    def __init__(self, llm: LLM) -> None:
+        """Bind the LLM used for semantic intent analysis."""
         self.llm = llm
 
     def analyze(self, turn: Turn, context: Any | None = None) -> IntentAnalysis:
@@ -194,12 +198,12 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
                 clean_text = clean_text[4:]
 
         try:
-            return json.loads(clean_text)
+            return cast(dict[str, Any], json.loads(clean_text))
         except json.JSONDecodeError:
             # Attempt to find JSON object if mixed with text
             match = re.search(r"\{.*\}", clean_text, re.DOTALL)
             if match:
-                return json.loads(match.group(0))
+                return cast(dict[str, Any], json.loads(match.group(0)))
             return {
                 "intent": "qa",
                 "rewritten_query": None,

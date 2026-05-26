@@ -26,13 +26,13 @@ class ClarificationPolicy:
         """
         self.config = config or ClarificationConfig()
 
-    def evaluate(
-        self, analysis: IntentAnalysis, clarifications_so_far: int = 0
-    ) -> ClarificationRequest:
+    def evaluate(self, analysis: IntentAnalysis, clarifications_so_far: int = 0) -> ClarificationRequest:
         """Decide whether to ask for clarification based on the analysis.
 
         Args:
             analysis (IntentAnalysis): The intent analysis result.
+            clarifications_so_far (int): How many clarifications have already been issued in this
+                session; used to enforce ``ClarificationConfig.max_clarifications``.
 
         Returns:
             ClarificationRequest: Clarification decision and message.

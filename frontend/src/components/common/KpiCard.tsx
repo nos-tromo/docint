@@ -1,10 +1,12 @@
+import type { ReactNode } from 'react'
+
 export function KpiCard({
   label,
   value,
   hint
 }: {
   label: string
-  value: number | string | null
+  value: ReactNode
   hint?: string
 }) {
   return (

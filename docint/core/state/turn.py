@@ -1,13 +1,14 @@
 """Turn ORM model capturing a single user/assistant exchange within a conversation."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from docint.core.state.base import Base
 
 
-class Turn(Base):
+class Turn(Base):  # type: ignore[misc]
     """Represents a user turn within a conversation.
 
     Args:
@@ -25,8 +26,6 @@ class Turn(Base):
     validation_checked = Column(Boolean, nullable=True)
     validation_mismatch = Column(Boolean, nullable=True)
     validation_reason = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.now(timezone.utc), nullable=False)
+    created_at = Column(DateTime, default=datetime.now(UTC), nullable=False)
     conversation = relationship("Conversation", back_populates="turns")
-    citations = relationship(
-        "Citation", back_populates="turn", cascade="all, delete-orphan"
-    )
+    citations = relationship("Citation", back_populates="turn", cascade="all, delete-orphan")

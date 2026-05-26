@@ -72,11 +72,8 @@ class OrchestratorResult:
 class UnderstandingAgent(Protocol):
     """Interface for understanding user input."""
 
-    def analyze(
-        self, turn: Turn, context: Any | None = None
-    ) -> IntentAnalysis:  # pragma: no cover - interface
-        """
-        Analyze a turn and return intent/entities/confidence.
+    def analyze(self, turn: Turn, context: Any | None = None) -> IntentAnalysis:  # pragma: no cover - interface
+        """Analyze a turn and return intent/entities/confidence.
 
         Args:
             turn (Turn): The turn to analyze.
@@ -91,11 +88,8 @@ class UnderstandingAgent(Protocol):
 class ClarificationAgent(Protocol):
     """Interface for clarification generation."""
 
-    def build(
-        self, turn: Turn, analysis: IntentAnalysis
-    ) -> ClarificationRequest:  # pragma: no cover - interface
-        """
-        Return a clarification request for the user.
+    def build(self, turn: Turn, analysis: IntentAnalysis) -> ClarificationRequest:  # pragma: no cover - interface
+        """Return a clarification request for the user.
 
         Args:
             turn (Turn): The current turn in the conversation.
@@ -110,11 +104,8 @@ class ClarificationAgent(Protocol):
 class RetrievalAgent(Protocol):
     """Interface for retrieval."""
 
-    def retrieve(
-        self, request: RetrievalRequest
-    ) -> RetrievalResult:  # pragma: no cover - interface
-        """
-        Return retrieval results for the turn and analysis.
+    def retrieve(self, request: RetrievalRequest) -> RetrievalResult:  # pragma: no cover - interface
+        """Return retrieval results for the turn and analysis.
 
         Args:
             request (RetrievalRequest): The retrieval request containing the turn and analysis.
@@ -128,11 +119,8 @@ class RetrievalAgent(Protocol):
 class ResponseAgent(Protocol):
     """Interface for response post-processing."""
 
-    def finalize(
-        self, result: RetrievalResult, turn: Turn
-    ) -> RetrievalResult:  # pragma: no cover - interface
-        """
-        Optionally post-process retrieval output before returning.
+    def finalize(self, result: RetrievalResult, turn: Turn) -> RetrievalResult:  # pragma: no cover - interface
+        """Optionally post-process retrieval output before returning.
 
         Args:
             result (RetrievalResult): The retrieval result to finalize.

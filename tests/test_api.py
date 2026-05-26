@@ -46,8 +46,7 @@ class DummySessionManager:
         return True
 
     def get_agent_context(self, session_id: str) -> Any:
-        """
-        Get the agent context for a session.
+        """Get the agent context for a session.
 
         Args:
             session_id (str): The ID of the session.
@@ -213,8 +212,7 @@ class DummyRAG:
         metadata_filter_rules: Any = None,
         vector_store_kwargs: Any = None,
     ) -> Generator[str | dict[str, Any], None, None]:
-        """
-        Stream chat responses from the RAG system.
+        """Stream chat responses from the RAG system.
 
         Args:
             question (str): The question to ask the RAG system.
@@ -296,6 +294,7 @@ class DummyRAG:
             qdrant_filter: Optional native Qdrant filter.
             limit: Maximum number of occurrence rows to return.
             refresh: Whether cache refresh was requested.
+            entity_merge_mode: Entity clustering mode (recorded for assertions).
 
         Returns:
             dict[str, Any]: Canned occurrence payload.
@@ -377,9 +376,7 @@ class DummyRAG:
             ],
         }
 
-    def expand_query_with_graph_with_debug(
-        self, query: str
-    ) -> tuple[str, dict[str, Any]]:
+    def expand_query_with_graph_with_debug(self, query: str) -> tuple[str, dict[str, Any]]:
         """Return deterministic GraphRAG expansion metadata for tests.
 
         Args:
@@ -422,10 +419,11 @@ class DummyRAG:
             refresh (bool, optional): Whether to bypass summary cache.
 
         Returns:
-            Generator[str | dict[str, Any], None, None]: A generator that yields chunks of the summary response and the final payload.
+            Generator[str | dict[str, Any], None, None]: Streams summary chunks plus the final
+                payload.
 
         Yields:
-            str | dict[str, Any]: Chunks of the summary response as they are generated, followed by the final summary payload.
+            str | dict[str, Any]: Summary chunks, then the final summary payload.
         """
         self.summary_stream_refresh_calls.append(bool(refresh))
         yield "sum"
@@ -465,13 +463,16 @@ class DummyRAG:
         """Return canned NER stats payload.
 
         Args:
-            top_k (int, optional): The number of top entities to return. Defaults to 15.
-            min_mentions (int, optional): The minimum number of mentions for an entity to be included. Defaults to 2.
+            top_k (int, optional): Number of top entities to return. Defaults to 15.
+            min_mentions (int, optional): Minimum mention count for inclusion. Defaults to 2.
             entity_type (str | None, optional): Filter entities by type. Defaults to None.
-            include_relations (bool, optional): Whether to include relation statistics. Defaults to True.
+            include_relations (bool, optional): Whether to include relation statistics.
+                Defaults to True.
+            entity_merge_mode (str): Entity clustering mode (recorded for assertions).
 
         Returns:
-            dict[str, Any]: A dictionary containing information extraction statistics, including totals, top entities, entity types, top relations, and document-level stats.
+            dict[str, Any]: NER stats payload with totals, top entities, entity types, top
+                relations, and document-level stats.
         """
         _ = (top_k, min_mentions, entity_type, include_relations)
         self.ner_stats_merge_modes.append(entity_merge_mode)
@@ -491,9 +492,7 @@ class DummyRAG:
                 }
             ],
             "entity_types": [{"type": "ORG", "mentions": 3, "unique_entities": 1}],
-            "top_relations": [
-                {"head": "Acme", "label": "owns", "tail": "Widget", "mentions": 2}
-            ],
+            "top_relations": [{"head": "Acme", "label": "owns", "tail": "Widget", "mentions": 2}],
             "documents": [
                 {
                     "filename": "doc1.pdf",
@@ -519,6 +518,7 @@ class DummyRAG:
             q (str, optional): The search query string. Defaults to "".
             entity_type (str | None, optional): Filter entities by type. Defaults to None.
             limit (int, optional): The maximum number of results to return. Defaults to 100.
+            entity_merge_mode (str): Entity clustering mode (recorded for assertions).
 
         Returns:
             list[dict[str, Any]]: A list of entity dictionaries that match the search criteria.
@@ -574,9 +574,7 @@ def test_collections_list_success(client: TestClient) -> None:
     assert response.json() == ["alpha", "beta"]
 
 
-def test_collections_list_failure(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient
-) -> None:
+def test_collections_list_failure(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """Test the failed retrieval of the collections list.
 
     Args:
@@ -593,9 +591,7 @@ def test_collections_list_failure(
     assert response.json()["detail"] == "boom"
 
 
-def test_collections_select_success(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient
-) -> None:
+def test_collections_select_success(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """Selecting a collection must succeed without warming the query engine.
 
     Regression guard for the same OOM pattern that commit 18a47a6 removed
@@ -702,9 +698,7 @@ def test_collections_ner_success(client: TestClient) -> None:
     Args:
         client (TestClient): The TestClient instance.
     """
-    api_module.rag.ner_sources = [
-        {"filename": "doc1.pdf", "page": 1, "row": 2, "entities": [], "relations": []}
-    ]
+    api_module.rag.ner_sources = [{"filename": "doc1.pdf", "page": 1, "row": 2, "entities": [], "relations": []}]
     response = client.get("/collections/ner")
     assert response.status_code == 200
     assert response.json() == {"sources": api_module.rag.ner_sources}
@@ -743,9 +737,7 @@ def test_collections_ner_stats_success(client: TestClient) -> None:
 
 def test_collections_ner_stats_support_exact_merge_mode(client: TestClient) -> None:
     """Stats endpoint should forward explicit merge-mode overrides."""
-    response = client.get(
-        "/collections/ner/stats", params={"entity_merge_mode": "exact"}
-    )
+    response = client.get("/collections/ner/stats", params={"entity_merge_mode": "exact"})
     assert response.status_code == 200
     assert cast(DummyRAG, api_module.rag).ner_stats_merge_modes[-1] == "exact"
 
@@ -797,9 +789,7 @@ def test_collections_ner_search_support_exact_merge_mode(client: TestClient) -> 
     assert cast(DummyRAG, api_module.rag).ner_search_merge_modes[-1] == "exact"
 
 
-def test_agent_chat_answers(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient
-) -> None:
+def test_agent_chat_answers(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """Agent chat should return an answer when confidence is sufficient.
 
     Args:
@@ -808,8 +798,7 @@ def test_agent_chat_answers(
     """
 
     def fake_chat(question: str, **_: Any) -> dict[str, Any]:
-        """
-        Fake implementation of the RAG chat method for testing purposes.
+        """Fake implementation of the RAG chat method for testing purposes.
 
         Args:
             question (str): The question to ask the RAG system.
@@ -834,24 +823,17 @@ def test_agent_chat_answers(
     assert data["confidence"] is not None
 
 
-def test_agent_chat_clarifies(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient
-) -> None:
+def test_agent_chat_clarifies(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """Agent chat should request clarification when policy requires it.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         client (TestClient): The TestClient instance.
     """
-
     monkeypatch.setattr(
         api_module,
         "_clarification_policy",
-        api_module.ClarificationPolicy(
-            api_module.ClarificationConfig(
-                confidence_threshold=1.0, require_entities=True
-            )
-        ),
+        api_module.ClarificationPolicy(api_module.ClarificationConfig(confidence_threshold=1.0, require_entities=True)),
     )
 
     payload = {"message": "hello"}
@@ -865,9 +847,7 @@ def test_agent_chat_clarifies(
     assert data["confidence"] is not None
 
 
-def test_agent_chat_returns_validation_alert(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient
-) -> None:
+def test_agent_chat_returns_validation_alert(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """Agent chat should surface response-validation metadata.
 
     Args:
@@ -878,7 +858,7 @@ def test_agent_chat_returns_validation_alert(
     class _StubOrchestrator:
         """Stub orchestrator that returns a canned retrieval result with validation metadata for testing purposes."""
 
-        def handle_turn(self, turn, context=None) -> OrchestratorResult:
+        def handle_turn(self, turn: Any, context: Any = None) -> OrchestratorResult:
             """Handle a turn by returning a canned retrieval result with validation metadata.
 
             Args:
@@ -889,9 +869,7 @@ def test_agent_chat_returns_validation_alert(
                 OrchestratorResult: The result of processing the turn.
             """
             _ = turn, context
-            analysis = IntentAnalysis(
-                intent="qa", confidence=0.9, entities={"query": "hello"}
-            )
+            analysis = IntentAnalysis(intent="qa", confidence=0.9, entities={"query": "hello"})
             retrieval = RetrievalResult(
                 answer="answer",
                 sources=[{"id": 1}],
@@ -900,9 +878,7 @@ def test_agent_chat_returns_validation_alert(
                 validation_mismatch=True,
                 validation_reason="mismatch",
             )
-            return OrchestratorResult(
-                clarification=None, retrieval=retrieval, analysis=analysis
-            )
+            return OrchestratorResult(clarification=None, retrieval=retrieval, analysis=analysis)
 
     monkeypatch.setattr(api_module, "_build_orchestrator", lambda: _StubOrchestrator())
 
@@ -916,24 +892,17 @@ def test_agent_chat_returns_validation_alert(
     assert data["validation_reason"] == "mismatch"
 
 
-def test_agent_chat_stream_clarifies(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient
-) -> None:
+def test_agent_chat_stream_clarifies(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """Streaming endpoint should emit clarification event when policy demands it.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         client (TestClient): The TestClient instance.
     """
-
     monkeypatch.setattr(
         api_module,
         "_clarification_policy",
-        api_module.ClarificationPolicy(
-            api_module.ClarificationConfig(
-                confidence_threshold=1.0, require_entities=True
-            )
-        ),
+        api_module.ClarificationPolicy(api_module.ClarificationConfig(confidence_threshold=1.0, require_entities=True)),
     )
 
     with client.stream("POST", "/agent/chat/stream", json={"message": "hello"}) as resp:
@@ -1255,9 +1224,7 @@ def test_collections_hate_speech_requires_selection(client: TestClient) -> None:
     assert "No collection selected" in response.json()["detail"]
 
 
-def test_collections_ner_failure(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient
-) -> None:
+def test_collections_ner_failure(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """Test the failed retrieval of information extraction data.
 
     Args:
@@ -1286,9 +1253,7 @@ def test_collections_ner_failure(
     assert response.json()["detail"] == "boom"
 
 
-def test_collections_ner_stats_failure(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient
-) -> None:
+def test_collections_ner_stats_failure(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """Stats endpoint should surface backend failures.
 
     Args:
@@ -1296,9 +1261,8 @@ def test_collections_ner_stats_failure(
         client (TestClient): The TestClient instance.
     """
 
-    def raiser(**kwargs) -> dict[str, Any]:
-        """
-        Fake implementation of get_collection_ner_stats that raises an error for testing purposes.
+    def raiser(**kwargs: Any) -> dict[str, Any]:
+        """Fake implementation of get_collection_ner_stats that raises an error for testing purposes.
 
         Returns:
             dict[str, Any]: Information extraction statistics for the selected collection.
@@ -1315,9 +1279,7 @@ def test_collections_ner_stats_failure(
     assert response.json()["detail"] == "boom"
 
 
-def test_collections_ner_search_failure(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient
-) -> None:
+def test_collections_ner_search_failure(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """Search endpoint should surface backend failures.
 
     Args:
@@ -1325,9 +1287,8 @@ def test_collections_ner_search_failure(
         client (TestClient): The TestClient instance.
     """
 
-    def raiser(**kwargs) -> list[dict[str, Any]]:
-        """
-        Fake implementation of search_collection_ner_entities that raises an error for testing purposes.
+    def raiser(**kwargs: Any) -> list[dict[str, Any]]:
+        """Fake implementation of search_collection_ner_entities that raises an error for testing purposes.
 
         Returns:
             list[dict[str, Any]]: The search results.
@@ -1344,9 +1305,7 @@ def test_collections_ner_search_failure(
     assert response.json()["detail"] == "boom"
 
 
-def test_collections_hate_speech_failure(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient
-) -> None:
+def test_collections_hate_speech_failure(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """Hate-speech endpoint should surface backend failures.
 
     Args:
@@ -1373,9 +1332,7 @@ def test_collections_hate_speech_failure(
     assert response.json()["detail"] == "boom"
 
 
-def test_query_requires_collection(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient
-) -> None:
+def test_query_requires_collection(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """Empty active collection must surface as a structured HTTP 400.
 
     Regression guard for the outer-handler antipattern that collapsed
@@ -1392,9 +1349,7 @@ def test_query_requires_collection(
     assert "No collection selected" in response.json()["detail"]
 
 
-def test_query_returns_404_when_active_collection_missing(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient
-) -> None:
+def test_query_returns_404_when_active_collection_missing(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """Stale active collection must surface as HTTP 404 with a clean message.
 
     Regression guard for the chat-after-delete crash: if a collection is
@@ -1434,9 +1389,7 @@ def test_stream_query_returns_404_when_active_collection_missing(
     assert "ghost" in response.json()["detail"]
 
 
-def test_stream_query_requires_collection(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient
-) -> None:
+def test_stream_query_requires_collection(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """Empty active collection on stream_query must surface as HTTP 400.
 
     Args:
@@ -1557,9 +1510,7 @@ def test_stream_query_passes_metadata_filters(client: TestClient) -> None:
     assert last_filters["vector_store_kwargs"]["qdrant_filters"] is not None
 
 
-def test_query_handles_missing_sources(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient
-) -> None:
+def test_query_handles_missing_sources(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """Test the query handles missing sources.
 
     Args:
@@ -1587,9 +1538,7 @@ def test_query_handles_missing_sources(
     assert body["session_id"] == "generated-session"
 
 
-def test_ingest_success(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
-) -> None:
+def test_ingest_success(monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path) -> None:
     """Test the successful ingestion of documents.
 
     Args:
@@ -1604,12 +1553,11 @@ def test_ingest_success(
 
     def fake_ingest(
         collection: str,
-        path,
+        path: Any,
         hybrid: bool = True,
-        progress_callback=None,
+        progress_callback: Any = None,
     ) -> None:
-        """
-        Fake implementation of the ingest_docs function for testing purposes.
+        """Fake implementation of the ingest_docs function for testing purposes.
 
         Args:
             collection (str): The name of the collection to ingest into.
@@ -1669,9 +1617,7 @@ def test_sessions_endpoints(client: TestClient) -> None:
     assert resp.json()["ok"] is True
 
 
-def test_ingest_missing_directory(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
-) -> None:
+def test_ingest_missing_directory(monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path) -> None:
     """Test the ingestion of documents when the data directory is missing.
 
     Args:
@@ -1792,7 +1738,7 @@ def test_ingest_upload_empty_emits_warning_and_completes(
     assert "Ingestion failed" not in body
 
     # select_collection must NOT have been called — DummyRAG.selected stays empty.
-    assert api_module.rag.selected == []
+    assert cast(Any, api_module.rag).selected == []
 
 
 def test_ingest_upload_success_does_not_warm_query_engine(
@@ -1963,9 +1909,7 @@ def test_ingest_upload_cancels_awaiter_on_client_disconnect(
         "ingestion_complete must NOT be emitted when the awaiter is cancelled; "
         "the worker thread still runs but its output is discarded."
     )
-    assert "Ingestion failed" not in body, (
-        "Cancellation must not be surfaced as a generic ingestion failure."
-    )
+    assert "Ingestion failed" not in body, "Cancellation must not be surfaced as a generic ingestion failure."
 
 
 def test_ingest_upload_poll_continues_when_still_connected(
@@ -2011,7 +1955,7 @@ def test_ingest_upload_poll_continues_when_still_connected(
             progress_callback (Any): Optional progress callback (ignored).
         """
         _ = (collection, path, hybrid, progress_callback)
-        time.sleep(0.15)  # ~3× poll interval
+        time.sleep(0.15)  # ~3x poll interval
 
     monkeypatch.setattr(api_module.ingest_module, "ingest_docs", slow_fake_ingest)
 
@@ -2104,7 +2048,7 @@ def test_ingest_sync_empty_returns_empty_flag(
     assert body["data_dir"] == str(tmp_path)
 
     # Collection was never created, so no select_collection should have fired.
-    assert api_module.rag.selected == []
+    assert cast(Any, api_module.rag).selected == []
 
 
 def test_ingest_sync_success_does_not_warm_query_engine(
@@ -2178,7 +2122,7 @@ def test_ingest_sync_success_does_not_warm_query_engine(
         "lazily."
     )
     # select_collection must also not run eagerly — DummyRAG.selected stays empty.
-    assert api_module.rag.selected == []
+    assert cast(Any, api_module.rag).selected == []
 
 
 def test_query_forwards_retrieval_query_to_validation_payload(

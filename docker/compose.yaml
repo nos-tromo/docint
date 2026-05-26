@@ -1,0 +1,106 @@
+name: docint
+
+##########################################################
+# Shared backend fragments (YAML anchors)
+##########################################################
+x-no-proxy-env: &no-proxy-env
+  NO_PROXY: "backend,qdrant,localhost,127.0.0.1,172.16.0.0/12,10.0.0.0/8${EXTRA_NO_PROXY:-}"
+  no_proxy: "backend,qdrant,localhost,127.0.0.1,172.16.0.0/12,10.0.0.0/8${EXTRA_NO_PROXY:-}"
+
+x-env-file: &env-file
+  - ../.env
+
+##########################################################
+# Shared logging — the local driver rotates and compresses
+# per-container; tail with `docker compose logs -f <svc>`.
+##########################################################
+x-logging: &default-logging
+  driver: "local"
+  options:
+    max-size: "50m"
+    max-file: "5"
+    compress: "true"
+
+services:
+  ##########################################################
+  # Backend
+  #
+  # Single image, CPU-only Python. All ML inference (chat,
+  # embeddings, rerank, NER, CLIP) is delegated over HTTP to
+  # the external vllm-service stack — see CLAUDE.md.
+  ##########################################################
+  backend:
+    image: docint-backend:${DOCINT_VERSION:-latest}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    logging: *default-logging
+    expose:
+      - "8000"
+    environment:
+      <<: *no-proxy-env
+      QDRANT_HOST: http://qdrant:6333
+      QDRANT_SRC_DIR: /var/lib/docint/sources
+      SESSIONS_DB_PATH: /var/lib/docint/sessions/sessions.sqlite3
+    env_file: *env-file
+    volumes:
+      - docling-cache:/root/.cache/docling
+      - huggingface-cache:/root/.cache/huggingface/hub
+      - qdrant-sources:/var/lib/docint/sources
+      - sessions-storage:/var/lib/docint/sessions
+    networks:
+      docint-net:
+        aliases:
+          - backend
+      data-net:
+        aliases:
+          - docint-backend
+      inference-net:
+        aliases:
+          - docint-backend
+    restart: unless-stopped
+
+  ##########################################################
+  # Frontend SPA – nginx serves the React build and reverse-
+  # proxies API routes to the backend on the docint-net network.
+  ##########################################################
+  frontend:
+    image: docint-frontend:${DOCINT_VERSION:-latest}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.frontend
+    logging: *default-logging
+    networks:
+      docint-net:
+        aliases:
+          - frontend
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+##########################################################
+# Volumes
+##########################################################
+volumes:
+  docling-cache:
+    external: true
+  huggingface-cache:
+    external: true
+  ollama-cache:
+    external: true
+  qdrant-sources:
+    external: true
+  sessions-storage:
+    external: true
+
+##########################################################
+# Networks
+##########################################################
+networks:
+  docint-net:
+  data-net:
+    external: true
+    name: ${DATA_NET:-data-net}
+  inference-net:
+    external: true
+    name: ${INFERENCE_NET:-inference-net}

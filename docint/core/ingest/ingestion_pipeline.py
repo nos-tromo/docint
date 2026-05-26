@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Iterable, NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 from llama_index.core import Document, SimpleDirectoryReader
+
+__all__ = ["DocumentIngestionPipeline", "SimpleDirectoryReader"]
 from llama_index.core.node_parser import (
     MarkdownNodeParser,
     NodeParser,
@@ -22,6 +25,7 @@ from loguru import logger
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.readers.images import ImageReader
 from docint.core.readers.json import CustomJSONReader
+from docint.core.readers.rtf import RTFReader
 from docint.core.readers.tables import TableReader
 from docint.core.storage.hierarchical import HierarchicalNodeParser
 from docint.utils.batching import chunk_nodes
@@ -32,9 +36,7 @@ from docint.utils.env_cfg import (
     load_ner_env,
 )
 from docint.utils.hashing import compute_file_hash
-from docint.utils.ner_extractor import (
-    build_gliner_ner_extractor,
-)
+from docint.utils.ner_client import build_remote_ner_extractor
 from docint.utils.openai_cfg import OpenAIPipeline
 
 CleanFn = Callable[[str], str]
@@ -105,7 +107,6 @@ class DocumentIngestionPipeline:
 
     # --- Constructor args ---
     data_dir: Path
-    device: str
     ner_model: OpenAI | None
     progress_callback: Callable[[str], None] | None
     hate_speech_model: OpenAI | None = None
@@ -136,7 +137,7 @@ class DocumentIngestionPipeline:
 
     # --- Named entity recognition (NER) ---
     ner_max_workers: int = field(default=4, init=False)
-    entity_extractor: Callable[[str], tuple[list[dict], list[dict]]] | None = None
+    entity_extractor: Callable[[str], tuple[list[dict[str, Any]], list[dict[str, Any]]]] | None = None
     hate_speech_enabled: bool = field(default=False, init=False)
     hate_speech_max_chars: int = field(default=1500, init=False)
     hate_speech_max_workers: int = field(default=1, init=False)
@@ -145,12 +146,8 @@ class DocumentIngestionPipeline:
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
     md_node_parser: MarkdownNodeParser | None = field(default=None, init=False)
     docling_node_parser: DoclingNodeParser | None = field(default=None, init=False)
-    sentence_splitter: SentenceSplitter = field(
-        default_factory=SentenceSplitter, init=False
-    )
-    hierarchical_node_parser: HierarchicalNodeParser | None = field(
-        default=None, init=False
-    )
+    sentence_splitter: SentenceSplitter = field(default_factory=SentenceSplitter, init=False)
+    hierarchical_node_parser: HierarchicalNodeParser | None = field(default=None, init=False)
     docs: list[Document] = field(default_factory=list, init=False)
     nodes: list[BaseNode] = field(default_factory=list, init=False)
     file_hash_cache: dict[str, str] = field(default_factory=dict, init=False)
@@ -163,11 +160,11 @@ class DocumentIngestionPipeline:
         self.ner_max_workers = ner_cfg.max_workers
 
         if ner_enabled:
-            logger.info("Initializing GLiNER NER extractor")
+            logger.info("Initializing remote NER extractor")
             try:
-                self.entity_extractor = build_gliner_ner_extractor(device=self.device)
+                self.entity_extractor = build_remote_ner_extractor()
             except Exception:
-                logger.warning("GLiNER model unavailable – continuing without NER")
+                logger.warning("Remote NER client init failed - continuing without NER")
                 self.entity_extractor = None
 
         hate_speech_cfg = load_hate_speech_env()
@@ -179,7 +176,7 @@ class DocumentIngestionPipeline:
                 self.hate_speech_prompt = OpenAIPipeline().load_prompt(kw="hate_speech")
             except Exception as exc:
                 logger.warning(
-                    "Hate-speech prompt unavailable – disabling detector: {}",
+                    "Hate-speech prompt unavailable - disabling detector: {}",
                     exc,
                 )
                 self.hate_speech_enabled = False
@@ -193,6 +190,7 @@ class DocumentIngestionPipeline:
         self.sentence_splitter = SentenceSplitter(
             chunk_size=sentence_splitter_chunk_size,
             chunk_overlap=sentence_splitter_chunk_overlap,
+            paragraph_separator="\n\n",
         )
         self.reader_required_exts = ingestion_cfg.supported_filetypes
         if ingestion_cfg.hierarchical_chunking_enabled:
@@ -205,21 +203,19 @@ class DocumentIngestionPipeline:
         else:
             self.hierarchical_node_parser = None
 
-    def build(
-        self, existing_hashes: set[str] | None = None
-    ) -> Iterable[tuple[list[Document], list[BaseNode]]]:
+    def build(self, existing_hashes: set[str] | None = None) -> Iterable[tuple[list[Document], list[BaseNode]]]:
         """Execute the full ingestion pipeline and yield batches of cleaned docs + nodes.
 
         Args:
-            existing_hashes (set[str] | None): A set of existing document hashes to filter out already processed documents.
+            existing_hashes (set[str] | None): Document hashes to filter out (already-processed
+                docs).
 
         Yields:
-            tuple[list[Document], list[BaseNode]]: A batch of cleaned documents and their corresponding nodes.
+            tuple[list[Document], list[BaseNode]]: Batches of cleaned documents and their nodes.
 
         Raises:
             RuntimeError: If the directory reader fails to initialize.
         """
-
         self._load_doc_readers()
         self._load_node_parsers()
 
@@ -333,9 +329,7 @@ class DocumentIngestionPipeline:
                 progress_total=total_nodes,
             )
             processed_nodes += len(node_batch)
-            completed_hashes = (
-                file_hashes if batch_idx == len(node_batches) - 1 else set()
-            )
+            completed_hashes = file_hashes if batch_idx == len(node_batches) - 1 else set()
             yield docs if batch_idx == 0 else [], node_batch, completed_hashes
 
     def _iter_loaded_documents(self) -> Iterable[list[Document]]:
@@ -353,23 +347,14 @@ class DocumentIngestionPipeline:
         Raises:
             RuntimeError: If the directory reader is not initialized.
         """
-
         if self.dir_reader is None:
             raise RuntimeError("Directory reader failed to initialize.")
         dir_reader = self.dir_reader
 
         for input_file in dir_reader.input_files:
             ext = input_file.suffix.lower()
-            reader = (
-                dir_reader.file_extractor.get(ext)
-                if dir_reader.file_extractor
-                else None
-            )
-            if (
-                self.streaming_readers_enabled
-                and reader is not None
-                and hasattr(reader, "iter_documents")
-            ):
+            reader = dir_reader.file_extractor.get(ext) if dir_reader.file_extractor else None
+            if self.streaming_readers_enabled and reader is not None and hasattr(reader, "iter_documents"):
                 extra_info = dir_reader.file_metadata(str(input_file))
                 docs = list(reader.iter_documents(input_file, extra_info=extra_info))
             else:
@@ -393,10 +378,11 @@ class DocumentIngestionPipeline:
 
         Args:
             docs (list[Document]): The list of documents to process.
-            existing_hashes (set[str] | None): A set of existing document hashes to filter out already processed documents.
+            existing_hashes (set[str] | None): Document hashes to filter out (already-processed
+                docs).
 
         Returns:
-            tuple[list[Document], list[BaseNode]]: A tuple containing the processed documents and their corresponding nodes.
+            tuple[list[Document], list[BaseNode]]: The processed documents and their nodes.
         """
         docs = self._attach_clean_text(docs)
         docs = self._ensure_file_hashes(docs)
@@ -452,29 +438,22 @@ class DocumentIngestionPipeline:
             if self.ner_max_workers > 1:
                 with ThreadPoolExecutor(max_workers=self.ner_max_workers) as executor:
                     futures = [
-                        executor.submit(_process_node, i + progress_offset, node)
-                        for i, node in enumerate(nodes)
+                        executor.submit(_process_node, i + progress_offset, node) for i, node in enumerate(nodes)
                     ]
                     for i, _ in enumerate(as_completed(futures)):
                         if self.progress_callback:
                             self.progress_callback(
-                                "Extracting entities: "
-                                f"{progress_offset + i + 1}/{total_nodes} chunks processed"
+                                f"Extracting entities: {progress_offset + i + 1}/{total_nodes} chunks processed"
                             )
             else:
                 for i, node in enumerate(nodes):
                     _process_node(i + progress_offset, node)
                     if self.progress_callback:
                         self.progress_callback(
-                            "Extracting entities: "
-                            f"{progress_offset + i + 1}/{total_nodes} chunks processed"
+                            f"Extracting entities: {progress_offset + i + 1}/{total_nodes} chunks processed"
                         )
 
-        if (
-            self.hate_speech_enabled
-            and self.hate_speech_prompt
-            and self.hate_speech_model is not None
-        ):
+        if self.hate_speech_enabled and self.hate_speech_prompt and self.hate_speech_model is not None:
 
             def _process_hate_speech(idx: int, node: BaseNode) -> None:
                 """Run hate-speech detection on ``node`` and annotate metadata when positive."""
@@ -490,11 +469,7 @@ class DocumentIngestionPipeline:
                     parsed = _parse_hate_speech_payload(str(raw))
                     if bool(parsed.get("hate_speech")):
                         meta = dict(getattr(node, "metadata", {}) or {})
-                        chunk_id = str(
-                            getattr(node, "node_id", "")
-                            or getattr(node, "id_", "")
-                            or ""
-                        )
+                        chunk_id = str(getattr(node, "node_id", "") or getattr(node, "id_", "") or "")
                         source_ref = str(
                             meta.get("file_path")
                             or meta.get("filename")
@@ -507,31 +482,24 @@ class DocumentIngestionPipeline:
                         parsed["source_ref"] = source_ref
                         node.metadata = {**meta, "hate_speech": parsed}
                 except Exception as exc:
-                    logger.warning(
-                        "Hate-speech detection failed on chunk {}: {}", idx, exc
-                    )
+                    logger.warning("Hate-speech detection failed on chunk {}: {}", idx, exc)
 
             if self.hate_speech_max_workers > 1:
-                with ThreadPoolExecutor(
-                    max_workers=self.hate_speech_max_workers
-                ) as executor:
+                with ThreadPoolExecutor(max_workers=self.hate_speech_max_workers) as executor:
                     futures = [
-                        executor.submit(_process_hate_speech, i + progress_offset, node)
-                        for i, node in enumerate(nodes)
+                        executor.submit(_process_hate_speech, i + progress_offset, node) for i, node in enumerate(nodes)
                     ]
                     for i, _ in enumerate(as_completed(futures)):
                         if self.progress_callback:
                             self.progress_callback(
-                                "Detecting hate speech: "
-                                f"{progress_offset + i + 1}/{total_nodes} chunks processed"
+                                f"Detecting hate speech: {progress_offset + i + 1}/{total_nodes} chunks processed"
                             )
             else:
                 for i, node in enumerate(nodes):
                     _process_hate_speech(i + progress_offset, node)
                     if self.progress_callback:
                         self.progress_callback(
-                            "Detecting hate speech: "
-                            f"{progress_offset + i + 1}/{total_nodes} chunks processed"
+                            f"Detecting hate speech: {progress_offset + i + 1}/{total_nodes} chunks processed"
                         )
 
     def _create_nodes_without_enrichment(self, docs: list[Document]) -> list[BaseNode]:
@@ -549,9 +517,7 @@ class DocumentIngestionPipeline:
         if self.md_node_parser is None or self.docling_node_parser is None:
             raise RuntimeError("Node parsers are not initialized.")
 
-        document_docs, img_docs, json_docs, table_docs, text_docs, transcript_docs = [
-            [] for _ in range(6)
-        ]
+        document_docs, img_docs, json_docs, table_docs, text_docs, transcript_docs = [[] for _ in range(6)]
         for d in docs:
             meta = getattr(d, "metadata", {}) or {}
             file_type = (meta.get("file_type") or "").lower()
@@ -571,7 +537,7 @@ class DocumentIngestionPipeline:
                 json_docs.append(d)
             elif file_type.endswith(("docx", "pdf")) or ext in {"docx", "pdf"}:
                 document_docs.append(d)
-            elif file_type.startswith("text/") or ext in {"txt", "md", "rst"}:
+            elif file_type.startswith("text/") or ext in {"txt", "md", "rst", "rtf"}:
                 text_docs.append(d)
             else:
                 logger.warning(
@@ -614,19 +580,13 @@ class DocumentIngestionPipeline:
                     "Parsing {} Docling JSON PDFs with DoclingNodeParser",
                     len(pdf_docs_docling),
                 )
-                nodes.extend(
-                    self._process_docs_hierarchical(
-                        pdf_docs_docling, self.docling_node_parser
-                    )
-                )
+                nodes.extend(self._process_docs_hierarchical(pdf_docs_docling, self.docling_node_parser))
             if pdf_docs_md:
                 logger.info(
                     "Parsing {} Markdown PDFs with MarkdownNodeParser",
                     len(pdf_docs_md),
                 )
-                nodes.extend(
-                    self._process_docs_hierarchical(pdf_docs_md, self.md_node_parser)
-                )
+                nodes.extend(self._process_docs_hierarchical(pdf_docs_md, self.md_node_parser))
 
         if table_docs:
             logger.info(
@@ -641,18 +601,14 @@ class DocumentIngestionPipeline:
                 "Parsing {} transcript segment documents with SentenceSplitter (one node per segment)",
                 len(transcript_docs),
             )
-            transcript_splitter = SentenceSplitter(
-                chunk_size=10_000_000, chunk_overlap=0
-            )
+            transcript_splitter = SentenceSplitter(chunk_size=10_000_000, chunk_overlap=0)
             nodes.extend(transcript_splitter.get_nodes_from_documents(transcript_docs))
 
         if text_docs:
             markdown_docs = [
                 d
                 for d in text_docs
-                if str(d.metadata.get("file_path", "")).endswith(
-                    (".md", ".markdown", ".rst")
-                )
+                if str(d.metadata.get("file_path", "")).endswith((".md", ".markdown", ".rst"))
                 or (d.text.strip().startswith("#"))
             ]
             plain_docs = [d for d in text_docs if d not in markdown_docs]
@@ -662,9 +618,7 @@ class DocumentIngestionPipeline:
                     "Parsing {} markdown documents with MarkdownNodeParser",
                     len(markdown_docs),
                 )
-                nodes.extend(
-                    self._process_docs_hierarchical(markdown_docs, self.md_node_parser)
-                )
+                nodes.extend(self._process_docs_hierarchical(markdown_docs, self.md_node_parser))
             if plain_docs:
                 logger.info(
                     "Parsing {} plain text documents with SentenceSplitter",
@@ -703,15 +657,11 @@ class DocumentIngestionPipeline:
 
                 filtered_files.append(path_obj)
             except Exception as e:
-                logger.warning(
-                    f"Failed to compute hash for {file_path}, skipping pre-filter: {e}"
-                )
+                logger.warning(f"Failed to compute hash for {file_path}, skipping pre-filter: {e}")
                 filtered_files.append(path_obj)
 
         if skipped_count > 0:
-            logger.info(
-                f"Skipping {skipped_count} files that already exist in the collection."
-            )
+            logger.info(f"Skipping {skipped_count} files that already exist in the collection.")
             self.dir_reader.input_files = filtered_files
 
     def _ensure_file_hashes(self, docs: list[Document]) -> list[Document]:
@@ -730,15 +680,11 @@ class DocumentIngestionPipeline:
         path_hash_map: dict[str, str] = {}
 
         for doc in docs:
-            if "file_hash" in doc.metadata and doc.metadata["file_hash"]:
+            if doc.metadata.get("file_hash"):
                 continue
 
             # Try to find the file path
-            file_path = (
-                doc.metadata.get("file_path")
-                or doc.metadata.get("path")
-                or doc.metadata.get("filename")
-            )
+            file_path = doc.metadata.get("file_path") or doc.metadata.get("path") or doc.metadata.get("filename")
 
             if not file_path:
                 continue
@@ -760,9 +706,7 @@ class DocumentIngestionPipeline:
                     path_hash_map[file_path_str] = f_hash
             except Exception as e:
                 logger.warning("Could not compute hash for {}: {}", file_path_str, e)
-                raise RuntimeError(
-                    f"Failed to compute file hash for {file_path}"
-                ) from e
+                raise RuntimeError(f"Failed to compute file hash for {file_path}") from e
 
         return docs
 
@@ -778,9 +722,7 @@ class DocumentIngestionPipeline:
         cleaned: list[Document] = []
         for doc in docs:
             if hasattr(doc, "text") and isinstance(doc.text, str):
-                cleaned.append(
-                    Document(text=self.clean_fn(doc.text), metadata=doc.metadata)
-                )
+                cleaned.append(Document(text=self.clean_fn(doc.text), metadata=doc.metadata))
             else:
                 cleaned.append(doc)
         return cleaned
@@ -788,16 +730,12 @@ class DocumentIngestionPipeline:
     def _load_doc_readers(self) -> None:
         """Load document readers for various file types."""
         image_reader = ImageReader(
-            image_ingestion_service=(
-                self.image_ingestion_service or ImageIngestionService()
-            ),
+            image_ingestion_service=(self.image_ingestion_service or ImageIngestionService()),
             source_collection=self.target_collection,
         )
         table_reader = TableReader(
             text_cols=self.table_text_cols,
-            metadata_cols=self.table_metadata_cols
-            if self.table_metadata_cols
-            else None,
+            metadata_cols=self.table_metadata_cols if self.table_metadata_cols else None,
             id_col=self.table_id_col,
             excel_sheet=self.table_excel_sheet,
         )
@@ -846,21 +784,18 @@ class DocumentIngestionPipeline:
                 ".csv": table_reader,
                 ".parquet": TableReader(
                     text_cols=self.table_text_cols or ["text"],
-                    metadata_cols=set(self.table_metadata_cols)
-                    if self.table_metadata_cols
-                    else None,
+                    metadata_cols=set(self.table_metadata_cols) if self.table_metadata_cols else None,
                     id_col=self.table_id_col,
                 ),
                 ".tsv": TableReader(
                     csv_sep="\t",
                     text_cols=self.table_text_cols,
-                    metadata_cols=set(self.table_metadata_cols)
-                    if self.table_metadata_cols
-                    else None,
+                    metadata_cols=set(self.table_metadata_cols) if self.table_metadata_cols else None,
                     id_col=self.table_id_col,
                 ),
                 ".xls": table_reader,
                 ".xlsx": table_reader,
+                ".rtf": RTFReader(),
             },
         )
 
@@ -870,7 +805,7 @@ class DocumentIngestionPipeline:
         self.docling_node_parser = DoclingNodeParser()
 
     @staticmethod
-    def _extract_file_hash(data: dict | None) -> str | None:
+    def _extract_file_hash(data: dict[str, Any] | None) -> str | None:
         """Extract the file hash from the given data.
 
         Args:
@@ -943,12 +878,7 @@ class DocumentIngestionPipeline:
             if not filename:
                 origin = metadata.get("origin")
                 if isinstance(origin, dict):
-                    filename = (
-                        origin.get("filename")
-                        or origin.get("file_path")
-                        or origin.get("path")
-                        or ""
-                    )
+                    filename = origin.get("filename") or origin.get("file_path") or origin.get("path") or ""
             skipped[file_hash] = filename
 
         if skipped:
@@ -960,15 +890,13 @@ class DocumentIngestionPipeline:
             )
         return filtered
 
-    def _process_docs_hierarchical(
-        self, docs: list[Document], base_parser: NodeParser | None = None
-    ) -> list[BaseNode]:
+    def _process_docs_hierarchical(self, docs: list[Document], base_parser: NodeParser | None = None) -> list[BaseNode]:
         """Process documents possibly using hierarchical chunking.
 
         Args:
             docs (list[Document]): Documents to process.
-            base_parser (NodeParser | None): The base parser to use for coarse chunking.
-                                             If None, uses the internal logic of HierarchicalNodeParser (defaulting to SentenceSplitter).
+            base_parser (NodeParser | None): Base parser for coarse chunking. If None, uses the
+                internal HierarchicalNodeParser logic (defaulting to SentenceSplitter).
 
         Returns:
             list[BaseNode]: The processed nodes.
