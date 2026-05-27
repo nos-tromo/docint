@@ -15,30 +15,35 @@ from docint.agents.types import IntentAnalysis, OrchestratorResult, RetrievalRes
 class DummySessionManager:
     """Dummy session manager for testing purposes."""
 
-    def list_sessions(self) -> list[dict[str, Any]]:
-        """List all sessions.
+    def list_sessions(self, owner: str | None = None) -> list[dict[str, Any]]:
+        """List the caller's sessions.
+
+        Args:
+            owner (str | None): The owning principal.
 
         Returns:
             list[dict[str, Any]]: A list of session dictionaries.
         """
         return [{"id": "123", "created_at": "2023-01-01", "title": "Test Chat"}]
 
-    def get_session_history(self, session_id: str) -> list[dict[str, Any]]:
+    def get_session_history(self, session_id: str, owner: str | None = None) -> list[dict[str, Any]]:
         """Get the message history for a session.
 
         Args:
             session_id (str): The ID of the session.
+            owner (str | None): The owning principal.
 
         Returns:
             list[dict[str, Any]]: A list of message dictionaries.
         """
         return [{"role": "user", "content": "hi"}]
 
-    def delete_session(self, session_id: str) -> bool:
+    def delete_session(self, session_id: str, owner: str | None = None) -> bool:
         """Delete a session by ID.
 
         Args:
             session_id (str): The ID of the session.
+            owner (str | None): The owning principal.
 
         Returns:
             bool: True if the session was successfully deleted, False otherwise.
@@ -1597,22 +1602,24 @@ def test_sessions_endpoints(client: TestClient) -> None:
     Args:
         client (TestClient): The TestClient instance.
     """
+    headers = {"X-Auth-User": "tester"}
+
     # List
-    resp = client.get("/sessions/list")
+    resp = client.get("/sessions/list", headers=headers)
     assert resp.status_code == 200
     data = resp.json()
     assert len(data["sessions"]) == 1
     assert data["sessions"][0]["id"] == "123"
 
     # History
-    resp = client.get("/sessions/123/history")
+    resp = client.get("/sessions/123/history", headers=headers)
     assert resp.status_code == 200
     data = resp.json()
     assert len(data["messages"]) == 1
     assert data["messages"][0]["content"] == "hi"
 
     # Delete
-    resp = client.delete("/sessions/123")
+    resp = client.delete("/sessions/123", headers=headers)
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
 
@@ -2203,3 +2210,100 @@ def test_stream_query_context_window_overflow_surfaces_descriptive_error(
 
     assert "OPENAI_CTX_WINDOW" in text
     assert "Internal server error" not in text
+
+
+def test_sessions_endpoints_pass_principal_and_404_on_cross_owner(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Session endpoints forward the resolved principal and 404 cross-owner.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    seen: dict[str, Any] = {}
+
+    class OwnerAwareSessions:
+        """Session manager stub recording the owner it was called with."""
+
+        def list_sessions(self, owner: str) -> list[dict[str, Any]]:
+            seen["list"] = owner
+            return [{"id": "s1", "created_at": "2026-01-01", "title": "t"}]
+
+        def get_session_history(self, session_id: str, owner: str) -> list[dict[str, Any]]:
+            seen["history"] = (session_id, owner)
+            # Simulate a cross-owner / missing session: empty history.
+            return [] if owner == "bob" else [{"role": "user", "content": "hi"}]
+
+        def delete_session(self, session_id: str, owner: str) -> bool:
+            seen["delete"] = (session_id, owner)
+            return owner == "alice"
+
+    monkeypatch.setattr(api_module.rag, "ensure_session_manager", lambda: OwnerAwareSessions())
+
+    # List forwards the header principal.
+    resp = client.get("/sessions/list", headers={"X-Auth-User": "alice"})
+    assert resp.status_code == 200
+    assert seen["list"] == "alice"
+    assert resp.json()["sessions"][0]["id"] == "s1"
+
+    # History for the owner succeeds.
+    resp = client.get("/sessions/s1/history", headers={"X-Auth-User": "alice"})
+    assert resp.status_code == 200
+    assert seen["history"] == ("s1", "alice")
+    assert resp.json()["messages"][0]["content"] == "hi"
+
+    # Cross-owner history is 404 (empty -> not found, no existence leak).
+    resp = client.get("/sessions/s1/history", headers={"X-Auth-User": "bob"})
+    assert resp.status_code == 404
+
+    # Cross-owner delete is 404.
+    resp = client.delete("/sessions/s1", headers={"X-Auth-User": "bob"})
+    assert resp.status_code == 404
+    assert seen["delete"] == ("s1", "bob")
+
+    # Owner delete succeeds.
+    resp = client.delete("/sessions/s1", headers={"X-Auth-User": "alice"})
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+
+
+def test_sessions_list_401_without_header_or_default(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """With no trusted header and no configured default, endpoints 401.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.delenv("DOCINT_AUTH_HEADER", raising=False)
+    monkeypatch.delenv("DOCINT_DEFAULT_IDENTITY", raising=False)
+
+    resp = client.get("/sessions/list")
+    assert resp.status_code == 401
+
+
+def test_sessions_list_uses_default_identity_when_no_header(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """A configured default identity is used as the owner when no header.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.delenv("DOCINT_AUTH_HEADER", raising=False)
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    seen: dict[str, Any] = {}
+
+    class OwnerAwareSessions:
+        """Session manager stub recording the owner it was called with."""
+
+        def list_sessions(self, owner: str) -> list[dict[str, Any]]:
+            seen["list"] = owner
+            return []
+
+    monkeypatch.setattr(api_module.rag, "ensure_session_manager", lambda: OwnerAwareSessions())
+
+    resp = client.get("/sessions/list")
+    assert resp.status_code == 200
+    assert seen["list"] == "operator"

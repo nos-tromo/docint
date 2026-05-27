@@ -85,7 +85,7 @@ def test_persist_then_update_validation_round_trips(
         validation_reason=None,
     )
 
-    history = session_manager.get_session_history(session_id)
+    history = session_manager.get_session_history(session_id, owner=None)
     assistant = history[1]
     assert assistant["role"] == "assistant"
     assert assistant["validation_checked"] is True
@@ -125,7 +125,7 @@ def test_get_session_history_omits_validation_when_all_null(
     session_id = "sess-legacy"
     _persist_dummy_turn(session_manager, session_id)
 
-    history = session_manager.get_session_history(session_id)
+    history = session_manager.get_session_history(session_id, owner=None)
     assistant = history[1]
     assert "validation_checked" not in assistant
     assert "validation_mismatch" not in assistant

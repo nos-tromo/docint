@@ -416,6 +416,49 @@ def load_host_env(
 
 
 @dataclass(frozen=True)
+class PrincipalConfig:
+    """Dataclass for request-principal resolution configuration."""
+
+    header_name: str
+    default_identity: str | None
+
+
+def load_principal_env(
+    default_header_name: str = "X-Auth-User",
+    default_identity: str | None = None,
+) -> PrincipalConfig:
+    """Loads request-principal configuration from environment variables.
+
+    The same single ``default_identity`` value is used both as the
+    resolver's dev fallback (when the trusted header is absent) and as
+    the migration backfill owner for pre-existing conversation rows, so
+    that legacy data and pre-auth requests share one identity.
+
+    Args:
+        default_header_name (str): Default trusted header carrying the
+            authenticated principal.
+        default_identity (str | None): Default fallback identity when no
+            ``DOCINT_DEFAULT_IDENTITY`` is configured.
+
+    Returns:
+        PrincipalConfig: Dataclass containing principal configuration.
+        - header_name (str): The trusted header carrying the principal.
+        - default_identity (str | None): Fallback / backfill identity, or
+          ``None`` when unset (resolver then fails closed with 401).
+    """
+    raw_identity = os.getenv("DOCINT_DEFAULT_IDENTITY")
+    if raw_identity is not None and raw_identity.strip():
+        resolved_identity: str | None = raw_identity.strip()
+    else:
+        resolved_identity = default_identity
+
+    return PrincipalConfig(
+        header_name=os.getenv("DOCINT_AUTH_HEADER", default_header_name),
+        default_identity=resolved_identity,
+    )
+
+
+@dataclass(frozen=True)
 class ServeConfig:
     """Bind address for the docint console script."""
 

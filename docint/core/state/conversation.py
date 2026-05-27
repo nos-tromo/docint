@@ -19,6 +19,7 @@ class Conversation(Base):  # type: ignore[misc]
     id = Column(String, primary_key=True)  # external session id
     created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
     collection_name = Column(String, nullable=True)
+    owner = Column(String, nullable=True, index=True)
     rolling_summary = Column(Text, default="", nullable=False)
     turns = relationship(
         argument="Turn",
