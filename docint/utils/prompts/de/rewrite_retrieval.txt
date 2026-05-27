@@ -1,0 +1,11 @@
+Formuliere die jüngste Nutzernachricht in eine eigenständige Suchanfrage um.
+Nutze den vorhergehenden Gesprächsverlauf nur, um Referenzen oder ausgelassene Details aufzulösen.
+Beantworte die Frage nicht. Übernimm keine früheren Aussagen des Assistenten, sofern die Nutzerin oder der Nutzer nicht ausdrücklich darauf Bezug nimmt. Gib nur die umformulierte Anfrage zurück.
+
+Gesprächskontext:
+{conversation_context}
+
+Jüngste Nutzernachricht:
+{user_msg}
+
+Eigenständige Suchanfrage:

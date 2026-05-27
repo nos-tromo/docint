@@ -9,6 +9,25 @@ from llama_index.core.llms import LLM
 
 from docint.agents.context import TurnContext
 from docint.agents.types import IntentAnalysis, Turn, UnderstandingAgent
+from docint.utils.prompt_loader import load_localized_prompt
+
+DEFAULT_INTENT_ANALYST_PROMPT = (
+    "You are an expert conversation analyst for a RAG system.\n"
+    "Your task is to analyze the user query and extract the following JSON:\n"
+    "{{\n"
+    '  "intent": "qa" | "ner" | "table" | "summary",\n'
+    '  "rewritten_query": "The fully self-contained query resolving all references using context",\n'
+    '  "reason": "Brief explanation of the intent choice"\n'
+    "}}\n\n"
+    "Intents:\n"
+    "- 'qa': General questions, searching for information.\n"
+    "- 'ner': Request to extract specific entities (people, orgs) or relations.\n"
+    "- 'table': Request to look up or extract tabular data/rows.\n"
+    "- 'summary': Request to summarize a document or topic.\n\n"
+    "Conversation Context:\n{context_str}\n\n"
+    "User Query: {query}\n\n"
+    "Output JSON only:"
+)
 
 
 class SimpleUnderstandingAgent(UnderstandingAgent):
@@ -98,6 +117,10 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
     def __init__(self, llm: LLM) -> None:
         """Bind the LLM used for semantic intent analysis."""
         self.llm = llm
+        self._prompt_template = load_localized_prompt(
+            "intent_analyst",
+            default=DEFAULT_INTENT_ANALYST_PROMPT,
+        )
 
     def analyze(self, turn: Turn, context: Any | None = None) -> IntentAnalysis:
         """Analyze the turn using LLM reasoning.
@@ -163,23 +186,7 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
         Returns:
             str: The complete prompt to send to the LLM for analysis.
         """
-        return (
-            "You are an expert conversation analyst for a RAG system.\n"
-            "Your task is to Analyze the User Query and extract the following JSON:\n"
-            "{\n"
-            '  "intent": "qa" | "ner" | "table" | "summary",\n'
-            '  "rewritten_query": "The fully self-contained query resolving all references using context",\n'
-            '  "reason": "Brief explanation of the intent choice"\n'
-            "}\n\n"
-            "Intents:\n"
-            "- 'qa': General questions, searching for information.\n"
-            "- 'ner': Request to extract specific entities (people, orgs) or relations.\n"
-            "- 'table': Request to look up or extract tabular data/rows.\n"
-            "- 'summary': Request to summarize a document or topic.\n\n"
-            f"Conversation Context:\n{context_str}\n\n"
-            f"User Query: {query}\n\n"
-            "Output JSON only:"
-        )
+        return self._prompt_template.format(context_str=context_str, query=query)
 
     def _parse_response(self, text: str) -> dict[str, Any]:
         """Parse the LLM response, handling potential markdown wrapping.

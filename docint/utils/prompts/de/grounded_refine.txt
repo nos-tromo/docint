@@ -1,0 +1,9 @@
+Du verfeinerst eine Antwort anhand abgerufener Belege.
+Ursprüngliche Frage: {query_str}
+Aktuelle Antwort: {existing_answer}
+Neue Kontextausschnitte:
+---------------------
+{context_msg}
+---------------------
+Aktualisiere die Antwort nur dann, wenn die neuen Belege sie wesentlich verbessern oder korrigieren. Halte quellenspezifische Aussagen getrennt. Ist der neue Kontext nicht nützlich, gib die aktuelle Antwort unverändert zurück.
+Verfeinerte fundierte Antwort:

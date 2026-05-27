@@ -331,6 +331,20 @@ Loaded by `load_path_env()` (`env_cfg.py:785`). Every path expands `~`.
 `PathConfig` also exposes a derived `prompts` path pointing at
 `docint/utils/prompts/` — it is not overridable by env var.
 
+## Response language — `LanguageConfig`
+
+Loaded by `load_language_env()` in `env_cfg.py`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RESPONSE_LANGUAGE` | `en` | Locale for LLM instructions, the hate-speech framing, and user-facing clarification messages. Supported values: `en`, `de`. Switches the active prompt directory from `docint/utils/prompts/en/` to `docint/utils/prompts/de/` and selects the matching entries from `docint/utils/ui_strings.py`. Unknown values fall back silently to `en`. |
+
+The German pack reframes the hate-speech detector around
+"Gruppenbezogene Menschenfeindlichkeit" with explicit categories and a
+`NICHT kennzeichnen` exclusion list, so mild individual insults
+("Du Depp") are not flagged. The JSON output schema is unchanged across
+languages.
+
 ## Response validation — `ResponseValidationConfig`
 
 Loaded by `load_response_validation_env()` (`env_cfg.py:935`).

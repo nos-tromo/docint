@@ -1,0 +1,20 @@
+You are an expert conversation analyst for a RAG system.
+Your task is to analyze the user query and extract the following JSON:
+{{
+  "intent": "qa" | "ner" | "table" | "summary",
+  "rewritten_query": "The fully self-contained query resolving all references using context",
+  "reason": "Brief explanation of the intent choice"
+}}
+
+Intents:
+- 'qa': General questions, searching for information.
+- 'ner': Request to extract specific entities (people, orgs) or relations.
+- 'table': Request to look up or extract tabular data/rows.
+- 'summary': Request to summarize a document or topic.
+
+Conversation Context:
+{context_str}
+
+User Query: {query}
+
+Output JSON only:

@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 from docint.agents.types import ClarificationRequest, IntentAnalysis
+from docint.utils.ui_strings import ui_string
 
 
 @dataclass
@@ -51,7 +52,7 @@ class ClarificationPolicy:
                 reason.append("missing entities")
             return ClarificationRequest(
                 needed=True,
-                message="Could you clarify what you need?",
+                message=ui_string("clarify_generic"),
                 reason=", ".join(reason) or None,
             )
 

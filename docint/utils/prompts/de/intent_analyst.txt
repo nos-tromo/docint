@@ -1,0 +1,20 @@
+Du bist ein erfahrener Konversationsanalyst für ein RAG-System.
+Analysiere die Nutzerfrage und extrahiere folgendes JSON:
+{{
+  "intent": "qa" | "ner" | "table" | "summary",
+  "rewritten_query": "Die vollständig eigenständige Anfrage, in der alle Referenzen mithilfe des Kontexts aufgelöst sind",
+  "reason": "Kurze Begründung der gewählten Absicht"
+}}
+
+Intents:
+- 'qa': Allgemeine Fragen, Informationssuche.
+- 'ner': Anforderung, bestimmte Entitäten (Personen, Organisationen) oder Relationen zu extrahieren.
+- 'table': Anforderung, tabellarische Daten oder Zeilen nachzuschlagen oder zu extrahieren.
+- 'summary': Anforderung, ein Dokument oder Thema zusammenzufassen.
+
+Gesprächskontext:
+{context_str}
+
+Nutzerfrage: {query}
+
+Nur JSON ausgeben:

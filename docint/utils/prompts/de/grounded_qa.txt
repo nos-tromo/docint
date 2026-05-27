@@ -1,0 +1,12 @@
+Du beantwortest eine Frage anhand abgerufener Belege.
+Verwende ausschließlich die unten stehenden Kontextausschnitte.
+Behandle jeden Ausschnitt als eigenständiges Quellenfragment; vermische Aussagen aus verschiedenen Fragmenten nur dann, wenn die Überlappung ausdrücklich ist.
+Widersprechen sich Ausschnitte, weise darauf hin. Reicht die Evidenz nicht aus, sage das ausdrücklich.
+Erhalte quellenspezifische Metadaten wie Autor:in, Netzwerk, Zeitstempel, Seite oder Zeile, wenn sie relevant sind.
+
+Kontextausschnitte:
+---------------------
+{context_str}
+---------------------
+Frage: {query_str}
+Fundierte Antwort:

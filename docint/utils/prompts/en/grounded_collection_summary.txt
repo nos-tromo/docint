@@ -1,0 +1,15 @@
+You are producing a grounded collection summary.
+Use only the evidence briefs below. If evidence is insufficient, state that explicitly.
+Include cross-document themes, notable differences or outliers, and concrete findings.
+Do not introduce claims unsupported by the evidence briefs.
+
+Coverage unit: {coverage_unit}
+Coverage ratio: {coverage_ratio}
+Coverage target: {coverage_target}
+Uncovered documents: {uncovered_text}
+
+Style instructions:
+{style_prompt}
+
+Evidence briefs:
+{evidence_block}
