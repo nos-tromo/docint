@@ -1,5 +1,8 @@
 """Tests for the conversations.owner column and its idempotent migration."""
 
+from pathlib import Path
+
+import pytest
 from sqlalchemy import (
     Column,
     DateTime,
@@ -27,11 +30,11 @@ def test_conversation_model_declares_indexed_owner_column() -> None:
     assert isinstance(owner_col.type, String)
 
 
-def test_fresh_db_has_owner_column(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_fresh_db_has_owner_column(tmp_path: Path) -> None:
     """A DB created via _make_session_maker exposes conversations.owner.
 
     Args:
-        tmp_path: Temporary directory provided by pytest.
+        tmp_path (Path): Temporary directory provided by pytest.
     """
     db_path = tmp_path / "fresh.db"
     _make_session_maker(f"sqlite:///{db_path}")
@@ -43,12 +46,12 @@ def test_fresh_db_has_owner_column(tmp_path) -> None:  # type: ignore[no-untyped
 
 
 def test_legacy_conversations_table_gets_column_and_backfill(
-    monkeypatch,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A pre-existing conversations table without owner is upgraded + backfilled.
 
     Args:
-        monkeypatch: The pytest monkeypatch fixture.
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
     """
     monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
 
@@ -87,9 +90,7 @@ def test_legacy_conversations_table_gets_column_and_backfill(
     assert any("owner" in ix["column_names"] for ix in indexes)
 
     with engine.begin() as conn:
-        backfilled = conn.execute(
-            text("SELECT owner FROM conversations WHERE id = 'c1'")
-        ).scalar()
+        backfilled = conn.execute(text("SELECT owner FROM conversations WHERE id = 'c1'")).scalar()
     assert backfilled == "operator"
     engine.dispose()
 
@@ -103,12 +104,12 @@ def test_migration_helper_no_op_when_table_missing() -> None:
 
 
 def test_backfill_skipped_when_no_default_identity(
-    monkeypatch,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With no configured identity the column is added but rows stay NULL.
 
     Args:
-        monkeypatch: The pytest monkeypatch fixture.
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
     """
     monkeypatch.delenv("DOCINT_DEFAULT_IDENTITY", raising=False)
 
@@ -135,8 +136,6 @@ def test_backfill_skipped_when_no_default_identity(
     _ensure_conversation_owner_column(engine)
 
     with engine.begin() as conn:
-        owner_val = conn.execute(
-            text("SELECT owner FROM conversations WHERE id = 'c1'")
-        ).scalar()
+        owner_val = conn.execute(text("SELECT owner FROM conversations WHERE id = 'c1'")).scalar()
     assert owner_val is None
     engine.dispose()

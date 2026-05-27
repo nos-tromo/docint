@@ -26,9 +26,7 @@ class DummySessionManager:
         """
         return [{"id": "123", "created_at": "2023-01-01", "title": "Test Chat"}]
 
-    def get_session_history(
-        self, session_id: str, owner: str | None = None
-    ) -> list[dict[str, Any]]:
+    def get_session_history(self, session_id: str, owner: str | None = None) -> list[dict[str, Any]]:
         """Get the message history for a session.
 
         Args:
@@ -2232,9 +2230,7 @@ def test_sessions_endpoints_pass_principal_and_404_on_cross_owner(
             seen["list"] = owner
             return [{"id": "s1", "created_at": "2026-01-01", "title": "t"}]
 
-        def get_session_history(
-            self, session_id: str, owner: str
-        ) -> list[dict[str, Any]]:
+        def get_session_history(self, session_id: str, owner: str) -> list[dict[str, Any]]:
             seen["history"] = (session_id, owner)
             # Simulate a cross-owner / missing session: empty history.
             return [] if owner == "bob" else [{"role": "user", "content": "hi"}]
@@ -2243,9 +2239,7 @@ def test_sessions_endpoints_pass_principal_and_404_on_cross_owner(
             seen["delete"] = (session_id, owner)
             return owner == "alice"
 
-    monkeypatch.setattr(
-        api_module.rag, "ensure_session_manager", lambda: OwnerAwareSessions()
-    )
+    monkeypatch.setattr(api_module.rag, "ensure_session_manager", lambda: OwnerAwareSessions())
 
     # List forwards the header principal.
     resp = client.get("/sessions/list", headers={"X-Auth-User": "alice"})
@@ -2274,9 +2268,7 @@ def test_sessions_endpoints_pass_principal_and_404_on_cross_owner(
     assert resp.json()["ok"] is True
 
 
-def test_sessions_list_401_without_header_or_default(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient
-) -> None:
+def test_sessions_list_401_without_header_or_default(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """With no trusted header and no configured default, endpoints 401.
 
     Args:
@@ -2310,9 +2302,7 @@ def test_sessions_list_uses_default_identity_when_no_header(
             seen["list"] = owner
             return []
 
-    monkeypatch.setattr(
-        api_module.rag, "ensure_session_manager", lambda: OwnerAwareSessions()
-    )
+    monkeypatch.setattr(api_module.rag, "ensure_session_manager", lambda: OwnerAwareSessions())
 
     resp = client.get("/sessions/list")
     assert resp.status_code == 200

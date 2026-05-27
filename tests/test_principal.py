@@ -63,10 +63,7 @@ def _make_request(headers: dict[str, str] | None = None) -> Request:
     Returns:
         Request: A request object whose ``.headers`` reflects ``headers``.
     """
-    raw_headers = [
-        (key.lower().encode("latin-1"), value.encode("latin-1"))
-        for key, value in (headers or {}).items()
-    ]
+    raw_headers = [(key.lower().encode("latin-1"), value.encode("latin-1")) for key, value in (headers or {}).items()]
     scope = {
         "type": "http",
         "method": "GET",

@@ -4,10 +4,9 @@ from pathlib import Path
 
 from loguru import logger
 from sqlalchemy import Engine, create_engine, inspect, text
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 from docint.utils.env_cfg import load_principal_env
-
 
 # --- Session persistence (ORM) ---
 Base = declarative_base()
@@ -81,18 +80,11 @@ def _ensure_conversation_owner_column(engine: Engine) -> None:
                 conn.execute(text("ALTER TABLE conversations ADD COLUMN owner TEXT"))
             index_names = {ix["name"] for ix in inspector.get_indexes("conversations")}
             if "ix_conversations_owner" not in index_names:
-                conn.execute(
-                    text(
-                        "CREATE INDEX IF NOT EXISTS ix_conversations_owner "
-                        "ON conversations (owner)"
-                    )
-                )
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_conversations_owner ON conversations (owner)"))
             default_identity = load_principal_env().default_identity
             if default_identity:
                 conn.execute(
-                    text(
-                        "UPDATE conversations SET owner = :default WHERE owner IS NULL"
-                    ),
+                    text("UPDATE conversations SET owner = :default WHERE owner IS NULL"),
                     {"default": default_identity},
                 )
     except Exception as exc:

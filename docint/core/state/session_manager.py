@@ -67,9 +67,7 @@ class SessionManager:
         self.chat_memory = None
         self._owner = None
 
-    def start_session(
-        self, requested_id: str | None = None, owner: str | None = None
-    ) -> str:
+    def start_session(self, requested_id: str | None = None, owner: str | None = None) -> str:
         """Start a new chat session.
 
         After ``RAG.select_collection`` switches collections it deliberately
@@ -455,9 +453,7 @@ class SessionManager:
         finally:
             session.close()
 
-    def _load_or_create_convo(
-        self, session: Session, session_id: str, owner: str | None = None
-    ) -> Conversation:
+    def _load_or_create_convo(self, session: Session, session_id: str, owner: str | None = None) -> Conversation:
         """Load an existing conversation or create a new one.
 
         A pre-existing conversation keeps its recorded owner; ``owner`` is
@@ -692,10 +688,7 @@ class SessionManager:
         """
         with self._session_scope() as s:
             convs = (
-                s.query(Conversation)
-                .filter(Conversation.owner == owner)
-                .order_by(Conversation.created_at.desc())
-                .all()
+                s.query(Conversation).filter(Conversation.owner == owner).order_by(Conversation.created_at.desc()).all()
             )
             results = []
             for c in convs:
@@ -716,9 +709,7 @@ class SessionManager:
                 )
             return results
 
-    def get_session_history(
-        self, session_id: str, owner: str | None
-    ) -> list[dict[str, Any]]:
+    def get_session_history(self, session_id: str, owner: str | None) -> list[dict[str, Any]]:
         """Get the full message history for a session the caller owns.
 
         A session owned by a different principal is treated as not found

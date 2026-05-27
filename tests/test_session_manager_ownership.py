@@ -1,6 +1,7 @@
 """Tests for owner-scoped session listing, history, and deletion."""
 
-from typing import Any, Generator, cast
+from collections.abc import Generator
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest

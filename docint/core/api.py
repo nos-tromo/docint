@@ -1097,14 +1097,14 @@ def get_collection_documents() -> dict[str, list[dict[str, Any]]]:
 @app.get("/sessions/list", response_model=SessionListOut, tags=["Sessions"])
 def list_sessions(
     principal: str = Depends(resolve_principal),
-) -> dict[str, list[dict]]:
+) -> dict[str, list[dict[str, Any]]]:
     """List the calling principal's chat sessions.
 
     Args:
         principal (str): The resolved request principal.
 
     Returns:
-        dict[str, list[dict]]: A dictionary containing the list of sessions.
+        dict[str, list[dict[str, Any]]]: A dictionary containing the list of sessions.
 
     Raises:
         HTTPException: If an error occurs while listing sessions.
@@ -1124,7 +1124,7 @@ def list_sessions(
 )
 def get_session_history(
     session_id: str, principal: str = Depends(resolve_principal)
-) -> dict[str, list[dict]]:
+) -> dict[str, list[dict[str, Any]]]:
     """Get history for a session owned by the calling principal.
 
     A session that does not exist or is owned by another principal is
@@ -1135,21 +1135,19 @@ def get_session_history(
         principal (str): The resolved request principal.
 
     Returns:
-        dict[str, list[dict]]: A dictionary containing the session messages.
+        dict[str, list[dict[str, Any]]]: A dictionary containing the session messages.
 
     Raises:
         HTTPException: 404 when the session is not found for this
             principal; 500 on unexpected errors.
     """
     try:
-        messages = rag.ensure_session_manager().get_session_history(
-            session_id, principal
-        )
+        messages = rag.ensure_session_manager().get_session_history(session_id, principal)
     except HTTPException:
         raise
     except Exception as e:
         logger.error("Error fetching history: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
     # NOTE: empty also covers "owned but zero turns" (brand-new session),
     # which collapses to 404 here; acceptable for Plan 1 (see Plan 2).
     if not messages:
@@ -1158,9 +1156,7 @@ def get_session_history(
 
 
 @app.delete("/sessions/{session_id}", tags=["Sessions"])
-def delete_session(
-    session_id: str, principal: str = Depends(resolve_principal)
-) -> dict[str, bool]:
+def delete_session(session_id: str, principal: str = Depends(resolve_principal)) -> dict[str, bool]:
     """Delete a session owned by the calling principal.
 
     A session that does not exist or is owned by another principal is
@@ -1184,7 +1180,7 @@ def delete_session(
         raise
     except Exception as e:
         logger.error("Error deleting session: {}", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
     if not success:
         raise HTTPException(status_code=404, detail="Session not found.")
     return {"ok": success}
