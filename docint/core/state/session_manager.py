@@ -24,6 +24,7 @@ from loguru import logger
 from sqlalchemy.orm import Session
 
 from docint.agents.context import TurnContext as AgentTurnContext
+from docint.agents.types import PriorTurn
 from docint.core.state.base import _make_session_maker
 from docint.core.state.citation import Citation
 from docint.core.state.conversation import Conversation
@@ -167,6 +168,56 @@ class SessionManager:
 
             return "\n\n".join(parts)
 
+    def _bind_prior_turn_context(
+        self,
+        engine: Any,
+        prior_turn: PriorTurn | None,
+    ) -> None:
+        """Bind ``{prior_turn_context}`` on the engine's QA/refine templates.
+
+        Uses :meth:`llama_index.core.PromptTemplate.partial_format` to
+        override the default sentinel set in
+        :meth:`docint.core.rag.RAG._build_grounded_text_qa_template`. No-op
+        when ``prior_turn`` is ``None`` (the default sentinel renders fine
+        as-is). Failures (e.g., the engine does not expose
+        ``update_prompts``) are logged and swallowed because the prior-turn
+        block is a soft enhancement; the engine remains usable with the
+        default binding.
+
+        Args:
+            engine: The active query engine (typically a ``RetrieverQueryEngine``).
+            prior_turn: The immediately preceding user/assistant exchange, if any.
+        """
+        if prior_turn is None:
+            return
+        update_prompts = getattr(engine, "update_prompts", None)
+        if update_prompts is None:
+            return
+        profile = self.rag._infer_collection_profile()
+        social_table = bool(profile.get("is_social_table"))
+        prior_turn_block = (
+            f"Previous user question: {prior_turn.user_text.strip()}\n"
+            f"Previous assistant answer: {prior_turn.assistant_text.strip()}"
+        )
+        try:
+            qa_tmpl = self.rag._build_grounded_text_qa_template(social_table=social_table).partial_format(
+                prior_turn_context=prior_turn_block
+            )
+            refine_tmpl = self.rag._build_grounded_refine_template(social_table=social_table).partial_format(
+                prior_turn_context=prior_turn_block
+            )
+            update_prompts(
+                {
+                    "response_synthesizer:text_qa_template": qa_tmpl,
+                    "response_synthesizer:refine_template": refine_tmpl,
+                }
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to bind prior_turn_context on query engine; continuing with the default sentinel: {}",
+                exc,
+            )
+
     def chat(
         self,
         user_msg: str,
@@ -175,6 +226,7 @@ class SessionManager:
         metadata_filters_active: bool = False,
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
+        prior_turn: PriorTurn | None = None,
     ) -> dict[str, Any]:
         """Handle a chat message from the user.
 
@@ -188,6 +240,13 @@ class SessionManager:
                 filter payloads for post-filtering auxiliary image sources.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
+            prior_turn (PriorTurn | None): Orchestrator-supplied prior
+                exchange. When provided, the second internal
+                ``rewrite_retrieval_query`` is skipped (the orchestrator
+                already produced a context-aware query) and the
+                ``prior_turn_context`` placeholder is bound on the
+                engine's generation templates so the synthesizer can
+                quote and elaborate on the prior assistant answer.
 
         Returns:
             dict[str, Any]: The response data.
@@ -218,17 +277,24 @@ class SessionManager:
         if self.chat_engine is None or session_id is None:
             session_id = self.start_session(session_id)
 
-        session_context = self._get_session_context(session_id)
-        retrieval_query = self.rag.rewrite_retrieval_query(
-            user_msg=user_msg,
-            conversation_context=session_context,
-        )
+        if prior_turn is not None:
+            # The orchestrator's understanding agent already rewrote with
+            # full history; do not rewrite again with the stricter
+            # SessionManager prompt that bans prior assistant claims.
+            retrieval_query = user_msg.strip()
+        else:
+            session_context = self._get_session_context(session_id)
+            retrieval_query = self.rag.rewrite_retrieval_query(
+                user_msg=user_msg,
+                conversation_context=session_context,
+            )
         expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(retrieval_query)
         coverage_unit = str(self.rag._infer_collection_profile().get("coverage_unit") or "documents")
         retrieval_mode = f"rewrite_{self.rag._resolve_chat_response_mode().value}"
         if bool(graph_debug.get("applied")):
             retrieval_mode += "_graph"
 
+        self._bind_prior_turn_context(engine, prior_turn)
         resp = engine.query(expanded_query)
         response = self.rag._normalize_response_data(
             user_msg,
@@ -252,6 +318,7 @@ class SessionManager:
         metadata_filters_active: bool = False,
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
+        prior_turn: PriorTurn | None = None,
     ) -> Iterator[str | dict[str, Any]]:
         """Handle a streaming chat message from the user.
 
@@ -265,6 +332,8 @@ class SessionManager:
                 filter payloads for post-filtering auxiliary image sources.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
+            prior_turn (PriorTurn | None): Orchestrator-supplied prior
+                exchange. See :meth:`chat` for semantics.
 
         Yields:
             str | dict: Chunks of text, followed by a dict with metadata.
@@ -294,17 +363,21 @@ class SessionManager:
         if self.chat_engine is None or session_id is None:
             session_id = self.start_session(session_id)
 
-        session_context = self._get_session_context(session_id)
-        retrieval_query = self.rag.rewrite_retrieval_query(
-            user_msg=user_msg,
-            conversation_context=session_context,
-        )
+        if prior_turn is not None:
+            retrieval_query = user_msg.strip()
+        else:
+            session_context = self._get_session_context(session_id)
+            retrieval_query = self.rag.rewrite_retrieval_query(
+                user_msg=user_msg,
+                conversation_context=session_context,
+            )
         expanded_query, graph_debug = self.rag.expand_query_with_graph_with_debug(retrieval_query)
         coverage_unit = str(self.rag._infer_collection_profile().get("coverage_unit") or "documents")
         retrieval_mode = f"rewrite_{self.rag._resolve_chat_response_mode().value}"
         if bool(graph_debug.get("applied")):
             retrieval_mode += "_graph"
 
+        self._bind_prior_turn_context(streaming_engine, prior_turn)
         response = streaming_engine.query(expanded_query)
         response_gen = getattr(response, "response_gen", None)
         if response_gen is None:

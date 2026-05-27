@@ -1,6 +1,6 @@
 """Shared types for agent orchestration."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 
@@ -34,11 +34,28 @@ class ClarificationRequest:
 
 
 @dataclass
+class PriorTurn:
+    """Captures the immediately preceding user/assistant exchange.
+
+    Used by the orchestrator path to (a) skip the
+    ``SessionManager.chat`` second rewrite (the orchestrator's
+    understanding agent already produced a context-aware query) and
+    (b) bind ``{prior_turn_context}`` into the grounded-QA template so
+    elaboration follow-ups can quote and expand on the prior assistant
+    answer.
+    """
+
+    user_text: str
+    assistant_text: str
+
+
+@dataclass
 class RetrievalRequest:
     """Input to the retrieval agent."""
 
     turn: Turn
     analysis: IntentAnalysis
+    history: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
