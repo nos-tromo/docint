@@ -524,7 +524,7 @@ def test_document_and_standalone_follow_same_shared_schema(tmp_path: Path) -> No
 
 
 def test_ingest_image_degrades_when_embedding_backend_init_fails() -> None:
-    """When the CLIP backend raises on init, ingestion should fail gracefully with an error message."""
+    """When the remote CLIP backend raises on init, ingestion should fail gracefully with an error message."""
     cfg = ImageIngestionConfig(
         enabled=True,
         embedding_enabled=True,
@@ -548,7 +548,7 @@ def test_ingest_image_degrades_when_embedding_backend_init_fails() -> None:
     )
 
     with patch(
-        "docint.core.ingest.images_service.CLIPImageEmbeddingBackend",
+        "docint.core.ingest.images_service.RemoteCLIPBackend",
         side_effect=RuntimeError("clip init failed"),
     ):
         record = service.ingest_image(

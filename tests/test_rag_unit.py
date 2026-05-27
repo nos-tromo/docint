@@ -2268,56 +2268,32 @@ def test_build_ingestion_pipeline_non_openai_keeps_gliner_ner_path(
     assert len(created) == 1
 
 
-def test_device_uses_use_device_override(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """RAG device selection should honor the explicit runtime override.
-
-    Args:
-        monkeypatch: The monkeypatch fixture.
-    """
-    monkeypatch.setenv("USE_DEVICE", "cpu")
-    monkeypatch.setattr(rag_module.torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(rag_module.torch.backends.mps, "is_available", lambda: False)
-    monkeypatch.setattr(rag_module.torch.backends.mps, "is_built", lambda: False)
-
-    rag = RAG(qdrant_collection="test")
-
-    assert rag.device == "cpu"
-
-
-def test_build_ingestion_pipeline_passes_configured_device_to_gliner(
+def test_build_ingestion_pipeline_wires_remote_ner_extractor(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Non-OpenAI ingestion should forward the resolved device to GLiNER.
+    """Enabled NER should wire the remote extractor onto the pipeline.
+
+    All ML inference (NER, CLIP, embed, rerank) goes over HTTP after the
+    Phase 3 collapse, so docint no longer threads a device argument
+    through the build call.
 
     Args:
         monkeypatch: The monkeypatch fixture.
         tmp_path: The temporary path fixture.
     """
-    monkeypatch.setenv("USE_DEVICE", "cpu")
     monkeypatch.setenv("NER_ENABLED", "true")
 
-    captured: dict[str, Any] = {}
+    call_count = 0
 
-    def _fake_build_gliner_ner_extractor(
-        labels: list[str] | None = None,
-        threshold: float = 0.3,
-        device: str | None = None,
-    ) -> object:
-        """Capture GLiNER device selection during pipeline construction.
-
-        Args:
-            labels: Requested GLiNER labels.
-            threshold: Requested GLiNER threshold.
-            device: Requested execution device.
+    def _fake_build_remote_ner_extractor() -> object:
+        """Capture remote-extractor construction during pipeline build.
 
         Returns:
             object: Placeholder extractor object.
         """
-        del labels, threshold
-        captured["device"] = device
+        nonlocal call_count
+        call_count += 1
         return object()
 
     rag = RAG(qdrant_collection="test")
@@ -2331,20 +2307,20 @@ def test_build_ingestion_pipeline_passes_configured_device_to_gliner(
     )
     monkeypatch.setattr(
         pipeline_module,
-        "build_gliner_ner_extractor",
-        _fake_build_gliner_ner_extractor,
+        "build_remote_ner_extractor",
+        _fake_build_remote_ner_extractor,
     )
     monkeypatch.setattr(
         rag_module,
         "ImageIngestionService",
-        lambda device: types.SimpleNamespace(device=device),
+        lambda: types.SimpleNamespace(),
     )
 
     pipeline = rag._build_ingestion_pipeline()
 
     assert pipeline.entity_extractor is not None
-    assert captured["device"] == "cpu"
-    assert getattr(rag._image_ingestion_service, "device", None) == "cpu"
+    assert call_count == 1
+    assert rag._image_ingestion_service is not None
 
 
 def test_sparse_model_returns_id_when_directly_supported(
@@ -2382,105 +2358,25 @@ def test_sparse_model_returns_id_when_directly_supported(
     assert rag.sparse_model == "Qdrant/all_miniLM_L6_v2_with_attentions"
 
 
-def test_reranker_passes_configured_fp16(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Reranker should pass the configured fp16 setting to FlagEmbeddingReranker.
+@pytest.mark.parametrize("provider", ["vllm", "ollama", "openai"])
+def test_reranker_always_uses_remote_postprocessor(
+    provider: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every provider yields the remote ``VLLMRerankPostprocessor``.
 
     Args:
-        monkeypatch: The monkeypatch fixture.
+        provider: The inference provider string set on the RAG instance.
+        monkeypatch: The monkeypatch fixture (clears RERANK_* env vars).
     """
-    captured: dict[str, object] = {}
-
-    class FakeFlagReranker:
-        """A fake FlagEmbeddingReranker for testing purposes."""
-
-        def __init__(self, top_n: int, model: str, use_fp16: bool) -> None:
-            """Initialize the FakeFlagReranker and capture the initialization parameters.
-
-            Args:
-                top_n (int): The number of top results to rerank.
-                model (str): The model identifier to use for reranking.
-                use_fp16 (bool): Whether to use fp16 precision for the model.
-            """
-            captured["top_n"] = top_n
-            captured["model"] = model
-            captured["use_fp16"] = use_fp16
-            self._model = types.SimpleNamespace(compute_score=lambda _: [0.0])
-
-    monkeypatch.setattr(rag_module, "FlagEmbeddingReranker", FakeFlagReranker)
-    monkeypatch.setattr(
-        rag_module,
-        "resolve_hf_cache_path",
-        lambda cache_dir, repo_id: None,
-    )
+    for var in ("RERANK_API_BASE", "RERANK_API_KEY", "RERANK_TIMEOUT"):
+        monkeypatch.delenv(var, raising=False)
 
     rag = RAG(qdrant_collection="test")
-    rag.openai_inference_provider = "ollama"
-    rag.rerank_use_fp16 = True
-    rag.rerank_top_n = 7
-
-    _ = rag.reranker
-
-    assert captured["top_n"] == 7
-    assert captured["model"] == rag.rerank_model_id
-    assert captured["use_fp16"] is True
-
-
-def test_openai_reranker_uses_flag_embedding(monkeypatch: pytest.MonkeyPatch) -> None:
-    """OpenAI provider should use the local FlagEmbedding reranker by default.
-
-    Args:
-        monkeypatch: The monkeypatch fixture.
-    """
-    captured: dict[str, object] = {}
-
-    class FakeFlagReranker:
-        """A fake FlagEmbeddingReranker for testing purposes."""
-
-        def __init__(self, top_n: int, model: str, use_fp16: bool) -> None:
-            """Initialize the FakeFlagReranker and capture the initialization parameters.
-
-            Args:
-                top_n (int): The number of top results to rerank.
-                model (str): The model identifier to use for reranking.
-                use_fp16 (bool): Whether to use fp16 precision for the model.
-            """
-            captured["top_n"] = top_n
-            captured["model"] = model
-            captured["use_fp16"] = use_fp16
-            self._model = types.SimpleNamespace(compute_score=lambda _: [0.0])
-
-    def fail_llm_rerank(*args: object, **kwargs: object) -> object:
-        """A fake LLMRerank that raises an error if used.
-
-        Raises:
-            AssertionError: Always raised to indicate that LLMRerank should not be used.
-        """
-        raise AssertionError("LLMRerank should not be used for the openai provider")
-
-    monkeypatch.setattr(rag_module, "FlagEmbeddingReranker", FakeFlagReranker)
-    monkeypatch.setattr(rag_module, "LLMRerank", fail_llm_rerank)
-    monkeypatch.setattr(
-        rag_module,
-        "resolve_hf_cache_path",
-        lambda cache_dir, repo_id: None,
-    )
-
-    rag = RAG(qdrant_collection="test")
-    rag.openai_inference_provider = "openai"
-    rag.rerank_top_n = 6
-
-    _ = rag.reranker
-
-    assert captured["top_n"] == 6
-    assert captured["model"] == rag.rerank_model_id
-
-
-def test_vllm_reranker_uses_remote_postprocessor() -> None:
-    """VLLM provider should use the remote rerank endpoint postprocessor."""
-    rag = RAG(qdrant_collection="test")
-    rag.openai_inference_provider = "vllm"
+    rag.openai_inference_provider = provider
     rag.openai_api_base = "http://router:8000/v1"
     rag.openai_api_key = "token-abc123"
+    rag.openai_timeout = 42.0
     rag.rerank_top_n = 4
 
     reranker = rag.reranker
@@ -2490,6 +2386,35 @@ def test_vllm_reranker_uses_remote_postprocessor() -> None:
     assert reranker.api_key == "token-abc123"
     assert reranker.model == rag.rerank_model_id
     assert reranker.top_n == 4
+    assert reranker.timeout == 42.0
+
+
+def test_reranker_honours_rerank_api_base_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``RERANK_API_BASE`` overrides ``OPENAI_API_BASE`` independently.
+
+    Operators running the rerank-only deployment shape point chat/embed
+    at one URL (e.g. Ollama) and rerank at another
+    (``http://rerank-cpu:8000``). The env override must take precedence
+    over the OpenAI defaults so the two endpoints stay decoupled.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    monkeypatch.setenv("RERANK_API_BASE", "http://rerank-cpu:8000/")
+    monkeypatch.delenv("RERANK_API_KEY", raising=False)
+    monkeypatch.delenv("RERANK_TIMEOUT", raising=False)
+
+    rag = RAG(qdrant_collection="test")
+    rag.openai_inference_provider = "ollama"
+    rag.openai_api_base = "http://localhost:11434/v1"
+    rag.openai_api_key = "sk-no-key-required"
+    rag.openai_timeout = 300.0
+
+    reranker = rag.reranker
+
+    assert isinstance(reranker, rag_module.VLLMRerankPostprocessor)
+    # Trailing slash stripped — postprocessor appends /rerank itself.
+    assert reranker.api_base == "http://rerank-cpu:8000"
 
 
 def test_vllm_reranker_reorders_results(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2672,45 +2597,6 @@ def test_embed_model_forwards_explicit_dimensions_override(
     _ = rag.embed_model
 
     assert captured["dimensions"] == 1024
-
-
-def test_reranker_falls_back_to_llm_on_meta_tensor_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Reranker should fallback to LLMRerank when FlagEmbedding hits meta tensor errors.
-
-    Args:
-        monkeypatch: The monkeypatch fixture.
-    """
-
-    class FakeFlagReranker:
-        def __init__(self, top_n: int, model: str, use_fp16: bool) -> None:
-            _ = (top_n, model, use_fp16)
-
-            def _raise(_pairs: object) -> list[float]:
-                raise NotImplementedError("Cannot copy out of meta tensor; no data!")
-
-            self._model = types.SimpleNamespace(compute_score=_raise)
-
-    llm_reranker_obj = object()
-
-    monkeypatch.setattr(rag_module, "FlagEmbeddingReranker", FakeFlagReranker)
-    monkeypatch.setattr(
-        rag_module,
-        "LLMRerank",
-        lambda top_n, llm: llm_reranker_obj,
-    )
-    monkeypatch.setattr(
-        rag_module,
-        "resolve_hf_cache_path",
-        lambda cache_dir, repo_id: None,
-    )
-
-    rag = RAG(qdrant_collection="test")
-    rag.openai_inference_provider = "ollama"
-    rag._text_model = None
-
-    assert rag.reranker is llm_reranker_obj
 
 
 class _FakeCompletion:

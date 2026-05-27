@@ -121,7 +121,8 @@ It is built by `RAG._build_ingestion_pipeline()` and takes:
 
 - the active Qdrant collection,
 - the data directory,
-- an NER extractor (`docint/utils/ner_extractor.py`) when
+- an NER extractor (`docint/utils/ner_client.py`, a thin HTTP client to
+  the remote GLiNER service hosted by `vllm-service`) when
   `NER_ENABLED=true`,
 - a hate-speech detector when `ENABLE_HATE_SPEECH_DETECTION=true`,
 - a progress callback (used by `/ingest/upload` to stream events).
@@ -217,12 +218,24 @@ supported workaround.
 ## NER and hate-speech
 
 Entity extraction runs during ingestion through
-`docint/utils/ner_extractor.py`, which wraps GLiNER
-(`NER_MODEL=gliner-community/gliner_large-v2.5`). Each chunk shorter
-than `NER_MAX_CHARS` is processed with up to `NER_MAX_WORKERS` threads.
-Detected entities, relations, and aggregate statistics end up in node
-metadata and, post-ingestion, in the NER cache that powers the
-`/collections/ner*` endpoints.
+`docint/utils/ner_client.py`, a thin HTTP client to the remote GLiNER
+service hosted by `vllm-service`. The model and device live on the
+service side; the docint side just configures the endpoint
+(`NER_API_BASE`, default `http://vllm-router:4000`; bearer auth via
+`NER_API_KEY` when the full vllm-service stack is in use). Each chunk
+shorter than `NER_MAX_CHARS` is POSTed with up to `NER_MAX_WORKERS`
+concurrent worker threads. Detected entities, relations, and aggregate
+statistics end up in node metadata and, post-ingestion, in the NER
+cache that powers the `/collections/ner*` endpoints.
+
+Two operator-side deployment shapes for the upstream NER service:
+
+- Full `vllm-service` stack (CUDA): docint reaches the router at
+  `http://vllm-router:4000/gliner`; set
+  `NER_API_KEY=$OPENAI_API_KEY` to satisfy the router's Bearer auth.
+- `vllm-service` NER-only stack (Mac, CPU-only Linux running Ollama for
+  chat/embed): docint reaches the GLiNER container directly at
+  `http://gliner-ner:8000/gliner`; no Bearer auth needed.
 
 Hate-speech detection is an optional parallel stage governed by
 `HateSpeechConfig`. Flagged chunks carry a `hate_speech_detected` flag

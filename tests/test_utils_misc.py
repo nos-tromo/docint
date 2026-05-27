@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -10,7 +9,6 @@ from loguru import logger
 
 from docint.utils.clean_text import basic_clean
 from docint.utils.env_cfg import (
-    _apply_device_visibility,
     load_frontend_env,
     load_hate_speech_env,
     load_ingestion_env,
@@ -18,7 +16,6 @@ from docint.utils.env_cfg import (
     load_openai_env,
     load_path_env,
     load_retrieval_env,
-    load_runtime_env,
     load_session_env,
     load_summary_env,
 )
@@ -99,22 +96,13 @@ def test_path_config_artifacts_env_override(monkeypatch: pytest.MonkeyPatch, tmp
     assert cfg.artifacts == custom
 
 
-def test_init_logger_respects_env_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """init_logger should honor LOG_PATH and create the log file.
-
-    Args:
-        tmp_path (Path): Temporary directory.
-        monkeypatch (pytest.MonkeyPatch): Fixture to override environment.
-    """
-    log_file = tmp_path / "logs" / "docint.log"
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("LOG_PATH", str(log_file))
-
-    resolved = init_logger(rotation="1 MB", retention=1)
-    logger.debug("create log entry for file")
-
-    assert resolved == log_file
-    assert log_file.exists()
+def test_init_logger_honors_log_level(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """init_logger should install a stderr sink whose level honors LOG_LEVEL."""
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    init_logger()
+    logger.debug("debug-level message")
+    captured = capsys.readouterr()
+    assert "debug-level message" in captured.err
 
 
 def test_load_summary_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -197,7 +185,6 @@ def test_load_retrieval_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     Args:
         monkeypatch: Fixture to clear environment variables.
     """
-    monkeypatch.delenv("RERANK_USE_FP16", raising=False)
     monkeypatch.delenv("RETRIEVE_TOP_K", raising=False)
     monkeypatch.delenv("CHAT_RESPONSE_MODE", raising=False)
     monkeypatch.delenv("RETRIEVAL_VECTOR_QUERY_MODE", raising=False)
@@ -208,7 +195,6 @@ def test_load_retrieval_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
 
     cfg = load_retrieval_env()
 
-    assert cfg.rerank_use_fp16 is False
     assert cfg.retrieve_top_k == 20
     assert cfg.chat_response_mode == "auto"
     assert cfg.vector_store_query_mode == "auto"
@@ -226,7 +212,6 @@ def test_load_retrieval_env_parses_chat_response_mode(
     Args:
         monkeypatch: Fixture to set environment variables.
     """
-    monkeypatch.setenv("RERANK_USE_FP16", "true")
     monkeypatch.setenv("RETRIEVE_TOP_K", "11")
     monkeypatch.setenv("CHAT_RESPONSE_MODE", "refine")
     monkeypatch.setenv("RETRIEVAL_VECTOR_QUERY_MODE", "hybrid")
@@ -237,7 +222,6 @@ def test_load_retrieval_env_parses_chat_response_mode(
 
     cfg = load_retrieval_env()
 
-    assert cfg.rerank_use_fp16 is True
     assert cfg.retrieve_top_k == 11
     assert cfg.chat_response_mode == "refine"
     assert cfg.vector_store_query_mode == "hybrid"
@@ -414,36 +398,6 @@ def test_load_session_env_honors_override(monkeypatch: pytest.MonkeyPatch) -> No
     assert cfg.session_store == "sqlite:////tmp/custom-sessions.db"
 
 
-def test_load_runtime_env_defaults_to_auto(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Runtime env loader should default to automatic device selection.
-
-    Args:
-        monkeypatch: Fixture to clear environment variables.
-    """
-    monkeypatch.delenv("USE_DEVICE", raising=False)
-
-    cfg = load_runtime_env()
-
-    assert cfg.use_device == "auto"
-
-
-def test_load_runtime_env_normalizes_supported_device(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Runtime env loader should normalize supported device overrides.
-
-    Args:
-        monkeypatch: Fixture to set environment variables.
-    """
-    monkeypatch.setenv("USE_DEVICE", "CUDA:1")
-
-    cfg = load_runtime_env()
-
-    assert cfg.use_device == "cuda:1"
-
-
 def test_load_model_env_reads_direct_text_and_vision_model_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -478,54 +432,6 @@ def test_load_model_env_uses_vllm_sparse_default(
     assert cfg.sparse_model == "BAAI/bge-m3"
 
 
-def test_apply_device_visibility_hides_cuda_on_cpu(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """USE_DEVICE=cpu should set CUDA_VISIBLE_DEVICES='' to prevent GPU context init.
-
-    Args:
-        monkeypatch: Fixture to override environment variables.
-    """
-    monkeypatch.setenv("USE_DEVICE", "cpu")
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-
-    _apply_device_visibility()
-
-    assert os.environ["CUDA_VISIBLE_DEVICES"] == ""
-
-
-def test_apply_device_visibility_skips_non_cpu(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Non-CPU device settings should not mask CUDA devices.
-
-    Args:
-        monkeypatch: Fixture to override environment variables.
-    """
-    monkeypatch.setenv("USE_DEVICE", "auto")
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-
-    _apply_device_visibility()
-
-    assert "CUDA_VISIBLE_DEVICES" not in os.environ
-
-
-def test_apply_device_visibility_respects_existing_override(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Operator-set CUDA_VISIBLE_DEVICES should not be overwritten.
-
-    Args:
-        monkeypatch: Fixture to override environment variables.
-    """
-    monkeypatch.setenv("USE_DEVICE", "cpu")
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
-
-    _apply_device_visibility()
-
-    assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"
-
-
 def test_load_model_env_uses_default_ner_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -544,12 +450,11 @@ def test_load_model_env_uses_default_ner_model(
 def test_load_model_env_preserves_explicit_ner_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Explicit NER model configuration should override device-based defaults.
+    """Explicit ``NER_MODEL`` env override should win over the default.
 
     Args:
         monkeypatch: Fixture to override environment variables.
     """
-    monkeypatch.setenv("USE_DEVICE", "cpu")
     monkeypatch.setenv("NER_MODEL", "gliner-community/gliner_large-v2.5")
 
     cfg = load_model_env()

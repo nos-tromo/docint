@@ -41,27 +41,6 @@ def set_offline_env() -> None:
 set_offline_env()  # Apply offline settings at module load time
 
 
-def _apply_device_visibility() -> None:
-    """Hide CUDA devices when the backend is configured for CPU-only work.
-
-    When ``USE_DEVICE=cpu`` the process should never initialise a CUDA
-    context.  Setting ``CUDA_VISIBLE_DEVICES=""`` before any PyTorch import
-    prevents accidental GPU memory allocation that can destabilise co-located
-    GPU services (e.g. vLLM workers sharing the same physical GPUs).
-    """
-    requested = os.getenv("USE_DEVICE", "auto").strip().lower()
-    if requested != "cpu":
-        return
-    # Only override when not already set by the operator.
-    if os.getenv("CUDA_VISIBLE_DEVICES") is not None:
-        return
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
-    logger.info("USE_DEVICE=cpu: set CUDA_VISIBLE_DEVICES='' to prevent GPU context init.")
-
-
-_apply_device_visibility()  # Must run before any torch.cuda call
-
-
 def resolve_hf_cache_path(cache_dir: Path, repo_id: str, filename: str | None = None) -> Path | None:
     """Resolve a HuggingFace model or file path from the local HF cache.
 
@@ -437,6 +416,49 @@ def load_host_env(
 
 
 @dataclass(frozen=True)
+class PrincipalConfig:
+    """Dataclass for request-principal resolution configuration."""
+
+    header_name: str
+    default_identity: str | None
+
+
+def load_principal_env(
+    default_header_name: str = "X-Auth-User",
+    default_identity: str | None = None,
+) -> PrincipalConfig:
+    """Loads request-principal configuration from environment variables.
+
+    The same single ``default_identity`` value is used both as the
+    resolver's dev fallback (when the trusted header is absent) and as
+    the migration backfill owner for pre-existing conversation rows, so
+    that legacy data and pre-auth requests share one identity.
+
+    Args:
+        default_header_name (str): Default trusted header carrying the
+            authenticated principal.
+        default_identity (str | None): Default fallback identity when no
+            ``DOCINT_DEFAULT_IDENTITY`` is configured.
+
+    Returns:
+        PrincipalConfig: Dataclass containing principal configuration.
+        - header_name (str): The trusted header carrying the principal.
+        - default_identity (str | None): Fallback / backfill identity, or
+          ``None`` when unset (resolver then fails closed with 401).
+    """
+    raw_identity = os.getenv("DOCINT_DEFAULT_IDENTITY")
+    if raw_identity is not None and raw_identity.strip():
+        resolved_identity: str | None = raw_identity.strip()
+    else:
+        resolved_identity = default_identity
+
+    return PrincipalConfig(
+        header_name=os.getenv("DOCINT_AUTH_HEADER", default_header_name),
+        default_identity=resolved_identity,
+    )
+
+
+@dataclass(frozen=True)
 class ServeConfig:
     """Bind address for the docint console script."""
 
@@ -583,7 +605,7 @@ def load_ingestion_env(
     default_docstore_retry_backoff_seconds: float = 0.25,
     default_docstore_retry_backoff_max_seconds: float = 2.0,
     default_fine_chunk_overlap: int = 0,
-    default_fine_chunk_size: int = 8192,
+    default_fine_chunk_size: int = 1024,
     default_hierarchical_chunking_enabled: bool = True,
     default_ingestion_batch_size: int = 50,
     default_sentence_splitter_chunk_overlap: int = 64,
@@ -651,6 +673,7 @@ def load_ingestion_env(
             ".parquet",
             ".pdf",
             ".png",
+            ".rtf",
             ".tsv",
             ".txt",
             ".xls",
@@ -729,7 +752,6 @@ class ModelConfig:
 
     embed_model: str
     embed_tokenizer_repo: str
-    image_embed_model: str
     ner_model: str
     rerank_model: str
     sparse_model: str
@@ -739,7 +761,6 @@ class ModelConfig:
 
 def load_model_env(
     default_embed_model: str = "bge-m3",
-    default_image_embed_model: str = "openai/clip-vit-base-patch32",
     default_ner_model: str = "gliner-community/gliner_large-v2.5",
     default_rerank_model: str = "BAAI/bge-reranker-v2-m3",
     default_sparse_model: str = "Qdrant/all_miniLM_L6_v2_with_attentions",
@@ -751,7 +772,6 @@ def load_model_env(
     Args:
         default_embed_model(str): Default embedding model identifier for
             Ollama-compatible embeddings.
-        default_image_embed_model (str): Default image embedding model identifier.
         default_ner_model (str): Default NER model identifier.
         default_rerank_model (str): Default reranker model identifier.
         default_sparse_model (str): Default sparse model identifier.
@@ -764,7 +784,6 @@ def load_model_env(
         - embed_tokenizer_repo (str): HF repo id of the tokenizer used
           for offline token counting at ingestion time. Empty when
           tokenization happens on the provider side (e.g. ``openai``).
-        - image_embed_model (str): The image embedding model identifier.
         - ner_model (str): The NER model identifier.
         - rerank_model (str): The reranker model identifier.
         - sparse_model (str): The sparse model identifier.
@@ -790,7 +809,6 @@ def load_model_env(
     return ModelConfig(
         embed_model=os.getenv("EMBED_MODEL", default_embed_model),
         embed_tokenizer_repo=os.getenv("EMBED_TOKENIZER_REPO", default_embed_tokenizer_repo),
-        image_embed_model=os.getenv("IMAGE_EMBED_MODEL", default_image_embed_model),
         ner_model=os.getenv("NER_MODEL", default_ner_model),
         rerank_model=os.getenv("RERANK_MODEL", default_rerank_model),
         sparse_model=os.getenv("SPARSE_MODEL", default_sparse_model),
@@ -833,6 +851,163 @@ def load_ner_env(
         enabled=str(os.getenv("NER_ENABLED", default_enabled)).lower() in {"true", "1", "yes"},
         max_chars=int(os.getenv("NER_MAX_CHARS", default_max_chars)),
         max_workers=int(os.getenv("NER_MAX_WORKERS", default_max_workers)),
+    )
+
+
+@dataclass(frozen=True)
+class NERClientConfig:
+    """Dataclass for the remote NER service HTTP client."""
+
+    api_base: str
+    api_key: str | None
+    threshold: float
+    timeout: float
+
+
+def load_ner_client_env(
+    default_api_base: str = "http://vllm-router:4000",
+    default_threshold: float = 0.3,
+    default_timeout: float = 30.0,
+) -> NERClientConfig:
+    """Load the remote NER client configuration from the environment.
+
+    The client POSTs to ``{api_base}/gliner`` with the GLiNER-native body
+    shape ``{text, labels, threshold}``. The default ``api_base`` matches
+    the LiteLLM router alias used by the full vllm-service stack; for the
+    ner-only deployment shape, override with
+    ``NER_API_BASE=http://gliner-ner:8000``.
+
+    Args:
+        default_api_base (str): Default base URL of the NER service.
+        default_threshold (float): Default GLiNER confidence threshold.
+        default_timeout (float): Default per-request HTTP timeout (seconds).
+
+    Returns:
+        NERClientConfig: Resolved configuration.
+
+        - ``api_base``: Base URL; the client appends ``/gliner`` itself.
+        - ``api_key``: Bearer token sent as ``Authorization: Bearer ...``
+          when set; omitted entirely when ``None``. The ner-only shape
+          requires no auth (trust ``inference-net``); the full vllm-service
+          shape requires the router's ``OPENAI_API_KEY`` master key —
+          operators set ``NER_API_KEY=$OPENAI_API_KEY`` explicitly in that
+          case to avoid hidden coupling between the two env vars.
+        - ``threshold``: GLiNER confidence cutoff passed per request.
+        - ``timeout``: Per-request HTTP timeout in seconds.
+    """
+    raw_key = os.getenv("NER_API_KEY")
+    api_key = raw_key.strip() if raw_key and raw_key.strip() else None
+    return NERClientConfig(
+        api_base=os.getenv("NER_API_BASE", default_api_base).rstrip("/"),
+        api_key=api_key,
+        threshold=float(os.getenv("NER_THRESHOLD", default_threshold)),
+        timeout=float(os.getenv("NER_TIMEOUT", default_timeout)),
+    )
+
+
+@dataclass(frozen=True)
+class CLIPClientConfig:
+    """Dataclass for the remote CLIP image+text embedding service HTTP client."""
+
+    api_base: str
+    api_key: str | None
+    timeout: float
+
+
+def load_clip_client_env(
+    default_api_base: str = "http://vllm-router:4000",
+    default_timeout: float = 30.0,
+) -> "CLIPClientConfig":
+    """Load the remote CLIP client configuration from the environment.
+
+    docint reaches CLIP over HTTP. The client POSTs to
+    ``{api_base}/clip/embed_image`` (multipart or JSON-base64) and
+    ``{api_base}/clip/embed_text``, and GETs ``{api_base}/clip/dimension``
+    at startup to probe the projection size. The default ``api_base``
+    matches the LiteLLM router alias used by the full vllm-service
+    stack; for the clip-only deployment shape, override with
+    ``CLIP_API_BASE=http://clip-embed:8000``.
+
+    Args:
+        default_api_base: Fallback base URL when ``CLIP_API_BASE`` is
+            unset. Typically the full-stack vllm-router alias.
+        default_timeout: Fallback request timeout in seconds.
+
+    Returns:
+        CLIPClientConfig: Resolved configuration.
+
+        - ``api_base``: Base URL; the client appends ``/clip/*`` itself.
+        - ``api_key``: Bearer token sent as ``Authorization: Bearer ...``
+          when set; omitted when ``None``. The clip-only shape requires
+          no auth (trust ``inference-net``); the full vllm-service shape
+          requires the router's ``OPENAI_API_KEY`` master key —
+          operators set ``CLIP_API_KEY=$OPENAI_API_KEY`` explicitly.
+        - ``timeout``: Per-request HTTP timeout in seconds.
+    """
+    raw_key = os.getenv("CLIP_API_KEY")
+    api_key = raw_key.strip() if raw_key and raw_key.strip() else None
+    return CLIPClientConfig(
+        api_base=os.getenv("CLIP_API_BASE", default_api_base).rstrip("/"),
+        api_key=api_key,
+        timeout=float(os.getenv("CLIP_TIMEOUT", default_timeout)),
+    )
+
+
+@dataclass(frozen=True)
+class RerankClientConfig:
+    """Dataclass for the remote rerank service HTTP client."""
+
+    api_base: str
+    api_key: str | None
+    timeout: float
+
+
+def load_rerank_client_env(
+    default_api_base: str,
+    default_api_key: str | None,
+    default_timeout: float,
+) -> "RerankClientConfig":
+    """Load the remote rerank client configuration from the environment.
+
+    docint always reaches rerank over HTTP. The client POSTs to
+    ``{api_base}/rerank`` with a Jina-shape body
+    ``{model, query, documents, top_n}``. Defaults mirror the OpenAI
+    client settings — the full vllm-service router exposes
+    ``/v1/rerank`` as a LiteLLM pass-through against the same base. For
+    the rerank-only deployment shape (CPU container hosted by
+    vllm-service), override with ``RERANK_API_BASE=http://rerank-cpu:8000``.
+
+    Args:
+        default_api_base (str): Fallback base URL when ``RERANK_API_BASE`` is
+            unset. Typically the active ``OPENAI_API_BASE``.
+        default_api_key (str | None): Fallback Bearer token when
+            ``RERANK_API_KEY`` is unset. ``None`` (or empty) disables auth.
+        default_timeout (float): Fallback request timeout in seconds.
+
+    Returns:
+        RerankClientConfig: Resolved configuration.
+
+        - ``api_base``: Base URL; the postprocessor appends ``/rerank``
+          itself.
+        - ``api_key``: Bearer token sent as ``Authorization: Bearer ...``
+          when set; omitted entirely when ``None``. The rerank-only shape
+          requires no auth (trust ``inference-net``); the full vllm-service
+          router requires the master key — operators leave the env unset
+          to inherit ``default_api_key``, or set ``RERANK_API_KEY``
+          explicitly.
+        - ``timeout``: Per-request HTTP timeout in seconds.
+    """
+    raw_key = os.getenv("RERANK_API_KEY")
+    if raw_key is not None and raw_key.strip():
+        api_key: str | None = raw_key.strip()
+    elif default_api_key and default_api_key.strip():
+        api_key = default_api_key.strip()
+    else:
+        api_key = None
+    return RerankClientConfig(
+        api_base=os.getenv("RERANK_API_BASE", default_api_base).rstrip("/"),
+        api_key=api_key,
+        timeout=float(os.getenv("RERANK_TIMEOUT", default_timeout)),
     )
 
 
@@ -985,7 +1160,6 @@ class PathConfig:
     artifacts: Path
     data: Path
     docint_home_dir: Path
-    logs: Path
     queries: Path
     results: Path
     prompts: Path
@@ -1002,7 +1176,6 @@ def load_path_env() -> PathConfig:
         - docint_home_dir (Path): Root home directory for docint, used as the base for other
             default paths. Defaults to ~/docint.
         - data (Path): Path to the data directory.
-        - logs (Path): Path to the logs file.
         - queries (Path): Path to the queries file.
         - results (Path): Path to the results directory.
         - prompts (Path): Path to the prompts directory.
@@ -1019,8 +1192,6 @@ def load_path_env() -> PathConfig:
 
     utils_dir: Path = Path(__file__).parent.resolve()
     default_prompts_dir: Path = utils_dir / "prompts"
-    project_root: Path = utils_dir.parents[1]
-    default_log_dir = project_root / ".logs" / "docint.log"
 
     default_qdrant_sources: Path = docint_home_dir / "qdrant_sources"
     default_artifacts_dir: Path = docint_home_dir / "artifacts"
@@ -1029,7 +1200,6 @@ def load_path_env() -> PathConfig:
         artifacts=Path(os.getenv("PIPELINE_ARTIFACTS_DIR", default_artifacts_dir)).expanduser(),
         data=Path(os.getenv("DATA_PATH", default_data_dir)).expanduser(),
         docint_home_dir=docint_home_dir,
-        logs=Path(os.getenv("LOG_PATH", default_log_dir)).expanduser(),
         queries=Path(os.getenv("QUERIES_PATH", default_query_dir)).expanduser(),
         results=Path(os.getenv("RESULTS_PATH", default_results_dir)).expanduser(),
         prompts=default_prompts_dir,
@@ -1164,7 +1334,6 @@ def load_response_validation_env(
 class RetrievalConfig:
     """Dataclass for RAG (Retrieval-Augmented Generation) configuration."""
 
-    rerank_use_fp16: bool
     retrieve_top_k: int
     chat_response_mode: Literal["auto", "compact", "refine"]
     vector_store_query_mode: Literal["auto", "default", "sparse", "hybrid", "mmr"]
@@ -1176,7 +1345,6 @@ class RetrievalConfig:
 
 
 def load_retrieval_env(
-    default_rerank_use_fp16: bool = False,
     default_retrieve_top_k: int = 20,
     default_chat_response_mode: Literal["auto", "compact", "refine"] = "auto",
     default_vector_store_query_mode: Literal["auto", "default", "sparse", "hybrid", "mmr"] = "auto",
@@ -1189,7 +1357,6 @@ def load_retrieval_env(
     """Loads retrieval configuration from environment variables or defaults.
 
     Args:
-        default_rerank_use_fp16 (bool): Use FP16 for reranker model. Default False.
         default_retrieve_top_k (int): Default number of top documents to retrieve.
         default_chat_response_mode (Literal["auto", "compact", "refine"]): Default response
             synthesizer mode for chat/query answers. Default "auto".
@@ -1210,7 +1377,6 @@ def load_retrieval_env(
 
     Returns:
         RetrievalConfig: Dataclass containing retrieval configuration.
-        - rerank_use_fp16 (bool): Whether to use FP16 for the reranker model.
         - retrieve_top_k (int): The number of top documents to retrieve for RAG
         - chat_response_mode (Literal["auto", "compact", "refine"]): The
           response synthesizer mode for chat/query answers.
@@ -1243,7 +1409,6 @@ def load_retrieval_env(
         vector_store_query_mode = "auto"
 
     return RetrievalConfig(
-        rerank_use_fp16=str(os.getenv("RERANK_USE_FP16", default_rerank_use_fp16)).lower() in {"true", "1", "yes"},
         retrieve_top_k=int(os.getenv("RETRIEVE_TOP_K", default_retrieve_top_k)),
         chat_response_mode=chat_response_mode,
         vector_store_query_mode=vector_store_query_mode,
@@ -1319,41 +1484,6 @@ def _parse_parent_context_safety_margin(*, default: float) -> float:
         )
         return default
     return parsed
-
-
-@dataclass(frozen=True)
-class RuntimeConfig:
-    """Dataclass for local runtime device preferences."""
-
-    use_device: str
-
-
-def load_runtime_env(default_use_device: str = "auto") -> RuntimeConfig:
-    """Load local runtime settings from environment variables.
-
-    Args:
-        default_use_device (str): Preferred device for local auxiliary models.
-            Supported values are ``auto``, ``cpu``, ``mps``, ``cuda``, and
-            ``cuda:<index>``.
-
-    Returns:
-        RuntimeConfig: Parsed runtime configuration.
-    """
-    normalized_default = default_use_device.strip().lower() or "auto"
-    requested_device = str(os.getenv("USE_DEVICE", normalized_default)).strip().lower()
-    if not requested_device:
-        requested_device = normalized_default
-
-    is_supported = requested_device in {
-        "auto",
-        "cpu",
-        "cuda",
-        "mps",
-    } or requested_device.startswith("cuda:")
-    if not is_supported:
-        requested_device = normalized_default
-
-    return RuntimeConfig(use_device=requested_device)
 
 
 @dataclass(frozen=True)

@@ -9,7 +9,16 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from anyio import to_thread
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -29,6 +38,7 @@ from docint.agents import (
     Turn,
 )
 from docint.cli import ingest as ingest_module
+from docint.core.auth.principal import resolve_principal
 from docint.core.rag import RAG, EmptyIngestionError
 from docint.core.retrieval_filters import build_metadata_filters, build_qdrant_filter
 from docint.utils.cursor import InvalidCursorError
@@ -1489,17 +1499,22 @@ def export_hate_speech_csv(
 
 
 @app.get("/sessions/list", response_model=SessionListOut, tags=["Sessions"])
-def list_sessions() -> dict[str, list[dict[str, Any]]]:
-    """List all available chat sessions.
+def list_sessions(
+    principal: str = Depends(resolve_principal),
+) -> dict[str, list[dict[str, Any]]]:
+    """List the calling principal's chat sessions.
+
+    Args:
+        principal (str): The resolved request principal.
 
     Returns:
-        dict[str, list[dict]]: A dictionary containing the list of sessions.
+        dict[str, list[dict[str, Any]]]: A dictionary containing the list of sessions.
 
     Raises:
         HTTPException: If an error occurs while listing sessions.
     """
     try:
-        sessions = rag.ensure_session_manager().list_sessions()
+        sessions = rag.ensure_session_manager().list_sessions(principal)
         return {"sessions": sessions}
     except Exception as e:
         logger.error("Error listing sessions: {}", e)
@@ -1511,27 +1526,40 @@ def list_sessions() -> dict[str, list[dict[str, Any]]]:
     response_model=SessionHistoryOut,
     tags=["Sessions"],
 )
-def get_session_history(session_id: str) -> dict[str, list[dict[str, Any]]]:
-    """Get history for a specific session.
+def get_session_history(
+    session_id: str, principal: str = Depends(resolve_principal)
+) -> dict[str, list[dict[str, Any]]]:
+    """Get history for a session owned by the calling principal.
+
+    A session that does not exist or is owned by another principal is
+    reported as 404 (no existence leak).
 
     Args:
         session_id (str): The ID of the session.
+        principal (str): The resolved request principal.
 
     Returns:
-        dict[str, list[dict]]: A dictionary containing the session messages.
+        dict[str, list[dict[str, Any]]]: A dictionary containing the session messages.
 
     Raises:
-        HTTPException: If an error occurs while fetching session history.
+        HTTPException: 404 when the session is not found for this
+            principal; 500 on unexpected errors.
     """
     try:
-        messages = rag.ensure_session_manager().get_session_history(session_id)
-        return {"messages": messages}
+        messages = rag.ensure_session_manager().get_session_history(session_id, principal)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error fetching history: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
+    # NOTE: empty also covers "owned but zero turns" (brand-new session),
+    # which collapses to 404 here; acceptable for Plan 1 (see Plan 2).
+    if not messages:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    return {"messages": messages}
 
 
-def _collect_session_source_files(session_id: str) -> list[tuple[str, Path]]:
+def _collect_session_source_files(session_id: str, principal: str) -> list[tuple[str, Path]]:
     """Return the unique source files referenced by a session's citations.
 
     Each entry is ``(filename_in_zip, path_on_disk)``. Files that can't be
@@ -1542,11 +1570,13 @@ def _collect_session_source_files(session_id: str) -> list[tuple[str, Path]]:
 
     Args:
         session_id (str): The session whose citations should be packaged.
+        principal (str): The resolved request principal; sessions owned by
+            another principal yield an empty result (404 at the endpoint).
 
     Returns:
         list[tuple[str, Path]]: Pairs ready for :meth:`zipfile.ZipFile.write`.
     """
-    messages = rag.ensure_session_manager().get_session_history(session_id)
+    messages = rag.ensure_session_manager().get_session_history(session_id, principal)
     active_collection = rag.qdrant_collection
     selected: dict[str, tuple[str, Path]] = {}
     used_arcnames: set[str] = set()
@@ -1582,27 +1612,30 @@ def _collect_session_source_files(session_id: str) -> list[tuple[str, Path]]:
 
 
 @app.get("/sessions/{session_id}/sources.zip", tags=["Sessions"])
-def export_session_sources_zip(session_id: str) -> StreamingResponse:
+def export_session_sources_zip(session_id: str, principal: str = Depends(resolve_principal)) -> StreamingResponse:
     """Stream a ZIP bundle of every source file cited in a session.
 
     Resolves each citation's ``file_hash`` to an on-disk file using the same
     lookup chain as ``/sources/preview``, deduplicates by hash, and writes the
     files into an in-memory ZIP (typical sessions cite tens of files, not
     thousands). Sources whose underlying file can't be found are skipped
-    rather than failing the whole download.
+    rather than failing the whole download. Sessions owned by another
+    principal collapse to 404 — they look identical to "no sources".
 
     Args:
         session_id (str): The session ID to package.
+        principal (str): The resolved request principal.
 
     Returns:
         StreamingResponse: ``application/zip`` payload with an
         ``attachment; filename="session-<id>-sources.zip"`` header.
 
     Raises:
-        HTTPException: 404 if the session has no resolvable sources.
+        HTTPException: 404 if the session has no resolvable sources or is
+            owned by another principal.
     """
     try:
-        files = _collect_session_source_files(session_id)
+        files = _collect_session_source_files(session_id, principal)
     except Exception as e:
         logger.error("Error assembling session sources for {}: {}", session_id, e)
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -1635,24 +1668,34 @@ def export_session_sources_zip(session_id: str) -> StreamingResponse:
 
 
 @app.delete("/sessions/{session_id}", tags=["Sessions"])
-def delete_session(session_id: str) -> dict[str, bool]:
-    """Delete a session.
+def delete_session(session_id: str, principal: str = Depends(resolve_principal)) -> dict[str, bool]:
+    """Delete a session owned by the calling principal.
+
+    A session that does not exist or is owned by another principal is
+    reported as 404 (no existence leak).
 
     Args:
         session_id (str): The ID of the session to delete.
+        principal (str): The resolved request principal.
 
     Returns:
-        dict[str, bool]: A dictionary indicating whether the deletion was successful.
+        dict[str, bool]: A dictionary indicating whether the deletion
+            was successful.
 
     Raises:
-        HTTPException: If an error occurs while deleting the session.
+        HTTPException: 404 when the session is not found for this
+            principal; 500 on unexpected errors.
     """
     try:
-        success = rag.ensure_session_manager().delete_session(session_id)
-        return {"ok": success}
+        success = rag.ensure_session_manager().delete_session(session_id, principal)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error deleting session: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
+    if not success:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    return {"ok": success}
 
 
 @app.post("/agent/chat", response_model=AgentChatOut, tags=["Agent"])
@@ -1673,7 +1716,10 @@ def agent_chat(payload: AgentChatIn) -> AgentChatOut:
     ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
 
     if ctx and rag.sessions:
-        ctx.history = rag.sessions.get_session_history(session_id)
+        # Plan 1: agent_chat is not yet principal-scoped; owner=None reads only
+        # legacy un-owned rows. Under DOCINT_DEFAULT_IDENTITY, backfilled/owned
+        # convos won't match here (no history preload) until Plan 2 wires this.
+        ctx.history = rag.sessions.get_session_history(session_id, owner=None)
 
     turn = Turn(user_input=payload.message, session_id=session_id)
     orchestrator = _build_orchestrator()

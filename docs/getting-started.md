@@ -53,7 +53,7 @@ extra context a new user needs to understand what they just started.
    ```
 
    This creates the external volumes `docling-cache`, `huggingface-cache`,
-   `ollama-cache`, `qdrant-sources`, and `sessions-storage` so model
+   `ollama-cache`, `sessions-storage`, and `source-preview-cache` so model
    artifacts and backend state persist across container rebuilds and are
    not destroyed by `docker compose down -v`.
 

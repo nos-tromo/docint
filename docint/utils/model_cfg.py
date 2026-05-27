@@ -21,118 +21,14 @@ from docint.utils.env_cfg import (
 # isort: on
 
 import ollama
-from docling.models.inference_engines.image_classification.transformers_engine import (  # type: ignore[attr-defined]
-    TransformersImageClassificationEngineOptions,
-)
-from docling.models.stages.code_formula.code_formula_model import CodeFormulaModel
-from docling.models.stages.layout.layout_model import LayoutModel
-from docling.models.stages.ocr.rapid_ocr_model import RapidOcrModel
-from docling.models.stages.picture_classifier.document_picture_classifier import (
-    DocumentPictureClassifier,
-    DocumentPictureClassifierOptions,
-)
-from docling.models.stages.table_structure.table_structure_model import (
-    TableStructureModel,
-)
 from dotenv import load_dotenv
-from gliner import GLiNER
 from huggingface_hub import snapshot_download
 from loguru import logger
-from transformers import AutoProcessor, CLIPModel
 
 from docint.utils.logger_cfg import init_logger
 
 load_dotenv()
 init_logger()
-
-
-def load_clip_model(model_id: str, cache_folder: Path) -> None:
-    """Preloads the CLIP model to the HuggingFace cache.
-
-    Args:
-        model_id (str): The name of the CLIP model to load.
-        cache_folder (Path): The path to the HuggingFace cache folder.
-    """
-    resolved = resolve_hf_cache_path(cache_dir=cache_folder, repo_id=model_id)
-    if resolved:
-        logger.info("Found local cache for CLIP at {}", resolved)
-        try:
-            CLIPModel.from_pretrained(
-                pretrained_model_name_or_path=str(resolved),
-                local_files_only=True,
-            )
-            AutoProcessor.from_pretrained(  # type: ignore[no-untyped-call]
-                pretrained_model_name_or_path=str(resolved),
-                local_files_only=True,
-            )
-        except Exception as e:
-            logger.warning("Failed to load CLIP from local cache: {}. Retrying with download...", e)
-            CLIPModel.from_pretrained(pretrained_model_name_or_path=model_id)
-            AutoProcessor.from_pretrained(pretrained_model_name_or_path=model_id)  # type: ignore[no-untyped-call]
-    else:
-        CLIPModel.from_pretrained(pretrained_model_name_or_path=model_id)
-        AutoProcessor.from_pretrained(pretrained_model_name_or_path=model_id)  # type: ignore[no-untyped-call]
-    logger.info("Loaded CLIP model: {}", model_id)
-
-
-def load_docling_models() -> None:
-    """Preloads Docling models to the HuggingFace cache.
-
-    We invoke the `download_models` static method of each model class directly.
-    This ensures that we use the exact same logic (repo_id, revision, local_dir)
-    that the runtime uses when initializing these models.
-
-    Note: RapidOCR uses a custom cache location, while others default to the
-    standard HF cache when no local_dir is provided.
-    """
-    try:
-        # 1. RapidOCR (Custom cache location)
-        # Note: RapidOCR requires a backend argument. We use "onnxruntime" as it's the default.
-        RapidOcrModel.download_models(backend="onnxruntime", progress=True)
-        logger.info("Loaded RapidOCR model")
-
-        # 2. Layout Model (Standard HF cache)
-        LayoutModel.download_models(progress=True)
-        logger.info("Loaded Layout model")
-
-        # 3. Table Structure Model (Standard HF cache)
-        TableStructureModel.download_models(progress=True)
-        logger.info("Loaded Table Structure model")
-
-        # 4. Code/Formula Model (Standard HF cache)
-        CodeFormulaModel.download_models(progress=True)
-        logger.info("Loaded Code/Formula model")
-
-        # 5. Picture Classifier (Standard HF cache)
-        opts = DocumentPictureClassifierOptions(engine_options=TransformersImageClassificationEngineOptions())
-        DocumentPictureClassifier.download_models(repo_id=opts.repo_id, progress=True)
-        logger.info("Loaded Picture Classifier model")
-
-    except Exception as e:
-        logger.warning("Failed to download Docling models: {}", e)
-
-
-def load_gliner_model(model_id: str, cache_folder: Path) -> None:
-    """Loads the GLiNER model.
-
-    Args:
-        model_id (str): The name of the GLiNER model to load.
-        cache_folder (Path): The path to the HuggingFace cache folder.
-    """
-    resolved = resolve_hf_cache_path(cache_dir=cache_folder, repo_id=model_id)
-    if resolved:
-        logger.info("Found local cache for GLiNER at {}", resolved)
-        try:
-            GLiNER.from_pretrained(model_id=str(resolved), local_files_only=True)
-        except Exception as e:
-            logger.warning(
-                "Failed to load GLiNER from local cache: {}. Retrying with download...",
-                e,
-            )
-            GLiNER.from_pretrained(model_id=model_id)
-    else:
-        GLiNER.from_pretrained(model_id=model_id)
-    logger.info("Loaded GLiNER model: {}", model_id)
 
 
 def load_hf_model(model_id: str, cache_folder: Path, kw: str, trust_remote_code: bool = False) -> None:
@@ -203,15 +99,10 @@ def main() -> None:
     for model_id in model_config.__dataclass_fields__.keys():
         logger.info("{}: {}", model_id, getattr(model_config, model_id))
 
-    # Load the app's models
-    # CLIP (used by Picture Classifier and Layout Model)
-    load_clip_model(model_id=model_config.image_embed_model, cache_folder=path_config.hf_hub_cache)
-
-    # Docling
-    load_docling_models()
-
-    # GLiNER
-    load_gliner_model(model_id=model_config.ner_model, cache_folder=path_config.hf_hub_cache)
+    # NER and CLIP are no longer loaded here: docint now calls the
+    # remote GLiNER and CLIP services hosted by vllm-service over HTTP.
+    # Model preloading happens in the vllm-service `ner` / `clip` (or
+    # `gliner-ner` / `clip-embed`) containers, not here.
 
     # Hugging Face
     hf_assets: list[tuple[str, str]] = [

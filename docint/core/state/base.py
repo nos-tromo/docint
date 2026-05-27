@@ -6,6 +6,8 @@ from loguru import logger
 from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
+from docint.utils.env_cfg import load_principal_env
+
 # --- Session persistence (ORM) ---
 Base = declarative_base()
 
@@ -57,6 +59,42 @@ def _ensure_turn_validation_columns(engine: Engine) -> None:
         )
 
 
+def _ensure_conversation_owner_column(engine: Engine) -> None:
+    """Backfill an ``owner`` column onto a pre-existing ``conversations`` table.
+
+    ``Base.metadata.create_all`` only creates missing tables, never adds
+    columns to existing ones. Sessions DBs created before ownership
+    shipped already have a ``conversations`` table and would otherwise
+    have no owner to scope list/history/delete by. This adds the column,
+    its index, and idempotently backfills legacy rows to the configured
+    default identity (the same value the principal resolver returns
+    pre-auth) so existing sessions are owned, not orphaned.
+    """
+    try:
+        inspector = inspect(engine)
+        if "conversations" not in inspector.get_table_names():
+            return
+        existing = {col["name"] for col in inspector.get_columns("conversations")}
+        with engine.begin() as conn:
+            if "owner" not in existing:
+                conn.execute(text("ALTER TABLE conversations ADD COLUMN owner TEXT"))
+            index_names = {ix["name"] for ix in inspector.get_indexes("conversations")}
+            if "ix_conversations_owner" not in index_names:
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_conversations_owner ON conversations (owner)"))
+            default_identity = load_principal_env().default_identity
+            if default_identity:
+                conn.execute(
+                    text("UPDATE conversations SET owner = :default WHERE owner IS NULL"),
+                    {"default": default_identity},
+                )
+    except Exception as exc:
+        logger.warning(
+            "Skipping conversations owner-column migration: {}: {}",
+            type(exc).__name__,
+            exc,
+        )
+
+
 # --- Session maker ---
 def _make_session_maker(db_url: str) -> sessionmaker[Session]:
     """Creates a new SQLAlchemy session maker.
@@ -71,4 +109,5 @@ def _make_session_maker(db_url: str) -> sessionmaker[Session]:
     engine = create_engine(db_url, future=True)
     Base.metadata.create_all(engine)
     _ensure_turn_validation_columns(engine)
+    _ensure_conversation_owner_column(engine)
     return sessionmaker(bind=engine, expire_on_commit=False)

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROFILE="${1:-cpu}"
 COMPOSE="docker compose --env-file .env -f docker/compose.yaml"
 
 # Always compute a fresh version from git so repeated bundle runs produce
@@ -25,14 +24,14 @@ echo "DOCINT_VERSION=$DOCINT_VERSION"
 # git or the original build date. Copy this file alongside docker/compose.yaml.
 echo "$DOCINT_VERSION" > .docint-version
 
-# Build locally-defined services (frontend + backend for the chosen profile)
-$COMPOSE --profile "$PROFILE" build
+# Build locally-defined services (backend + frontend).
+$COMPOSE build
 
-# Pull externally hosted services (any image:-only services)
-$COMPOSE --profile "$PROFILE" pull --ignore-buildable
+# Pull externally hosted services (any image:-only services).
+$COMPOSE pull --ignore-buildable
 
 # Partition compose's image list and ensure local tag bindings exist:
-#   built  = local-only names like "docint-backend-cpu" (already tagged by build)
+#   built  = local-only names like "docint-backend" (already tagged by build)
 #   pulled = registry refs like "docker.io/qdrant/qdrant:v1.17.0@sha256:..."
 #
 # Docker Desktop sometimes drops the name:tag binding when you pull
@@ -56,17 +55,17 @@ while IFS= read -r img; do
   else
     built+=("$img")
   fi
-done < <($COMPOSE --profile "$PROFILE" config --images)
+done < <($COMPOSE config --images)
 
 echo "Built images:  ${built[*]:-<none>}"
 echo "Pulled images: ${pulled[*]:-<none>}"
 
 if (( ${#built[@]} > 0 )); then
-  docker save "${built[@]}" | gzip > "docint-built-${PROFILE}-${DOCINT_VERSION}.tar.gz"
+  docker save "${built[@]}" | gzip > "docint-built-${DOCINT_VERSION}.tar.gz"
 fi
 
 if (( ${#pulled[@]} > 0 )); then
-  docker save "${pulled[@]}" | gzip > "docint-pulled-${PROFILE}-${DOCINT_VERSION}.tar.gz"
+  docker save "${pulled[@]}" | gzip > "docint-pulled-${DOCINT_VERSION}.tar.gz"
 fi
 
-echo "Wrote: docint-built-${PROFILE}-${DOCINT_VERSION}.tar.gz, docint-pulled-${PROFILE}-${DOCINT_VERSION}.tar.gz"
+echo "Wrote: docint-built-${DOCINT_VERSION}.tar.gz, docint-pulled-${DOCINT_VERSION}.tar.gz"

@@ -5,9 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Install dependencies (torch/torchvision are optional extras)
-uv sync --extra cpu   # local dev (CPU torch from pytorch-cpu index)
-uv sync --extra cuda  # GPU dev (cu130 torch + fastembed-gpu + onnxruntime-gpu)
+# Install dependencies (single env, no extras — docint is CPU-only Python;
+# all ML inference is delegated to vllm-service over HTTP).
+uv sync
 
 # Run tests
 uv run pytest
@@ -32,15 +32,18 @@ uv run ingest --help
 uv run query --help
 uv run load-models          # pre-download model assets
 
-# Docker (Makefile is PROFILE-driven; PROFILE=cpu|cuda read from .env, default cpu)
+# Docker — single CPU image, no profile toggle.
 make network   # create the external inference-net + data-net (one-time)
 make volumes   # create the external Docker volumes (one-time)
-make up        # build + run the active profile; override: make up PROFILE=cuda
+make up        # build + run docint (production shape, no host ports)
+make up-dev    # like 'up', but publishes the React SPA on the host
 ```
 
 ## Architecture
 
 Document Intelligence is a RAG stack: FastAPI backend + React SPA + Qdrant vector DB + pluggable inference (Ollama, OpenAI-compatible APIs, or external vLLM).
+
+**All ML inference is remote.** docint ships no GPU code and no local model runtime: chat/embeddings go through the OpenAI-compatible API, reranking through `{RERANK_API_BASE}/rerank`, NER through `{NER_API_BASE}/gliner`, and CLIP image+text embedding through `{CLIP_API_BASE}/clip/*`. All four default to the LiteLLM router alias of the full vllm-service stack; standalone CPU profiles (`ner-only`, `rerank-only`, `clip-only`) live in `vllm-service/docker/compose.*-only.yaml` and let non-CUDA dev hosts override the relevant `*_API_BASE` independently. The runtime container is a single Debian-slim image (no CUDA, no `[cuda]` extra).
 
 **Request flow:**
 ```
@@ -58,7 +61,10 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
 - `docint/core/readers/json.py` — Generic JSON / JSONL reader. Detects Nextext transcripts (JSONL with `text` plus timing keys `start_ts`/`end_ts` or `start_seconds`/`end_seconds`) and routes them to one-node-per-segment ingestion, mirroring the social-table specialized schema pattern; timing/speaker metadata surface via `reference_metadata`.
 - `docint/core/storage/` — Qdrant-backed document store, hierarchical node storage, source tracking
 - `docint/core/state/` — Session management (SQLite-backed) and citation handling
-- `docint/core/ner.py` — Named entity recognition (GLiNER), entity clustering, graph building
+- `docint/core/ner.py` — Entity aggregation / clustering / graph building over already-extracted NER metadata (pure post-processing; no model inference)
+- `docint/utils/ner_client.py` — Thin HTTP client for the remote GLiNER service hosted by `vllm-service` (full stack: `http://vllm-router:4000/gliner` with Bearer auth; ner-only shape: `http://gliner-ner:8000/gliner` with no auth). Replaces the in-process GLiNER runtime previously shipped here.
+- `docint/utils/clip_client.py` — Thin HTTP client for the remote CLIP image+text embedding service hosted by `vllm-service`. Same dual-shape posture as the NER client (full stack via router with Bearer auth; `clip-only` shape at `http://clip-embed:8000` with no auth). `RemoteCLIPBackend` satisfies the `ImageEmbeddingBackend` Protocol so `core/ingest/images_service.py` swaps in place. Probes `/clip/dimension` at construction to size Qdrant `_images` collections without burning an embed call. `IMAGE_EMBED_MODEL` is no longer read by docint — set `CLIP_MODEL` on the vllm-service container instead. Override the endpoint via `CLIP_API_BASE` / `CLIP_API_KEY` / `CLIP_TIMEOUT`.
+- **Reranking is always remote.** `core/rag.py::RAG.reranker` builds a `VLLMRerankPostprocessor` that POSTs to `{RERANK_API_BASE}/rerank` in the Jina shape (`{model, query, documents, top_n}` → `{results: [{index, relevance_score}]}`) regardless of `INFERENCE_PROVIDER`. Defaults inherit from `OPENAI_API_BASE` / `OPENAI_API_KEY` / `OPENAI_TIMEOUT`; override per-knob with `RERANK_API_BASE` / `RERANK_API_KEY` / `RERANK_TIMEOUT`. The full vllm-service stack exposes `/v1/rerank` via the LiteLLM router; the `rerank-only` deployment shape (CPU container, pairs with `ner-only` for non-CUDA dev) expects `RERANK_API_BASE=http://rerank-cpu:8000`. Transport failure (endpoint unreachable, malformed payload) degrades to original retrieval order (top_n unranked) — no crash, no local fallback model.
 - `docint/utils/embed_chunking.py` — Pre-embed re-chunker: bounds oversize chunks to the embedding budget and links sub-nodes back to their parent via `hier.parent_id`
 - `docint/utils/embedding_tokenizer.py` — Loads the embedding model's tokenizer from the HF cache for accurate token counting during pre-embed re-chunking; falls back to char-ratio when unavailable
 - `docint/utils/env_cfg.py` — **All** environment-backed configuration dataclasses live here (see below)

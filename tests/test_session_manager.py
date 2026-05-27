@@ -88,7 +88,7 @@ def test_persist_and_retrieve_citation_with_hash(
     # Retrieve
     # We don't mock _get_node_text_by_id, so it will return None/empty string
 
-    history = session_manager.get_session_history(session_id)
+    history = session_manager.get_session_history(session_id, owner=None)
     assert len(history) == 2  # User + Assistant
 
     assistant_msg = history[1]
@@ -152,7 +152,7 @@ def test_get_session_history_enriches_sources_from_node_lookup(
         {"response": "Hi", "reasoning": None},
     )
 
-    history = session_manager.get_session_history("session-social")
+    history = session_manager.get_session_history("session-social", owner=None)
 
     source = history[1]["sources"][0]
     assert source["filename"] == "social.csv"
