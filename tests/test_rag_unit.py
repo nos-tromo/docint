@@ -88,6 +88,25 @@ class DummyResponse:
         self.source_nodes = nodes
 
 
+def test_default_prompts_handle_elaboration_followups() -> None:
+    """Guard against regressions: prompts must declare elaboration semantics.
+
+    The rewrite prompt must explicitly handle "elaborate" follow-ups (so the
+    standalone retrieval query inlines prior-turn entities), and the grounded
+    QA / refine prompts must carry the ``{prior_turn_context}`` placeholder
+    that the SessionManager binds via ``PromptTemplate.partial_format``.
+    """
+    from docint.core.rag import (
+        DEFAULT_GROUNDED_REFINE_PROMPT,
+        DEFAULT_GROUNDED_TEXT_QA_PROMPT,
+        DEFAULT_RETRIEVAL_REWRITE_PROMPT,
+    )
+
+    assert "elaborate" in DEFAULT_RETRIEVAL_REWRITE_PROMPT.lower()
+    assert "{prior_turn_context}" in DEFAULT_GROUNDED_TEXT_QA_PROMPT
+    assert "{prior_turn_context}" in DEFAULT_GROUNDED_REFINE_PROMPT
+
+
 def test_normalize_response_data_extracts_sources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

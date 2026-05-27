@@ -314,6 +314,58 @@ def test_make_session_maker_creates_parent_dir(tmp_path: Path) -> None:
     session.close()
 
 
+def test_chat_skips_rewrite_when_prior_turn_supplied(
+    session_manager: SessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``prior_turn`` is set, the SessionManager must not invoke ``rewrite_retrieval_query``.
+
+    The orchestrator's understanding agent has already produced a
+    history-aware query. Re-running the SessionManager rewrite would
+    overwrite that work using a stricter prompt that bans prior assistant
+    claims.
+
+    Args:
+        session_manager: The session manager fixture.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    from docint.agents.types import PriorTurn
+
+    engine = MagicMock()
+    filtered_response = MagicMock()
+    filtered_response.metadata = {}
+    filtered_response.source_nodes = []
+    engine.query.return_value = filtered_response
+
+    session_manager.rag.query_engine = engine
+    session_manager.rag.expand_query_with_graph_with_debug.return_value = (  # type: ignore[attr-defined]
+        "expanded",
+        {"applied": False},
+    )
+    session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
+        "response": "ok",
+        "sources": [],
+    }
+    session_manager.session_id = "s1"
+    session_manager.chat_engine = object()  # type: ignore[assignment]
+
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args: None)
+    monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
+
+    session_manager.chat(
+        "Please elaborate.",
+        prior_turn=PriorTurn(
+            user_text="Which is correct?",
+            assistant_text="The text mentions the UN Security Council.",
+        ),
+    )
+
+    session_manager.rag.rewrite_retrieval_query.assert_not_called()  # type: ignore[attr-defined]
+    session_manager.rag.expand_query_with_graph_with_debug.assert_called_once_with(  # type: ignore[attr-defined]
+        "Please elaborate."
+    )
+
+
 def test_chat_rewrites_retrieval_query_without_prefixing_session_context(
     session_manager: SessionManager,
     monkeypatch: pytest.MonkeyPatch,

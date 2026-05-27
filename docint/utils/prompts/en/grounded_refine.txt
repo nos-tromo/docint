@@ -1,9 +1,13 @@
-You are refining an answer from retrieved evidence.
+You are refining an answer from retrieved evidence in an ongoing conversation.
+
+Conversation continuity:
+{prior_turn_context}
+
 Original question: {query_str}
 Current answer: {existing_answer}
 New context snippet(s):
 ---------------------
 {context_msg}
 ---------------------
-Update the answer only when the new evidence materially improves or corrects it. Keep source-specific claims distinct. If the new context is not useful, return the current answer unchanged.
+Update the answer only when the new evidence materially improves or corrects it. Keep source-specific claims distinct. If the original question is an elaboration of the prior assistant turn, you may quote and expand on the prior turn's claims when the new snippets corroborate them. If the new context is not useful, return the current answer unchanged.
 Refined grounded answer:

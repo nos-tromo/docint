@@ -21,7 +21,10 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from docint.agents.types import PriorTurn
 
 # isort: off
 # Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
@@ -294,10 +297,22 @@ DEFAULT_SOCIAL_SUMMARIZE_PROMPT = (
     "conflicts or uncertainty explicitly."
 )
 DEFAULT_RETRIEVAL_REWRITE_PROMPT = (
-    "Rewrite the user's latest message into a standalone retrieval query.\n"
-    "Use prior conversation only to resolve references or omitted details.\n"
-    "Do not answer the question. Do not include prior assistant claims unless "
-    "the user explicitly refers to them. Return only the rewritten query.\n\n"
+    "Rewrite the user's latest message into a standalone retrieval query "
+    "suitable for vector search.\n\n"
+    "Rules:\n"
+    "- Resolve all pronouns and ellipses using the conversation context.\n"
+    "- If the user is asking to elaborate, clarify, or expand on a previous "
+    'answer ("tell me more", "please elaborate", "I didn\'t understand X", '
+    '"what do you mean by ..."), EXTRACT the specific entities, names, '
+    "organizations, claims, or topics they are referring to from the most "
+    "recent assistant turn and inline them in the rewritten query. Example: "
+    '"Tell me more about the UN references" becomes a query that names the '
+    "specific UN bodies/resolutions/claims the prior assistant turn "
+    "mentioned.\n"
+    "- Do not answer the question; only produce search terms.\n"
+    "- Do not invent facts that are absent from both the user message and the "
+    "conversation context.\n"
+    "- Return ONLY the rewritten query, no preamble.\n\n"
     "Conversation context:\n{conversation_context}\n\n"
     "Latest user message:\n{user_msg}\n\n"
     "Standalone retrieval query:"
@@ -309,32 +324,48 @@ DEFAULT_CONVERSATION_SUMMARY_PROMPT = (
     "conclusions. Do not add new claims.\n\n"
 )
 DEFAULT_GROUNDED_TEXT_QA_PROMPT = (
-    "You are answering a question from retrieved evidence.\n"
-    "Use only the context snippets below.\n"
-    "Treat each snippet as a distinct source chunk; do not blend claims across "
-    "different chunks unless the overlap is explicit.\n"
-    "If snippets conflict, say so. If evidence is insufficient, say that "
-    "explicitly.\n"
-    "Preserve source-specific metadata such as author, network, timestamp, page, "
-    "or row when it matters.\n\n"
-    "Context snippets:\n"
+    "You are answering a question from retrieved evidence in an ongoing "
+    "conversation.\n\n"
+    "Conversation continuity:\n"
+    "{prior_turn_context}\n\n"
+    "Retrieved context snippets:\n"
     "---------------------\n"
     "{context_str}\n"
     "---------------------\n"
-    "Question: {query_str}\n"
+    "Current question: {query_str}\n\n"
+    "Instructions:\n"
+    "- Treat each retrieved snippet as a distinct source chunk; do not blend "
+    "claims across chunks unless the overlap is explicit.\n"
+    "- If the current question asks to elaborate on, clarify, or expand on the "
+    "prior assistant turn, restate and expand the specific claims from that "
+    "prior turn that the user is asking about. Use the retrieved snippets to "
+    "corroborate or add supporting detail. The prior assistant turn was itself "
+    "sourced; you may quote and elaborate on it.\n"
+    "- If snippets conflict, say so explicitly.\n"
+    "- Only respond that evidence is insufficient when BOTH the retrieved "
+    "snippets AND the prior assistant turn lack the requested information. In "
+    "that case, name the specific aspect that is missing.\n"
+    "- Preserve source-specific metadata such as author, network, timestamp, "
+    "page, or row when it matters.\n\n"
     "Grounded answer:"
 )
 DEFAULT_GROUNDED_REFINE_PROMPT = (
-    "You are refining an answer from retrieved evidence.\n"
+    "You are refining an answer from retrieved evidence in an ongoing "
+    "conversation.\n\n"
+    "Conversation continuity:\n"
+    "{prior_turn_context}\n\n"
     "Original question: {query_str}\n"
     "Current answer: {existing_answer}\n"
     "New context snippet(s):\n"
     "---------------------\n"
     "{context_msg}\n"
     "---------------------\n"
-    "Update the answer only when the new evidence materially improves or corrects "
-    "it. Keep source-specific claims distinct. If the new context is not useful, "
-    "return the current answer unchanged.\n"
+    "Update the answer only when the new evidence materially improves or "
+    "corrects it. Keep source-specific claims distinct. If the original "
+    "question is an elaboration of the prior assistant turn, you may quote "
+    "and expand on the prior turn's claims when the new snippets corroborate "
+    "them. If the new context is not useful, return the current answer "
+    "unchanged.\n"
     "Refined grounded answer:"
 )
 DEFAULT_GROUNDED_COLLECTION_SUMMARY_PROMPT = (
@@ -3539,6 +3570,14 @@ class RAG:
     def _build_grounded_text_qa_template(self, *, social_table: bool) -> PromptTemplate:
         """Return the grounded QA prompt template for answer synthesis.
 
+        The template carries a ``{prior_turn_context}`` placeholder that the
+        chat loop binds per-turn via
+        :meth:`llama_index.core.PromptTemplate.partial_format` when the caller
+        passes a ``PriorTurn`` (see
+        :meth:`docint.core.state.session_manager.SessionManager.chat`). On the
+        default path the placeholder is partial-formatted with the sentinel
+        below so the rendered prompt is well-formed even without a prior turn.
+
         Args:
             social_table (bool): Whether the active collection is social/table-heavy and needs
                 instructions to preserve post-level distinctions during synthesis.
@@ -3553,10 +3592,14 @@ class RAG:
                 "When the context comes from social posts or table rows, keep each "
                 "post distinct and avoid merging separate authors or timestamps.\n"
             )
-        return PromptTemplate(prompt)
+        return PromptTemplate(prompt).partial_format(prior_turn_context="(no prior turn)")
 
     def _build_grounded_refine_template(self, *, social_table: bool) -> PromptTemplate:
         """Return the grounded refine prompt template for answer synthesis.
+
+        Carries the same ``{prior_turn_context}`` placeholder as
+        :meth:`_build_grounded_text_qa_template`; see that method for the
+        partial-format contract.
 
         Args:
             social_table (bool): Whether the active collection is social/table-heavy and needs
@@ -3572,7 +3615,7 @@ class RAG:
                 "For row-level social evidence, preserve distinctions between "
                 "different posts even when they discuss the same topic.\n"
             )
-        return PromptTemplate(prompt)
+        return PromptTemplate(prompt).partial_format(prior_turn_context="(no prior turn)")
 
     def _compute_parent_context_budget(self, *, social_table: bool) -> tuple[int, int]:
         """Compute the per-query chat budget available to parent-context expansion.
@@ -3626,7 +3669,12 @@ class RAG:
         # the template overhead (shrinking the usable budget slightly) than
         # under-estimate it (overflowing the chat context).
         chat_ratio_proxy = float(self.embed_char_token_ratio or 3.5)
-        query_answer_allowance_tokens = 400  # user query + prior answer
+        # 400 tokens: user query + refine's prior ``existing_answer``.
+        # 400 tokens: ``prior_turn_context`` block (orchestrator-supplied
+        # prior assistant turn, bound via PromptTemplate.partial_format at
+        # chat time). Sized for a typical grounded answer; we'd rather
+        # over-reserve than overflow the chat context.
+        query_answer_allowance_tokens = 800
         template_tokens = (
             max(
                 estimate_tokens(qa_raw, chat_ratio_proxy),
@@ -5639,6 +5687,7 @@ class RAG:
         metadata_filters_active: bool = False,
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
+        prior_turn: PriorTurn | None = None,
     ) -> dict[str, Any]:
         """Proxy chat turns to SessionManager.
 
@@ -5652,6 +5701,10 @@ class RAG:
                 filter payloads for post-filtering auxiliary image sources.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
+            prior_turn (PriorTurn | None): Orchestrator-supplied prior
+                exchange. See
+                :meth:`docint.core.state.session_manager.SessionManager.chat`
+                for semantics.
 
         Returns:
             dict[str, Any]: The chat response data.
@@ -5662,6 +5715,7 @@ class RAG:
             metadata_filters_active=metadata_filters_active,
             metadata_filter_rules=metadata_filter_rules,
             vector_store_kwargs=vector_store_kwargs,
+            prior_turn=prior_turn,
         )
 
     def stream_chat(
@@ -5672,6 +5726,7 @@ class RAG:
         metadata_filters_active: bool = False,
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
+        prior_turn: PriorTurn | None = None,
     ) -> Any:
         """Proxy stream chat turns to SessionManager.
 
@@ -5685,6 +5740,10 @@ class RAG:
                 filter payloads for post-filtering auxiliary image sources.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
+            prior_turn (PriorTurn | None): Orchestrator-supplied prior
+                exchange. See
+                :meth:`docint.core.state.session_manager.SessionManager.chat`
+                for semantics.
 
         Returns:
             Any: A generator yielding response chunks.
@@ -5695,6 +5754,7 @@ class RAG:
             metadata_filters_active=metadata_filters_active,
             metadata_filter_rules=metadata_filter_rules,
             vector_store_kwargs=vector_store_kwargs,
+            prior_turn=prior_turn,
         )
 
     def expand_query_with_graph_with_debug(self, query: str) -> tuple[str, dict[str, Any]]:
