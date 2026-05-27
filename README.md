@@ -36,12 +36,12 @@ and chat. It ships with:
 
    ```bash
    make build
-   make up
+   make up-dev
    ```
 
-   `make up` layers `docker/compose.override.yaml` so host ports are
-   published for local development. The base `docker/compose.yaml` is the
-   production shape and publishes no host ports.
+   `make up-dev` layers `docker/compose.override.yaml` so host ports are
+   published for local development; `make up` runs the base
+   `docker/compose.yaml` alone (production shape, no host ports).
 
 4. Open the app:
 
