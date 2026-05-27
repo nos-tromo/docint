@@ -852,6 +852,55 @@ def test_agent_chat_clarifies(monkeypatch: pytest.MonkeyPatch, client: TestClien
     assert data["confidence"] is not None
 
 
+def test_agent_chat_falls_back_to_clarification_on_weak_validation_mismatch(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """A weak (refusal-shaped) answer with validation_mismatch must surface as clarification.
+
+    Exercises the orchestrator's post-responder fallback end-to-end: the
+    monkeypatched orchestrator returns a ``RetrievalResult`` shaped exactly
+    like the production failure (answer="Evidence insufficient.",
+    validation_mismatch=True), and the API must respond with
+    ``status="clarification"`` and a helpful nudge instead of echoing the
+    refusal back to the user.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    # Use a real orchestrator (post-responder fallback lives there).
+    monkeypatch.setattr(
+        api_module.rag,
+        "chat",
+        lambda *_, **__: {
+            "response": "Evidence insufficient.",
+            "sources": [],
+        },
+    )
+
+    # Force the response validator to flag mismatch by stubbing it.
+    from docint.agents.generation import ResultValidationResponseAgent
+    from docint.agents.types import RetrievalResult as _RR
+
+    def _flag_mismatch(self: Any, result: _RR, turn: Any) -> _RR:
+        """Mark every result as mismatched for this test."""
+        _ = self, turn
+        result.validation_checked = True
+        result.validation_mismatch = True
+        result.validation_reason = "no UN content in sources"
+        return result
+
+    monkeypatch.setattr(ResultValidationResponseAgent, "finalize", _flag_mismatch)
+
+    response = client.post("/agent/chat", json={"message": "Please elaborate."})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "clarification"
+    assert data["message"]
+    assert "previous answer" in data["message"].lower() or "elaborate" in data["message"].lower()
+
+
 def test_agent_chat_returns_validation_alert(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """Agent chat should surface response-validation metadata.
 

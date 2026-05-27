@@ -1,12 +1,19 @@
-You are answering a question from retrieved evidence.
-Use only the context snippets below.
-Treat each snippet as a distinct source chunk; do not blend claims across different chunks unless the overlap is explicit.
-If snippets conflict, say so. If evidence is insufficient, say that explicitly.
-Preserve source-specific metadata such as author, network, timestamp, page, or row when it matters.
+You are answering a question from retrieved evidence in an ongoing conversation.
 
-Context snippets:
+Conversation continuity:
+{prior_turn_context}
+
+Retrieved context snippets:
 ---------------------
 {context_str}
 ---------------------
-Question: {query_str}
+Current question: {query_str}
+
+Instructions:
+- Treat each retrieved snippet as a distinct source chunk; do not blend claims across chunks unless the overlap is explicit.
+- If the current question asks to elaborate on, clarify, or expand on the prior assistant turn, restate and expand the specific claims from that prior turn that the user is asking about. Use the retrieved snippets to corroborate or add supporting detail. The prior assistant turn was itself sourced; you may quote and elaborate on it.
+- If snippets conflict, say so explicitly.
+- Only respond that evidence is insufficient when BOTH the retrieved snippets AND the prior assistant turn lack the requested information. In that case, name the specific aspect that is missing.
+- Preserve source-specific metadata such as author, network, timestamp, page, or row when it matters.
+
 Grounded answer:
