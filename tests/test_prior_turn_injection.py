@@ -43,12 +43,10 @@ def session_manager() -> Generator[SessionManager, None, None]:
     rag_mock._resolve_chat_response_mode.return_value = mode
     cast(Any, rag_mock.get_source_by_node_id).return_value = None
     rag_mock._build_grounded_text_qa_template.return_value = PromptTemplate(
-        "QA template. continuity={prior_turn_context} ctx={context_str} "
-        "q={query_str}"
+        "QA template. continuity={prior_turn_context} ctx={context_str} q={query_str}"
     ).partial_format(prior_turn_context="(no prior turn)")
     rag_mock._build_grounded_refine_template.return_value = PromptTemplate(
-        "Refine template. continuity={prior_turn_context} q={query_str} "
-        "a={existing_answer} m={context_msg}"
+        "Refine template. continuity={prior_turn_context} q={query_str} a={existing_answer} m={context_msg}"
     ).partial_format(prior_turn_context="(no prior turn)")
 
     sm = SessionManager(rag=rag_mock)
@@ -133,9 +131,7 @@ def test_chat_binds_prior_turn_context_via_update_prompts(
     qa_tmpl: PromptTemplate = payload["response_synthesizer:text_qa_template"]
     refine_tmpl: PromptTemplate = payload["response_synthesizer:refine_template"]
     qa_rendered = qa_tmpl.format(context_str="CTX", query_str="Q")
-    refine_rendered = refine_tmpl.format(
-        context_msg="NEW", query_str="Q", existing_answer="A0"
-    )
+    refine_rendered = refine_tmpl.format(context_msg="NEW", query_str="Q", existing_answer="A0")
     assert "UN Security Council" in qa_rendered
     assert "Which interpretation is correct?" in qa_rendered
     assert "UN Security Council" in refine_rendered
@@ -178,9 +174,7 @@ def test_default_grounded_qa_template_renders_without_prior_turn() -> None:
     """The default-bound sentinel must let the template render with only context/query."""
     from docint.core.rag import DEFAULT_GROUNDED_TEXT_QA_PROMPT
 
-    tmpl = PromptTemplate(DEFAULT_GROUNDED_TEXT_QA_PROMPT).partial_format(
-        prior_turn_context="(no prior turn)"
-    )
+    tmpl = PromptTemplate(DEFAULT_GROUNDED_TEXT_QA_PROMPT).partial_format(prior_turn_context="(no prior turn)")
     rendered = tmpl.format(context_str="CTX", query_str="Q")
     assert "(no prior turn)" in rendered
     assert "CTX" in rendered

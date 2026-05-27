@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import MagicMock
 
 from docint.agents import (
@@ -62,9 +61,7 @@ def test_retrieve_passes_none_when_history_empty() -> None:
     agent = RAGRetrievalAgent(rag)
     request = RetrievalRequest(
         turn=Turn(user_input="hello", session_id="session-1"),
-        analysis=IntentAnalysis(
-            intent="qa", confidence=0.9, entities={"query": "hello"}
-        ),
+        analysis=IntentAnalysis(intent="qa", confidence=0.9, entities={"query": "hello"}),
     )
 
     agent.retrieve(request)
@@ -169,9 +166,7 @@ def test_retrieve_history_field_defaults_empty_list() -> None:
     agent = RAGRetrievalAgent(rag)
     request = RetrievalRequest(
         turn=Turn(user_input="hello"),
-        analysis=IntentAnalysis(
-            intent="qa", confidence=0.9, entities={"query": "hello"}
-        ),
+        analysis=IntentAnalysis(intent="qa", confidence=0.9, entities={"query": "hello"}),
     )
     # history defaults to []; verify here
     assert request.history == []
