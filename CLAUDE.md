@@ -35,7 +35,8 @@ uv run load-models          # pre-download model assets
 # Docker — single CPU image, no profile toggle.
 make network   # create the external inference-net + data-net (one-time)
 make volumes   # create the external Docker volumes (one-time)
-make up        # build + run docint
+make up        # build + run docint (production shape, no host ports)
+make up-dev    # like 'up', but publishes the React SPA on the host
 ```
 
 ## Architecture

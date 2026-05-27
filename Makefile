@@ -6,7 +6,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help network volumes build bundle up stop pre-commit test
+.PHONY: help network volumes build bundle up up-dev stop pre-commit test
 
 # Versioned image tag.
 # On production: read from .docint-version written by bundle_images.sh.
@@ -18,7 +18,8 @@ DOCINT_VERSION ?= $(shell \
       echo "$$(date +%Y-%m-%d)$${_s:+-$$_s}"; } )
 export DOCINT_VERSION
 
-COMPOSE := docker compose --env-file .env -f docker/compose.yaml -f docker/compose.override.yaml
+COMPOSE     := docker compose --env-file .env -f docker/compose.yaml
+COMPOSE_DEV := docker compose --env-file .env -f docker/compose.yaml -f docker/compose.override.yaml
 
 help:
 	@echo "docint — build-host helpers."
@@ -27,7 +28,8 @@ help:
 	@echo "  make volumes    create the external Docker volumes"
 	@echo "  make build      build images"
 	@echo "  make bundle     ship images as a versioned .tar.gz pair"
-	@echo "  make up         build + run docint"
+	@echo "  make up         build + run docint (production shape, no host ports)"
+	@echo "  make up-dev     like 'up', but publishes the frontend port on the host"
 	@echo "  make stop       stop docint containers"
 	@echo "  make pre-commit run pre-commit hooks (ruff + mypy)"
 	@echo "  make test       run the test suite"
@@ -49,9 +51,14 @@ build:
 bundle:
 	./scripts/bundle_images.sh
 
-# Build and run docint.
+# Build and run docint in production shape (no host ports).
 up:
 	DOCKER_BUILDKIT=1 $(COMPOSE) up
+
+# Like 'up' but layers compose.override.yaml on top to publish the
+# frontend (React SPA) port on the host.
+up-dev:
+	DOCKER_BUILDKIT=1 $(COMPOSE_DEV) up
 
 # Stop docint containers.
 stop:
