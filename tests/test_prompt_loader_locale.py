@@ -39,9 +39,7 @@ def test_load_localized_prompt_reads_german_when_de(monkeypatch: pytest.MonkeyPa
     assert "Grounded answer:" not in text
 
 
-def test_load_localized_prompt_falls_back_when_file_missing(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_load_localized_prompt_falls_back_when_file_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """When the prompt file is missing and ``required=False``, the default is returned."""
     monkeypatch.delenv("RESPONSE_LANGUAGE", raising=False)
     fake_root = tmp_path / "prompts"
