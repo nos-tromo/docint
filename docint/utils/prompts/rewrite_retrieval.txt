@@ -1,6 +1,11 @@
-Rewrite the user's latest message into a standalone retrieval query.
-Use prior conversation only to resolve references or omitted details.
-Do not answer the question. Do not include prior assistant claims unless the user explicitly refers to them. Return only the rewritten query.
+Rewrite the user's latest message into a standalone retrieval query suitable for vector search.
+
+Rules:
+- Resolve all pronouns and ellipses using the conversation context.
+- If the user is asking to elaborate, clarify, or expand on a previous answer ("tell me more", "please elaborate", "I didn't understand X", "what do you mean by ..."), EXTRACT the specific entities, names, organizations, claims, or topics they are referring to from the most recent assistant turn and inline them in the rewritten query. Example: "Tell me more about the UN references" becomes a query that names the specific UN bodies/resolutions/claims the prior assistant turn mentioned.
+- Do not answer the question; only produce search terms.
+- Do not invent facts that are absent from both the user message and the conversation context.
+- Return ONLY the rewritten query, no preamble.
 
 Conversation context:
 {conversation_context}
