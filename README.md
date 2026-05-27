@@ -74,6 +74,9 @@ and chat. It ships with:
   shared cache volumes.
 - If you use an outbound proxy, put the proxy variables in `.env` so Compose,
   image builds, and containers use the same values.
+- Large `/ingest/upload` requests are capped by the frontend nginx proxy.
+   Override `DOCINT_CLIENT_MAX_BODY_SIZE` in `.env` if your combined multipart
+   upload needs more than the default `1g`.
 - Session persistence uses one SQLite file path. Set `SESSIONS_DB_PATH` for
   the normal case or `SESSION_STORE` if you want to supply a full SQLAlchemy
   database URL.
