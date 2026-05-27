@@ -6,7 +6,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help network volumes build bundle up up-dev stop pre-commit test
+.PHONY: help network volumes build bundle up up-dev stop down pre-commit test
 
 # Versioned image tag.
 # On production: read from .docint-version written by bundle_images.sh.
@@ -31,6 +31,7 @@ help:
 	@echo "  make up         build + run docint (production shape, no host ports)"
 	@echo "  make up-dev     like 'up', but publishes the frontend port on the host"
 	@echo "  make stop       stop docint containers"
+	@echo "  make down       stop + remove containers (never touches data-plane state)"
 	@echo "  make pre-commit run pre-commit hooks (ruff + mypy)"
 	@echo "  make test       run the test suite"
 
@@ -63,6 +64,12 @@ up-dev:
 # Stop docint containers.
 stop:
 	$(COMPOSE) stop
+
+# Stop + remove containers. All docint volumes (sessions-storage, caches)
+# are declared external, and Qdrant lives in data-plane, so this is safe —
+# `down` never destroys session state or vector data.
+down:
+	$(COMPOSE) down
 
 # Run pre-commit hooks (ruff + mypy).
 pre-commit:
