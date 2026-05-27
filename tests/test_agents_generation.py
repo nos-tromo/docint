@@ -2,8 +2,21 @@
 
 from typing import Any, cast
 
+import pytest
+
 from docint.agents.generation import MAX_SOURCE_CHARS, ResultValidationResponseAgent
 from docint.agents.types import RetrievalResult, Turn
+
+
+@pytest.fixture(autouse=True)
+def _pin_response_language_to_english(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin ``RESPONSE_LANGUAGE`` to ``en`` so prompt-text assertions are stable.
+
+    The validator template is locale-aware (see ``prompts/{en,de}/response_validator.txt``);
+    these tests assert on the English text of that template, so they would
+    flake under ``RESPONSE_LANGUAGE=de`` deployments without this pin.
+    """
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
 
 
 class _FakeLLMResponse:

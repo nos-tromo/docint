@@ -15,6 +15,7 @@ from openai.types.chat import ChatCompletionContentPartParam, ChatCompletionMess
 
 from docint.utils.env_cfg import (
     OpenAIConfig,
+    load_language_env,
     load_model_env,
     load_openai_env,
     load_path_env,
@@ -358,7 +359,7 @@ class OpenAIPipeline:
             max_retries=_openai_config.max_retries,
         )
 
-        self.prompt_dir = load_path_env().prompts
+        self.prompt_dir = load_path_env().prompts / load_language_env().code
 
     def load_prompt(self, kw: str = "system") -> str:
         """Load a prompt from the prompts directory based on the given keyword.

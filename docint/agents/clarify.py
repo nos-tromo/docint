@@ -6,6 +6,7 @@ from docint.agents.types import (
     IntentAnalysis,
     Turn,
 )
+from docint.utils.ui_strings import ui_string
 
 
 class SimpleClarificationAgent(ClarificationAgent):
@@ -18,10 +19,11 @@ class SimpleClarificationAgent(ClarificationAgent):
         """Initialize the SimpleClarificationAgent.
 
         Args:
-            prompt (str | None, optional): The clarification prompt to use. Defaults to None.
+            prompt (str | None, optional): The clarification prompt to use. Defaults to the
+                locale-aware UI string ``clarify_generic`` when not provided.
             required_entities (list[str] | None, optional): List of required entities to check for. Defaults to None.
         """
-        self.prompt = prompt or "Could you clarify what you need?"
+        self.prompt = prompt or ui_string("clarify_generic")
         self.required_entities = required_entities or ["query"]
 
     def build(self, turn: Turn, analysis: IntentAnalysis) -> ClarificationRequest:
@@ -35,8 +37,9 @@ class SimpleClarificationAgent(ClarificationAgent):
             ClarificationRequest: The constructed clarification request.
         """
         missing = [k for k in self.required_entities if k not in analysis.entities]
-        detail = f"Missing details: {', '.join(missing)}" if missing else analysis.reason
+        fields = ", ".join(missing)
+        detail = ui_string("clarify_missing_label").format(fields=fields) if missing else analysis.reason
         message = self.prompt
         if missing:
-            message = f"{self.prompt} Please provide: {', '.join(missing)}."
+            message = f"{self.prompt} {ui_string('clarify_missing_request').format(fields=fields)}"
         return ClarificationRequest(needed=True, message=message, reason=detail)

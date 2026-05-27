@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, cast
 from loguru import logger
 
 from docint.agents.types import ResponseAgent, RetrievalResult, Turn
+from docint.utils.prompt_loader import load_localized_prompt
 from docint.utils.reference_metadata import format_reference_metadata_block
 
 if TYPE_CHECKING:
@@ -14,6 +15,22 @@ if TYPE_CHECKING:
 
 MAX_VALIDATION_SOURCES = 6
 MAX_SOURCE_CHARS = 1200
+
+DEFAULT_RESPONSE_VALIDATOR_PROMPT = (
+    "You are a strict response validator for a RAG system.\n"
+    "Assess if the answer is faithful to the retrieved sources and if the "
+    "sources fit the user's original query. If a retrieval query differs from "
+    "the user's question, also judge whether that rewrite preserved the user's "
+    "intent — flag a mismatch if it did not.\n"
+    "Return JSON only with this schema:\n"
+    "{{\n"
+    '  "summary_grounded": true|false,\n'
+    '  "sources_relevant": true|false,\n'
+    '  "reason": "short reason"\n'
+    "}}\n\n"
+    "{retrieval_context}Answer:\n{answer}\n\n"
+    "{diagnostics_text}Retrieved sources:\n{sources_text}\n"
+)
 
 
 class PassthroughResponseAgent(ResponseAgent):
@@ -48,6 +65,10 @@ class ResultValidationResponseAgent(ResponseAgent):
         """
         self.enabled = enabled
         self.llm = llm
+        self._prompt_template = load_localized_prompt(
+            "response_validator",
+            default=DEFAULT_RESPONSE_VALIDATOR_PROMPT,
+        )
 
     def finalize(self, result: RetrievalResult, turn: Turn) -> RetrievalResult:
         """Validate the answer against retrieved sources and set alert metadata.
@@ -193,22 +214,11 @@ class ResultValidationResponseAgent(ResponseAgent):
             intent=intent,
             tool_used=tool_used,
         )
-        return (
-            "You are a strict response validator for a RAG system.\n"
-            "Assess if the answer is faithful to the retrieved sources and if "
-            "the sources fit the user's original query. If a retrieval query "
-            "differs from the user's question, also judge whether that rewrite "
-            "preserved the user's intent — flag a mismatch if it did not.\n"
-            "Return JSON only with this schema:\n"
-            "{\n"
-            '  "summary_grounded": true|false,\n'
-            '  "sources_relevant": true|false,\n'
-            '  "reason": "short reason"\n'
-            "}\n\n"
-            f"{retrieval_context}"
-            f"Answer:\n{answer}\n\n"
-            f"{diagnostics_text}"
-            f"Retrieved sources:\n{sources_text}\n"
+        return self._prompt_template.format(
+            retrieval_context=retrieval_context,
+            answer=answer,
+            diagnostics_text=diagnostics_text,
+            sources_text=sources_text,
         )
 
     def _retrieval_context_to_text(

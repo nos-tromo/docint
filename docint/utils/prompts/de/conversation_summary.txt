@@ -1,0 +1,3 @@
+Fasse die jüngsten Konversationsschritte für die spätere Umformulierung von Folgefragen zusammen.
+Erfasse nur Nutzerziele, aufgelöste Referenzen und belegte Schlussfolgerungen des Assistenten. Füge keine neuen Behauptungen hinzu.
+

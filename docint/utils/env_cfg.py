@@ -377,6 +377,40 @@ def load_hate_speech_env(
     )
 
 
+SUPPORTED_LANGUAGES: tuple[str, ...] = ("en", "de")
+
+
+@dataclass(frozen=True)
+class LanguageConfig:
+    """Dataclass for response-language configuration."""
+
+    code: Literal["en", "de"]
+
+
+def load_language_env(default: str = "en") -> LanguageConfig:
+    """Load the response-language setting from the ``RESPONSE_LANGUAGE`` env var.
+
+    Controls which locale subdirectory of the prompts tree is used and which
+    set of user-facing UI strings is selected. Unknown values fall back
+    silently to ``default`` so a typo cannot break the bring-up of the app.
+
+    Args:
+        default (str): Language code used when ``RESPONSE_LANGUAGE`` is unset
+            or unrecognised. Defaults to ``"en"``.
+
+    Returns:
+        LanguageConfig: Parsed language configuration.
+    """
+    raw = os.getenv("RESPONSE_LANGUAGE")
+    candidate = (raw if raw is not None else default).strip().lower()
+    if candidate not in SUPPORTED_LANGUAGES:
+        candidate = default.strip().lower()
+        if candidate not in SUPPORTED_LANGUAGES:
+            candidate = "en"
+    code: Literal["en", "de"] = "de" if candidate == "de" else "en"
+    return LanguageConfig(code=code)
+
+
 @dataclass(frozen=True)
 class HostConfig:
     """Dataclass for host configuration."""

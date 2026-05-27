@@ -47,6 +47,7 @@ from docint.utils.env_cfg import (
     load_hate_speech_env,
     load_host_env,
     load_ingestion_env,
+    load_language_env,
     load_model_env,
     load_ner_env,
     load_openai_env,
@@ -366,6 +367,20 @@ DEFAULT_GROUNDED_REFINE_PROMPT = (
     "them. If the new context is not useful, return the current answer "
     "unchanged.\n"
     "Refined grounded answer:"
+)
+DEFAULT_GROUNDED_COLLECTION_SUMMARY_PROMPT = (
+    "You are producing a grounded collection summary.\n"
+    "Use only the evidence briefs below. If evidence is insufficient, state that "
+    "explicitly.\n"
+    "Include cross-document themes, notable differences or outliers, and concrete "
+    "findings.\n"
+    "Do not introduce claims unsupported by the evidence briefs.\n\n"
+    "Coverage unit: {coverage_unit}\n"
+    "Coverage ratio: {coverage_ratio}\n"
+    "Coverage target: {coverage_target}\n"
+    "Uncovered documents: {uncovered_text}\n\n"
+    "Style instructions:\n{style_prompt}\n\n"
+    "Evidence briefs:\n{evidence_block}\n"
 )
 
 
@@ -1535,6 +1550,7 @@ class RAG:
     _qdrant_src_dir: Path | None = field(default=None, init=False, repr=False)
 
     # --- Prompt config ---
+    language_code: str = field(default="en", init=False)
     prompt_dir: Path | None = field(default=None, init=False)
     summarize_prompt_path: Path | None = field(default=None, init=False)
     summarize_social_prompt_path: Path | None = field(default=None, init=False)
@@ -1542,12 +1558,14 @@ class RAG:
     rewrite_retrieval_prompt_path: Path | None = field(default=None, init=False)
     grounded_text_qa_prompt_path: Path | None = field(default=None, init=False)
     grounded_refine_prompt_path: Path | None = field(default=None, init=False)
+    grounded_collection_summary_prompt_path: Path | None = field(default=None, init=False)
     summarize_prompt: str = field(default="", init=False)
     summarize_social_prompt: str = field(default="", init=False)
     conversation_summary_prompt: str = field(default="", init=False)
     rewrite_retrieval_prompt: str = field(default="", init=False)
     grounded_text_qa_prompt: str = field(default="", init=False)
     grounded_refine_prompt: str = field(default="", init=False)
+    grounded_collection_summary_prompt: str = field(default="", init=False)
 
     # --- Runtime (lazy caches / not in repr) ---
     _embed_model: BaseEmbedding | None = field(default=None, init=False, repr=False)
@@ -1674,7 +1692,8 @@ class RAG:
         # --- Path config ---
         self.path_config = self.path_config
         self.data_dir = self.path_config.data
-        self.prompt_dir = self.path_config.prompts
+        self.language_code = load_language_env().code
+        self.prompt_dir = self.path_config.prompts / self.language_code
         self._qdrant_src_dir = self.path_config.qdrant_sources
         self.hf_hub_cache = self.path_config.hf_hub_cache
 
@@ -1686,6 +1705,7 @@ class RAG:
             self.rewrite_retrieval_prompt_path = self.prompt_dir / "rewrite_retrieval.txt"
             self.grounded_text_qa_prompt_path = self.prompt_dir / "grounded_qa.txt"
             self.grounded_refine_prompt_path = self.prompt_dir / "grounded_refine.txt"
+            self.grounded_collection_summary_prompt_path = self.prompt_dir / "grounded_collection_summary.txt"
         if self.summarize_prompt_path is None:
             logger.error("ValueError: summarize_prompt_path is not set. Cannot load summarize prompt.")
             raise ValueError("summarize_prompt_path is not set. Cannot load summarize prompt.")
@@ -1713,6 +1733,10 @@ class RAG:
         self.grounded_refine_prompt = self._load_prompt_text(
             self.grounded_refine_prompt_path,
             default=DEFAULT_GROUNDED_REFINE_PROMPT,
+        )
+        self.grounded_collection_summary_prompt = self._load_prompt_text(
+            self.grounded_collection_summary_prompt_path,
+            default=DEFAULT_GROUNDED_COLLECTION_SUMMARY_PROMPT,
         )
 
         # --- Retrieval config ---
@@ -6131,17 +6155,13 @@ class RAG:
         uncovered = diagnostics.get("uncovered_documents") or []
         uncovered_text = ", ".join(str(item) for item in uncovered) or "(none)"
         evidence_block = "\n\n".join(briefs) if briefs else "(no evidence extracted)"
-        return (
-            "You are producing a grounded collection summary.\n"
-            "Use only the evidence briefs below. If evidence is insufficient, state that explicitly.\n"
-            "Include cross-document themes, notable differences or outliers, and concrete findings.\n"
-            "Do not introduce claims unsupported by the evidence briefs.\n\n"
-            f"Coverage unit: {coverage_unit}\n"
-            f"Coverage ratio: {coverage_ratio:.2f}\n"
-            f"Coverage target: {coverage_target:.2f}\n"
-            f"Uncovered documents: {uncovered_text}\n\n"
-            f"Style instructions:\n{style_prompt.strip()}\n\n"
-            f"Evidence briefs:\n{evidence_block}\n"
+        return self.grounded_collection_summary_prompt.format(
+            coverage_unit=coverage_unit,
+            coverage_ratio=f"{coverage_ratio:.2f}",
+            coverage_target=f"{coverage_target:.2f}",
+            uncovered_text=uncovered_text,
+            style_prompt=style_prompt.strip(),
+            evidence_block=evidence_block,
         )
 
     def _prepare_document_summary_context(self) -> dict[str, Any]:

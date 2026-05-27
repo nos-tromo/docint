@@ -5,8 +5,22 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from docint.agents import ContextualUnderstandingAgent, Turn
 from docint.agents.context import TurnContext
+
+
+@pytest.fixture(autouse=True)
+def _pin_response_language_to_english(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin ``RESPONSE_LANGUAGE`` to ``en`` so prompt-text assertions are stable.
+
+    The intent-analyst template is locale-aware (see
+    ``prompts/{en,de}/intent_analyst.txt``); these tests assert on the English
+    "rewritten_query MUST" phrasing, so they would flake under
+    ``RESPONSE_LANGUAGE=de`` deployments without this pin.
+    """
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
 
 
 class _FakeLLM:
