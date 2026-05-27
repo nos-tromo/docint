@@ -167,7 +167,7 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
             "You are an expert conversation analyst for a RAG system.\n"
             "Your task is to Analyze the User Query and extract the following JSON:\n"
             "{\n"
-            '  "intent": "qa" | "ner" | "table" | "summary",\n'
+            '  "intent": "qa" | "ner" | "table" | "summary" | "elaborate",\n'
             '  "rewritten_query": "The fully self-contained query resolving all references using context",\n'
             '  "reason": "Brief explanation of the intent choice"\n'
             "}\n\n"
@@ -175,7 +175,20 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
             "- 'qa': General questions, searching for information.\n"
             "- 'ner': Request to extract specific entities (people, orgs) or relations.\n"
             "- 'table': Request to look up or extract tabular data/rows.\n"
-            "- 'summary': Request to summarize a document or topic.\n\n"
+            "- 'summary': Request to summarize a document or topic.\n"
+            "- 'elaborate': Follow-up asking to clarify, expand, or restate "
+            'something the assistant just said ("tell me more", "please '
+            'elaborate", "I didn\'t understand X", "what do you mean by"). '
+            "Routed identically to 'qa' downstream.\n\n"
+            "Special rule for elaboration follow-ups: the rewritten_query MUST "
+            "inline the specific entities, names, organizations, or claims from "
+            "the most recent assistant turn that the user is referring to. Do "
+            "not return a near-passthrough of the user message — produce a "
+            "search query that actually names the things being asked about. "
+            'Example: if the user says "I did not understand the UN '
+            'references" and the prior assistant turn mentioned the UN '
+            'Security Council, rewrite as "UN Security Council references and '
+            'claims discussed previously".\n\n'
             f"Conversation Context:\n{context_str}\n\n"
             f"User Query: {query}\n\n"
             "Output JSON only:"
