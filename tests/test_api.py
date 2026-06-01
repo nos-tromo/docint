@@ -1112,9 +1112,7 @@ def test_agent_chat_stream_stamps_default_identity_on_session_start(
     assert seen == {"session_id": None, "owner": "operator"}
 
 
-def test_agent_chat_stream_uses_history_and_prior_turn(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient
-) -> None:
+def test_agent_chat_stream_uses_history_and_prior_turn(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """Streaming agent chat must feed prior history into understanding and stream_chat.
 
     Verifies parity with /agent/chat: prior_turn + history-rewritten query
@@ -1174,6 +1172,47 @@ def test_agent_chat_stream_uses_history_and_prior_turn(
     assert isinstance(seen["prior_turn"], PriorTurn)
     assert seen["prior_turn"].user_text == "Who chairs the council?"
     assert seen["prior_turn"].assistant_text == "The Security Council has a rotating presidency."
+
+
+def test_agent_chat_history_is_owner_scoped_on_both_endpoints(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Both agent endpoints load session history scoped to the resolved principal.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    owners: list[str | None] = []
+
+    def record_history(session_id: str, owner: str | None = None) -> list[dict[str, str]]:
+        owners.append(owner)
+        return [{"role": "user", "content": "hi"}]
+
+    monkeypatch.setattr(api_module.rag.sessions, "get_session_history", record_history)
+
+    class _StubOrchestrator:
+        def handle_turn(self, turn: Any, context: Any = None) -> OrchestratorResult:
+            _ = turn, context
+            analysis = IntentAnalysis(intent="qa", confidence=0.9, entities={"query": "hi"})
+            retrieval = RetrievalResult(answer="a", sources=[], session_id="generated-session")
+            return OrchestratorResult(clarification=None, retrieval=retrieval, analysis=analysis)
+
+    monkeypatch.setattr(api_module, "_build_orchestrator", lambda: _StubOrchestrator())
+    resp1 = client.post("/agent/chat", json={"message": "hi"})
+    assert resp1.status_code == 200
+
+    monkeypatch.setattr(
+        api_module,
+        "_clarification_policy",
+        api_module.ClarificationPolicy(api_module.ClarificationConfig(confidence_threshold=1.0, require_entities=True)),
+    )
+    with client.stream("POST", "/agent/chat/stream", json={"message": "hi"}) as resp2:
+        assert resp2.status_code == 200
+        list(resp2.iter_lines())
+
+    assert owners == ["operator", "operator"]
 
 
 def test_query_stateless_mode_skips_session_chat(client: TestClient) -> None:
