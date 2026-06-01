@@ -1,4 +1,5 @@
 import { NavLink, useNavigate } from 'react-router-dom'
+import { ApiError } from '@/api/client'
 import { useCollections, useDeleteCollection, useSelectCollection } from '@/hooks/useCollections'
 import { useDeleteSession, useSessions } from '@/hooks/useSessions'
 import { useUiStore } from '@/stores/ui'
@@ -12,17 +13,25 @@ const NAV = [
   { to: '/inspector', label: 'Inspector' }
 ]
 
+function getSessionsStatusMessage(error: unknown) {
+  if (error instanceof ApiError && error.status === 401) {
+    return 'Session history requires an authenticated user or DOCINT_DEFAULT_IDENTITY.'
+  }
+  return 'Failed to load chats.'
+}
+
 export function Sidebar() {
   const navigate = useNavigate()
   const { data: collections } = useCollections()
   const selectMutation = useSelectCollection()
   const deleteCollectionMutation = useDeleteCollection()
-  const { data: sessionsData } = useSessions()
+  const { data: sessionsData, isLoading: sessionsLoading, error: sessionsError } = useSessions()
   const deleteSessionMutation = useDeleteSession()
   const selected = useUiStore((s) => s.selectedCollection)
   const setSelected = useUiStore((s) => s.setSelectedCollection)
   const currentSessionId = useUiStore((s) => s.currentSessionId)
   const setCurrentSessionId = useUiStore((s) => s.setCurrentSessionId)
+  const sessions = sessionsData?.sessions ?? []
 
   const onSelectCollection = async (name: string) => {
     if (!name) return
@@ -161,7 +170,18 @@ export function Sidebar() {
           </button>
         </div>
         <ul className="mt-2 flex-1 overflow-auto space-y-1">
-          {sessionsData?.sessions.map((s) => {
+          {sessionsLoading && (
+            <li className="px-2 py-1 text-sm text-muted-foreground">Loading chats...</li>
+          )}
+          {!sessionsLoading && sessionsError && (
+            <li role="alert" className="rounded-md border border-amber-900/60 bg-amber-500/10 px-2 py-2 text-sm text-amber-200">
+              {getSessionsStatusMessage(sessionsError)}
+            </li>
+          )}
+          {!sessionsLoading && !sessionsError && sessions.length === 0 && (
+            <li className="px-2 py-1 text-sm text-muted-foreground">No chats yet.</li>
+          )}
+          {!sessionsLoading && !sessionsError && sessions.map((s) => {
             const active = currentSessionId === s.id
             return (
               <li key={s.id} className="flex items-center gap-1">

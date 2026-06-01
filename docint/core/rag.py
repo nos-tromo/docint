@@ -5662,7 +5662,7 @@ class RAG:
         """
         return self.ensure_session_manager().export_session(session_id=session_id, out_dir=out_dir)
 
-    def start_session(self, session_id: str | None = None) -> str:
+    def start_session(self, session_id: str | None = None, owner: str | None = None) -> str:
         """Start or resume a chat session through SessionManager.
 
         ``SessionManager.start_session`` lazily builds the query engine when
@@ -5673,11 +5673,15 @@ class RAG:
         Args:
             session_id (str | None): The session ID to start or resume. If None,
                 a new session is created.
+            owner (str | None): The owning principal for persisted sessions.
 
         Returns:
             str: The ID of the started or resumed session.
         """
-        return self.ensure_session_manager().start_session(session_id)
+        session_manager = self.ensure_session_manager()
+        if owner is None:
+            return session_manager.start_session(session_id)
+        return session_manager.start_session(session_id, owner=owner)
 
     def chat(
         self,

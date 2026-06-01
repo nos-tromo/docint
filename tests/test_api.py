@@ -151,15 +151,17 @@ class DummyRAG:
         """
         return self.sessions
 
-    def start_session(self, session_id: str | None = None) -> str:
+    def start_session(self, session_id: str | None = None, owner: str | None = None) -> str:
         """Start a new session or resume an existing one.
 
         Args:
             session_id (str | None, optional): The ID of the session to resume. Defaults to None.
+            owner (str | None, optional): The owning principal. Defaults to None.
 
         Returns:
             str: The session ID.
         """
+        _ = owner
         return session_id or "generated-session"
 
     def chat(
@@ -553,6 +555,8 @@ def _patch_rag(monkeypatch: pytest.MonkeyPatch) -> Any | None:
     Returns:
         Any | None: Yields None after patching.
     """
+    monkeypatch.delenv("DOCINT_AUTH_HEADER", raising=False)
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "test-operator")
     dummy = DummyRAG()
     monkeypatch.setattr(api_module, "rag", dummy)
     yield
@@ -981,6 +985,92 @@ def test_stream_query_includes_validation_metadata(client: TestClient) -> None:
     assert '"retrieval_query"' in text
     assert '"retrieval_mode"' in text
     assert '"response": "answer"' in text
+
+
+def test_query_stamps_default_identity_on_session_start(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """Session-backed query requests must stamp the resolved principal.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    seen: dict[str, Any] = {}
+
+    def record_start_session(session_id: str | None = None, owner: str | None = None) -> str:
+        seen["session_id"] = session_id
+        seen["owner"] = owner
+        return session_id or "generated-session"
+
+    monkeypatch.setattr(api_module.rag, "start_session", record_start_session)
+
+    response = client.post("/query", json={"question": "hello"})
+
+    assert response.status_code == 200
+    assert seen == {"session_id": None, "owner": "operator"}
+
+
+def test_stream_query_stamps_default_identity_on_session_start(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Session-backed stream queries must stamp the resolved principal.
+
+    The frontend uses ``/stream_query`` for chat. If the write path starts
+    sessions without the same owner that ``/sessions/list`` later filters by,
+    chats persist but never appear in the sidebar.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    seen: dict[str, Any] = {}
+
+    def record_start_session(session_id: str | None = None, owner: str | None = None) -> str:
+        seen["session_id"] = session_id
+        seen["owner"] = owner
+        return session_id or "generated-session"
+
+    monkeypatch.setattr(api_module.rag, "start_session", record_start_session)
+
+    with client.stream("POST", "/stream_query", json={"question": "hello"}) as resp:
+        assert resp.status_code == 200
+        list(resp.iter_lines())
+
+    assert seen == {"session_id": None, "owner": "operator"}
+
+
+def test_agent_chat_stamps_default_identity_on_session_start(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Agent chat must stamp the resolved principal on session start.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    seen: dict[str, Any] = {}
+
+    class _StubOrchestrator:
+        def handle_turn(self, turn: Any, context: Any = None) -> OrchestratorResult:
+            _ = turn, context
+            analysis = IntentAnalysis(intent="qa", confidence=0.9, entities={"query": "hello"})
+            retrieval = RetrievalResult(answer="answer", sources=[{"id": 1}], session_id="generated-session")
+            return OrchestratorResult(clarification=None, retrieval=retrieval, analysis=analysis)
+
+    def record_start_session(session_id: str | None = None, owner: str | None = None) -> str:
+        seen["session_id"] = session_id
+        seen["owner"] = owner
+        return session_id or "generated-session"
+
+    monkeypatch.setattr(api_module, "_build_orchestrator", lambda: _StubOrchestrator())
+    monkeypatch.setattr(api_module.rag, "start_session", record_start_session)
+
+    response = client.post("/agent/chat", json={"message": "hello"})
+
+    assert response.status_code == 200
+    assert seen == {"session_id": None, "owner": "operator"}
 
 
 def test_query_stateless_mode_skips_session_chat(client: TestClient) -> None:
