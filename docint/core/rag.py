@@ -5678,10 +5678,7 @@ class RAG:
         Returns:
             str: The ID of the started or resumed session.
         """
-        session_manager = self.ensure_session_manager()
-        if owner is None:
-            return session_manager.start_session(session_id)
-        return session_manager.start_session(session_id, owner=owner)
+        return self.ensure_session_manager().start_session(session_id, owner=owner)
 
     def chat(
         self,
