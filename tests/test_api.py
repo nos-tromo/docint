@@ -1073,6 +1073,43 @@ def test_agent_chat_stamps_default_identity_on_session_start(
     assert seen == {"session_id": None, "owner": "operator"}
 
 
+def test_agent_chat_stream_stamps_default_identity_on_session_start(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Streaming agent chat must stamp the resolved principal on session start.
+
+    ``/agent/chat/stream`` resolves the principal eagerly (before the SSE
+    generator) and passes it to ``start_session``. Without it, agent chats would
+    persist unowned and never surface in ``/sessions/list``. The clarification
+    policy is forced so the generator reaches ``start_session`` and returns
+    without depending on the chat stream.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    seen: dict[str, Any] = {}
+
+    def record_start_session(session_id: str | None = None, owner: str | None = None) -> str:
+        seen["session_id"] = session_id
+        seen["owner"] = owner
+        return session_id or "generated-session"
+
+    monkeypatch.setattr(api_module.rag, "start_session", record_start_session)
+    monkeypatch.setattr(
+        api_module,
+        "_clarification_policy",
+        api_module.ClarificationPolicy(api_module.ClarificationConfig(confidence_threshold=1.0, require_entities=True)),
+    )
+
+    with client.stream("POST", "/agent/chat/stream", json={"message": "hello"}) as resp:
+        assert resp.status_code == 200
+        list(resp.iter_lines())
+
+    assert seen == {"session_id": None, "owner": "operator"}
+
+
 def test_query_stateless_mode_skips_session_chat(client: TestClient) -> None:
     """Stateless query mode should use direct retrieval without chat session state.
 
