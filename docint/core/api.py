@@ -35,6 +35,7 @@ from docint.agents import (
     SimpleUnderstandingAgent,
     Turn,
 )
+from docint.agents.history import build_prior_turn
 from docint.cli import ingest as ingest_module
 from docint.core.auth.principal import resolve_principal
 from docint.core.rag import RAG, EmptyIngestionError
@@ -1343,9 +1344,11 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
 
         session_id = rag.start_session(payload.session_id, owner=owner)
         ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
+        if ctx and rag.sessions:
+            ctx.history = rag.sessions.get_session_history(session_id, owner=owner)
         turn = Turn(user_input=payload.message, session_id=session_id)
 
-        analysis = _understanding_agent.analyze(turn)
+        analysis = _understanding_agent.analyze(turn, context=ctx)
         clarification_decision = _clarification_policy.evaluate(
             analysis, clarifications_so_far=ctx.clarifications if ctx else 0
         )
@@ -1364,8 +1367,10 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
             yield _format_sse("clarification", payload_out)
             return
 
-        # Stream via RAG chat
-        stream = rag.stream_chat(turn.user_input)
+        # Stream via RAG chat (history-aware: rewritten query + prior turn)
+        query_text = analysis.rewritten_query or turn.user_input
+        prior_turn = build_prior_turn(ctx.history) if ctx else None
+        stream = rag.stream_chat(query_text, prior_turn=prior_turn)
 
         # Tokens
         for chunk in stream:

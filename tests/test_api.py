@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import docint.core.api as api_module
-from docint.agents.types import IntentAnalysis, OrchestratorResult, RetrievalResult
+from docint.agents.types import IntentAnalysis, OrchestratorResult, PriorTurn, RetrievalResult
 
 
 class DummySessionManager:
@@ -218,6 +218,7 @@ class DummyRAG:
         metadata_filters_active: bool = False,
         metadata_filter_rules: Any = None,
         vector_store_kwargs: Any = None,
+        prior_turn: Any = None,
     ) -> Generator[str | dict[str, Any], None, None]:
         """Stream chat responses from the RAG system.
 
@@ -227,6 +228,7 @@ class DummyRAG:
             metadata_filters_active (bool): Whether request filters were active.
             metadata_filter_rules (Any): Optional raw request filter rules.
             vector_store_kwargs (Any): Optional native vector-store query kwargs.
+            prior_turn (Any): Optional prior user/assistant exchange for context.
 
         Yields:
             str | dict[str, Any]: Chunks of the chat response as they are generated.
@@ -1108,6 +1110,70 @@ def test_agent_chat_stream_stamps_default_identity_on_session_start(
         list(resp.iter_lines())
 
     assert seen == {"session_id": None, "owner": "operator"}
+
+
+def test_agent_chat_stream_uses_history_and_prior_turn(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Streaming agent chat must feed prior history into understanding and stream_chat.
+
+    Verifies parity with /agent/chat: prior_turn + history-rewritten query
+    are both forwarded to stream_chat.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    seeded_history = [
+        {"role": "user", "content": "Who chairs the council?"},
+        {"role": "assistant", "content": "The Security Council has a rotating presidency."},
+    ]
+    monkeypatch.setattr(
+        api_module.rag.sessions,
+        "get_session_history",
+        lambda session_id, owner=None: seeded_history,
+    )
+
+    seen: dict[str, Any] = {}
+
+    class _RecordingUnderstanding:
+        def analyze(self, turn: Any, context: Any = None) -> IntentAnalysis:
+            seen["context_history"] = list(context.history) if context is not None else None
+            return IntentAnalysis(
+                intent="qa",
+                confidence=0.9,
+                entities={"query": turn.user_input},
+                rewritten_query="REWRITTEN QUERY",
+            )
+
+    def record_stream_chat(
+        user_msg: str, *, prior_turn: Any = None, **kwargs: Any
+    ) -> Generator[str | dict[str, Any], None, None]:
+        seen["stream_query"] = user_msg
+        seen["prior_turn"] = prior_turn
+        yield "token"
+        yield {"sources": [], "session_id": "generated-session"}
+
+    monkeypatch.setattr(api_module, "_understanding_agent", _RecordingUnderstanding())
+    monkeypatch.setattr(
+        api_module,
+        "_clarification_policy",
+        api_module.ClarificationPolicy(
+            api_module.ClarificationConfig(confidence_threshold=0.0, require_entities=False)
+        ),
+    )
+    monkeypatch.setattr(api_module.rag, "stream_chat", record_stream_chat)
+
+    with client.stream("POST", "/agent/chat/stream", json={"message": "And who is she?"}) as resp:
+        assert resp.status_code == 200
+        list(resp.iter_lines())
+
+    assert seen["context_history"] == seeded_history
+    assert seen["stream_query"] == "REWRITTEN QUERY"
+    assert isinstance(seen["prior_turn"], PriorTurn)
+    assert seen["prior_turn"].user_text == "Who chairs the council?"
+    assert seen["prior_turn"].assistant_text == "The Security Council has a rotating presidency."
 
 
 def test_query_stateless_mode_skips_session_chat(client: TestClient) -> None:
