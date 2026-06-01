@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 import docint.core.api as api_module
 from docint.agents.types import IntentAnalysis, OrchestratorResult, PriorTurn, RetrievalResult
+from docint.agents.understanding import ContextualUnderstandingAgent
 
 
 class DummySessionManager:
@@ -1213,6 +1214,23 @@ def test_agent_chat_history_is_owner_scoped_on_both_endpoints(
         list(resp2.iter_lines())
 
     assert owners == ["operator", "operator"]
+
+
+def test_select_understanding_agent_falls_back_to_simple_without_llm(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Without a configured LLM, the shared selector returns the module-level simple agent."""
+    monkeypatch.setattr(api_module.rag, "text_model_id", None, raising=False)
+    assert api_module._select_understanding_agent() is api_module._understanding_agent
+
+
+def test_select_understanding_agent_prefers_contextual_when_llm_configured(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """With an LLM configured, the selector returns the history-aware contextual agent."""
+    monkeypatch.setattr(api_module.rag, "text_model_id", "test-model", raising=False)
+    monkeypatch.setattr(api_module.rag, "text_model", object(), raising=False)
+    assert isinstance(api_module._select_understanding_agent(), ContextualUnderstandingAgent)
 
 
 def test_query_stateless_mode_skips_session_chat(client: TestClient) -> None:
