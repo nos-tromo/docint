@@ -58,6 +58,7 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
 - `docint/agents/orchestrator.py` — Coordinates understanding, clarification, retrieval, and generation agents
 - `docint/core/ingest/ingestion_pipeline.py` — Document processing, chunking, metadata extraction
 - `docint/core/readers/documents/` — Page-level PDF pipeline: triage, layout analysis, OCR fallback, extraction, chunking
+- `docint/core/readers/docx.py` — Word `.docx` reader. Converts via a DOCX-scoped docling `DocumentConverter` (pure-XML `SimplePipeline`, no models or network — airgap-safe) into compact Docling-JSON, so a docx flows through the already-wired `DoclingNodeParser` like a PDF (Markdown fallback if JSON export fails; skips rather than emitting raw bytes if conversion fails). Registered in `ingestion_pipeline.py`'s `file_extractor`, mirroring `rtf.py` — a binary type with no registered extractor gets silently decoded as UTF-8 (the bug this fixed).
 - `docint/core/readers/json.py` — Generic JSON / JSONL reader. Detects Nextext transcripts (JSONL with `text` plus timing keys `start_ts`/`end_ts` or `start_seconds`/`end_seconds`) and routes them to one-node-per-segment ingestion, mirroring the social-table specialized schema pattern; timing/speaker metadata surface via `reference_metadata`.
 - `docint/core/storage/` — Qdrant-backed document store, hierarchical node storage, source tracking
 - `docint/core/state/` — Session management (SQLite-backed) and citation handling
