@@ -30,7 +30,6 @@ cd frontend && pnpm build
 # CLI tools
 uv run ingest --help
 uv run query --help
-uv run resolve              # merge duplicate/similar entities for a collection
 uv run load-models          # pre-download model assets
 
 # Docker — single CPU image, no profile toggle.
@@ -38,6 +37,10 @@ make network   # create the external inference-net + data-net (one-time)
 make volumes   # create the external Docker volumes (one-time)
 make up        # build + run docint (production shape, no host ports)
 make up-dev    # like 'up', but publishes the React SPA on the host
+# Merge duplicate/similar entities for a collection (one-off backend container,
+# so it reaches the qdrant/vllm-router aliases — production is Docker-only).
+make resolve                    # prompts for the collection name
+make resolve COLLECTION=mydocs  # non-interactive
 ```
 
 ## Architecture

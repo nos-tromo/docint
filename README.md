@@ -165,8 +165,13 @@ Re-runnable and idempotent; results surface in the NER views under
 `entity_merge_mode=resolved`. Tuned by `RES_EMBED_THRESHOLD` (0.86),
 `RES_LLM_TIEBREAK` (true), `RES_CASE_NORMALIZE` (true), `RES_VECTOR_K` (5):
 
+Runs in a one-off `backend` container (production is Docker-only), so it
+reaches the `qdrant` / `vllm-router` network aliases — bring up data-plane and
+vllm-service first.
+
 ```bash
-uv run resolve            # prompts for the collection name
+make resolve                    # prompts for the collection name
+make resolve COLLECTION=mydocs  # non-interactive
 # or over HTTP, on the selected collection:
 # curl -X POST http://localhost:8000/collections/entities/resolve
 ```
