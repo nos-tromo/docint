@@ -14,7 +14,9 @@ from collections import defaultdict
 from itertools import combinations
 from typing import Any, Literal
 
-EntityMergeMode = Literal["orthographic", "exact"]
+from docint.core.entities.resolution import normalize_surface
+
+EntityMergeMode = Literal["orthographic", "exact", "resolved"]
 
 _LOOKUP_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 _ACRONYM_STOPWORDS = {
@@ -100,7 +102,12 @@ def normalize_entity_merge_mode(value: Any) -> EntityMergeMode:
     Returns:
         EntityMergeMode: Supported merge mode, defaulting to ``"orthographic"``.
     """
-    return "exact" if str(value or "").strip().lower() == "exact" else "orthographic"
+    mode = str(value or "").strip().lower()
+    if mode == "exact":
+        return "exact"
+    if mode == "resolved":
+        return "resolved"
+    return "orthographic"
 
 
 def _entity_key(text: str, entity_type: str) -> str:
@@ -162,6 +169,36 @@ def entity_cluster_key(
 
     compact = _compact_lookup(text) or str(text or "").strip().lower()
     return f"{compact}::{entity_type.lower()}"
+
+
+def _resolved_cluster_key(
+    text: str,
+    entity_type: str,
+    resolved_index: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    """Map an occurrence to a durable entity key via a resolved index.
+
+    Args:
+        text (str): Entity surface text.
+        entity_type (str): Entity type/label.
+        resolved_index (dict[str, Any]): Index produced by
+            ``EntityStore.load_alias_index`` — ``alias_to_id`` keyed by
+            ``(normalized_surface, type_lower)``, plus ``canonical`` and the
+            ``case_normalize`` flag used at resolve time.
+
+    Returns:
+        tuple[str | None, str | None]: ``(cluster_key, canonical_override)`` —
+        both ``None`` when the surface is not in the index (caller falls back
+        to orthographic clustering).
+    """
+    alias_to_id: dict[tuple[str, str], str] = resolved_index.get("alias_to_id") or {}
+    case_normalize = bool(resolved_index.get("case_normalize", True))
+    norm = normalize_surface(text, case_normalize=case_normalize)
+    entity_id = alias_to_id.get((norm, entity_type.lower()))
+    if entity_id is None:
+        return None, None
+    canonical = (resolved_index.get("canonical") or {}).get(entity_id)
+    return f"ent::{entity_id}", (str(canonical) if canonical else None)
 
 
 def _entity_aliases(text: str) -> set[str]:
@@ -411,17 +448,24 @@ def aggregate_ner_sources(
     sources: list[dict[str, Any]] | None,
     *,
     entity_merge_mode: EntityMergeMode = "orthographic",
+    resolved_index: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate NER payloads across source rows.
 
     Args:
         sources (list[dict[str, Any]] | None): Source metadata rows containing optional ``entities`` and ``relations``.
         entity_merge_mode (EntityMergeMode): Entity clustering mode used for aggregation.
+        resolved_index (dict[str, Any] | None): Durable entity index from
+            ``EntityStore.load_alias_index``; required for ``"resolved"`` mode,
+            which groups occurrences by canonical entity id and falls back to
+            orthographic clustering for surfaces not yet resolved.
 
     Returns:
         dict[str, Any]: Aggregation dictionary used by stats/search/graph helpers.
     """
     merge_mode = normalize_entity_merge_mode(entity_merge_mode)
+    use_resolved = merge_mode == "resolved" and resolved_index is not None
+    canonical_overrides: dict[str, str] = {}
     entity_index: dict[str, dict[str, Any]] = {}
     relation_index: dict[tuple[str, str, str], dict[str, Any]] = {}
     doc_index: dict[str, dict[str, Any]] = {}
@@ -455,11 +499,16 @@ def aggregate_ner_sources(
         for ent in normalized_entities:
             text = str(ent["text"])
             entity_type = str(ent["type"])
-            key = entity_cluster_key(
-                text,
-                entity_type,
-                entity_merge_mode=merge_mode,
-            )
+            if use_resolved and resolved_index is not None:
+                resolved_key, canonical_override = _resolved_cluster_key(text, entity_type, resolved_index)
+                if resolved_key is not None:
+                    key = resolved_key
+                    if canonical_override:
+                        canonical_overrides[key] = canonical_override
+                else:
+                    key = entity_cluster_key(text, entity_type, entity_merge_mode="orthographic")
+            else:
+                key = entity_cluster_key(text, entity_type, entity_merge_mode=merge_mode)
             source_keys.add(key)
             _add_lookup_key(local_text_to_keys, text.lower(), key)
             _add_lookup_key(local_compact_to_keys, _compact_lookup(text), key)
@@ -519,7 +568,7 @@ def aggregate_ner_sources(
     text_to_keys: dict[str, list[str]] = {}
     compact_to_keys: dict[str, list[str]] = {}
     for row in entity_index.values():
-        canonical_text = _canonical_variant_text(row)
+        canonical_text = canonical_overrides.get(row["key"]) or _canonical_variant_text(row)
         canonical_text_by_key[row["key"]] = canonical_text
         variants = _variant_rows(row)
         entity_row = {

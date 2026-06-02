@@ -1,0 +1,2 @@
+You are resolving an entity reference to a canonical entity.
+Reply with ONLY the id of the candidate that refers to the same real-world entity as the surface form, or NONE if none of them do.

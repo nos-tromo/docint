@@ -50,6 +50,7 @@ Repository = "https://github.com/nos-tromo/docint.git"
 [project.scripts]
 docint = "docint.cli.serve:main"
 ingest = "docint.cli.ingest:main"
+resolve = "docint.cli.resolve:main"
 query = "docint.cli.query:main"
 query-eval = "docint.cli.eval:main"
 verify = "docint.cli.verify:main"

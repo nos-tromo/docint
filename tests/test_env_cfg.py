@@ -21,6 +21,7 @@ import pytest
 from docint.utils.env_cfg import (
     load_embedding_env,
     load_model_env,
+    load_resolution_env,
     load_retrieval_env,
 )
 
@@ -495,3 +496,87 @@ def test_parent_context_safety_margin_rejects_out_of_range(
         monkeypatch.setenv("PARENT_CONTEXT_SAFETY_MARGIN", bad)
         cfg = load_retrieval_env()
         assert cfg.parent_context_safety_margin == pytest.approx(0.95)
+
+
+def _clear_resolution_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove every RES_* override so loader defaults are observable.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    for var in (
+        "RES_EMBED_THRESHOLD",
+        "RES_LLM_TIEBREAK",
+        "RES_CASE_NORMALIZE",
+        "RES_VECTOR_K",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_resolution_config_defaults_match_chorus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defaults mirror chorus: threshold 0.86, tiebreak+case-norm on, k=5.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    _clear_resolution_env(monkeypatch)
+
+    cfg = load_resolution_env()
+
+    assert cfg.embed_cluster_threshold == pytest.approx(0.86)
+    assert cfg.llm_tiebreak_enabled is True
+    assert cfg.case_normalize is True
+    assert cfg.vector_k == 5
+
+
+def test_resolution_config_reads_env_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Operator env values override every resolution default.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.setenv("RES_EMBED_THRESHOLD", "0.91")
+    monkeypatch.setenv("RES_LLM_TIEBREAK", "false")
+    monkeypatch.setenv("RES_CASE_NORMALIZE", "0")
+    monkeypatch.setenv("RES_VECTOR_K", "8")
+
+    cfg = load_resolution_env()
+
+    assert cfg.embed_cluster_threshold == pytest.approx(0.91)
+    assert cfg.llm_tiebreak_enabled is False
+    assert cfg.case_normalize is False
+    assert cfg.vector_k == 8
+
+
+def test_resolution_config_rejects_threshold_out_of_unit_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cosine threshold outside [0, 1] is a configuration error.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    _clear_resolution_env(monkeypatch)
+    for bad in ("1.5", "-0.1", "not-a-float"):
+        monkeypatch.setenv("RES_EMBED_THRESHOLD", bad)
+        with pytest.raises(ValueError, match="RES_EMBED_THRESHOLD"):
+            load_resolution_env()
+
+
+def test_resolution_config_rejects_non_positive_vector_k(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``vector_k`` must be a positive integer in range.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    _clear_resolution_env(monkeypatch)
+    for bad in ("0", "-3", "not-an-int"):
+        monkeypatch.setenv("RES_VECTOR_K", bad)
+        with pytest.raises(ValueError, match="RES_VECTOR_K"):
+            load_resolution_env()
