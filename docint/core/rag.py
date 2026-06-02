@@ -5689,6 +5689,7 @@ class RAG:
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
         prior_turn: PriorTurn | None = None,
+        skip_query_rewrite: bool | None = None,
     ) -> dict[str, Any]:
         """Proxy chat turns to SessionManager.
 
@@ -5702,10 +5703,12 @@ class RAG:
                 filter payloads for post-filtering auxiliary image sources.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
-            prior_turn (PriorTurn | None): Orchestrator-supplied prior
-                exchange. See
+            prior_turn (PriorTurn | None): Prior user/assistant exchange. See
                 :meth:`docint.core.state.session_manager.SessionManager.chat`
                 for semantics.
+            skip_query_rewrite (bool | None): Forwarded to
+                :meth:`docint.core.state.session_manager.SessionManager.chat`;
+                see there for semantics.
 
         Returns:
             dict[str, Any]: The chat response data.
@@ -5717,6 +5720,7 @@ class RAG:
             metadata_filter_rules=metadata_filter_rules,
             vector_store_kwargs=vector_store_kwargs,
             prior_turn=prior_turn,
+            skip_query_rewrite=skip_query_rewrite,
         )
 
     def stream_chat(
@@ -5728,6 +5732,7 @@ class RAG:
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
         prior_turn: PriorTurn | None = None,
+        skip_query_rewrite: bool | None = None,
     ) -> Any:
         """Proxy stream chat turns to SessionManager.
 
@@ -5741,10 +5746,12 @@ class RAG:
                 filter payloads for post-filtering auxiliary image sources.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
-            prior_turn (PriorTurn | None): Orchestrator-supplied prior
-                exchange. See
+            prior_turn (PriorTurn | None): Prior user/assistant exchange. See
                 :meth:`docint.core.state.session_manager.SessionManager.chat`
                 for semantics.
+            skip_query_rewrite (bool | None): Forwarded to
+                :meth:`docint.core.state.session_manager.SessionManager.chat`;
+                see there for semantics.
 
         Returns:
             Any: A generator yielding response chunks.
@@ -5756,6 +5763,7 @@ class RAG:
             metadata_filter_rules=metadata_filter_rules,
             vector_store_kwargs=vector_store_kwargs,
             prior_turn=prior_turn,
+            skip_query_rewrite=skip_query_rewrite,
         )
 
     def expand_query_with_graph_with_debug(self, query: str) -> tuple[str, dict[str, Any]]:

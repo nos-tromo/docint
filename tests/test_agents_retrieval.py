@@ -1,4 +1,4 @@
-"""Tests for :class:`RAGRetrievalAgent` prior-turn extraction."""
+"""Integration tests for RAGRetrievalAgent.retrieve (history wired in via build_prior_turn)."""
 
 from __future__ import annotations
 
@@ -88,27 +88,6 @@ def test_retrieve_uses_rewritten_query_when_present() -> None:
 
     args, _ = rag.chat.call_args
     assert args == ("standalone query",)
-
-
-def test_build_prior_turn_handles_assistant_only_history() -> None:
-    """When history has only an assistant message, ``PriorTurn.user_text`` is empty."""
-    rag = _make_rag_mock()
-    agent = RAGRetrievalAgent(rag)
-    history: list[dict[str, str]] = [
-        {"role": "assistant", "content": "Standalone assistant note."},
-    ]
-    prior = agent._build_prior_turn(history)
-    assert prior is not None
-    assert prior.assistant_text == "Standalone assistant note."
-    assert prior.user_text == ""
-
-
-def test_build_prior_turn_returns_none_without_assistant() -> None:
-    """No assistant in history → no prior turn (first user message of the session)."""
-    rag = _make_rag_mock()
-    agent = RAGRetrievalAgent(rag)
-    history: list[dict[str, str]] = [{"role": "user", "content": "first question"}]
-    assert agent._build_prior_turn(history) is None
 
 
 def test_retrieve_skips_chat_for_ner_intent() -> None:

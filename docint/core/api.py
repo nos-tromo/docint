@@ -35,6 +35,7 @@ from docint.agents import (
     SimpleUnderstandingAgent,
     Turn,
 )
+from docint.agents.history import build_prior_turn
 from docint.cli import ingest as ingest_module
 from docint.core.auth.principal import resolve_principal
 from docint.core.rag import RAG, EmptyIngestionError
@@ -86,6 +87,26 @@ _clarification_agent = SimpleClarificationAgent()
 _clarification_policy = ClarificationPolicy(ClarificationConfig())
 
 
+def _select_understanding_agent() -> SimpleUnderstandingAgent | ContextualUnderstandingAgent:
+    """Return the history-aware contextual understanding agent when an LLM is configured.
+
+    Shared by ``_build_orchestrator`` (non-streaming ``/agent/chat``) and
+    ``agent_chat_stream`` so both paths run identical, history-aware intent
+    analysis and query rewriting. Falls back to the keyword-based simple agent
+    when no LLM is configured.
+
+    Returns:
+        ContextualUnderstandingAgent bound to ``rag.text_model`` when available,
+        otherwise the module-level simple agent.
+    """
+    if getattr(rag, "text_model_id", None):
+        try:
+            return ContextualUnderstandingAgent(llm=rag.text_model)
+        except Exception as e:
+            logger.warning("Failed to init ContextualUnderstandingAgent: {}", e)
+    return _understanding_agent
+
+
 def _build_orchestrator() -> AgentOrchestrator:
     """Construct an orchestrator bound to the current RAG instance.
 
@@ -93,17 +114,9 @@ def _build_orchestrator() -> AgentOrchestrator:
         AgentOrchestrator: The constructed agent orchestrator.
     """
     retrieval_agent = RAGRetrievalAgent(rag)
-    understanding: SimpleUnderstandingAgent | ContextualUnderstandingAgent = _understanding_agent
+    understanding = _select_understanding_agent()
     validation_cfg = load_response_validation_env()
-    validation_llm = None
-
-    # Use contextual understanding if LLM is configured
-    if getattr(rag, "text_model_id", None):
-        try:
-            understanding = ContextualUnderstandingAgent(llm=rag.text_model)
-            validation_llm = rag.text_model
-        except Exception as e:
-            logger.warning("Failed to init ContextualUnderstandingAgent: {}", e)
+    validation_llm = rag.text_model if isinstance(understanding, ContextualUnderstandingAgent) else None
 
     return AgentOrchestrator(
         understanding=understanding,
@@ -780,7 +793,17 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                     "graph_debug": stateless_data.get("graph_debug"),
                 }
             else:
-                rag.start_session(payload.session_id, owner=session_owner)
+                session_id = rag.start_session(payload.session_id, owner=session_owner)
+                # The React chat UI calls /stream_query, so this is where
+                # generation-time history is wired: bind the prior
+                # user/assistant exchange (owner-scoped) onto the synthesis
+                # templates while keeping this endpoint's own internal
+                # retrieval rewrite (``skip_query_rewrite=False``).
+                prior_turn = (
+                    build_prior_turn(rag.sessions.get_session_history(session_id, owner=session_owner))
+                    if rag.sessions is not None
+                    else None
+                )
                 # Iterate over the sync generator
                 for chunk in rag.stream_chat(
                     payload.question,
@@ -788,6 +811,8 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                     metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
                     metadata_filter_rules=payload.metadata_filters,
                     vector_store_kwargs=vector_store_kwargs or None,
+                    prior_turn=prior_turn,
+                    skip_query_rewrite=False,
                 ):
                     if isinstance(chunk, str):
                         full_answer += chunk
@@ -1343,9 +1368,11 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
 
         session_id = rag.start_session(payload.session_id, owner=owner)
         ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
+        if ctx and rag.sessions:
+            ctx.history = rag.sessions.get_session_history(session_id, owner=owner)
         turn = Turn(user_input=payload.message, session_id=session_id)
 
-        analysis = _understanding_agent.analyze(turn)
+        analysis = _select_understanding_agent().analyze(turn, context=ctx)
         clarification_decision = _clarification_policy.evaluate(
             analysis, clarifications_so_far=ctx.clarifications if ctx else 0
         )
@@ -1364,8 +1391,10 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
             yield _format_sse("clarification", payload_out)
             return
 
-        # Stream via RAG chat
-        stream = rag.stream_chat(turn.user_input)
+        # Stream via RAG chat (history-aware: rewritten query + prior turn)
+        query_text = analysis.rewritten_query or turn.user_input
+        prior_turn = build_prior_turn(ctx.history) if ctx else None
+        stream = rag.stream_chat(query_text, prior_turn=prior_turn)
 
         # Tokens
         for chunk in stream:

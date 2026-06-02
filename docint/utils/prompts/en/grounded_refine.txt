@@ -9,5 +9,5 @@ New context snippet(s):
 ---------------------
 {context_msg}
 ---------------------
-Update the answer only when the new evidence materially improves or corrects it. Keep source-specific claims distinct. If the original question is an elaboration of the prior assistant turn, you may quote and expand on the prior turn's claims when the new snippets corroborate them. If the new context is not useful, return the current answer unchanged.
+Update the answer only when the new evidence materially improves or corrects it, and keep source-specific claims distinct. If a prior assistant turn is shown above and the original question elaborates on it, you may quote and expand on its claims when the new snippets corroborate them. If the new context is not useful, return the current answer unchanged. Return only the answer the user should read — do not narrate these rules, describe the snippets or sources, or comment on whether the evidence was sufficient or consistent.
 Refined grounded answer:
