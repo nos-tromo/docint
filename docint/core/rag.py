@@ -53,6 +53,7 @@ from docint.utils.env_cfg import (
     load_openai_env,
     load_path_env,
     load_rerank_client_env,
+    load_resolution_env,
     load_retrieval_env,
     load_session_env,
     load_summary_env,
@@ -112,6 +113,12 @@ __all__ = [
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from qdrant_client.qdrant_fastembed import IDF_EMBEDDING_MODELS  # type: ignore[attr-defined]
 
+from docint.core.entities.resolution import (
+    ResolutionSummary,
+    SurfaceMention,
+    resolve_collection,
+)
+from docint.core.entities.store import EntityStore
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.ingest.streaming_executor import overlapped
@@ -162,7 +169,15 @@ from docint.utils.retry import (
 SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
 SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
 SUMMARY_CACHE_REVISION_KEY = "summary_revision"
-HIDDEN_COLLECTION_SUFFIXES: tuple[str, ...] = ("_images", "_dockv")
+HIDDEN_COLLECTION_SUFFIXES: tuple[str, ...] = ("_images", "_dockv", "_entities")
+
+# Fallback tie-break preamble used when the locale prompt file is absent.
+# The canonical templates live in ``prompts/{en,de}/entity_tiebreak.txt``.
+DEFAULT_ENTITY_TIEBREAK_PROMPT = (
+    "You are resolving an entity reference to a canonical entity.\n"
+    "Reply with ONLY the id of the candidate that refers to the same "
+    "real-world entity as the surface form, or NONE if none of them do."
+)
 
 # Pinned to LlamaIndex's QdrantVectorStore DEFAULT_DENSE_VECTOR_NAME /
 # DEFAULT_SPARSE_VECTOR_NAME so a collection we pre-create has the same
@@ -4545,10 +4560,13 @@ class RAG:
         self._bump_summary_revision(target, allow_create=False)
 
         # The primary collection is the only one whose failure is fatal.
-        # `{target}_images` is supplementary metadata whose absence is tolerated.
+        # The `{target}_images` / `{target}_entities` companions are
+        # supplementary metadata whose absence is tolerated.
         secondary_collections: list[str] = []
-        if not target.endswith("_images"):
+        if not target.endswith(HIDDEN_COLLECTION_SUFFIXES):
             secondary_collections.append(f"{target}_images")
+            if qdrant_collection_exists(self.qdrant_client, f"{target}_entities"):
+                secondary_collections.append(f"{target}_entities")
 
         # 1. Delete the primary Qdrant collection — fail-fast on error so
         #    we don't proceed to destroy the SQLite KV file / source dir.
@@ -4955,20 +4973,20 @@ class RAG:
                         exc,
                     )
 
-        images_collection = f"{collection}_images"
-        if qdrant_collection_exists(self.qdrant_client, images_collection):
-            try:
-                self.qdrant_client.delete_collection(images_collection)
-                logger.info(
-                    "Deleted empty companion collection '{}' from Qdrant.",
-                    images_collection,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Failed to delete companion collection '{}': {}",
-                    images_collection,
-                    exc,
-                )
+        for companion in (f"{collection}_images", f"{collection}_entities"):
+            if qdrant_collection_exists(self.qdrant_client, companion):
+                try:
+                    self.qdrant_client.delete_collection(companion)
+                    logger.info(
+                        "Deleted empty companion collection '{}' from Qdrant.",
+                        companion,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to delete companion collection '{}': {}",
+                        companion,
+                        exc,
+                    )
 
     # --- Public API ---
     def ingest_docs(
@@ -6999,6 +7017,162 @@ class RAG:
         findings.sort(key=operator.itemgetter("source_ref", "chunk_id"))
         return findings
 
+    def _entities_collection(self) -> str:
+        """Return the hidden companion collection name for resolved entities.
+
+        Returns:
+            str: ``{active_collection}_entities`` (empty when no collection
+            is selected).
+        """
+        return f"{self.qdrant_collection}_entities" if self.qdrant_collection else ""
+
+    def _embed_surfaces(self, texts: list[str]) -> list[list[float]]:
+        """Embed surface forms in batches that respect the embed budget.
+
+        Reuses the embedding model and per-request batch size already
+        configured on the RAG instance (see
+        :meth:`_prepare_vector_nodes_for_insert` for the same slicing).
+
+        Args:
+            texts (list[str]): Surface forms to embed.
+
+        Returns:
+            list[list[float]]: Embedding vectors aligned to ``texts``.
+        """
+        embed_model = self.embed_model
+        get_embeddings = getattr(embed_model, "get_text_embeddings_strict", None)
+        if not callable(get_embeddings):
+            return [embed_model.get_text_embedding(text) for text in texts]
+        vectors: list[list[float]] = []
+        batch_size = max(1, self.embed_batch_size)
+        for start in range(0, len(texts), batch_size):
+            chunk = texts[start : start + batch_size]
+            vectors.extend(cast(list[list[float]], get_embeddings(chunk)))
+        return vectors
+
+    def _entity_vector_dim(self) -> int:
+        """Resolve the embedding dimension for the entity vector store.
+
+        Returns:
+            int: Configured ``openai_dimensions`` when set, otherwise a single
+            embed probe of the active model.
+        """
+        if self.openai_dimensions is not None:
+            return int(self.openai_dimensions)
+        return len(self.embed_model.get_text_embedding("ping"))
+
+    def _load_resolved_index(self) -> dict[str, Any] | None:
+        """Load the durable entity index for ``"resolved"`` aggregation.
+
+        Returns:
+            dict[str, Any] | None: ``{"alias_to_id", "canonical",
+            "case_normalize"}`` for :func:`aggregate_ner_sources`, or ``None``
+            when no entities have been resolved for the active collection.
+        """
+        collection = self._entities_collection()
+        if not collection or not qdrant_collection_exists(self.qdrant_client, collection):
+            return None
+        cfg = load_resolution_env()
+        store = EntityStore(
+            self.qdrant_client,
+            collection=collection,
+            dim=int(self.openai_dimensions or 1),
+            embed_model=self.embed_model_id,
+        )
+        alias_to_id, canonical = store.load_alias_index(case_normalize=cfg.case_normalize)
+        return {
+            "alias_to_id": alias_to_id,
+            "canonical": canonical,
+            "case_normalize": cfg.case_normalize,
+        }
+
+    def resolve_entities(
+        self,
+        *,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> ResolutionSummary:
+        """Resolve the active collection's entities into durable canonicals.
+
+        Mirrors chorus's batch ``resolve`` stage: collapse extracted entities to
+        unique ``(surface, type)`` pairs, embed them once, and resolve each
+        most-mentioned-first into the hidden ``{collection}_entities`` store
+        (exact alias -> type-blocked vector match -> conservative LLM tie-break
+        -> mint). Idempotent: surfaces already resolved on a prior run are
+        skipped. Invalidates the NER cache so the ``"resolved"`` aggregate
+        recomputes against the updated store.
+
+        Args:
+            progress_callback (Callable[[str], None] | None): Optional sink for
+                human-readable progress messages.
+
+        Returns:
+            ResolutionSummary: Counts of minted/attached/skipped surfaces.
+
+        Raises:
+            ValueError: If no collection is selected.
+        """
+        if not self.qdrant_collection:
+            raise ValueError("qdrant_collection must be set to resolve entities")
+
+        def _emit(message: str) -> None:
+            """Forward a progress message to the callback when present."""
+            if progress_callback is not None:
+                progress_callback(message)
+            logger.info(message)
+
+        sources = self._load_collection_ner_sources()
+        mention_counts: dict[tuple[str, str], int] = defaultdict(int)
+        for src in sources:
+            for ent in normalize_entities(src.get("entities")):
+                mention_counts[(str(ent["text"]), str(ent["type"]))] += 1
+
+        surfaces = [
+            SurfaceMention(surface=surface, entity_type=entity_type, mentions=mentions)
+            for (surface, entity_type), mentions in mention_counts.items()
+        ]
+        if not surfaces:
+            _emit(f"No entities to resolve in collection '{self.qdrant_collection}'.")
+            return ResolutionSummary(processed=0, minted=0, attached=0, skipped=0, entities_touched=0)
+
+        _emit(f"Resolving {len(surfaces)} distinct entity surfaces in '{self.qdrant_collection}'.")
+        cfg = load_resolution_env()
+        store = EntityStore(
+            self.qdrant_client,
+            collection=self._entities_collection(),
+            dim=self._entity_vector_dim(),
+            embed_model=self.embed_model_id,
+        )
+        store.ensure_collection()
+
+        prompt_header = DEFAULT_ENTITY_TIEBREAK_PROMPT
+        if self.prompt_dir:
+            prompt_header = self._load_prompt_text(
+                self.prompt_dir / "entity_tiebreak.txt",
+                default=DEFAULT_ENTITY_TIEBREAK_PROMPT,
+            )
+
+        def _chat(prompt: str) -> str:
+            """Run the configured chat model for one tie-break prompt."""
+            completion = self.text_model.complete(prompt)
+            return str(getattr(completion, "text", "") or "").strip()
+
+        summary = resolve_collection(
+            store,
+            surfaces,
+            embed_fn=self._embed_surfaces,
+            chat_fn=_chat,
+            prompt_header=prompt_header,
+            cfg=cfg,
+        )
+
+        self._bump_summary_revision(self.qdrant_collection)
+        self._invalidate_ner_cache(self.qdrant_collection)
+        _emit(
+            f"Entity resolution complete for '{self.qdrant_collection}': "
+            f"{summary.minted} minted, {summary.attached} attached, {summary.skipped} skipped."
+        )
+        return summary
+
     def _get_collection_ner_aggregate(
         self,
         *,
@@ -7025,8 +7199,9 @@ class RAG:
         if cache_key in self.ner_aggregate_cache:
             return self.ner_aggregate_cache[cache_key]
 
+        resolved_index = self._load_resolved_index() if merge_mode == "resolved" else None
         sources = self.get_collection_ner(refresh=refresh)
-        aggregate = aggregate_ner_sources(sources, entity_merge_mode=merge_mode)
+        aggregate = aggregate_ner_sources(sources, entity_merge_mode=merge_mode, resolved_index=resolved_index)
         self.ner_aggregate_cache[cache_key] = aggregate
         return aggregate
 
