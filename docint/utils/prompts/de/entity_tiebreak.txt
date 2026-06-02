@@ -1,0 +1,2 @@
+Sie lösen eine Entitätsreferenz zu einer kanonischen Entität auf.
+Antworten Sie AUSSCHLIESSLICH mit der id des Kandidaten, der sich auf dieselbe reale Entität wie die Oberflächenform bezieht, oder mit NONE, wenn keiner zutrifft.
