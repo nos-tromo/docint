@@ -159,6 +159,18 @@ Query data:
 uv run query --help
 ```
 
+Resolve entities — merge duplicate and semantically-similar named entities
+(e.g. `USA`/`United States`) for a collection into durable canonical records.
+Re-runnable and idempotent; results surface in the NER views under
+`entity_merge_mode=resolved`. Tuned by `RES_EMBED_THRESHOLD` (0.86),
+`RES_LLM_TIEBREAK` (true), `RES_CASE_NORMALIZE` (true), `RES_VECTOR_K` (5):
+
+```bash
+uv run resolve            # prompts for the collection name
+# or over HTTP, on the selected collection:
+# curl -X POST http://localhost:8000/collections/entities/resolve
+```
+
 Verify that a collection's Qdrant vector store and SQLite KV docstore
 are in sync — reports drift (KV-only orphans, Qdrant-only orphans,
 broken hierarchical parents) and optionally repairs KV-only orphans:
