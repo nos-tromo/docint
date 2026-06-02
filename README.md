@@ -80,6 +80,13 @@ and chat. It ships with:
 - Session persistence uses one SQLite file path. Set `SESSIONS_DB_PATH` for
   the normal case or `SESSION_STORE` if you want to supply a full SQLAlchemy
   database URL.
+- The React SPA does not add an authenticated user header by itself. For
+   single-user Docker or local setups, set `DOCINT_DEFAULT_IDENTITY` in `.env`
+   so session-backed chat and `/sessions/list` share one owner. If you run
+   behind a trusted proxy that injects a user header, set
+   `DOCINT_AUTH_HEADER` to that header name instead. Existing legacy sessions
+   with `owner = NULL` are backfilled to `DOCINT_DEFAULT_IDENTITY` when the
+   backend initializes the session store.
 
 ### Shared Docker Volumes
 

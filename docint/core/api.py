@@ -518,11 +518,13 @@ def collections_delete(name: str) -> dict[str, bool]:
 
 
 @app.post("/query", response_model=QueryOut, tags=["Query"])
-def query(payload: QueryIn) -> dict[str, list[dict[str, Any]] | str | bool | None]:
+def query(payload: QueryIn, request: Request) -> dict[str, list[dict[str, Any]] | str | bool | None]:
     """Handle a query request.
 
     Args:
         payload (QueryIn): The query payload containing the question and session ID.
+        request (Request): The incoming request used to resolve the calling principal
+            for session-backed chats.
 
     Returns:
         QueryOut: The query response containing the answer, sources, and session ID.
@@ -583,7 +585,10 @@ def query(payload: QueryIn) -> dict[str, list[dict[str, Any]] | str | bool | Non
                     data["graph_debug"] = graph_debug
                 session_id = payload.session_id or "stateless"
             else:
-                session_id = rag.start_session(payload.session_id)
+                session_id = rag.start_session(
+                    payload.session_id,
+                    owner=resolve_principal(request),
+                )
                 data = rag.chat(
                     payload.question,
                     metadata_filters=metadata_filters,
@@ -659,11 +664,13 @@ def query(payload: QueryIn) -> dict[str, list[dict[str, Any]] | str | bool | Non
 
 
 @app.post("/stream_query", tags=["Query"])
-async def stream_query(payload: QueryIn) -> StreamingResponse:
+async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
     """Handle a streaming query request.
 
     Args:
         payload (QueryIn): The query payload containing the question and session ID.
+        request (Request): The incoming request used to resolve the calling principal
+            for session-backed chats.
 
     Returns:
         StreamingResponse: A streaming response that yields SSE events during the query.
@@ -684,6 +691,13 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
         and getattr(rag, "index", None) is None
     ):
         rag.create_index()
+
+    session_owner: str | None = None
+    if (
+        payload.query_mode not in {"entity_occurrence", "entity_occurrence_multi"}
+        and payload.retrieval_mode != "stateless"
+    ):
+        session_owner = resolve_principal(request)
 
     async def event_generator() -> AsyncIterator[str]:
         """Generate SSE events for the streaming query.
@@ -766,7 +780,7 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                     "graph_debug": stateless_data.get("graph_debug"),
                 }
             else:
-                rag.start_session(payload.session_id)
+                rag.start_session(payload.session_id, owner=session_owner)
                 # Iterate over the sync generator
                 for chunk in rag.stream_chat(
                     payload.question,
@@ -1187,11 +1201,12 @@ def delete_session(session_id: str, principal: str = Depends(resolve_principal))
 
 
 @app.post("/agent/chat", response_model=AgentChatOut, tags=["Agent"])
-def agent_chat(payload: AgentChatIn) -> AgentChatOut:
+def agent_chat(payload: AgentChatIn, request: Request) -> AgentChatOut:
     """Agentic chat endpoint: understand → maybe clarify → retrieve/respond.
 
     Args:
         payload (AgentChatIn): Message and optional session id.
+        request (Request): The incoming request used to resolve the calling principal.
 
     Returns:
         AgentChatOut: Clarification prompt or answer with sources.
@@ -1200,14 +1215,12 @@ def agent_chat(payload: AgentChatIn) -> AgentChatOut:
         raise HTTPException(status_code=400, detail="No collection selected")
 
     # Ensure a session is active and get per-session agent context
-    session_id = rag.start_session(payload.session_id)
+    owner = resolve_principal(request)
+    session_id = rag.start_session(payload.session_id, owner=owner)
     ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
 
     if ctx and rag.sessions:
-        # Plan 1: agent_chat is not yet principal-scoped; owner=None reads only
-        # legacy un-owned rows. Under DOCINT_DEFAULT_IDENTITY, backfilled/owned
-        # convos won't match here (no history preload) until Plan 2 wires this.
-        ctx.history = rag.sessions.get_session_history(session_id, owner=None)
+        ctx.history = rag.sessions.get_session_history(session_id, owner=owner)
 
     turn = Turn(user_input=payload.message, session_id=session_id)
     orchestrator = _build_orchestrator()
@@ -1306,15 +1319,17 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
 
 
 @app.post("/agent/chat/stream", tags=["Agent"])
-async def agent_chat_stream(payload: AgentChatIn) -> StreamingResponse:
+async def agent_chat_stream(payload: AgentChatIn, request: Request) -> StreamingResponse:
     """Streaming variant of agent chat with token events and final metadata.
 
     Args:
         payload (AgentChatIn): Message and optional session id.
+        request (Request): The incoming request used to resolve the calling principal.
 
     Returns:
         StreamingResponse: SSE stream with clarification or answer tokens and metadata.
     """
+    owner = resolve_principal(request)
 
     async def event_generator() -> AsyncIterator[str]:
         """Generate SSE events for the agent chat stream.
@@ -1326,7 +1341,7 @@ async def agent_chat_stream(payload: AgentChatIn) -> StreamingResponse:
             yield _format_sse("error", {"detail": "No collection selected"})
             return
 
-        session_id = rag.start_session(payload.session_id)
+        session_id = rag.start_session(payload.session_id, owner=owner)
         ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
         turn = Turn(user_input=payload.message, session_id=session_id)
 
