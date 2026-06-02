@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 import docint.core.api as api_module
 from docint.agents.types import IntentAnalysis, OrchestratorResult, PriorTurn, RetrievalResult
 from docint.agents.understanding import ContextualUnderstandingAgent
+from docint.core.entities.resolution import ResolutionSummary
 
 
 class DummySessionManager:
@@ -549,6 +550,19 @@ class DummyRAG:
             }
         ]
 
+    def resolve_entities(self, *, progress_callback: Any = None) -> ResolutionSummary:
+        """Record a resolution call and return a fixed summary.
+
+        Args:
+            progress_callback (Any): Optional progress sink (ignored).
+
+        Returns:
+            ResolutionSummary: Fixed counts for endpoint assertions.
+        """
+        _ = progress_callback
+        self.resolve_called = True
+        return ResolutionSummary(processed=4, minted=2, attached=1, skipped=1, entities_touched=2)
+
 
 @pytest.fixture(autouse=True)
 def _patch_rag(monkeypatch: pytest.MonkeyPatch) -> Any | None:
@@ -801,6 +815,34 @@ def test_collections_ner_search_support_exact_merge_mode(client: TestClient) -> 
     )
     assert response.status_code == 200
     assert cast(DummyRAG, api_module.rag).ner_search_merge_modes[-1] == "exact"
+
+
+def test_collections_ner_stats_support_resolved_merge_mode(client: TestClient) -> None:
+    """Stats endpoint should accept and forward the resolved merge mode."""
+    response = client.get("/collections/ner/stats", params={"entity_merge_mode": "resolved"})
+    assert response.status_code == 200
+    assert cast(DummyRAG, api_module.rag).ner_stats_merge_modes[-1] == "resolved"
+
+
+def test_resolve_entities_success(client: TestClient) -> None:
+    """The resolve endpoint returns the resolution summary counts."""
+    response = client.post("/collections/entities/resolve")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload == {
+        "processed": 4,
+        "minted": 2,
+        "attached": 1,
+        "skipped": 1,
+        "entities_touched": 2,
+    }
+
+
+def test_resolve_entities_requires_selected_collection(client: TestClient) -> None:
+    """The resolve endpoint 400s when no collection is selected."""
+    api_module.rag.qdrant_collection = ""
+    response = client.post("/collections/entities/resolve")
+    assert response.status_code == 400
 
 
 def test_agent_chat_answers(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:

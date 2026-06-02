@@ -1042,7 +1042,7 @@ def get_collection_ner_stats(
     min_mentions: int = 2,
     entity_type: str | None = None,
     include_relations: bool = True,
-    entity_merge_mode: Literal["orthographic", "exact"] = Query(default="orthographic"),
+    entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
 ) -> dict[str, Any]:
     """Get collection-wide NER statistics.
 
@@ -1051,8 +1051,8 @@ def get_collection_ner_stats(
         min_mentions (int): Minimum mention count for ranked outputs.
         entity_type (str | None): Optional case-insensitive entity type filter.
         include_relations (bool): Whether relation aggregates are included.
-        entity_merge_mode (Literal["orthographic", "exact"]): Entity clustering mode used for
-            derived views.
+        entity_merge_mode (Literal["orthographic", "exact", "resolved"]): Entity clustering mode used for
+            derived views ("resolved" groups by durable canonical entity id).
 
     Returns:
         dict[str, Any]: A dashboard-friendly NER stats payload.
@@ -1080,7 +1080,7 @@ def search_collection_ner_entities(
     q: str = "",
     entity_type: str | None = None,
     limit: int = 100,
-    entity_merge_mode: Literal["orthographic", "exact"] = Query(default="orthographic"),
+    entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
 ) -> dict[str, list[dict[str, Any]]]:
     """Search entities across the selected collection.
 
@@ -1088,8 +1088,8 @@ def search_collection_ner_entities(
         q (str): Substring query applied to entity text.
         entity_type (str | None): Optional case-insensitive type filter.
         limit (int): Maximum number of rows to return.
-        entity_merge_mode (Literal["orthographic", "exact"]): Entity clustering mode used for
-            derived views.
+        entity_merge_mode (Literal["orthographic", "exact", "resolved"]): Entity clustering mode used for
+            derived views ("resolved" groups by durable canonical entity id).
 
     Returns:
         dict[str, list[dict]]: Dictionary containing matched entities.
@@ -1110,6 +1110,39 @@ def search_collection_ner_entities(
         }
     except Exception as e:
         logger.error("Error searching collection entities: {}", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/collections/entities/resolve", tags=["Query"])
+def resolve_collection_entities() -> dict[str, int]:
+    """Resolve the selected collection's entities into durable canonicals.
+
+    Runs the batch resolution pipeline (name embeddings + conservative LLM
+    tie-break) that merges semantically-equivalent named entities into the
+    hidden ``{collection}_entities`` store, so the ``entity_merge_mode=
+    "resolved"`` views group them. Idempotent — already-resolved surfaces are
+    skipped.
+
+    Returns:
+        dict[str, int]: Resolution summary counts (``processed``, ``minted``,
+        ``attached``, ``skipped``, ``entities_touched``).
+
+    Raises:
+        HTTPException: If no collection is selected or an internal error occurs.
+    """
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+    try:
+        summary = rag.resolve_entities()
+        return {
+            "processed": summary.processed,
+            "minted": summary.minted,
+            "attached": summary.attached,
+            "skipped": summary.skipped,
+            "entities_touched": summary.entities_touched,
+        }
+    except Exception as e:
+        logger.error("Error resolving collection entities: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
