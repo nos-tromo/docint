@@ -23,6 +23,7 @@ from llama_index.node_parser.docling import DoclingNodeParser
 from loguru import logger
 
 from docint.core.ingest.images_service import ImageIngestionService
+from docint.core.readers.docx import DocxReader
 from docint.core.readers.images import ImageReader
 from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.rtf import RTFReader
@@ -795,6 +796,7 @@ class DocumentIngestionPipeline:
                 ),
                 ".xls": table_reader,
                 ".xlsx": table_reader,
+                ".docx": DocxReader(),
                 ".rtf": RTFReader(),
             },
         )
