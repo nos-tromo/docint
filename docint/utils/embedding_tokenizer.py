@@ -78,7 +78,7 @@ def build_embedding_token_counter(
         return None
 
     try:
-        tokenizer = AutoTokenizer.from_pretrained(  # type: ignore[no-untyped-call]
+        tokenizer = AutoTokenizer.from_pretrained(
             str(resolved),
             local_files_only=True,
             use_fast=True,
