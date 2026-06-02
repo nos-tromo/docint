@@ -227,6 +227,7 @@ class SessionManager:
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
         prior_turn: PriorTurn | None = None,
+        skip_query_rewrite: bool | None = None,
     ) -> dict[str, Any]:
         """Handle a chat message from the user.
 
@@ -240,13 +241,18 @@ class SessionManager:
                 filter payloads for post-filtering auxiliary image sources.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
-            prior_turn (PriorTurn | None): Orchestrator-supplied prior
-                exchange. When provided, the second internal
-                ``rewrite_retrieval_query`` is skipped (the orchestrator
-                already produced a context-aware query) and the
-                ``prior_turn_context`` placeholder is bound on the
-                engine's generation templates so the synthesizer can
-                quote and elaborate on the prior assistant answer.
+            prior_turn (PriorTurn | None): Prior user/assistant exchange.
+                When provided, the ``prior_turn_context`` placeholder is
+                bound on the engine's generation templates so the
+                synthesizer can quote and elaborate on the prior assistant
+                answer.
+            skip_query_rewrite (bool | None): Whether to skip the internal
+                ``rewrite_retrieval_query``. Defaults to ``None``, which
+                skips the rewrite exactly when ``prior_turn`` is supplied
+                (the agent orchestrator already produced a history-aware
+                query). Pass ``False`` to bind ``prior_turn`` for generation
+                while still running the internal retrieval rewrite (the
+                ``/stream_query`` path); pass ``True`` to skip it regardless.
 
         Returns:
             dict[str, Any]: The response data.
@@ -277,10 +283,15 @@ class SessionManager:
         if self.chat_engine is None or session_id is None:
             session_id = self.start_session(session_id)
 
-        if prior_turn is not None:
-            # The orchestrator's understanding agent already rewrote with
-            # full history; do not rewrite again with the stricter
-            # SessionManager prompt that bans prior assistant claims.
+        # ``skip_query_rewrite`` decouples "bind the prior turn for generation"
+        # from "skip the internal retrieval rewrite". Default (``None``) skips
+        # the rewrite exactly when ``prior_turn`` is supplied — the agent
+        # orchestrator already produced a history-aware query, so re-running the
+        # stricter SessionManager rewrite (which bans prior assistant claims)
+        # would clobber it. ``/stream_query`` passes ``False`` to keep its own
+        # rewrite while still binding the prior turn below.
+        should_skip_rewrite = prior_turn is not None if skip_query_rewrite is None else skip_query_rewrite
+        if should_skip_rewrite:
             retrieval_query = user_msg.strip()
         else:
             session_context = self._get_session_context(session_id)
@@ -319,6 +330,7 @@ class SessionManager:
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
         prior_turn: PriorTurn | None = None,
+        skip_query_rewrite: bool | None = None,
     ) -> Iterator[str | dict[str, Any]]:
         """Handle a streaming chat message from the user.
 
@@ -332,8 +344,11 @@ class SessionManager:
                 filter payloads for post-filtering auxiliary image sources.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
-            prior_turn (PriorTurn | None): Orchestrator-supplied prior
-                exchange. See :meth:`chat` for semantics.
+            prior_turn (PriorTurn | None): Prior user/assistant exchange.
+                See :meth:`chat` for semantics.
+            skip_query_rewrite (bool | None): See :meth:`chat`. The
+                ``/stream_query`` path passes ``False`` to keep its internal
+                retrieval rewrite while binding the prior turn for generation.
 
         Yields:
             str | dict: Chunks of text, followed by a dict with metadata.
@@ -363,7 +378,10 @@ class SessionManager:
         if self.chat_engine is None or session_id is None:
             session_id = self.start_session(session_id)
 
-        if prior_turn is not None:
+        # See :meth:`chat`: ``skip_query_rewrite`` decouples prior-turn binding
+        # from the internal rewrite (``None`` -> skip iff ``prior_turn`` given).
+        should_skip_rewrite = prior_turn is not None if skip_query_rewrite is None else skip_query_rewrite
+        if should_skip_rewrite:
             retrieval_query = user_msg.strip()
         else:
             session_context = self._get_session_context(session_id)

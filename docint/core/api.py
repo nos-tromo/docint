@@ -793,7 +793,17 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                     "graph_debug": stateless_data.get("graph_debug"),
                 }
             else:
-                rag.start_session(payload.session_id, owner=session_owner)
+                session_id = rag.start_session(payload.session_id, owner=session_owner)
+                # The React chat UI calls /stream_query, so this is where
+                # generation-time history is wired: bind the prior
+                # user/assistant exchange (owner-scoped) onto the synthesis
+                # templates while keeping this endpoint's own internal
+                # retrieval rewrite (``skip_query_rewrite=False``).
+                prior_turn = (
+                    build_prior_turn(rag.sessions.get_session_history(session_id, owner=session_owner))
+                    if rag.sessions is not None
+                    else None
+                )
                 # Iterate over the sync generator
                 for chunk in rag.stream_chat(
                     payload.question,
@@ -801,6 +811,8 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                     metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
                     metadata_filter_rules=payload.metadata_filters,
                     vector_store_kwargs=vector_store_kwargs or None,
+                    prior_turn=prior_turn,
+                    skip_query_rewrite=False,
                 ):
                     if isinstance(chunk, str):
                         full_answer += chunk

@@ -220,6 +220,7 @@ class DummyRAG:
         metadata_filter_rules: Any = None,
         vector_store_kwargs: Any = None,
         prior_turn: Any = None,
+        skip_query_rewrite: Any = None,
     ) -> Generator[str | dict[str, Any], None, None]:
         """Stream chat responses from the RAG system.
 
@@ -230,6 +231,7 @@ class DummyRAG:
             metadata_filter_rules (Any): Optional raw request filter rules.
             vector_store_kwargs (Any): Optional native vector-store query kwargs.
             prior_turn (Any): Optional prior user/assistant exchange for context.
+            skip_query_rewrite (Any): Accepted for parity with RAG.stream_chat; ignored by the stub.
 
         Yields:
             str | dict[str, Any]: Chunks of the chat response as they are generated.
@@ -1173,6 +1175,58 @@ def test_agent_chat_stream_uses_history_and_prior_turn(monkeypatch: pytest.Monke
     assert isinstance(seen["prior_turn"], PriorTurn)
     assert seen["prior_turn"].user_text == "Who chairs the council?"
     assert seen["prior_turn"].assistant_text == "The Security Council has a rotating presidency."
+
+
+def test_stream_query_session_mode_feeds_prior_turn(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """``/stream_query`` (the endpoint the React SPA actually calls) must feed the prior turn.
+
+    In session mode it should build the immediately preceding user/assistant
+    exchange from owner-scoped history and pass it to ``stream_chat`` together
+    with ``skip_query_rewrite=False`` — so generation becomes history-aware while
+    the endpoint keeps its own internal retrieval-query rewrite.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    seeded_history = [
+        {"role": "user", "content": "Was ist im Bild sichtbar?"},
+        {"role": "assistant", "content": "Ein grüner Baum auf einer Wiese."},
+    ]
+    monkeypatch.setattr(
+        api_module.rag.sessions,
+        "get_session_history",
+        lambda session_id, owner=None: seeded_history,
+    )
+
+    seen: dict[str, Any] = {}
+
+    def record_stream_chat(
+        user_msg: str,
+        *,
+        prior_turn: Any = None,
+        skip_query_rewrite: Any = None,
+        **kwargs: Any,
+    ) -> Generator[str | dict[str, Any], None, None]:
+        seen["user_msg"] = user_msg
+        seen["prior_turn"] = prior_turn
+        seen["skip_query_rewrite"] = skip_query_rewrite
+        yield "tok"
+        yield {"response": "answer", "sources": [], "session_id": "generated-session"}
+
+    monkeypatch.setattr(api_module.rag, "stream_chat", record_stream_chat)
+
+    with client.stream("POST", "/stream_query", json={"question": "Enthält es Menschen?"}) as resp:
+        assert resp.status_code == 200
+        list(resp.iter_lines())
+
+    # The raw user message reaches stream_chat (the internal rewrite still runs there).
+    assert seen["user_msg"] == "Enthält es Menschen?"
+    assert seen["skip_query_rewrite"] is False
+    assert isinstance(seen["prior_turn"], PriorTurn)
+    assert seen["prior_turn"].user_text == "Was ist im Bild sichtbar?"
+    assert seen["prior_turn"].assistant_text == "Ein grüner Baum auf einer Wiese."
 
 
 def test_agent_chat_history_is_owner_scoped_on_both_endpoints(
