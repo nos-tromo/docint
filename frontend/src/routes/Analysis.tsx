@@ -4,6 +4,7 @@ import { useUiStore } from '@/stores/ui'
 import { EntityInspector } from '@/components/analysis/EntityInspector'
 import { HateSpeechTable } from '@/components/analysis/HateSpeechTable'
 import { SummaryPanel } from '@/components/analysis/SummaryPanel'
+import { MergeModeToggle } from '@/components/common/MergeModeToggle'
 import { cn } from '@/lib/cn'
 
 const TABS = ['NER', 'Hate speech', 'Summary'] as const
@@ -12,10 +13,16 @@ type Tab = (typeof TABS)[number]
 export function Analysis() {
   const [tab, setTab] = useState<Tab>('NER')
   const collection = useUiStore((s) => s.selectedCollection)
+  const mergeMode = useUiStore((s) => s.entityMergeMode)
   // Stats give us the entity dropdown (aggregated, ranked); /collections/ner
   // gives us the raw mention rows we filter client-side to show the chunks
   // for the picked entity, mirroring the deleted Streamlit drill-down.
-  const stats = useNerStats({ top_k: 500, min_mentions: 1, include_relations: false })
+  const stats = useNerStats({
+    top_k: 500,
+    min_mentions: 1,
+    include_relations: false,
+    entity_merge_mode: mergeMode
+  })
   const sources = useNer()
   const hate = useHateSpeech()
 
@@ -39,6 +46,12 @@ export function Analysis() {
       </nav>
       {tab === 'NER' && (
         <div className="space-y-3">
+          {collection && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <span>Merge mode</span>
+              <MergeModeToggle />
+            </div>
+          )}
           {!collection ? (
             <p className="text-sm text-muted-foreground">
               Select a collection to inspect entities.

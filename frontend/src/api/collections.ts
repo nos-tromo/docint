@@ -1,5 +1,5 @@
 import { apiDelete, apiGet, apiPost } from './client'
-import type { DocumentRecord, HateSpeechRow, NerSourceRow, NerStats } from './types'
+import type { DocumentRecord, EntityMergeMode, HateSpeechRow, NerSourceRow, NerStats } from './types'
 
 export const listCollections = () => apiGet<string[]>('/collections/list')
 
@@ -17,7 +17,7 @@ export const getNerStats = (params: {
   min_mentions?: number
   entity_type?: string
   include_relations?: boolean
-  entity_merge_mode?: 'orthographic' | 'exact'
+  entity_merge_mode?: EntityMergeMode
 }) => apiGet<NerStats>('/collections/ner/stats', params)
 
 export const getNer = (refresh?: boolean) =>

@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import type { EntityMergeMode } from '@/api/types'
 
 export interface PreviewModal {
   collection: string
@@ -11,8 +12,10 @@ interface UiState {
   selectedCollection: string | null
   currentSessionId: string | null
   previewModal: PreviewModal | null
+  entityMergeMode: EntityMergeMode
   setSelectedCollection: (name: string | null) => void
   setCurrentSessionId: (id: string | null) => void
+  setEntityMergeMode: (mode: EntityMergeMode) => void
   openPreview: (modal: PreviewModal) => void
   closePreview: () => void
 }
@@ -23,8 +26,10 @@ export const useUiStore = create<UiState>()(
       selectedCollection: null,
       currentSessionId: null,
       previewModal: null,
+      entityMergeMode: 'resolved',
       setSelectedCollection: (name) => set({ selectedCollection: name }),
       setCurrentSessionId: (id) => set({ currentSessionId: id }),
+      setEntityMergeMode: (mode) => set({ entityMergeMode: mode }),
       openPreview: (modal) => set({ previewModal: modal }),
       closePreview: () => set({ previewModal: null })
     }),
@@ -36,7 +41,8 @@ export const useUiStore = create<UiState>()(
       // chain of 400s until the user re-picks. Each session starts fresh
       // and the user must deliberately lock in a collection.
       partialize: (s) => ({
-        currentSessionId: s.currentSessionId
+        currentSessionId: s.currentSessionId,
+        entityMergeMode: s.entityMergeMode
       }),
       // v0 builds saved `selectedCollection` to localStorage. Strip it on
       // rehydrate so existing users do not inherit a stale selection that

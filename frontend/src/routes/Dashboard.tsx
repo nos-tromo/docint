@@ -5,17 +5,24 @@ import { useNerStats } from '@/hooks/useNer'
 import { useSessions } from '@/hooks/useSessions'
 import { useUiStore } from '@/stores/ui'
 import { KpiCard } from '@/components/common/KpiCard'
+import { MergeModeToggle } from '@/components/common/MergeModeToggle'
 import { TopEntitiesChart } from '@/components/dashboard/TopEntitiesChart'
 import { cn } from '@/lib/cn'
 
 export function Dashboard() {
   const collection = useUiStore((s) => s.selectedCollection)
+  const mergeMode = useUiStore((s) => s.entityMergeMode)
   const { data: collections, isError } = useCollections()
   const { data: documents } = useDocuments()
   const { data: sessionsData } = useSessions()
   const [topK, setTopK] = useState(15)
   const [minMentions, setMinMentions] = useState(2)
-  const stats = useNerStats({ top_k: topK, min_mentions: minMentions, include_relations: false })
+  const stats = useNerStats({
+    top_k: topK,
+    min_mentions: minMentions,
+    include_relations: false,
+    entity_merge_mode: mergeMode
+  })
 
   return (
     <div className="p-8 space-y-6">
@@ -52,7 +59,8 @@ export function Dashboard() {
       <section className="rounded-lg border border-border bg-zinc-900 p-4">
         <header className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-medium">Top entities</h2>
-          <div className="flex gap-3 text-sm">
+          <div className="flex items-center gap-3 text-sm">
+            <MergeModeToggle />
             <label className="flex items-center gap-2">
               top-k
               <input
