@@ -1,5 +1,6 @@
 """Tests for the FastAPI application endpoints."""
 
+import asyncio
 import types
 from collections.abc import Generator
 from pathlib import Path
@@ -83,6 +84,7 @@ class DummyRAG:
         self.sessions = DummySessionManager()
         self.chats: list[str] = []
         self.stateless_queries: list[str] = []
+        self.stateless_query_filters: list[dict[str, Any]] = []
         self.entity_occurrence_queries: list[str] = []
         self.entity_occurrence_filters: list[Any] = []
         self.entity_occurrence_merge_modes: list[str] = []
@@ -290,6 +292,42 @@ class DummyRAG:
             "response": "answer",
             "sources": [{"id": 1}],
         }
+
+    async def run_query_async(
+        self,
+        prompt: str,
+        *,
+        metadata_filters: Any = None,
+        metadata_filter_rules: Any = None,
+        vector_store_kwargs: Any = None,
+        retrieval_options: Any = None,
+    ) -> dict[str, Any]:
+        """Async stateless retrieval query mirroring :meth:`run_query`.
+
+        Args:
+            prompt: Query prompt.
+            metadata_filters: Optional compiled metadata filters.
+            metadata_filter_rules: Optional raw request filter rules.
+            vector_store_kwargs: Optional native vector-store query kwargs.
+            retrieval_options: Optional runtime retrieval overrides.
+
+        Returns:
+            dict[str, Any]: Response payload.
+        """
+        _ = retrieval_options
+        self.stateless_query_filters.append(
+            {
+                "filters": metadata_filters,
+                "rules": metadata_filter_rules,
+                "vector_store_kwargs": vector_store_kwargs,
+            }
+        )
+        return self.run_query(
+            prompt,
+            metadata_filters=metadata_filters,
+            metadata_filter_rules=metadata_filter_rules,
+            vector_store_kwargs=vector_store_kwargs,
+        )
 
     def run_entity_occurrence_query(
         self,
@@ -1353,11 +1391,16 @@ def test_query_stateless_mode_skips_session_chat(client: TestClient) -> None:
 
 
 def test_stream_query_stateless_mode_emits_tokens(client: TestClient) -> None:
-    """Stateless stream mode should emit token events and final metadata payload.
+    """Stateless stream mode should emit tokens via the async query path.
+
+    The stateless branch must call the native-async ``run_query_async`` (so the
+    event loop is not blocked) and forward the request-scoped filters intact.
 
     Args:
         client: The TestClient instance.
     """
+    rag = cast(DummyRAG, api_module.rag)
+    before = len(rag.stateless_query_filters)
     with client.stream(
         "POST",
         "/stream_query",
@@ -1369,6 +1412,10 @@ def test_stream_query_stateless_mode_emits_tokens(client: TestClient) -> None:
     assert '"token"' in text
     assert '"session_id": "stateless"' in text
     assert '"graph_debug"' in text
+    # The async query path was exercised and carried the filter kwargs.
+    assert len(rag.stateless_query_filters) == before + 1
+    recorded = rag.stateless_query_filters[-1]
+    assert set(recorded) == {"filters", "rules", "vector_store_kwargs"}
 
 
 @pytest.mark.anyio
@@ -2702,3 +2749,144 @@ def test_sessions_list_uses_default_identity_when_no_header(
     resp = client.get("/sessions/list")
     assert resp.status_code == 200
     assert seen["list"] == "operator"
+
+
+@pytest.mark.anyio
+async def test_stream_query_does_not_block_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow streaming query must not stall concurrent requests.
+
+    Regression test for the PR-195 freeze: the chat stream used to iterate a
+    blocking sync generator directly on the event loop, so a single in-flight
+    ``/stream_query`` starved every other request (nginx 504s, frozen UI). With
+    the generator pumped on a worker thread, a cheap ``/collections/list`` must
+    still return promptly while the slow stream is mid-flight.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    import time
+
+    import httpx
+    from httpx import ASGITransport
+
+    rag = cast(DummyRAG, api_module.rag)
+
+    def slow_stream(question: str, **_kwargs: Any) -> Generator[str | dict[str, Any], None, None]:
+        """Block before the first yield, modelling retrieval + first-token latency.
+
+        The heavy synchronous work (query rewrite, embedding, Qdrant search,
+        rerank, first LLM token) all happens inside the first ``next()`` before
+        any chunk is produced — so a single ``time.sleep`` before the first
+        ``yield`` is the faithful reproduction of the freeze.
+        """
+        time.sleep(1.0)
+        yield "tok "
+        yield {"response": "answer", "sources": [], "session_id": "generated-session"}
+
+    monkeypatch.setattr(rag, "stream_chat", slow_stream)
+
+    # Measure each request's completion time relative to a shared start. The
+    # blocking sync sleep cannot be "raced" on a single event loop — what
+    # distinguishes the bug from the fix is *when the loop is free*. With the
+    # bug, the stream blocks the loop for its full duration, so the cheap GET
+    # cannot complete until the stream releases it (both finish ~together).
+    # With the fix, the stream parks on a worker thread immediately, so the GET
+    # completes near-instantly while the stream is still sleeping.
+    transport = ASGITransport(app=api_module.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+        start = time.perf_counter()
+        timings: dict[str, float] = {}
+
+        async def timed_stream() -> int:
+            """Drive the slow streaming query to completion, recording its finish."""
+            resp = await ac.post("/stream_query", json={"question": "hi", "session_id": "s"})
+            timings["stream"] = time.perf_counter() - start
+            return resp.status_code
+
+        async def timed_cheap() -> int:
+            """Hit a cheap endpoint concurrently, recording its finish."""
+            resp = await ac.get("/collections/list")
+            timings["cheap"] = time.perf_counter() - start
+            return resp.status_code
+
+        stream_status, cheap_status = await asyncio.gather(timed_stream(), timed_cheap())
+
+        assert stream_status == 200
+        assert cheap_status == 200
+        # The cheap call must clear well before the ~1s stream finishes; if the
+        # loop were blocked it could only complete once the stream released it.
+        assert timings["cheap"] < timings["stream"] - 0.5, (
+            f"concurrent request was blocked behind the stream: "
+            f"cheap={timings['cheap']:.2f}s stream={timings['stream']:.2f}s"
+        )
+
+
+def test_stream_query_disconnect_cancels_awaiter(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """A client disconnect mid-stream must stop draining the chat generator.
+
+    Mirrors ``test_ingest_upload_cancels_awaiter_on_client_disconnect``: the
+    poll interval is shrunk and ``is_disconnected`` forced ``True`` so the
+    disconnect fires before the slow generator yields its first token — no
+    token events should reach the client.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    import time
+
+    from starlette.requests import Request as StarletteRequest
+
+    monkeypatch.setattr(api_module, "STREAM_DISCONNECT_POLL_INTERVAL_S", 0.05)
+
+    rag = cast(DummyRAG, api_module.rag)
+
+    def slow_stream(question: str, **_kwargs: Any) -> Generator[str | dict[str, Any], None, None]:
+        """Block before the first yield so the disconnect poll wins the race."""
+        time.sleep(0.3)
+        yield "tok "
+        yield {"response": "answer", "sources": [], "session_id": "generated-session"}
+
+    monkeypatch.setattr(rag, "stream_chat", slow_stream)
+
+    async def always_disconnected(_self: StarletteRequest) -> bool:
+        """Simulate an immediate client disconnect."""
+        return True
+
+    monkeypatch.setattr(StarletteRequest, "is_disconnected", always_disconnected)
+
+    with client.stream("POST", "/stream_query", json={"question": "hi", "session_id": "s"}) as resp:
+        assert resp.status_code == 200
+        body = "".join(chunk.decode() for chunk in resp.iter_raw())
+
+    # The awaiter was cancelled before the generator produced any token.
+    assert '"token"' not in body
+
+
+def test_stream_query_surfaces_generator_error(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """An exception raised inside the chat generator becomes an SSE error event.
+
+    The thread-bridge re-raises the worker exception on the loop, where the
+    endpoint's existing ``except`` clause converts it to an ``error`` payload.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    rag = cast(DummyRAG, api_module.rag)
+
+    def boom_stream(question: str, **_kwargs: Any) -> Generator[str | dict[str, Any], None, None]:
+        """Yield one token, then raise to exercise error propagation."""
+        yield "tok "
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(rag, "stream_chat", boom_stream)
+
+    with client.stream("POST", "/stream_query", json={"question": "hi", "session_id": "s"}) as resp:
+        assert resp.status_code == 200
+        body = "".join(chunk.decode() for chunk in resp.iter_raw())
+
+    assert '"token": "tok ' in body
+    assert '"error"' in body
