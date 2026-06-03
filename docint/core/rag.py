@@ -116,6 +116,7 @@ from qdrant_client.qdrant_fastembed import IDF_EMBEDDING_MODELS  # type: ignore[
 from docint.core.entities.resolution import (
     ResolutionSummary,
     SurfaceMention,
+    normalize_surface,
     resolve_collection,
 )
 from docint.core.entities.store import EntityStore
@@ -233,6 +234,54 @@ def _filter_sources_by_entity(
                 matches.append(source)
                 break
             if target_compact and _compact_entity_form(cand_text) == target_compact:
+                matches.append(source)
+                break
+    return matches
+
+
+def _filter_sources_by_surfaces(
+    sources: list[dict[str, Any]],
+    *,
+    surfaces: set[str],
+    target_type: str,
+) -> list[dict[str, Any]]:
+    """Return sources whose entity list contains any of several surface forms.
+
+    The multi-surface variant of :func:`_filter_sources_by_entity`, used for
+    resolved drill-down: a canonical entity's siblings (e.g. ``"US"`` plus
+    ``"United States"``) are all accepted, so no mention rows are lost. Matching
+    is case-insensitive on text or compact-lookup form within the same type.
+
+    Args:
+        sources (list[dict[str, Any]]): Candidate source rows.
+        surfaces (set[str]): Accepted surface forms (any case).
+        target_type (str): Entity type/label constraint (empty = unconstrained).
+
+    Returns:
+        list[dict[str, Any]]: Sources mentioning at least one accepted surface.
+    """
+    surface_set = {str(s or "").strip().lower() for s in surfaces if str(s or "").strip()}
+    if not surface_set:
+        return list(sources)
+    compact_set = {_compact_entity_form(s) for s in surface_set}
+    compact_set.discard("")
+    target_type_lower = str(target_type or "").strip().lower()
+
+    matches: list[dict[str, Any]] = []
+    for source in sources:
+        candidates = source.get("entities") or []
+        if not isinstance(candidates, list):
+            continue
+        for cand in candidates:
+            if not isinstance(cand, dict):
+                continue
+            cand_text = str(cand.get("text") or "").strip().lower()
+            if not cand_text:
+                continue
+            cand_type = str(cand.get("type") or "").strip().lower()
+            if target_type_lower and cand_type and cand_type != target_type_lower:
+                continue
+            if cand_text in surface_set or _compact_entity_form(cand_text) in compact_set:
                 matches.append(source)
                 break
     return matches
@@ -1583,6 +1632,9 @@ class RAG:
     # --- Pagination caches (server-side slicing for HTTP endpoints) ---
     _documents_cache: dict[str, list[dict[str, Any]]] = field(default_factory=dict, init=False, repr=False)
     _hate_speech_cache: dict[str, list[dict[str, Any]]] = field(default_factory=dict, init=False, repr=False)
+    # Per-collection resolved-entity index ({alias_to_id, canonical, case_normalize}
+    # or None), memoized so paginated drill-down pages don't re-scroll _entities.
+    _resolved_index_cache: dict[str, dict[str, Any] | None] = field(default_factory=dict, init=False, repr=False)
 
     # --- OpenAI parameters ---
     openai_api_base: str | None = field(default=None, init=False)
@@ -5709,6 +5761,7 @@ class RAG:
             self._parent_context_support_cache.clear()
             self._documents_cache.clear()
             self._hate_speech_cache.clear()
+            self._resolved_index_cache.clear()
             return
 
         stale_aggregate_keys = [key for key in self.ner_aggregate_cache if key[0] == collection]
@@ -5725,6 +5778,7 @@ class RAG:
         self._parent_context_support_cache.pop(collection, None)
         self._documents_cache.pop(collection, None)
         self._hate_speech_cache.pop(collection, None)
+        self._resolved_index_cache.pop(collection, None)
 
     def ensure_session_manager(self) -> SessionManager:
         """Ensure the SessionManager is initialized and return it.
@@ -7085,6 +7139,7 @@ class RAG:
         entity_text: str | None = None,
         entity_type: str | None = None,
         entity_key: str | None = None,
+        entity_merge_mode: EntityMergeMode = "orthographic",
     ) -> tuple[list[dict[str, Any]], str | None]:
         """Return one paginated slice of NER-bearing sources.
 
@@ -7094,7 +7149,10 @@ class RAG:
 
         Entity filtering mirrors the SPA's ``sourceContainsEntity``: the same
         match-by-text-or-compact-form rules apply, scoped to the same entity
-        type when both sides specify one.
+        type when both sides specify one. In ``"resolved"`` mode the filter
+        expands the requested surface to every sibling alias of its canonical
+        entity, so a chunk mentioning only an alias (e.g. "United States" for
+        the canonical "US") is still returned — no mention rows are lost.
 
         Args:
             cursor (str | None): Opaque cursor token from a previous call.
@@ -7105,6 +7163,8 @@ class RAG:
             entity_key (str | None): Raw ``"<text>::<type>"`` key, accepted as
                 a shorthand for ``entity_text``/``entity_type``. The SPA's
                 ``EntityInspector.keyOf`` produces this format.
+            entity_merge_mode (EntityMergeMode): Clustering mode; ``"resolved"``
+                expands to the canonical entity's sibling aliases.
 
         Returns:
             tuple[list[dict[str, Any]], str | None]: The page of source rows
@@ -7127,11 +7187,23 @@ class RAG:
                 entity_text = entity_key
 
         if entity_text:
-            filtered = _filter_sources_by_entity(
-                sources,
-                target_text=entity_text,
-                target_type=entity_type or "",
+            alias_surfaces = (
+                self._resolved_alias_surfaces(entity_text, entity_type or "")
+                if normalize_entity_merge_mode(entity_merge_mode) == "resolved"
+                else None
             )
+            if alias_surfaces is not None:
+                filtered = _filter_sources_by_surfaces(
+                    sources,
+                    surfaces=alias_surfaces,
+                    target_type=entity_type or "",
+                )
+            else:
+                filtered = _filter_sources_by_entity(
+                    sources,
+                    target_text=entity_text,
+                    target_type=entity_type or "",
+                )
         else:
             filtered = list(sources)
 
@@ -7290,8 +7362,14 @@ class RAG:
             "case_normalize"}`` for :func:`aggregate_ner_sources`, or ``None``
             when no entities have been resolved for the active collection.
         """
+        base = self.qdrant_collection
+        if base and base in self._resolved_index_cache:
+            return self._resolved_index_cache[base]
+
         collection = self._entities_collection()
         if not collection or not qdrant_collection_exists(self.qdrant_client, collection):
+            if base:
+                self._resolved_index_cache[base] = None
             return None
         cfg = load_resolution_env()
         store = EntityStore(
@@ -7301,11 +7379,42 @@ class RAG:
             embed_model=self.embed_model_id,
         )
         alias_to_id, canonical = store.load_alias_index(case_normalize=cfg.case_normalize)
-        return {
+        index: dict[str, Any] = {
             "alias_to_id": alias_to_id,
             "canonical": canonical,
             "case_normalize": cfg.case_normalize,
         }
+        if base:
+            self._resolved_index_cache[base] = index
+        return index
+
+    def _resolved_alias_surfaces(self, entity_text: str, entity_type: str) -> set[str] | None:
+        """Return all normalized surface forms of the resolved entity for a surface.
+
+        Looks up the canonical entity that ``(entity_text, entity_type)`` resolves
+        to and returns every surface (aliases + canonical) attached to it, so the
+        drill-down can match sibling-alias chunks (e.g. "United States" when the
+        canonical is "US"). Normalized (casefolded) forms, matched case-insensitively
+        against source mentions.
+
+        Args:
+            entity_text (str): A surface (canonical or alias) of the target entity.
+            entity_type (str): The entity type/label.
+
+        Returns:
+            set[str] | None: Normalized sibling surfaces, or ``None`` when the
+            collection is unresolved or the surface maps to no canonical entity.
+        """
+        resolved = self._load_resolved_index()
+        if not resolved:
+            return None
+        alias_to_id: dict[tuple[str, str], str] = resolved.get("alias_to_id") or {}
+        case_normalize = bool(resolved.get("case_normalize", True))
+        norm = normalize_surface(entity_text, case_normalize=case_normalize)
+        entity_id = alias_to_id.get((norm, str(entity_type or "").lower()))
+        if entity_id is None:
+            return None
+        return {surface for (surface, _type), eid in alias_to_id.items() if eid == entity_id}
 
     def resolve_entities(
         self,

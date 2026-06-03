@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import type { NerEntityRow, NerSourceRow } from '@/api/types'
+import type { EntityMergeMode, NerEntityRow, NerSourceRow } from '@/api/types'
 import { csvExportHref } from '@/api/collections'
 import { EntityFinding } from './EntityFinding'
 
@@ -14,6 +14,7 @@ interface Props {
   onLoadMore?: () => void
   collection: string
   keyOf: (e: NerEntityRow) => string
+  entityMergeMode?: EntityMergeMode
 }
 
 function entityOptionLabel(entity: NerEntityRow): string {
@@ -40,7 +41,8 @@ export function EntityInspector({
   hasNextPage,
   onLoadMore,
   collection,
-  keyOf
+  keyOf,
+  entityMergeMode
 }: Props) {
   const entityList = useMemo(
     () => entities.filter((e) => (e.text ?? '').trim().length > 0),
@@ -94,7 +96,8 @@ export function EntityInspector({
     selected && selectedKey
       ? {
           entity_text: selected.text,
-          entity_type: selected.type
+          entity_type: selected.type,
+          entity_merge_mode: entityMergeMode
         }
       : undefined
 

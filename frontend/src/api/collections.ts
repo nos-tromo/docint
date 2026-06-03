@@ -40,13 +40,15 @@ export const getNerSourcesPage = (params: {
   entity_key?: string
   entity_text?: string
   entity_type?: string
+  entity_merge_mode?: EntityMergeMode
 }) =>
   apiGet<Page<NerSourceRow>>('/collections/ner/sources', {
     cursor: params.cursor ?? undefined,
     limit: params.limit ?? 50,
     entity_key: params.entity_key,
     entity_text: params.entity_text,
-    entity_type: params.entity_type
+    entity_type: params.entity_type,
+    entity_merge_mode: params.entity_merge_mode
   })
 
 export const warmCollectionNer = () =>
@@ -77,6 +79,7 @@ export interface CsvExportParams {
   entity_key?: string
   entity_text?: string
   entity_type?: string
+  entity_merge_mode?: EntityMergeMode
   category?: string
   min_confidence?: string
   top_k?: number

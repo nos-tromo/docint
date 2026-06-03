@@ -5970,6 +5970,46 @@ def test_resolve_entities_then_resolved_aggregation_merges_semantic_variants(
     assert {v["text"] for v in entity["variants"]} == {"USA", "United States"}
 
 
+def test_iter_collection_ner_sources_resolved_includes_sibling_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolved drill-down returns chunks for ALL of a canonical entity's aliases.
+
+    A chunk mentioning only the alias "United States" must appear when drilling
+    into the resolved canonical "US" — otherwise the per-source view loses rows
+    that the entity's merged mention count includes.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="docs")
+    sources: list[dict[str, Any]] = [
+        {"chunk_id": "c1", "entities": [{"text": "US", "type": "loc"}]},
+        {"chunk_id": "c2", "entities": [{"text": "United States", "type": "loc"}]},
+        {"chunk_id": "c3", "entities": [{"text": "Canada", "type": "loc"}]},
+    ]
+    monkeypatch.setattr(RAG, "get_collection_ner", lambda self, refresh=False: sources)
+    monkeypatch.setattr(
+        RAG,
+        "_load_resolved_index",
+        lambda self: {
+            "alias_to_id": {("us", "loc"): "e1", ("united states", "loc"): "e1"},
+            "canonical": {"e1": "US"},
+            "case_normalize": True,
+        },
+    )
+
+    resolved_page, _ = rag.iter_collection_ner_sources(
+        entity_text="US", entity_type="loc", entity_merge_mode="resolved", limit=50
+    )
+    assert {s["chunk_id"] for s in resolved_page} == {"c1", "c2"}
+
+    ortho_page, _ = rag.iter_collection_ner_sources(
+        entity_text="US", entity_type="loc", entity_merge_mode="orthographic", limit=50
+    )
+    assert {s["chunk_id"] for s in ortho_page} == {"c1"}
+
+
 def test_vllm_sparse_encoder_converts_pooling_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

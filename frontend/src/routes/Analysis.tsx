@@ -99,6 +99,7 @@ export function Analysis() {
               onLoadMore={() => ner.fetchNextPage()}
               collection={collection}
               keyOf={(e) => keyOf(e.text, e.type)}
+              entityMergeMode={mergeMode}
             />
           )}
         </div>

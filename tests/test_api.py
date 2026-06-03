@@ -512,6 +512,7 @@ class DummyRAG:
         entity_key: str | None = None,
         entity_text: str | None = None,
         entity_type: str | None = None,
+        entity_merge_mode: str = "orthographic",
     ) -> tuple[list[dict[str, Any]], str | None]:
         """Stub paginated NER source iterator that slices ``ner_sources``."""
         from docint.utils.cursor import decode_cursor, encode_cursor
@@ -520,6 +521,7 @@ class DummyRAG:
             "entity_key": entity_key,
             "entity_text": entity_text,
             "entity_type": entity_type,
+            "entity_merge_mode": entity_merge_mode,
         }
         offset = int(decode_cursor(cursor).get("o") or 0)
         rows = self.ner_sources
@@ -2782,6 +2784,30 @@ def test_ner_sources_paginates_and_forwards_filters(client: TestClient) -> None:
 
     forwarded = rag.last_ner_sources_filter
     assert forwarded["entity_key"] == "Acme::ORG"
+
+
+def test_ner_sources_forwards_resolved_merge_mode(client: TestClient) -> None:
+    """The paginated NER-sources endpoint forwards entity_merge_mode=resolved."""
+    _select_alpha(client)
+    rag = cast(DummyRAG, api_module.rag)
+    response = client.get(
+        "/collections/ner/sources",
+        params={"entity_key": "US::loc", "entity_merge_mode": "resolved"},
+    )
+    assert response.status_code == 200
+    assert rag.last_ner_sources_filter["entity_merge_mode"] == "resolved"
+
+
+def test_export_ner_sources_csv_forwards_resolved_merge_mode(client: TestClient) -> None:
+    """The NER-sources CSV export forwards entity_merge_mode=resolved to the iterator."""
+    _select_alpha(client)
+    rag = cast(DummyRAG, api_module.rag)
+    response = client.get(
+        "/collections/alpha/export/ner-sources.csv",
+        params={"entity_text": "US", "entity_type": "loc", "entity_merge_mode": "resolved"},
+    )
+    assert response.status_code == 200
+    assert rag.last_ner_sources_filter["entity_merge_mode"] == "resolved"
 
 
 def test_ner_sources_invalid_cursor_returns_400(client: TestClient) -> None:

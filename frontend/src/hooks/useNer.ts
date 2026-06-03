@@ -25,13 +25,15 @@ export function useNerStats(params: Parameters<typeof getNerStats>[0]) {
  */
 export function useNerSources(entityKey: string | null) {
   const collection = useUiStore((s) => s.selectedCollection)
+  const mergeMode = useUiStore((s) => s.entityMergeMode)
   return useInfiniteQuery({
-    queryKey: ['ner-sources', collection, entityKey],
+    queryKey: ['ner-sources', collection, entityKey, mergeMode],
     queryFn: ({ pageParam }) =>
       getNerSourcesPage({
         cursor: pageParam as string | null,
         limit: 50,
-        entity_key: entityKey ?? undefined
+        entity_key: entityKey ?? undefined,
+        entity_merge_mode: mergeMode
       }),
     initialPageParam: null as string | null,
     getNextPageParam: (last) => last.next_cursor,

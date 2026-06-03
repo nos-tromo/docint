@@ -1158,13 +1158,16 @@ def get_collection_ner_sources(
     entity_key: str | None = None,
     entity_text: str | None = None,
     entity_type: str | None = None,
+    entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
 ) -> dict[str, Any]:
     """Return one page of NER-bearing source rows for the selected collection.
 
     Always paginated — there is no full-list mode. When an entity filter is
     supplied the matcher mirrors the SPA's ``sourceContainsEntity`` (same
     exact-text and compact-lookup rules) so results align with the UI's
-    client-side filter prior to pagination.
+    client-side filter prior to pagination. ``entity_merge_mode="resolved"``
+    expands the filter to the canonical entity's sibling aliases so the
+    drill-down reflects the merged mention count.
 
     Args:
         cursor (str | None): Opaque cursor token from a previous call.
@@ -1173,6 +1176,8 @@ def get_collection_ner_sources(
             SPA's ``EntityInspector.keyOf``).
         entity_text (str | None): Explicit entity surface form.
         entity_type (str | None): Explicit entity type/label.
+        entity_merge_mode (Literal): Clustering mode; ``"resolved"`` includes
+            sibling aliases of the canonical entity.
 
     Returns:
         dict[str, Any]: ``{"items": [...], "next_cursor": ...}``.
@@ -1186,6 +1191,7 @@ def get_collection_ner_sources(
             entity_key=entity_key,
             entity_text=entity_text,
             entity_type=entity_type,
+            entity_merge_mode=entity_merge_mode,
         )
         return {"items": items, "next_cursor": next_cursor}
     except InvalidCursorError as e:
@@ -1498,13 +1504,15 @@ def export_ner_sources_csv(
     entity_key: str | None = None,
     entity_text: str | None = None,
     entity_type: str | None = None,
+    entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
 ) -> StreamingResponse:
     """Stream entity findings (per-source rows) as CSV.
 
     Output schema matches ``entityFindingsToCsv`` in
     ``frontend/src/lib/exports.ts``. Filtering uses the same matcher as the
     paginated ``/collections/ner/sources`` endpoint, so the export reflects
-    exactly what the SPA's entity inspector shows.
+    exactly what the SPA's entity inspector shows. ``entity_merge_mode=
+    "resolved"`` includes the canonical entity's sibling aliases.
     """
     from docint.utils.csv_stream import NER_SOURCE_COLUMNS, ner_source_row, stream_csv
 
@@ -1527,6 +1535,7 @@ def export_ner_sources_csv(
                 limit=500,
                 entity_text=entity_text,
                 entity_type=entity_type,
+                entity_merge_mode=entity_merge_mode,
             )
             for source in page:
                 yield ner_source_row(source, entity_label=entity_label)
