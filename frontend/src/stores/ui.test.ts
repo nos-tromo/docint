@@ -3,7 +3,12 @@ import { useUiStore } from './ui'
 
 beforeEach(() => {
   localStorage.clear()
-  useUiStore.setState({ selectedCollection: null, currentSessionId: null, previewModal: null })
+  useUiStore.setState({
+    selectedCollection: null,
+    currentSessionId: null,
+    previewModal: null,
+    entityMergeMode: 'resolved'
+  })
 })
 
 describe('useUiStore', () => {
@@ -22,5 +27,20 @@ describe('useUiStore', () => {
     useUiStore.getState().setCurrentSessionId('s1')
     useUiStore.getState().setCurrentSessionId(null)
     expect(useUiStore.getState().currentSessionId).toBeNull()
+  })
+
+  it('defaults the entity merge mode to resolved', () => {
+    expect(useUiStore.getState().entityMergeMode).toBe('resolved')
+  })
+
+  it('updates the entity merge mode', () => {
+    useUiStore.getState().setEntityMergeMode('orthographic')
+    expect(useUiStore.getState().entityMergeMode).toBe('orthographic')
+  })
+
+  it('persists the entity merge mode across reloads', () => {
+    useUiStore.getState().setEntityMergeMode('exact')
+    const persisted = JSON.parse(localStorage.getItem('docint-ui')!).state
+    expect(persisted.entityMergeMode).toBe('exact')
   })
 })
