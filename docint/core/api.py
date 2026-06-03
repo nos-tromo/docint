@@ -41,6 +41,7 @@ from docint.cli import ingest as ingest_module
 from docint.core.auth.principal import resolve_principal
 from docint.core.rag import RAG, EmptyIngestionError
 from docint.core.retrieval_filters import build_metadata_filters, build_qdrant_filter
+from docint.utils.cursor import InvalidCursorError
 from docint.utils.env_cfg import (
     load_host_env,
     load_path_env,
@@ -198,6 +199,85 @@ def _resolve_qdrant_src_dir() -> Path:
     if path_config.qdrant_sources is None:
         raise RuntimeError("Qdrant sources directory is not configured")
     return path_config.qdrant_sources
+
+
+def _resolve_source_file_path(
+    collection: str,
+    file_hash: str,
+    *,
+    filename_hint: str | None = None,
+) -> Path | None:
+    """Resolve a ``(collection, file_hash)`` pair to an on-disk source file.
+
+    Mirrors the lookup chain used by :func:`preview_source`: scroll Qdrant
+    for a matching payload to recover the original ``file_path``, then fall
+    back to the data directory and the ``qdrant-sources`` mount under
+    ``<collection>/<filename>``. ``filename_hint`` lets callers (e.g. the
+    session ZIP endpoint) skip the Qdrant scroll when the citation row
+    already carries the filename.
+    """
+    file_path_str: str | None = None
+    try:
+        points, _ = rag.qdrant_client.scroll(
+            collection_name=collection,
+            scroll_filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="file_hash",
+                        match=models.MatchValue(value=file_hash),
+                    )
+                ]
+            ),
+            limit=1,
+            with_payload=True,
+        )
+        if not points:
+            points, _ = rag.qdrant_client.scroll(
+                collection_name=collection,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="metadata.file_hash",
+                            match=models.MatchValue(value=file_hash),
+                        )
+                    ]
+                ),
+                limit=1,
+                with_payload=True,
+            )
+        if points:
+            payload = points[0].payload or {}
+            file_path_str = (
+                payload.get("file_path")
+                or payload.get("path")
+                or (payload.get("metadata") or {}).get("file_path")
+                or (payload.get("origin") or {}).get("file_path")
+            )
+    except Exception as exc:
+        logger.warning("Failed to resolve source file for {}/{}: {}", collection, file_hash, exc)
+
+    candidates: list[Path] = []
+    filename: str | None
+    if file_path_str:
+        candidates.append(Path(file_path_str))
+        filename = Path(file_path_str).name
+    else:
+        filename = filename_hint
+
+    if filename:
+        try:
+            candidates.append(_resolve_data_dir() / filename)
+        except Exception:
+            pass
+        try:
+            candidates.append(_resolve_qdrant_src_dir() / collection / filename)
+        except Exception:
+            pass
+
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
 
 
 def _format_sse(event: str, data: dict[str, Any]) -> str:
@@ -497,12 +577,6 @@ class NERStatsOut(BaseModel):
 
 class NERSearchOut(BaseModel):
     """Matching entities returned from a NER search query."""
-
-    results: list[dict[str, Any]] = []
-
-
-class HateSpeechOut(BaseModel):
-    """Hate-speech classification results for a document or collection."""
 
     results: list[dict[str, Any]] = []
 
@@ -1093,9 +1167,15 @@ async def summarize_stream(request: Request, refresh: bool = Query(False)) -> St
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
-@app.get("/collections/ner", tags=["Query"])
+@app.get("/collections/ner", tags=["Query"], deprecated=True)
 def get_collection_ner(refresh: bool = False) -> dict[str, list[dict[str, Any]]]:
     """Get all NER data (entities and relations) for the currently selected collection.
+
+    Deprecated: scrolls the entire collection in one response and is the
+    pre-pagination path. Prefer ``GET /collections/ner/sources`` (paginated,
+    optionally server-filtered by entity) and ``GET /collections/ner/stats``
+    for the entity dropdown. Retained to keep external consumers working
+    until they migrate.
 
     Args:
         refresh (bool): If ``True``, bypass in-memory cache and re-fetch from storage.
@@ -1116,19 +1196,125 @@ def get_collection_ner(refresh: bool = False) -> dict[str, list[dict[str, Any]]]
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@app.get("/collections/hate-speech", response_model=HateSpeechOut, tags=["Query"])
-def get_collection_hate_speech() -> dict[str, list[dict[str, Any]]]:
-    """Get flagged hate-speech chunks for the selected collection.
+@app.get("/collections/hate-speech", tags=["Query"])
+def get_collection_hate_speech(
+    cursor: str | None = None,
+    limit: int = Query(default=0, ge=0, le=500),
+    category: str | None = None,
+    min_confidence: str | None = None,
+) -> dict[str, Any]:
+    """Return flagged hate-speech chunks for the selected collection.
+
+    The endpoint operates in two modes:
+
+    * **Legacy (default)**: ``cursor`` omitted and ``limit=0`` — returns the
+      full list under ``{"results": [...]}``, matching the original shape.
+    * **Paginated**: any of ``cursor`` / ``limit`` / ``category`` /
+      ``min_confidence`` supplied — returns ``{"items": [...], "next_cursor":
+      ...}`` and uses the in-memory hate-speech cache for slicing.
+
+    Args:
+        cursor (str | None): Opaque cursor token from a previous paginated call.
+        limit (int): Page size (1-500). ``0`` selects legacy mode.
+        category (str | None): Optional case-insensitive category filter.
+        min_confidence (str | None): Optional confidence floor (``low`` <
+            ``medium`` < ``high``).
 
     Returns:
-        dict[str, list[dict]]: A dictionary containing the list of hate-speech findings.
+        dict[str, Any]: Either the legacy ``{"results": ...}`` payload or a
+        paginated ``{"items": ..., "next_cursor": ...}`` envelope.
+    """
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+
+    paginated = cursor is not None or limit > 0 or category is not None or min_confidence is not None
+    try:
+        if not paginated:
+            return {"results": rag.get_collection_hate_speech()}
+        items, next_cursor = rag.iter_hate_speech(
+            cursor=cursor,
+            limit=limit or 50,
+            category=category,
+            min_confidence=min_confidence,
+        )
+        return {"items": items, "next_cursor": next_cursor}
+    except InvalidCursorError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        logger.error("Error fetching collection hate-speech results: {}", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/collections/ner/sources", tags=["Query"])
+def get_collection_ner_sources(
+    cursor: str | None = None,
+    limit: int = Query(default=50, ge=1, le=500),
+    entity_key: str | None = None,
+    entity_text: str | None = None,
+    entity_type: str | None = None,
+    entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
+) -> dict[str, Any]:
+    """Return one page of NER-bearing source rows for the selected collection.
+
+    Always paginated — there is no full-list mode. When an entity filter is
+    supplied the matcher mirrors the SPA's ``sourceContainsEntity`` (same
+    exact-text and compact-lookup rules) so results align with the UI's
+    client-side filter prior to pagination. ``entity_merge_mode="resolved"``
+    expands the filter to the canonical entity's sibling aliases so the
+    drill-down reflects the merged mention count.
+
+    Args:
+        cursor (str | None): Opaque cursor token from a previous call.
+        limit (int): Records per page (1-500).
+        entity_key (str | None): ``"<text>::<type>"`` shorthand (matches the
+            SPA's ``EntityInspector.keyOf``).
+        entity_text (str | None): Explicit entity surface form.
+        entity_type (str | None): Explicit entity type/label.
+        entity_merge_mode (Literal): Clustering mode; ``"resolved"`` includes
+            sibling aliases of the canonical entity.
+
+    Returns:
+        dict[str, Any]: ``{"items": [...], "next_cursor": ...}``.
     """
     if not rag.qdrant_collection:
         raise HTTPException(status_code=400, detail="No collection selected")
     try:
-        return {"results": rag.get_collection_hate_speech()}
+        items, next_cursor = rag.iter_collection_ner_sources(
+            cursor=cursor,
+            limit=limit,
+            entity_key=entity_key,
+            entity_text=entity_text,
+            entity_type=entity_type,
+            entity_merge_mode=entity_merge_mode,
+        )
+        return {"items": items, "next_cursor": next_cursor}
+    except InvalidCursorError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
-        logger.error("Error fetching collection hate-speech results: {}", e)
+        logger.error("Error fetching collection NER sources: {}", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/collections/ner/warm", tags=["Query"])
+async def warm_collection_ner() -> dict[str, Any]:
+    """Pre-warm the NER aggregate cache for the selected collection.
+
+    Runs :meth:`docint.core.rag.RAG._get_collection_ner_aggregate` on a
+    worker thread so the first ``/collections/ner/stats`` call after a
+    collection switch doesn't pay the full Qdrant scroll cost on a user
+    interaction. Safe to call concurrently — the underlying cache uses
+    a per-collection key and tolerates repeat-loads.
+
+    Returns:
+        dict[str, Any]: ``{"ok": True}`` once warming completes.
+    """
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+    try:
+        await to_thread.run_sync(rag._get_collection_ner_aggregate)
+        return {"ok": True}
+    except Exception as e:
+        logger.error("Error warming collection NER aggregate: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
@@ -1243,23 +1429,251 @@ def resolve_collection_entities() -> dict[str, int]:
 
 
 @app.get("/collections/documents", tags=["Query"])
-def get_collection_documents() -> dict[str, list[dict[str, Any]]]:
-    """Get list of documents in the currently selected collection.
+def get_collection_documents(
+    cursor: str | None = None,
+    limit: int = Query(default=0, ge=0, le=500),
+) -> dict[str, Any]:
+    """Return documents in the currently selected collection.
+
+    The endpoint operates in two modes for backward compatibility:
+
+    * **Legacy (default)**: ``cursor`` omitted and ``limit=0`` — returns the
+      full list under ``{"documents": [...]}``, matching the original shape.
+    * **Paginated**: any of ``cursor`` / ``limit`` supplied — returns
+      ``{"items": [...], "next_cursor": ...}`` and uses the in-memory
+      document cache for slicing.
+
+    Args:
+        cursor (str | None): Opaque cursor token from a previous paginated call.
+        limit (int): Page size (1-500). ``0`` selects legacy mode.
 
     Returns:
-        dict[str, list[dict]]: A dictionary containing the list of documents.
+        dict[str, Any]: Either the legacy ``{"documents": ...}`` payload or a
+        paginated ``{"items": ..., "next_cursor": ...}`` envelope.
+    """
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
 
-    Raises:
-        HTTPException: If no collection is selected or an error occurs.
+    paginated = cursor is not None or limit > 0
+    try:
+        if not paginated:
+            return {"documents": rag.list_documents()}
+        items, next_cursor = rag.iter_documents(cursor=cursor, limit=limit or 50)
+        return {"items": items, "next_cursor": next_cursor}
+    except InvalidCursorError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        logger.error("Error fetching collection documents: {}", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/collections/documents/count", tags=["Query"])
+def get_collection_documents_count() -> dict[str, int]:
+    """Return the number of unique documents in the active collection.
+
+    Backed by the same per-collection cache as ``/collections/documents``
+    pagination, so the first call after a collection switch pays the
+    Qdrant scroll once and the dashboard KPI then reads from cache.
     """
     if not rag.qdrant_collection:
         raise HTTPException(status_code=400, detail="No collection selected")
     try:
-        docs = rag.list_documents()
-        return {"documents": docs}
+        return {"count": rag.get_document_count()}
     except Exception as e:
-        logger.error("Error fetching collection documents: {}", e)
+        logger.error("Error fetching collection document count: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+def _validate_export_collection(name: str) -> None:
+    """Validate that ``name`` matches the active collection and is visible.
+
+    Args:
+        name (str): Collection name from the export URL path.
+
+    Raises:
+        HTTPException: 400 if no collection is selected, 404 if the requested
+            collection is hidden or unknown, 409 if a different collection is
+            currently active (the SPA must call ``/collections/select`` first).
+    """
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+    if name != rag.qdrant_collection:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Active collection is '{rag.qdrant_collection}'; "
+                f"call /collections/select for '{name}' before exporting."
+            ),
+        )
+    try:
+        visible = rag.list_collections()
+    except Exception:
+        visible = [rag.qdrant_collection]
+    if name not in visible:
+        raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
+
+
+def _csv_attachment_headers(stem: str) -> dict[str, str]:
+    """Build streaming CSV response headers, including RFC 6266 filename."""
+    from urllib.parse import quote
+
+    safe_stem = stem.replace('"', "_")
+    ascii_only = "".join(ch if ord(ch) < 128 else "_" for ch in safe_stem)
+    filename = f"{ascii_only}.csv"
+    star = quote(f"{safe_stem}.csv", safe="")
+    return {
+        "Content-Disposition": f"attachment; filename=\"{filename}\"; filename*=UTF-8''{star}",
+        "X-Accel-Buffering": "no",
+        "Cache-Control": "no-store",
+    }
+
+
+@app.get("/collections/{name}/export/documents.csv", tags=["Query"])
+def export_documents_csv(name: str) -> StreamingResponse:
+    """Stream the documents table as CSV.
+
+    The endpoint reads from :meth:`docint.core.rag.RAG.list_documents` (cached
+    after the first call) and emits one row per document. Output matches the
+    CLI's ``query --documents`` schema column-for-column.
+    """
+    from docint.utils.csv_stream import DOCUMENT_COLUMNS, document_row, stream_csv
+
+    _validate_export_collection(name)
+    docs = rag.list_documents()
+
+    def row_iter() -> Iterator[dict[str, Any]]:
+        for doc in docs:
+            yield document_row(doc)
+
+    return StreamingResponse(
+        stream_csv(row_iter(), DOCUMENT_COLUMNS),
+        media_type="text/csv; charset=utf-8",
+        headers=_csv_attachment_headers(f"{name}-documents"),
+    )
+
+
+@app.get("/collections/{name}/export/entities.csv", tags=["Query"])
+def export_entities_csv(
+    name: str,
+    top_k: int = Query(default=50, ge=1, le=100_000),
+    min_mentions: int = Query(default=1, ge=1),
+    entity_type: str | None = None,
+    entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
+) -> StreamingResponse:
+    """Stream the top entities by mention frequency as CSV.
+
+    Mirrors the CLI's ``query --entities`` export (``rank,entity,type,mentions``).
+    Defaults match the CLI's ``DEFAULT_ENTITY_LIMIT`` so the two paths produce
+    identical output for the same collection. ``entity_merge_mode="resolved"``
+    streams the durable canonical entities (same as the Analysis/Dashboard
+    resolved view); it falls back to orthographic on collections that have not
+    been resolved.
+    """
+    from docint.utils.csv_stream import ENTITY_STATS_COLUMNS, entity_stats_row, stream_csv
+
+    _validate_export_collection(name)
+    stats = rag.get_collection_ner_stats(
+        top_k=top_k,
+        min_mentions=min_mentions,
+        entity_type=entity_type,
+        include_relations=False,
+        entity_merge_mode=entity_merge_mode,
+    )
+    entities = list(stats.get("top_entities") or [])
+
+    def row_iter() -> Iterator[dict[str, Any]]:
+        for idx, entity in enumerate(entities, start=1):
+            yield entity_stats_row(entity, rank=idx)
+
+    return StreamingResponse(
+        stream_csv(row_iter(), ENTITY_STATS_COLUMNS),
+        media_type="text/csv; charset=utf-8",
+        headers=_csv_attachment_headers(f"{name}-entities"),
+    )
+
+
+@app.get("/collections/{name}/export/ner-sources.csv", tags=["Query"])
+def export_ner_sources_csv(
+    name: str,
+    entity_key: str | None = None,
+    entity_text: str | None = None,
+    entity_type: str | None = None,
+    entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
+) -> StreamingResponse:
+    """Stream entity findings (per-source rows) as CSV.
+
+    Output schema matches ``entityFindingsToCsv`` in
+    ``frontend/src/lib/exports.ts``. Filtering uses the same matcher as the
+    paginated ``/collections/ner/sources`` endpoint, so the export reflects
+    exactly what the SPA's entity inspector shows. ``entity_merge_mode=
+    "resolved"`` includes the canonical entity's sibling aliases.
+    """
+    from docint.utils.csv_stream import NER_SOURCE_COLUMNS, ner_source_row, stream_csv
+
+    _validate_export_collection(name)
+
+    if entity_key and not (entity_text or entity_type):
+        if "::" in entity_key:
+            entity_text, entity_type = entity_key.split("::", 1)
+        else:
+            entity_text = entity_key
+
+    label_type = entity_type or "Unlabeled"
+    entity_label = f"{entity_text} [{label_type}]" if entity_text else ""
+
+    def row_iter() -> Iterator[dict[str, Any]]:
+        cursor: str | None = None
+        while True:
+            page, cursor = rag.iter_collection_ner_sources(
+                cursor=cursor,
+                limit=500,
+                entity_text=entity_text,
+                entity_type=entity_type,
+                entity_merge_mode=entity_merge_mode,
+            )
+            for source in page:
+                yield ner_source_row(source, entity_label=entity_label)
+            if cursor is None:
+                break
+
+    return StreamingResponse(
+        stream_csv(row_iter(), NER_SOURCE_COLUMNS),
+        media_type="text/csv; charset=utf-8",
+        headers=_csv_attachment_headers(f"{name}-ner-sources"),
+    )
+
+
+@app.get("/collections/{name}/export/hate-speech.csv", tags=["Query"])
+def export_hate_speech_csv(
+    name: str,
+    category: str | None = None,
+    min_confidence: str | None = None,
+) -> StreamingResponse:
+    """Stream the hate-speech findings table as CSV.
+
+    Output schema matches ``hateSpeechToCsv`` in
+    ``frontend/src/lib/exports.ts``. Filtering uses the same logic as the
+    paginated ``/collections/hate-speech`` endpoint.
+    """
+    from docint.core.rag import _filter_hate_speech
+    from docint.utils.csv_stream import HATE_SPEECH_COLUMNS, hate_speech_row, stream_csv
+
+    _validate_export_collection(name)
+    findings = _filter_hate_speech(
+        rag.get_collection_hate_speech(),
+        category=category,
+        min_confidence=min_confidence,
+    )
+
+    def row_iter() -> Iterator[dict[str, Any]]:
+        for finding in findings:
+            yield hate_speech_row(finding)
+
+    return StreamingResponse(
+        stream_csv(row_iter(), HATE_SPEECH_COLUMNS),
+        media_type="text/csv; charset=utf-8",
+        headers=_csv_attachment_headers(f"{name}-hate-speech"),
+    )
 
 
 @app.get("/sessions/list", response_model=SessionListOut, tags=["Sessions"])
@@ -1321,6 +1735,114 @@ def get_session_history(
     if not messages:
         raise HTTPException(status_code=404, detail="Session not found.")
     return {"messages": messages}
+
+
+def _collect_session_source_files(session_id: str, principal: str) -> list[tuple[str, Path]]:
+    """Return the unique source files referenced by a session's citations.
+
+    Each entry is ``(filename_in_zip, path_on_disk)``. Files that can't be
+    resolved on disk are skipped — the ZIP is best-effort and surfaces only
+    files the backend can still serve. Collection is resolved from each
+    source's ``collection`` field when present and falls back to the
+    currently active collection so behaviour matches ``/sources/preview``.
+
+    Args:
+        session_id (str): The session whose citations should be packaged.
+        principal (str): The resolved request principal; sessions owned by
+            another principal yield an empty result (404 at the endpoint).
+
+    Returns:
+        list[tuple[str, Path]]: Pairs ready for :meth:`zipfile.ZipFile.write`.
+    """
+    messages = rag.ensure_session_manager().get_session_history(session_id, principal)
+    active_collection = rag.qdrant_collection
+    selected: dict[str, tuple[str, Path]] = {}
+    used_arcnames: set[str] = set()
+    for message in messages:
+        for source in message.get("sources") or []:
+            if not isinstance(source, dict):
+                continue
+            file_hash = source.get("file_hash")
+            if not file_hash or file_hash in selected:
+                continue
+            collection = str(source.get("collection") or active_collection or "")
+            if not collection:
+                continue
+            filename = str(source.get("filename") or "")
+            path = _resolve_source_file_path(
+                collection,
+                str(file_hash),
+                filename_hint=filename or None,
+            )
+            if path is None:
+                continue
+
+            arcname = filename or path.name
+            base = arcname
+            counter = 1
+            while arcname in used_arcnames:
+                stem, dot, ext = base.partition(".")
+                arcname = f"{stem}_{counter}{dot}{ext}" if dot else f"{base}_{counter}"
+                counter += 1
+            used_arcnames.add(arcname)
+            selected[str(file_hash)] = (arcname, path)
+    return list(selected.values())
+
+
+@app.get("/sessions/{session_id}/sources.zip", tags=["Sessions"])
+def export_session_sources_zip(session_id: str, principal: str = Depends(resolve_principal)) -> StreamingResponse:
+    """Stream a ZIP bundle of every source file cited in a session.
+
+    Resolves each citation's ``file_hash`` to an on-disk file using the same
+    lookup chain as ``/sources/preview``, deduplicates by hash, and writes the
+    files into an in-memory ZIP (typical sessions cite tens of files, not
+    thousands). Sources whose underlying file can't be found are skipped
+    rather than failing the whole download. Sessions owned by another
+    principal collapse to 404 — they look identical to "no sources".
+
+    Args:
+        session_id (str): The session ID to package.
+        principal (str): The resolved request principal.
+
+    Returns:
+        StreamingResponse: ``application/zip`` payload with an
+        ``attachment; filename="session-<id>-sources.zip"`` header.
+
+    Raises:
+        HTTPException: 404 if the session has no resolvable sources or is
+            owned by another principal.
+    """
+    try:
+        files = _collect_session_source_files(session_id, principal)
+    except Exception as e:
+        logger.error("Error assembling session sources for {}: {}", session_id, e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    if not files:
+        raise HTTPException(status_code=404, detail="No source files found for this session")
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for arcname, path in files:
+            try:
+                zf.write(path, arcname=arcname)
+            except OSError as exc:
+                logger.warning("Skipping unreadable source {}: {}", path, exc)
+    buffer.seek(0)
+
+    def iter_chunks(chunk_size: int = 64 * 1024) -> Iterator[bytes]:
+        while True:
+            chunk = buffer.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="session-{session_id}-sources.zip"',
+        "X-Accel-Buffering": "no",
+        "Cache-Control": "no-store",
+    }
+    return StreamingResponse(iter_chunks(), media_type="application/zip", headers=headers)
 
 
 @app.delete("/sessions/{session_id}", tags=["Sessions"])
@@ -1808,71 +2330,7 @@ def preview_source(collection: str, file_hash: str) -> FileResponse:
     Raises:
         HTTPException: If an error occurs while retrieving the source preview.
     """
-    file_path_str = None
-    qdrant_src_dir = _resolve_qdrant_src_dir()
-
-    # 1. Try to resolve filename via Qdrant
-    try:
-        points, _ = rag.qdrant_client.scroll(
-            collection_name=collection,
-            scroll_filter=models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="file_hash",
-                        match=models.MatchValue(value=file_hash),
-                    )
-                ]
-            ),
-            limit=1,
-            with_payload=True,
-        )
-
-        if not points:
-            # Fallback: try checking 'metadata.file_hash' just in case
-            points, _ = rag.qdrant_client.scroll(
-                collection_name=collection,
-                scroll_filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="metadata.file_hash",
-                            match=models.MatchValue(value=file_hash),
-                        )
-                    ]
-                ),
-                limit=1,
-                with_payload=True,
-            )
-
-        if points:
-            payload = points[0].payload or {}
-            file_path_str = (
-                payload.get("file_path")
-                or payload.get("path")
-                or (payload.get("metadata") or {}).get("file_path")
-                or (payload.get("origin") or {}).get("file_path")
-            )
-    except Exception as e:
-        logger.warning("Failed to query Qdrant for file preview: {}", e)
-
-    # 2. If we found a path from Qdrant, try to use it
-    if file_path_str:
-        path = Path(file_path_str)
-        if path.exists() and path.is_file():
-            return FileResponse(path)
-
-        # Fallback: Check if the file exists in the default data directory
-        filename = path.name
-        data_dir = _resolve_data_dir()
-        alt_path = data_dir / filename
-
-        if alt_path.exists() and alt_path.is_file():
-            logger.info("Found file at alternative path: {}", alt_path)
-            return FileResponse(alt_path)
-
-        # Check sources root first, then legacy collection path
-        src_path = qdrant_src_dir / collection / filename
-        if src_path.exists() and src_path.is_file():
-            logger.info("Found file at sources path: {}", src_path)
-            return FileResponse(src_path)
-
-    raise HTTPException(status_code=404, detail="File not found")
+    path = _resolve_source_file_path(collection, file_hash)
+    if path is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(path)

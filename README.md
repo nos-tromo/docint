@@ -198,6 +198,45 @@ Stop the Docker stack:
 make stop
 ```
 
+## Server-Side Exports For Large Collections
+
+The React UI streams collection-wide CSVs from the backend so the browser
+never accumulates the whole result set in memory. Two paths exist for jobs
+that would otherwise tax the SPA:
+
+```bash
+# Server-streamed CSV from anywhere with HTTP access to the backend.
+# Selects the active collection first (the SPA does this automatically;
+# the example assumes the API is reachable on port 8000).
+curl -X POST http://localhost:8000/collections/select \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "my_collection"}'
+curl -O "http://localhost:8000/collections/my_collection/export/entities.csv"
+curl -O "http://localhost:8000/collections/my_collection/export/hate-speech.csv"
+curl -O "http://localhost:8000/collections/my_collection/export/documents.csv"
+
+# The entities export honours the same merge modes as the Analysis view —
+# pass entity_merge_mode=resolved to stream the durable canonical entities
+# (run `make resolve` first; falls back to orthographic if not resolved).
+curl -O "http://localhost:8000/collections/my_collection/export/entities.csv?entity_merge_mode=resolved"
+```
+
+For batch jobs that take many minutes (or shouldn't hold an HTTP
+connection open), the `query` CLI runs inside the backend container and
+writes the same CSV files to a mounted volume:
+
+```bash
+docker compose --env-file .env -f docker/compose.yaml \
+  exec backend-cpu query --collection my_collection --all \
+  --output /var/lib/docint/sources/my_collection/exports
+docker compose cp \
+  backend-cpu:/var/lib/docint/sources/my_collection/exports ./exports
+```
+
+Both paths share the schemas defined in `docint/utils/csv_stream.py`, so
+the streaming endpoint and the CLI produce byte-identical CSVs for the
+same collection.
+
 ## Standalone vLLM App
 
 The standalone deployment lives in

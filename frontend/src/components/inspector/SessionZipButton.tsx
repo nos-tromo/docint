@@ -1,50 +1,27 @@
-import { useState } from 'react'
-import JSZip from 'jszip'
 import { useUiStore } from '@/stores/ui'
-import { useSessionHistory } from '@/hooks/useSessions'
-import { sourcePreviewUrl } from '@/api/ingest'
+import { url } from '@/api/client'
 
+/**
+ * Triggers the server-side session-sources ZIP stream.
+ *
+ * Replaces the original in-browser JSZip loop (which fetched every source
+ * file individually and assembled the archive on the main thread); the
+ * backend now streams ``application/zip`` directly from the
+ * ``qdrant-sources`` volume, so the browser only handles the download.
+ */
 export function SessionZipButton() {
   const sessionId = useUiStore((s) => s.currentSessionId)
   const collection = useUiStore((s) => s.selectedCollection)
-  const history = useSessionHistory(sessionId)
-  const [busy, setBusy] = useState(false)
-
-  const build = async () => {
-    if (!sessionId || !collection || !history.data) return
-    setBusy(true)
-    try {
-      const zip = new JSZip()
-      const seen = new Set<string>()
-      for (const m of history.data.messages) {
-        for (const c of m.sources ?? []) {
-          if (!c.file_hash || seen.has(c.file_hash)) continue
-          seen.add(c.file_hash)
-          const res = await fetch(sourcePreviewUrl(collection, c.file_hash))
-          if (!res.ok) continue
-          zip.file(c.filename, await res.blob())
-        }
-      }
-      const blob = await zip.generateAsync({ type: 'blob' })
-      const a = document.createElement('a')
-      a.href = URL.createObjectURL(blob)
-      a.download = `session-${sessionId}-sources.zip`
-      a.click()
-      URL.revokeObjectURL(a.href)
-    } finally {
-      setBusy(false)
-    }
-  }
-
   if (!sessionId || !collection) return null
+
+  const href = url(`/sessions/${encodeURIComponent(sessionId)}/sources.zip`)
   return (
-    <button
-      type="button"
-      onClick={build}
-      disabled={busy}
-      className="px-3 py-1 rounded-md border border-border text-sm disabled:opacity-50"
+    <a
+      href={href}
+      download={`session-${sessionId}-sources.zip`}
+      className="px-3 py-1 rounded-md border border-border text-sm"
     >
-      {busy ? 'Building…' : 'Download session sources (ZIP)'}
-    </button>
+      Download session sources (ZIP)
+    </a>
   )
 }
