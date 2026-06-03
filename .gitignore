@@ -112,3 +112,10 @@ wheels/*.whl
 !AGENTS.md
 !CLAUDE.md
 !README.md
+
+# ==================================
+# Final overrides (must follow exceptions above)
+# ==================================
+# Claude-authored implementation plans/specs — kept local, never tracked.
+# Needed here because !docs/**/*.md above would otherwise re-include them.
+docs/superpowers/

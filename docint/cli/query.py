@@ -17,6 +17,7 @@ from loguru import logger
 from docint.agents.generation import ResultValidationResponseAgent
 from docint.agents.types import RetrievalResult, Turn
 from docint.core.rag import RAG
+from docint.utils.csv_stream import entity_stats_row, hate_speech_row
 from docint.utils.env_cfg import (
     load_path_env,
     load_response_validation_env,
@@ -478,17 +479,7 @@ def _build_entities_csv(
     Returns:
         list[dict[str, Any]]: List of dicts with keys: rank, entity, type, mentions.
     """
-    rows = []
-    for index, row in enumerate(top_entities[:DEFAULT_ENTITY_LIMIT], start=1):
-        rows.append(
-            {
-                "rank": index,
-                "entity": str(row.get("text") or "Unknown"),
-                "type": str(row.get("type") or "Unlabeled"),
-                "mentions": int(row.get("mentions", row.get("count", 0)) or 0),
-            }
-        )
-    return rows
+    return [entity_stats_row(row, rank=index) for index, row in enumerate(top_entities[:DEFAULT_ENTITY_LIMIT], start=1)]
 
 
 def _build_hate_speech_csv(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -500,32 +491,7 @@ def _build_hate_speech_csv(findings: list[dict[str, Any]]) -> list[dict[str, Any
     Returns:
         list[dict[str, Any]]: List of dicts covering all finding fields.
     """
-    rows = []
-    for chunk in findings:
-        ref = chunk.get("reference_metadata") or {}
-        rows.append(
-            {
-                "source": chunk.get("source_ref"),
-                "page": chunk.get("page"),
-                "row": chunk.get("row"),
-                "chunk_id": chunk.get("chunk_id"),
-                "category": chunk.get("category"),
-                "confidence": chunk.get("confidence"),
-                "reason": chunk.get("reason"),
-                "chunk_text": chunk.get("chunk_text") or chunk.get("text"),
-                "network": ref.get("network"),
-                "ref_type": ref.get("type"),
-                "uuid": ref.get("uuid"),
-                "timestamp": ref.get("timestamp"),
-                "author": ref.get("author"),
-                "author_id": ref.get("author_id"),
-                "vanity": ref.get("vanity"),
-                "text_id": ref.get("text_id"),
-                "anchor_text": ref.get("anchor_text"),
-                "parent_text": ref.get("parent_text"),
-            }
-        )
-    return rows
+    return [hate_speech_row(chunk) for chunk in findings]
 
 
 def _build_hate_speech_txt(findings: list[dict[str, Any]]) -> str:
