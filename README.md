@@ -214,6 +214,11 @@ curl -X POST http://localhost:8000/collections/select \
 curl -O "http://localhost:8000/collections/my_collection/export/entities.csv"
 curl -O "http://localhost:8000/collections/my_collection/export/hate-speech.csv"
 curl -O "http://localhost:8000/collections/my_collection/export/documents.csv"
+
+# The entities export honours the same merge modes as the Analysis view —
+# pass entity_merge_mode=resolved to stream the durable canonical entities
+# (run `make resolve` first; falls back to orthographic if not resolved).
+curl -O "http://localhost:8000/collections/my_collection/export/entities.csv?entity_merge_mode=resolved"
 ```
 
 For batch jobs that take many minutes (or shouldn't hold an HTTP

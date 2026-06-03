@@ -1458,13 +1458,16 @@ def export_entities_csv(
     top_k: int = Query(default=50, ge=1, le=100_000),
     min_mentions: int = Query(default=1, ge=1),
     entity_type: str | None = None,
-    entity_merge_mode: Literal["orthographic", "exact"] = Query(default="orthographic"),
+    entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
 ) -> StreamingResponse:
     """Stream the top entities by mention frequency as CSV.
 
     Mirrors the CLI's ``query --entities`` export (``rank,entity,type,mentions``).
     Defaults match the CLI's ``DEFAULT_ENTITY_LIMIT`` so the two paths produce
-    identical output for the same collection.
+    identical output for the same collection. ``entity_merge_mode="resolved"``
+    streams the durable canonical entities (same as the Analysis/Dashboard
+    resolved view); it falls back to orthographic on collections that have not
+    been resolved.
     """
     from docint.utils.csv_stream import ENTITY_STATS_COLUMNS, entity_stats_row, stream_csv
 

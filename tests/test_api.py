@@ -2876,6 +2876,17 @@ def test_export_entities_csv_uses_ner_stats(client: TestClient) -> None:
     assert rows[1] == ["1", "Acme", "ORG", "3"]
 
 
+def test_export_entities_csv_supports_resolved_merge_mode(client: TestClient) -> None:
+    """Entity export accepts entity_merge_mode=resolved and forwards it to stats."""
+    _select_alpha(client)
+    response = client.get(
+        "/collections/alpha/export/entities.csv",
+        params={"entity_merge_mode": "resolved"},
+    )
+    assert response.status_code == 200
+    assert cast(DummyRAG, api_module.rag).ner_stats_merge_modes[-1] == "resolved"
+
+
 def test_export_ner_sources_csv_filters_by_entity(client: TestClient) -> None:
     """NER-source export honors entity_text + entity_type filters and embeds the entity label."""
     _select_alpha(client)
