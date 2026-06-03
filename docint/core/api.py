@@ -37,6 +37,7 @@ from docint.agents import (
     SimpleUnderstandingAgent,
     Turn,
 )
+from docint.agents.history import build_prior_turn
 from docint.cli import ingest as ingest_module
 from docint.core.auth.principal import resolve_principal
 from docint.core.rag import RAG, EmptyIngestionError
@@ -89,6 +90,26 @@ _clarification_agent = SimpleClarificationAgent()
 _clarification_policy = ClarificationPolicy(ClarificationConfig())
 
 
+def _select_understanding_agent() -> SimpleUnderstandingAgent | ContextualUnderstandingAgent:
+    """Return the history-aware contextual understanding agent when an LLM is configured.
+
+    Shared by ``_build_orchestrator`` (non-streaming ``/agent/chat``) and
+    ``agent_chat_stream`` so both paths run identical, history-aware intent
+    analysis and query rewriting. Falls back to the keyword-based simple agent
+    when no LLM is configured.
+
+    Returns:
+        ContextualUnderstandingAgent bound to ``rag.text_model`` when available,
+        otherwise the module-level simple agent.
+    """
+    if getattr(rag, "text_model_id", None):
+        try:
+            return ContextualUnderstandingAgent(llm=rag.text_model)
+        except Exception as e:
+            logger.warning("Failed to init ContextualUnderstandingAgent: {}", e)
+    return _understanding_agent
+
+
 def _build_orchestrator() -> AgentOrchestrator:
     """Construct an orchestrator bound to the current RAG instance.
 
@@ -96,17 +117,9 @@ def _build_orchestrator() -> AgentOrchestrator:
         AgentOrchestrator: The constructed agent orchestrator.
     """
     retrieval_agent = RAGRetrievalAgent(rag)
-    understanding: SimpleUnderstandingAgent | ContextualUnderstandingAgent = _understanding_agent
+    understanding = _select_understanding_agent()
     validation_cfg = load_response_validation_env()
-    validation_llm = None
-
-    # Use contextual understanding if LLM is configured
-    if getattr(rag, "text_model_id", None):
-        try:
-            understanding = ContextualUnderstandingAgent(llm=rag.text_model)
-            validation_llm = rag.text_model
-        except Exception as e:
-            logger.warning("Failed to init ContextualUnderstandingAgent: {}", e)
+    validation_llm = rag.text_model if isinstance(understanding, ContextualUnderstandingAgent) else None
 
     return AgentOrchestrator(
         understanding=understanding,
@@ -594,11 +607,13 @@ def collections_delete(name: str) -> dict[str, bool]:
 
 
 @app.post("/query", response_model=QueryOut, tags=["Query"])
-def query(payload: QueryIn) -> dict[str, list[dict[str, Any]] | str | bool | None]:
+def query(payload: QueryIn, request: Request) -> dict[str, list[dict[str, Any]] | str | bool | None]:
     """Handle a query request.
 
     Args:
         payload (QueryIn): The query payload containing the question and session ID.
+        request (Request): The incoming request used to resolve the calling principal
+            for session-backed chats.
 
     Returns:
         QueryOut: The query response containing the answer, sources, and session ID.
@@ -659,7 +674,10 @@ def query(payload: QueryIn) -> dict[str, list[dict[str, Any]] | str | bool | Non
                     data["graph_debug"] = graph_debug
                 session_id = payload.session_id or "stateless"
             else:
-                session_id = rag.start_session(payload.session_id)
+                session_id = rag.start_session(
+                    payload.session_id,
+                    owner=resolve_principal(request),
+                )
                 data = rag.chat(
                     payload.question,
                     metadata_filters=metadata_filters,
@@ -735,11 +753,13 @@ def query(payload: QueryIn) -> dict[str, list[dict[str, Any]] | str | bool | Non
 
 
 @app.post("/stream_query", tags=["Query"])
-async def stream_query(payload: QueryIn) -> StreamingResponse:
+async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
     """Handle a streaming query request.
 
     Args:
         payload (QueryIn): The query payload containing the question and session ID.
+        request (Request): The incoming request used to resolve the calling principal
+            for session-backed chats.
 
     Returns:
         StreamingResponse: A streaming response that yields SSE events during the query.
@@ -760,6 +780,13 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
         and getattr(rag, "index", None) is None
     ):
         rag.create_index()
+
+    session_owner: str | None = None
+    if (
+        payload.query_mode not in {"entity_occurrence", "entity_occurrence_multi"}
+        and payload.retrieval_mode != "stateless"
+    ):
+        session_owner = resolve_principal(request)
 
     async def event_generator() -> AsyncIterator[str]:
         """Generate SSE events for the streaming query.
@@ -842,7 +869,17 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                     "graph_debug": stateless_data.get("graph_debug"),
                 }
             else:
-                rag.start_session(payload.session_id)
+                session_id = rag.start_session(payload.session_id, owner=session_owner)
+                # The React chat UI calls /stream_query, so this is where
+                # generation-time history is wired: bind the prior
+                # user/assistant exchange (owner-scoped) onto the synthesis
+                # templates while keeping this endpoint's own internal
+                # retrieval rewrite (``skip_query_rewrite=False``).
+                prior_turn = (
+                    build_prior_turn(rag.sessions.get_session_history(session_id, owner=session_owner))
+                    if rag.sessions is not None
+                    else None
+                )
                 # Iterate over the sync generator
                 for chunk in rag.stream_chat(
                     payload.question,
@@ -850,6 +887,8 @@ async def stream_query(payload: QueryIn) -> StreamingResponse:
                     metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
                     metadata_filter_rules=payload.metadata_filters,
                     vector_store_kwargs=vector_store_kwargs or None,
+                    prior_turn=prior_turn,
+                    skip_query_rewrite=False,
                 ):
                     if isinstance(chunk, str):
                         full_answer += chunk
@@ -1185,7 +1224,7 @@ def get_collection_ner_stats(
     min_mentions: int = 2,
     entity_type: str | None = None,
     include_relations: bool = True,
-    entity_merge_mode: Literal["orthographic", "exact"] = Query(default="orthographic"),
+    entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
 ) -> dict[str, Any]:
     """Get collection-wide NER statistics.
 
@@ -1194,8 +1233,8 @@ def get_collection_ner_stats(
         min_mentions (int): Minimum mention count for ranked outputs.
         entity_type (str | None): Optional case-insensitive entity type filter.
         include_relations (bool): Whether relation aggregates are included.
-        entity_merge_mode (Literal["orthographic", "exact"]): Entity clustering mode used for
-            derived views.
+        entity_merge_mode (Literal["orthographic", "exact", "resolved"]): Entity clustering mode used for
+            derived views ("resolved" groups by durable canonical entity id).
 
     Returns:
         dict[str, Any]: A dashboard-friendly NER stats payload.
@@ -1223,7 +1262,7 @@ def search_collection_ner_entities(
     q: str = "",
     entity_type: str | None = None,
     limit: int = 100,
-    entity_merge_mode: Literal["orthographic", "exact"] = Query(default="orthographic"),
+    entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
 ) -> dict[str, list[dict[str, Any]]]:
     """Search entities across the selected collection.
 
@@ -1231,8 +1270,8 @@ def search_collection_ner_entities(
         q (str): Substring query applied to entity text.
         entity_type (str | None): Optional case-insensitive type filter.
         limit (int): Maximum number of rows to return.
-        entity_merge_mode (Literal["orthographic", "exact"]): Entity clustering mode used for
-            derived views.
+        entity_merge_mode (Literal["orthographic", "exact", "resolved"]): Entity clustering mode used for
+            derived views ("resolved" groups by durable canonical entity id).
 
     Returns:
         dict[str, list[dict]]: Dictionary containing matched entities.
@@ -1253,6 +1292,39 @@ def search_collection_ner_entities(
         }
     except Exception as e:
         logger.error("Error searching collection entities: {}", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/collections/entities/resolve", tags=["Query"])
+def resolve_collection_entities() -> dict[str, int]:
+    """Resolve the selected collection's entities into durable canonicals.
+
+    Runs the batch resolution pipeline (name embeddings + conservative LLM
+    tie-break) that merges semantically-equivalent named entities into the
+    hidden ``{collection}_entities`` store, so the ``entity_merge_mode=
+    "resolved"`` views group them. Idempotent — already-resolved surfaces are
+    skipped.
+
+    Returns:
+        dict[str, int]: Resolution summary counts (``processed``, ``minted``,
+        ``attached``, ``skipped``, ``entities_touched``).
+
+    Raises:
+        HTTPException: If no collection is selected or an internal error occurs.
+    """
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+    try:
+        summary = rag.resolve_entities()
+        return {
+            "processed": summary.processed,
+            "minted": summary.minted,
+            "attached": summary.attached,
+            "skipped": summary.skipped,
+            "entities_touched": summary.entities_touched,
+        }
+    except Exception as e:
+        logger.error("Error resolving collection entities: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
@@ -1699,11 +1771,12 @@ def delete_session(session_id: str, principal: str = Depends(resolve_principal))
 
 
 @app.post("/agent/chat", response_model=AgentChatOut, tags=["Agent"])
-def agent_chat(payload: AgentChatIn) -> AgentChatOut:
+def agent_chat(payload: AgentChatIn, request: Request) -> AgentChatOut:
     """Agentic chat endpoint: understand → maybe clarify → retrieve/respond.
 
     Args:
         payload (AgentChatIn): Message and optional session id.
+        request (Request): The incoming request used to resolve the calling principal.
 
     Returns:
         AgentChatOut: Clarification prompt or answer with sources.
@@ -1712,14 +1785,12 @@ def agent_chat(payload: AgentChatIn) -> AgentChatOut:
         raise HTTPException(status_code=400, detail="No collection selected")
 
     # Ensure a session is active and get per-session agent context
-    session_id = rag.start_session(payload.session_id)
+    owner = resolve_principal(request)
+    session_id = rag.start_session(payload.session_id, owner=owner)
     ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
 
     if ctx and rag.sessions:
-        # Plan 1: agent_chat is not yet principal-scoped; owner=None reads only
-        # legacy un-owned rows. Under DOCINT_DEFAULT_IDENTITY, backfilled/owned
-        # convos won't match here (no history preload) until Plan 2 wires this.
-        ctx.history = rag.sessions.get_session_history(session_id, owner=None)
+        ctx.history = rag.sessions.get_session_history(session_id, owner=owner)
 
     turn = Turn(user_input=payload.message, session_id=session_id)
     orchestrator = _build_orchestrator()
@@ -1818,15 +1889,17 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
 
 
 @app.post("/agent/chat/stream", tags=["Agent"])
-async def agent_chat_stream(payload: AgentChatIn) -> StreamingResponse:
+async def agent_chat_stream(payload: AgentChatIn, request: Request) -> StreamingResponse:
     """Streaming variant of agent chat with token events and final metadata.
 
     Args:
         payload (AgentChatIn): Message and optional session id.
+        request (Request): The incoming request used to resolve the calling principal.
 
     Returns:
         StreamingResponse: SSE stream with clarification or answer tokens and metadata.
     """
+    owner = resolve_principal(request)
 
     async def event_generator() -> AsyncIterator[str]:
         """Generate SSE events for the agent chat stream.
@@ -1838,11 +1911,13 @@ async def agent_chat_stream(payload: AgentChatIn) -> StreamingResponse:
             yield _format_sse("error", {"detail": "No collection selected"})
             return
 
-        session_id = rag.start_session(payload.session_id)
+        session_id = rag.start_session(payload.session_id, owner=owner)
         ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
+        if ctx and rag.sessions:
+            ctx.history = rag.sessions.get_session_history(session_id, owner=owner)
         turn = Turn(user_input=payload.message, session_id=session_id)
 
-        analysis = _understanding_agent.analyze(turn)
+        analysis = _select_understanding_agent().analyze(turn, context=ctx)
         clarification_decision = _clarification_policy.evaluate(
             analysis, clarifications_so_far=ctx.clarifications if ctx else 0
         )
@@ -1861,8 +1936,10 @@ async def agent_chat_stream(payload: AgentChatIn) -> StreamingResponse:
             yield _format_sse("clarification", payload_out)
             return
 
-        # Stream via RAG chat
-        stream = rag.stream_chat(turn.user_input)
+        # Stream via RAG chat (history-aware: rewritten query + prior turn)
+        query_text = analysis.rewritten_query or turn.user_input
+        prior_turn = build_prior_turn(ctx.history) if ctx else None
+        stream = rag.stream_chat(query_text, prior_turn=prior_turn)
 
         # Tokens
         for chunk in stream:

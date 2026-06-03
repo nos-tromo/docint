@@ -314,6 +314,119 @@ def test_make_session_maker_creates_parent_dir(tmp_path: Path) -> None:
     session.close()
 
 
+def test_chat_skips_rewrite_when_prior_turn_supplied(
+    session_manager: SessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``prior_turn`` is set, the SessionManager must not invoke ``rewrite_retrieval_query``.
+
+    The orchestrator's understanding agent has already produced a
+    history-aware query. Re-running the SessionManager rewrite would
+    overwrite that work using a stricter prompt that bans prior assistant
+    claims.
+
+    Args:
+        session_manager: The session manager fixture.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    from docint.agents.types import PriorTurn
+
+    engine = MagicMock()
+    filtered_response = MagicMock()
+    filtered_response.metadata = {}
+    filtered_response.source_nodes = []
+    engine.query.return_value = filtered_response
+
+    session_manager.rag.query_engine = engine
+    session_manager.rag.expand_query_with_graph_with_debug.return_value = (  # type: ignore[attr-defined]
+        "expanded",
+        {"applied": False},
+    )
+    session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
+        "response": "ok",
+        "sources": [],
+    }
+    session_manager.session_id = "s1"
+    session_manager.chat_engine = object()  # type: ignore[assignment]
+
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args: None)
+    monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
+
+    session_manager.chat(
+        "Please elaborate.",
+        prior_turn=PriorTurn(
+            user_text="Which is correct?",
+            assistant_text="The text mentions the UN Security Council.",
+        ),
+    )
+
+    session_manager.rag.rewrite_retrieval_query.assert_not_called()  # type: ignore[attr-defined]
+    session_manager.rag.expand_query_with_graph_with_debug.assert_called_once_with(  # type: ignore[attr-defined]
+        "Please elaborate."
+    )
+
+
+def test_stream_chat_binds_prior_turn_but_keeps_rewrite_when_not_skipped(
+    session_manager: SessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``skip_query_rewrite=False`` keeps the internal rewrite AND binds the prior turn.
+
+    The ``/stream_query`` path wants generation-time history (the prior exchange
+    bound onto the QA/refine templates) *without* losing its own retrieval-query
+    rewrite. Passing a ``prior_turn`` must therefore no longer imply the caller
+    already rewrote — the two concerns are decoupled via ``skip_query_rewrite``.
+
+    Args:
+        session_manager: The session manager fixture.
+        monkeypatch: The pytest monkeypatch fixture.
+    """
+    from docint.agents.types import PriorTurn
+
+    streaming_engine = MagicMock()
+    streaming_response = MagicMock()
+    streaming_response.response_gen = iter(())
+    streaming_response.source_nodes = []
+    streaming_engine.query.return_value = streaming_response
+
+    session_manager.rag.build_query_engine.return_value = streaming_engine  # type: ignore[attr-defined]
+    session_manager.rag.rewrite_retrieval_query.return_value = "rewritten people"  # type: ignore[attr-defined]
+    session_manager.rag.expand_query_with_graph_with_debug.return_value = (  # type: ignore[attr-defined]
+        "expanded people",
+        {},
+    )
+    session_manager.rag._infer_collection_profile.return_value = {  # type: ignore[attr-defined]
+        "coverage_unit": "documents",
+        "is_social_table": False,
+    }
+    session_manager.rag._normalize_response_data.return_value = {  # type: ignore[attr-defined]
+        "response": "No people are mentioned.",
+        "sources": [],
+        "retrieval_query": "rewritten people",
+        "coverage_unit": "documents",
+        "retrieval_mode": "rewrite_compact",
+    }
+    session_manager.rag.index = object()  # type: ignore[assignment]
+    session_manager.session_id = "session-1"
+    session_manager.chat_engine = object()  # type: ignore[assignment]
+
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args: 0)
+    monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
+
+    list(
+        session_manager.stream_chat(
+            "Enthält es Menschen?",
+            prior_turn=PriorTurn(user_text="Was ist sichtbar?", assistant_text="Ein Baum."),
+            skip_query_rewrite=False,
+        )
+    )
+
+    # Not skipped: the internal retrieval-query rewrite still runs ...
+    session_manager.rag.rewrite_retrieval_query.assert_called_once()  # type: ignore[attr-defined]
+    # ... and the prior turn is bound onto the streaming engine's generation templates.
+    streaming_engine.update_prompts.assert_called_once()
+
+
 def test_chat_rewrites_retrieval_query_without_prefixing_session_context(
     session_manager: SessionManager,
     monkeypatch: pytest.MonkeyPatch,

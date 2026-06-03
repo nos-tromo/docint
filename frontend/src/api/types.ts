@@ -177,6 +177,8 @@ export interface NerDocumentRow {
   entity_density: number
 }
 
+export type EntityMergeMode = 'orthographic' | 'exact' | 'resolved'
+
 export interface NerStats {
   totals: {
     unique_entities: number

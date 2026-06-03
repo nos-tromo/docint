@@ -88,6 +88,25 @@ class DummyResponse:
         self.source_nodes = nodes
 
 
+def test_default_prompts_handle_elaboration_followups() -> None:
+    """Guard against regressions: prompts must declare elaboration semantics.
+
+    The rewrite prompt must explicitly handle "elaborate" follow-ups (so the
+    standalone retrieval query inlines prior-turn entities), and the grounded
+    QA / refine prompts must carry the ``{prior_turn_context}`` placeholder
+    that the SessionManager binds via ``PromptTemplate.partial_format``.
+    """
+    from docint.core.rag import (
+        DEFAULT_GROUNDED_REFINE_PROMPT,
+        DEFAULT_GROUNDED_TEXT_QA_PROMPT,
+        DEFAULT_RETRIEVAL_REWRITE_PROMPT,
+    )
+
+    assert "elaborate" in DEFAULT_RETRIEVAL_REWRITE_PROMPT.lower()
+    assert "{prior_turn_context}" in DEFAULT_GROUNDED_TEXT_QA_PROMPT
+    assert "{prior_turn_context}" in DEFAULT_GROUNDED_REFINE_PROMPT
+
+
 def test_normalize_response_data_extracts_sources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5560,9 +5579,9 @@ def test_delete_collection_attempts_summary_invalidation(
 ) -> None:
     """delete_collection should attempt summary revision bump before deletion.
 
-    Deletes the main and ``_images`` Qdrant collections (SQLite KV store
-    lives under the source directory and is cleaned up via the source-dir
-    rmtree pass).
+    Deletes the main, ``_images`` and ``_entities`` Qdrant collections (SQLite
+    KV store lives under the source directory and is cleaned up via the
+    source-dir rmtree pass).
 
     Args:
         monkeypatch: The monkeypatch fixture.
@@ -5599,7 +5618,7 @@ def test_delete_collection_attempts_summary_invalidation(
 
     assert bumps == [("target", False)]
     deleted = [str(call.args[0]) for call in rag._qdrant_client.delete_collection.call_args_list]
-    assert deleted == ["target", "target_images"]
+    assert deleted == ["target", "target_images", "target_entities"]
 
 
 def test_delete_collection_fail_fast_on_primary_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -5863,7 +5882,7 @@ def test_delete_collection_tolerates_secondary_failure(monkeypatch: pytest.Monke
     rag.delete_collection("target")
 
     deleted = [str(call.args[0]) for call in rag._qdrant_client.delete_collection.call_args_list]
-    assert deleted == ["target", "target_images"]
+    assert deleted == ["target", "target_images", "target_entities"]
 
 
 def test_delete_collection_companion_name_does_not_expand(
@@ -5887,6 +5906,68 @@ def test_delete_collection_companion_name_does_not_expand(
 
     deleted = [str(call.args[0]) for call in rag._qdrant_client.delete_collection.call_args_list]
     assert deleted == ["target_images"]
+
+
+class _FakeResolveEmbed:
+    """Deterministic embed model for entity-resolution RAG tests."""
+
+    def __init__(self, vectors: dict[str, list[float]]) -> None:
+        """Store the surface->vector map.
+
+        Args:
+            vectors: Mapping of surface text to its embedding vector.
+        """
+        self.vectors = vectors
+
+    def get_text_embeddings_strict(self, texts: list[str]) -> list[list[float]]:
+        """Return vectors aligned to ``texts``."""
+        return [self.vectors[t] for t in texts]
+
+    def get_text_embedding(self, text: str) -> list[float]:
+        """Return a single vector (used for the dimension probe)."""
+        return self.vectors.get(text, [0.0, 0.0])
+
+
+def test_resolve_entities_then_resolved_aggregation_merges_semantic_variants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """resolve_entities persists canonicals that resolved-mode stats then merge.
+
+    End-to-end RAG wiring against an in-memory Qdrant: USA and United States
+    are minted/attached into the ``_entities`` companion, and a subsequent
+    ``entity_merge_mode="resolved"`` stats call collapses them into one entity.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    from qdrant_client import QdrantClient
+
+    rag = RAG(qdrant_collection="docs")
+    rag._qdrant_client = QdrantClient(location=":memory:")
+    rag.openai_dimensions = 2
+    rag._embed_model = cast(Any, _FakeResolveEmbed({"USA": [1.0, 0.0], "United States": [0.98, 0.2]}))
+    monkeypatch.setattr(RAG, "_bump_summary_revision", lambda self, collection=None, allow_create=True: 1)
+
+    sources: list[dict[str, Any]] = [
+        {"filename": "a.pdf", "entities": [{"text": "USA", "type": "loc", "score": 0.9}]},
+        {"filename": "b.pdf", "entities": [{"text": "USA", "type": "loc", "score": 0.9}]},
+        {"filename": "c.pdf", "entities": [{"text": "United States", "type": "loc", "score": 0.8}]},
+    ]
+    monkeypatch.setattr(RAG, "_load_collection_ner_sources", lambda self, *, qdrant_filter=None: sources)
+
+    summary = rag.resolve_entities()
+    assert summary.minted == 1
+    assert summary.attached == 1
+    assert rag.qdrant_client.collection_exists("docs_entities")
+
+    monkeypatch.setattr(RAG, "get_collection_ner", lambda self, refresh=False: sources)
+    stats = rag.get_collection_ner_stats(entity_merge_mode="resolved", min_mentions=1)
+
+    assert len(stats["top_entities"]) == 1
+    entity = stats["top_entities"][0]
+    assert entity["text"] == "USA"
+    assert entity["mentions"] == 3
+    assert {v["text"] for v in entity["variants"]} == {"USA", "United States"}
 
 
 def test_vllm_sparse_encoder_converts_pooling_output(

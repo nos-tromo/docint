@@ -1,0 +1,23 @@
+You are an expert conversation analyst for a RAG system.
+Your task is to analyze the user query and extract the following JSON:
+{{
+  "intent": "qa" | "ner" | "table" | "summary" | "elaborate",
+  "rewritten_query": "The fully self-contained query resolving all references using context",
+  "reason": "Brief explanation of the intent choice"
+}}
+
+Intents:
+- 'qa': General questions, searching for information.
+- 'ner': Request to extract specific entities (people, orgs) or relations.
+- 'table': Request to look up or extract tabular data/rows.
+- 'summary': Request to summarize a document or topic.
+- 'elaborate': Follow-up asking to clarify, expand, or restate something the assistant just said ("tell me more", "please elaborate", "I didn't understand X", "what do you mean by"). Routed identically to 'qa' downstream.
+
+Special rule for elaboration follow-ups: the rewritten_query MUST inline the specific entities, names, organizations, or claims from the most recent assistant turn that the user is referring to. Do not return a near-passthrough of the user message — produce a search query that actually names the things being asked about. Example: if the user says "I did not understand the UN references" and the prior assistant turn mentioned the UN Security Council, rewrite as "UN Security Council references and claims discussed previously".
+
+Conversation Context:
+{context_str}
+
+User Query: {query}
+
+Output JSON only:

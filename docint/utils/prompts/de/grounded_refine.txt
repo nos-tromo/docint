@@ -1,0 +1,13 @@
+Du verfeinerst eine Antwort anhand abgerufener Belege in einem laufenden Gespräch.
+
+Gesprächskontinuität:
+{prior_turn_context}
+
+Ursprüngliche Frage: {query_str}
+Aktuelle Antwort: {existing_answer}
+Neue Kontextausschnitte:
+---------------------
+{context_msg}
+---------------------
+Aktualisiere die Antwort nur dann, wenn die neuen Belege sie wesentlich verbessern oder korrigieren, und halte quellenspezifische Aussagen getrennt. Ist oben eine vorherige Assistenten-Antwort angegeben und führt die ursprüngliche Frage sie aus, darfst du ihre Aussagen zitieren und erweitern, sofern die neuen Ausschnitte sie bestätigen. Ist der neue Kontext nicht nützlich, gib die aktuelle Antwort unverändert zurück. Gib ausschließlich die Antwort zurück, die die Nutzerin oder der Nutzer lesen soll — benenne diese Regeln nicht, beschreibe die Ausschnitte oder Quellen nicht und kommentiere nicht, ob die Evidenz ausreichend oder widerspruchsfrei war.
+Verfeinerte fundierte Antwort:

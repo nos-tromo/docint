@@ -107,6 +107,7 @@ wheels/*.whl
 !scripts/bundle_images.sh
 !scripts/create_docker_volumes.sh
 !**/prompts/*.txt
+!**/prompts/**/*.txt
 !**/required_exts.txt
 !AGENTS.md
 !CLAUDE.md

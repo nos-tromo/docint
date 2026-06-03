@@ -21,7 +21,10 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from docint.agents.types import PriorTurn
 
 # isort: off
 # Import env_cfg BEFORE any third-party libraries so that HF_HUB_OFFLINE and
@@ -44,11 +47,13 @@ from docint.utils.env_cfg import (
     load_hate_speech_env,
     load_host_env,
     load_ingestion_env,
+    load_language_env,
     load_model_env,
     load_ner_env,
     load_openai_env,
     load_path_env,
     load_rerank_client_env,
+    load_resolution_env,
     load_retrieval_env,
     load_session_env,
     load_summary_env,
@@ -108,6 +113,12 @@ __all__ = [
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from qdrant_client.qdrant_fastembed import IDF_EMBEDDING_MODELS  # type: ignore[attr-defined]
 
+from docint.core.entities.resolution import (
+    ResolutionSummary,
+    SurfaceMention,
+    resolve_collection,
+)
+from docint.core.entities.store import EntityStore
 from docint.core.ingest.images_service import ImageIngestionService
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
 from docint.core.ingest.streaming_executor import overlapped
@@ -160,7 +171,15 @@ from docint.utils.retry import (
 SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
 SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
 SUMMARY_CACHE_REVISION_KEY = "summary_revision"
-HIDDEN_COLLECTION_SUFFIXES: tuple[str, ...] = ("_images", "_dockv")
+HIDDEN_COLLECTION_SUFFIXES: tuple[str, ...] = ("_images", "_dockv", "_entities")
+
+# Fallback tie-break preamble used when the locale prompt file is absent.
+# The canonical templates live in ``prompts/{en,de}/entity_tiebreak.txt``.
+DEFAULT_ENTITY_TIEBREAK_PROMPT = (
+    "You are resolving an entity reference to a canonical entity.\n"
+    "Reply with ONLY the id of the candidate that refers to the same "
+    "real-world entity as the surface form, or NONE if none of them do."
+)
 
 # Confidence values stored on hate-speech findings, ordered weakest → strongest.
 _HATE_SPEECH_CONFIDENCE_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 2}
@@ -377,10 +396,22 @@ DEFAULT_SOCIAL_SUMMARIZE_PROMPT = (
     "conflicts or uncertainty explicitly."
 )
 DEFAULT_RETRIEVAL_REWRITE_PROMPT = (
-    "Rewrite the user's latest message into a standalone retrieval query.\n"
-    "Use prior conversation only to resolve references or omitted details.\n"
-    "Do not answer the question. Do not include prior assistant claims unless "
-    "the user explicitly refers to them. Return only the rewritten query.\n\n"
+    "Rewrite the user's latest message into a standalone retrieval query "
+    "suitable for vector search.\n\n"
+    "Rules:\n"
+    "- Resolve all pronouns and ellipses using the conversation context.\n"
+    "- If the user is asking to elaborate, clarify, or expand on a previous "
+    'answer ("tell me more", "please elaborate", "I didn\'t understand X", '
+    '"what do you mean by ..."), EXTRACT the specific entities, names, '
+    "organizations, claims, or topics they are referring to from the most "
+    "recent assistant turn and inline them in the rewritten query. Example: "
+    '"Tell me more about the UN references" becomes a query that names the '
+    "specific UN bodies/resolutions/claims the prior assistant turn "
+    "mentioned.\n"
+    "- Do not answer the question; only produce search terms.\n"
+    "- Do not invent facts that are absent from both the user message and the "
+    "conversation context.\n"
+    "- Return ONLY the rewritten query, no preamble.\n\n"
     "Conversation context:\n{conversation_context}\n\n"
     "Latest user message:\n{user_msg}\n\n"
     "Standalone retrieval query:"
@@ -392,33 +423,63 @@ DEFAULT_CONVERSATION_SUMMARY_PROMPT = (
     "conclusions. Do not add new claims.\n\n"
 )
 DEFAULT_GROUNDED_TEXT_QA_PROMPT = (
-    "You are answering a question from retrieved evidence.\n"
-    "Use only the context snippets below.\n"
-    "Treat each snippet as a distinct source chunk; do not blend claims across "
-    "different chunks unless the overlap is explicit.\n"
-    "If snippets conflict, say so. If evidence is insufficient, say that "
-    "explicitly.\n"
-    "Preserve source-specific metadata such as author, network, timestamp, page, "
-    "or row when it matters.\n\n"
-    "Context snippets:\n"
+    "You are answering a question from retrieved evidence in an ongoing "
+    "conversation.\n\n"
+    "Conversation continuity:\n"
+    "{prior_turn_context}\n\n"
+    "Retrieved context snippets:\n"
     "---------------------\n"
     "{context_str}\n"
     "---------------------\n"
-    "Question: {query_str}\n"
+    "Current question: {query_str}\n\n"
+    "Instructions:\n"
+    "- Treat each retrieved snippet as a distinct source chunk; do not blend "
+    "claims across chunks unless the overlap is explicit.\n"
+    "- If the current question asks to elaborate on, clarify, or expand on the "
+    "prior assistant turn, restate and expand the specific claims from that "
+    "prior turn that the user is asking about. Use the retrieved snippets to "
+    "corroborate or add supporting detail. The prior assistant turn was itself "
+    "sourced; you may quote and elaborate on it.\n"
+    "- If snippets conflict, say so explicitly.\n"
+    "- Only respond that evidence is insufficient when BOTH the retrieved "
+    "snippets AND the prior assistant turn lack the requested information. In "
+    "that case, name the specific aspect that is missing.\n"
+    "- Preserve source-specific metadata such as author, network, timestamp, "
+    "page, or row when it matters.\n\n"
     "Grounded answer:"
 )
 DEFAULT_GROUNDED_REFINE_PROMPT = (
-    "You are refining an answer from retrieved evidence.\n"
+    "You are refining an answer from retrieved evidence in an ongoing "
+    "conversation.\n\n"
+    "Conversation continuity:\n"
+    "{prior_turn_context}\n\n"
     "Original question: {query_str}\n"
     "Current answer: {existing_answer}\n"
     "New context snippet(s):\n"
     "---------------------\n"
     "{context_msg}\n"
     "---------------------\n"
-    "Update the answer only when the new evidence materially improves or corrects "
-    "it. Keep source-specific claims distinct. If the new context is not useful, "
-    "return the current answer unchanged.\n"
+    "Update the answer only when the new evidence materially improves or "
+    "corrects it. Keep source-specific claims distinct. If the original "
+    "question is an elaboration of the prior assistant turn, you may quote "
+    "and expand on the prior turn's claims when the new snippets corroborate "
+    "them. If the new context is not useful, return the current answer "
+    "unchanged.\n"
     "Refined grounded answer:"
+)
+DEFAULT_GROUNDED_COLLECTION_SUMMARY_PROMPT = (
+    "You are producing a grounded collection summary.\n"
+    "Use only the evidence briefs below. If evidence is insufficient, state that "
+    "explicitly.\n"
+    "Include cross-document themes, notable differences or outliers, and concrete "
+    "findings.\n"
+    "Do not introduce claims unsupported by the evidence briefs.\n\n"
+    "Coverage unit: {coverage_unit}\n"
+    "Coverage ratio: {coverage_ratio}\n"
+    "Coverage target: {coverage_target}\n"
+    "Uncovered documents: {uncovered_text}\n\n"
+    "Style instructions:\n{style_prompt}\n\n"
+    "Evidence briefs:\n{evidence_block}\n"
 )
 
 
@@ -1592,6 +1653,7 @@ class RAG:
     _qdrant_src_dir: Path | None = field(default=None, init=False, repr=False)
 
     # --- Prompt config ---
+    language_code: str = field(default="en", init=False)
     prompt_dir: Path | None = field(default=None, init=False)
     summarize_prompt_path: Path | None = field(default=None, init=False)
     summarize_social_prompt_path: Path | None = field(default=None, init=False)
@@ -1599,12 +1661,14 @@ class RAG:
     rewrite_retrieval_prompt_path: Path | None = field(default=None, init=False)
     grounded_text_qa_prompt_path: Path | None = field(default=None, init=False)
     grounded_refine_prompt_path: Path | None = field(default=None, init=False)
+    grounded_collection_summary_prompt_path: Path | None = field(default=None, init=False)
     summarize_prompt: str = field(default="", init=False)
     summarize_social_prompt: str = field(default="", init=False)
     conversation_summary_prompt: str = field(default="", init=False)
     rewrite_retrieval_prompt: str = field(default="", init=False)
     grounded_text_qa_prompt: str = field(default="", init=False)
     grounded_refine_prompt: str = field(default="", init=False)
+    grounded_collection_summary_prompt: str = field(default="", init=False)
 
     # --- Runtime (lazy caches / not in repr) ---
     _embed_model: BaseEmbedding | None = field(default=None, init=False, repr=False)
@@ -1731,7 +1795,8 @@ class RAG:
         # --- Path config ---
         self.path_config = self.path_config
         self.data_dir = self.path_config.data
-        self.prompt_dir = self.path_config.prompts
+        self.language_code = load_language_env().code
+        self.prompt_dir = self.path_config.prompts / self.language_code
         self._qdrant_src_dir = self.path_config.qdrant_sources
         self.hf_hub_cache = self.path_config.hf_hub_cache
 
@@ -1743,6 +1808,7 @@ class RAG:
             self.rewrite_retrieval_prompt_path = self.prompt_dir / "rewrite_retrieval.txt"
             self.grounded_text_qa_prompt_path = self.prompt_dir / "grounded_qa.txt"
             self.grounded_refine_prompt_path = self.prompt_dir / "grounded_refine.txt"
+            self.grounded_collection_summary_prompt_path = self.prompt_dir / "grounded_collection_summary.txt"
         if self.summarize_prompt_path is None:
             logger.error("ValueError: summarize_prompt_path is not set. Cannot load summarize prompt.")
             raise ValueError("summarize_prompt_path is not set. Cannot load summarize prompt.")
@@ -1770,6 +1836,10 @@ class RAG:
         self.grounded_refine_prompt = self._load_prompt_text(
             self.grounded_refine_prompt_path,
             default=DEFAULT_GROUNDED_REFINE_PROMPT,
+        )
+        self.grounded_collection_summary_prompt = self._load_prompt_text(
+            self.grounded_collection_summary_prompt_path,
+            default=DEFAULT_GROUNDED_COLLECTION_SUMMARY_PROMPT,
         )
 
         # --- Retrieval config ---
@@ -3603,6 +3673,14 @@ class RAG:
     def _build_grounded_text_qa_template(self, *, social_table: bool) -> PromptTemplate:
         """Return the grounded QA prompt template for answer synthesis.
 
+        The template carries a ``{prior_turn_context}`` placeholder that the
+        chat loop binds per-turn via
+        :meth:`llama_index.core.PromptTemplate.partial_format` when the caller
+        passes a ``PriorTurn`` (see
+        :meth:`docint.core.state.session_manager.SessionManager.chat`). On the
+        default path the placeholder is partial-formatted with the sentinel
+        below so the rendered prompt is well-formed even without a prior turn.
+
         Args:
             social_table (bool): Whether the active collection is social/table-heavy and needs
                 instructions to preserve post-level distinctions during synthesis.
@@ -3617,10 +3695,14 @@ class RAG:
                 "When the context comes from social posts or table rows, keep each "
                 "post distinct and avoid merging separate authors or timestamps.\n"
             )
-        return PromptTemplate(prompt)
+        return PromptTemplate(prompt).partial_format(prior_turn_context="(no prior turn)")
 
     def _build_grounded_refine_template(self, *, social_table: bool) -> PromptTemplate:
         """Return the grounded refine prompt template for answer synthesis.
+
+        Carries the same ``{prior_turn_context}`` placeholder as
+        :meth:`_build_grounded_text_qa_template`; see that method for the
+        partial-format contract.
 
         Args:
             social_table (bool): Whether the active collection is social/table-heavy and needs
@@ -3636,7 +3718,7 @@ class RAG:
                 "For row-level social evidence, preserve distinctions between "
                 "different posts even when they discuss the same topic.\n"
             )
-        return PromptTemplate(prompt)
+        return PromptTemplate(prompt).partial_format(prior_turn_context="(no prior turn)")
 
     def _compute_parent_context_budget(self, *, social_table: bool) -> tuple[int, int]:
         """Compute the per-query chat budget available to parent-context expansion.
@@ -3690,7 +3772,12 @@ class RAG:
         # the template overhead (shrinking the usable budget slightly) than
         # under-estimate it (overflowing the chat context).
         chat_ratio_proxy = float(self.embed_char_token_ratio or 3.5)
-        query_answer_allowance_tokens = 400  # user query + prior answer
+        # 400 tokens: user query + refine's prior ``existing_answer``.
+        # 400 tokens: ``prior_turn_context`` block (orchestrator-supplied
+        # prior assistant turn, bound via PromptTemplate.partial_format at
+        # chat time). Sized for a typical grounded answer; we'd rather
+        # over-reserve than overflow the chat context.
+        query_answer_allowance_tokens = 800
         template_tokens = (
             max(
                 estimate_tokens(qa_raw, chat_ratio_proxy),
@@ -4543,10 +4630,13 @@ class RAG:
         self._bump_summary_revision(target, allow_create=False)
 
         # The primary collection is the only one whose failure is fatal.
-        # `{target}_images` is supplementary metadata whose absence is tolerated.
+        # The `{target}_images` / `{target}_entities` companions are
+        # supplementary metadata whose absence is tolerated.
         secondary_collections: list[str] = []
-        if not target.endswith("_images"):
+        if not target.endswith(HIDDEN_COLLECTION_SUFFIXES):
             secondary_collections.append(f"{target}_images")
+            if qdrant_collection_exists(self.qdrant_client, f"{target}_entities"):
+                secondary_collections.append(f"{target}_entities")
 
         # 1. Delete the primary Qdrant collection — fail-fast on error so
         #    we don't proceed to destroy the SQLite KV file / source dir.
@@ -4953,20 +5043,20 @@ class RAG:
                         exc,
                     )
 
-        images_collection = f"{collection}_images"
-        if qdrant_collection_exists(self.qdrant_client, images_collection):
-            try:
-                self.qdrant_client.delete_collection(images_collection)
-                logger.info(
-                    "Deleted empty companion collection '{}' from Qdrant.",
-                    images_collection,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Failed to delete companion collection '{}': {}",
-                    images_collection,
-                    exc,
-                )
+        for companion in (f"{collection}_images", f"{collection}_entities"):
+            if qdrant_collection_exists(self.qdrant_client, companion):
+                try:
+                    self.qdrant_client.delete_collection(companion)
+                    logger.info(
+                        "Deleted empty companion collection '{}' from Qdrant.",
+                        companion,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to delete companion collection '{}': {}",
+                        companion,
+                        exc,
+                    )
 
     # --- Public API ---
     def ingest_docs(
@@ -5665,7 +5755,7 @@ class RAG:
         """
         return self.ensure_session_manager().export_session(session_id=session_id, out_dir=out_dir)
 
-    def start_session(self, session_id: str | None = None) -> str:
+    def start_session(self, session_id: str | None = None, owner: str | None = None) -> str:
         """Start or resume a chat session through SessionManager.
 
         ``SessionManager.start_session`` lazily builds the query engine when
@@ -5676,11 +5766,12 @@ class RAG:
         Args:
             session_id (str | None): The session ID to start or resume. If None,
                 a new session is created.
+            owner (str | None): The owning principal for persisted sessions.
 
         Returns:
             str: The ID of the started or resumed session.
         """
-        return self.ensure_session_manager().start_session(session_id)
+        return self.ensure_session_manager().start_session(session_id, owner=owner)
 
     def chat(
         self,
@@ -5690,6 +5781,8 @@ class RAG:
         metadata_filters_active: bool = False,
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
+        prior_turn: PriorTurn | None = None,
+        skip_query_rewrite: bool | None = None,
     ) -> dict[str, Any]:
         """Proxy chat turns to SessionManager.
 
@@ -5703,6 +5796,12 @@ class RAG:
                 filter payloads for post-filtering auxiliary image sources.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
+            prior_turn (PriorTurn | None): Prior user/assistant exchange. See
+                :meth:`docint.core.state.session_manager.SessionManager.chat`
+                for semantics.
+            skip_query_rewrite (bool | None): Forwarded to
+                :meth:`docint.core.state.session_manager.SessionManager.chat`;
+                see there for semantics.
 
         Returns:
             dict[str, Any]: The chat response data.
@@ -5713,6 +5812,8 @@ class RAG:
             metadata_filters_active=metadata_filters_active,
             metadata_filter_rules=metadata_filter_rules,
             vector_store_kwargs=vector_store_kwargs,
+            prior_turn=prior_turn,
+            skip_query_rewrite=skip_query_rewrite,
         )
 
     def stream_chat(
@@ -5723,6 +5824,8 @@ class RAG:
         metadata_filters_active: bool = False,
         metadata_filter_rules: Sequence[Any] | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
+        prior_turn: PriorTurn | None = None,
+        skip_query_rewrite: bool | None = None,
     ) -> Any:
         """Proxy stream chat turns to SessionManager.
 
@@ -5736,6 +5839,12 @@ class RAG:
                 filter payloads for post-filtering auxiliary image sources.
             vector_store_kwargs (dict[str, Any] | None): Optional native
                 vector-store query kwargs.
+            prior_turn (PriorTurn | None): Prior user/assistant exchange. See
+                :meth:`docint.core.state.session_manager.SessionManager.chat`
+                for semantics.
+            skip_query_rewrite (bool | None): Forwarded to
+                :meth:`docint.core.state.session_manager.SessionManager.chat`;
+                see there for semantics.
 
         Returns:
             Any: A generator yielding response chunks.
@@ -5746,6 +5855,8 @@ class RAG:
             metadata_filters_active=metadata_filters_active,
             metadata_filter_rules=metadata_filter_rules,
             vector_store_kwargs=vector_store_kwargs,
+            prior_turn=prior_turn,
+            skip_query_rewrite=skip_query_rewrite,
         )
 
     def expand_query_with_graph_with_debug(self, query: str) -> tuple[str, dict[str, Any]]:
@@ -6146,17 +6257,13 @@ class RAG:
         uncovered = diagnostics.get("uncovered_documents") or []
         uncovered_text = ", ".join(str(item) for item in uncovered) or "(none)"
         evidence_block = "\n\n".join(briefs) if briefs else "(no evidence extracted)"
-        return (
-            "You are producing a grounded collection summary.\n"
-            "Use only the evidence briefs below. If evidence is insufficient, state that explicitly.\n"
-            "Include cross-document themes, notable differences or outliers, and concrete findings.\n"
-            "Do not introduce claims unsupported by the evidence briefs.\n\n"
-            f"Coverage unit: {coverage_unit}\n"
-            f"Coverage ratio: {coverage_ratio:.2f}\n"
-            f"Coverage target: {coverage_target:.2f}\n"
-            f"Uncovered documents: {uncovered_text}\n\n"
-            f"Style instructions:\n{style_prompt.strip()}\n\n"
-            f"Evidence briefs:\n{evidence_block}\n"
+        return self.grounded_collection_summary_prompt.format(
+            coverage_unit=coverage_unit,
+            coverage_ratio=f"{coverage_ratio:.2f}",
+            coverage_target=f"{coverage_target:.2f}",
+            uncovered_text=uncovered_text,
+            style_prompt=style_prompt.strip(),
+            evidence_block=evidence_block,
         )
 
     def _prepare_document_summary_context(self) -> dict[str, Any]:
@@ -7131,6 +7238,162 @@ class RAG:
         next_cursor = encode_cursor(end) if end < len(filtered) else None
         return page, next_cursor
 
+    def _entities_collection(self) -> str:
+        """Return the hidden companion collection name for resolved entities.
+
+        Returns:
+            str: ``{active_collection}_entities`` (empty when no collection
+            is selected).
+        """
+        return f"{self.qdrant_collection}_entities" if self.qdrant_collection else ""
+
+    def _embed_surfaces(self, texts: list[str]) -> list[list[float]]:
+        """Embed surface forms in batches that respect the embed budget.
+
+        Reuses the embedding model and per-request batch size already
+        configured on the RAG instance (see
+        :meth:`_prepare_vector_nodes_for_insert` for the same slicing).
+
+        Args:
+            texts (list[str]): Surface forms to embed.
+
+        Returns:
+            list[list[float]]: Embedding vectors aligned to ``texts``.
+        """
+        embed_model = self.embed_model
+        get_embeddings = getattr(embed_model, "get_text_embeddings_strict", None)
+        if not callable(get_embeddings):
+            return [embed_model.get_text_embedding(text) for text in texts]
+        vectors: list[list[float]] = []
+        batch_size = max(1, self.embed_batch_size)
+        for start in range(0, len(texts), batch_size):
+            chunk = texts[start : start + batch_size]
+            vectors.extend(cast(list[list[float]], get_embeddings(chunk)))
+        return vectors
+
+    def _entity_vector_dim(self) -> int:
+        """Resolve the embedding dimension for the entity vector store.
+
+        Returns:
+            int: Configured ``openai_dimensions`` when set, otherwise a single
+            embed probe of the active model.
+        """
+        if self.openai_dimensions is not None:
+            return int(self.openai_dimensions)
+        return len(self.embed_model.get_text_embedding("ping"))
+
+    def _load_resolved_index(self) -> dict[str, Any] | None:
+        """Load the durable entity index for ``"resolved"`` aggregation.
+
+        Returns:
+            dict[str, Any] | None: ``{"alias_to_id", "canonical",
+            "case_normalize"}`` for :func:`aggregate_ner_sources`, or ``None``
+            when no entities have been resolved for the active collection.
+        """
+        collection = self._entities_collection()
+        if not collection or not qdrant_collection_exists(self.qdrant_client, collection):
+            return None
+        cfg = load_resolution_env()
+        store = EntityStore(
+            self.qdrant_client,
+            collection=collection,
+            dim=int(self.openai_dimensions or 1),
+            embed_model=self.embed_model_id,
+        )
+        alias_to_id, canonical = store.load_alias_index(case_normalize=cfg.case_normalize)
+        return {
+            "alias_to_id": alias_to_id,
+            "canonical": canonical,
+            "case_normalize": cfg.case_normalize,
+        }
+
+    def resolve_entities(
+        self,
+        *,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> ResolutionSummary:
+        """Resolve the active collection's entities into durable canonicals.
+
+        Mirrors chorus's batch ``resolve`` stage: collapse extracted entities to
+        unique ``(surface, type)`` pairs, embed them once, and resolve each
+        most-mentioned-first into the hidden ``{collection}_entities`` store
+        (exact alias -> type-blocked vector match -> conservative LLM tie-break
+        -> mint). Idempotent: surfaces already resolved on a prior run are
+        skipped. Invalidates the NER cache so the ``"resolved"`` aggregate
+        recomputes against the updated store.
+
+        Args:
+            progress_callback (Callable[[str], None] | None): Optional sink for
+                human-readable progress messages.
+
+        Returns:
+            ResolutionSummary: Counts of minted/attached/skipped surfaces.
+
+        Raises:
+            ValueError: If no collection is selected.
+        """
+        if not self.qdrant_collection:
+            raise ValueError("qdrant_collection must be set to resolve entities")
+
+        def _emit(message: str) -> None:
+            """Forward a progress message to the callback when present."""
+            if progress_callback is not None:
+                progress_callback(message)
+            logger.info(message)
+
+        sources = self._load_collection_ner_sources()
+        mention_counts: dict[tuple[str, str], int] = defaultdict(int)
+        for src in sources:
+            for ent in normalize_entities(src.get("entities")):
+                mention_counts[(str(ent["text"]), str(ent["type"]))] += 1
+
+        surfaces = [
+            SurfaceMention(surface=surface, entity_type=entity_type, mentions=mentions)
+            for (surface, entity_type), mentions in mention_counts.items()
+        ]
+        if not surfaces:
+            _emit(f"No entities to resolve in collection '{self.qdrant_collection}'.")
+            return ResolutionSummary(processed=0, minted=0, attached=0, skipped=0, entities_touched=0)
+
+        _emit(f"Resolving {len(surfaces)} distinct entity surfaces in '{self.qdrant_collection}'.")
+        cfg = load_resolution_env()
+        store = EntityStore(
+            self.qdrant_client,
+            collection=self._entities_collection(),
+            dim=self._entity_vector_dim(),
+            embed_model=self.embed_model_id,
+        )
+        store.ensure_collection()
+
+        prompt_header = DEFAULT_ENTITY_TIEBREAK_PROMPT
+        if self.prompt_dir:
+            prompt_header = self._load_prompt_text(
+                self.prompt_dir / "entity_tiebreak.txt",
+                default=DEFAULT_ENTITY_TIEBREAK_PROMPT,
+            )
+
+        def _chat(prompt: str) -> str:
+            """Run the configured chat model for one tie-break prompt."""
+            completion = self.text_model.complete(prompt)
+            return str(getattr(completion, "text", "") or "").strip()
+
+        summary = resolve_collection(
+            store,
+            surfaces,
+            embed_fn=self._embed_surfaces,
+            chat_fn=_chat,
+            prompt_header=prompt_header,
+            cfg=cfg,
+        )
+
+        self._bump_summary_revision(self.qdrant_collection)
+        self._invalidate_ner_cache(self.qdrant_collection)
+        _emit(
+            f"Entity resolution complete for '{self.qdrant_collection}': "
+            f"{summary.minted} minted, {summary.attached} attached, {summary.skipped} skipped."
+        )
+        return summary
+
     def _get_collection_ner_aggregate(
         self,
         *,
@@ -7157,8 +7420,9 @@ class RAG:
         if cache_key in self.ner_aggregate_cache:
             return self.ner_aggregate_cache[cache_key]
 
+        resolved_index = self._load_resolved_index() if merge_mode == "resolved" else None
         sources = self.get_collection_ner(refresh=refresh)
-        aggregate = aggregate_ner_sources(sources, entity_merge_mode=merge_mode)
+        aggregate = aggregate_ner_sources(sources, entity_merge_mode=merge_mode, resolved_index=resolved_index)
         self.ner_aggregate_cache[cache_key] = aggregate
         return aggregate
 

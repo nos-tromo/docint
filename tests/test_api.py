@@ -10,7 +10,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 import docint.core.api as api_module
-from docint.agents.types import IntentAnalysis, OrchestratorResult, RetrievalResult
+from docint.agents.types import IntentAnalysis, OrchestratorResult, PriorTurn, RetrievalResult
+from docint.agents.understanding import ContextualUnderstandingAgent
+from docint.core.entities.resolution import ResolutionSummary
 
 
 class DummySessionManager:
@@ -153,15 +155,17 @@ class DummyRAG:
         """
         return self.sessions
 
-    def start_session(self, session_id: str | None = None) -> str:
+    def start_session(self, session_id: str | None = None, owner: str | None = None) -> str:
         """Start a new session or resume an existing one.
 
         Args:
             session_id (str | None, optional): The ID of the session to resume. Defaults to None.
+            owner (str | None, optional): The owning principal. Defaults to None.
 
         Returns:
             str: The session ID.
         """
+        _ = owner
         return session_id or "generated-session"
 
     def chat(
@@ -218,6 +222,8 @@ class DummyRAG:
         metadata_filters_active: bool = False,
         metadata_filter_rules: Any = None,
         vector_store_kwargs: Any = None,
+        prior_turn: Any = None,
+        skip_query_rewrite: Any = None,
     ) -> Generator[str | dict[str, Any], None, None]:
         """Stream chat responses from the RAG system.
 
@@ -227,6 +233,8 @@ class DummyRAG:
             metadata_filters_active (bool): Whether request filters were active.
             metadata_filter_rules (Any): Optional raw request filter rules.
             vector_store_kwargs (Any): Optional native vector-store query kwargs.
+            prior_turn (Any): Optional prior user/assistant exchange for context.
+            skip_query_rewrite (Any): Accepted for parity with RAG.stream_chat; ignored by the stub.
 
         Yields:
             str | dict[str, Any]: Chunks of the chat response as they are generated.
@@ -611,6 +619,19 @@ class DummyRAG:
             }
         ]
 
+    def resolve_entities(self, *, progress_callback: Any = None) -> ResolutionSummary:
+        """Record a resolution call and return a fixed summary.
+
+        Args:
+            progress_callback (Any): Optional progress sink (ignored).
+
+        Returns:
+            ResolutionSummary: Fixed counts for endpoint assertions.
+        """
+        _ = progress_callback
+        self.resolve_called = True
+        return ResolutionSummary(processed=4, minted=2, attached=1, skipped=1, entities_touched=2)
+
 
 @pytest.fixture(autouse=True)
 def _patch_rag(monkeypatch: pytest.MonkeyPatch) -> Any | None:
@@ -622,6 +643,8 @@ def _patch_rag(monkeypatch: pytest.MonkeyPatch) -> Any | None:
     Returns:
         Any | None: Yields None after patching.
     """
+    monkeypatch.delenv("DOCINT_AUTH_HEADER", raising=False)
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "test-operator")
     dummy = DummyRAG()
     monkeypatch.setattr(api_module, "rag", dummy)
     yield
@@ -863,6 +886,34 @@ def test_collections_ner_search_support_exact_merge_mode(client: TestClient) -> 
     assert cast(DummyRAG, api_module.rag).ner_search_merge_modes[-1] == "exact"
 
 
+def test_collections_ner_stats_support_resolved_merge_mode(client: TestClient) -> None:
+    """Stats endpoint should accept and forward the resolved merge mode."""
+    response = client.get("/collections/ner/stats", params={"entity_merge_mode": "resolved"})
+    assert response.status_code == 200
+    assert cast(DummyRAG, api_module.rag).ner_stats_merge_modes[-1] == "resolved"
+
+
+def test_resolve_entities_success(client: TestClient) -> None:
+    """The resolve endpoint returns the resolution summary counts."""
+    response = client.post("/collections/entities/resolve")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload == {
+        "processed": 4,
+        "minted": 2,
+        "attached": 1,
+        "skipped": 1,
+        "entities_touched": 2,
+    }
+
+
+def test_resolve_entities_requires_selected_collection(client: TestClient) -> None:
+    """The resolve endpoint 400s when no collection is selected."""
+    api_module.rag.qdrant_collection = ""
+    response = client.post("/collections/entities/resolve")
+    assert response.status_code == 400
+
+
 def test_agent_chat_answers(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """Agent chat should return an answer when confidence is sufficient.
 
@@ -919,6 +970,55 @@ def test_agent_chat_clarifies(monkeypatch: pytest.MonkeyPatch, client: TestClien
     assert data["message"]
     assert data["intent"] is not None
     assert data["confidence"] is not None
+
+
+def test_agent_chat_falls_back_to_clarification_on_weak_validation_mismatch(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """A weak (refusal-shaped) answer with validation_mismatch must surface as clarification.
+
+    Exercises the orchestrator's post-responder fallback end-to-end: the
+    monkeypatched orchestrator returns a ``RetrievalResult`` shaped exactly
+    like the production failure (answer="Evidence insufficient.",
+    validation_mismatch=True), and the API must respond with
+    ``status="clarification"`` and a helpful nudge instead of echoing the
+    refusal back to the user.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    # Use a real orchestrator (post-responder fallback lives there).
+    monkeypatch.setattr(
+        api_module.rag,
+        "chat",
+        lambda *_, **__: {
+            "response": "Evidence insufficient.",
+            "sources": [],
+        },
+    )
+
+    # Force the response validator to flag mismatch by stubbing it.
+    from docint.agents.generation import ResultValidationResponseAgent
+    from docint.agents.types import RetrievalResult as _RR
+
+    def _flag_mismatch(self: Any, result: _RR, turn: Any) -> _RR:
+        """Mark every result as mismatched for this test."""
+        _ = self, turn
+        result.validation_checked = True
+        result.validation_mismatch = True
+        result.validation_reason = "no UN content in sources"
+        return result
+
+    monkeypatch.setattr(ResultValidationResponseAgent, "finalize", _flag_mismatch)
+
+    response = client.post("/agent/chat", json={"message": "Please elaborate."})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "clarification"
+    assert data["message"]
+    assert "previous answer" in data["message"].lower() or "elaborate" in data["message"].lower()
 
 
 def test_agent_chat_returns_validation_alert(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
@@ -1001,6 +1101,301 @@ def test_stream_query_includes_validation_metadata(client: TestClient) -> None:
     assert '"retrieval_query"' in text
     assert '"retrieval_mode"' in text
     assert '"response": "answer"' in text
+
+
+def test_query_stamps_default_identity_on_session_start(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """Session-backed query requests must stamp the resolved principal.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    seen: dict[str, Any] = {}
+
+    def record_start_session(session_id: str | None = None, owner: str | None = None) -> str:
+        seen["session_id"] = session_id
+        seen["owner"] = owner
+        return session_id or "generated-session"
+
+    monkeypatch.setattr(api_module.rag, "start_session", record_start_session)
+
+    response = client.post("/query", json={"question": "hello"})
+
+    assert response.status_code == 200
+    assert seen == {"session_id": None, "owner": "operator"}
+
+
+def test_stream_query_stamps_default_identity_on_session_start(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Session-backed stream queries must stamp the resolved principal.
+
+    The frontend uses ``/stream_query`` for chat. If the write path starts
+    sessions without the same owner that ``/sessions/list`` later filters by,
+    chats persist but never appear in the sidebar.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    seen: dict[str, Any] = {}
+
+    def record_start_session(session_id: str | None = None, owner: str | None = None) -> str:
+        seen["session_id"] = session_id
+        seen["owner"] = owner
+        return session_id or "generated-session"
+
+    monkeypatch.setattr(api_module.rag, "start_session", record_start_session)
+
+    with client.stream("POST", "/stream_query", json={"question": "hello"}) as resp:
+        assert resp.status_code == 200
+        list(resp.iter_lines())
+
+    assert seen == {"session_id": None, "owner": "operator"}
+
+
+def test_agent_chat_stamps_default_identity_on_session_start(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Agent chat must stamp the resolved principal on session start.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    seen: dict[str, Any] = {}
+
+    class _StubOrchestrator:
+        def handle_turn(self, turn: Any, context: Any = None) -> OrchestratorResult:
+            _ = turn, context
+            analysis = IntentAnalysis(intent="qa", confidence=0.9, entities={"query": "hello"})
+            retrieval = RetrievalResult(answer="answer", sources=[{"id": 1}], session_id="generated-session")
+            return OrchestratorResult(clarification=None, retrieval=retrieval, analysis=analysis)
+
+    def record_start_session(session_id: str | None = None, owner: str | None = None) -> str:
+        seen["session_id"] = session_id
+        seen["owner"] = owner
+        return session_id or "generated-session"
+
+    monkeypatch.setattr(api_module, "_build_orchestrator", lambda: _StubOrchestrator())
+    monkeypatch.setattr(api_module.rag, "start_session", record_start_session)
+
+    response = client.post("/agent/chat", json={"message": "hello"})
+
+    assert response.status_code == 200
+    assert seen == {"session_id": None, "owner": "operator"}
+
+
+def test_agent_chat_stream_stamps_default_identity_on_session_start(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Streaming agent chat must stamp the resolved principal on session start.
+
+    ``/agent/chat/stream`` resolves the principal eagerly (before the SSE
+    generator) and passes it to ``start_session``. Without it, agent chats would
+    persist unowned and never surface in ``/sessions/list``. The clarification
+    policy is forced so the generator reaches ``start_session`` and returns
+    without depending on the chat stream.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    seen: dict[str, Any] = {}
+
+    def record_start_session(session_id: str | None = None, owner: str | None = None) -> str:
+        seen["session_id"] = session_id
+        seen["owner"] = owner
+        return session_id or "generated-session"
+
+    monkeypatch.setattr(api_module.rag, "start_session", record_start_session)
+    monkeypatch.setattr(
+        api_module,
+        "_clarification_policy",
+        api_module.ClarificationPolicy(api_module.ClarificationConfig(confidence_threshold=1.0, require_entities=True)),
+    )
+
+    with client.stream("POST", "/agent/chat/stream", json={"message": "hello"}) as resp:
+        assert resp.status_code == 200
+        list(resp.iter_lines())
+
+    assert seen == {"session_id": None, "owner": "operator"}
+
+
+def test_agent_chat_stream_uses_history_and_prior_turn(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """Streaming agent chat must feed prior history into understanding and stream_chat.
+
+    Verifies parity with /agent/chat: prior_turn + history-rewritten query
+    are both forwarded to stream_chat.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    seeded_history = [
+        {"role": "user", "content": "Who chairs the council?"},
+        {"role": "assistant", "content": "The Security Council has a rotating presidency."},
+    ]
+    monkeypatch.setattr(
+        api_module.rag.sessions,
+        "get_session_history",
+        lambda session_id, owner=None: seeded_history,
+    )
+
+    seen: dict[str, Any] = {}
+
+    class _RecordingUnderstanding:
+        def analyze(self, turn: Any, context: Any = None) -> IntentAnalysis:
+            seen["context_history"] = list(context.history) if context is not None else None
+            return IntentAnalysis(
+                intent="qa",
+                confidence=0.9,
+                entities={"query": turn.user_input},
+                rewritten_query="REWRITTEN QUERY",
+            )
+
+    def record_stream_chat(
+        user_msg: str, *, prior_turn: Any = None, **kwargs: Any
+    ) -> Generator[str | dict[str, Any], None, None]:
+        seen["stream_query"] = user_msg
+        seen["prior_turn"] = prior_turn
+        yield "token"
+        yield {"sources": [], "session_id": "generated-session"}
+
+    monkeypatch.setattr(api_module, "_understanding_agent", _RecordingUnderstanding())
+    monkeypatch.setattr(
+        api_module,
+        "_clarification_policy",
+        api_module.ClarificationPolicy(
+            api_module.ClarificationConfig(confidence_threshold=0.0, require_entities=False)
+        ),
+    )
+    monkeypatch.setattr(api_module.rag, "stream_chat", record_stream_chat)
+
+    with client.stream("POST", "/agent/chat/stream", json={"message": "And who is she?"}) as resp:
+        assert resp.status_code == 200
+        list(resp.iter_lines())
+
+    assert seen["context_history"] == seeded_history
+    assert seen["stream_query"] == "REWRITTEN QUERY"
+    assert isinstance(seen["prior_turn"], PriorTurn)
+    assert seen["prior_turn"].user_text == "Who chairs the council?"
+    assert seen["prior_turn"].assistant_text == "The Security Council has a rotating presidency."
+
+
+def test_stream_query_session_mode_feeds_prior_turn(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """``/stream_query`` (the endpoint the React SPA actually calls) must feed the prior turn.
+
+    In session mode it should build the immediately preceding user/assistant
+    exchange from owner-scoped history and pass it to ``stream_chat`` together
+    with ``skip_query_rewrite=False`` — so generation becomes history-aware while
+    the endpoint keeps its own internal retrieval-query rewrite.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    seeded_history = [
+        {"role": "user", "content": "Was ist im Bild sichtbar?"},
+        {"role": "assistant", "content": "Ein grüner Baum auf einer Wiese."},
+    ]
+    monkeypatch.setattr(
+        api_module.rag.sessions,
+        "get_session_history",
+        lambda session_id, owner=None: seeded_history,
+    )
+
+    seen: dict[str, Any] = {}
+
+    def record_stream_chat(
+        user_msg: str,
+        *,
+        prior_turn: Any = None,
+        skip_query_rewrite: Any = None,
+        **kwargs: Any,
+    ) -> Generator[str | dict[str, Any], None, None]:
+        seen["user_msg"] = user_msg
+        seen["prior_turn"] = prior_turn
+        seen["skip_query_rewrite"] = skip_query_rewrite
+        yield "tok"
+        yield {"response": "answer", "sources": [], "session_id": "generated-session"}
+
+    monkeypatch.setattr(api_module.rag, "stream_chat", record_stream_chat)
+
+    with client.stream("POST", "/stream_query", json={"question": "Enthält es Menschen?"}) as resp:
+        assert resp.status_code == 200
+        list(resp.iter_lines())
+
+    # The raw user message reaches stream_chat (the internal rewrite still runs there).
+    assert seen["user_msg"] == "Enthält es Menschen?"
+    assert seen["skip_query_rewrite"] is False
+    assert isinstance(seen["prior_turn"], PriorTurn)
+    assert seen["prior_turn"].user_text == "Was ist im Bild sichtbar?"
+    assert seen["prior_turn"].assistant_text == "Ein grüner Baum auf einer Wiese."
+
+
+def test_agent_chat_history_is_owner_scoped_on_both_endpoints(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Both agent endpoints load session history scoped to the resolved principal.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    owners: list[str | None] = []
+
+    def record_history(session_id: str, owner: str | None = None) -> list[dict[str, str]]:
+        owners.append(owner)
+        return [{"role": "user", "content": "hi"}]
+
+    monkeypatch.setattr(api_module.rag.sessions, "get_session_history", record_history)
+
+    class _StubOrchestrator:
+        def handle_turn(self, turn: Any, context: Any = None) -> OrchestratorResult:
+            _ = turn, context
+            analysis = IntentAnalysis(intent="qa", confidence=0.9, entities={"query": "hi"})
+            retrieval = RetrievalResult(answer="a", sources=[], session_id="generated-session")
+            return OrchestratorResult(clarification=None, retrieval=retrieval, analysis=analysis)
+
+    monkeypatch.setattr(api_module, "_build_orchestrator", lambda: _StubOrchestrator())
+    resp1 = client.post("/agent/chat", json={"message": "hi"})
+    assert resp1.status_code == 200
+
+    monkeypatch.setattr(
+        api_module,
+        "_clarification_policy",
+        api_module.ClarificationPolicy(api_module.ClarificationConfig(confidence_threshold=1.0, require_entities=True)),
+    )
+    with client.stream("POST", "/agent/chat/stream", json={"message": "hi"}) as resp2:
+        assert resp2.status_code == 200
+        list(resp2.iter_lines())
+
+    assert owners == ["operator", "operator"]
+
+
+def test_select_understanding_agent_falls_back_to_simple_without_llm(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Without a configured LLM, the shared selector returns the module-level simple agent."""
+    monkeypatch.setattr(api_module.rag, "text_model_id", None, raising=False)
+    assert api_module._select_understanding_agent() is api_module._understanding_agent
+
+
+def test_select_understanding_agent_prefers_contextual_when_llm_configured(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """With an LLM configured, the selector returns the history-aware contextual agent."""
+    monkeypatch.setattr(api_module.rag, "text_model_id", "test-model", raising=False)
+    monkeypatch.setattr(api_module.rag, "text_model", object(), raising=False)
+    assert isinstance(api_module._select_understanding_agent(), ContextualUnderstandingAgent)
 
 
 def test_query_stateless_mode_skips_session_chat(client: TestClient) -> None:

@@ -43,10 +43,17 @@ class _StubRetrievalAgent(RetrievalAgent):
             request: The retrieval request from the orchestrator.
 
         Returns:
-            A canned ``RetrievalResult``.
+            A canned ``RetrievalResult`` long enough to clear weak-answer detection.
         """
         self.called_with = request
-        return RetrievalResult(answer="ok", sources=[{"id": 1}], session_id="s1")
+        return RetrievalResult(
+            answer=(
+                "This is a substantive stub answer for the retrieval agent — "
+                "long enough to clear the weak-answer threshold."
+            ),
+            sources=[{"id": 1}],
+            session_id="s1",
+        )
 
 
 class _StubResponseAgent(ResponseAgent):
@@ -160,7 +167,7 @@ def test_orchestrator_retrieves_when_confident(turn: Turn) -> None:
 
     assert result.clarification is None
     assert result.retrieval is not None
-    assert result.retrieval.answer == "ok"
+    assert "substantive stub answer" in (result.retrieval.answer or "")
     assert retriever.called_with is not None
     assert retriever.called_with.turn is turn
 
@@ -184,3 +191,144 @@ def test_orchestrator_runs_response_agent(turn: Turn) -> None:
     assert result.retrieval.validation_checked is True
     assert result.retrieval.validation_mismatch is True
     assert result.retrieval.validation_reason == "mismatch"
+
+
+class _WeakAnswerRetrievalAgent(RetrievalAgent):
+    """Retrieval agent that returns a degenerate ``"Evidence insufficient."`` answer."""
+
+    def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
+        """Return a refusal-shaped answer to exercise the fallback path.
+
+        Args:
+            request: The retrieval request from the orchestrator.
+
+        Returns:
+            A canned weak ``RetrievalResult``.
+        """
+        _ = request
+        return RetrievalResult(
+            answer="Evidence insufficient.",
+            sources=[],
+            session_id="s1",
+        )
+
+
+class _MismatchResponseAgent(ResponseAgent):
+    """Response agent that flags ``validation_mismatch=True``."""
+
+    def finalize(self, result: RetrievalResult, turn: TurnType) -> RetrievalResult:
+        """Set mismatch metadata on the result.
+
+        Args:
+            result: The retrieval result to annotate.
+            turn: The current conversation turn (unused).
+
+        Returns:
+            The annotated retrieval result.
+        """
+        _ = turn
+        result.validation_checked = True
+        result.validation_mismatch = True
+        result.validation_reason = "no UN content in sources"
+        return result
+
+
+def test_orchestrator_falls_back_to_clarification_on_weak_mismatched_answer(
+    turn: Turn,
+) -> None:
+    """A weak answer with validation_mismatch=True should convert to a clarification."""
+    orchestrator = AgentOrchestrator(
+        understanding=SimpleUnderstandingAgent(default_confidence=0.9),
+        clarifier=_NoopClarifier(),
+        retriever=_WeakAnswerRetrievalAgent(),
+        responder=_MismatchResponseAgent(),
+        policy=_NeverClarifyPolicy(),
+    )
+
+    result = orchestrator.handle_turn(turn)
+
+    assert result.clarification is not None
+    assert result.clarification.needed is True
+    assert result.clarification.reason == "weak_answer_after_validation_mismatch"
+    assert result.retrieval is None
+
+
+def test_orchestrator_keeps_strong_answer_even_with_mismatch(turn: Turn) -> None:
+    """A long, substantive answer should be returned even when validator flags mismatch.
+
+    The fallback is gated on BOTH ``validation_mismatch=True`` AND a weak
+    answer signal (short text or refusal phrase). The default
+    ``_StubRetrievalAgent`` returns ``answer="ok"`` (3 chars) which IS weak;
+    use a richer stub here to assert the strong-answer path is preserved.
+    """
+
+    class _StrongRetriever(RetrievalAgent):
+        def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
+            _ = request
+            return RetrievalResult(
+                answer=(
+                    "Hamas's stance is described as oppositional toward Jews "
+                    "and Christians, with multiple cited passages spanning "
+                    "pages 13 and 67 of the source corpus."
+                ),
+                sources=[{"id": 1}],
+                session_id="s1",
+            )
+
+    orchestrator = AgentOrchestrator(
+        understanding=SimpleUnderstandingAgent(default_confidence=0.9),
+        clarifier=_NoopClarifier(),
+        retriever=_StrongRetriever(),
+        responder=_MismatchResponseAgent(),
+        policy=_NeverClarifyPolicy(),
+    )
+
+    result = orchestrator.handle_turn(turn)
+
+    assert result.clarification is None
+    assert result.retrieval is not None
+    assert result.retrieval.validation_mismatch is True
+
+
+def test_orchestrator_respects_max_clarifications_for_fallback(turn: Turn) -> None:
+    """Once max_clarifications is reached, the weak result is returned as-is."""
+    from docint.agents.context import TurnContext
+
+    orchestrator = AgentOrchestrator(
+        understanding=SimpleUnderstandingAgent(default_confidence=0.9),
+        clarifier=_NoopClarifier(),
+        retriever=_WeakAnswerRetrievalAgent(),
+        responder=_MismatchResponseAgent(),
+        policy=_NeverClarifyPolicy(),
+    )
+
+    # The default ClarificationConfig.max_clarifications is 2; saturate it.
+    ctx = TurnContext(session_id=turn.session_id, clarifications=2)
+    result = orchestrator.handle_turn(turn, context=ctx)
+
+    assert result.clarification is None
+    assert result.retrieval is not None
+    assert result.retrieval.answer == "Evidence insufficient."
+
+
+def test_orchestrator_forwards_history_into_retrieval_request(turn: Turn) -> None:
+    """``TurnContext.history`` must reach the retrieval agent via ``RetrievalRequest.history``."""
+    from docint.agents.context import TurnContext
+
+    retriever = _StubRetrievalAgent()
+    orchestrator = AgentOrchestrator(
+        understanding=SimpleUnderstandingAgent(default_confidence=0.9),
+        clarifier=_NoopClarifier(),
+        retriever=retriever,
+        policy=_NeverClarifyPolicy(),
+    )
+
+    history = [
+        {"role": "user", "content": "prior question"},
+        {"role": "assistant", "content": "prior answer"},
+    ]
+    ctx = TurnContext(session_id=turn.session_id, history=history)
+    orchestrator.handle_turn(turn, context=ctx)
+
+    assert retriever.called_with is not None
+    assert retriever.called_with.history == history

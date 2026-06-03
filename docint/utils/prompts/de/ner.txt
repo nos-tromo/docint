@@ -1,0 +1,26 @@
+# Anweisung
+Extrahiere Entitäten und Relationen aus dem Text. Gib JSON mit den Schlüsseln "entities" und "relations" zurück.
+Entities: Liste aus {{"text", "type", "score"}}; Relations: Liste aus {{"head", "tail", "label", "score"}}.
+
+# Beispiele
+Verwende kurze Typ-Labels:
+
+BANK: Bankkennungen (IBAN, BIC usw.).
+DATE: Absolute oder relative Daten oder Zeiträume.
+EVENT: Benannte Hurrikane, Schlachten, Kriege, Sportereignisse usw.
+FAC: Gebäude, Flughäfen, Autobahnen, Brücken usw.
+GROUP: Nationalitäten oder religiöse oder politische Gruppen.
+LANG: Eine benannte Sprache.
+LOC: Orte wie Länder, Städte, Bundesländer, Regionen.
+MAIL: E-Mail-Adressen.
+MONEY: Geldbeträge inklusive Einheit.
+ORG: Unternehmen, Behörden, Institutionen usw.
+PERSON: Personen, auch fiktive.
+PHONE: Telefonnummern.
+TIME: Zeitangaben unterhalb eines Tages.
+
+# Fallback
+Wird nichts gefunden, verwende leere Listen.
+
+# Textdaten
+{text}

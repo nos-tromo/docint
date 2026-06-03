@@ -100,4 +100,36 @@ describe('Sidebar collection selection', () => {
     expect(badge).toHaveTextContent(/active/i)
     expect(badge).toHaveTextContent('alpha')
   })
+
+  it('shows an actionable error when the sessions list requires a principal', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+        const path = typeof input === 'string' ? input : input.toString()
+        if (path.includes('/collections/list')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ['alpha'],
+            text: async () => '["alpha"]'
+          }
+        }
+        if (path.includes('/sessions/list')) {
+          return {
+            ok: false,
+            status: 401,
+            json: async () => ({ detail: 'Missing authenticated principal.' }),
+            text: async () => '{"detail":"Missing authenticated principal."}'
+          }
+        }
+        return { ok: true, status: 200, json: async () => null, text: async () => 'null' }
+      })
+    )
+
+    renderSidebar()
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/DOCINT_DEFAULT_IDENTITY/i)
+    expect(alert).toHaveTextContent(/authenticated user/i)
+  })
 })

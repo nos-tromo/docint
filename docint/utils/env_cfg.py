@@ -377,6 +377,40 @@ def load_hate_speech_env(
     )
 
 
+SUPPORTED_LANGUAGES: tuple[str, ...] = ("en", "de")
+
+
+@dataclass(frozen=True)
+class LanguageConfig:
+    """Dataclass for response-language configuration."""
+
+    code: Literal["en", "de"]
+
+
+def load_language_env(default: str = "en") -> LanguageConfig:
+    """Load the response-language setting from the ``RESPONSE_LANGUAGE`` env var.
+
+    Controls which locale subdirectory of the prompts tree is used and which
+    set of user-facing UI strings is selected. Unknown values fall back
+    silently to ``default`` so a typo cannot break the bring-up of the app.
+
+    Args:
+        default (str): Language code used when ``RESPONSE_LANGUAGE`` is unset
+            or unrecognised. Defaults to ``"en"``.
+
+    Returns:
+        LanguageConfig: Parsed language configuration.
+    """
+    raw = os.getenv("RESPONSE_LANGUAGE")
+    candidate = (raw if raw is not None else default).strip().lower()
+    if candidate not in SUPPORTED_LANGUAGES:
+        candidate = default.strip().lower()
+        if candidate not in SUPPORTED_LANGUAGES:
+            candidate = "en"
+    code: Literal["en", "de"] = "de" if candidate == "de" else "en"
+    return LanguageConfig(code=code)
+
+
 @dataclass(frozen=True)
 class HostConfig:
     """Dataclass for host configuration."""
@@ -902,6 +936,84 @@ def load_ner_client_env(
         api_key=api_key,
         threshold=float(os.getenv("NER_THRESHOLD", default_threshold)),
         timeout=float(os.getenv("NER_TIMEOUT", default_timeout)),
+    )
+
+
+@dataclass(frozen=True)
+class ResolutionConfig:
+    """Dataclass for entity-resolution clustering parameters.
+
+    Mirrors the chorus resolution stage so the two apps share one operator
+    vocabulary (``RES_*`` env vars). Consumed by the batch ``resolve`` step
+    (see :mod:`docint.core.entities.resolution`) that merges
+    semantically-equivalent named entities into durable canonical records
+    before they surface in the NER analytics views.
+    """
+
+    embed_cluster_threshold: float
+    llm_tiebreak_enabled: bool
+    case_normalize: bool
+    vector_k: int
+
+
+def load_resolution_env(
+    default_embed_cluster_threshold: float = 0.86,
+    default_llm_tiebreak_enabled: bool = True,
+    default_case_normalize: bool = True,
+    default_vector_k: int = 5,
+) -> ResolutionConfig:
+    """Load entity-resolution configuration from environment variables.
+
+    Args:
+        default_embed_cluster_threshold (float): Minimum cosine similarity
+            for a stored entity to count as a merge candidate.
+        default_llm_tiebreak_enabled (bool): Whether to ask the chat LLM to
+            disambiguate when more than one candidate clears the threshold.
+        default_case_normalize (bool): Whether surface forms are casefolded
+            before the in-run clustering cache key is built.
+        default_vector_k (int): Number of nearest candidates fetched from the
+            entity vector index per surface form.
+
+    Returns:
+        ResolutionConfig: Resolved configuration.
+
+        - ``embed_cluster_threshold`` (float): Cosine cutoff in ``[0, 1]``.
+        - ``llm_tiebreak_enabled`` (bool): LLM tie-break toggle.
+        - ``case_normalize`` (bool): Casefold toggle for the in-run cache key.
+        - ``vector_k`` (int): Candidate fan-out per surface form.
+
+    Raises:
+        ValueError: When ``RES_EMBED_THRESHOLD`` is not a float in ``[0, 1]``
+            or ``RES_VECTOR_K`` is not an integer in ``[1, 100]``.
+    """
+    raw_threshold = os.getenv("RES_EMBED_THRESHOLD")
+    if raw_threshold is not None and raw_threshold.strip():
+        try:
+            embed_cluster_threshold = float(raw_threshold)
+        except ValueError as exc:
+            raise ValueError(f"RES_EMBED_THRESHOLD must be a float, got {raw_threshold!r}") from exc
+    else:
+        embed_cluster_threshold = float(default_embed_cluster_threshold)
+    if not (0.0 <= embed_cluster_threshold <= 1.0):
+        raise ValueError(f"RES_EMBED_THRESHOLD={embed_cluster_threshold!r} is out of range — must be within [0, 1].")
+
+    raw_vector_k = os.getenv("RES_VECTOR_K")
+    if raw_vector_k is not None and raw_vector_k.strip():
+        try:
+            vector_k = int(raw_vector_k)
+        except ValueError as exc:
+            raise ValueError(f"RES_VECTOR_K must be an integer, got {raw_vector_k!r}") from exc
+    else:
+        vector_k = int(default_vector_k)
+    if not (1 <= vector_k <= 100):
+        raise ValueError(f"RES_VECTOR_K={vector_k!r} is out of range — must be between 1 and 100.")
+
+    return ResolutionConfig(
+        embed_cluster_threshold=embed_cluster_threshold,
+        llm_tiebreak_enabled=str(os.getenv("RES_LLM_TIEBREAK", default_llm_tiebreak_enabled)).lower()
+        in {"true", "1", "yes"},
+        case_normalize=str(os.getenv("RES_CASE_NORMALIZE", default_case_normalize)).lower() in {"true", "1", "yes"},
+        vector_k=vector_k,
     )
 
 

@@ -80,6 +80,13 @@ and chat. It ships with:
 - Session persistence uses one SQLite file path. Set `SESSIONS_DB_PATH` for
   the normal case or `SESSION_STORE` if you want to supply a full SQLAlchemy
   database URL.
+- The React SPA does not add an authenticated user header by itself. For
+   single-user Docker or local setups, set `DOCINT_DEFAULT_IDENTITY` in `.env`
+   so session-backed chat and `/sessions/list` share one owner. If you run
+   behind a trusted proxy that injects a user header, set
+   `DOCINT_AUTH_HEADER` to that header name instead. Existing legacy sessions
+   with `owner = NULL` are backfilled to `DOCINT_DEFAULT_IDENTITY` when the
+   backend initializes the session store.
 
 ### Shared Docker Volumes
 
@@ -150,6 +157,23 @@ Query data:
 
 ```bash
 uv run query --help
+```
+
+Resolve entities — merge duplicate and semantically-similar named entities
+(e.g. `USA`/`United States`) for a collection into durable canonical records.
+Re-runnable and idempotent; results surface in the NER views under
+`entity_merge_mode=resolved`. Tuned by `RES_EMBED_THRESHOLD` (0.86),
+`RES_LLM_TIEBREAK` (true), `RES_CASE_NORMALIZE` (true), `RES_VECTOR_K` (5):
+
+Runs in a one-off `backend` container (production is Docker-only), so it
+reaches the `qdrant` / `vllm-router` network aliases — bring up data-plane and
+vllm-service first.
+
+```bash
+make resolve                    # prompts for the collection name
+make resolve COLLECTION=mydocs  # non-interactive
+# or over HTTP, on the selected collection:
+# curl -X POST http://localhost:8000/collections/entities/resolve
 ```
 
 Verify that a collection's Qdrant vector store and SQLite KV docstore

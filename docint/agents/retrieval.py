@@ -3,7 +3,12 @@
 import time
 from typing import TYPE_CHECKING, Any
 
-from docint.agents.types import RetrievalAgent, RetrievalRequest, RetrievalResult
+from docint.agents.history import build_prior_turn
+from docint.agents.types import (
+    RetrievalAgent,
+    RetrievalRequest,
+    RetrievalResult,
+)
 
 if TYPE_CHECKING:
     from docint.core.rag import RAG
@@ -69,7 +74,8 @@ class RAGRetrievalAgent(RetrievalAgent):
             )
 
         query_text = analysis.rewritten_query or turn.user_input
-        data = self.rag.chat(query_text)
+        prior_turn = build_prior_turn(request.history)
+        data = self.rag.chat(query_text, prior_turn=prior_turn)
         latency = (time.monotonic() - start) * 1000
 
         answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""

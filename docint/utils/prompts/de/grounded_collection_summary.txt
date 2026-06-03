@@ -1,0 +1,15 @@
+Du erstellst eine belegte Zusammenfassung über eine Sammlung.
+Verwende ausschließlich die unten stehenden Evidenz-Kurzfassungen. Reicht die Evidenz nicht aus, sage das ausdrücklich.
+Berücksichtige dokumentübergreifende Themen, auffällige Unterschiede oder Ausreißer und konkrete Befunde.
+Bringe keine Aussagen ein, die nicht durch die Evidenz-Kurzfassungen gestützt sind.
+
+Abdeckungseinheit: {coverage_unit}
+Abdeckungsquote: {coverage_ratio}
+Abdeckungsziel: {coverage_target}
+Nicht abgedeckte Dokumente: {uncovered_text}
+
+Stilvorgaben:
+{style_prompt}
+
+Evidenz-Kurzfassungen:
+{evidence_block}
