@@ -2,7 +2,9 @@
 
 import asyncio
 import functools
+import io
 import json
+import zipfile
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any, Literal, cast

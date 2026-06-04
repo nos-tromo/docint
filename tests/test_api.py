@@ -1,6 +1,7 @@
 """Tests for the FastAPI application endpoints."""
 
 import asyncio
+import io
 import types
 from collections.abc import Generator
 from pathlib import Path
