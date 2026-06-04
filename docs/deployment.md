@@ -1,58 +1,51 @@
 # Deployment
 
 Docint ships its Docker assets under `docker/`: a base `compose.yaml`, a
-`compose.override.yaml` dev overlay, and three Dockerfiles covering CPU
-and CUDA backends plus a dedicated frontend image. This document
-explains the profiles, services, volumes, and networks, and the two
-supported co-deployment patterns with external inference services.
+`compose.override.yaml` dev overlay, and two Dockerfiles — a CPU-only
+backend image and a React-SPA frontend image. Docint is **CPU-only**: all
+ML inference (chat, embeddings, rerank, NER, CLIP) is delegated over HTTP
+to the external `vllm-service` stack, so there is no GPU code, no CUDA
+image, and no profile toggle. This document explains the services,
+volumes, and networks, and the two supported co-deployment patterns with
+external inference services.
 
 ## Files
 
 | File | Role |
 |---|---|
-| `docker/compose.yaml` | Services, profiles, volumes, networks — production shape, no host ports published. |
-| `docker/compose.override.yaml` | Dev overlay that publishes host ports; layered automatically by `make up`. |
-| `docker/Dockerfile.backend.cpu` | Multi-stage backend image with CPU PyTorch. |
-| `docker/Dockerfile.backend.cuda` | Multi-stage backend image with CUDA PyTorch. |
-| `docker/Dockerfile.frontend` | Lightweight Streamlit image. |
+| `docker/compose.yaml` | Services, volumes, networks — production shape, no host ports published. |
+| `docker/compose.override.yaml` | Dev overlay that publishes the frontend port; layered by `make up-dev` (not `make up`). |
+| `docker/Dockerfile.backend` | CPU-only backend image — a `uv`-assembled virtualenv on the `uv` Python base. |
+| `docker/Dockerfile.frontend` | React SPA built with pnpm and served by nginx. |
 | `.dockerignore` | Build-context excludes; stays at the repo root so it applies to every image build. |
 | `scripts/create_docker_volumes.sh` | Creates the external cache and state volumes (idempotent). |
-| `scripts/bundle_images.sh` | Builds and packages versioned image tarballs for offline distribution. |
-| `Makefile` | The blessed entry point — convenience targets wrapping the above (`make network`, `make volumes`, `make build`, `make up`, `make stop`, `make bundle`). |
+| `scripts/bundle_images.sh` | Builds and packages a versioned image tarball for offline distribution. |
+| `Makefile` | The blessed entry point — convenience targets wrapping the above (`make network`, `volumes`, `build`, `up`, `up-dev`, `bundle`, `stop`, `down`, `resolve`). |
 | `.env.example` | Canonical `.env` template. |
 
 The `Makefile` is the entry point for every Docker workflow: it points
 `docker compose` at `docker/compose.yaml` for you. A bare `docker compose`
 run from the repo root no longer finds the compose file. When a raw
 command is needed, the equivalent form is `docker compose --env-file .env
--f docker/compose.yaml [-f docker/compose.override.yaml] [--profile <p>]
-<cmd>`.
+-f docker/compose.yaml [-f docker/compose.override.yaml] <cmd>`.
 
-## Profiles
+## Running the stack
 
-`docker/compose.yaml` uses Compose profiles to select the backend and
-frontend hardware variant.
-
-| Profile | Services enabled |
-|---|---|
-| `cpu`  | `backend-cpu`, `frontend-cpu`   |
-| `cuda` | `backend-cuda`, `frontend-cuda` |
-
-The profile is read from `PROFILE` in `.env` (default `cpu`), so the
-`make` targets follow the host's hardware. Override per-invocation on
-the command line:
+Docint builds a single CPU-only backend image and a single frontend
+image — there is no `cpu`/`cuda` profile and no `PROFILE` toggle (all ML
+inference is remote; see `CLAUDE.md`). The two `make` targets differ only
+in whether host ports are published:
 
 ```bash
-make up               # uses PROFILE from .env
-make up PROFILE=cuda  # override
+make up        # production shape — docker/compose.yaml alone, no host ports
+make up-dev    # layers compose.override.yaml; serves the React SPA on
+               # http://localhost:${DOCINT_HOST_PORT:-8080}
 ```
 
-`make up` builds and runs the active profile, layering
-`docker/compose.override.yaml` so host ports are published for local
-development. The underlying invocation is `docker compose --env-file .env
--f docker/compose.yaml -f docker/compose.override.yaml --profile
-<cpu|cuda> up`. The base `docker/compose.yaml` on its own is the
-production shape and publishes no host ports.
+`make up` runs the base `docker/compose.yaml`, which publishes no host
+ports — the backend is reachable only in-network and the SPA only through
+the nginx sidecar. `make up-dev` layers `docker/compose.override.yaml` so
+the frontend port is published for local development.
 
 > Qdrant is **not** part of this compose project. It is owned by the
 > sibling `data-plane` project (`../data-plane/`), which runs Neo4j and
@@ -62,45 +55,45 @@ production shape and publishes no host ports.
 
 ## Services
 
-### `backend-cpu` / `backend-cuda`
+### `backend`
 
-- Build from `docker/Dockerfile.backend.cpu` or
-  `docker/Dockerfile.backend.cuda`.
-- Publish port `8000`.
-- Share the same volume set via the `x-backend-cpu` YAML anchor.
-- Receive the following environment variables at runtime (on top of
-  whatever is in `.env`):
+- Built from `docker/Dockerfile.backend` (CPU-only; `uv`-assembled venv).
+- Exposes port `8000` on the compose networks — not host-published.
+- Receives the following environment variables from the compose file (on
+  top of whatever is in `.env`):
 
   | Variable | Value |
   |---|---|
-  | `LOG_PATH` | `/var/log/docint/backend-{cpu|cuda}.log` |
   | `QDRANT_HOST` | `http://qdrant:6333` |
   | `QDRANT_SRC_DIR` | `/var/lib/docint/sources` |
   | `SESSIONS_DB_PATH` | `/var/lib/docint/sessions/sessions.sqlite3` |
-  | `USE_DEVICE` | `cpu` on the CPU profile, `auto` on CUDA |
-  | `NVIDIA_VISIBLE_DEVICES` (CUDA) | `all` |
+  | `NO_PROXY` / `no_proxy` | `backend,qdrant,localhost,127.0.0.1,172.16.0.0/12,10.0.0.0/8` (plus `EXTRA_NO_PROXY`) |
 
-- The CUDA variant also declares `deploy.resources.reservations.devices`
-  for NVIDIA GPUs and requires the NVIDIA Container Toolkit on the host.
-- Both services attach to the `docint-net` network, to `inference-net`
-  with the alias `docint-backend` so co-deployed services can reach
-  them, and to `data-net` so they can reach the `data-plane` project's
-  Qdrant at `http://qdrant:6333`.
+- Mounts the `docling-cache`, `huggingface-cache`, `sessions-storage`, and
+  `source-preview-cache` volumes.
+- Attaches to the `docint-net` network, to `inference-net` with the alias
+  `docint-backend` (to reach the vLLM router), and to `data-net` with the
+  alias `docint-backend` (to reach the `data-plane` project's Qdrant at
+  `http://qdrant:6333`).
+- Set `PRELOAD_MODELS=true` to run `load-models` at container start before
+  `uvicorn` (warms the HF / Docling caches); otherwise it starts `uvicorn`
+  directly.
 
-### `frontend-cpu` / `frontend-cuda`
+### `frontend`
 
-- Built from `docker/Dockerfile.frontend` (Streamlit + `loguru`, `pandas`,
-  `requests`).
-- Runs `streamlit run docint/app.py --server.address 0.0.0.0` on
-  port `8501` (host port configurable via `DOCINT_HOST_PORT`).
-- Environment: `BACKEND_HOST=http://backend:8000`,
-  `BACKEND_PUBLIC_HOST=http://localhost:8000`,
-  `STREAMLIT_BROWSER_GATHER_USAGE_STATS=false`,
-  `LOG_PATH=/var/log/docint/frontend.log`.
-- Mounts the `docint-logs` volume.
-- Attaches to `docint-net` only.
-- `depends_on` the matching backend (`backend-cpu` / `backend-cuda`),
-  so Compose starts the backend container first.
+- Built from `docker/Dockerfile.frontend`: a multi-stage build that
+  compiles the React SPA with pnpm (`node:20-alpine`) and serves the
+  static bundle via nginx (`nginx:1.27-alpine`) on container port `80`.
+- nginx reverse-proxies API routes to the backend at `backend:8000` over
+  `docint-net`, so the backend is never host-published — in dev the SPA is
+  the only host-exposed surface.
+- The host port is published only by the dev overlay:
+  `compose.override.yaml` maps `${DOCINT_HOST_PORT:-8080}:80`, so
+  `make up-dev` serves the UI at `http://localhost:8080`.
+- Environment: `DOCINT_CLIENT_MAX_BODY_SIZE` (default `1g`) — the nginx
+  upload-size cap.
+- Attaches to `docint-net` only, and `depends_on` the `backend` so Compose
+  starts the backend container first.
 
 ## Vector store: the `data-plane` project
 
@@ -131,7 +124,6 @@ destroyed by `docker compose down -v`. The helper script
 
 | Volume | Scope | Purpose |
 |---|---|---|
-| `docint-logs` | internal | Shared log directory (`/var/log/docint`). |
 | `docling-cache` | external | Docling model cache. |
 | `huggingface-cache` | external | HF Hub cache (embedding, reranker, NER, image models). |
 | `ollama-cache` | external | Ollama model cache, used when Ollama is co-deployed. |
@@ -140,8 +132,8 @@ destroyed by `docker compose down -v`. The helper script
 
 ## Networks
 
-- `docint-net` — internal bridge network shared by `backend-*` and
-  `frontend-*`.
+- `docint-net` — internal bridge network shared by `backend` and
+  `frontend`.
 - `inference-net` — **external** network declared with
   `name: ${INFERENCE_NET:-inference-net}`. The backend attaches to it
   with the alias `docint-backend` and reaches the vLLM router over it.
@@ -161,57 +153,60 @@ docker network create data-net
 
 ## Dockerfiles
 
-### `docker/Dockerfile.backend.cpu` / `docker/Dockerfile.backend.cuda`
+### `docker/Dockerfile.backend`
 
-Multi-stage builds:
+Multi-stage build, CPU-only:
 
-1. **Builder stage** — starts from
-   `${PYTHON_SLIM_BOOKWORM_IMAGE:-python:3.11.12-slim-bookworm}` (or
-   `${NVIDIA_CUDA_RUNTIME_IMAGE}` for the CUDA variant), installs
-   system dependencies (`libmagic1`, `libgl1`), copies
-   `pyproject.toml` / `uv.lock`, and runs `uv sync` with the matching
-   extra.
-2. **Runtime stage** — copies the resolved virtualenv, copies the app
-   source, and sets `CMD` to
+1. **Builder stage** — starts from the `uv` base image pinned by the
+   `UV_IMAGE` build arg (default `ghcr.io/astral-sh/uv:…-python3.11-…`),
+   installs build dependencies (`build-essential`, `python3-dev`,
+   `zlib1g-dev`), and assembles the virtualenv with `uv sync --locked`
+   from `pyproject.toml` / `uv.lock`.
+2. **Runtime stage** — starts from the same `uv` base, installs only the
+   runtime libraries (`libmagic1`, `libgl1`), copies the prebuilt
+   virtualenv and app source, exposes `8000`, and sets the entrypoint to
    `uvicorn docint.core.api:app --host 0.0.0.0 --port 8000`.
-3. **Optional model preload** — when `PRELOAD_MODELS=true` is passed
-   as a build arg, the builder runs `uv run load-models` so the final
-   image embeds the HF / Docling caches.
+3. **Optional model preload** — the entrypoint runs `load-models` before
+   `uvicorn` when `PRELOAD_MODELS=true` is set at runtime, warming the
+   HF / Docling caches on first start.
 
 ### `docker/Dockerfile.frontend`
 
-Single-stage image that installs a minimal Streamlit runtime
-(`streamlit`, `loguru`, `pandas`, `requests`, `python-dotenv`). It is
-much smaller than the backend images and does not carry any ML
-dependencies.
+Multi-stage build: compiles the React SPA with pnpm on `node:20-alpine`,
+then serves the static bundle via `nginx:1.27-alpine` on port `80`. nginx
+also reverse-proxies API routes to the backend and honors
+`DOCINT_CLIENT_MAX_BODY_SIZE` for the upload-size limit. The image carries
+no Python or ML dependencies.
 
 ## Environment configuration
 
-All services share `.env` at the repository root via
-`env_file: - .env`. Put provider-specific settings there:
+`.env` at the repository root feeds both Compose variable interpolation
+(via `--env-file`) and the backend container (`env_file: ../.env`). Put
+provider-specific settings there:
 
 ```bash
 INFERENCE_PROVIDER=vllm
-OPENAI_API_BASE=http://vllm-router:9000/v1
+OPENAI_API_BASE=http://vllm-router:4000/v1
 OPENAI_API_KEY=sk-no-key-required
 TEXT_MODEL=Qwen/Qwen3.5-2B
 ```
 
 See [configuration.md](configuration.md) for every variable. A handful
-of image / proxy overrides are Compose-specific:
+of network, proxy, and runtime overrides are Compose-specific:
 
 | Variable | Purpose |
 |---|---|
-| `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` (and lowercase variants) | Forwarded into image builds and runtime containers through the `x-proxy-build-args` anchor. |
-| `PYTHON_SLIM_BOOKWORM_IMAGE` | Override the Python base image. |
-| `NVIDIA_CUDA_RUNTIME_IMAGE` | Override the CUDA base image. |
-| `INFERENCE_NET` | Name of the shared external network. |
-| `USE_DEVICE` | Forced to `cpu` on the CPU profile; defaults to `auto` on CUDA. |
+| `EXTRA_NO_PROXY` | Comma-separated hostnames appended to the backend's `NO_PROXY` / `no_proxy` (must start with a leading comma). |
+| `INFERENCE_NET` | Name of the shared external inference network (default `inference-net`). |
+| `DATA_NET` | Name of the shared external data network (default `data-net`). |
+| `DOCINT_HOST_PORT` | Host port for the React SPA under `make up-dev` (default `8080`). |
+| `DOCINT_CLIENT_MAX_BODY_SIZE` | nginx upload-size cap on the frontend (default `1g`). |
+| `PRELOAD_MODELS` | When `true`, the backend runs `load-models` at startup before `uvicorn`. |
 
 ## Session persistence
 
-Docker profiles default `SESSIONS_DB_PATH` to
-`/var/lib/docint/sessions/sessions.sqlite3` and mount the
+The backend defaults `SESSIONS_DB_PATH` to
+`/var/lib/docint/sessions/sessions.sqlite3` and mounts the
 `sessions-storage` volume over it. Override with `SESSION_STORE` in
 `.env` to point at a different SQLAlchemy URL (for example, a PostgreSQL
 instance) — this wins over `SESSIONS_DB_PATH` when both are set.
@@ -234,7 +229,7 @@ To run both on a single host with a shared network:
 
    ```bash
    INFERENCE_PROVIDER=vllm
-   OPENAI_API_BASE=http://vllm-router:9000/v1
+   OPENAI_API_BASE=http://vllm-router:4000/v1
    OPENAI_API_KEY=sk-no-key-required
    TEXT_MODEL=Qwen/Qwen3.5-2B
    VISION_MODEL=Qwen/Qwen3.5-2B
@@ -248,7 +243,7 @@ To run both on a single host with a shared network:
 
    ```bash
    make build
-   make up PROFILE=cuda
+   make up
    ```
 
 For a remote vLLM router, drop `INFERENCE_NET` and point
@@ -324,23 +319,21 @@ copy it across with the `docker/` directory and `.env`.
 
 ### Producing the bundle
 
-`make bundle` wraps build → pull → re-tag → save for the active profile:
+`make bundle` wraps build → save:
 
 ```bash
-make bundle               # uses PROFILE from .env
-make bundle PROFILE=cuda  # override
+make bundle
 ```
 
-The underlying script is `./scripts/bundle_images.sh <profile>`.
+The underlying script is `./scripts/bundle_images.sh`.
 
 This computes `DOCINT_VERSION` as `YYYY-MM-DD-<short-sha>` (override by
 exporting it before invocation), tags the buildable services with that
-version, then writes the gzipped tarballs:
+version, then writes the gzipped tarball:
 
 | File | Contents |
 |---|---|
-| `docint-built-<profile>-<version>.tar.gz` | Locally-built `docint-backend-*` and `docint-frontend-*` images. |
-| `docint-pulled-<profile>-<version>.tar.gz` | Externally-hosted images, re-tagged so the `name:tag@digest` references in `docker/compose.yaml` resolve after `docker load`. Only written when the compose project has registry-only images — docint's no longer does (Qdrant moved to the `data-plane` project), so on a standard build this file is omitted. |
+| `docint-built-<version>.tar.gz` | Locally-built `docint-backend` and `docint-frontend` images — the only tarball `make bundle` produces. Stateful/remote images (Qdrant) live in the `data-plane` project and ship with its bundle, not this one. |
 
 The compose file references the version through
 `image: docint-<service>:${DOCINT_VERSION:-latest}`. The `Makefile`
@@ -352,21 +345,19 @@ exported.
 
 ### Loading and running the bundle
 
-Ship the tarball(s) produced above, the matching `docker/` directory,
+Ship the tarball produced above, the matching `docker/` directory,
 and a `.env` file to the target host. Then:
 
 ```bash
-docker load -i docint-built-cpu-<version>.tar.gz
-# only if a pulled tarball was produced:
-docker load -i docint-pulled-cpu-<version>.tar.gz
+docker load -i docint-built-<version>.tar.gz
 export DOCINT_VERSION=<version>
-docker compose --env-file .env -f docker/compose.yaml --profile cpu up --no-build
+docker compose --env-file .env -f docker/compose.yaml up --no-build
 ```
 
 The bundle target host runs the production shape — `docker/compose.yaml`
 without the dev override — so no host ports are published.
 
-The version is embedded in the tarball filenames, so the operator just
+The version is embedded in the tarball filename, so the operator just
 reads it off the file. Verify with `docker images | grep docint` before
 `up`.
 
@@ -380,15 +371,16 @@ reads it off the file. Verify with `docker images | grep docint` before
 - Backend readiness — `GET /collections/list` returns `200` once Qdrant
   is reachable. The UI's sidebar health indicator polls this endpoint.
 - Qdrant readiness — `GET http://qdrant:6333/` returns a JSON payload.
-- Frontend readiness — Streamlit exposes `/healthz` on port 8501.
+- Frontend readiness — nginx serves the React SPA at `/` on container
+  port `80` (host `${DOCINT_HOST_PORT:-8080}` under `make up-dev`).
 
 ## Teardown
 
 ```bash
-make stop                                  # stop the active profile's containers
-# remove containers, or also drop internal volumes:
-docker compose --env-file .env -f docker/compose.yaml --profile cpu down
-docker compose --env-file .env -f docker/compose.yaml --profile cpu down --volumes
+make stop      # stop containers, keep them
+make down      # stop + remove containers (never touches data-plane state)
+# or drop internal volumes too:
+docker compose --env-file .env -f docker/compose.yaml down --volumes
 ```
 
 Note that the `external` volumes (`docling-cache`, `huggingface-cache`,
