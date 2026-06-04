@@ -7038,6 +7038,9 @@ class RAG:
                 if isinstance(end_sec, (int, float)):
                     entry["max_duration"] = max(entry["max_duration"], float(end_sec))
 
+            if offset is None:
+                break
+
         results = []
         for _, data in docs_map.items():
             data["page_count"] = len(data.pop("pages"))

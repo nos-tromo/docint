@@ -1,5 +1,6 @@
 """Tests for RAG collection listing functionality."""
 
+from typing import Any
 from unittest.mock import MagicMock
 
 from docint.core.rag import RAG
@@ -101,3 +102,43 @@ def test_list_documents() -> None:
     assert doc_transcript["filename"] == "transcript.jsonl"
     assert doc_transcript["mimetype"] == "application/x-ndjson"
     assert doc_transcript["max_duration"] == 125.5
+
+
+def test_list_documents_terminates_when_cursor_exhausted() -> None:
+    """list_documents must stop once the scroll cursor is exhausted.
+
+    Regression for an infinite loop: real Qdrant returns the final partial page
+    *with* a ``None`` next-page offset (it does not emit a trailing empty page).
+    The loop only broke on empty ``points``, so after the last page ``offset``
+    reset to ``None`` and re-scrolled page 1 forever. This reproduces real
+    Qdrant pagination (no trailing empty page; ``offset=None`` re-yields page 1)
+    and asserts the scan terminates — chat and summary reach this method via
+    ``start_session`` -> ``build_query_engine`` -> ``_infer_collection_profile``,
+    so the loop hung both end to end.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag._qdrant_client = MagicMock()
+
+    point1 = MagicMock()
+    point1.payload = {"origin": {"filename": "a.pdf", "file_hash": "h1"}, "page": 1}
+    point2 = MagicMock()
+    point2.payload = {"origin": {"filename": "b.pdf", "file_hash": "h2"}, "page": 1}
+
+    # page 1 carries a cursor; the final page returns offset=None (no empty
+    # trailing page). offset=None always re-yields page 1, as real Qdrant does.
+    page1: tuple[list[MagicMock], Any] = ([point1], "cursor-1")
+    page2: tuple[list[MagicMock], Any] = ([point2], None)
+    calls = {"n": 0}
+
+    def fake_scroll(**kwargs: Any) -> tuple[list[MagicMock], Any]:
+        calls["n"] += 1
+        if calls["n"] > 10:
+            raise AssertionError("list_documents did not terminate — infinite scroll loop")
+        return page1 if kwargs.get("offset") is None else page2
+
+    rag._qdrant_client.scroll = fake_scroll
+
+    docs = rag.list_documents()
+
+    assert calls["n"] == 2  # page 1 (cursor) -> page 2 (offset=None) -> stop
+    assert sorted(d["filename"] for d in docs) == ["a.pdf", "b.pdf"]
