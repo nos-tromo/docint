@@ -1,10 +1,11 @@
 """FastAPI app exposing chat, ingestion, collection, and citation endpoints."""
 
 import asyncio
+import functools
 import io
 import json
 import zipfile
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -83,6 +84,10 @@ SIMULATED_STREAM_TOKEN_DELAY_SECONDS = 0.03
 # faster at a tiny CPU cost; longer values are cheaper. 1 s is a
 # compromise. Tests may monkeypatch this to a smaller value.
 INGEST_DISCONNECT_POLL_INTERVAL_S = 1.0
+# Interval (seconds) between client-disconnect checks while a blocking sync
+# generator (chat/summary streaming) is being drained on a worker thread.
+# Mirrors INGEST_DISCONNECT_POLL_INTERVAL_S; tests may monkeypatch it small.
+STREAM_DISCONNECT_POLL_INTERVAL_S = 1.0
 
 # Agent components (kept lightweight; swap with richer agents as needed)
 _understanding_agent = SimpleUnderstandingAgent()
@@ -371,6 +376,75 @@ async def _stream_simulated_text(answer_text: str) -> AsyncIterator[str]:
     for token in _iter_text_tokens(answer_text):
         yield f"data: {json.dumps({'token': token + ' '})}\n\n"
         await asyncio.sleep(SIMULATED_STREAM_TOKEN_DELAY_SECONDS)
+
+
+async def _aiter_sync_gen(
+    gen_factory: Callable[[], Iterator[Any]],
+    request: Request | None = None,
+) -> AsyncIterator[Any]:
+    """Drive a blocking sync generator on a worker thread, yielding its items.
+
+    The generator is built and fully iterated inside ``to_thread.run_sync`` so
+    neither construction nor any ``next()`` (query rewrite, embedding, Qdrant
+    search, rerank, LLM streaming) runs on the asyncio event loop — that keeps
+    the loop free to serve concurrent requests. Items cross back to the loop
+    via a thread-safe queue: ``None`` signals normal completion and an
+    ``Exception`` instance is re-raised on the loop. Mirrors the thread-bridge
+    used by ``/ingest/upload``.
+
+    Args:
+        gen_factory (Callable[[], Iterator[Any]]): Zero-arg callable returning
+            the blocking generator. A factory (not the generator itself) is
+            used so construction also happens off the loop.
+        request (Request | None): Optional request polled for client
+            disconnect; when disconnected the worker-awaiter is cancelled and
+            iteration stops. The worker thread cannot be force-killed, so it
+            runs to completion and its remaining output is discarded.
+
+    Yields:
+        Any: Each item produced by the generator, in order.
+    """
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def _safe_put(item: Any) -> None:
+        """Enqueue an item from the worker thread, tolerating a closed loop."""
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, item)
+        except Exception as exc:
+            # The loop may be gone after a client disconnect/teardown; log
+            # rather than letting the worker-thread exception vanish.
+            logger.warning("Could not enqueue stream item (loop unavailable): {}", exc)
+
+    def _pump() -> None:
+        """Iterate the blocking generator, forwarding items then a sentinel."""
+        try:
+            for item in gen_factory():
+                _safe_put(item)
+            _safe_put(None)
+        except Exception as exc:  # surface to the loop, then stop
+            _safe_put(exc)
+
+    task = asyncio.create_task(to_thread.run_sync(_pump))
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(
+                    queue.get(),
+                    timeout=STREAM_DISCONNECT_POLL_INTERVAL_S,
+                )
+            except TimeoutError:
+                if request is not None and await request.is_disconnected():
+                    return
+                continue
+            if item is None:
+                break
+            if isinstance(item, Exception):
+                raise item
+            yield item
+    finally:
+        if not task.done():
+            task.cancel()
 
 
 # --- Pydantic models for request and response payloads ---
@@ -779,7 +853,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
         payload.query_mode not in {"entity_occurrence", "entity_occurrence_multi"}
         and getattr(rag, "index", None) is None
     ):
-        rag.create_index()
+        await to_thread.run_sync(rag.create_index)
 
     session_owner: str | None = None
     if (
@@ -802,14 +876,20 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
             final_payload: dict[str, Any] | None = None
             if payload.query_mode in {"entity_occurrence", "entity_occurrence_multi"}:
                 if payload.query_mode == "entity_occurrence_multi":
-                    occurrence_data = rag.run_multi_entity_occurrence_query(
-                        payload.question,
-                        qdrant_filter=qdrant_filter,
+                    occurrence_data = await to_thread.run_sync(
+                        functools.partial(
+                            rag.run_multi_entity_occurrence_query,
+                            payload.question,
+                            qdrant_filter=qdrant_filter,
+                        )
                     )
                 else:
-                    occurrence_data = rag.run_entity_occurrence_query(
-                        payload.question,
-                        qdrant_filter=qdrant_filter,
+                    occurrence_data = await to_thread.run_sync(
+                        functools.partial(
+                            rag.run_entity_occurrence_query,
+                            payload.question,
+                            qdrant_filter=qdrant_filter,
+                        )
                     )
                 answer_text = str(occurrence_data.get("response") or occurrence_data.get("answer") or "")
                 async for event in _stream_simulated_text(answer_text):
@@ -835,7 +915,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                 expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
                 if callable(expand_with_debug):
                     try:
-                        expanded, debug_payload = expand_with_debug(retrieval_query)
+                        expanded, debug_payload = await to_thread.run_sync(expand_with_debug, retrieval_query)
                         retrieval_query = str(expanded)
                         if isinstance(debug_payload, dict):
                             graph_debug = debug_payload
@@ -845,7 +925,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                             exc,
                         )
 
-                stateless_data = rag.run_query(
+                stateless_data = await rag.run_query_async(
                     retrieval_query,
                     metadata_filters=metadata_filters,
                     metadata_filter_rules=payload.metadata_filters,
@@ -869,31 +949,45 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                     "graph_debug": stateless_data.get("graph_debug"),
                 }
             else:
-                session_id = rag.start_session(payload.session_id, owner=session_owner)
-                # The React chat UI calls /stream_query, so this is where
-                # generation-time history is wired: bind the prior
-                # user/assistant exchange (owner-scoped) onto the synthesis
-                # templates while keeping this endpoint's own internal
-                # retrieval rewrite (``skip_query_rewrite=False``).
-                prior_turn = (
-                    build_prior_turn(rag.sessions.get_session_history(session_id, owner=session_owner))
-                    if rag.sessions is not None
-                    else None
-                )
-                # Iterate over the sync generator
-                for chunk in rag.stream_chat(
-                    payload.question,
-                    metadata_filters=metadata_filters,
-                    metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
-                    metadata_filter_rules=payload.metadata_filters,
-                    vector_store_kwargs=vector_store_kwargs or None,
-                    prior_turn=prior_turn,
-                    skip_query_rewrite=False,
-                ):
+
+                def _make_chat_stream() -> Iterator[Any]:
+                    """Build the blocking chat stream off the event loop.
+
+                    Session start, history load, and the retrieval/LLM stream
+                    are all synchronous and so run on the worker thread driven
+                    by ``_aiter_sync_gen``.
+
+                    Returns:
+                        Iterator[Any]: The sync chat-chunk generator.
+                    """
+                    # The React chat UI calls /stream_query, so this is where
+                    # generation-time history is wired: bind the prior
+                    # user/assistant exchange (owner-scoped) onto the synthesis
+                    # templates while keeping this endpoint's own internal
+                    # retrieval rewrite (``skip_query_rewrite=False``).
+                    session_id = rag.start_session(payload.session_id, owner=session_owner)
+                    prior_turn = (
+                        build_prior_turn(rag.sessions.get_session_history(session_id, owner=session_owner))
+                        if rag.sessions is not None
+                        else None
+                    )
+                    return cast(
+                        "Iterator[Any]",
+                        rag.stream_chat(
+                            payload.question,
+                            metadata_filters=metadata_filters,
+                            metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
+                            metadata_filter_rules=payload.metadata_filters,
+                            vector_store_kwargs=vector_store_kwargs or None,
+                            prior_turn=prior_turn,
+                            skip_query_rewrite=False,
+                        ),
+                    )
+
+                async for chunk in _aiter_sync_gen(_make_chat_stream, request):
                     if isinstance(chunk, str):
                         full_answer += chunk
                         yield f"data: {json.dumps({'token': chunk})}\n\n"
-                        await asyncio.sleep(0)
                     elif isinstance(chunk, dict):
                         final_payload = chunk
 
@@ -1016,10 +1110,12 @@ def summarize(refresh: bool = Query(False)) -> dict[str, Any]:
 
 
 @app.post("/summarize/stream", tags=["Query"])
-async def summarize_stream(refresh: bool = Query(False)) -> StreamingResponse:
+async def summarize_stream(request: Request, refresh: bool = Query(False)) -> StreamingResponse:
     """Generate a streaming summary for the currently selected collection.
 
     Args:
+        request (Request): The incoming request, used to detect client
+            disconnects while the blocking summary stream is drained.
         refresh (bool): If ``True``, bypass cached collection summaries.
 
     Returns:
@@ -1040,7 +1136,7 @@ async def summarize_stream(refresh: bool = Query(False)) -> StreamingResponse:
         try:
             full_summary = ""
             final_payload: dict[str, Any] | None = None
-            for chunk in rag.stream_summarize_collection(refresh=refresh):
+            async for chunk in _aiter_sync_gen(lambda: rag.stream_summarize_collection(refresh=refresh), request):
                 if isinstance(chunk, str):
                     full_summary += chunk
                     yield f"data: {json.dumps({'token': chunk})}\n\n"
@@ -1923,16 +2019,28 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
             yield _format_sse("error", {"detail": "No collection selected"})
             return
 
-        session_id = rag.start_session(payload.session_id, owner=owner)
-        ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
-        if ctx and rag.sessions:
-            ctx.history = rag.sessions.get_session_history(session_id, owner=owner)
-        turn = Turn(user_input=payload.message, session_id=session_id)
+        def _prepare() -> tuple[str, Any, Any, Any]:
+            """Run the blocking session/understanding pre-amble off the loop.
 
-        analysis = _select_understanding_agent().analyze(turn, context=ctx)
-        clarification_decision = _clarification_policy.evaluate(
-            analysis, clarifications_so_far=ctx.clarifications if ctx else 0
-        )
+            Session start, history load, and intent analysis are synchronous
+            (and may issue LLM calls), so they run on a worker thread.
+
+            Returns:
+                tuple[str, Any, Any, Any]: ``(session_id, ctx, analysis,
+                clarification_decision)``.
+            """
+            session_id = rag.start_session(payload.session_id, owner=owner)
+            ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
+            if ctx and rag.sessions:
+                ctx.history = rag.sessions.get_session_history(session_id, owner=owner)
+            turn = Turn(user_input=payload.message, session_id=session_id)
+            analysis = _select_understanding_agent().analyze(turn, context=ctx)
+            clarification_decision = _clarification_policy.evaluate(
+                analysis, clarifications_so_far=ctx.clarifications if ctx else 0
+            )
+            return session_id, ctx, analysis, clarification_decision
+
+        session_id, ctx, analysis, clarification_decision = await to_thread.run_sync(_prepare)
 
         if clarification_decision.needed:
             if ctx:
@@ -1949,12 +2057,19 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
             return
 
         # Stream via RAG chat (history-aware: rewritten query + prior turn)
-        query_text = analysis.rewritten_query or turn.user_input
-        prior_turn = build_prior_turn(ctx.history) if ctx else None
-        stream = rag.stream_chat(query_text, prior_turn=prior_turn)
+        query_text = analysis.rewritten_query or payload.message
+
+        def _make_agent_stream() -> Iterator[Any]:
+            """Build the blocking agent chat stream off the event loop.
+
+            Returns:
+                Iterator[Any]: The sync chat-chunk generator.
+            """
+            prior_turn = build_prior_turn(ctx.history) if ctx else None
+            return cast("Iterator[Any]", rag.stream_chat(query_text, prior_turn=prior_turn))
 
         # Tokens
-        for chunk in stream:
+        async for chunk in _aiter_sync_gen(_make_agent_stream, request):
             if isinstance(chunk, str):
                 yield _format_sse("token", {"token": chunk})
             elif isinstance(chunk, dict):
