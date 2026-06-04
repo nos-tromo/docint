@@ -94,7 +94,7 @@ Loaded by `load_host_env()` (`env_cfg.py:220`).
 | `BACKEND_HOST` | `http://localhost:8000` | Internal backend URL used by the frontend container. |
 | `BACKEND_PUBLIC_HOST` | `BACKEND_HOST` | External URL used for document preview links. |
 | `QDRANT_HOST` | `http://localhost:6333` | Qdrant REST URL. |
-| `CORS_ALLOWED_ORIGINS` | `http://localhost:8501,http://127.0.0.1:8501` | Comma-separated CORS origins. |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Comma-separated CORS origins (the Vite dev server). |
 
 ## Retrieval — `RetrievalConfig`
 

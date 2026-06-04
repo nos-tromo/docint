@@ -10,7 +10,7 @@ this doc are declared at the top of `docint/core/api.py:208` and onward.
 ## Base URL & CORS
 
 - The backend binds to port `8000` by default.
-- `CORS_ALLOWED_ORIGINS` (default `http://localhost:8501,http://127.0.0.1:8501`)
+- `CORS_ALLOWED_ORIGINS` (default `http://localhost:5173,http://127.0.0.1:5173`)
   controls allowed origins. The CORS middleware accepts `*` for
   methods and headers.
 - See [configuration.md](configuration.md#host-endpoints--hostconfig) for
