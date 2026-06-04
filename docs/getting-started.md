@@ -13,7 +13,11 @@ extra context a new user needs to understand what they just started.
 - **Docker** (Engine + Compose v2) — only if you want the containerised
   quick start.
 - **Python 3.11** and the [`uv`](https://github.com/astral-sh/uv) package
-  manager — required for local development.
+  manager — required for local development. docint is CPU-only: there is no
+  GPU build and no `cpu`/`cuda` profile, because all ML inference is
+  delegated to a remote OpenAI-compatible endpoint.
+- **Node 20 + pnpm** — only if you want to run the React frontend dev
+  server locally.
 - A running **inference backend** reachable from Docint:
   - any OpenAI-compatible endpoint (Ollama, vLLM, the public OpenAI API, …),
   - configured via `INFERENCE_PROVIDER`, `OPENAI_API_BASE`, and
@@ -46,51 +50,46 @@ extra context a new user needs to understand what they just started.
    TEXT_MODEL=gpt-4o
    ```
 
-2. **Create the shared external volumes** (idempotent):
+2. **Create the shared networks and volumes** (idempotent):
 
    ```bash
-   ./scripts/create_docker_volumes.sh
+   make network    # external inference-net + data-net
+   make volumes    # external cache + state volumes
    ```
 
-   This creates the external volumes `docling-cache`, `huggingface-cache`,
+   `make volumes` creates `docling-cache`, `huggingface-cache`,
    `ollama-cache`, `sessions-storage`, and `source-preview-cache` so model
    artifacts and backend state persist across container rebuilds and are
    not destroyed by `docker compose down -v`.
 
-3. **Pick a profile and start the stack:**
-
-   | Profile | When to use it |
-   |---|---|
-   | `cpu`  | Development laptops, CI, CPU-only servers. |
-   | `cuda` | Machines with an NVIDIA GPU + NVIDIA Container Toolkit. |
-
-   Set `PROFILE` in `.env` (default `cpu`), then build and start via the
-   `Makefile` — the blessed entry point, which points Compose at
-   `docker/compose.yaml` for you:
+3. **Build and start the stack:**
 
    ```bash
    make build
-   make up               # or: make up PROFILE=cuda
+   make up-dev   # publishes the React SPA on the host (dev overlay)
    ```
 
-   `make up` layers `docker/compose.override.yaml` to publish host ports
-   for local development.
+   docint builds a single CPU-only backend image and a React-SPA frontend
+   image — there is no profile to choose. `make up` runs the production
+   shape (`docker/compose.yaml` alone, no host ports); `make up-dev` layers
+   `docker/compose.override.yaml` to publish the frontend port.
 
 4. **Open the app:**
 
-   - Streamlit UI — <http://localhost:8501>
-   - FastAPI backend — <http://localhost:8000>
+   - React SPA — <http://localhost:8080> (override the host port with
+     `DOCINT_HOST_PORT` in `.env`).
 
-   Qdrant is not served by this stack — it comes from the `data-plane`
-   project (see Prerequisites above).
+   The backend (`:8000`) is reached only through the frontend's nginx
+   sidecar — it is not host-published. Qdrant is not served by this stack;
+   it comes from the `data-plane` project (see Prerequisites above).
 
 For the complete deployment reference (services, volumes, networks, vLLM
 co-deployment) see [deployment.md](deployment.md).
 
 ## Quick start for local development
 
-Use this path when you want to iterate on the Python code without going
-through Docker.
+Use this path when you want to iterate on the Python and/or React code
+without going through Docker.
 
 1. **Copy the env file** (same as above):
 
@@ -105,14 +104,14 @@ through Docker.
      Qdrant on the host port.
    - An OpenAI-compatible endpoint (Ollama, vLLM, OpenAI, …).
 
-3. **Install dependencies:**
+3. **Install Python dependencies:**
 
    ```bash
-   uv sync --extra cpu   # or --extra cuda on a GPU host
+   uv sync
    ```
 
-   The `cpu` / `cuda` extras are mutually exclusive; they pin the matching
-   `torch` / `torchvision` index.
+   A single environment — no `--extra` flags. docint ships no GPU code, so
+   there is no `cpu`/`cuda` split.
 
 4. **(Optional) pre-download model assets:**
 
@@ -127,18 +126,25 @@ through Docker.
 
    ```bash
    uv run uvicorn docint.core.api:app --reload
+   # or, without auto-reload: uv run docint
    ```
 
-6. **Start the Streamlit UI in another terminal:**
+6. **Start the React frontend in another terminal:**
 
    ```bash
-   uv run docint
+   cd frontend
+   pnpm install
+   pnpm dev        # → http://localhost:5173 (proxies API calls to :8000)
    ```
+
+   The Vite dev server proxies `/collections`, `/query`, `/stream_query`,
+   `/ingest`, … to the backend on `:8000`, so the SPA and API share an
+   origin. See [ui-guide.md](ui-guide.md).
 
 ## Your first ingest and query
 
-1. **Create a collection** — the UI sidebar (`docint/ui/sidebar.py`) lets
-   you create a new collection. You can also hit the API directly:
+1. **Create a collection** — the SPA sidebar lets you create and select a
+   collection. You can also hit the API directly:
 
    ```bash
    curl -X POST http://localhost:8000/collections/select \
@@ -146,8 +152,8 @@ through Docker.
         -d '{"name": "demo"}'
    ```
 
-2. **Ingest a file** — from the UI **Ingest** page (see
-   [ui-guide.md](ui-guide.md)), drop a PDF or use the CLI:
+2. **Ingest a file** — from the SPA **Ingest** page (see
+   [ui-guide.md](ui-guide.md)), drop a PDF, or use the CLI:
 
    ```bash
    uv run ingest
@@ -155,7 +161,7 @@ through Docker.
    # referenced by the DATA_PATH env var.
    ```
 
-3. **Ask a question** — from the UI **Chat** page, or via the API:
+3. **Ask a question** — from the SPA **Chat** page, or via the API:
 
    ```bash
    curl -X POST http://localhost:8000/query \

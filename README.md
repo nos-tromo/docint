@@ -45,7 +45,7 @@ and chat. It ships with:
 
 4. Open the app:
 
-   - App: <http://localhost:8080> (override with `FRONTEND_PORT` in `.env`)
+   - App: <http://localhost:8080> (override with `DOCINT_HOST_PORT` in `.env`)
 
    The backend is reachable only via the nginx sidecar — it is no longer
    published on the host. Use `docker compose --env-file .env -f
@@ -68,8 +68,7 @@ and chat. It ships with:
   ends in `/v1`, plus the vLLM sparse routes at `/pooling` and `/tokenize`.
 - For co-deployed stacks on one server, create one shared external Docker
   network, attach both compose projects to it, and set
-  `OPENAI_API_BASE=http://vllm-router:9000/v1`.
-- The `cuda` profile needs an NVIDIA GPU and the NVIDIA Container Toolkit.
+  `OPENAI_API_BASE=http://vllm-router:4000/v1`.
 - First startup may take a while because model assets are downloaded into the
   shared cache volumes.
 - If you use an outbound proxy, put the proxy variables in `.env` so Compose,
@@ -227,10 +226,10 @@ writes the same CSV files to a mounted volume:
 
 ```bash
 docker compose --env-file .env -f docker/compose.yaml \
-  exec backend-cpu query --collection my_collection --all \
+  exec backend query --collection my_collection --all \
   --output /var/lib/docint/sources/my_collection/exports
 docker compose cp \
-  backend-cpu:/var/lib/docint/sources/my_collection/exports ./exports
+  backend:/var/lib/docint/sources/my_collection/exports ./exports
 ```
 
 Both paths share the schemas defined in `docint/utils/csv_stream.py`, so
@@ -256,7 +255,7 @@ For a shared-network deployment on one server:
 
    ```bash
    INFERENCE_PROVIDER=vllm
-   OPENAI_API_BASE=http://vllm-router:9000/v1
+   OPENAI_API_BASE=http://vllm-router:4000/v1
    OPENAI_API_KEY=<token>
    ```
 
@@ -280,14 +279,14 @@ manual. It complements this README with topic-by-topic deep dives:
 - [Configuration](docs/configuration.md) — every env var grouped by
   dataclass, with defaults
 - [API reference](docs/api-reference.md) — every FastAPI route
-- [CLI reference](docs/cli-reference.md) — `docint`, `ingest`, `query`,
-  `query-eval`, `load-models`
+- [CLI reference](docs/cli-reference.md) — `docint`, `ingest`, `resolve`,
+  `query`, `query-eval`, `verify`, `load-models`
 - [Ingestion pipeline](docs/ingestion.md) — readers, chunking, NER,
   storage
 - [Retrieval and agents](docs/retrieval-and-agents.md) — orchestrator,
   hybrid retrieval, graph-RAG, validation
-- [UI guide](docs/ui-guide.md) — Streamlit pages and components
-- [Deployment](docs/deployment.md) — Docker profiles, volumes,
+- [UI guide](docs/ui-guide.md) — React SPA pages and components
+- [Deployment](docs/deployment.md) — Docker deployment, volumes,
   co-deployment with vLLM / Ollama, offline image bundles
 - [Development](docs/development.md) — dev workflow, pre-commit,
   pytest layout, CI, extension points

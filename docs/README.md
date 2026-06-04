@@ -13,11 +13,11 @@ topic-by-topic deep dives.
 | [architecture.md](architecture.md) | Runtime architecture, component map, end-to-end request flow |
 | [configuration.md](configuration.md) | Every environment variable grouped by the dataclass that reads it, with defaults |
 | [api-reference.md](api-reference.md) | Every FastAPI route, method, tag, request/response shape, and streaming semantics |
-| [cli-reference.md](cli-reference.md) | `docint`, `ingest`, `query`, `query-eval`, `load-models` — flags and examples |
+| [cli-reference.md](cli-reference.md) | `docint`, `ingest`, `resolve`, `query`, `query-eval`, `verify`, `load-models` — flags and examples |
 | [ingestion.md](ingestion.md) | Document ingestion pipeline: triage, layout, OCR, extraction, chunking, embedding |
 | [retrieval-and-agents.md](retrieval-and-agents.md) | Agent orchestration, hybrid retrieval, reranking, parent-context expansion, Graph-RAG |
-| [ui-guide.md](ui-guide.md) | Streamlit UI pages — Dashboard, Chat, Ingest, Analysis, Inspector |
-| [deployment.md](deployment.md) | Docker profiles, shared volumes, networks, vLLM co-deployment, proxies |
+| [ui-guide.md](ui-guide.md) | React SPA pages — Dashboard, Chat, Ingest, Analysis, Inspector |
+| [deployment.md](deployment.md) | Docker services, shared volumes, networks, vLLM co-deployment, proxies |
 | [development.md](development.md) | Dev workflow, `uv`, pre-commit, pytest layout, CI, extension points |
 
 ## Who this is for
@@ -31,8 +31,8 @@ topic-by-topic deep dives.
   [ingestion.md](ingestion.md) and [retrieval-and-agents.md](retrieval-and-agents.md).
 - **API consumers** wiring a client against the FastAPI surface — go
   straight to [api-reference.md](api-reference.md).
-- **UI contributors** — see [ui-guide.md](ui-guide.md) and the Streamlit
-  entry point `docint/app.py`.
+- **UI contributors** — see [ui-guide.md](ui-guide.md) and the React SPA
+  under `frontend/`.
 
 ## Conventions used in these docs
 

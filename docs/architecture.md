@@ -2,14 +2,14 @@
 
 Docint is a modular RAG stack. This document describes the runtime
 components, how they are wired together, and how a user request flows from
-the Streamlit UI down to Qdrant and back.
+the React SPA down to Qdrant and back.
 
 ## Component map
 
 ```
 +------------------+       HTTP/SSE         +---------------------+
-|   Streamlit UI   | <--------------------> |   FastAPI backend   |
-|  (docint/ui/)    |                        |  (docint/core/api)  |
+|    React SPA     | <--------------------> |   FastAPI backend   |
+|   (frontend/)    |                        |  (docint/core/api)  |
 +------------------+                        +----------+----------+
                                                        |
                                                        v
@@ -52,8 +52,8 @@ The same RAG engine is used for both ingestion (write path) and retrieval
 | `docint/core/state/` | Conversation sessions and citation tracking (SQLAlchemy) |
 | `docint/core/ner.py` | Named-entity extraction and graph building |
 | `docint/agents/` | Agent orchestrator, understanding, clarification, retrieval, generation |
-| `docint/cli/` | CLI entry points (`ingest`, `query`, `eval`) |
-| `docint/ui/` | Streamlit page modules |
+| `docint/cli/` | CLI entry points (`serve`, `ingest`, `query`, `eval`, `resolve`, `verify`) |
+| `frontend/` | React SPA (Vite + TypeScript); see [ui-guide.md](ui-guide.md) |
 | `docint/utils/env_cfg.py` | Centralised environment-variable configuration |
 
 ## Request flow: answering a user query
