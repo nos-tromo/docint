@@ -43,7 +43,15 @@ network:
 
 # Create the external Docker volumes (one-time per host; idempotent).
 volumes:
-	./scripts/create_docker_volumes.sh
+	@for volume_name in \
+		docling-cache \
+		huggingface-cache \
+		ollama-cache \
+		sessions-storage \
+		source-preview-cache; do \
+		docker volume create "$$volume_name" >/dev/null 2>&1 || true; \
+		printf 'Ensured Docker volume exists: %s\n' "$$volume_name"; \
+	done
 
 # Build images.
 build:

@@ -105,7 +105,6 @@ wheels/*.whl
 !frontend/index.html
 !scripts/
 !scripts/bundle_images.sh
-!scripts/create_docker_volumes.sh
 !**/prompts/*.txt
 !**/prompts/**/*.txt
 !**/required_exts.txt

@@ -18,7 +18,6 @@ external inference services.
 | `docker/Dockerfile.backend` | CPU-only backend image — a `uv`-assembled virtualenv on the `uv` Python base. |
 | `docker/Dockerfile.frontend` | React SPA built with pnpm and served by nginx. |
 | `.dockerignore` | Build-context excludes; stays at the repo root so it applies to every image build. |
-| `scripts/create_docker_volumes.sh` | Creates the external cache and state volumes (idempotent). |
 | `scripts/bundle_images.sh` | Builds and packages a versioned image tarball for offline distribution. |
 | `Makefile` | The blessed entry point — convenience targets wrapping the above (`make network`, `volumes`, `build`, `up`, `up-dev`, `bundle`, `stop`, `down`, `resolve`). |
 | `.env.example` | Canonical `.env` template. |
@@ -119,8 +118,8 @@ nos-tromo stack over the shared `data-net` network.
 
 Backend caches and backend filesystem state are declared
 `external: true` so they survive container rebuilds and are **not**
-destroyed by `docker compose down -v`. The helper script
-`./scripts/create_docker_volumes.sh` creates them idempotently.
+destroyed by `docker compose down -v`. `make volumes` creates them
+idempotently before the stack starts.
 
 | Volume | Scope | Purpose |
 |---|---|---|
