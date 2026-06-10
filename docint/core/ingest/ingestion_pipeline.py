@@ -37,6 +37,7 @@ from docint.utils.env_cfg import (
     load_ner_env,
 )
 from docint.utils.hashing import compute_file_hash
+from docint.utils.llm_sanitize import strip_reasoning
 from docint.utils.ner_client import build_remote_ner_extractor
 from docint.utils.openai_cfg import OpenAIPipeline
 
@@ -55,6 +56,35 @@ class HateSpeechDetection(TypedDict):
     source_ref: NotRequired[str]
 
 
+def _extract_first_json_dict(text: str) -> tuple[dict[str, Any] | None, json.JSONDecodeError | None]:
+    """Return the first decodable JSON object embedded in *text*.
+
+    Args:
+        text (str): Arbitrary model output that may contain prose, fences,
+            or multiple JSON objects.
+
+    Returns:
+        tuple[dict[str, Any] | None, json.JSONDecodeError | None]: The first
+            decoded JSON object plus the last decode error seen while
+            scanning, if no object could be recovered.
+    """
+    decoder = json.JSONDecoder()
+    last_exc: json.JSONDecodeError | None = None
+
+    for idx, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(text[idx:])
+        except json.JSONDecodeError as exc:
+            last_exc = exc
+            continue
+        if isinstance(parsed, dict):
+            return parsed, None
+
+    return None, last_exc
+
+
 def _parse_hate_speech_payload(raw: str) -> HateSpeechDetection:
     """Parse hate-speech detector model output into a structured dictionary.
 
@@ -64,20 +94,27 @@ def _parse_hate_speech_payload(raw: str) -> HateSpeechDetection:
     Returns:
         HateSpeechDetection: A structured dictionary containing hate-speech detection results.
     """
-    parsed: dict[str, Any] = {}
+    cleaned, captured = strip_reasoning(raw or "")
+    if captured:
+        logger.debug(
+            "Stripped {} chars of reasoning from hate-speech response",
+            len(captured),
+        )
+
+    parsed: Any = {}
     try:
-        parsed = json.loads(raw)
+        parsed = json.loads(cleaned)
     except Exception as exc:
         logger.debug("Failed direct hate-speech JSON parse: {}", exc)
-        try:
-            start = raw.find("{")
-            end = raw.rfind("}")
-            if start != -1 and end != -1 and end > start:
-                parsed = json.loads(raw[start : end + 1])
-        except Exception as extract_exc:
+        extracted, extract_exc = _extract_first_json_dict(cleaned)
+        if extracted is not None:
+            parsed = extracted
+        else:
+            preview = cleaned[:160].replace("\n", " ")
             logger.warning(
-                "Failed hate-speech JSON extraction from model response: {}",
-                extract_exc,
+                "Failed hate-speech JSON extraction from model response: {} (preview={!r})",
+                extract_exc or exc,
+                preview,
             )
             parsed = {}
 

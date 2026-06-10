@@ -14,6 +14,40 @@ import docint.core.ingest.ingestion_pipeline as pipeline_module
 from docint.core.ingest.ingestion_pipeline import DocumentIngestionPipeline
 
 
+def test_parse_hate_speech_payload_extracts_first_json_object_from_noisy_output() -> None:
+    """Parser should recover the first JSON object from noisy LLM output."""
+    raw = (
+        "<think>private chain of thought</think>\n"
+        "```json\n"
+        '{"hate_speech": true, "category": "ethnicity", "confidence": "high", '
+        '"reason": "Contains dehumanizing language."}\n'
+        "```\n"
+        "One more note the caller should ignore.\n"
+        '{"hate_speech": false, "category": "none", "confidence": "low", "reason": "ignored"}'
+    )
+
+    parsed = pipeline_module._parse_hate_speech_payload(raw)
+
+    assert parsed == {
+        "hate_speech": True,
+        "category": "ethnicity",
+        "confidence": "high",
+        "reason": "Contains dehumanizing language.",
+    }
+
+
+def test_parse_hate_speech_payload_returns_safe_default_for_invalid_json() -> None:
+    """Parser should fail open when the model response is unrecoverably malformed."""
+    raw = '{"hate_speech": true, "category": "ethnicity", "confidence": "high", "reason": "Contains "quoted" slur"}'
+
+    parsed = pipeline_module._parse_hate_speech_payload(raw)
+
+    assert parsed["hate_speech"] is False
+    assert parsed["category"] == "none"
+    assert parsed["confidence"] == "low"
+    assert parsed["reason"] == ""
+
+
 def test_get_collection(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that get_collection returns the user input.
 
