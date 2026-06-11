@@ -217,6 +217,16 @@ export interface IngestEvent {
     | 'ingestion_complete'
     | 'error'
   data: Record<string, unknown>
+  /**
+   * Client-side wall-clock time (ms since epoch) at which this event was
+   * received from the SSE stream, stamped once by `streamIngestUpload`.
+   *
+   * The ingest elapsed timer is derived from this rather than read from the
+   * wall clock inside `deriveIngestStatus`, so that derivation stays a pure
+   * function of its inputs. Re-deriving status on every incoming event must
+   * not move `startedAt` (otherwise the timer resets on each batch).
+   */
+  receivedAt?: number
 }
 
 export interface SummaryDiagnostics {

@@ -170,7 +170,12 @@ export function deriveIngestStatus(
         status.collection = strOf(d.collection) ?? status.collection
         const files = Array.isArray(d.files) ? (d.files as unknown[]) : []
         status.totalFiles = files.length
-        if (status.startedAt === undefined) status.startedAt = Date.now()
+        // Anchor the elapsed timer to the *arrival* time of the start event,
+        // stamped once on the event itself (IngestEvent.receivedAt). Reading
+        // Date.now() here instead would reset startedAt on every re-derivation
+        // — this reducer re-runs for each incoming event — making the timer
+        // snap back to zero on every batch.
+        if (status.startedAt === undefined) status.startedAt = ev.receivedAt
         break
       }
       case 'upload_progress': {
@@ -251,13 +256,13 @@ export function deriveIngestStatus(
         status.uploadingFile = undefined
         status.uploadingBytes = undefined
         status.uploadingTotalBytes = undefined
-        status.finishedAt = Date.now()
+        status.finishedAt = ev.receivedAt
         break
       }
       case 'error': {
         status.phase = 'error'
         status.errorMessage = strOf(d.message) ?? 'Ingestion failed'
-        status.finishedAt = Date.now()
+        status.finishedAt = ev.receivedAt
         break
       }
     }

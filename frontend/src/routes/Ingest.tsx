@@ -104,7 +104,7 @@ export function Ingest() {
     let sawTerminal = false
     try {
       for await (const ev of streamIngestUpload(state.collection, state.files)) {
-        dispatch({ type: 'event', v: ev as IngestEvent })
+        dispatch({ type: 'event', v: ev })
         if (ev.event === 'error') {
           const data = ev.data as Record<string, unknown>
           setError(String(data.message ?? 'Ingestion failed'))

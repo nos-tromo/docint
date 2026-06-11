@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import type { IngestEvent } from '@/api/types'
 import {
   deriveIngestStatus,
@@ -126,14 +126,15 @@ describe('deriveIngestStatus', () => {
     const events: IngestEvent[] = [
       {
         event: 'start',
-        data: { collection: 'testdata-1', target_dir: '/tmp', files: ['a.pdf', 'b.pdf'] }
+        data: { collection: 'testdata-1', target_dir: '/tmp', files: ['a.pdf', 'b.pdf'] },
+        receivedAt: 1000
       }
     ]
     const status = deriveIngestStatus(events)
     expect(status.phase).toBe('uploading')
     expect(status.totalFiles).toBe(2)
     expect(status.collection).toBe('testdata-1')
-    expect(typeof status.startedAt).toBe('number')
+    expect(status.startedAt).toBe(1000)
   })
 
   it('tracks upload progress and file_saved increments', () => {
@@ -248,13 +249,83 @@ describe('deriveIngestStatus', () => {
 
   it('marks ingestion_complete with a finishedAt timestamp', () => {
     const events: IngestEvent[] = [
-      { event: 'start', data: { collection: 'c', target_dir: '/t', files: [] } },
-      { event: 'ingestion_started', data: { collection: 'c' } },
-      { event: 'ingestion_complete', data: { collection: 'c', data_dir: '/d' } }
+      { event: 'start', data: { collection: 'c', target_dir: '/t', files: [] }, receivedAt: 1000 },
+      { event: 'ingestion_started', data: { collection: 'c' }, receivedAt: 2000 },
+      {
+        event: 'ingestion_complete',
+        data: { collection: 'c', data_dir: '/d' },
+        receivedAt: 9000
+      }
     ]
     const status = deriveIngestStatus(events)
     expect(status.phase).toBe('complete')
-    expect(typeof status.finishedAt).toBe('number')
+    expect(status.startedAt).toBe(1000)
+    expect(status.finishedAt).toBe(9000)
+  })
+
+  it('derives startedAt/finishedAt from event arrival time, not the wall clock', () => {
+    const events: IngestEvent[] = [
+      {
+        event: 'start',
+        data: { collection: 'c', target_dir: '/t', files: ['a.pdf'] },
+        receivedAt: 1000
+      },
+      { event: 'ingestion_started', data: { collection: 'c' }, receivedAt: 2000 },
+      progress('Extracting entities: 1/2 chunks processed'),
+      {
+        event: 'ingestion_complete',
+        data: { collection: 'c', data_dir: '/d' },
+        receivedAt: 9000
+      }
+    ]
+    const status = deriveIngestStatus(events)
+    expect(status.startedAt).toBe(1000)
+    expect(status.finishedAt).toBe(9000)
+  })
+
+  it('keeps startedAt anchored to the first start event across re-derivations', () => {
+    // Regression: deriveIngestStatus must be pure. The elapsed timer is
+    // rendered as (now - startedAt); re-running derivation as each batch of
+    // progress events streams in must NOT move startedAt, or the timer would
+    // reset on every batch instead of counting the whole run.
+    const base: IngestEvent[] = [
+      {
+        event: 'start',
+        data: { collection: 'c', target_dir: '/t', files: ['a.pdf'] },
+        receivedAt: 1000
+      }
+    ]
+    const early = deriveIngestStatus(base)
+    const later = deriveIngestStatus([
+      ...base,
+      progress('Extracting entities: 1/2 chunks processed'),
+      progress('Extracting entities: 2/2 chunks processed')
+    ])
+    expect(early.startedAt).toBe(1000)
+    expect(later.startedAt).toBe(1000)
+  })
+
+  it('is deterministic even as the wall clock advances between calls', () => {
+    vi.useFakeTimers()
+    try {
+      const events: IngestEvent[] = [
+        { event: 'start', data: { collection: 'c', target_dir: '/t', files: [] }, receivedAt: 1000 },
+        {
+          event: 'ingestion_complete',
+          data: { collection: 'c', data_dir: '/d' },
+          receivedAt: 9000
+        }
+      ]
+      vi.setSystemTime(new Date(1234))
+      const first = deriveIngestStatus(events)
+      vi.setSystemTime(new Date(987_654))
+      const second = deriveIngestStatus(events)
+      expect(second).toEqual(first)
+      expect(second.startedAt).toBe(1000)
+      expect(second.finishedAt).toBe(9000)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('records error events with phase=error and the message', () => {
