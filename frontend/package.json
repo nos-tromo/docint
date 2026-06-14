@@ -16,7 +16,7 @@
     "@fontsource/inter": "^5.1.0",
     "@tanstack/react-query": "^5.100.14",
     "@tanstack/react-table": "^8.20.5",
-    "@tanstack/react-virtual": "^3.13.25",
+    "@tanstack/react-virtual": "^3.14.2",
     "clsx": "^2.1.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
