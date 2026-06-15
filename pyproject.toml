@@ -40,7 +40,7 @@ dependencies = [
   "requests>=2.34.2",
   "sqlalchemy>=2.0.50",
   "striprtf>=0.0.32",
-  "transformers>=5.12.0",
+  "transformers>=5.4,<5.9",  # <5.9 required by docling 2.102.1 (docling-core[chunking])
   "uvicorn>=0.49.0",
 ]
 
