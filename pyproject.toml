@@ -8,13 +8,13 @@ authors = [
 requires-python = ">=3.11,<3.12"
 license = "Apache-2.0"
 dependencies = [
-  "cryptography>=48.0.0",
-  "docling>=2.97.0",
-  "fastapi>=0.136.3",
+  "cryptography>=49.0.0",
+  "docling>=2.102.1",
+  "fastapi>=0.137.0",
   "fastembed>=0.8.0",
   "fastparquet>=2026.5.0",
   "httpx>=0.28.1",
-  "huggingface-hub>=1.18.0,<2.0",
+  "huggingface-hub>=1.19.0,<2.0",
   "llama-index>=0.14.22",
   "llama-index-embeddings-huggingface>=0.7.0",
   "llama-index-embeddings-openai>=0.6.0",
@@ -26,13 +26,13 @@ dependencies = [
   "numba>=0.65.1",
   "numpy>=2.3.5,<2.4",
   "ollama>=0.6.2",
-  "openai>=2.41.0",
+  "openai>=2.41.1",
   "opencv-python-headless>=4.13.0.92",
   "pandas>=3.0.3",
   "pillow>=11.3.0,<12.0.0",
   "pyarrow>=24.0.0",
   "pydantic>=2.13.4",
-  "pypdf>=6.13.0",
+  "pypdf>=6.13.2",
   "python-dotenv>=1.2.2",
   "python-magic>=0.4.27",
   "python-multipart>=0.0.32",
@@ -40,7 +40,7 @@ dependencies = [
   "requests>=2.34.2",
   "sqlalchemy>=2.0.50",
   "striprtf>=0.0.32",
-  "transformers>=5.10.2",
+  "transformers>=5.4,<5.9",  # <5.9 required by docling 2.102.1 (docling-core[chunking])
   "uvicorn>=0.49.0",
 ]
 
@@ -60,7 +60,7 @@ load-models = "docint.utils.model_cfg:main"
 dev = [
     "mypy==1.19.0",
     "pre-commit>=4.6.0",
-    "pytest>=9.0.3",
+    "pytest>=9.1.0",
     "ruff==0.15.14",
 ]
 

@@ -19,6 +19,12 @@ updates:
         versions: [">= 12.0.0"]
       - dependency-name: "numpy"
         versions: [">= 2.4.0"]
+      # transformers is capped <5.9 in pyproject.toml: docling 2.102.1
+      # (docling-core[chunking]) requires transformers<5.9.0, so bumping past
+      # it makes `uv lock` unsatisfiable. Lift once docling allows transformers
+      # >=5.9 (i.e. docling-slim depends on docling-core>=3.0).
+      - dependency-name: "transformers"
+        versions: [">= 5.9.0"]
 
   - package-ecosystem: "npm"
     directory: "/frontend"
