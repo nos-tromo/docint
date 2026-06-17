@@ -1,14 +1,20 @@
 @import "tailwindcss";
+@import "@infra/ui/theme.css";
 @config "../../tailwind.config.ts";
+@source "../../node_modules/@infra/ui/dist";
 
 :root {
   color-scheme: dark;
+  --app-accent: hsl(160 84% 39%);   /* emerald — docint's brand accent */
   /* Single source of truth for the app font. Tailwind's `sans` AND `mono`
      families both resolve to this var (see tailwind.config.ts), so every
      piece of text — including markdown code blocks and any stray
      `font-mono` — renders the same face. Change it here to restyle the
      whole app. */
   --app-font: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  /* Override @infra/ui's default monospace stack so all text (incl. code
+     blocks in prose) stays Inter, matching docint's unified-font design. */
+  --font-mono: var(--app-font);
 }
 
 html, body, #root {

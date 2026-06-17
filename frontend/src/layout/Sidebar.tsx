@@ -1,4 +1,5 @@
 import { NavLink, useNavigate } from 'react-router-dom'
+import { Button } from '@infra/ui'
 import { ApiError } from '@/api/client'
 import { useCollections, useDeleteCollection, useSelectCollection } from '@/hooks/useCollections'
 import { useDeleteSession, useSessions } from '@/hooks/useSessions'
@@ -161,13 +162,13 @@ export function Sidebar() {
       <section className="flex-1 min-h-0 flex flex-col">
         <div className="flex items-center justify-between">
           <label className="text-xs uppercase text-muted-foreground">Sessions</label>
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={onNewChat}
-            className="text-xs px-2 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700"
           >
             + New
-          </button>
+          </Button>
         </div>
         <ul className="mt-2 flex-1 overflow-auto space-y-1">
           {sessionsLoading && (
