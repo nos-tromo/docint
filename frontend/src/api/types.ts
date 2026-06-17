@@ -128,6 +128,7 @@ export type ReferenceMetadata = Record<string, unknown> & {
   anchor_text?: string | null
   speaker?: string | null
   language?: string | null
+  detected_language?: string | null
   source_file?: string | null
 }
 

@@ -18,6 +18,7 @@ export const REFERENCE_METADATA_FIELDS: Array<{ key: keyof ReferenceMetadata; la
   { key: 'anchor_text', label: 'Anchor Text' },
   { key: 'speaker', label: 'Speaker' },
   { key: 'language', label: 'Language' },
+  { key: 'detected_language', label: 'Detected Language' },
   { key: 'source_file', label: 'Source File' }
 ]
 
