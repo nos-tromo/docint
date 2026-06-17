@@ -108,7 +108,8 @@ The following fields from a Nextext segment are extracted into
 | `start_ts` | Segment start time in `hh:mm:ss` format (if available) |
 | `end_ts` | Segment end time in `hh:mm:ss` format (if available) |
 | `speaker` | Speaker name or identifier (if present in segment) |
-| `language` | Detected or specified language code |
+| `language` | Transcript-text language code (the target for `translate`, the source for `transcribe`) |
+| `detected_language` | Auto-detected source-audio language code (equals `language` for `transcribe`; the original source for `translate`) |
 | `source_file` | Name of the original transcript file |
 | `type` | Always `"transcript_segment"` |
 | `network` | Always `"nextext"` |

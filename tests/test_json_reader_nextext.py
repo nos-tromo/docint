@@ -70,6 +70,7 @@ def _nextext_segment(**overrides: Any) -> dict[str, Any]:
         "source_file": "interview.mp3",
         "source_file_hash": "sha256:abc",
         "language": "de",
+        "detected_language": "de",
         "task": "transcribe",
         "sentence_index": 0,
         "start_seconds": 12.3,
@@ -105,6 +106,7 @@ def test_jsonl_reader_detects_nextext_schema(tmp_path: Path) -> None:
     assert meta["filename"] == "transcript.jsonl"
     assert meta["whisper_task"] == "transcribe"
     assert meta["whisper_language"] == "de"
+    assert meta["whisper_detected_language"] == "de"
     assert meta["sentence_index"] == 0
     assert meta["start_ts"] == "00:00:12"
     assert meta["end_ts"] == "00:00:18"
@@ -441,8 +443,47 @@ def test_nextext_reference_metadata_populated(tmp_path: Path) -> None:
         "intentionally — flat metadata still carries it for LLM context"
     )
     assert ref["language"] == "de"
+    assert ref["detected_language"] == "de"
     assert ref["source_file"] == source_file
     assert ref["author"] == "SPEAKER_01"
+
+
+def test_nextext_detected_language_differs_for_translate(tmp_path: Path) -> None:
+    """A translate segment keeps whisper_language=target, detected=source.
+
+    Args:
+        tmp_path: Temporary directory provided by pytest.
+    """
+    jsonl = tmp_path / "translate.jsonl"
+    _write_jsonl(
+        jsonl,
+        [_nextext_segment(language="en", detected_language="de", task="translate")],
+    )
+
+    reader = CustomJSONReader(is_jsonl=True)
+    meta = reader.load_data(jsonl)[0].metadata
+
+    assert meta["whisper_language"] == "en"
+    assert meta["whisper_detected_language"] == "de"
+    ref = meta["reference_metadata"]
+    assert ref["language"] == "en"
+    assert ref["detected_language"] == "de"
+
+
+def test_nextext_detected_language_absent_when_null(tmp_path: Path) -> None:
+    """A segment with a null detected_language omits the key everywhere.
+
+    Args:
+        tmp_path: Temporary directory provided by pytest.
+    """
+    jsonl = tmp_path / "no_detected.jsonl"
+    _write_jsonl(jsonl, [_nextext_segment(detected_language=None)])
+
+    reader = CustomJSONReader(is_jsonl=True)
+    meta = reader.load_data(jsonl)[0].metadata
+
+    assert "whisper_detected_language" not in meta
+    assert "detected_language" not in meta["reference_metadata"]
 
 
 def test_nextext_segment_without_speaker_omits_key(tmp_path: Path) -> None:

@@ -413,14 +413,18 @@ class CustomJSONReader(BaseReader):
         """Compose segment-level metadata + ``reference_metadata`` block.
 
         Produces the flat backward-compatible keys (``whisper_task``,
-        ``whisper_language``, ``sentence_index``, ``start_seconds``,
-        ``end_seconds``, ``start_ts``, ``end_ts``, ``speaker``,
-        ``source_file``, ``source_file_hash``) at the top level. The nested
-        ``reference_metadata`` sub-dict carries the citation-UI fields:
-        ``type``, ``network``, ``author``, ``text``, ``text_id``, plus
-        ``timestamp`` (segment start, mirrors the generic anchor used by
-        social-table content), ``language``, ``source_file``, and
-        ``speaker`` when present. ``start_ts`` / ``end_ts`` are intentionally
+        ``whisper_language``, ``whisper_detected_language``,
+        ``sentence_index``, ``start_seconds``, ``end_seconds``, ``start_ts``,
+        ``end_ts``, ``speaker``, ``source_file``, ``source_file_hash``) at
+        the top level. The nested ``reference_metadata`` sub-dict carries the
+        citation-UI fields: ``type``, ``network``, ``author``, ``text``,
+        ``text_id``, plus ``timestamp`` (segment start, mirrors the generic
+        anchor used by social-table content), ``language``,
+        ``detected_language``, ``source_file``, and ``speaker`` when present.
+        ``whisper_language`` / ``language`` carry the transcript-text
+        language; ``whisper_detected_language`` / ``detected_language`` carry
+        the Whisper-detected source language (equal for transcribe tasks,
+        distinct for translate). ``start_ts`` / ``end_ts`` are intentionally
         absent from ``reference_metadata`` — surfacing them duplicated the
         ``timestamp`` row in the citation view; the flat-metadata copies
         feed ``LLM_VISIBLE_METADATA_KEYS`` for prompt-side citation context.
@@ -453,6 +457,12 @@ class CustomJSONReader(BaseReader):
         if isinstance(language, str) and language:
             metadata["whisper_language"] = language
             language_str = language
+
+        detected_language = segment.get("detected_language")
+        detected_language_str: str | None = None
+        if isinstance(detected_language, str) and detected_language:
+            metadata["whisper_detected_language"] = detected_language
+            detected_language_str = detected_language
 
         start = segment.get("start_seconds")
         end = segment.get("end_seconds")
@@ -529,6 +539,8 @@ class CustomJSONReader(BaseReader):
             reference_metadata["timestamp"] = start_ts_str
         if language_str is not None:
             reference_metadata["language"] = language_str
+        if detected_language_str is not None:
+            reference_metadata["detected_language"] = detected_language_str
         if source_file_str is not None:
             reference_metadata["source_file"] = source_file_str
         if speaker_str is not None:
