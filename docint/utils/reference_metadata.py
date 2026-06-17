@@ -18,6 +18,7 @@ REFERENCE_METADATA_FIELDS: dict[str, str] = {
     "anchor_text": "Anchor Text",
     "speaker": "Speaker",
     "language": "Language",
+    "detected_language": "Detected Language",
     "source_file": "Source File",
 }
 
