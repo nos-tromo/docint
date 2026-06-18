@@ -1,4 +1,5 @@
 import { useMemo, useReducer, useState } from 'react'
+import { Button } from '@infra/ui'
 import { streamIngestUpload } from '@/api/ingest'
 import { useSelectCollection, useCollections, collectionsKey } from '@/hooks/useCollections'
 import { useQueryClient } from '@tanstack/react-query'
@@ -169,14 +170,13 @@ export function Ingest() {
       )}
 
       <div className="flex gap-2">
-        <button
-          type="button"
+        <Button
+          variant="primary"
           onClick={submit}
           disabled={state.busy || !state.collection || state.files.length === 0}
-          className="px-4 py-2 rounded-md bg-zinc-100 text-zinc-900 disabled:opacity-50"
         >
           {state.busy ? 'Ingesting…' : 'Ingest'}
-        </button>
+        </Button>
         {state.files.length > 0 && (
           <button
             type="button"

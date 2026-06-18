@@ -45,7 +45,7 @@ describe('Dashboard backend status indicator', () => {
     renderDashboard()
 
     const dot = await screen.findByTestId('backend-status-dot')
-    expect(dot).toHaveClass('bg-emerald-400')
+    expect(dot).toHaveClass('bg-primary')
     expect(screen.getByText('online')).toBeInTheDocument()
   })
 

@@ -40,7 +40,7 @@ export function Dashboard() {
                   'h-2 w-2 shrink-0 rounded-full',
                   isError
                     ? 'bg-red-400 shadow-[0_0_6px_rgb(248_113_113_/_0.8)]'
-                    : 'bg-emerald-400 shadow-[0_0_6px_rgb(52_211_153_/_0.8)]'
+                    : 'bg-primary shadow-[0_0_6px_var(--color-primary)]'
                 )}
               />
               {isError ? 'offline' : 'online'}

@@ -81,7 +81,7 @@ export function Sidebar() {
             className={({ isActive }) =>
               cn(
                 'rounded-md px-3 py-2 text-sm hover:bg-zinc-800',
-                isActive && 'bg-zinc-800 text-foreground'
+                isActive && 'bg-primary/15 text-primary'
               )
             }
           >
@@ -96,7 +96,7 @@ export function Sidebar() {
           data-testid={selected ? 'active-collection' : undefined}
           className={cn(
             'mt-1 flex items-center gap-2 rounded-md border px-2.5 py-2 transition-colors',
-            selected ? 'border-emerald-700/60 bg-emerald-500/5' : 'border-border'
+            selected ? 'border-primary/60 bg-primary/5' : 'border-border'
           )}
         >
           <span
@@ -104,12 +104,12 @@ export function Sidebar() {
             className={cn(
               'h-2 w-2 shrink-0 rounded-full',
               selected
-                ? 'bg-emerald-400 shadow-[0_0_6px_rgb(52_211_153_/_0.8)]'
+                ? 'bg-primary shadow-[0_0_6px_var(--color-primary)]'
                 : 'bg-zinc-600'
             )}
           />
           {selected && (
-            <span className="text-[10px] uppercase tracking-wide text-emerald-300/80 shrink-0">
+            <span className="text-[10px] uppercase tracking-wide text-primary shrink-0">
               Active
             </span>
           )}
@@ -163,7 +163,7 @@ export function Sidebar() {
         <div className="flex items-center justify-between">
           <label className="text-xs uppercase text-muted-foreground">Sessions</label>
           <Button
-            variant="secondary"
+            variant="primary"
             size="sm"
             onClick={onNewChat}
           >
@@ -191,7 +191,7 @@ export function Sidebar() {
                   onClick={() => onPickSession(s.id)}
                   className={cn(
                     'flex-1 text-left text-sm px-2 py-1 rounded-md truncate',
-                    active ? 'bg-zinc-800' : 'hover:bg-zinc-900'
+                    active ? 'bg-primary/10 text-primary' : 'hover:bg-zinc-900'
                   )}
                   title={s.title ?? s.id}
                 >

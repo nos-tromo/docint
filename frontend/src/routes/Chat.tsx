@@ -1,5 +1,6 @@
 import { useEffect, useReducer, useRef } from 'react'
 import { useParams } from 'react-router-dom'
+import { Button } from '@infra/ui'
 import { streamQuery } from '@/api/chat'
 import type { ChatFinalEvent } from '@/api/types'
 import { useChatFiltersStore } from '@/stores/chatFilters'
@@ -216,13 +217,13 @@ export function Chat() {
             rows={1}
             className="flex-1 bg-zinc-900 border border-border rounded-md px-3 py-2 resize-none max-h-40 leading-6"
           />
-          <button
+          <Button
+            variant="primary"
             type="submit"
             disabled={state.inflight || !state.draft.trim()}
-            className="h-10 px-4 rounded-md bg-zinc-100 text-zinc-900 disabled:opacity-50"
           >
             {state.inflight ? '…' : 'Send'}
-          </button>
+          </Button>
         </form>
       </section>
 
