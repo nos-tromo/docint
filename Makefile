@@ -2,24 +2,22 @@
 #
 # docint is a CPU-only Python app. All ML inference (chat, embeddings,
 # rerank, NER, CLIP) is delegated over HTTP to the external vllm-service
-# stack — see CLAUDE.md. There is no PROFILE / CUDA toggle here anymore.
+# stack — see CLAUDE.md. There is no PROFILE / CUDA toggle here.
+#
+# The compose lifecycle (network/volumes/build/bundle/up/up-dev/stop/down/
+# logs/pre-commit/test) + the versioned image tag come from make/common.mk,
+# vendored from nos-tromo/.github. Only docint-specific config, the help
+# text, and the `resolve` target live here.
 
 .DEFAULT_GOAL := help
 
-.PHONY: help network volumes build bundle up up-dev stop down resolve pre-commit test
+REPO     := docint
+NETWORKS := inference-net data-net
+VOLUMES  := docling-cache huggingface-cache ollama-cache sessions-storage source-preview-cache
+UP_ENV   := DOCKER_BUILDKIT=1
+include make/common.mk
 
-# Versioned image tag.
-# On production: read from .docint-version written by bundle_images.sh.
-# On dev: compute YYYY-MM-DD[-<short-sha>] on the fly.
-# Override entirely by exporting DOCINT_VERSION before invoking make.
-DOCINT_VERSION ?= $(shell \
-    cat .docint-version 2>/dev/null || \
-    { _s=$$(git rev-parse --short HEAD 2>/dev/null); \
-      echo "$$(date +%Y-%m-%d)$${_s:+-$$_s}"; } )
-export DOCINT_VERSION
-
-COMPOSE     := docker compose --env-file .env -f docker/compose.yaml
-COMPOSE_DEV := docker compose --env-file .env -f docker/compose.yaml -f docker/compose.override.yaml
+.PHONY: help resolve
 
 help:
 	@echo "docint — build-host helpers."
@@ -36,50 +34,6 @@ help:
 	@echo "  make pre-commit run pre-commit hooks (ruff + mypy)"
 	@echo "  make test       run the test suite"
 
-# Create the external Docker networks (one-time per host; idempotent).
-network:
-	docker network create inference-net >/dev/null 2>&1 || true
-	docker network create data-net >/dev/null 2>&1 || true
-
-# Create the external Docker volumes (one-time per host; idempotent).
-volumes:
-	@for volume_name in \
-		docling-cache \
-		huggingface-cache \
-		ollama-cache \
-		sessions-storage \
-		source-preview-cache; do \
-		docker volume create "$$volume_name" >/dev/null 2>&1 || true; \
-		printf 'Ensured Docker volume exists: %s\n' "$$volume_name"; \
-	done
-
-# Build images.
-build:
-	DOCKER_BUILDKIT=1 $(COMPOSE) build
-
-# Build images and ship them as a versioned .tar.gz of locally-built images.
-bundle:
-	./scripts/bundle_images.sh
-
-# Build and run docint in production shape (no host ports).
-up:
-	DOCKER_BUILDKIT=1 $(COMPOSE) up
-
-# Like 'up' but layers compose.override.yaml on top to publish the
-# frontend (React SPA) port on the host.
-up-dev:
-	DOCKER_BUILDKIT=1 $(COMPOSE_DEV) up
-
-# Stop docint containers.
-stop:
-	$(COMPOSE) stop
-
-# Stop + remove containers. All docint volumes (sessions-storage, caches)
-# are declared external, and Qdrant lives in data-plane, so this is safe —
-# `down` never destroys session state or vector data.
-down:
-	$(COMPOSE) down
-
 # Resolve duplicate / semantically-similar entities for a collection into
 # durable canonicals (see CLAUDE.md). Runs the `resolve` CLI in a one-off
 # backend container so it reaches the qdrant / vllm-router network aliases —
@@ -92,11 +46,3 @@ resolve:
 	else \
 		$(COMPOSE) run --rm backend resolve; \
 	fi
-
-# Run pre-commit hooks (ruff + mypy).
-pre-commit:
-	uv run pre-commit run --all-files
-
-# Run the test suite.
-test:
-	uv run pytest -q

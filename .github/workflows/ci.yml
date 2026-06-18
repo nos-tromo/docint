@@ -15,10 +15,10 @@ concurrency:
 
 jobs:
   ci:
-    # Pinned to v2.3 (local mypy hook so strict mode sees project deps;
-    # v2.3 fixes github.job_workflow_ref usage in the lint job).
-    # Canonical at nos-tromo/.github/configs/python-strict/.
-    uses: nos-tromo/.github/.github/workflows/python-app-ci.yml@v2.3
+    # Pinned to v2.5 (local mypy hook so strict mode sees project deps + the
+    # make/common.mk drift-check). Canonical configs at
+    # nos-tromo/.github/configs/{python-strict,make-common}/.
+    uses: nos-tromo/.github/.github/workflows/python-app-ci.yml@v2.5
     with:
       python-versions: '["3.11"]'
       uv-sync-args: '--frozen --group dev'
