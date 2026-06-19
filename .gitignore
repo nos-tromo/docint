@@ -105,6 +105,7 @@ wheels/*.whl
 !frontend/index.html
 !scripts/
 !scripts/bundle_images.sh
+!scripts/bundle-lib.sh
 !**/prompts/*.txt
 !**/prompts/**/*.txt
 !**/required_exts.txt
