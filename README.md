@@ -6,7 +6,6 @@ and chat. It ships with:
 - a FastAPI backend
 - a React SPA served by an nginx sidecar that reverse-proxies API
   requests to the backend on the internal Docker network
-- Qdrant for storage and retrieval
 - pluggable inference via any OpenAI-compatible API or an external routed vLLM service
 
 ## What You Need
