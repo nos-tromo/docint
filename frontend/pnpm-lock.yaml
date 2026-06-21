@@ -12,7 +12,7 @@ importers:
         specifier: ^5.1.0
         version: 5.2.8
       '@infra/ui':
-        specifier: github:nos-tromo/infra-ui#v0.2.1
+        specifier: https://codeload.github.com/nos-tromo/infra-ui/tar.gz/4cafeadc32d7ad4b5bd40bbdbb086142f4a19df9
         version: https://codeload.github.com/nos-tromo/infra-ui/tar.gz/4cafeadc32d7ad4b5bd40bbdbb086142f4a19df9(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@tanstack/react-query':
         specifier: ^5.100.14
