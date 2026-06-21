@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useHateSpeechPages, useNerSources, useNerStats } from '@/hooks/useNer'
+import { useReportDedupeKeys } from '@/hooks/useReports'
+import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
 import { EntityInspector } from '@/components/analysis/EntityInspector'
 import { HateSpeechTable } from '@/components/analysis/HateSpeechTable'
@@ -18,6 +20,10 @@ export function Analysis() {
   const [tab, setTab] = useState<Tab>('NER')
   const collection = useUiStore((s) => s.selectedCollection)
   const mergeMode = useUiStore((s) => s.entityMergeMode)
+  // Report-builder context, computed once and threaded into both analysis
+  // views so each virtualized row only does a Set lookup (no per-row query).
+  const activeReportId = useReportStore((s) => s.activeReportId)
+  const reportDedupeKeys = useReportDedupeKeys(activeReportId)
 
   const stats = useNerStats({
     top_k: 500,
@@ -100,6 +106,7 @@ export function Analysis() {
               collection={collection}
               keyOf={(e) => keyOf(e.text, e.type)}
               entityMergeMode={mergeMode}
+              reportDedupeKeys={reportDedupeKeys}
             />
           )}
         </div>
@@ -111,9 +118,10 @@ export function Analysis() {
           hasNextPage={!!hate.hasNextPage}
           onLoadMore={() => hate.fetchNextPage()}
           collection={collection ?? ''}
+          reportDedupeKeys={reportDedupeKeys}
         />
       )}
-      {tab === 'Summary' && <SummaryPanel />}
+      {tab === 'Summary' && <SummaryPanel reportDedupeKeys={reportDedupeKeys} />}
     </div>
   )
 }

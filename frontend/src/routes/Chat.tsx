@@ -5,6 +5,8 @@ import { streamQuery } from '@/api/chat'
 import type { ChatFinalEvent } from '@/api/types'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSessionHistory } from '@/hooks/useSessions'
+import { useReportDedupeKeys } from '@/hooks/useReports'
+import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
 import { useQueryClient } from '@tanstack/react-query'
 import { sessionsKey } from '@/hooks/useSessions'
@@ -66,6 +68,8 @@ export function Chat() {
   const sessionIdParam = params.sessionId ?? null
   const setCurrentSessionId = useUiStore((s) => s.setCurrentSessionId)
   const currentSessionId = useUiStore((s) => s.currentSessionId)
+  const activeReportId = useReportStore((s) => s.activeReportId)
+  const reportDedupeKeys = useReportDedupeKeys(activeReportId)
   const filters = useChatFiltersStore()
   const qc = useQueryClient()
   const history = useSessionHistory(sessionIdParam)
@@ -191,7 +195,13 @@ export function Chat() {
         </div>
         <div className="flex-1 overflow-auto space-y-6 pr-2">
           {state.turns.map((t, i) => (
-            <ChatTurn key={i} turn={t} />
+            <ChatTurn
+              key={i}
+              turn={t}
+              sessionId={t.meta?.session_id ?? currentSessionId ?? undefined}
+              turnIdx={i}
+              reportDedupeKeys={reportDedupeKeys}
+            />
           ))}
         </div>
         <form

@@ -3,6 +3,8 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { csvExportHref } from '@/api/collections'
 import type { HateSpeechRow } from '@/api/types'
 import { referenceMetadataItems } from '@/lib/referenceMetadata'
+import { AddToReportButton } from '@/components/report/AddToReportButton'
+import { hateSpeechSnapshot } from '@/lib/reportSnapshots'
 
 export type { HateSpeechRow }
 
@@ -12,6 +14,7 @@ interface Props {
   hasNextPage?: boolean
   onLoadMore?: () => void
   collection: string
+  reportDedupeKeys?: Set<string>
 }
 
 function locationParts(r: HateSpeechRow): string {
@@ -22,8 +25,18 @@ function locationParts(r: HateSpeechRow): string {
   return parts.join(', ')
 }
 
-function HateSpeechRowDetail({ row, index }: { row: HateSpeechRow; index: number }) {
+function HateSpeechRowDetail({
+  row,
+  index,
+  reportDedupeKeys
+}: {
+  row: HateSpeechRow
+  index: number
+  reportDedupeKeys?: Set<string>
+}) {
   const [open, setOpen] = useState(false)
+  const reportItem = hateSpeechSnapshot(row)
+  const inReport = reportDedupeKeys?.has(reportItem.dedupe_key) ?? false
   const meta = referenceMetadataItems(row.reference_metadata)
   const chunkText = (row.chunk_text ?? row.text ?? '').trim()
   const source = row.source_ref ?? row.filename ?? 'Unknown source'
@@ -32,24 +45,27 @@ function HateSpeechRowDetail({ row, index }: { row: HateSpeechRow; index: number
   const reason = (row.reason ?? '').trim()
   return (
     <div className="rounded-md border border-border bg-zinc-900">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-start justify-between gap-2 px-3 py-2 text-left text-sm"
-      >
-        <span className="min-w-0 flex-1">
-          <span className="text-muted-foreground mr-2">{index}</span>
-          <span className="uppercase text-xs font-medium mr-2">{category}</span>
-          {reason && <span className="text-muted-foreground">{reason}</span>}
-          <span className="block text-xs text-muted-foreground truncate mt-0.5">
-            {source}
-            {location && <> · {location}</>}
+      <div className="flex items-start gap-1 pr-2">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex-1 min-w-0 flex items-start justify-between gap-2 px-3 py-2 text-left text-sm"
+        >
+          <span className="min-w-0 flex-1">
+            <span className="text-muted-foreground mr-2">{index}</span>
+            <span className="uppercase text-xs font-medium mr-2">{category}</span>
+            {reason && <span className="text-muted-foreground">{reason}</span>}
+            <span className="block text-xs text-muted-foreground truncate mt-0.5">
+              {source}
+              {location && <> · {location}</>}
+            </span>
           </span>
-        </span>
-        <span aria-hidden="true" className="text-muted-foreground text-xs shrink-0 mt-0.5">
-          {open ? '▾' : '▸'}
-        </span>
-      </button>
+          <span aria-hidden="true" className="text-muted-foreground text-xs shrink-0 mt-0.5">
+            {open ? '▾' : '▸'}
+          </span>
+        </button>
+        {reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} className="mt-1.5" />}
+      </div>
       {open && (
         <div className="border-t border-border px-3 py-3 space-y-3 text-sm">
           <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
@@ -100,7 +116,8 @@ export function HateSpeechTable({
   isFetching,
   hasNextPage,
   onLoadMore,
-  collection
+  collection,
+  reportDedupeKeys
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
@@ -156,7 +173,7 @@ export function HateSpeechTable({
                 className="absolute left-0 right-0 pb-2"
                 style={{ transform: `translateY(${vRow.start}px)` }}
               >
-                <HateSpeechRowDetail row={r} index={vRow.index + 1} />
+                <HateSpeechRowDetail row={r} index={vRow.index + 1} reportDedupeKeys={reportDedupeKeys} />
               </li>
             )
           })}

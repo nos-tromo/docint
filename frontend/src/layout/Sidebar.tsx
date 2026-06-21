@@ -11,7 +11,8 @@ const NAV = [
   { to: '/chat', label: 'Chat' },
   { to: '/ingest', label: 'Ingest' },
   { to: '/analysis', label: 'Analysis' },
-  { to: '/inspector', label: 'Inspector' }
+  { to: '/inspector', label: 'Inspector' },
+  { to: '/report', label: 'Report' }
 ]
 
 function getSessionsStatusMessage(error: unknown) {

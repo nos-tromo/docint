@@ -208,6 +208,47 @@ export interface HateSpeechRow {
   reference_metadata?: ReferenceMetadata
 }
 
+// --- Report builder ---
+export type ArtifactType = 'chat_answer' | 'entity_finding' | 'hate_speech_finding' | 'summary'
+
+export type ReportExportFormat = 'md' | 'html' | 'pdf' | 'json' | 'zip'
+
+/** A frozen artifact snapshot; its shape varies by `artifact_type`. */
+export type ReportSnapshot = Record<string, unknown>
+
+export interface ReportItemInput {
+  artifact_type: ArtifactType
+  dedupe_key: string
+  snapshot: ReportSnapshot
+  note?: string | null
+}
+
+export interface ReportItem {
+  id: number
+  artifact_type: ArtifactType
+  dedupe_key: string
+  position: number
+  note: string | null
+  snapshot: ReportSnapshot
+  created_at: string | null
+}
+
+export interface ReportSummary {
+  id: number
+  title: string
+  collection_name: string | null
+  operator: string | null
+  reference_number: string | null
+  session_id: string | null
+  created_at: string | null
+  updated_at: string | null
+  item_count: number
+}
+
+export interface Report extends ReportSummary {
+  items: ReportItem[]
+}
+
 export interface IngestEvent {
   event:
     | 'start'

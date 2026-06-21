@@ -4,6 +4,8 @@ import { useUiStore } from '@/stores/ui'
 import { sourcePreviewUrl } from '@/api/ingest'
 import { referenceMetadataItems } from '@/lib/referenceMetadata'
 import { highlightSegments } from '@/lib/highlight'
+import { AddToReportButton } from '@/components/report/AddToReportButton'
+import { entityFindingSnapshot } from '@/lib/reportSnapshots'
 
 interface Props {
   index: number
@@ -14,6 +16,11 @@ interface Props {
   highlightTerms: string[]
   selectedTypeLower?: string
   defaultOpen?: boolean
+  // Report-builder context. When `reportDedupeKeys` is provided (the entity
+  // is rendered inside a report-aware view), an "Add to report" control shows
+  // and `entityLabel` becomes the report's entity column for this chunk.
+  entityLabel?: string
+  reportDedupeKeys?: Set<string>
 }
 
 function locationLabel(source: NerSourceRow): string {
@@ -56,9 +63,13 @@ export function EntityFinding({
   source,
   highlightTerms,
   selectedTypeLower,
-  defaultOpen = false
+  defaultOpen = false,
+  entityLabel,
+  reportDedupeKeys
 }: Props) {
   const [open, setOpen] = useState(defaultOpen)
+  const reportItem = entityLabel != null ? entityFindingSnapshot(source, entityLabel) : null
+  const inReport = reportItem != null && (reportDedupeKeys?.has(reportItem.dedupe_key) ?? false)
   const collection = useUiStore((s) => s.selectedCollection)
   const refMeta = referenceMetadataItems(source.reference_metadata)
   const chunkText = (source.chunk_text ?? source.text ?? '').trim()
@@ -86,19 +97,22 @@ export function EntityFinding({
 
   return (
     <div className="rounded-md border border-border bg-zinc-900">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left text-sm"
-      >
-        <span className="truncate">
-          <span className="text-muted-foreground mr-2">Chunk {index}:</span>
-          {locationLabel(source)}
-        </span>
-        <span aria-hidden="true" className="text-muted-foreground text-xs shrink-0">
-          {open ? '▾' : '▸'}
-        </span>
-      </button>
+      <div className="flex items-center gap-1 pr-2">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex-1 min-w-0 flex items-center justify-between gap-2 px-3 py-2 text-left text-sm"
+        >
+          <span className="truncate">
+            <span className="text-muted-foreground mr-2">Chunk {index}:</span>
+            {locationLabel(source)}
+          </span>
+          <span aria-hidden="true" className="text-muted-foreground text-xs shrink-0">
+            {open ? '▾' : '▸'}
+          </span>
+        </button>
+        {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
+      </div>
       {open && (
         <div className="border-t border-border px-3 py-3 space-y-3 text-sm">
           <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">

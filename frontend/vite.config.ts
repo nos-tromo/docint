@@ -17,6 +17,7 @@ export default defineConfig({
     proxy: {
       '/collections': 'http://localhost:8000',
       '/sessions': 'http://localhost:8000',
+      '/reports': 'http://localhost:8000',
       '/sources': 'http://localhost:8000',
       '/query': 'http://localhost:8000',
       '/stream_query': 'http://localhost:8000',
