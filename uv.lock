@@ -576,12 +576,12 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=49.0.0" },
-    { name = "docling", specifier = ">=2.103.0" },
-    { name = "fastapi", specifier = ">=0.137.1" },
+    { name = "docling", specifier = ">=2.104.0" },
+    { name = "fastapi", specifier = ">=0.138.0" },
     { name = "fastembed", specifier = ">=0.8.0" },
     { name = "fastparquet", specifier = ">=2026.5.0" },
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "huggingface-hub", specifier = ">=1.19.0,<2.0" },
+    { name = "huggingface-hub", specifier = ">=1.20.1,<2.0" },
     { name = "llama-index", specifier = ">=0.14.22" },
     { name = "llama-index-embeddings-huggingface", specifier = ">=0.7.0" },
     { name = "llama-index-embeddings-openai", specifier = ">=0.6.0" },
@@ -616,20 +616,20 @@ requires-dist = [
 dev = [
     { name = "mypy", specifier = "==1.19.0" },
     { name = "pre-commit", specifier = ">=4.6.0" },
-    { name = "pytest", specifier = ">=9.1.0" },
+    { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = "==0.15.14" },
 ]
 
 [[package]]
 name = "docling"
-version = "2.103.0"
+version = "2.104.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "docling-slim", extra = ["standard"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a5/4c/4f28e80cb2ac8e6e3c673f50e3cc6c63d77e73b6d30293cb6544155fd577/docling-2.103.0.tar.gz", hash = "sha256:1b449f610077f693d04a96bd208fb6557542f375cfb31fcf05331d795d735542", size = 8840, upload-time = "2026-06-17T08:50:33.439Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a6/a1/5f02d87de3d9886270ffe3a0526a358d91d04a84bfbf088d438bbcae964e/docling-2.104.0.tar.gz", hash = "sha256:042636aac519f6f4f92f929f655db6b191c6558bd10f998cdf396a664048ada7", size = 8839, upload-time = "2026-06-19T04:53:29.661Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/04/e6/ecb1a2a91bb16242109f13d0bed0a78307c6c21af40211dc00cc54496dec/docling-2.103.0-py3-none-any.whl", hash = "sha256:bf706a3f856e9352f9cc51e61f531d585f7a5c5f8298ea065f994a2ac2fbeeae", size = 5013, upload-time = "2026-06-17T08:50:32.066Z" },
+    { url = "https://files.pythonhosted.org/packages/4f/4d/e51e60887d185c9fcbd46b85a5e0e0db5d96003b354eabc55f1a5854b42b/docling-2.104.0-py3-none-any.whl", hash = "sha256:fb2b04fd021fee53d70543820983b89380b77481a40a8c9e57c2ee6c3af61b23", size = 5013, upload-time = "2026-06-19T04:53:28.383Z" },
 ]
 
 [[package]]
@@ -711,7 +711,7 @@ wheels = [
 
 [[package]]
 name = "docling-slim"
-version = "2.103.0"
+version = "2.104.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "certifi" },
@@ -723,9 +723,9 @@ dependencies = [
     { name = "requests" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1c/f1/c6305cc6569dce9e30d79c17770df1a7a26960ba887d74266a6294217469/docling_slim-2.103.0.tar.gz", hash = "sha256:05ff493237ffdae9cb28f420dd21b40d423feb6858d1e5f26a6b14671d19f630", size = 433807, upload-time = "2026-06-17T08:49:06.456Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/aa/75/217803d56063d559c7565c59f3dc27c898eeec857cd4ba890c4a3c8681a7/docling_slim-2.104.0.tar.gz", hash = "sha256:a426ba5802fe0b6102da9a8f19079036dcf4eac33791a8967df9887bb7449b53", size = 442998, upload-time = "2026-06-19T04:52:06.9Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a5/06/22986d8662e7a8b295ff5eab6bc61c8f08427b3633ac2786f816353b3fbb/docling_slim-2.103.0-py3-none-any.whl", hash = "sha256:1674139d3a333904346dd7b161b5d5688d53e5750d7440036f2f6c9cb37c2d63", size = 556865, upload-time = "2026-06-17T08:49:04.416Z" },
+    { url = "https://files.pythonhosted.org/packages/51/ea/113dc379562b1c1911e658bbd92800d3a35c0146a7cfc58d16e71a8e5a92/docling_slim-2.104.0-py3-none-any.whl", hash = "sha256:952df3510c596bab561cd9bba6758a3eb4ea3b142ded52b0c2ffe839e026f8ce", size = 568758, upload-time = "2026-06-19T04:52:04.977Z" },
 ]
 
 [package.optional-dependencies]
@@ -783,7 +783,7 @@ wheels = [
 
 [[package]]
 name = "fastapi"
-version = "0.137.1"
+version = "0.138.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "annotated-doc" },
@@ -792,9 +792,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "typing-inspection" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d5/b1/e5b92c59d2c37817e77c1a8c2fc1f79cdcc04c68253e5406b43e3204cba7/fastapi-0.137.1.tar.gz", hash = "sha256:822360704230d9533d8d9475399613525968aa2f0b5bd2a3ccc9f18c88fd541c", size = 408293, upload-time = "2026-06-15T11:28:20.79Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5b/58/ff455d9fe47c60abadb34b9e05a304b1f05f5ab8000ac01565156b6f5e43/fastapi-0.138.0.tar.gz", hash = "sha256:d445a4877636ad191e7053e08c9bf98cb921a6756776848400bb773d1740c061", size = 419240, upload-time = "2026-06-20T01:18:05.259Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/da/35/380b9a5922f4340e51c309cde09e5bd32e62f02302971bee30dc15aa0624/fastapi-0.137.1-py3-none-any.whl", hash = "sha256:64f6983c59e45c4b9fdc44e57cb8035c2451ee91ea8e8ec042aca37de7cf6b69", size = 121877, upload-time = "2026-06-15T11:28:19.523Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/ff/8496d9847a5fedae775eb49460722d3efaa80487854273e9647ae876218c/fastapi-0.138.0-py3-none-any.whl", hash = "sha256:b6f54fd1bd72c80b0f899f172c61a600f6f7af9b43d4d772a018f35624048cb0", size = 126779, upload-time = "2026-06-20T01:18:03.483Z" },
 ]
 
 [[package]]
@@ -1081,7 +1081,7 @@ http2 = [
 
 [[package]]
 name = "huggingface-hub"
-version = "1.19.0"
+version = "1.20.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -1095,9 +1095,9 @@ dependencies = [
     { name = "typer" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/88/27/629cfe58c582f92ded066c4a07d1a057ff617118ab7973200f770bd853cb/huggingface_hub-1.19.0.tar.gz", hash = "sha256:fd771622182d40977272a923953ee3b1b13538f9f8a7f5d78398f10af0f1c0bd", size = 824721, upload-time = "2026-06-11T12:33:18.665Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e6/7e/fad82ad491b226e832d2da90a1a59f36acd4526cda8c726f639834754aa4/huggingface_hub-1.20.1.tar.gz", hash = "sha256:9f6d63bfbeab2d2a8357200a9bc4f18cd2c8bfac9579f792f5922e77bf6471d0", size = 859910, upload-time = "2026-06-18T22:06:53.348Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b2/a5/558da89f66464d8d0229ff497e8b8666977de2d8cf48c28a2862ecf1250f/huggingface_hub-1.19.0-py3-none-any.whl", hash = "sha256:1dc72e1f6b4d6df6b30eb72e57d00514ef453d660f04af2b87f0e67267f31ee0", size = 693398, upload-time = "2026-06-11T12:33:16.695Z" },
+    { url = "https://files.pythonhosted.org/packages/8e/b5/ff8516e74b459da3dce9567540c39f2d305ee7a2655109f6802873ff1588/huggingface_hub-1.20.1-py3-none-any.whl", hash = "sha256:274448a45c1ba6f112fe2fb168ead05574c654faa156904157a84085cfae14bd", size = 719837, upload-time = "2026-06-18T22:06:51.486Z" },
 ]
 
 [[package]]
@@ -2396,7 +2396,7 @@ wheels = [
 
 [[package]]
 name = "pytest"
-version = "9.1.0"
+version = "9.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorama", marker = "sys_platform == 'win32'" },
@@ -2405,9 +2405,9 @@ dependencies = [
     { name = "pluggy" },
     { name = "pygments" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/84/0e/b5858858d74958632c49b72cb25a3976ff9f632397626715be71c89d3971/pytest-9.1.0.tar.gz", hash = "sha256:41dd9148c08072446394cefd3d79701701335a9f4cae69ba92e39f6c7f5c061c", size = 1634181, upload-time = "2026-06-13T18:52:45.983Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e4/47/b9efed96c114afcfa3c9d3fe98a76a1d14c74a9e266d397cf6eb64be5e01/pytest-9.1.1.tar.gz", hash = "sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313", size = 1636369, upload-time = "2026-06-19T10:58:32.857Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8b/5a/ba30a81239b909821b3153e303e7def45178bf353da4f72380e6c5e8793b/pytest-9.1.0-py3-none-any.whl", hash = "sha256:8ebb0e7888bdf2bdfc602ec51f8f62d50200af37356c74e503c79a94f5c81f32", size = 386453, upload-time = "2026-06-13T18:52:44.045Z" },
+    { url = "https://files.pythonhosted.org/packages/24/25/1de2678b631f5a49215c6c96fff41ba892b0a34df68d6d80292b1b48aa7f/pytest-9.1.1-py3-none-any.whl", hash = "sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c", size = 386536, upload-time = "2026-06-19T10:58:31.347Z" },
 ]
 
 [[package]]

@@ -9,12 +9,12 @@ requires-python = ">=3.11,<3.12"
 license = "Apache-2.0"
 dependencies = [
   "cryptography>=49.0.0",
-  "docling>=2.103.0",
-  "fastapi>=0.137.1",
+  "docling>=2.104.0",
+  "fastapi>=0.138.0",
   "fastembed>=0.8.0",
   "fastparquet>=2026.5.0",
   "httpx>=0.28.1",
-  "huggingface-hub>=1.19.0,<2.0",
+  "huggingface-hub>=1.20.1,<2.0",
   "llama-index>=0.14.22",
   "llama-index-embeddings-huggingface>=0.7.0",
   "llama-index-embeddings-openai>=0.6.0",
@@ -61,7 +61,7 @@ load-models = "docint.utils.model_cfg:main"
 dev = [
     "mypy==1.19.0",
     "pre-commit>=4.6.0",
-    "pytest>=9.1.0",
+    "pytest>=9.1.1",
     "ruff==0.15.14",
 ]
 
