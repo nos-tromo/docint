@@ -15,10 +15,6 @@ updates:
     ignore:
       - dependency-name: "mypy"
       - dependency-name: "ruff"
-      - dependency-name: "pillow"
-        versions: [">= 12.0.0"]
-      - dependency-name: "numpy"
-        versions: [">= 2.4.0"]
       # transformers is capped <5.9 in pyproject.toml: docling 2.102.1
       # (docling-core[chunking]) requires transformers<5.9.0, so bumping past
       # it makes `uv lock` unsatisfiable. Lift once docling allows transformers
