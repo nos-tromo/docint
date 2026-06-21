@@ -11,6 +11,7 @@ describe('cn', () => {
   })
 
   it('drops falsy values', () => {
+    // eslint-disable-next-line no-constant-binary-expression -- intentional: cn must drop literal falsy class args
     expect(cn('a', false && 'b', null, undefined, 'c')).toBe('a c')
   })
 })
