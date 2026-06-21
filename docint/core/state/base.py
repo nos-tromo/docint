@@ -95,6 +95,32 @@ def _ensure_conversation_owner_column(engine: Engine) -> None:
         )
 
 
+def _ensure_report_columns(engine: Engine) -> None:
+    """Backfill ``operator`` / ``reference_number`` onto a pre-existing reports table.
+
+    ``Base.metadata.create_all`` never adds columns to an existing table, so a
+    ``reports`` table created before these case-metadata fields shipped needs
+    them added explicitly. Uses raw SQL + ``inspect`` (no model import) to avoid
+    a base ↔ report import cycle.
+    """
+    try:
+        inspector = inspect(engine)
+        if "reports" not in inspector.get_table_names():
+            return
+        existing = {col["name"] for col in inspector.get_columns("reports")}
+        pending = [("operator", "TEXT"), ("reference_number", "TEXT")]
+        with engine.begin() as conn:
+            for name, sql_type in pending:
+                if name not in existing:
+                    conn.execute(text(f"ALTER TABLE reports ADD COLUMN {name} {sql_type}"))
+    except Exception as exc:
+        logger.warning(
+            "Skipping reports column migration: {}: {}",
+            type(exc).__name__,
+            exc,
+        )
+
+
 # --- Session maker ---
 def _make_session_maker(db_url: str) -> sessionmaker[Session]:
     """Creates a new SQLAlchemy session maker.
@@ -110,4 +136,8 @@ def _make_session_maker(db_url: str) -> sessionmaker[Session]:
     Base.metadata.create_all(engine)
     _ensure_turn_validation_columns(engine)
     _ensure_conversation_owner_column(engine)
+    # ``create_all`` above creates any missing table (incl. reports/report_items,
+    # registered via ``docint.core.state.__init__``). Only added *columns* on a
+    # pre-existing table need a manual backfill:
+    _ensure_report_columns(engine)
     return sessionmaker(bind=engine, expire_on_commit=False)

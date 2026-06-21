@@ -137,6 +137,7 @@ from docint.core.ner import (
 )
 from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.retrieval_filters import matches_metadata_filters
+from docint.core.state.report_manager import ReportManager
 from docint.core.state.session_manager import SessionManager
 from docint.core.storage.ingest_manifest import (
     IngestManifest,
@@ -1741,6 +1742,7 @@ class RAG:
     index: VectorStoreIndex | None = field(default=None, init=False)
     query_engine: RetrieverQueryEngine | None = field(default=None, init=False)
     sessions: SessionManager | None = field(default=None, init=False)
+    reports: ReportManager | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """Post-initialization to set up any necessary components.
@@ -1913,6 +1915,7 @@ class RAG:
         # --- Session config ---
         self.session_store = self.session_config.session_store
         self.sessions = SessionManager(self)
+        self.reports = ReportManager(self)
 
         # --- Summary config ---
         self.summary_coverage_target = self.summary_config.coverage_target
@@ -5795,6 +5798,20 @@ class RAG:
         if self.sessions is None:
             self.sessions = SessionManager(self)
         return self.sessions
+
+    def ensure_report_manager(self) -> ReportManager:
+        """Ensure the ReportManager is initialized and return it.
+
+        Parallels :meth:`ensure_session_manager`. Used by the report API
+        endpoints, which need owner-scoped report CRUD without starting a chat
+        turn or building the query engine.
+
+        Returns:
+            ReportManager: The initialized report manager for this RAG instance.
+        """
+        if self.reports is None:
+            self.reports = ReportManager(self)
+        return self.reports
 
     def export_session(self, session_id: str | None = None, out_dir: str | Path = "session") -> Path:
         """Delegate session export to SessionManager.

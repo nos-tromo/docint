@@ -5,6 +5,7 @@ import { Chat } from './Chat'
 import { Ingest } from './Ingest'
 import { Analysis } from './Analysis'
 import { Inspector } from './Inspector'
+import { Report } from './Report'
 
 export function Router() {
   return (
@@ -16,6 +17,7 @@ export function Router() {
         <Route path="/ingest" element={<Ingest />} />
         <Route path="/analysis" element={<Analysis />} />
         <Route path="/inspector" element={<Inspector />} />
+        <Route path="/report" element={<Report />} />
       </Routes>
     </Shell>
   )

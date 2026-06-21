@@ -39,8 +39,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 WORKDIR /app
 
+# libmagic1/libgl1: file-type detection + docling image deps.
+# pango/harfbuzz/fontconfig/gdk-pixbuf + Noto fonts: WeasyPrint's native runtime
+# libraries and a broad multi-script font set (Latin/Cyrillic/CJK) for the PDF
+# report export. Installed at build time → baked into the (airgapped) image.
 RUN apt-get update -y && apt-get install -y --no-install-recommends \
     libmagic1 libgl1 \
+    libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b libfontconfig1 libgdk-pixbuf-2.0-0 \
+    fonts-dejavu-core fonts-noto-core fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app /app

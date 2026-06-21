@@ -15,6 +15,9 @@ interface Props {
   collection: string
   keyOf: (e: NerEntityRow) => string
   entityMergeMode?: EntityMergeMode
+  // Dedupe keys in the active report; when provided each finding shows an
+  // "Add to report" control.
+  reportDedupeKeys?: Set<string>
 }
 
 function entityOptionLabel(entity: NerEntityRow): string {
@@ -42,7 +45,8 @@ export function EntityInspector({
   onLoadMore,
   collection,
   keyOf,
-  entityMergeMode
+  entityMergeMode,
+  reportDedupeKeys
 }: Props) {
   const entityList = useMemo(
     () => entities.filter((e) => (e.text ?? '').trim().length > 0),
@@ -91,6 +95,10 @@ export function EntityInspector({
       <div className="text-sm text-muted-foreground">No entities found in this collection.</div>
     )
   }
+
+  // Mirrors the backend's ner-sources `entity_label` (``text [TYPE]``) so a
+  // report's entity column matches the CSV export.
+  const entityLabel = selected ? `${selected.text} [${selected.type || 'Unlabeled'}]` : undefined
 
   const exportParams =
     selected && selectedKey
@@ -193,6 +201,8 @@ export function EntityInspector({
                         highlightTerms={highlightTermsForEntity(selected)}
                         selectedTypeLower={(selected.type || '').toLowerCase()}
                         defaultOpen={findings.length === 1}
+                        entityLabel={entityLabel}
+                        reportDedupeKeys={reportDedupeKeys}
                       />
                     </li>
                   )

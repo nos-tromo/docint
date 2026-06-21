@@ -44,6 +44,16 @@ export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   )
 }
 
+export async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
+  return handle<T>(
+    await fetch(url(path), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    })
+  )
+}
+
 export async function apiDelete<T>(path: string): Promise<T> {
   return handle<T>(await fetch(url(path), { method: 'DELETE' }))
 }

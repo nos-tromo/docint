@@ -5,6 +5,8 @@ import { Citation } from './Citation'
 import { ValidationBanner } from './ValidationBanner'
 import { GraphDebugPanel } from './GraphDebugPanel'
 import { EntityCandidatesPanel } from './EntityCandidatesPanel'
+import { AddToReportButton } from '@/components/report/AddToReportButton'
+import { chatAnswerSnapshot } from '@/lib/reportSnapshots'
 
 export interface ChatTurnData {
   user: string
@@ -47,8 +49,29 @@ function dedupeSources(sources: Source[]): Source[] {
   return out
 }
 
-export function ChatTurn({ turn }: { turn: ChatTurnData }) {
+export function ChatTurn({
+  turn,
+  sessionId,
+  turnIdx,
+  reportDedupeKeys
+}: {
+  turn: ChatTurnData
+  sessionId?: string
+  turnIdx?: number
+  reportDedupeKeys?: Set<string>
+}) {
   const sources = dedupeSources(turn.meta?.sources ?? [])
+  const reportItem =
+    turn.done && turn.assistant && sessionId && turnIdx != null
+      ? chatAnswerSnapshot({
+          sessionId,
+          turnIdx,
+          userText: turn.user,
+          modelResponse: turn.assistant,
+          sources
+        })
+      : null
+  const inReport = reportItem != null && (reportDedupeKeys?.has(reportItem.dedupe_key) ?? false)
   return (
     <article className="space-y-3">
       <div className="rounded-md bg-zinc-900 px-4 py-2 self-end max-w-2xl ml-auto">
@@ -56,7 +79,10 @@ export function ChatTurn({ turn }: { turn: ChatTurnData }) {
         <div className="whitespace-pre-wrap">{turn.user}</div>
       </div>
       <div className="rounded-md bg-zinc-950 border border-border px-4 py-3">
-        <div className="text-xs text-muted-foreground mb-1">Assistant</div>
+        <div className="flex items-center justify-between gap-2 mb-1">
+          <div className="text-xs text-muted-foreground">Assistant</div>
+          {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
+        </div>
         {turn.assistant ? (
           <div className="prose prose-invert prose-sm max-w-none prose-p:my-2 prose-pre:bg-zinc-900 prose-code:before:content-none prose-code:after:content-none">
             <Markdown remarkPlugins={[remarkGfm]}>{turn.assistant}</Markdown>

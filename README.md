@@ -235,6 +235,40 @@ Both paths share the schemas defined in `docint/utils/csv_stream.py`, so
 the streaming endpoint and the CLI produce byte-identical CSVs for the
 same collection.
 
+## Curated Reports (Report Builder)
+
+The collection-wide exports above are all-or-nothing. For an investigative case
+you usually want a *curated* document — only the chat answers, entity findings,
+and hate-speech findings that matter, with the duplicate chunks a single entity
+drags in collapsed. The **Report Builder** (the **Report** tab in the SPA) is
+that workflow:
+
+- An **"+ Report"** control sits on every chat answer, entity finding, and
+  hate-speech finding. Clicking it snapshots that one artifact into the active
+  report (auto-creating an "Untitled report" the first time). Re-adding the same
+  chunk is a no-op — findings are deduped by `chunk_id`.
+- The **Report** view lists your reports and, for the active one, shows the
+  picked artifacts grouped by type with per-item notes, reordering, and removal.
+- Reports are **owner-scoped** and persisted server-side in the same SQLite
+  store as chat sessions; each item is **snapshotted at add-time**, so later
+  re-ingestion of the collection never changes a finished report.
+
+Export a finished report in five formats (also available directly over HTTP):
+
+```bash
+curl -O "http://localhost:8000/reports/1/export.pdf"   # paginated case-file PDF (WeasyPrint)
+curl -O "http://localhost:8000/reports/1/export.md"    # combined Markdown
+curl    "http://localhost:8000/reports/1/export.html"  # self-contained HTML (also the PDF source)
+curl -O "http://localhost:8000/reports/1/export.json"  # structured selection
+curl -O "http://localhost:8000/reports/1/export.zip"   # per-type CSV bundle (reuses csv_stream.py schemas)
+```
+
+The PDF is rendered server-side by WeasyPrint into a real paginated document
+(running header, page numbers, findings kept whole across page breaks, Noto
+fonts for multi-script text). It needs WeasyPrint's native libraries, which the
+backend image installs; if they are absent the `.pdf` route returns 503 while
+every other format keeps working.
+
 ## Standalone vLLM App
 
 The standalone deployment lives in

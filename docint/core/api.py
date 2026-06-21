@@ -20,7 +20,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 from qdrant_client import models
@@ -606,6 +606,51 @@ class AgentChatOut(BaseModel):
     validation_checked: bool | None = None
     validation_mismatch: bool | None = None
     validation_reason: str | None = None
+
+
+class ReportCreateIn(BaseModel):
+    """Request payload creating a new (empty) report."""
+
+    title: str
+    collection_name: str | None = None
+    operator: str | None = None
+    reference_number: str | None = None
+    session_id: str | None = None
+
+
+class ReportUpdateIn(BaseModel):
+    """Request payload updating a report's title or case metadata."""
+
+    title: str | None = None
+    operator: str | None = None
+    reference_number: str | None = None
+
+
+class ReportItemIn(BaseModel):
+    """Request payload adding one snapshotted artifact to a report."""
+
+    artifact_type: str
+    dedupe_key: str
+    snapshot: dict[str, Any]
+    note: str | None = None
+
+
+class ReportItemNoteIn(BaseModel):
+    """Request payload setting or clearing an item note."""
+
+    note: str | None = None
+
+
+class ReportReorderIn(BaseModel):
+    """Request payload reordering a report's items."""
+
+    item_ids: list[int]
+
+
+class ReportListOut(BaseModel):
+    """List of reports visible to the caller."""
+
+    reports: list[dict[str, Any]]
 
 
 # --- API Endpoints ---
@@ -1530,6 +1575,56 @@ def _csv_attachment_headers(stem: str) -> dict[str, str]:
     }
 
 
+def _download_headers(stem: str, ext: str, *, inline: bool = False) -> dict[str, str]:
+    """Build Content-Disposition headers (RFC 6266) for a report download.
+
+    Args:
+        stem (str): Filename stem (without extension). Non-ASCII is preserved in
+            the ``filename*`` form and transliterated to ``_`` in the ASCII
+            ``filename`` fallback.
+        ext (str): File extension without the leading dot.
+        inline (bool): Serve inline (e.g. the HTML view) instead of as an
+            attachment download.
+
+    Returns:
+        dict[str, str]: Response headers.
+    """
+    from urllib.parse import quote
+
+    safe_stem = (stem or "report").replace('"', "_")
+    ascii_only = "".join(ch if ord(ch) < 128 else "_" for ch in safe_stem)
+    disposition = "inline" if inline else "attachment"
+    star = quote(f"{safe_stem}.{ext}", safe="")
+    return {
+        "Content-Disposition": f"{disposition}; filename=\"{ascii_only}.{ext}\"; filename*=UTF-8''{star}",
+        "Cache-Control": "no-store",
+    }
+
+
+def _report_stem(report: dict[str, Any]) -> str:
+    """Build a download filename stem from a report dict."""
+    return f"report-{report.get('id')}-{report.get('title') or 'report'}"
+
+
+def _get_owned_report(report_id: int, principal: str) -> dict[str, Any]:
+    """Fetch a report owned by ``principal`` or raise 404.
+
+    Args:
+        report_id (int): The report id.
+        principal (str): The resolved request principal.
+
+    Returns:
+        dict[str, Any]: The report, including its ordered items.
+
+    Raises:
+        HTTPException: 404 when the report is missing or owned by another principal.
+    """
+    report = rag.ensure_report_manager().get_report(report_id, principal)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found.")
+    return report
+
+
 @app.get("/collections/{name}/export/documents.csv", tags=["Query"])
 def export_documents_csv(name: str) -> StreamingResponse:
     """Stream the documents table as CSV.
@@ -1876,6 +1971,286 @@ def delete_session(session_id: str, principal: str = Depends(resolve_principal))
     if not success:
         raise HTTPException(status_code=404, detail="Session not found.")
     return {"ok": success}
+
+
+@app.post("/reports", tags=["Reports"])
+def create_report(payload: ReportCreateIn, principal: str = Depends(resolve_principal)) -> dict[str, Any]:
+    """Create a new, empty report owned by the calling principal.
+
+    Args:
+        payload (ReportCreateIn): Title and optional collection/session scope.
+        principal (str): The resolved request principal.
+
+    Returns:
+        dict[str, Any]: The created report.
+    """
+    try:
+        return rag.ensure_report_manager().create_report(
+            title=payload.title,
+            owner=principal,
+            collection_name=payload.collection_name,
+            operator=payload.operator,
+            reference_number=payload.reference_number,
+            session_id=payload.session_id,
+        )
+    except Exception as e:
+        logger.error("Error creating report: {}", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/reports", response_model=ReportListOut, tags=["Reports"])
+def list_reports(
+    collection: str | None = None, principal: str = Depends(resolve_principal)
+) -> dict[str, list[dict[str, Any]]]:
+    """List the caller's reports, optionally filtered by collection.
+
+    Args:
+        collection (str | None): Optional collection filter.
+        principal (str): The resolved request principal.
+
+    Returns:
+        dict[str, list[dict[str, Any]]]: The caller's report summaries.
+    """
+    try:
+        return {"reports": rag.ensure_report_manager().list_reports(principal, collection)}
+    except Exception as e:
+        logger.error("Error listing reports: {}", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/reports/{report_id}", tags=["Reports"])
+def get_report(report_id: int, principal: str = Depends(resolve_principal)) -> dict[str, Any]:
+    """Return a report (with items) owned by the calling principal.
+
+    Args:
+        report_id (int): The report id.
+        principal (str): The resolved request principal.
+
+    Returns:
+        dict[str, Any]: The report and its ordered items.
+
+    Raises:
+        HTTPException: 404 when the report is missing or not owned.
+    """
+    return _get_owned_report(report_id, principal)
+
+
+@app.patch("/reports/{report_id}", tags=["Reports"])
+def update_report(
+    report_id: int, payload: ReportUpdateIn, principal: str = Depends(resolve_principal)
+) -> dict[str, Any]:
+    """Rename a report owned by the calling principal.
+
+    Args:
+        report_id (int): The report id.
+        payload (ReportUpdateIn): New title.
+        principal (str): The resolved request principal.
+
+    Returns:
+        dict[str, Any]: The updated report.
+
+    Raises:
+        HTTPException: 404 when the report is missing or not owned.
+    """
+    report = rag.ensure_report_manager().update_report(
+        report_id,
+        principal,
+        title=payload.title,
+        operator=payload.operator,
+        reference_number=payload.reference_number,
+    )
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found.")
+    return report
+
+
+@app.delete("/reports/{report_id}", tags=["Reports"])
+def delete_report(report_id: int, principal: str = Depends(resolve_principal)) -> dict[str, bool]:
+    """Delete a report (and its items) owned by the calling principal.
+
+    Args:
+        report_id (int): The report id.
+        principal (str): The resolved request principal.
+
+    Returns:
+        dict[str, bool]: ``{"ok": True}`` on success.
+
+    Raises:
+        HTTPException: 404 when the report is missing or not owned.
+    """
+    if not rag.ensure_report_manager().delete_report(report_id, principal):
+        raise HTTPException(status_code=404, detail="Report not found.")
+    return {"ok": True}
+
+
+@app.post("/reports/{report_id}/items", tags=["Reports"])
+def add_report_item(
+    report_id: int, payload: ReportItemIn, principal: str = Depends(resolve_principal)
+) -> dict[str, Any]:
+    """Add a snapshotted artifact to a report (idempotent by dedupe key).
+
+    Args:
+        report_id (int): The report id.
+        payload (ReportItemIn): Artifact type, dedupe key, snapshot, optional note.
+        principal (str): The resolved request principal.
+
+    Returns:
+        dict[str, Any]: The added (or pre-existing) item.
+
+    Raises:
+        HTTPException: 404 when the report is missing or not owned.
+    """
+    item = rag.ensure_report_manager().add_item(
+        report_id,
+        principal,
+        artifact_type=payload.artifact_type,
+        dedupe_key=payload.dedupe_key,
+        snapshot=payload.snapshot,
+        note=payload.note,
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Report not found.")
+    return item
+
+
+@app.patch("/reports/{report_id}/items/{item_id}", tags=["Reports"])
+def annotate_report_item(
+    report_id: int, item_id: int, payload: ReportItemNoteIn, principal: str = Depends(resolve_principal)
+) -> dict[str, Any]:
+    """Set or clear the note on a report item.
+
+    Args:
+        report_id (int): The report id.
+        item_id (int): The item id.
+        payload (ReportItemNoteIn): The new note (``None`` clears it).
+        principal (str): The resolved request principal.
+
+    Returns:
+        dict[str, Any]: The updated item.
+
+    Raises:
+        HTTPException: 404 when the report/item is missing or not owned.
+    """
+    item = rag.ensure_report_manager().annotate_item(report_id, principal, item_id, note=payload.note)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Report or item not found.")
+    return item
+
+
+@app.delete("/reports/{report_id}/items/{item_id}", tags=["Reports"])
+def remove_report_item(report_id: int, item_id: int, principal: str = Depends(resolve_principal)) -> dict[str, bool]:
+    """Remove a single item from a report owned by the calling principal.
+
+    Args:
+        report_id (int): The report id.
+        item_id (int): The item id.
+        principal (str): The resolved request principal.
+
+    Returns:
+        dict[str, bool]: ``{"ok": True}`` on success.
+
+    Raises:
+        HTTPException: 404 when the report/item is missing or not owned.
+    """
+    if not rag.ensure_report_manager().remove_item(report_id, principal, item_id):
+        raise HTTPException(status_code=404, detail="Report or item not found.")
+    return {"ok": True}
+
+
+@app.post("/reports/{report_id}/items/reorder", tags=["Reports"])
+def reorder_report_items(
+    report_id: int, payload: ReportReorderIn, principal: str = Depends(resolve_principal)
+) -> dict[str, Any]:
+    """Reorder a report's items to match the supplied id order.
+
+    Args:
+        report_id (int): The report id.
+        payload (ReportReorderIn): Desired item id order.
+        principal (str): The resolved request principal.
+
+    Returns:
+        dict[str, Any]: The reordered report.
+
+    Raises:
+        HTTPException: 404 when the report is missing or not owned.
+    """
+    report = rag.ensure_report_manager().reorder_items(report_id, principal, payload.item_ids)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found.")
+    return report
+
+
+@app.get("/reports/{report_id}/export.md", tags=["Reports"])
+def export_report_markdown(report_id: int, principal: str = Depends(resolve_principal)) -> Response:
+    """Export a report as a single Markdown document (attachment download)."""
+    from docint.core.state.report_render import render_markdown
+
+    report = _get_owned_report(report_id, principal)
+    return Response(
+        content=render_markdown(report),
+        media_type="text/markdown; charset=utf-8",
+        headers=_download_headers(_report_stem(report), "md"),
+    )
+
+
+@app.get("/reports/{report_id}/export.html", tags=["Reports"])
+def export_report_html(report_id: int, principal: str = Depends(resolve_principal)) -> Response:
+    """Export a report as a self-contained HTML document (served inline)."""
+    from docint.core.state.report_render import render_html
+
+    report = _get_owned_report(report_id, principal)
+    return Response(
+        content=render_html(report),
+        media_type="text/html; charset=utf-8",
+        headers=_download_headers(_report_stem(report), "html", inline=True),
+    )
+
+
+@app.get("/reports/{report_id}/export.json", tags=["Reports"])
+def export_report_json(report_id: int, principal: str = Depends(resolve_principal)) -> Response:
+    """Export the full report (with snapshots) as JSON (attachment download)."""
+    from docint.core.state.report_render import render_json
+
+    report = _get_owned_report(report_id, principal)
+    return Response(
+        content=render_json(report),
+        media_type="application/json",
+        headers=_download_headers(_report_stem(report), "json"),
+    )
+
+
+@app.get("/reports/{report_id}/export.zip", tags=["Reports"])
+def export_report_zip(report_id: int, principal: str = Depends(resolve_principal)) -> Response:
+    """Export a report as a ZIP bundle of per-type CSVs (attachment download)."""
+    from docint.core.state.report_render import report_csv_bundle
+
+    report = _get_owned_report(report_id, principal)
+    return Response(
+        content=report_csv_bundle(report),
+        media_type="application/zip",
+        headers=_download_headers(_report_stem(report), "zip"),
+    )
+
+
+@app.get("/reports/{report_id}/export.pdf", tags=["Reports"])
+def export_report_pdf(report_id: int, principal: str = Depends(resolve_principal)) -> Response:
+    """Export a report as a real paginated PDF rendered by WeasyPrint.
+
+    Returns 503 if the PDF engine (WeasyPrint + native libs) is unavailable,
+    leaving the other export formats unaffected.
+    """
+    from docint.core.state.report_render import PdfEngineUnavailableError, render_pdf
+
+    report = _get_owned_report(report_id, principal)
+    try:
+        pdf_bytes = render_pdf(report)
+    except PdfEngineUnavailableError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers=_download_headers(_report_stem(report), "pdf"),
+    )
 
 
 @app.post("/agent/chat", response_model=AgentChatOut, tags=["Agent"])

@@ -8,6 +8,9 @@ import { downloadText } from '@/lib/csv'
 import { summaryToMarkdown } from '@/lib/exports'
 import { CoverageBanner } from './CoverageBanner'
 import type { SummaryResponse } from '@/api/types'
+import { useUiStore } from '@/stores/ui'
+import { summarySnapshot } from '@/lib/reportSnapshots'
+import { AddToReportButton } from '@/components/report/AddToReportButton'
 
 interface State {
   text: string
@@ -35,7 +38,8 @@ function reducer(s: State, a: Action): State {
   }
 }
 
-export function SummaryPanel() {
+export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<string> }) {
+  const collection = useUiStore((s) => s.selectedCollection)
   const [state, dispatch] = useReducer(reducer, {
     text: '',
     done: false,
@@ -67,6 +71,9 @@ export function SummaryPanel() {
     }
   }
 
+  const reportItem = state.text && collection ? summarySnapshot({ collection, text: state.text }) : null
+  const inReport = reportItem != null && (reportDedupeKeys?.has(reportItem.dedupe_key) ?? false)
+
   return (
     <div className="space-y-3">
       <div className="flex gap-2">
@@ -87,19 +94,22 @@ export function SummaryPanel() {
           Refresh
         </button>
         {state.text && (
-          <button
-            type="button"
-            onClick={() =>
-              downloadText(
-                'summary.md',
-                summaryToMarkdown(state.meta, state.text),
-                'text/markdown;charset=utf-8'
-              )
-            }
-            className="ml-auto px-3 py-1 rounded-md border border-border"
-          >
-            Download MD
-          </button>
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() =>
+                downloadText(
+                  'summary.md',
+                  summaryToMarkdown(state.meta, state.text),
+                  'text/markdown;charset=utf-8'
+                )
+              }
+              className="px-3 py-1 rounded-md border border-border"
+            >
+              Download MD
+            </button>
+            {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
+          </div>
         )}
       </div>
 
