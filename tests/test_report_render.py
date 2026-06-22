@@ -202,6 +202,22 @@ def test_case_file_only_in_running_header(monkeypatch: pytest.MonkeyPatch) -> No
     assert 'class="running-refnum"' not in R.render_html(_empty())
 
 
+@pytest.mark.parametrize("locale", ["en", "de"])
+def test_running_header_bare_value_is_locale_agnostic(monkeypatch: pytest.MonkeyPatch, locale: str) -> None:
+    """The case-file header shows the bare value with no label — identically in every locale.
+
+    The label was dropped from the shared renderer (not a per-language string), so
+    neither the English ``File reference`` nor the German ``Aktenzeichen`` prefix
+    may leak into the header for either locale.
+    """
+    monkeypatch.setenv("RESPONSE_LANGUAGE", locale)
+    htm = R.render_html(_report())
+    refnum = re.search(r'<div class="running-refnum">(.*?)</div>', htm, re.S)
+    assert refnum is not None
+    assert refnum.group(1).strip() == "AZ-2026-42"  # bare value, byte-for-byte the same en/de
+    assert ui_string("report_label_reference") not in htm  # this locale's label never appears
+
+
 def test_disclaimer_footer_present(monkeypatch: pytest.MonkeyPatch) -> None:
     """A short AI-generation caveat is rendered for both Markdown and HTML/PDF."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
