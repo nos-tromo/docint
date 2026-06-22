@@ -192,8 +192,14 @@ def test_case_file_only_in_running_header(monkeypatch: pytest.MonkeyPatch) -> No
     assert "2026-06-20" in subheader  # creation date …
     assert "10:00" not in subheader  # … without the time component
     assert "AZ-2026-42" not in subheader  # the case file is kept out of the subheader
-    assert 'class="running-refnum"' in htm  # it lives in the running header instead
-    assert "AZ-2026-42" in htm
+    # It rides the running header instead — shown bare, with no label prefix.
+    refnum = re.search(r'<div class="running-refnum">(.*?)</div>', htm, re.S)
+    assert refnum is not None
+    assert refnum.group(1).strip() == "AZ-2026-42"
+    assert ui_string("report_label_reference") not in htm  # no "File reference:" label leaks in
+
+    # No case file set → no running-header marker at all (the header stays empty).
+    assert 'class="running-refnum"' not in R.render_html(_empty())
 
 
 def test_disclaimer_footer_present(monkeypatch: pytest.MonkeyPatch) -> None:

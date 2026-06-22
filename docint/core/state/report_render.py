@@ -423,15 +423,13 @@ def render_html(report: dict[str, Any]) -> str:
 
     body_parts = [f'<h1 class="report-title">{_esc(title)}</h1>', meta_html]
 
-    # Case file → running top-right header (its only appearance); AI disclaimer →
-    # running bottom-left footer. Both markers sit near the top so the running
-    # element is current from the first page onward (a marker placed last would
-    # only surface on the final page).
+    # Case file → running top-right header (its only appearance, shown bare with
+    # no label); AI disclaimer → running bottom-left footer. Both markers sit near
+    # the top so the running element is current from the first page onward (a
+    # marker placed last would only surface on the final page). With no case file
+    # the running element is absent and the header stays empty.
     if report.get("reference_number"):
-        body_parts.append(
-            f'<div class="running-refnum">{ui_string("report_label_reference")}: '
-            f"{_esc(report['reference_number'])}</div>"
-        )
+        body_parts.append(f'<div class="running-refnum">{_esc(report["reference_number"])}</div>')
     body_parts.append(f'<div class="running-disclaimer">{_esc(ui_string("report_disclaimer"))}</div>')
 
     grouped = _group_items(report.get("items") or [])
