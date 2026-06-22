@@ -15,11 +15,12 @@ import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
 import { cn } from '@/lib/cn'
 
+// Summaries lead the document, matching the server renderer's SECTION_ORDER.
 const SECTIONS: Array<{ type: ArtifactType; label: string }> = [
+  { type: 'summary', label: 'Summaries' },
   { type: 'chat_answer', label: 'Chat answers' },
   { type: 'entity_finding', label: 'Entity findings' },
-  { type: 'hate_speech_finding', label: 'Hate-speech findings' },
-  { type: 'summary', label: 'Summaries' }
+  { type: 'hate_speech_finding', label: 'Hate-speech findings' }
 ]
 
 const EXPORTS: Array<{ format: ReportExportFormat; label: string; view?: boolean }> = [

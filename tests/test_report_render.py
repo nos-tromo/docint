@@ -2,6 +2,7 @@
 
 import io
 import json
+import re
 import zipfile
 from typing import Any
 
@@ -46,6 +47,12 @@ def _report() -> dict[str, Any]:
                     "filename": "a.pdf",
                     "page": 2,
                     "entities": [{"text": "Acme", "type": "ORG"}, {"text": "Bob", "type": "PERSON"}],
+                    "reference_metadata": {
+                        "network": "Telegram",
+                        "author": "alice",
+                        "timestamp": "2026-01-02T00:00:00Z",
+                        "uuid": "u-1",
+                    },
                 },
             },
             {
@@ -59,6 +66,7 @@ def _report() -> dict[str, Any]:
                     "reason": "contains slur",
                     "chunk_text": "bad text",
                     "filename": "b.json",
+                    "reference_metadata": {"network": "X", "author": "bob", "timestamp": "2026-03-04"},
                 },
             },
         ],
@@ -116,7 +124,11 @@ def test_render_html_escapes_user_content_and_has_paged_media() -> None:
     assert "&lt;script&gt;" in htm  # snapshot text is HTML-escaped
     assert "<script>alert" not in htm
     assert "counter(page)" in htm
-    assert "string-set: doctitle" in htm
+    # Case file rides the running top-right header; the report name is no longer
+    # duplicated into the page header via a doctitle string.
+    assert "position: running(refnum)" in htm
+    assert "element(refnum)" in htm
+    assert "string-set: doctitle" not in htm
     assert 'class="item"' in htm
 
 
@@ -129,10 +141,83 @@ def test_render_includes_case_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "Jane Doe" in htm and "AZ-2026-42" in htm
 
 
-def test_pdf_footer_is_right_aligned() -> None:
-    """The page-number footer is bottom-right (not centered)."""
+def test_summaries_render_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Summaries lead the document, ahead of the chat-answers section."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = {
+        "id": 9,
+        "title": "Ordered",
+        "collection_name": "c",
+        "created_at": "2026-06-20T10:00:00+00:00",
+        "items": [
+            {
+                "id": 1,
+                "artifact_type": "chat_answer",
+                "note": None,
+                "snapshot": {"user_text": "q", "model_response": "a", "sources": []},
+            },
+            {
+                "id": 2,
+                "artifact_type": "summary",
+                "note": None,
+                "snapshot": {"collection": "c", "text": "the summary"},
+            },
+        ],
+    }
+    md = R.render_markdown(report)
+    assert md.index(ui_string("report_section_summaries")) < md.index(ui_string("report_section_chat"))
+    htm = R.render_html(report)
+    assert htm.index(ui_string("report_section_summaries")) < htm.index(ui_string("report_section_chat"))
+
+
+def test_findings_carry_reference_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Entity and hate-speech findings surface their reference metadata (provenance)."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    label = ui_string("report_label_reference_metadata")
+    for blob in (R.render_markdown(_report()), R.render_html(_report())):
+        assert blob.count(label) >= 2  # one block for the entity finding, one for the hate finding
+        assert "Telegram" in blob and "alice" in blob  # entity finding provenance
+        assert "bob" in blob  # hate-speech finding provenance
+
+
+def test_case_file_only_in_running_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The case file rides the running header — not the subheader — and the date is date-only."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    htm = R.render_html(_report())
+    meta = re.search(r'<div class="report-meta">(.*?)</div>', htm, re.S)
+    assert meta is not None
+    subheader = meta.group(1)
+    assert "docs" in subheader  # collection
+    assert "Jane Doe" in subheader  # operator
+    assert "2026-06-20" in subheader  # creation date …
+    assert "10:00" not in subheader  # … without the time component
+    assert "AZ-2026-42" not in subheader  # the case file is kept out of the subheader
+    assert 'class="running-refnum"' in htm  # it lives in the running header instead
+    assert "AZ-2026-42" in htm
+
+
+def test_disclaimer_footer_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A short AI-generation caveat is rendered for both Markdown and HTML/PDF."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    disclaimer = ui_string("report_disclaimer")
+    assert disclaimer in R.render_markdown(_report())
+    htm = R.render_html(_report())
+    assert disclaimer in htm
+    assert 'class="running-disclaimer"' in htm
+
+
+def test_report_name_only_in_headline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The report name is the single H1 headline, not echoed elsewhere in Markdown."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    md = R.render_markdown(_report())
+    assert md.count("# Case Alpha") == 1
+
+
+def test_pdf_footer_layout() -> None:
+    """Page numbers sit bottom-right, the AI disclaimer bottom-left, none centered."""
     htm = R.render_html(_report())
     assert "@bottom-right" in htm
+    assert "@bottom-left" in htm  # AI-generated disclaimer footer
     assert "@bottom-center" not in htm
 
 
