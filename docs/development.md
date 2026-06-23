@@ -57,7 +57,7 @@ CPU-only; all ML inference is remote, so there is no `cpu`/`cuda` split.)
 | `uv add <package>` | Add a runtime dependency (updates `pyproject.toml` and `uv.lock`). |
 | `uv remove <package>` | Remove a runtime dependency. |
 | `uv run pytest` | Run the backend test suite. |
-| `uv run pre-commit run --all-files` | Run ruff, ruff-format, and mypy. |
+| `uv run pre-commit run --all-files` | Run ruff, ruff-format, and pyrefly. |
 | `uv run uvicorn docint.core.api:app --reload` | Start the backend locally with hot-reload. |
 | `uv run docint` | Run the backend (uvicorn) via the console script. |
 
@@ -83,7 +83,7 @@ stores, API layer).
 
 1. **`ruff check`** — lint.
 2. **`ruff format`** — formatter.
-3. **`mypy`** — type checker.
+3. **`pyrefly`** — type checker.
 
 Run the suite locally before finishing any change:
 
@@ -190,7 +190,7 @@ A single workflow, `.github/workflows/ci.yml`, runs on pushes and pull
 requests to `main`. It delegates to the shared reusable pipeline
 `nos-tromo/.github/.github/workflows/python-app-ci.yml@v2.3`, which runs:
 
-- **ruff** (lint + format check) and **mypy** (strict) — the same checks
+- **ruff** (lint + format check) and **pyrefly** (strict) — the same checks
   as pre-commit, so a clean local `pre-commit run --all-files` should pass
   CI.
 - **pytest** on Python 3.11 (`uv sync --frozen --group dev`).

@@ -31,7 +31,7 @@ help:
 	@echo "  make stop       stop docint containers"
 	@echo "  make down       stop + remove containers (never touches data-plane state)"
 	@echo "  make resolve    merge duplicate/similar entities (COLLECTION=<name> optional)"
-	@echo "  make pre-commit run pre-commit hooks (ruff + mypy)"
+	@echo "  make pre-commit run pre-commit hooks (ruff + pyrefly)"
 	@echo "  make test       run the test suite"
 
 # Resolve duplicate / semantically-similar entities for a collection into

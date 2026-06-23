@@ -53,7 +53,7 @@ These instructions apply to the entire `docint` repository unless a directory in
 
   ```bash
   uv run pytest
-  uv run pre-commit run --all-files   # ruff check, ruff format, mypy
+  uv run pre-commit run --all-files   # ruff check, ruff format, pyrefly
   ```
 
 - Docker changes: the Dockerfiles and compose files live under `docker/`; if you modify them, ensure the relevant service still builds locally (`docker compose --env-file .env -f docker/compose.yaml build <service>`).
