@@ -108,7 +108,9 @@ def _ensure_report_columns(engine: Engine) -> None:
         if "reports" not in inspector.get_table_names():
             return
         existing = {col["name"] for col in inspector.get_columns("reports")}
-        pending = [("operator", "TEXT"), ("reference_number", "TEXT")]
+        # ``BOOLEAN DEFAULT 1`` backfills pre-existing reports to TOC-on (the model
+        # default), matching the "on by default" behavior for new reports.
+        pending = [("operator", "TEXT"), ("reference_number", "TEXT"), ("show_toc", "BOOLEAN DEFAULT 1")]
         with engine.begin() as conn:
             for name, sql_type in pending:
                 if name not in existing:

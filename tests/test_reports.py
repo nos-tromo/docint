@@ -78,6 +78,16 @@ def test_create_and_update_case_metadata(report_manager: ReportManager) -> None:
     assert updated["reference_number"] == "AZ-1"
 
 
+def test_show_toc_defaults_on_and_can_be_disabled(report_manager: ReportManager) -> None:
+    """The table-of-contents flag defaults on, persists when toggled, and survives a fetch."""
+    created = report_manager.create_report(title="A", owner="alice")
+    assert created["show_toc"] is True
+
+    updated = _ok(report_manager.update_report(created["id"], "alice", show_toc=False))
+    assert updated["show_toc"] is False
+    assert _ok(report_manager.get_report(created["id"], "alice"))["show_toc"] is False
+
+
 def test_list_reports_is_owner_scoped(report_manager: ReportManager) -> None:
     """list_reports only returns reports owned by the caller."""
     report_manager.create_report(title="A", owner="alice")

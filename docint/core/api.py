@@ -624,6 +624,7 @@ class ReportUpdateIn(BaseModel):
     title: str | None = None
     operator: str | None = None
     reference_number: str | None = None
+    show_toc: bool | None = None
 
 
 class ReportItemIn(BaseModel):
@@ -2039,11 +2040,11 @@ def get_report(report_id: int, principal: str = Depends(resolve_principal)) -> d
 def update_report(
     report_id: int, payload: ReportUpdateIn, principal: str = Depends(resolve_principal)
 ) -> dict[str, Any]:
-    """Rename a report owned by the calling principal.
+    """Update a report (title, case metadata, or contents toggle) owned by the caller.
 
     Args:
         report_id (int): The report id.
-        payload (ReportUpdateIn): New title.
+        payload (ReportUpdateIn): Fields to update; only non-null fields apply.
         principal (str): The resolved request principal.
 
     Returns:
@@ -2058,6 +2059,7 @@ def update_report(
         title=payload.title,
         operator=payload.operator,
         reference_number=payload.reference_number,
+        show_toc=payload.show_toc,
     )
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found.")
