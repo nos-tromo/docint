@@ -49,8 +49,8 @@ UI_STRINGS: Final[dict[str, dict[str, str]]] = {
         "clarify_missing_label": "Fehlende Angaben: {fields}",
         "clarify_missing_request": "Bitte geben Sie an: {fields}.",
         "report_section_chat": "Chat-Antworten",
-        "report_section_entities": "Entitätsfunde",
-        "report_section_hate_speech": "Hassrede-Funde",
+        "report_section_entities": "Entitäten",
+        "report_section_hate_speech": "Gruppenbezogene Menschenfeindlichkeit (GMF)",
         "report_section_summaries": "Zusammenfassungen",
         "report_label_collection": "Sammlung",
         "report_label_generated": "Erstellt",
@@ -70,7 +70,7 @@ UI_STRINGS: Final[dict[str, dict[str, str]]] = {
         "report_label_answer": "Antwort",
         "report_label_sources": "Quellen",
         "report_label_items": "Einträge",
-        "report_label_reference_metadata": "Referenzmetadaten",
+        "report_label_reference_metadata": "Metadaten",
         "report_disclaimer": (
             "Dieser Bericht wurde KI-gestützt erstellt; alle Ergebnisse sind vor der weiteren Verarbeitung zu prüfen."
         ),

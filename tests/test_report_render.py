@@ -115,7 +115,7 @@ def test_render_de_locale_headings(monkeypatch: pytest.MonkeyPatch) -> None:
     """Section headings are localized when the response language is German."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
     md = R.render_markdown(_report())
-    assert "Entitätsfunde" in md  # de translation of report_section_entities
+    assert "Entitäten" in md  # de translation of report_section_entities
 
 
 def test_render_html_escapes_user_content_and_has_paged_media() -> None:
