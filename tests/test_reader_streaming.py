@@ -203,7 +203,7 @@ def test_image_iter_documents_yields_one_document(tmp_path: Path, monkeypatch: p
         llm_tags: ClassVar[list[str]] = ["cat", "animal"]
         image_id = "img-1"
         point_id = "pt-1"
-        error = None
+        error: str | None = None
         status = "ok"
 
     class FakeService:
@@ -228,7 +228,7 @@ def test_image_load_data_matches_iter_documents(tmp_path: Path, monkeypatch: pyt
         llm_tags: ClassVar[list[str]] = []
         image_id = ""
         point_id = ""
-        error = None
+        error: str | None = None
         status = ""
 
     class FakeService:

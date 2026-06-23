@@ -5,18 +5,17 @@ repos:
       - id: ruff-check
         args: ["--fix", "--exit-non-zero-on-fix"]
       - id: ruff-format
-  # mypy is a local hook so it uses the project venv — strict mode needs
-  # to see every dep's decorators/base classes (FastAPI, llama-index,
-  # qdrant, pytest, etc.); pre-commit's isolated env can't keep up.
-  # Pinned to mypy==<canonical> in dev deps; canonical at
+  # pyrefly is a local hook so it uses the project venv — resolving every dep's
+  # types (FastAPI, llama-index, qdrant, pytest, etc.) needs the installed deps;
+  # pre-commit's isolated env can't keep up. Pinned to pyrefly==<canonical> in
+  # dev deps; canonical at
   # nos-tromo/.github/configs/python-strict/precommit-versions.yaml.
   - repo: local
     hooks:
-      - id: mypy
-        name: mypy
-        entry: uv run mypy
+      - id: pyrefly
+        name: pyrefly
+        entry: uv run pyrefly check
         language: system
         types: [python]
         require_serial: true
         pass_filenames: false
-        args: ["."]

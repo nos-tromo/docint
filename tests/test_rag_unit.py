@@ -4052,8 +4052,8 @@ class _FakePipeline:
 
     def __init__(self) -> None:
         """Initialise with empty reader and extractor fields."""
-        self.dir_reader = None
-        self.entity_extractor = None
+        self.dir_reader: None = None
+        self.entity_extractor: None = None
         self.ner_max_workers = 1
 
     def build(self, processed_hashes: set[str]) -> list[tuple[list[Any], list[Any]]]:
@@ -5836,7 +5836,7 @@ def test_verify_collection_repair_deletes_kv_orphans(
     doc_store.add_documents([orphan])
 
     rag._qdrant_client.collection_exists.return_value = True
-    rag._qdrant_client.scroll.return_value = ([], None)
+    rag._qdrant_client.scroll.return_value = (cast(list[Any], []), None)
 
     report = rag.verify_collection("active", repair=True)
 

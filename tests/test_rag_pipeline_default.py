@@ -6,7 +6,7 @@ import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -21,17 +21,17 @@ def test_reader_build_nodes_sets_expected_metadata(tmp_path: Path) -> None:
     pdf_path = tmp_path / "sample.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
 
-    chunks = [
+    chunks: list[dict[str, Any]] = [
         {
             "chunk_id": "chunk-1",
             "text": "Hello from core pipeline.",
             "page_range": [0],
             "block_ids": ["b1"],
             "section_path": ["Intro"],
-            "table_ids": [],
-            "image_ids": [],
+            "table_ids": cast(list[str], []),
+            "image_ids": cast(list[str], []),
             "source_mix": "pdf_text",
-            "bbox_refs": [],
+            "bbox_refs": cast(list[dict[str, float]], []),
             "metadata": {"custom": "value"},
         }
     ]
@@ -258,9 +258,9 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(monkeypatch: pytest.MonkeyPatch
 
         def __init__(self) -> None:
             """Initialise with empty state."""
-            self.dir_reader = None
+            self.dir_reader: None = None
             self.seen_hashes: set[str] | None = None
-            self.entity_extractor = None
+            self.entity_extractor: None = None
             self.ner_max_workers = 1
 
         def build(self, existing_hashes: Any) -> Iterator[Any]:

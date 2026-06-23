@@ -3,6 +3,8 @@
 import time
 from typing import TYPE_CHECKING, Any
 
+from typing_extensions import override
+
 from docint.agents.history import build_prior_turn
 from docint.agents.types import (
     RetrievalAgent,
@@ -28,6 +30,7 @@ class RAGRetrievalAgent(RetrievalAgent):
         """
         self.rag = rag
 
+    @override
     def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
         """Invoke the appropriate tool based on intent; default to RAG chat.
 

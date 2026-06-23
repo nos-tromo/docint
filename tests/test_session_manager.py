@@ -61,8 +61,8 @@ def test_persist_and_retrieve_citation_with_hash(
 
     # Mock response object
     resp_mock = MagicMock()
-    resp_mock.metadata = {}
-    resp_mock.source_nodes = []
+    resp_mock.metadata = cast(dict[str, Any], {})
+    resp_mock.source_nodes = cast(list[Any], [])
 
     # Create a source node with file_hash
     node_mock = MagicMock()
@@ -132,7 +132,7 @@ def test_get_session_history_enriches_sources_from_node_lookup(
     }
 
     resp_mock = MagicMock()
-    resp_mock.metadata = {}
+    resp_mock.metadata = cast(dict[str, Any], {})
     node_mock = MagicMock()
     node_mock.node_id = "node-social"
     node_mock.metadata = {
@@ -169,8 +169,8 @@ def test_export_session_omits_stale_host_dir_and_succeeds(session_manager: Sessi
     """
     session_id = "export-session"
     resp_mock = MagicMock()
-    resp_mock.metadata = {}
-    resp_mock.source_nodes = []
+    resp_mock.metadata = cast(dict[str, Any], {})
+    resp_mock.source_nodes = cast(list[Any], [])
 
     session_manager._persist_turn(
         session_id,
@@ -252,7 +252,7 @@ def test_stream_chat_includes_final_response_when_no_tokens(
     streaming_engine = MagicMock()
     streaming_response = MagicMock()
     streaming_response.response_gen = iter(())
-    streaming_response.source_nodes = []
+    streaming_response.source_nodes = cast(list[Any], [])
     streaming_engine.query.return_value = streaming_response
 
     session_manager.rag.build_query_engine.return_value = streaming_engine  # type: ignore[attr-defined]
@@ -333,8 +333,8 @@ def test_chat_skips_rewrite_when_prior_turn_supplied(
 
     engine = MagicMock()
     filtered_response = MagicMock()
-    filtered_response.metadata = {}
-    filtered_response.source_nodes = []
+    filtered_response.metadata = cast(dict[str, Any], {})
+    filtered_response.source_nodes = cast(list[Any], [])
     engine.query.return_value = filtered_response
 
     session_manager.rag.query_engine = engine
@@ -386,7 +386,7 @@ def test_stream_chat_binds_prior_turn_but_keeps_rewrite_when_not_skipped(
     streaming_engine = MagicMock()
     streaming_response = MagicMock()
     streaming_response.response_gen = iter(())
-    streaming_response.source_nodes = []
+    streaming_response.source_nodes = cast(list[Any], [])
     streaming_engine.query.return_value = streaming_response
 
     session_manager.rag.build_query_engine.return_value = streaming_engine  # type: ignore[attr-defined]
@@ -438,8 +438,8 @@ def test_chat_rewrites_retrieval_query_without_prefixing_session_context(
         monkeypatch: The pytest monkeypatch fixture.
     """
     resp_mock = MagicMock()
-    resp_mock.metadata = {}
-    resp_mock.source_nodes = []
+    resp_mock.metadata = cast(dict[str, Any], {})
+    resp_mock.source_nodes = cast(list[Any], [])
 
     session_manager._persist_turn(
         "rewrite-session",

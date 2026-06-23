@@ -61,8 +61,8 @@ def _persist_owned_turn(sm: SessionManager, session_id: str, owner: str) -> None
         sm._load_or_create_convo(s, session_id, owner)
 
     resp_mock = MagicMock()
-    resp_mock.metadata = {}
-    resp_mock.source_nodes = []
+    resp_mock.metadata = cast(dict[str, Any], {})
+    resp_mock.source_nodes = cast(list[Any], [])
     sm._owner = owner
     sm._persist_turn(
         session_id,

@@ -12,6 +12,7 @@ from llama_index.llms.openai import OpenAI as LlamaIndexOpenAI
 from loguru import logger
 from openai import OpenAI
 from openai.types.chat import ChatCompletionContentPartParam, ChatCompletionMessageParam
+from typing_extensions import override
 
 from docint.utils.env_cfg import (
     OpenAIConfig,
@@ -43,6 +44,7 @@ class LocalOpenAI(LlamaIndexOpenAI):
         self._context_window = context_window
         self._num_output = num_output
 
+    @override
     @property
     def metadata(self) -> LLMMetadata:
         """Return model metadata, always honouring the configured context window.
@@ -252,6 +254,7 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
                 raise
             raise self._raise_budget_overflow(exc, texts=texts) from exc
 
+    @override
     def _get_text_embeddings(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts, raising loudly on context overflow.
 
@@ -272,6 +275,7 @@ class BudgetedOpenAIEmbedding(OpenAIEmbedding):
                 raise
             raise self._raise_budget_overflow(exc, texts=texts) from exc
 
+    @override
     async def _aget_text_embeddings(self, texts: list[str]) -> list[list[float]]:
         """Async batch embedding that raises loudly on context overflow.
 
@@ -417,7 +421,7 @@ class OpenAIPipeline:
                 top_p=self.top_p,
                 **request_kwargs,
             )
-            return response.choices[0].message.content or ""
+            return response.choices[0].message.content or ""  # pyrefly: ignore[missing-attribute]  # non-streaming call
         except Exception as e:
             logger.error("Error during chat inference: {}", e)
             raise RuntimeError(f"Chat inference failed: {e}") from e
@@ -459,7 +463,7 @@ class OpenAIPipeline:
                 top_p=self.top_p,
                 **request_kwargs,
             )
-            raw = response.choices[0].message.content or ""
+            raw = response.choices[0].message.content or ""  # pyrefly: ignore[missing-attribute]  # non-streaming call
             clean, captured = strip_reasoning(raw)
             if captured:
                 logger.debug(

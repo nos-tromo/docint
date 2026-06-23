@@ -727,7 +727,7 @@ def collections_delete(name: str) -> dict[str, bool]:
 
 
 @app.post("/query", response_model=QueryOut, tags=["Query"])
-def query(payload: QueryIn, request: Request) -> dict[str, list[dict[str, Any]] | str | bool | None]:
+def query(payload: QueryIn, request: Request) -> dict[str, Any]:
     """Handle a query request.
 
     Args:
@@ -774,7 +774,7 @@ def query(payload: QueryIn, request: Request) -> dict[str, list[dict[str, Any]] 
                 expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
                 if callable(expand_with_debug):
                     try:
-                        expanded, debug_payload = expand_with_debug(retrieval_query)
+                        expanded, debug_payload = cast("tuple[Any, Any]", expand_with_debug(retrieval_query))
                         retrieval_query = str(expanded)
                         if isinstance(debug_payload, dict):
                             graph_debug = debug_payload
@@ -826,12 +826,12 @@ def query(payload: QueryIn, request: Request) -> dict[str, list[dict[str, Any]] 
             if isinstance(data, dict) and data.get("retrieval_mode") is not None
             else None
         )
-        entity_match_candidates = (
+        entity_match_candidates: list[Any] = (
             data.get("entity_match_candidates", [])
             if isinstance(data, dict) and isinstance(data.get("entity_match_candidates"), list)
             else []
         )
-        entity_match_groups = (
+        entity_match_groups: list[Any] = (
             data.get("entity_match_groups", [])
             if isinstance(data, dict) and isinstance(data.get("entity_match_groups"), list)
             else []
@@ -961,7 +961,10 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                 expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
                 if callable(expand_with_debug):
                     try:
-                        expanded, debug_payload = await to_thread.run_sync(expand_with_debug, retrieval_query)
+                        expanded, debug_payload = cast(
+                            "tuple[Any, Any]",
+                            await to_thread.run_sync(expand_with_debug, retrieval_query),
+                        )
                         retrieval_query = str(expanded)
                         if isinstance(debug_payload, dict):
                             graph_debug = debug_payload
@@ -1043,7 +1046,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                 answer = full_answer
             sources = payload_out.get("sources")
             if not isinstance(sources, list):
-                sources = []
+                sources = cast(list[dict[str, Any]], [])
             stream_summary_diagnostics = (
                 payload_out.get("summary_diagnostics")
                 if isinstance(payload_out.get("summary_diagnostics"), dict)
@@ -1195,7 +1198,7 @@ async def summarize_stream(request: Request, refresh: bool = Query(False)) -> St
                 summary = full_summary
             sources = payload_out.get("sources")
             if not isinstance(sources, list):
-                sources = []
+                sources = cast(list[dict[str, Any]], [])
             summary_diagnostics = payload_out.get("summary_diagnostics")
             if not isinstance(summary_diagnostics, dict):
                 summary_diagnostics = None
@@ -1359,7 +1362,7 @@ async def warm_collection_ner() -> dict[str, Any]:
     if not rag.qdrant_collection:
         raise HTTPException(status_code=400, detail="No collection selected")
     try:
-        await to_thread.run_sync(rag._get_collection_ner_aggregate)
+        await to_thread.run_sync(rag._get_collection_ner_aggregate)  # pyrefly: ignore[bad-argument-type]  # anyio run_sync over-strict on bound method with keyword-only args
         return {"ok": True}
     except Exception as e:
         logger.error("Error warming collection NER aggregate: {}", e)

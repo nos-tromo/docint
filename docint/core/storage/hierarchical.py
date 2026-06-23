@@ -10,6 +10,7 @@ from typing import Any, cast
 from llama_index.core.bridge.pydantic import PrivateAttr
 from llama_index.core.node_parser import NodeParser, SentenceSplitter
 from llama_index.core.schema import BaseNode, Document, NodeRelationship
+from typing_extensions import override
 
 from docint.utils.env_cfg import load_ingestion_env
 
@@ -63,6 +64,7 @@ class HierarchicalNodeParser(NodeParser):
             paragraph_separator="\n\n",
         )
 
+    @override
     def _parse_nodes(self, nodes: Sequence[BaseNode], show_progress: bool = False, **kwargs: Any) -> list[BaseNode]:
         """Parse nodes into hierarchical chunks.
 

@@ -23,6 +23,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from typing_extensions import override
+
 if TYPE_CHECKING:
     from docint.agents.types import PriorTurn
 
@@ -589,6 +591,7 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
 
     diversity_limit: int = 2
 
+    @override
     @classmethod
     def class_name(cls) -> str:
         """Return a stable class identifier."""
@@ -674,6 +677,7 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
                 time_bucket = timestamp_raw[:13]
         return f"{author.lower()}::{time_bucket}"
 
+    @override
     def _postprocess_nodes(
         self,
         nodes: list[NodeWithScore],
@@ -752,6 +756,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
     char_token_ratio: float = 3.5
     budget_enforced: bool = False
 
+    @override
     @classmethod
     def class_name(cls) -> str:
         """Return a stable class identifier.
@@ -994,6 +999,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
         )
         return clone
 
+    @override
     def _postprocess_nodes(
         self,
         nodes: list[NodeWithScore],
@@ -1175,6 +1181,7 @@ class VLLMRerankPostprocessor(BaseNodePostprocessor):
     timeout: float = 300.0
     top_n: int = 5
 
+    @override
     @classmethod
     def class_name(cls) -> str:
         """Return a stable class identifier.
@@ -1216,6 +1223,7 @@ class VLLMRerankPostprocessor(BaseNodePostprocessor):
         """
         return nodes[: max(1, min(int(self.top_n), len(nodes)))]
 
+    @override
     def _postprocess_nodes(
         self,
         nodes: list[NodeWithScore],
@@ -1324,6 +1332,7 @@ class LazyRerankerPostprocessor(BaseNodePostprocessor):
 
     rag: Any
 
+    @override
     @classmethod
     def class_name(cls) -> str:
         """Return a stable class identifier.
@@ -1334,6 +1343,7 @@ class LazyRerankerPostprocessor(BaseNodePostprocessor):
         """
         return "LazyRerankerPostprocessor"
 
+    @override
     def _postprocess_nodes(
         self,
         nodes: list[NodeWithScore],
@@ -1540,7 +1550,7 @@ class VLLMSparseEncoder:
                 token_scores.append(float(item))
                 continue
 
-            if isinstance(item, list | tuple):
+            if isinstance(item, list | tuple):  # pyrefly: ignore[implicit-any-type-argument]  # bare list/tuple in isinstance; type params unknowable at this call site
                 numeric_values = [float(value) for value in item if isinstance(value, int | float)]
                 if not numeric_values:
                     continue
@@ -2492,7 +2502,7 @@ class RAG:
 
             description = str(payload.get("llm_description") or "").strip()
             tags_raw = payload.get("llm_tags")
-            tags = [str(tag) for tag in tags_raw] if isinstance(tags_raw, list) else []
+            tags: list[str] = [str(tag) for tag in tags_raw] if isinstance(tags_raw, list) else []
             text_value = description
             if tags:
                 text_value = f"{description}\n\nTags: {', '.join(tags)}" if description else f"Tags: {', '.join(tags)}"
@@ -2760,7 +2770,7 @@ class RAG:
             self._assert_embed_payloads_fit_budget(embed_batch, chunk_texts)
             chunk_embeddings = cast(
                 list[list[float]],
-                await aget_embeddings(chunk_texts),
+                await aget_embeddings(chunk_texts),  # pyrefly: ignore[not-async]  # getattr'd coroutine fn
             )
             for node, embedding in zip(embed_batch, chunk_embeddings, strict=False):
                 node.embedding = embedding
@@ -3521,7 +3531,7 @@ class RAG:
     def _source_diversity_bucket(source: dict[str, Any]) -> str:
         """Return a coarse author/time bucket for social summary diversity."""
         reference_metadata = source.get("reference_metadata")
-        ref = reference_metadata if isinstance(reference_metadata, dict) else {}
+        ref: dict[str, Any] = reference_metadata if isinstance(reference_metadata, dict) else {}
         author = str(ref.get("author_id") or ref.get("author") or "unknown").strip()
         timestamp_raw = str(ref.get("timestamp") or "").strip()
         time_bucket = "unknown"
@@ -4107,7 +4117,7 @@ class RAG:
             meta = getattr(result, "metadata", {}) or {}
             source_nodes = meta.get("source_nodes")
         if not isinstance(source_nodes, list):
-            source_nodes = []
+            source_nodes = cast(list[Any], [])
 
         sources: list[dict[str, Any]] = []
         for nws in source_nodes:
@@ -6518,7 +6528,7 @@ class RAG:
         briefs: list[str] = []
         for index, source in enumerate(sources, start=1):
             reference_metadata = source.get("reference_metadata")
-            ref = reference_metadata if isinstance(reference_metadata, dict) else {}
+            ref: dict[str, Any] = reference_metadata if isinstance(reference_metadata, dict) else {}
             metadata_bits = [
                 f"network={ref.get('network')}" if ref.get("network") else "",
                 f"type={ref.get('type')}" if ref.get("type") else "",
@@ -6566,7 +6576,7 @@ class RAG:
             "total_documents": total_units,
             "covered_documents": covered_units,
             "coverage_ratio": round(coverage_ratio, 4),
-            "uncovered_documents": [],
+            "uncovered_documents": cast(list[str], []),
             "coverage_target": self.summary_coverage_target,
             "coverage_unit": coverage_unit,
             "candidate_count": len(candidate_sources),
@@ -6768,10 +6778,10 @@ class RAG:
 
         sources = payload.get("sources")
         if not isinstance(sources, list):
-            sources = []
+            sources = cast(list[dict[str, Any]], [])
         summary_diagnostics = payload.get("summary_diagnostics")
         if not isinstance(summary_diagnostics, dict):
-            summary_diagnostics = {}
+            summary_diagnostics = cast(dict[str, Any], {})
 
         return {
             "query": self.summarize_prompt,
@@ -6795,10 +6805,10 @@ class RAG:
         prompt_fingerprint = self._summary_prompt_fingerprint()
         sources = payload.get("sources")
         if not isinstance(sources, list):
-            sources = []
+            sources = cast(list[dict[str, Any]], [])
         summary_diagnostics = payload.get("summary_diagnostics")
         if not isinstance(summary_diagnostics, dict):
-            summary_diagnostics = {}
+            summary_diagnostics = cast(dict[str, Any], {})
 
         cache_payload = {
             "revision": revision,

@@ -877,7 +877,7 @@ def search_entities(
     return [
         {key: value for key, value in row.items() if key not in {"_match_rank", "_match_alias"}}
         | {
-            "match_rank": int(row.get("_match_rank", 99)),
+            "match_rank": int(row.get("_match_rank", 99)),  # pyrefly: ignore[bad-argument-type]  # ner row dict values are Any
             "match_alias": str(row.get("_match_alias") or ""),
         }
         for row in rows[: max(1, int(limit))]

@@ -15,6 +15,7 @@ from typing import Any, TypeVar
 
 from llama_index.core.storage.kvstore.types import DEFAULT_COLLECTION, BaseKVStore
 from loguru import logger
+from typing_extensions import override
 
 from docint.utils.metadata_sanitize import sanitize_for_json
 from docint.utils.retry import retry_with_backoff
@@ -197,6 +198,7 @@ class SQLiteKVStore(BaseKVStore):
     # Sync API
     # ------------------------------------------------------------------
 
+    @override
     def put(
         self,
         key: str,
@@ -220,6 +222,7 @@ class SQLiteKVStore(BaseKVStore):
 
         self._execute_locked("put", _do_put)
 
+    @override
     def put_all(
         self,
         kv_pairs: list[tuple[str, dict[str, Any]]],
@@ -247,6 +250,7 @@ class SQLiteKVStore(BaseKVStore):
 
         self._execute_locked("put_all", _do_put_all)
 
+    @override
     def get(
         self,
         key: str,
@@ -274,6 +278,7 @@ class SQLiteKVStore(BaseKVStore):
 
         return self._execute_locked("get", _do_get)
 
+    @override
     def get_all(self, collection: str = DEFAULT_COLLECTION) -> dict[str, Any]:
         """Retrieve all key-value pairs for *collection*.
 
@@ -293,6 +298,7 @@ class SQLiteKVStore(BaseKVStore):
 
         return self._execute_locked("get_all", _do_get_all)
 
+    @override
     def delete(self, key: str, collection: str = DEFAULT_COLLECTION) -> bool:
         """Delete a key-value pair.
 
@@ -318,6 +324,7 @@ class SQLiteKVStore(BaseKVStore):
     # Async API — delegates to sync (SQLite is local, latency is trivial)
     # ------------------------------------------------------------------
 
+    @override
     async def aput(
         self,
         key: str,
@@ -333,6 +340,7 @@ class SQLiteKVStore(BaseKVStore):
         """
         return self.put(key, val, collection)
 
+    @override
     async def aput_all(
         self,
         kv_pairs: list[tuple[str, dict[str, Any]]],
@@ -348,6 +356,7 @@ class SQLiteKVStore(BaseKVStore):
         """
         return self.put_all(kv_pairs, collection, batch_size)
 
+    @override
     async def aget(
         self,
         key: str,
@@ -356,10 +365,12 @@ class SQLiteKVStore(BaseKVStore):
         """Async wrapper for :meth:`get`."""
         return self.get(key, collection)
 
+    @override
     async def aget_all(self, collection: str = DEFAULT_COLLECTION) -> dict[str, Any]:
         """Async wrapper for :meth:`get_all`."""
         return self.get_all(collection)
 
+    @override
     async def adelete(self, key: str, collection: str = DEFAULT_COLLECTION) -> bool:
         """Async wrapper for :meth:`delete`."""
         return self.delete(key, collection)

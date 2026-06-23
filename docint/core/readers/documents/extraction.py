@@ -170,8 +170,10 @@ def _try_extract_xobject_image(page: object, image_id: str, output_dir: Path) ->
                 continue
 
             output_dir.mkdir(parents=True, exist_ok=True)
+            # Bind `data` before the try so the except fallback (write raw
+            # bytes) can't hit an unbound name if get_data() itself fails.
+            data = resolved.get_data()
             try:
-                data = resolved.get_data()
                 width = int(resolved.get("/Width", 0))
                 height = int(resolved.get("/Height", 0))
                 color_space = str(resolved.get("/ColorSpace", "/DeviceRGB"))

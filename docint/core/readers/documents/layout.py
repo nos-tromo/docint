@@ -10,6 +10,7 @@ from typing import Any
 
 import pypdf
 from loguru import logger
+from typing_extensions import override
 
 from docint.core.readers.documents.models import BBox, BlockType, LayoutBlock, PageInfo
 
@@ -53,6 +54,7 @@ class PypdfLayoutAnalyzer(LayoutAnalyzer):
         self._file_path = Path(file_path)
         self._reader = pypdf.PdfReader(self._file_path)
 
+    @override
     def analyze_page(self, page_index: int, *, file_path: Path | None = None) -> list[LayoutBlock]:
         """Return layout blocks for a single page.
 

@@ -512,7 +512,7 @@ def test_resplit_passes_token_counter_to_sentence_splitter(
                 **kwargs: Keyword args forwarded; also recorded.
             """
             recorded_kwargs.append(dict(kwargs))
-            super().__init__(*args, **kwargs)
+            super().__init__(*args, **kwargs)  # pyrefly: ignore[bad-argument-type]  # spy wrapper passes-through *args/**kwargs; exact SentenceSplitter params are not statically known
 
     monkeypatch.setattr(embed_chunking, "SentenceSplitter", SpySentenceSplitter)
 

@@ -5,6 +5,7 @@ import re
 from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
+from typing_extensions import override
 
 from docint.agents.types import ResponseAgent, RetrievalResult, Turn
 from docint.utils.prompt_loader import load_localized_prompt
@@ -39,6 +40,7 @@ class PassthroughResponseAgent(ResponseAgent):
     Returns retrieval results unchanged.
     """
 
+    @override
     def finalize(self, result: RetrievalResult, turn: Turn) -> RetrievalResult:
         """Return retrieval results unchanged.
 
@@ -70,6 +72,7 @@ class ResultValidationResponseAgent(ResponseAgent):
             default=DEFAULT_RESPONSE_VALIDATOR_PROMPT,
         )
 
+    @override
     def finalize(self, result: RetrievalResult, turn: Turn) -> RetrievalResult:
         """Validate the answer against retrieved sources and set alert metadata.
 

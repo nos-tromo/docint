@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict, cast
 
 from llama_index.core import Document, SimpleDirectoryReader
 
@@ -116,7 +116,7 @@ def _parse_hate_speech_payload(raw: str) -> HateSpeechDetection:
                 extract_exc or exc,
                 preview,
             )
-            parsed = {}
+            parsed = cast(dict[str, Any], {})
 
     if not isinstance(parsed, dict):
         return {
@@ -555,7 +555,12 @@ class DocumentIngestionPipeline:
         if self.md_node_parser is None or self.docling_node_parser is None:
             raise RuntimeError("Node parsers are not initialized.")
 
-        document_docs, img_docs, json_docs, table_docs, text_docs, transcript_docs = [[] for _ in range(6)]
+        document_docs: list[Document] = []
+        img_docs: list[Document] = []
+        json_docs: list[Document] = []
+        table_docs: list[Document] = []
+        text_docs: list[Document] = []
+        transcript_docs: list[Document] = []
         for d in docs:
             meta = getattr(d, "metadata", {}) or {}
             file_type = (meta.get("file_type") or "").lower()

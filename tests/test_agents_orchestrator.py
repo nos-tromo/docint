@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from typing_extensions import override
 
 from docint.agents import (
     AgentOrchestrator,
@@ -36,6 +37,7 @@ class _StubRetrievalAgent(RetrievalAgent):
         """Initialise with no recorded request."""
         self.called_with: RetrievalRequest | None = None
 
+    @override
     def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
         """Record the request and return a fixed retrieval result.
 
@@ -63,6 +65,7 @@ class _StubResponseAgent(ResponseAgent):
         """Initialise with the call flag unset."""
         self.called = False
 
+    @override
     def finalize(self, result: RetrievalResult, turn: TurnType) -> RetrievalResult:
         """Set validation flags on the result and record the call.
 
@@ -84,6 +87,7 @@ class _StubResponseAgent(ResponseAgent):
 class _NoopClarifier(SimpleClarificationAgent):
     """Clarifier that always requests clarification."""
 
+    @override
     def build(self, turn: TurnType, analysis: Any) -> ClarificationRequest:
         """Return a clarification request regardless of input.
 
@@ -105,6 +109,7 @@ class _AlwaysClarifyPolicy(ClarificationPolicy):
         """Initialise with a strict confidence threshold."""
         super().__init__(ClarificationConfig(confidence_threshold=1.0, require_entities=True))
 
+    @override
     def evaluate(self, analysis: Any, clarifications_so_far: int = 0) -> ClarificationRequest:
         """Always request clarification.
 
@@ -196,6 +201,7 @@ def test_orchestrator_runs_response_agent(turn: Turn) -> None:
 class _WeakAnswerRetrievalAgent(RetrievalAgent):
     """Retrieval agent that returns a degenerate ``"Evidence insufficient."`` answer."""
 
+    @override
     def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
         """Return a refusal-shaped answer to exercise the fallback path.
 
@@ -216,6 +222,7 @@ class _WeakAnswerRetrievalAgent(RetrievalAgent):
 class _MismatchResponseAgent(ResponseAgent):
     """Response agent that flags ``validation_mismatch=True``."""
 
+    @override
     def finalize(self, result: RetrievalResult, turn: TurnType) -> RetrievalResult:
         """Set mismatch metadata on the result.
 
@@ -263,6 +270,7 @@ def test_orchestrator_keeps_strong_answer_even_with_mismatch(turn: Turn) -> None
     """
 
     class _StrongRetriever(RetrievalAgent):
+        @override
         def retrieve(self, request: RetrievalRequest) -> RetrievalResult:
             _ = request
             return RetrievalResult(

@@ -62,8 +62,8 @@ def test_chat_skips_rewrite_when_prior_turn_supplied(
     """``rewrite_retrieval_query`` must NOT be invoked when ``prior_turn`` is set."""
     engine = MagicMock()
     filtered_response = MagicMock()
-    filtered_response.metadata = {}
-    filtered_response.source_nodes = []
+    filtered_response.metadata = cast(dict[str, Any], {})
+    filtered_response.source_nodes = cast(list[Any], [])
     engine.query.return_value = filtered_response
 
     session_manager.rag.query_engine = engine
@@ -101,8 +101,8 @@ def test_chat_binds_prior_turn_context_via_update_prompts(
     """``engine.update_prompts`` is called with QA + refine templates bound to the prior turn."""
     engine = MagicMock()
     filtered_response = MagicMock()
-    filtered_response.metadata = {}
-    filtered_response.source_nodes = []
+    filtered_response.metadata = cast(dict[str, Any], {})
+    filtered_response.source_nodes = cast(list[Any], [])
     engine.query.return_value = filtered_response
 
     session_manager.rag.query_engine = engine
@@ -144,8 +144,8 @@ def test_chat_default_path_still_rewrites(
     """Without ``prior_turn`` the legacy double-rewrite remains in effect."""
     engine = MagicMock()
     filtered_response = MagicMock()
-    filtered_response.metadata = {}
-    filtered_response.source_nodes = []
+    filtered_response.metadata = cast(dict[str, Any], {})
+    filtered_response.source_nodes = cast(list[Any], [])
     engine.query.return_value = filtered_response
 
     session_manager.rag.query_engine = engine

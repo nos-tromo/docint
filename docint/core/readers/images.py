@@ -9,6 +9,7 @@ from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from llama_index.core.schema import MediaResource
 from loguru import logger
+from typing_extensions import override
 
 from docint.core.ingest.images_service import (
     ImageAsset,
@@ -154,7 +155,8 @@ class ImageReader(BaseReader):
             extra_info=extra_info if isinstance(extra_info, dict) else None,
         )
 
-    def load_data(self, file: str | Path, **kwargs: Any) -> list[Document]:
+    @override
+    def load_data(self, file: str | Path, **kwargs: Any) -> list[Document]:  # pyrefly: ignore[bad-override]  # llama-index BaseReader.load_data; runtime-compatible
         """Eager-list shim over :meth:`iter_documents` for legacy callers.
 
         Args:
