@@ -41,7 +41,7 @@ UI_STRINGS: Final[dict[str, dict[str, str]]] = {
         "report_label_sources": "Sources",
         "report_label_items": "Items",
         "report_label_reference_metadata": "Reference metadata",
-        "report_disclaimer": "AI-generated report — verify all results before further processing.",
+        "report_disclaimer": "AI-generated report.",
         "report_empty": "This report has no items yet.",
     },
     "de": {
@@ -71,9 +71,7 @@ UI_STRINGS: Final[dict[str, dict[str, str]]] = {
         "report_label_sources": "Quellen",
         "report_label_items": "Einträge",
         "report_label_reference_metadata": "Metadaten",
-        "report_disclaimer": (
-            "Dieser Bericht wurde KI-gestützt erstellt; alle Ergebnisse sind vor der weiteren Verarbeitung zu prüfen."
-        ),
+        "report_disclaimer": ("Dieser Bericht wurde KI-gestützt erstellt."),
         "report_empty": "Dieser Bericht enthält noch keine Einträge.",
     },
 }
