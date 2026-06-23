@@ -97,17 +97,53 @@ def _location(snap: dict[str, Any]) -> str:
     return ""
 
 
-def _source_oneline(src: dict[str, Any]) -> str:
-    """Compact single-line description of a chat citation/source."""
+def _source_oneline(src: dict[str, Any], *, include_score: bool = True) -> str:
+    """Compact single-line description of a chat citation/source.
+
+    Args:
+        src (dict[str, Any]): The citation/source dict.
+        include_score (bool): Whether to append the ``[0.000]`` relevance score.
+            The human-facing report renderers pass ``False`` (a bare score reads
+            like debug output); the CSV/JSON data exports keep the default so the
+            number stays available for downstream analysis.
+    """
     name = src.get("filename") or src.get("source") or ""
     loc = _location(src)
     score = src.get("score")
     parts = [str(name)]
     if loc:
         parts.append(f"({loc})")
-    if isinstance(score, (int, float)):
+    if include_score and isinstance(score, (int, float)):
         parts.append(f"[{score:.3f}]")
     return " ".join(p for p in parts if p)
+
+
+def _dedupe_entities(entities: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """De-duplicate entity mentions case-insensitively, preserving first order.
+
+    A single chunk often names the same surface form many times; the report
+    shows each distinct ``(text, type)`` once.
+
+    Args:
+        entities (list[dict[str, Any]]): Raw entity dicts (``text`` / ``type``).
+
+    Returns:
+        list[tuple[str, str]]: Ordered ``(text, type)`` pairs in first-seen
+        casing, one per distinct case-insensitive mention.
+    """
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str]] = []
+    for e in entities:
+        text = str(e.get("text") or "").strip()
+        etype = str(e.get("type") or "").strip()
+        if not text:
+            continue
+        key = (text.lower(), etype.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((text, etype))
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -145,7 +181,7 @@ def _md_chat(snap: dict[str, Any], note: str | None) -> list[str]:
     sources = snap.get("sources") or []
     if sources:
         lines += ["", f"**{ui_string('report_label_sources')}:**"]
-        lines += [f"- {_source_oneline(s)}" for s in sources]
+        lines += [f"- {_source_oneline(s, include_score=False)}" for s in sources]
     if note:
         lines += ["", f"*{ui_string('report_label_note')}: {note.strip()}*"]
     lines.append("")
@@ -161,9 +197,9 @@ def _md_entity(snap: dict[str, Any], note: str | None) -> list[str]:
     chunk = _truncate(snap.get("chunk_text") or "")
     if chunk:
         lines += ["", "> " + "\n> ".join(chunk.splitlines())]
-    entities = snap.get("entities") or []
+    entities = _dedupe_entities(snap.get("entities") or [])
     if entities:
-        rendered = ", ".join(f"{e.get('text', '')} [{e.get('type', '')}]" for e in entities)
+        rendered = ", ".join(f"{text} [{etype}]" if etype else text for text, etype in entities)
         lines += ["", f"**{ui_string('report_label_entities')}:** {rendered}"]
     lines += _md_reference_metadata(snap)
     if note:
@@ -268,8 +304,8 @@ body {
   font-family: 'Noto Sans', 'Noto Sans CJK SC', 'DejaVu Sans', 'Liberation Sans', Arial, sans-serif;
   font-size: 10.5pt; line-height: 1.45; color: #1a1a1a; margin: 0;
 }
-h1.report-title { font-size: 20pt; margin: 0 0 4pt; }
-.report-meta { color: #666; font-size: 9pt; margin-bottom: 16pt; white-space: nowrap; }
+h1.report-title { font-size: 20pt; font-weight: 600; margin: 0 0 4pt; }
+.report-meta { color: #666; font-size: 9pt; margin-bottom: 14pt; white-space: nowrap; }
 /* Case file (top-right) + AI disclaimer (bottom-left) are lifted into the page
    margins by WeasyPrint, so they repeat on every page. Placed near the top of
    the body so the running element is current from page 1. On screen (no paged
@@ -281,28 +317,43 @@ h1.report-title { font-size: 20pt; margin: 0 0 4pt; }
 .running-refnum { position: running(refnum); }
 .running-disclaimer { position: running(disclaimer); font-style: italic; }
 h2.section {
-  font-size: 14pt; border-bottom: 1.5px solid #333; padding-bottom: 3pt;
-  margin: 22pt 0 10pt; break-after: avoid;
+  font-size: 13pt; font-weight: 600; border-bottom: 1px solid #333; padding-bottom: 3pt;
+  margin: 22pt 0 8pt; break-after: avoid;
 }
-.item {
-  break-inside: avoid; border: 1px solid #ddd; border-radius: 4px;
-  padding: 8pt 10pt; margin: 0 0 10pt;
-}
-.item-title { font-weight: 600; margin: 0 0 4pt; }
-.item-meta { color: #666; font-size: 8.5pt; margin: 0 0 5pt; }
+/* Flat layout: no boxed cards. Findings sit in open space, separated from one
+   another by a single hairline rule between consecutive items. */
+.item { break-inside: avoid; margin: 0; padding: 0; }
+.item + .item { border-top: 1px solid #e6e6e6; margin-top: 12pt; padding-top: 12pt; }
+.item-title { font-weight: 600; font-size: 11pt; margin: 0 0 2pt; }
+.item-meta { color: #777; font-size: 8.5pt; margin: 0 0 5pt; }
+/* Verbatim evidence text (social-media posts, document chunks) — kept exact. */
 .chunk {
-  white-space: pre-wrap; background: #f7f7f7; border-left: 3px solid #ccc;
-  padding: 5pt 8pt; font-size: 9.5pt; margin: 5pt 0;
+  white-space: pre-wrap; background: #fafafa; border-left: 2px solid #ddd;
+  padding: 5pt 8pt; font-size: 9pt; color: #333; margin: 5pt 0;
 }
+/* Rendered Markdown prose (summaries, chat answers). */
+.prose { margin: 2pt 0 4pt; }
+.prose > :first-child { margin-top: 0; }
+.prose > :last-child { margin-bottom: 0; }
+.prose p { margin: 0 0 5pt; }
+.prose ul, .prose ol { margin: 3pt 0 5pt; padding-left: 16pt; }
+.prose li { margin: 1pt 0; }
+.prose strong { font-weight: 600; }
+.prose h1, .prose h2, .prose h3, .prose h4 { font-size: 11pt; font-weight: 600; margin: 7pt 0 3pt; }
 .note { font-style: italic; color: #444; margin-top: 5pt; }
 .label { font-weight: 600; color: #333; }
 .badge {
   display: inline-block; padding: 1pt 6pt; border-radius: 3px;
-  background: #eee; font-size: 8.5pt; margin-right: 4pt;
+  background: #f0f0f0; font-size: 8.5pt; margin: 0 4pt 2pt 0;
 }
+.badge .etype { color: #999; font-size: 7.5pt; }
 ul.sources { margin: 4pt 0 0; padding-left: 16pt; font-size: 9pt; }
-ul.refmeta { margin: 4pt 0 0; padding-left: 16pt; font-size: 8.5pt; color: #555; }
-ul.refmeta .rm-key { font-weight: 600; color: #444; }
+/* Provenance: every field kept, but laid out as a compact, muted two-column
+   key/value grid so the identifiers do not dominate the page. */
+.rm-head { font-weight: 600; color: #444; font-size: 8.5pt; margin-top: 6pt; }
+.refmeta { columns: 2; column-gap: 18pt; margin: 2pt 0 0; font-size: 8pt; color: #666; }
+.refmeta .rm-row { break-inside: avoid; margin: 0 0 1pt; }
+.refmeta .rm-key { font-weight: 600; color: #555; }
 .empty { color: #888; font-style: italic; }
 """
 
@@ -310,6 +361,34 @@ ul.refmeta .rm-key { font-weight: 600; color: #444; }
 def _esc(value: Any) -> str:
     """HTML-escape an arbitrary value."""
     return html.escape(str(value if value is not None else ""))
+
+
+_MD_RENDERER: Any = None
+
+
+def _render_markdown_html(text: str) -> str:
+    """Render LLM-authored Markdown (summaries, chat answers) to safe HTML.
+
+    Raw HTML in the source is escaped (``html=False``), so investigator-facing
+    text can never inject markup into the report. Evidence chunk text is *not*
+    routed here — it stays verbatim via :func:`_esc`. The renderer is built once
+    and cached; the import is lazy so importing this module stays cheap.
+
+    Args:
+        text (str): The Markdown source.
+
+    Returns:
+        str: Rendered HTML, or ``""`` for empty input.
+    """
+    global _MD_RENDERER
+    text = (text or "").strip()
+    if not text:
+        return ""
+    if _MD_RENDERER is None:
+        from markdown_it import MarkdownIt
+
+        _MD_RENDERER = MarkdownIt("commonmark", {"html": False})
+    return str(_MD_RENDERER.render(text))
 
 
 def _html_note(note: str | None) -> str:
@@ -324,22 +403,31 @@ def _html_chunk(snap: dict[str, Any]) -> str:
 
 
 def _html_reference_metadata(snap: dict[str, Any]) -> str:
-    """Render the source's reference metadata (provenance) as a list, if any."""
+    """Render the source's reference metadata (provenance) as a compact block.
+
+    Every captured field is kept (chain-of-custody), laid out as a tight, muted
+    two-column key/value grid so the identifiers no longer dominate the page.
+    """
     items = reference_metadata_items(snap, skip_keys=BODY_TEXT_FIELDS)
     if not items:
         return ""
-    rows = "".join(f'<li><span class="rm-key">{_esc(label)}:</span> {_esc(value)}</li>' for label, value in items)
-    return f'<div class="label">{ui_string("report_label_reference_metadata")}:</div><ul class="refmeta">{rows}</ul>'
+    rows = "".join(
+        f'<div class="rm-row"><span class="rm-key">{_esc(label)}:</span> {_esc(value)}</div>' for label, value in items
+    )
+    return (
+        f'<div class="rm-head">{ui_string("report_label_reference_metadata")}:</div><div class="refmeta">{rows}</div>'
+    )
 
 
 def _html_chat(snap: dict[str, Any], note: str | None) -> str:
     parts = [
         f'<div class="item-title">{ui_string("report_label_question")}: {_esc(snap.get("user_text"))}</div>',
-        f'<div><span class="label">{ui_string("report_label_answer")}:</span> {_esc(snap.get("model_response"))}</div>',
+        f'<div class="label">{ui_string("report_label_answer")}:</div>',
+        f'<div class="prose">{_render_markdown_html(snap.get("model_response") or "")}</div>',
     ]
     sources = snap.get("sources") or []
     if sources:
-        items = "".join(f"<li>{_esc(_source_oneline(s))}</li>" for s in sources)
+        items = "".join(f"<li>{_esc(_source_oneline(s, include_score=False))}</li>" for s in sources)
         parts.append(f'<div class="label">{ui_string("report_label_sources")}:</div><ul class="sources">{items}</ul>')
     parts.append(_html_note(note))
     return "".join(parts)
@@ -351,9 +439,14 @@ def _html_entity(snap: dict[str, Any], note: str | None) -> str:
     if meta:
         parts.append(f'<div class="item-meta">{ui_string("report_label_source")}: {_esc(meta)}</div>')
     parts.append(_html_chunk(snap))
-    entities = snap.get("entities") or []
+    entities = _dedupe_entities(snap.get("entities") or [])
     if entities:
-        badges = "".join(f'<span class="badge">{_esc(e.get("text"))} [{_esc(e.get("type"))}]</span>' for e in entities)
+        badges = "".join(
+            f'<span class="badge">{_esc(text)}'
+            + (f' <span class="etype">{_esc(etype)}</span>' if etype else "")
+            + "</span>"
+            for text, etype in entities
+        )
         parts.append(f'<div><span class="label">{ui_string("report_label_entities")}:</span> {badges}</div>')
     parts.append(_html_reference_metadata(snap))
     parts.append(_html_note(note))
@@ -381,7 +474,7 @@ def _html_hate(snap: dict[str, Any], note: str | None) -> str:
 def _html_summary(snap: dict[str, Any], note: str | None) -> str:
     parts = [
         f'<div class="item-title">{_esc(snap.get("collection"))}</div>',
-        f'<div class="chunk">{_esc((snap.get("text") or "").strip())}</div>',
+        f'<div class="prose">{_render_markdown_html(snap.get("text") or "")}</div>',
         _html_note(note),
     ]
     return "".join(parts)
@@ -423,13 +516,17 @@ def render_html(report: dict[str, Any]) -> str:
 
     body_parts = [f'<h1 class="report-title">{_esc(title)}</h1>', meta_html]
 
-    # Case file → running top-right header (its only appearance, shown bare with
-    # no label); AI disclaimer → running bottom-left footer. Both markers sit near
-    # the top so the running element is current from the first page onward (a
+    # Case file → running top-right header (its only appearance), prefixed with a
+    # short localized label ("File:" / "Az.:") so a bare number does not read as a
+    # page artifact; AI disclaimer → running bottom-left footer. Both markers sit
+    # near the top so the running element is current from the first page onward (a
     # marker placed last would only surface on the final page). With no case file
     # the running element is absent and the header stays empty.
     if report.get("reference_number"):
-        body_parts.append(f'<div class="running-refnum">{_esc(report["reference_number"])}</div>')
+        body_parts.append(
+            f'<div class="running-refnum">'
+            f"{_esc(ui_string('report_label_reference_abbr'))}: {_esc(report['reference_number'])}</div>"
+        )
     body_parts.append(f'<div class="running-disclaimer">{_esc(ui_string("report_disclaimer"))}</div>')
 
     grouped = _group_items(report.get("items") or [])

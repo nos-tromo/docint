@@ -192,30 +192,29 @@ def test_case_file_only_in_running_header(monkeypatch: pytest.MonkeyPatch) -> No
     assert "2026-06-20" in subheader  # creation date …
     assert "10:00" not in subheader  # … without the time component
     assert "AZ-2026-42" not in subheader  # the case file is kept out of the subheader
-    # It rides the running header instead — shown bare, with no label prefix.
+    # It rides the running header instead — prefixed with a discreet abbreviated label.
     refnum = re.search(r'<div class="running-refnum">(.*?)</div>', htm, re.S)
     assert refnum is not None
-    assert refnum.group(1).strip() == "AZ-2026-42"
-    assert ui_string("report_label_reference") not in htm  # no "File reference:" label leaks in
+    assert refnum.group(1).strip() == f"{ui_string('report_label_reference_abbr')}: AZ-2026-42"
+    assert ui_string("report_label_reference") not in htm  # the long "File reference" label never leaks in
 
     # No case file set → no running-header marker at all (the header stays empty).
     assert 'class="running-refnum"' not in R.render_html(_empty())
 
 
 @pytest.mark.parametrize("locale", ["en", "de"])
-def test_running_header_bare_value_is_locale_agnostic(monkeypatch: pytest.MonkeyPatch, locale: str) -> None:
-    """The case-file header shows the bare value with no label — identically in every locale.
+def test_running_header_case_file_is_labeled_per_locale(monkeypatch: pytest.MonkeyPatch, locale: str) -> None:
+    """The case-file header carries a discreet, localized abbreviation label.
 
-    The label was dropped from the shared renderer (not a per-language string), so
-    neither the English ``File reference`` nor the German ``Aktenzeichen`` prefix
-    may leak into the header for either locale.
+    A bare number in the page corner reads like an artifact; a short prefix
+    (``File:`` / ``Az.:``) makes it legible as a case reference. The label is a
+    per-language string, so it differs between locales by design.
     """
     monkeypatch.setenv("RESPONSE_LANGUAGE", locale)
     htm = R.render_html(_report())
     refnum = re.search(r'<div class="running-refnum">(.*?)</div>', htm, re.S)
     assert refnum is not None
-    assert refnum.group(1).strip() == "AZ-2026-42"  # bare value, byte-for-byte the same en/de
-    assert ui_string("report_label_reference") not in htm  # this locale's label never appears
+    assert refnum.group(1).strip() == f"{ui_string('report_label_reference_abbr')}: AZ-2026-42"
 
 
 def test_disclaimer_footer_present(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -280,3 +279,85 @@ def test_render_pdf_available_returns_bytes(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(R, "_load_weasyprint", lambda: (_FakeHTML, None))
     out = R.render_pdf(_report())
     assert out.startswith(b"%PDF")
+
+
+def _single_item_report(artifact_type: str, snapshot: dict[str, Any]) -> dict[str, Any]:
+    """A minimal one-item report for exercising a single renderer in isolation."""
+    return {
+        "id": 1,
+        "title": "T",
+        "collection_name": "c",
+        "created_at": "2026-06-20T10:00:00+00:00",
+        "items": [{"id": 1, "artifact_type": artifact_type, "note": None, "snapshot": snapshot}],
+    }
+
+
+def test_html_renders_markdown_in_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Summary Markdown (bold, bullets) is rendered to HTML, never shown raw."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _single_item_report("summary", {"collection": "c", "text": "Lead in.\n\n* **alpha** point\n* beta"})
+    htm = R.render_html(report)
+    assert "<strong>alpha</strong>" in htm  # bold rendered
+    assert "<li>" in htm  # bullets rendered
+    assert "* **alpha**" not in htm  # the raw markdown markers are gone
+
+
+def test_html_renders_markdown_in_chat_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Chat-answer Markdown is rendered to HTML."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _single_item_report(
+        "chat_answer", {"user_text": "q", "model_response": "It is **strongly** so.", "sources": []}
+    )
+    htm = R.render_html(report)
+    assert "<strong>strongly</strong>" in htm
+    assert "**strongly**" not in htm
+
+
+def test_html_summary_renders_as_prose_not_evidence_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A summary flows as prose, not inside the grey `.chunk` evidence box."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _single_item_report("summary", {"collection": "c", "text": "plain summary body"})
+    htm = R.render_html(report)
+    assert "plain summary body" in htm
+    assert 'class="chunk"' not in htm  # the only body here is the summary; it must not be boxed
+
+
+def test_html_escapes_raw_markup_inside_markdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Raw HTML embedded in summary/chat Markdown is escaped, never injected."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _single_item_report("summary", {"collection": "c", "text": "see <script>alert(1)</script>"})
+    htm = R.render_html(report)
+    assert "<script>alert" not in htm
+    assert "&lt;script&gt;" in htm
+
+
+def test_html_dedupes_entity_chips(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Repeated entities collapse to one chip each (case-insensitive)."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _single_item_report(
+        "entity_finding",
+        {
+            "chunk_id": "c1",
+            "entity_label": "Männer [group]",
+            "chunk_text": "…",
+            "filename": "x.csv",
+            "row": 0,
+            "entities": [
+                {"text": "Männer", "type": "group"},
+                {"text": "männer", "type": "group"},  # case-variant duplicate
+                {"text": "Männer", "type": "group"},  # exact duplicate
+                {"text": "Volk", "type": "group"},
+            ],
+        },
+    )
+    htm = R.render_html(report)
+    assert htm.count('class="badge"') == 2  # Männer + Volk only
+
+
+def test_relevance_score_dropped_from_report_but_kept_in_csv() -> None:
+    """The [score] is removed from the human-facing PDF/HTML/Markdown, but kept in the CSV data."""
+    report = _report()  # its chat citation carries score 0.91 -> "[0.910]"
+    assert "[0.910]" not in R.render_html(report)
+    assert "[0.910]" not in R.render_markdown(report)
+    zf = zipfile.ZipFile(io.BytesIO(R.report_csv_bundle(report)))
+    assert "[0.910]" in zf.read("chat-answers.csv").decode("utf-8")
