@@ -11,7 +11,7 @@ export const createReport = (body: { title: string; collection_name?: string | n
 
 export const updateReport = (
   id: number,
-  body: { title?: string; operator?: string; reference_number?: string }
+  body: { title?: string; operator?: string; reference_number?: string; show_toc?: boolean }
 ) => apiPatch<Report>(`/reports/${id}`, body)
 
 export const deleteReport = (id: number) => apiDelete<{ ok: boolean }>(`/reports/${id}`)

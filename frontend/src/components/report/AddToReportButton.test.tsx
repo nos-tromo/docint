@@ -67,6 +67,7 @@ describe('AddToReportButton', () => {
       collection_name: 'docs',
       operator: null,
       reference_number: null,
+      show_toc: true,
       session_id: null,
       created_at: null,
       updated_at: null,

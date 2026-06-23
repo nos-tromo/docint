@@ -246,6 +246,16 @@ export function Report() {
                       aria-label="File reference (Aktenzeichen)"
                     />
                   </label>
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={report.show_toc ?? true}
+                      onChange={(e) => updateReport.mutate({ id: report.id, show_toc: e.target.checked })}
+                      className="accent-primary"
+                      aria-label="Table of contents"
+                    />
+                    <span className="uppercase tracking-wide">Table of contents</span>
+                  </label>
                 </div>
               </div>
 

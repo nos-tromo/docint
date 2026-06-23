@@ -239,6 +239,7 @@ export interface ReportSummary {
   collection_name: string | null
   operator: string | null
   reference_number: string | null
+  show_toc: boolean
   session_id: string | null
   created_at: string | null
   updated_at: string | null

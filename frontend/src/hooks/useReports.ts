@@ -46,8 +46,16 @@ export function useCreateReport() {
 export function useUpdateReport() {
   const invalidate = useReportInvalidator()
   return useMutation({
-    mutationFn: ({ id, ...body }: { id: number; title?: string; operator?: string; reference_number?: string }) =>
-      updateReport(id, body),
+    mutationFn: ({
+      id,
+      ...body
+    }: {
+      id: number
+      title?: string
+      operator?: string
+      reference_number?: string
+      show_toc?: boolean
+    }) => updateReport(id, body),
     onSuccess: invalidate
   })
 }
