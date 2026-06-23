@@ -642,7 +642,7 @@ class ImageIngestionService:
         """
         if self.qdrant_client is None:
             return
-        occurrences = payload.get("occurrences")
+        occurrences: list[dict[str, Any]] = payload.get("occurrences") or []
         if not isinstance(occurrences, list):
             occurrences = []
         if occurrence not in occurrences:

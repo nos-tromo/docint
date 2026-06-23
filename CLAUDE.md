@@ -14,7 +14,7 @@ uv run pytest
 uv run pytest tests/test_rag_unit.py          # single file
 uv run pytest tests/test_rag_unit.py::test_fn  # single test
 
-# Lint and format (ruff check, ruff format, mypy)
+# Lint and format (ruff check, ruff format, pyrefly)
 uv run pre-commit run --all-files
 
 # Start backend (needs Qdrant + an inference endpoint reachable).
@@ -82,7 +82,7 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
 - **Centralized config**: All `os.getenv` calls and config dataclasses must live in `docint/utils/env_cfg.py`. Other modules import from there. If a subpackage needs a short import path, use a thin re-export module.
 - **Test synchronization**: Every functional change must include corresponding test updates. Tests are in `tests/` and use pytest. `conftest.py` provides mock stubs for external dependencies like `magic`.
 - **Google-style docstrings** for new/modified functions and classes.
-- **Pre-commit is mandatory**: always run `uv run pre-commit run --all-files` before finishing work (ruff check, ruff format, mypy).
+- **Pre-commit is mandatory**: always run `uv run pre-commit run --all-files` before finishing work (ruff check, ruff format, pyrefly).
 - Prefer incremental, focused commits. When changes affect both API and UI, update `README.md`.
 - Frontend lives in `frontend/`. Keep business logic in the API/agents layer. Frontend dev: pnpm; tests: Vitest.
 - **Hidden collection suffixes**: `docint/core/rag.py` defines `HIDDEN_COLLECTION_SUFFIXES` (currently `("_images", "_dockv", "_entities")`). `RAG.list_collections()` filters these out, which transitively hides them from `/collections/list` and makes `select_collection()` reject them. Extend the tuple rather than adding filters at the UI layer. The companions share the base collection's lifecycle — `delete_collection` and the empty-ingestion cleanup remove `{name}_images`/`{name}_entities` alongside it.

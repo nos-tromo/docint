@@ -10,7 +10,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 from time import time
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 
@@ -542,7 +542,8 @@ def run_query(rag: RAG, query: str, index: int, output_path: str | Path) -> None
     expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
     if callable(expand_with_debug):
         try:
-            expanded, debug_payload = expand_with_debug(query)
+            # getattr-dispatched method returns a (str, dict) tuple at runtime.
+            expanded, debug_payload = cast("tuple[Any, Any]", expand_with_debug(query))
             retrieval_query = str(expanded)
             if isinstance(debug_payload, dict):
                 graph_debug = debug_payload

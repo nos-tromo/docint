@@ -200,7 +200,7 @@ def _matches_rule(metadata: Mapping[str, Any], rule: dict[str, Any]) -> bool:
         expected_values = _normalize_values(rule.get("values"))
         if not expected_values:
             scalar = _normalize_scalar(rule.get("value"))
-            expected_values = [scalar] if scalar is not None else []
+            expected_values = [scalar] if scalar is not None else cast(list[str | int | float | bool], [])
         if not expected_values:
             return False
         normalized_actual = {_coerce_comparable(value) for value in values}
@@ -352,7 +352,7 @@ def _compile_rule(rule: dict[str, Any]) -> MetadataFilter | MetadataFilters | No
         values = _normalize_values(rule.get("values"))
         if not values:
             scalar = _normalize_scalar(rule.get("value"))
-            values = [scalar] if scalar is not None else []
+            values = [scalar] if scalar is not None else cast(list[str | int | float | bool], [])
         if not values:
             return None
         return MetadataFilter(key=field, value=cast(Any, values), operator=FilterOperator.IN)
@@ -477,7 +477,7 @@ def _compile_qdrant_rule(
         values = _normalize_values(rule.get("values"))
         if not values:
             scalar = _normalize_scalar(rule.get("value"))
-            values = [scalar] if scalar is not None else []
+            values = [scalar] if scalar is not None else cast(list[str | int | float | bool], [])
         if not values:
             return None, False
         return (

@@ -4,7 +4,7 @@ import io
 import json
 import re
 import zipfile
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -173,7 +173,7 @@ def test_render_includes_case_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_summaries_render_first(monkeypatch: pytest.MonkeyPatch) -> None:
     """Summaries lead the document, ahead of the chat-answers section."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
-    report = {
+    report: dict[str, Any] = {
         "id": 9,
         "title": "Ordered",
         "collection_name": "c",
@@ -183,7 +183,7 @@ def test_summaries_render_first(monkeypatch: pytest.MonkeyPatch) -> None:
                 "id": 1,
                 "artifact_type": "chat_answer",
                 "note": None,
-                "snapshot": {"user_text": "q", "model_response": "a", "sources": []},
+                "snapshot": {"user_text": "q", "model_response": "a", "sources": cast(list[dict[str, Any]], [])},
             },
             {
                 "id": 2,

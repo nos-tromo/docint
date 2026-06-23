@@ -14,6 +14,7 @@ from loguru import logger
 from openai import OpenAI as _OpenAI
 from openai.types.chat import ChatCompletionContentPartParam, ChatCompletionMessageParam
 from PIL import Image as PILImage
+from typing_extensions import override
 
 from docint.core.readers.documents.models import (
     BBox,
@@ -59,6 +60,7 @@ class PypdfTextEngine(OCREngine):
         self._file_path = Path(file_path)
         self._reader = pypdf.PdfReader(self._file_path)
 
+    @override
     def ocr_page(self, page_index: int, *, file_path: Path | None = None) -> list[OCRSpan]:
         """Extract text from a page using pypdf (no actual OCR).
 
@@ -182,6 +184,7 @@ class VisionOCREngine(OCREngine):
             max_retries=self._max_retries,
         )
 
+    @override
     def ocr_page(self, page_index: int, *, file_path: Path | None = None) -> list[OCRSpan]:
         """Render *page_index* to an image and extract text via vision LLM.
 

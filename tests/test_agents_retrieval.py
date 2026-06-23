@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock
 
 from docint.agents import (
@@ -93,7 +94,8 @@ def test_retrieve_uses_rewritten_query_when_present() -> None:
 def test_retrieve_skips_chat_for_ner_intent() -> None:
     """The NER branch must not call ``rag.chat`` (no PriorTurn forwarded there)."""
     rag = _make_rag_mock()
-    rag.get_collection_ner.return_value = []
+    ner_results: list[dict[str, Any]] = []
+    rag.get_collection_ner.return_value = ner_results
     agent = RAGRetrievalAgent(rag)
     request = RetrievalRequest(
         turn=Turn(user_input="extract entities", session_id="session-1"),

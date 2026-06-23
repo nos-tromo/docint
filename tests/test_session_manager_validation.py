@@ -60,8 +60,8 @@ def session_manager() -> Generator[SessionManager, None, None]:
 def _persist_dummy_turn(sm: SessionManager, session_id: str) -> int:
     """Persist a single empty turn and return its assigned idx."""
     resp_mock = MagicMock()
-    resp_mock.metadata = {}
-    resp_mock.source_nodes = []
+    resp_mock.metadata = cast(dict[str, Any], {})
+    resp_mock.source_nodes = cast(list[Any], [])
     return sm._persist_turn(
         session_id,
         "hello",

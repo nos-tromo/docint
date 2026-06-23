@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from typing import Any, cast
 
 from llama_index.core.llms import LLM
+from typing_extensions import override
 
 from docint.agents.context import TurnContext
 from docint.agents.types import IntentAnalysis, Turn, UnderstandingAgent
@@ -100,6 +101,7 @@ class SimpleUnderstandingAgent(UnderstandingAgent):
                 entities["page"] = page_match.group(1)
         return entities
 
+    @override
     def analyze(self, turn: Turn, context: Any | None = None) -> IntentAnalysis:
         """Return intent, confidence, entities, and reason.
 
@@ -135,6 +137,7 @@ class ContextualUnderstandingAgent(UnderstandingAgent):
             default=DEFAULT_INTENT_ANALYST_PROMPT,
         )
 
+    @override
     def analyze(self, turn: Turn, context: Any | None = None) -> IntentAnalysis:
         """Analyze the turn using LLM reasoning.
 

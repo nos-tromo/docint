@@ -151,10 +151,10 @@ def _make_rag_with_streaming_pipeline(
 
     class FakePipeline:
         def __init__(self) -> None:
-            self.entity_extractor = None
+            self.entity_extractor: None = None
             self.ner_max_workers = 0
-            self.image_ingestion_service = None
-            self.dir_reader = None
+            self.image_ingestion_service: None = None
+            self.dir_reader: None = None
 
         def build_streaming(self, processed_hashes: set[str]) -> Any:
             yield from yields

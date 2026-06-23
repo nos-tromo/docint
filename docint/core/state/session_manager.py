@@ -153,7 +153,7 @@ class SessionManager:
             # Matches logic in _maybe_update_summary (every 5 turns)
             # If turns=6, 6%5=1, last 1 turn is not in summary.
             # If turns=4, 4%5=4, last 4 turns are not in summary.
-            remainder = len(turns) % 5
+            remainder = len(turns) % 5  # pyrefly: ignore[bad-argument-type]  # SQLAlchemy InstrumentedAttribute
 
             if remainder == 0:
                 return summary
@@ -481,7 +481,7 @@ class SessionManager:
                 "schema_version": "1.0.0",
                 "session_id": conv.id,
                 "created_at": conv.created_at.replace(tzinfo=UTC).isoformat(),
-                "turn_count": len(conv.turns),
+                "turn_count": len(conv.turns),  # pyrefly: ignore[bad-argument-type]  # SQLAlchemy InstrumentedAttribute
                 "rolling_summary": rolling_summary,
                 "models": {
                     "embed_model_id": self.rag.embed_model_id,
@@ -611,7 +611,7 @@ class SessionManager:
             rewritten = str(rewritten_candidate).strip() if isinstance(rewritten_candidate, str) else None
 
             reasoning = data.get("reasoning")
-            next_idx = len(conv.turns)
+            next_idx = len(conv.turns)  # pyrefly: ignore[bad-argument-type]  # SQLAlchemy InstrumentedAttribute
             t = Turn(
                 conversation_id=conv.id,
                 idx=next_idx,
@@ -708,7 +708,7 @@ class SessionManager:
         """
         with self._session_scope() as s:
             conv = s.get(Conversation, session_id)
-            if not conv or len(conv.turns) == 0 or (len(conv.turns) % every_n_turns) != 0:
+            if not conv or len(conv.turns) == 0 or (len(conv.turns) % every_n_turns) != 0:  # pyrefly: ignore[bad-argument-type]  # SQLAlchemy InstrumentedAttribute
                 return
 
             slice_text = []

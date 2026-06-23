@@ -101,6 +101,6 @@ def build_embedding_token_counter(
         Returns:
             The full list of input ids including BOS/EOS.
         """
-        return list(tokenizer.encode(text, add_special_tokens=True))
+        return list(tokenizer.encode(text, add_special_tokens=True))  # pyrefly: ignore[missing-attribute]  # tokenizer loaded above
 
     return _counter

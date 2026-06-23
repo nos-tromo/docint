@@ -1,5 +1,7 @@
 """Clarification agents."""
 
+from typing_extensions import override
+
 from docint.agents.types import (
     ClarificationAgent,
     ClarificationRequest,
@@ -26,6 +28,7 @@ class SimpleClarificationAgent(ClarificationAgent):
         self.prompt = prompt or ui_string("clarify_generic")
         self.required_entities = required_entities or ["query"]
 
+    @override
     def build(self, turn: Turn, analysis: IntentAnalysis) -> ClarificationRequest:
         """Return a clarification request, listing missing entities if any.
 

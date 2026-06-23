@@ -84,9 +84,9 @@ class ReportManager:
         """Serialize a :class:`ReportItem`, decoding its JSON snapshot."""
         raw = cast(str | None, item.snapshot)
         try:
-            snapshot = json.loads(raw) if raw else {}
+            snapshot: dict[str, Any] = json.loads(raw) if raw else {}
         except (TypeError, ValueError):
-            snapshot = {}
+            snapshot = cast(dict[str, Any], {})
         created = cast(datetime | None, item.created_at)
         return {
             "id": item.id,

@@ -12,6 +12,7 @@ import pandas as pd
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from loguru import logger
+from typing_extensions import override
 
 from docint.utils.hashing import compute_file_hash, ensure_file_hash
 from docint.utils.metadata_sanitize import sanitize_for_json
@@ -241,7 +242,7 @@ class TableReader(BaseReader):
             self.metadata_cols = list(self.metadata_cols)
 
         if self.combine_with is None:
-            self.combine_with = "\n"  # guardrail
+            self.combine_with = "\n"  # pyrefly: ignore[bad-assignment]  # defensive None guard (field is str)
 
     # --- Helpers ---
     def _guess_text_cols(self, df: pd.DataFrame) -> list[str]:
@@ -441,7 +442,7 @@ class TableReader(BaseReader):
             ft_extras = {"excel": {"sheet": sheet}}
         elif suffix == ".parquet":
             df = pd.read_parquet(file_path)
-            ft_extras = {"parquet": {}}
+            ft_extras = {"parquet": cast(dict[str, str], {})}
         else:
             logger.error("ValueError: Unsupported table type: {}", suffix)
             raise ValueError(f"Unsupported table type: {suffix}")
@@ -492,7 +493,7 @@ class TableReader(BaseReader):
         for i, row in df.iterrows():
             row_dict = {k: (None if pd.isna(v) else v) for k, v in row.items()}
             original_row_index = row_dict.pop(ORIGINAL_INDEX_COL, None)
-            if self.row_filter and not self.row_filter(row_dict):
+            if self.row_filter and not self.row_filter(cast(dict[str, Any], row_dict)):
                 continue
 
             content = self._combine_text(row, text_cols)
@@ -562,7 +563,8 @@ class TableReader(BaseReader):
             if self.limit and count >= self.limit:
                 break
 
-    def load_data(self, file: str | Path, **kwargs: Any) -> list[Document]:
+    @override
+    def load_data(self, file: str | Path, **kwargs: Any) -> list[Document]:  # pyrefly: ignore[bad-override]  # llama-index BaseReader.load_data; runtime-compatible
         """Eager-list shim over :meth:`iter_documents` for legacy callers.
 
         Args:

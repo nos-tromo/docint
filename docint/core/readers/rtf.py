@@ -18,6 +18,7 @@ from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from loguru import logger
 from striprtf.striprtf import rtf_to_text
+from typing_extensions import override
 
 from docint.utils.clean_text import basic_clean
 from docint.utils.hashing import ensure_file_hash
@@ -85,7 +86,8 @@ class RTFReader(BaseReader):
         text = basic_clean(stripped)
         yield self._build_document(file_path, text, extra_info)
 
-    def load_data(self, file: str | Path, **kwargs: Any) -> list[Document]:
+    @override
+    def load_data(self, file: str | Path, **kwargs: Any) -> list[Document]:  # pyrefly: ignore[bad-override]  # llama-index BaseReader.load_data; runtime-compatible
         """Eager-list shim over :meth:`iter_documents` for legacy callers.
 
         Args:
