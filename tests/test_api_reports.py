@@ -73,6 +73,20 @@ def _entity_payload(chunk_id: str = "c1") -> dict[str, Any]:
     }
 
 
+def test_created_report_defaults_show_toc_on(client: TestClient) -> None:
+    """A freshly created report has the table-of-contents flag on by default."""
+    assert _create(client)["show_toc"] is True
+
+
+def test_patch_show_toc(client: TestClient) -> None:
+    """PATCH /reports/{id} toggles the table-of-contents flag and it persists."""
+    rid = _create(client)["id"]
+    resp = client.patch(f"/reports/{rid}", json={"show_toc": False})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["show_toc"] is False
+    assert client.get(f"/reports/{rid}").json()["show_toc"] is False
+
+
 def test_create_and_list(client: TestClient) -> None:
     """POST /reports creates a report that then appears in GET /reports."""
     created = _create(client, title="Case A")

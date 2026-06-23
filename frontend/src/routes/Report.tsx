@@ -15,11 +15,12 @@ import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
 import { cn } from '@/lib/cn'
 
+// Summaries lead the document, matching the server renderer's SECTION_ORDER.
 const SECTIONS: Array<{ type: ArtifactType; label: string }> = [
+  { type: 'summary', label: 'Summaries' },
   { type: 'chat_answer', label: 'Chat answers' },
   { type: 'entity_finding', label: 'Entity findings' },
-  { type: 'hate_speech_finding', label: 'Hate-speech findings' },
-  { type: 'summary', label: 'Summaries' }
+  { type: 'hate_speech_finding', label: 'Hate-speech findings' }
 ]
 
 const EXPORTS: Array<{ format: ReportExportFormat; label: string; view?: boolean }> = [
@@ -244,6 +245,16 @@ export function Report() {
                       className="bg-zinc-950 border border-border rounded px-2 py-1 text-xs text-foreground"
                       aria-label="File reference (Aktenzeichen)"
                     />
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={report.show_toc ?? true}
+                      onChange={(e) => updateReport.mutate({ id: report.id, show_toc: e.target.checked })}
+                      className="accent-primary"
+                      aria-label="Table of contents"
+                    />
+                    <span className="uppercase tracking-wide">Table of contents</span>
                   </label>
                 </div>
               </div>

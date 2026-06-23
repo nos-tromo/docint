@@ -263,11 +263,19 @@ curl -O "http://localhost:8000/reports/1/export.json"  # structured selection
 curl -O "http://localhost:8000/reports/1/export.zip"   # per-type CSV bundle (reuses csv_stream.py schemas)
 ```
 
-The PDF is rendered server-side by WeasyPrint into a real paginated document
-(running header, page numbers, findings kept whole across page breaks, Noto
-fonts for multi-script text). It needs WeasyPrint's native libraries, which the
-backend image installs; if they are absent the `.pdf` route returns 503 while
-every other format keeps working.
+Every export leads with the **summaries**, then chat answers, entity findings,
+and hate-speech findings; entity and hate-speech findings carry their source
+**reference metadata** (network, author, timestamp, …) alongside the chunk. The
+report name is the single headline and the subheader stays on one line
+(collection · creation date · operator).
+
+The PDF is rendered server-side by WeasyPrint into a real paginated document: a
+running header carrying the case file (*Aktenzeichen*) in the upper-right
+corner, page numbers and an "AI-generated — verify before further processing"
+disclaimer in the footer of every page, findings kept whole across page breaks,
+and Noto fonts for multi-script text. It needs WeasyPrint's native libraries,
+which the backend image installs; if they are absent the `.pdf` route returns
+503 while every other format keeps working.
 
 ## Standalone vLLM App
 

@@ -113,6 +113,7 @@ class ReportManager:
             "collection_name": report.collection_name,
             "operator": report.operator,
             "reference_number": report.reference_number,
+            "show_toc": True if report.show_toc is None else bool(report.show_toc),
             "session_id": report.session_id,
             "created_at": created.isoformat() if created else None,
             "updated_at": updated.isoformat() if updated else None,
@@ -207,6 +208,7 @@ class ReportManager:
         title: str | None = None,
         operator: str | None = None,
         reference_number: str | None = None,
+        show_toc: bool | None = None,
     ) -> dict[str, Any] | None:
         """Update a report the caller owns.
 
@@ -219,6 +221,8 @@ class ReportManager:
             title (str | None): New title, when provided.
             operator (str | None): New case worker, when provided.
             reference_number (str | None): New file reference, when provided.
+            show_toc (bool | None): Whether the exports render a contents
+                section, when provided.
 
         Returns:
             dict[str, Any] | None: The updated report, or ``None`` when missing
@@ -234,6 +238,8 @@ class ReportManager:
                 report.operator = cast(Any, operator)
             if reference_number is not None:
                 report.reference_number = cast(Any, reference_number)
+            if show_toc is not None:
+                report.show_toc = cast(Any, show_toc)
             s.commit()
             s.refresh(report)
             return self._serialize_report(s, report)

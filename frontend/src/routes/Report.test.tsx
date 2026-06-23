@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Report } from './Report'
 import { useReportStore } from '@/stores/report'
@@ -8,6 +8,7 @@ const reportDetail = {
   id: 1,
   title: 'Case Alpha',
   collection_name: 'docs',
+  show_toc: true,
   session_id: null,
   created_at: null,
   updated_at: null,
@@ -94,5 +95,19 @@ describe('Report view', () => {
     useReportStore.setState({ activeReportId: null })
     renderReport()
     expect(await screen.findByText(/select a report/i)).toBeInTheDocument()
+  })
+
+  it('reflects show_toc and toggles it via PATCH', async () => {
+    renderReport()
+    const toggle = await screen.findByRole('checkbox', { name: /contents/i })
+    expect(toggle).toBeChecked()
+    fireEvent.click(toggle)
+    await waitFor(() => {
+      const patch = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.find(
+        (c) => (c[1] as RequestInit | undefined)?.method === 'PATCH'
+      )
+      expect(patch).toBeTruthy()
+      expect(JSON.parse(String((patch![1] as RequestInit).body))).toMatchObject({ show_toc: false })
+    })
   })
 })
