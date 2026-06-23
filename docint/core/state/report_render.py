@@ -355,7 +355,13 @@ h2.section {
 }
 /* Flat layout: no boxed cards. Findings sit in open space, separated from one
    another by a single hairline rule between consecutive items. */
-.item { break-inside: avoid; margin: 0; padding: 0; }
+.item { margin: 0; padding: 0; }
+/* Keep a compact finding (entity / hate-speech card) intact across a page break.
+   Prose items (summaries, chat answers) deliberately OMIT this: they are often
+   taller than a page, and `break-inside: avoid` would push the whole block onto a
+   fresh page — stranding its section heading on an almost-empty page (orphaned
+   heading) and leaving a large gap. Prose flows; only cards avoid in-page breaks. */
+.item--card { break-inside: avoid; }
 .item + .item { border-top: 1px solid #e6e6e6; margin-top: 12pt; padding-top: 12pt; }
 .item-title { font-weight: 600; font-size: 11pt; margin: 0 0 2pt; }
 .item-meta { color: #777; font-size: 8.5pt; margin: 0 0 5pt; }
@@ -520,6 +526,11 @@ _HTML_DISPATCH = {
     ARTIFACT_SUMMARY: _html_summary,
 }
 
+# Compact "card" findings (entity / hate-speech) get `break-inside: avoid` so a
+# single finding is never split across pages; the prose artifacts (summary, chat
+# answer) flow instead — see the `.item--card` CSS note on orphaned headings.
+_CARD_ARTIFACTS = frozenset({ARTIFACT_ENTITY, ARTIFACT_HATE})
+
 
 def _html_toc(grouped: OrderedDict[str, list[dict[str, Any]]]) -> str:
     """Render the contents block (Inhaltsverzeichnis) linking each present section.
@@ -595,8 +606,11 @@ def render_html(report: dict[str, Any]) -> str:
             anchor = SECTION_ANCHOR.get(artifact_type, "")
             body_parts.append(f'<h2 class="section" id="{anchor}">{_esc(ui_string(heading_key))}</h2>')
             renderer = _HTML_DISPATCH[artifact_type]
+            item_class = "item item--card" if artifact_type in _CARD_ARTIFACTS else "item"
             for item in items:
-                body_parts.append(f'<div class="item">{renderer(item.get("snapshot") or {}, item.get("note"))}</div>')
+                body_parts.append(
+                    f'<div class="{item_class}">{renderer(item.get("snapshot") or {}, item.get("note"))}</div>'
+                )
 
     return (
         f'<!DOCTYPE html>\n<html lang="{_esc(locale)}">\n<head>\n'

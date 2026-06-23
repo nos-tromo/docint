@@ -132,6 +132,35 @@ def test_render_html_escapes_user_content_and_has_paged_media() -> None:
     assert 'class="item"' in htm
 
 
+def test_prose_items_flow_while_findings_stay_intact() -> None:
+    """Page-break contract: prose items flow; only findings avoid in-page breaks.
+
+    A summary or chat answer is often taller than a page. If it carries
+    ``break-inside: avoid`` WeasyPrint pushes the whole block onto a fresh page,
+    stranding the section heading on an almost-empty page (an orphaned heading)
+    and leaving a large gap. So the prose artifacts (summary, chat answer) must
+    flow, and the ``break-inside: avoid`` guard belongs only to the compact
+    entity / hate-speech finding cards (``.item--card``).
+    """
+    htm = R.render_html(_report())  # chat (prose) + entity + hate (cards)
+    # The break-avoid guard lives on the card modifier, not the base item rule.
+    assert ".item--card" in htm
+    assert "break-inside: avoid" in htm
+    base_item_rule = re.search(r"\.item\s*\{([^}]*)\}", htm)
+    assert base_item_rule is not None
+    assert "break-inside" not in base_item_rule.group(1)  # the base item flows
+    # Findings opt into staying intact; prose does not.
+    card_report = _single_item_report(
+        "entity_finding",
+        {"entity_label": "E", "chunk_text": "x", "filename": "f", "row": 0, "entities": []},
+    )
+    assert 'class="item item--card"' in R.render_html(card_report)
+    prose_report = _single_item_report("summary", {"collection": "c", "text": "long prose body"})
+    prose_html = R.render_html(prose_report)
+    assert 'class="item"' in prose_html  # prose keeps the plain item class …
+    assert 'class="item item--card"' not in prose_html  # … never the break-avoid card modifier
+
+
 def test_render_includes_case_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     """Operator and file reference appear in the Markdown and HTML headers."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
