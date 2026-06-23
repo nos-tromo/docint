@@ -40,6 +40,15 @@ SECTION_ORDER: tuple[tuple[str, str], ...] = (
     (ARTIFACT_HATE, "report_section_hate_speech"),
 )
 
+# Stable in-document anchor id per section, shared by the section headings and the
+# table-of-contents links (the targets WeasyPrint resolves page numbers against).
+SECTION_ANCHOR: dict[str, str] = {
+    ARTIFACT_SUMMARY: "sec-summaries",
+    ARTIFACT_CHAT: "sec-chat",
+    ARTIFACT_ENTITY: "sec-entities",
+    ARTIFACT_HATE: "sec-hate",
+}
+
 _CHUNK_MAX_CHARS = 1500
 
 # CSV bundle column schemas for the chat/summary artifacts (entity & hate-speech
@@ -244,6 +253,16 @@ _MD_DISPATCH = {
 }
 
 
+def _md_toc(grouped: OrderedDict[str, list[dict[str, Any]]]) -> list[str]:
+    """Render a Markdown contents list — section names only (Markdown has no pages)."""
+    entries = [
+        f"- {ui_string(heading_key)}" for artifact_type, heading_key in SECTION_ORDER if grouped.get(artifact_type)
+    ]
+    if not entries:
+        return []
+    return [f"## {ui_string('report_section_toc')}", "", *entries, ""]
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     """Render the report as a single Markdown document."""
     title = report.get("title") or "Report"
@@ -269,6 +288,9 @@ def render_markdown(report: dict[str, Any]) -> str:
     if not any(grouped.values()):
         lines += [ui_string("report_empty"), ""]
         return "\n".join(lines)
+
+    if report.get("show_toc"):
+        lines += _md_toc(grouped)
 
     for artifact_type, heading_key in SECTION_ORDER:
         items = grouped.get(artifact_type) or []
@@ -319,6 +341,17 @@ h1.report-title { font-size: 20pt; font-weight: 600; margin: 0 0 4pt; }
 h2.section {
   font-size: 13pt; font-weight: 600; border-bottom: 1px solid #333; padding-bottom: 3pt;
   margin: 22pt 0 8pt; break-after: avoid;
+}
+/* Contents (Inhaltsverzeichnis). Page numbers are emitted only in paged media
+   (WeasyPrint renders @media print) via target-counter; on screen the entries are
+   plain in-document anchors. */
+.toc { margin: 12pt 0 18pt; break-after: avoid; }
+.toc-head { font-weight: 600; font-size: 12pt; margin: 0 0 5pt; }
+.toc ul { list-style: none; margin: 0; padding: 0; }
+.toc li { margin: 1.5pt 0; }
+.toc a { display: flex; justify-content: space-between; text-decoration: none; color: #1a1a1a; }
+@media print {
+  .toc a::after { content: target-counter(attr(href), page); color: #666; padding-left: 10pt; }
 }
 /* Flat layout: no boxed cards. Findings sit in open space, separated from one
    another by a single hairline rule between consecutive items. */
@@ -488,6 +521,26 @@ _HTML_DISPATCH = {
 }
 
 
+def _html_toc(grouped: OrderedDict[str, list[dict[str, Any]]]) -> str:
+    """Render the contents block (Inhaltsverzeichnis) linking each present section.
+
+    Lists only sections that have content, section-level only. Page numbers come
+    from WeasyPrint's ``target-counter`` in paged media (see the ``@media print``
+    stylesheet rule); on screen the entries are plain in-document anchors.
+    """
+    entries = [
+        f'<li><a href="#{SECTION_ANCHOR[artifact_type]}">{_esc(ui_string(heading_key))}</a></li>'
+        for artifact_type, heading_key in SECTION_ORDER
+        if grouped.get(artifact_type)
+    ]
+    if not entries:
+        return ""
+    return (
+        f'<nav class="toc"><div class="toc-head">{_esc(ui_string("report_section_toc"))}</div>'
+        f"<ul>{''.join(entries)}</ul></nav>"
+    )
+
+
 def render_html(report: dict[str, Any]) -> str:
     """Render the report as a self-contained, styled HTML document.
 
@@ -533,11 +586,14 @@ def render_html(report: dict[str, Any]) -> str:
     if not any(grouped.values()):
         body_parts.append(f'<p class="empty">{_esc(ui_string("report_empty"))}</p>')
     else:
+        if report.get("show_toc"):
+            body_parts.append(_html_toc(grouped))
         for artifact_type, heading_key in SECTION_ORDER:
             items = grouped.get(artifact_type) or []
             if not items:
                 continue
-            body_parts.append(f'<h2 class="section">{_esc(ui_string(heading_key))}</h2>')
+            anchor = SECTION_ANCHOR.get(artifact_type, "")
+            body_parts.append(f'<h2 class="section" id="{anchor}">{_esc(ui_string(heading_key))}</h2>')
             renderer = _HTML_DISPATCH[artifact_type]
             for item in items:
                 body_parts.append(f'<div class="item">{renderer(item.get("snapshot") or {}, item.get("note"))}</div>')

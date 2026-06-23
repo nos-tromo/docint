@@ -361,3 +361,80 @@ def test_relevance_score_dropped_from_report_but_kept_in_csv() -> None:
     assert "[0.910]" not in R.render_markdown(report)
     zf = zipfile.ZipFile(io.BytesIO(R.report_csv_bundle(report)))
     assert "[0.910]" in zf.read("chat-answers.csv").decode("utf-8")
+
+
+def _toc_report(show_toc: bool = True) -> dict[str, Any]:
+    """A report carrying all four section types, for table-of-contents tests."""
+    return {
+        "id": 1,
+        "title": "T",
+        "collection_name": "c",
+        "created_at": "2026-06-20T10:00:00+00:00",
+        "show_toc": show_toc,
+        "items": [
+            {"id": 1, "artifact_type": "summary", "note": None, "snapshot": {"collection": "c", "text": "s"}},
+            {
+                "id": 2,
+                "artifact_type": "chat_answer",
+                "note": None,
+                "snapshot": {"user_text": "q", "model_response": "a", "sources": []},
+            },
+            {
+                "id": 3,
+                "artifact_type": "entity_finding",
+                "note": None,
+                "snapshot": {"entity_label": "E", "chunk_text": "x", "filename": "f", "row": 0, "entities": []},
+            },
+            {
+                "id": 4,
+                "artifact_type": "hate_speech_finding",
+                "note": None,
+                "snapshot": {"category": "x", "confidence": "high", "reason": "r", "chunk_text": "x", "filename": "f"},
+            },
+        ],
+    }
+
+
+def test_html_toc_lists_present_sections_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With show_toc on, a contents block links every present section by anchor."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    htm = R.render_html(_toc_report(show_toc=True))
+    assert 'class="toc"' in htm
+    assert ui_string("report_section_toc") in htm
+    for anchor in ("#sec-summaries", "#sec-chat", "#sec-entities", "#sec-hate"):
+        assert f'href="{anchor}"' in htm
+    assert 'id="sec-chat"' in htm  # the section heading carries the matching id
+    assert "target-counter" in htm  # WeasyPrint page-number mechanism present in CSS
+
+
+def test_html_toc_absent_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With show_toc off, no contents block is rendered."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    htm = R.render_html(_toc_report(show_toc=False))
+    assert 'class="toc"' not in htm
+
+
+def test_html_toc_lists_only_present_sections(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The contents block lists only sections that actually have content."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _single_item_report("chat_answer", {"user_text": "q", "model_response": "a", "sources": []})
+    report["show_toc"] = True
+    htm = R.render_html(report)
+    assert 'href="#sec-chat"' in htm
+    assert 'href="#sec-entities"' not in htm
+    assert 'href="#sec-summaries"' not in htm
+
+
+def test_markdown_toc_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Markdown export carries a contents list (no page numbers) when enabled."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    md = R.render_markdown(_toc_report(show_toc=True))
+    toc = ui_string("report_section_toc")
+    assert toc in md
+    assert md.index(toc) < md.index(ui_string("report_section_summaries"))  # leads the document
+
+
+def test_markdown_toc_absent_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No contents list in Markdown when the toggle is off."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    assert ui_string("report_section_toc") not in R.render_markdown(_toc_report(show_toc=False))
