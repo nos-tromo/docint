@@ -75,6 +75,12 @@ export interface ForceSimulation {
   isSettled(): boolean
   /** Re-heat the layout (e.g. after a drag) so it re-settles. */
   reheat(value?: number): void
+  /**
+   * Merge new layout options into the live simulation. Forces read `opts` every
+   * tick, so changes (e.g. a wider `linkDistance`/`repulsion` from the
+   * edge-length control) take effect on the next reheat — no rebuild/reseed.
+   */
+  setOptions(partial: Partial<SimulationOptions>): void
   /** Pin a node to a layout-space position (drag start / move). */
   fixNode(id: string, x: number, y: number): void
   /** Release a previously pinned node (drag end). */
@@ -226,6 +232,9 @@ export function createForceSimulation(
     isSettled: () => alpha < ALPHA_MIN,
     reheat: (value = 0.6) => {
       alpha = Math.max(alpha, value)
+    },
+    setOptions: (partial) => {
+      Object.assign(opts, partial)
     },
     fixNode: (id, x, y) => {
       const n = byId.get(id)

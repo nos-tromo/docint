@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { EntityGraph } from './EntityGraph'
 import type { NerGraphEdge, NerGraphNode } from '@/api/types'
@@ -101,6 +101,50 @@ describe('EntityGraph', () => {
     expect(screen.queryByText('Widget')).not.toBeInTheDocument()
     // Acme is the most-connected node, so the threshold cannot climb further.
     expect(inc).toBeDisabled()
+  })
+
+  it('renders an edge-length slider defaulting to 1x density', () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    const slider = screen.getByRole('slider', { name: /edge length/i }) as HTMLInputElement
+    expect(slider).toBeInTheDocument()
+    // Default keeps today's density (1x); users widen toward 3x or compact to 0.5x.
+    expect(slider.value).toBe('1')
+  })
+
+  it('updates the edge-length value when the slider is dragged', () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    const slider = screen.getByRole('slider', { name: /edge length/i }) as HTMLInputElement
+    fireEvent.change(slider, { target: { value: '2.5' } })
+    expect(slider.value).toBe('2.5')
+  })
+
+  it('labels the zoom controls as their own group (distinct from min-edges)', () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    expect(screen.getByRole('group', { name: /zoom/i })).toBeInTheDocument()
   })
 
   it('shows an empty state when there are no nodes', () => {

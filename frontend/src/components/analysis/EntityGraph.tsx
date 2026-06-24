@@ -14,6 +14,13 @@ const CENTER_Y = HEIGHT / 2
 const MIN_ZOOM = 0.25
 const MAX_ZOOM = 4
 const DRAG_THRESHOLD = 4 // px of movement before a press counts as a drag
+// Edge-length ("spread") slider: bounds + the base spacing it scales. The bases
+// mirror forceGraph's DEFAULTS (linkDistance 70, repulsion 320); a multiplier of
+// 1 reproduces today's density, higher values push nodes farther apart.
+const MIN_SPREAD = 0.5
+const MAX_SPREAD = 3
+const BASE_LINK_DISTANCE = 70
+const BASE_REPULSION = 320
 
 // A small categorical palette; entity types map onto it by a stable hash so a
 // given label keeps its color across renders.
@@ -83,6 +90,10 @@ export function EntityGraph({
   // Edge-count (degree) filter: hide any node with fewer than `minDegree`
   // incident edges. Default 0 shows every node.
   const [minDegree, setMinDegree] = useState(0)
+
+  // Edge-length multiplier from the "Edge length" slider; 1 = today's density.
+  // Applied to the live sim's link rest-length + repulsion (see effect below).
+  const [spread, setSpread] = useState(1)
 
   // Incident-edge count per node id, from the full edge set.
   const degreeById = useMemo(() => {
@@ -192,6 +203,18 @@ export function EntityGraph({
       runningRef.current = false
     }
   }, [runLoop])
+
+  // Apply the edge-length multiplier to the live simulation (no reseed): scale
+  // link rest-length and repulsion together so clusters open up, not just
+  // directly-linked pairs. Re-runs on a fresh graph (sim) and on slider moves.
+  useEffect(() => {
+    sim.setOptions({
+      linkDistance: BASE_LINK_DISTANCE * spread,
+      repulsion: BASE_REPULSION * spread
+    })
+    sim.reheat()
+    runLoop()
+  }, [sim, spread, runLoop])
 
   /** Convert client (screen) coords to layout-space coords. */
   const screenToLayout = useCallback(
@@ -364,13 +387,13 @@ export function EntityGraph({
 
   return (
     <div className="space-y-2">
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="space-y-2">
         <p className="text-sm text-muted-foreground">
           {isLoading
             ? 'Building entity graph…'
             : `${visibleNodes.length} entit${visibleNodes.length === 1 ? 'y' : 'ies'} · ${visibleEdges.length} link${visibleEdges.length === 1 ? '' : 's'}${minDegree > 0 ? ` · ≥${minDegree} edge${minDegree === 1 ? '' : 's'}` : ''}. Scroll to zoom, drag to move, click a node to inspect.`}
         </p>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-border pt-2">
           <div className="flex items-center gap-1" role="group" aria-label="Minimum edges per node">
             <span className="text-xs text-muted-foreground">Min edges</span>
             <button
@@ -395,7 +418,28 @@ export function EntityGraph({
               +
             </button>
           </div>
-          <div className="flex items-center gap-1">
+
+          <span aria-hidden="true" className="h-5 border-l border-border" />
+
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">Edge length</span>
+            <input
+              type="range"
+              min={MIN_SPREAD}
+              max={MAX_SPREAD}
+              step={0.1}
+              value={spread}
+              onChange={(e) => setSpread(Number(e.target.value))}
+              aria-label="Edge length"
+              title="Spread nodes apart to de-clutter a dense graph"
+              className="w-28 cursor-pointer accent-primary"
+            />
+          </div>
+
+          <span aria-hidden="true" className="h-5 border-l border-border" />
+
+          <div className="flex items-center gap-1" role="group" aria-label="Zoom">
+            <span className="text-xs text-muted-foreground">Zoom</span>
             <button
               type="button"
               aria-label="Zoom in"

@@ -85,8 +85,12 @@ at a time) and a merge-mode toggle:
   the dependency-free `src/lib/forceGraph.ts` layout, fed by
   `GET /collections/ner/graph`). Nodes are draggable (with collision), the
   canvas zooms (wheel) and pans (background drag), and clicking a node selects
-  that entity. A **Min edges** +/− stepper (default 0) hides nodes with fewer
-  than that many incident edges to thin out weakly-connected clutter.
+  that entity. Below the graph, a dedicated controls row carries three labeled
+  groups: a **Min edges** +/− stepper (default 0) that hides nodes with fewer
+  than that many incident edges to thin out weakly-connected clutter; an **Edge
+  length** slider (default 1×, range 0.5×–3×) that scales the layout's link
+  rest-length and repulsion on the live simulation to spread a dense graph apart
+  without reseeding it; and a labeled **Zoom** group (+/− and Reset).
 
 Either selection surface drives the shared **findings table**
 (`EntityFindingsTable` → `EntityFinding` rows): one chunk per row, with all

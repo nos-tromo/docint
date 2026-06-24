@@ -69,6 +69,28 @@ describe('createForceSimulation', () => {
     expect(() => settle(sim, 50)).not.toThrow()
     expect(Number.isFinite(nodes[0].x)).toBe(true)
   })
+
+  it('setOptions widens spacing on a live simulation (drives the edge-length control)', () => {
+    const nodes = [node('a', -200, 0), node('b', 200, 0)]
+    const sim = createForceSimulation(nodes, [{ source: 'a', target: 'b', weight: 1 }], {
+      centerX: 0,
+      centerY: 0,
+      linkDistance: 70,
+      repulsion: 320
+    })
+    settle(sim)
+    const tight = dist(nodes[0], nodes[1])
+
+    // The edge-length slider scales link rest-length (and repulsion) on the
+    // already-built sim, then reheats — the layout must re-settle farther apart
+    // without being rebuilt/reseeded.
+    sim.setOptions({ linkDistance: 210, repulsion: 960 })
+    sim.reheat()
+    settle(sim)
+    const wide = dist(nodes[0], nodes[1])
+
+    expect(wide).toBeGreaterThan(tight)
+  })
 })
 
 describe('phyllotaxisSeed', () => {
