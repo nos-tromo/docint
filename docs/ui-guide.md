@@ -85,7 +85,8 @@ at a time) and a merge-mode toggle:
   the dependency-free `src/lib/forceGraph.ts` layout, fed by
   `GET /collections/ner/graph`). Nodes are draggable (with collision), the
   canvas zooms (wheel) and pans (background drag), and clicking a node selects
-  that entity.
+  that entity. A **Min edges** +/− stepper (default 0) hides nodes with fewer
+  than that many incident edges to thin out weakly-connected clutter.
 
 Either selection surface drives the shared **findings table**
 (`EntityFindingsTable` → `EntityFinding` rows): one chunk per row, with all

@@ -80,13 +80,53 @@ export function EntityGraph({
 }: Props) {
   const svgRef = useRef<SVGSVGElement>(null)
 
-  // Build the simulation (and a node-id → display-meta map) whenever the graph
-  // payload changes. Seed positions deterministically so layouts are stable.
+  // Edge-count (degree) filter: hide any node with fewer than `minDegree`
+  // incident edges. Default 0 shows every node.
+  const [minDegree, setMinDegree] = useState(0)
+
+  // Incident-edge count per node id, from the full edge set.
+  const degreeById = useMemo(() => {
+    const deg = new Map<string, number>()
+    for (const e of edges) {
+      deg.set(e.source, (deg.get(e.source) ?? 0) + 1)
+      deg.set(e.target, (deg.get(e.target) ?? 0) + 1)
+    }
+    return deg
+  }, [edges])
+
+  const maxDegree = useMemo(() => {
+    let m = 0
+    for (const n of nodes) m = Math.max(m, degreeById.get(n.id) ?? 0)
+    return m
+  }, [nodes, degreeById])
+
+  // Keep the threshold valid when a smaller graph loads (e.g. a merge-mode
+  // switch) so it never strands the view on an all-filtered, empty graph.
+  useEffect(() => {
+    setMinDegree((d) => Math.min(d, maxDegree))
+  }, [maxDegree])
+
+  const visibleNodes = useMemo(
+    () =>
+      minDegree <= 0
+        ? nodes
+        : nodes.filter((n) => (degreeById.get(n.id) ?? 0) >= minDegree),
+    [nodes, degreeById, minDegree]
+  )
+
+  const visibleEdges = useMemo(() => {
+    if (minDegree <= 0) return edges
+    const ids = new Set(visibleNodes.map((n) => n.id))
+    return edges.filter((e) => ids.has(e.source) && ids.has(e.target))
+  }, [edges, visibleNodes, minDegree])
+
+  // Build the simulation (and a node-id → display-meta map) over the currently
+  // visible nodes/edges. Seed positions deterministically so layouts are stable.
   const { sim, meta, selectableKeyById } = useMemo(() => {
-    const seeds = phyllotaxisSeed(nodes.length, CENTER_X, CENTER_Y, 30)
+    const seeds = phyllotaxisSeed(visibleNodes.length, CENTER_X, CENTER_Y, 30)
     const metaById = new Map<string, NodeMeta>()
     const keyById = new Map<string, string>()
-    const simNodes: ForceNode[] = nodes.map((n, i) => {
+    const simNodes: ForceNode[] = visibleNodes.map((n, i) => {
       metaById.set(n.id, {
         text: n.text,
         type: n.type,
@@ -96,7 +136,7 @@ export function EntityGraph({
       keyById.set(n.id, keyForNode(n))
       return { id: n.id, x: seeds[i].x, y: seeds[i].y, vx: 0, vy: 0, r: radiusForMentions(n.mentions) }
     })
-    const simLinks: ForceLink[] = edges.map((e) => ({
+    const simLinks: ForceLink[] = visibleEdges.map((e) => ({
       source: e.source,
       target: e.target,
       weight: e.weight
@@ -106,7 +146,7 @@ export function EntityGraph({
       meta: metaById,
       selectableKeyById: keyById
     }
-  }, [nodes, edges, keyForNode])
+  }, [visibleNodes, visibleEdges, keyForNode])
 
   // `frame` is bumped each animation step purely to re-render at the sim's
   // current positions; the authoritative state lives on the mutated sim nodes.
@@ -293,16 +333,16 @@ export function EntityGraph({
   const neighborIds = useMemo(() => {
     if (!selectedId) return null
     const set = new Set<string>()
-    for (const e of edges) {
+    for (const e of visibleEdges) {
       if (e.source === selectedId) set.add(e.target)
       else if (e.target === selectedId) set.add(e.source)
     }
     return set
-  }, [edges, selectedId])
+  }, [visibleEdges, selectedId])
 
   const legendTypes = useMemo(() => {
     const counts = new Map<string, number>()
-    for (const n of nodes) {
+    for (const n of visibleNodes) {
       const t = n.type || 'Unlabeled'
       counts.set(t, (counts.get(t) ?? 0) + 1)
     }
@@ -310,7 +350,7 @@ export function EntityGraph({
       .sort((a, b) => b[1] - a[1])
       .slice(0, 8)
       .map(([type]) => ({ type, color: colorForType(type) }))
-  }, [nodes])
+  }, [visibleNodes])
 
   if (!isLoading && nodes.length === 0) {
     return (
@@ -324,36 +364,62 @@ export function EntityGraph({
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm text-muted-foreground">
           {isLoading
             ? 'Building entity graph…'
-            : `${nodes.length} entit${nodes.length === 1 ? 'y' : 'ies'} · ${edges.length} link${edges.length === 1 ? '' : 's'}. Scroll to zoom, drag to move, click a node to inspect.`}
+            : `${visibleNodes.length} entit${visibleNodes.length === 1 ? 'y' : 'ies'} · ${visibleEdges.length} link${visibleEdges.length === 1 ? '' : 's'}${minDegree > 0 ? ` · ≥${minDegree} edge${minDegree === 1 ? '' : 's'}` : ''}. Scroll to zoom, drag to move, click a node to inspect.`}
         </p>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            aria-label="Zoom in"
-            onClick={() => zoomBy(1.25)}
-            className="h-7 w-7 rounded-md border border-border text-sm leading-none"
-          >
-            +
-          </button>
-          <button
-            type="button"
-            aria-label="Zoom out"
-            onClick={() => zoomBy(1 / 1.25)}
-            className="h-7 w-7 rounded-md border border-border text-sm leading-none"
-          >
-            −
-          </button>
-          <button
-            type="button"
-            onClick={() => setView({ x: 0, y: 0, k: 1 })}
-            className="h-7 px-2 rounded-md border border-border text-xs"
-          >
-            Reset
-          </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1" role="group" aria-label="Minimum edges per node">
+            <span className="text-xs text-muted-foreground">Min edges</span>
+            <button
+              type="button"
+              aria-label="Decrease minimum edges"
+              disabled={minDegree <= 0}
+              onClick={() => setMinDegree((d) => Math.max(0, d - 1))}
+              className="h-7 w-7 rounded-md border border-border text-sm leading-none disabled:opacity-40"
+            >
+              −
+            </button>
+            <span aria-live="polite" className="w-5 text-center text-xs tabular-nums">
+              {minDegree}
+            </span>
+            <button
+              type="button"
+              aria-label="Increase minimum edges"
+              disabled={minDegree >= maxDegree}
+              onClick={() => setMinDegree((d) => Math.min(maxDegree, d + 1))}
+              className="h-7 w-7 rounded-md border border-border text-sm leading-none disabled:opacity-40"
+            >
+              +
+            </button>
+          </div>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              aria-label="Zoom in"
+              onClick={() => zoomBy(1.25)}
+              className="h-7 w-7 rounded-md border border-border text-sm leading-none"
+            >
+              +
+            </button>
+            <button
+              type="button"
+              aria-label="Zoom out"
+              onClick={() => zoomBy(1 / 1.25)}
+              className="h-7 w-7 rounded-md border border-border text-sm leading-none"
+            >
+              −
+            </button>
+            <button
+              type="button"
+              onClick={() => setView({ x: 0, y: 0, k: 1 })}
+              className="h-7 px-2 rounded-md border border-border text-xs"
+            >
+              Reset
+            </button>
+          </div>
         </div>
       </div>
 
@@ -378,7 +444,7 @@ export function EntityGraph({
             onPointerUp={onBackgroundPointerUp}
           />
           <g transform={transform}>
-            {edges.map((e, i) => {
+            {visibleEdges.map((e, i) => {
               const a = sim.nodeById(e.source)
               const b = sim.nodeById(e.target)
               if (!a || !b) return null
@@ -398,7 +464,7 @@ export function EntityGraph({
                 />
               )
             })}
-            {nodes.map((n) => {
+            {visibleNodes.map((n) => {
               const sn = sim.nodeById(n.id)
               if (!sn) return null
               const m = meta.get(n.id)!

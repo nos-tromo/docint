@@ -77,6 +77,32 @@ describe('EntityGraph', () => {
     expect(screen.getByText('PRODUCT')).toBeInTheDocument()
   })
 
+  it('filters out low-degree nodes via the min-edges stepper (default 0 shows all)', async () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    // Default threshold is 0: every node visible, and decrement is disabled.
+    expect(screen.getByText('Rivertown')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /decrease minimum edges/i })).toBeDisabled()
+
+    const inc = screen.getByRole('button', { name: /increase minimum edges/i })
+    await userEvent.click(inc) // min edges = 1 — every node still has ≥1 edge.
+    expect(screen.getByText('Widget')).toBeInTheDocument()
+
+    await userEvent.click(inc) // min edges = 2 — only Acme (degree 2) survives.
+    expect(screen.getByText('Acme')).toBeInTheDocument()
+    expect(screen.queryByText('Rivertown')).not.toBeInTheDocument()
+    expect(screen.queryByText('Widget')).not.toBeInTheDocument()
+    // Acme is the most-connected node, so the threshold cannot climb further.
+    expect(inc).toBeDisabled()
+  })
+
   it('shows an empty state when there are no nodes', () => {
     render(
       <EntityGraph
