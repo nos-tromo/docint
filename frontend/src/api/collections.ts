@@ -1,5 +1,12 @@
 import { apiDelete, apiGet, apiPost, url } from './client'
-import type { DocumentRecord, EntityMergeMode, HateSpeechRow, NerSourceRow, NerStats } from './types'
+import type {
+  DocumentRecord,
+  EntityMergeMode,
+  HateSpeechRow,
+  NerGraph,
+  NerSourceRow,
+  NerStats
+} from './types'
 
 export interface Page<T> {
   items: T[]
@@ -48,6 +55,17 @@ export const getNerSourcesPage = (params: {
     entity_key: params.entity_key,
     entity_text: params.entity_text,
     entity_type: params.entity_type,
+    entity_merge_mode: params.entity_merge_mode
+  })
+
+export const getNerGraph = (params: {
+  top_k_nodes?: number
+  min_edge_weight?: number
+  entity_merge_mode?: EntityMergeMode
+}) =>
+  apiGet<NerGraph>('/collections/ner/graph', {
+    top_k_nodes: params.top_k_nodes,
+    min_edge_weight: params.min_edge_weight,
     entity_merge_mode: params.entity_merge_mode
   })
 

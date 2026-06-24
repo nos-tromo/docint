@@ -583,6 +583,14 @@ class NERSearchOut(BaseModel):
     results: list[dict[str, Any]] = []
 
 
+class NERGraphOut(BaseModel):
+    """Derived entity graph (nodes + edges) for interactive exploration."""
+
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    meta: dict[str, int] = {}
+
+
 class AgentChatIn(BaseModel):
     """Request payload for a single agent chat turn."""
 
@@ -1318,7 +1326,7 @@ def get_collection_ner_sources(
         cursor (str | None): Opaque cursor token from a previous call.
         limit (int): Records per page (1-500).
         entity_key (str | None): ``"<text>::<type>"`` shorthand (matches the
-            SPA's ``EntityInspector.keyOf``).
+            SPA's ``Analysis.tsx`` ``keyOf``).
         entity_text (str | None): Explicit entity surface form.
         entity_type (str | None): Explicit entity type/label.
         entity_merge_mode (Literal): Clustering mode; ``"resolved"`` includes
@@ -1443,6 +1451,47 @@ def search_collection_ner_entities(
         }
     except Exception as e:
         logger.error("Error searching collection entities: {}", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/collections/ner/graph", response_model=NERGraphOut, tags=["Query"])
+def get_collection_ner_graph(
+    top_k_nodes: int = Query(default=80, ge=1, le=500),
+    min_edge_weight: int = Query(default=1, ge=1),
+    entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
+) -> dict[str, Any]:
+    """Return a derived entity graph for the selected collection.
+
+    Wraps :meth:`docint.core.rag.RAG.get_collection_ner_graph`, exposing the
+    same node/edge payload the GraphRAG expansion uses so the SPA can render an
+    interactive, zoomable entity graph. Nodes are the top ``top_k_nodes``
+    entities by mention count; edges combine extracted relations with
+    co-occurrence links. Node ids are cluster keys — clients map a node back to
+    an entity for drill-down via its ``text``/``type`` fields.
+
+    Args:
+        top_k_nodes (int): Maximum number of highest-mention entity nodes (1-500).
+        min_edge_weight (int): Minimum edge weight to include.
+        entity_merge_mode (Literal["orthographic", "exact", "resolved"]): Entity
+            clustering mode used for derived views ("resolved" groups by durable
+            canonical entity id).
+
+    Returns:
+        dict[str, Any]: Graph payload containing ``nodes``, ``edges`` and ``meta``.
+
+    Raises:
+        HTTPException: If no collection is selected or an internal error occurs.
+    """
+    if not rag.qdrant_collection:
+        raise HTTPException(status_code=400, detail="No collection selected")
+    try:
+        return rag.get_collection_ner_graph(
+            top_k_nodes=top_k_nodes,
+            min_edge_weight=min_edge_weight,
+            entity_merge_mode=entity_merge_mode,
+        )
+    except Exception as e:
+        logger.error("Error building collection NER graph: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 

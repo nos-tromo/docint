@@ -100,6 +100,7 @@ class DummyRAG:
         self.ner_refresh_calls: list[bool] = []
         self.ner_stats_merge_modes: list[str] = []
         self.ner_search_merge_modes: list[str] = []
+        self.ner_graph_merge_modes: list[str] = []
         self.hate_speech_rows: list[dict[str, Any]] = []
         self.documents: list[dict[str, Any]] = []
         self.summary_refresh_calls: list[bool] = []
@@ -659,6 +660,42 @@ class DummyRAG:
             }
         ]
 
+    def get_collection_ner_graph(
+        self,
+        *,
+        top_k_nodes: int = 80,
+        min_edge_weight: int = 1,
+        entity_merge_mode: str = "orthographic",
+    ) -> dict[str, Any]:
+        """Return a canned entity graph payload.
+
+        Args:
+            top_k_nodes (int): Node cap (recorded indirectly via the payload meta).
+            min_edge_weight (int): Edge weight threshold (ignored by the stub).
+            entity_merge_mode (str): Entity clustering mode (recorded for assertions).
+
+        Returns:
+            dict[str, Any]: Graph payload with nodes, edges, and meta counts.
+        """
+        _ = (top_k_nodes, min_edge_weight)
+        self.ner_graph_merge_modes.append(entity_merge_mode)
+        return {
+            "nodes": [
+                {"id": "acme::org", "text": "Acme", "type": "ORG", "mentions": 3},
+                {"id": "widget::product", "text": "Widget", "type": "PRODUCT", "mentions": 2},
+            ],
+            "edges": [
+                {
+                    "source": "acme::org",
+                    "target": "widget::product",
+                    "label": "owns",
+                    "kind": "relation",
+                    "weight": 2,
+                }
+            ],
+            "meta": {"node_count": 2, "edge_count": 1},
+        }
+
     def resolve_entities(self, *, progress_callback: Any = None) -> ResolutionSummary:
         """Record a resolution call and return a fixed summary.
 
@@ -931,6 +968,51 @@ def test_collections_ner_stats_support_resolved_merge_mode(client: TestClient) -
     response = client.get("/collections/ner/stats", params={"entity_merge_mode": "resolved"})
     assert response.status_code == 200
     assert cast(DummyRAG, api_module.rag).ner_stats_merge_modes[-1] == "resolved"
+
+
+def test_collections_ner_graph_success(client: TestClient) -> None:
+    """Graph endpoint should return nodes, edges, and meta counts.
+
+    Args:
+        client (TestClient): The TestClient instance.
+    """
+    response = client.get("/collections/ner/graph")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["nodes"][0]["text"] == "Acme"
+    assert payload["edges"][0]["kind"] == "relation"
+    assert payload["meta"]["node_count"] == 2
+    assert cast(DummyRAG, api_module.rag).ner_graph_merge_modes[-1] == "orthographic"
+
+
+def test_collections_ner_graph_forwards_merge_mode(client: TestClient) -> None:
+    """Graph endpoint should forward explicit merge-mode overrides."""
+    response = client.get("/collections/ner/graph", params={"entity_merge_mode": "resolved"})
+    assert response.status_code == 200
+    assert cast(DummyRAG, api_module.rag).ner_graph_merge_modes[-1] == "resolved"
+
+
+def test_collections_ner_graph_requires_selection(client: TestClient) -> None:
+    """Graph endpoint should 400 when no collection is selected."""
+    api_module.rag.qdrant_collection = ""
+    response = client.get("/collections/ner/graph")
+    assert response.status_code == 400
+
+
+def test_collections_ner_graph_failure(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """Graph endpoint should 500 when the RAG layer raises.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+
+    def raiser(**_: Any) -> dict[str, Any]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(api_module.rag, "get_collection_ner_graph", raiser)
+    response = client.get("/collections/ner/graph")
+    assert response.status_code == 500
 
 
 def test_resolve_entities_success(client: TestClient) -> None:

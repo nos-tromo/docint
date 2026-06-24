@@ -72,10 +72,26 @@ per-stage status.
 
 ### Analysis (`src/routes/Analysis.tsx`)
 
-Three tabs: **NER** (`EntityInspector` — searchable entities → paginated
-sources, with a merge-mode toggle), **Hate Speech** (`HateSpeechTable`),
-and **Summary** (`SummaryPanel` with coverage diagnostics). Pre-warms the
-NER aggregate when opened.
+Three tabs: **NER**, **Hate Speech** (`HateSpeechTable`), and **Summary**
+(`SummaryPanel` with coverage diagnostics). Pre-warms the NER aggregate when
+opened.
+
+The **NER** tab opens with a **Table / Graph** view toggle (only one is shown
+at a time) and a merge-mode toggle:
+
+- **Table** — an `EntitySelect` category + entity picker. The category filter
+  re-filters the entity dropdown and pre-selects that category's top entity.
+- **Graph** — an interactive, force-directed entity graph (`EntityGraph`, over
+  the dependency-free `src/lib/forceGraph.ts` layout, fed by
+  `GET /collections/ner/graph`). Nodes are draggable (with collision), the
+  canvas zooms (wheel) and pans (background drag), and clicking a node selects
+  that entity.
+
+Either selection surface drives the shared **findings table**
+(`EntityFindingsTable` → `EntityFinding` rows): one chunk per row, with all
+locator/reference metadata flattened into a single Metadata column and an
+inline "Add to report" control. `HateSpeechTable` follows the same one-row-per-
+finding table shape.
 
 ### Inspector (`src/routes/Inspector.tsx`)
 

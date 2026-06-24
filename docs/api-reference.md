@@ -30,6 +30,7 @@ this doc are declared at the top of `docint/core/api.py:208` and onward.
 | `GET`  | `/collections/ner` | `Query` | Full NER dump for the active collection. |
 | `GET`  | `/collections/ner/stats` | `Query` | Aggregated NER statistics. |
 | `GET`  | `/collections/ner/search` | `Query` | Search for entities by name/pattern. |
+| `GET`  | `/collections/ner/graph` | `Query` | Derived entity graph (nodes + edges) for the active collection. |
 | `GET`  | `/collections/hate-speech` | `Query` | Hate-speech findings for the active collection. |
 | `GET`  | `/collections/documents` | `Query` | List documents in a collection. |
 | `GET`  | `/sessions/list` | `Sessions` | List stored sessions. |
@@ -178,6 +179,23 @@ Response (`NERStatsOut`):
 
 Accepts a query string and returns matching entity records as
 `NERSearchOut` (`{"results": [...]}`).
+
+### `GET /collections/ner/graph`
+
+Returns a derived entity graph (`NERGraphOut`) for the active collection,
+powering the Analysis NER **Graph** view. Nodes are the top `top_k_nodes`
+(default 80, max 500) entities by mention count; edges combine extracted
+relations with co-occurrence links above `min_edge_weight`. `entity_merge_mode`
+matches the other NER views. Node `id` is a cluster key — clients map a node
+back to an entity for drill-down via its `text`/`type` fields.
+
+```json
+{
+  "nodes": [{"id": "acme::org", "text": "Acme", "type": "ORG", "mentions": 9}],
+  "edges": [{"source": "acme::org", "target": "rivertown::loc", "label": "located_in", "kind": "relation", "weight": 3}],
+  "meta": {"node_count": 80, "edge_count": 142}
+}
+```
 
 ### `GET /collections/hate-speech`
 
