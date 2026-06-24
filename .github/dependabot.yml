@@ -8,12 +8,12 @@ updates:
       python-dependencies:
         patterns:
           - "*"
-    # mypy and ruff are centrally pinned in nos-tromo/.github/configs/
+    # pyrefly and ruff are centrally pinned in nos-tromo/.github/configs/
     # python-strict/ and mirrored into pyproject.toml; the strict-config CI
     # check fails on any local drift. They move only when the canonical
     # config moves (manual re-mirror), never via an automated bump here.
     ignore:
-      - dependency-name: "mypy"
+      - dependency-name: "pyrefly"
       - dependency-name: "ruff"
       # transformers is capped <5.9 in pyproject.toml: docling 2.102.1
       # (docling-core[chunking]) requires transformers<5.9.0, so bumping past

@@ -32,7 +32,7 @@ def _install_mock_transport(
         kwargs["transport"] = handler
         return original_client(*args, **kwargs)  # type: ignore[arg-type]
 
-    # Patch via the attribute path string so mypy doesn't require the
+    # Patch via the attribute path string so pyrefly doesn't require the
     # ner_client module to re-export ``httpx`` explicitly.
     monkeypatch.setattr("docint.utils.ner_client.httpx.Client", _patched_client)
 

@@ -34,7 +34,7 @@ def report_manager() -> Generator[ReportManager, None, None]:
 
 
 def _ok(value: dict[str, Any] | None) -> dict[str, Any]:
-    """Assert an owner-scoped lookup returned a row and narrow it for mypy."""
+    """Assert an owner-scoped lookup returned a row and narrow it for the type checker."""
     assert value is not None
     return value
 

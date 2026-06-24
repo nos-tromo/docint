@@ -32,8 +32,8 @@ from transformers import AutoTokenizer
 from docint.utils.env_cfg import resolve_hf_cache_path
 
 # Re-export AutoTokenizer for tests that monkeypatch
-# ``embedding_tokenizer.AutoTokenizer``. Strict mypy ignores implicit
-# re-exports without an explicit ``__all__``.
+# ``embedding_tokenizer.AutoTokenizer``. pyrefly treats implicit
+# re-exports as private without an explicit ``__all__``.
 __all__ = ["AutoTokenizer", "build_embedding_token_counter"]
 
 

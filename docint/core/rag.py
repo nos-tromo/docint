@@ -97,8 +97,8 @@ from loguru import logger
 from qdrant_client import QdrantClient
 from qdrant_client import models as qdrant_models
 
-# Names re-exported for test monkey-patching. Strict mypy
-# (no_implicit_reexport) ignores these without an explicit ``__all__``,
+# Names re-exported for test monkey-patching. pyrefly treats these as
+# private re-exports without an explicit ``__all__``,
 # so list every test-reachable third-party symbol here.
 __all__ = [
     "RAG",

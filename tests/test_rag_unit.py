@@ -5224,7 +5224,7 @@ def _setup_empty_ingest_rag(
     Returns:
         Tuple of ``(rag, qdrant_mock, bumps)`` where ``qdrant_mock`` is
         the ``MagicMock`` substituted for ``rag._qdrant_client`` (returned
-        explicitly so that mypy keeps the ``MagicMock`` typing across the
+        explicitly so that the type checker keeps the ``MagicMock`` typing across the
         call boundary instead of widening to ``QdrantClient | None``),
         and ``bumps`` records each ``_bump_summary_revision`` call as
         ``(collection, allow_create)``.
