@@ -18,7 +18,7 @@ from docint.core.readers.documents.artifacts import (
     save_page_text,
     save_table,
 )
-from docint.core.readers.documents.chunking import chunk_document
+from docint.core.readers.documents.chunking import build_coarse_units
 from docint.core.readers.documents.extraction import extract_images, extract_tables
 from docint.core.readers.documents.layout import analyze_document
 from docint.core.readers.documents.models import (
@@ -38,7 +38,7 @@ from docint.core.readers.documents.ocr import (
     extract_text_for_pages,
 )
 from docint.core.readers.documents.triage import triage_pdf
-from docint.utils.env_cfg import PipelineConfig, load_pipeline_config
+from docint.utils.env_cfg import PipelineConfig, load_ingestion_env, load_pipeline_config
 from docint.utils.hashing import compute_file_hash
 
 
@@ -59,6 +59,9 @@ class DocumentPipelineOrchestrator:
             the config is loaded from environment variables.
         """
         self.config = config or load_pipeline_config()
+        # Coarse-unit budget is shared with the hierarchical parser so PDFs
+        # and other file types size their Level-1 parents identically.
+        self.coarse_chunk_size = load_ingestion_env().coarse_chunk_size
 
     # ------------------------------------------------------------------
     # Public API
@@ -247,7 +250,7 @@ class DocumentPipelineOrchestrator:
         chunks: list[ChunkResult] = (
             self._run_with_retry(
                 "chunking",
-                lambda: chunk_document(doc_id, layout, page_texts, tables, images),
+                lambda: build_coarse_units(doc_id, layout, page_texts, tables, images, self.coarse_chunk_size),
             )
             or []
         )

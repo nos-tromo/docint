@@ -153,3 +153,34 @@ def test_input_nodes() -> None:
     assert len(fine_nodes) > 0
     assert fine_nodes[0].metadata["hier.level"] == 2
     assert fine_nodes[0].metadata["hier.parent_id"] == text_node.node_id
+
+
+def test_pdf_coarse_metadata_propagates_to_fine() -> None:
+    """A coarse TextNode with PDF layout keys passes them down to fine children.
+
+    This is the contract the PDF reader relies on: page/section/bbox metadata
+    placed on a coarse unit must survive onto the embedded fine children so
+    citations and image/table linking keep working for PDFs.
+    """
+    from llama_index.core.schema import TextNode
+
+    parser = HierarchicalNodeParser(coarse_chunk_size=1000, fine_chunk_size=200, fine_chunk_overlap=0)
+    coarse = TextNode(
+        text="First sentence here. Second sentence follows. Third sentence ends.",
+        metadata={
+            "page": 3,
+            "section_path": ["Results"],
+            "bbox_refs": [{"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}],
+            "file_hash": "abc",
+        },
+    )
+
+    nodes = parser._parse_nodes([coarse])
+    fine_nodes = [n for n in nodes if n.metadata.get("hier.level") == 2]
+    assert len(fine_nodes) >= 1
+    for fine in fine_nodes:
+        assert fine.metadata["page"] == 3
+        assert fine.metadata["section_path"] == ["Results"]
+        assert fine.metadata["bbox_refs"] == [{"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}]
+        assert fine.metadata["file_hash"] == "abc"
+        assert fine.metadata["hier.parent_id"] == coarse.node_id

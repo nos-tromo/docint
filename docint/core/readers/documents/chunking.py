@@ -1,9 +1,22 @@
-"""Layout-aware, section-aware, sentence-level chunking."""
+"""Layout-aware, section-aware coarse-unit assembly.
+
+The page-level PDF pipeline produces layout blocks with reading order and
+type. This module groups those blocks into *coarse units* — one per
+section, bounded by ``coarse_chunk_size`` — preserving page, bbox,
+section-path, and table/image associations.
+
+Sentence-level *fine* splitting is intentionally **not** done here: it is
+delegated to the shared
+:class:`~docint.core.storage.hierarchical.HierarchicalNodeParser`, so PDFs
+flow through the same chunking machinery (overlap-free,
+sentence-boundary-respecting :class:`SentenceSplitter`) as every other
+file type. This replaces the previous bespoke character-overlap chunker
+whose raw tail-slice overlap produced chunks that started mid-sentence.
+"""
 
 from __future__ import annotations
 
 import hashlib
-import re
 
 from loguru import logger
 
@@ -16,20 +29,13 @@ from docint.core.readers.documents.models import (
     TableResult,
 )
 
+# Blocks that update the running section path. They are not emitted as body
+# text; their text becomes the heading prefix of the following unit(s).
+_HEADING_BLOCK_TYPES = frozenset({BlockType.TITLE, BlockType.HEADER})
 
-def _sentence_split(text: str) -> list[str]:
-    """Split text into sentences using a simple regex heuristic.
-
-    Args:
-        text (str): The input text to split into sentences.
-
-    Returns:
-        list[str]: A list of sentence strings extracted from the input text.
-    """
-    if not text.strip():
-        return []
-    parts = re.split(r"(?<=[.!?])\s+", text.strip())
-    return [p.strip() for p in parts if p.strip()]
+# Blocks that contribute prose to a coarse unit's body and may fall back to
+# the page's full text when their own ``text`` is empty.
+_PROSE_BLOCK_TYPES = frozenset({BlockType.TEXT, BlockType.LIST, BlockType.CAPTION})
 
 
 def _stable_chunk_id(doc_id: str, page_index: int, block_id: str, idx: int) -> str:
@@ -37,9 +43,9 @@ def _stable_chunk_id(doc_id: str, page_index: int, block_id: str, idx: int) -> s
 
     Args:
         doc_id (str): The unique identifier for the document (e.g., sha256 of file bytes).
-        page_index (int): The index of the page the chunk is derived from.
-        block_id (str): The identifier of the layout block the chunk is derived from.
-        idx (int): The index of the chunk within the block (for multiple chunks from the same block
+        page_index (int): The index of the first page the unit is derived from.
+        block_id (str): The identifier of the first layout block in the unit.
+        idx (int): The index of the unit within the document.
 
     Returns:
         str: A deterministic chunk ID string.
@@ -48,32 +54,60 @@ def _stable_chunk_id(doc_id: str, page_index: int, block_id: str, idx: int) -> s
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
-def chunk_document(
+def _merge_source_mix(values: list[str]) -> str:
+    """Collapse the per-block ``source_mix`` values of a unit into one label.
+
+    Args:
+        values (list[str]): The ordered ``source_mix`` values seen while
+            accumulating a coarse unit (e.g. ``"pdf_text"``, ``"ocr"``).
+
+    Returns:
+        str: ``"pdf_text"`` when no values were seen, the single value when
+            the unit is homogeneous, or ``"mixed"`` when blocks of
+            different provenance were combined.
+    """
+    seen = [v for v in dict.fromkeys(values) if v]
+    if not seen:
+        return "pdf_text"
+    if len(seen) == 1:
+        return seen[0]
+    return "mixed"
+
+
+def build_coarse_units(
     doc_id: str,
     layout: dict[int, list[LayoutBlock]],
     page_texts: dict[int, PageText],
     tables: list[TableResult],
     images: list[ImageResult],
-    chunk_size: int = 1024,
-    chunk_overlap: int = 64,
+    coarse_chunk_size: int = 8192,
 ) -> list[ChunkResult]:
-    """Produce layout-aware chunks from processed document data.
+    """Group layout blocks into section-bounded coarse units.
 
-    The chunker walks pages in order, respects reading order within each
-    page, tracks a *section_path* derived from heading/title blocks, and
-    splits text at the sentence level inside each block.
+    The walker visits pages in order and blocks in reading order. Heading
+    blocks (``TITLE``/``HEADER``) update a running ``section_path`` and
+    flush the in-progress unit so each unit belongs to a single section.
+    Consecutive prose blocks under the current heading are accumulated
+    until adding another would exceed ``coarse_chunk_size``, at which point
+    the unit is flushed. The active section heading is prepended to each
+    unit's text so the unit is self-contained; the fine (sentence-level)
+    split is performed downstream by ``HierarchicalNodeParser``.
+
+    No character overlap is applied — parent context is reconstructed at
+    query time from the coarse parent via ``hier.parent_id``.
 
     Args:
         doc_id (str): Deterministic document identifier (sha256 of file bytes).
         layout (dict[int, list[LayoutBlock]]): Mapping of page_index → layout blocks.
         page_texts (dict[int, PageText]): Mapping of page_index → ``PageText``.
-        tables (list[TableResult]): Extracted tables.
-        images (list[ImageResult]): Extracted images.
-        chunk_size (int): Maximum characters per chunk.
-        chunk_overlap (int): Overlap characters between consecutive chunks.
+        tables (list[TableResult]): Extracted tables (linked by bbox overlap).
+        images (list[ImageResult]): Extracted images (linked by bbox overlap).
+        coarse_chunk_size (int): Maximum characters of body text per unit
+            before a flush. A single block larger than this is emitted whole
+            and re-split downstream.
 
     Returns:
-        list[ChunkResult]: List of ``ChunkResult`` items.
+        list[ChunkResult]: One ``ChunkResult`` per coarse unit, in reading order.
     """
     table_by_page: dict[int, list[TableResult]] = {}
     for t in tables:
@@ -82,143 +116,133 @@ def chunk_document(
     for img in images:
         image_by_page.setdefault(img.page_index, []).append(img)
 
-    chunks: list[ChunkResult] = []
+    units: list[ChunkResult] = []
     section_path: list[str] = []
 
-    sorted_pages = sorted(layout.keys())
-    for page_idx in sorted_pages:
+    # In-progress unit accumulator.
+    acc_parts: list[str] = []
+    acc_section: list[str] = []
+    acc_block_ids: list[str] = []
+    acc_pages: list[int] = []
+    acc_bbox_refs: list[dict[str, float]] = []
+    acc_table_ids: list[str] = []
+    acc_image_ids: list[str] = []
+    acc_source: list[str] = []
+    acc_first_page: int | None = None
+    acc_first_block: str | None = None
+    # Pages whose body text has already been captured, so an empty prose
+    # block does not pull the whole-page fallback text a second time.
+    pages_captured: set[int] = set()
+
+    def _acc_body_len() -> int:
+        """Return the rendered length of the accumulated body (with separators)."""
+        if not acc_parts:
+            return 0
+        return sum(len(p) for p in acc_parts) + 2 * (len(acc_parts) - 1)
+
+    def _flush() -> None:
+        """Emit the accumulated unit (if it has body text) and reset state."""
+        nonlocal acc_first_page, acc_first_block
+        body = "\n\n".join(p for p in acc_parts if p).strip()
+        if body:
+            heading = " > ".join(s for s in acc_section if s)
+            text = f"{heading}\n\n{body}" if heading else body
+            units.append(
+                ChunkResult(
+                    doc_id=doc_id,
+                    chunk_id=_stable_chunk_id(
+                        doc_id,
+                        acc_first_page if acc_first_page is not None else 0,
+                        acc_first_block or "unit",
+                        len(units),
+                    ),
+                    text=text.strip(),
+                    page_range=sorted(dict.fromkeys(acc_pages)),
+                    block_ids=list(acc_block_ids),
+                    section_path=list(acc_section),
+                    table_ids=list(acc_table_ids),
+                    image_ids=list(acc_image_ids),
+                    source_mix=_merge_source_mix(acc_source),
+                    bbox_refs=list(acc_bbox_refs),
+                )
+            )
+        acc_parts.clear()
+        acc_section.clear()
+        acc_block_ids.clear()
+        acc_pages.clear()
+        acc_bbox_refs.clear()
+        acc_table_ids.clear()
+        acc_image_ids.clear()
+        acc_source.clear()
+        acc_first_page = None
+        acc_first_block = None
+
+    for page_idx in sorted(layout.keys()):
         blocks = sorted(layout[page_idx], key=lambda b: b.reading_order)
         page_text = page_texts.get(page_idx)
-        source_mix = page_text.source_mix if page_text else "pdf_text"
+        page_source_mix = page_text.source_mix if page_text else "pdf_text"
+        page_tables = table_by_page.get(page_idx, [])
+        page_images = image_by_page.get(page_idx, [])
 
         for block in blocks:
-            # Update section path on title/header blocks
-            if block.type in {BlockType.TITLE, BlockType.HEADER}:
-                title_text = block.text.strip()
-                if title_text:
-                    section_path = _update_section_path(section_path, title_text, block.type)
+            # Heading blocks delimit sections: flush the current unit, then
+            # update the running section path (do not emit the heading as body).
+            if block.type in _HEADING_BLOCK_TYPES:
+                heading_text = block.text.strip()
+                _flush()
+                if heading_text:
+                    section_path = _update_section_path(section_path, heading_text, block.type)
+                continue
 
-            # Determine related tables/images for this block
-            page_tables = table_by_page.get(page_idx, [])
-            page_images = image_by_page.get(page_idx, [])
-            related_table_ids = [t.table_id for t in page_tables if t.bbox.overlaps(block.bbox)]
-            related_image_ids = [img.image_id for img in page_images if img.bbox.overlaps(block.bbox)]
-
-            # Get the text to chunk
             text = block.text.strip()
-            if not text and page_text:
-                text = page_text.full_text
-
             if not text:
-                continue
-
-            # Sentence-level splitting
-            sentences = _sentence_split(text)
-            if not sentences:
-                continue
-
-            # Build chunks respecting chunk_size
-            current_text = ""
-            current_sentences: list[str] = []
-            chunk_idx = 0
-
-            for sentence in sentences:
-                if current_text and len(current_text) + len(sentence) + 1 > chunk_size:
-                    # Emit chunk
-                    chunks.append(
-                        _make_chunk(
-                            doc_id=doc_id,
-                            page_idx=page_idx,
-                            block=block,
-                            text=current_text,
-                            chunk_idx=chunk_idx,
-                            section_path=list(section_path),
-                            source_mix=source_mix,
-                            table_ids=related_table_ids,
-                            image_ids=related_image_ids,
-                        )
-                    )
-                    chunk_idx += 1
-
-                    # Apply overlap
-                    if chunk_overlap > 0 and current_text:
-                        overlap_text = current_text[-chunk_overlap:]
-                        current_text = overlap_text + " " + sentence
-                    else:
-                        current_text = sentence
-                    current_sentences = [sentence]
+                # Fall back to the page's OCR/full text — but only for prose
+                # blocks and only once per page, so figure blocks and repeated
+                # empty blocks do not duplicate the page text.
+                if (
+                    block.type in _PROSE_BLOCK_TYPES
+                    and page_text is not None
+                    and page_idx not in pages_captured
+                    and page_text.full_text.strip()
+                ):
+                    text = page_text.full_text.strip()
                 else:
-                    current_text = current_text + " " + sentence if current_text else sentence
-                    current_sentences.append(sentence)
+                    continue
 
-            # Emit remaining text
-            if current_text.strip():
-                chunks.append(
-                    _make_chunk(
-                        doc_id=doc_id,
-                        page_idx=page_idx,
-                        block=block,
-                        text=current_text,
-                        chunk_idx=chunk_idx,
-                        section_path=list(section_path),
-                        source_mix=source_mix,
-                        table_ids=related_table_ids,
-                        image_ids=related_image_ids,
-                    )
-                )
+            # Flush before exceeding the coarse budget. A single block larger
+            # than the budget is still added whole (re-split downstream).
+            if acc_parts and _acc_body_len() + len(text) + 2 > coarse_chunk_size:
+                _flush()
 
-    logger.info("Produced {} chunks for document {}", len(chunks), doc_id[:12])
-    return chunks
+            if not acc_parts:
+                acc_first_page = page_idx
+                acc_first_block = block.block_id
+                acc_section.extend(section_path)
 
+            acc_parts.append(text)
+            acc_block_ids.append(block.block_id)
+            acc_pages.append(page_idx)
+            pages_captured.add(page_idx)
+            acc_bbox_refs.append(
+                {
+                    "x0": block.bbox.x0,
+                    "y0": block.bbox.y0,
+                    "x1": block.bbox.x1,
+                    "y1": block.bbox.y1,
+                }
+            )
+            acc_source.append(page_source_mix)
+            for tbl in page_tables:
+                if tbl.bbox.overlaps(block.bbox) and tbl.table_id not in acc_table_ids:
+                    acc_table_ids.append(tbl.table_id)
+            for img in page_images:
+                if img.bbox.overlaps(block.bbox) and img.image_id not in acc_image_ids:
+                    acc_image_ids.append(img.image_id)
 
-def _make_chunk(
-    *,
-    doc_id: str,
-    page_idx: int,
-    block: LayoutBlock,
-    text: str,
-    chunk_idx: int,
-    section_path: list[str],
-    source_mix: str,
-    table_ids: list[str],
-    image_ids: list[str],
-) -> ChunkResult:
-    """Create a single ``ChunkResult``.
+    _flush()
 
-    Args:
-        doc_id (str): The unique identifier for the document (e.g., sha256 of file bytes).
-        page_idx (int): The index of the page the chunk is derived from.
-        block (LayoutBlock): The layout block the chunk is derived from.
-        text (str): The text content of the chunk.
-        chunk_idx (int): The index of the chunk within the block (for multiple chunks from the same block).
-        section_path (list[str]): The hierarchical section path derived from heading/title blocks.
-        source_mix (str): The source of the text (e.g., "pdf_text", "ocr_text").
-        table_ids (list[str]): List of related table identifiers that overlap with the block.
-        image_ids (list[str]): List of related image identifiers that overlap with the block.
-
-    Returns:
-        ChunkResult: A ``ChunkResult`` instance representing the chunked text and its metadata.
-    """
-    chunk_id = _stable_chunk_id(doc_id, page_idx, block.block_id, chunk_idx)
-    return ChunkResult(
-        doc_id=doc_id,
-        chunk_id=chunk_id,
-        text=text.strip(),
-        page_range=[page_idx],
-        block_ids=[block.block_id],
-        section_path=section_path,
-        table_ids=table_ids,
-        image_ids=image_ids,
-        source_mix=source_mix,
-        bbox_refs=[
-            {
-                "x0": block.bbox.x0,
-                "y0": block.bbox.y0,
-                "x1": block.bbox.x1,
-                "y1": block.bbox.y1,
-            }
-        ],
-    )
+    logger.info("Produced {} coarse units for document {}", len(units), doc_id[:12])
+    return units
 
 
 def _update_section_path(
