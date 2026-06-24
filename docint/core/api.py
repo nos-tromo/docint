@@ -52,8 +52,8 @@ from docint.utils.env_cfg import (
 from docint.utils.hashing import compute_file_hash
 from docint.utils.logger_cfg import init_logger
 
-# Names re-exported for test monkey-patching. Strict mypy
-# (no_implicit_reexport) ignores these without an explicit ``__all__``.
+# Names re-exported for test monkey-patching. pyrefly treats these as
+# private re-exports without an explicit ``__all__``.
 __all__ = [
     "RAG",
     "ClarificationConfig",

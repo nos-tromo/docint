@@ -10,7 +10,6 @@
 **/.github/
 **/.idea/
 **/.logs/
-**/.mypy_cache/
 **/.pre-commit-cache/
 **/.pytest_cache/
 **/.ruff_cache/

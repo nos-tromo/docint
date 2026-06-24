@@ -135,7 +135,7 @@ def test_build_token_counter_returns_callable_when_tokenizer_loads(
     counter = embedding_tokenizer.build_embedding_token_counter("BAAI/bge-m3", Path("/tmp/cache"))
 
     assert callable(counter)
-    # mypy-friendly: tell the type checker counter is not None here.
+    # type-checker-friendly: tell pyrefly counter is not None here.
     assert counter is not None
     assert counter("hi") == [1, 2, 3, 4]
     assert len(counter("hi")) == 4
