@@ -192,6 +192,30 @@ export interface NerStats {
   documents: NerDocumentRow[]
 }
 
+export interface NerGraphNode {
+  // Cluster key (e.g. `compact::type` or `ent::<id>`); not the `text::type`
+  // selection key. Map a node to an entity for drill-down via `text`/`type`.
+  id: string
+  text: string
+  type: string
+  mentions: number
+}
+
+export interface NerGraphEdge {
+  source: string
+  target: string
+  label: string
+  // "relation" (extracted head→tail) or "cooccurrence" (entities in one chunk).
+  kind: string
+  weight: number
+}
+
+export interface NerGraph {
+  nodes: NerGraphNode[]
+  edges: NerGraphEdge[]
+  meta: { node_count: number; edge_count: number }
+}
+
 export interface HateSpeechRow {
   chunk_id?: string
   filename?: string

@@ -5,8 +5,14 @@ import type { HateSpeechRow } from '@/api/types'
 import { referenceMetadataItems } from '@/lib/referenceMetadata'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
 import { hateSpeechSnapshot } from '@/lib/reportSnapshots'
+import { cn } from '@/lib/cn'
 
 export type { HateSpeechRow }
+
+// Shared column template for the header row and every body row. Metadata is a
+// single column (reason / confidence / chunk id / reference metadata).
+const HATE_GRID = '2.5rem 6.5rem minmax(8rem,0.8fr) minmax(9rem,1.1fr) minmax(12rem,1.8fr) 6rem'
+const TEXT_CLAMP_CHARS = 240
 
 interface Props {
   rows: HateSpeechRow[]
@@ -25,7 +31,12 @@ function locationParts(r: HateSpeechRow): string {
   return parts.join(', ')
 }
 
-function HateSpeechRowDetail({
+/**
+ * One flagged chunk rendered as a table row. The former accordion's hidden
+ * fields (reason, confidence, chunk id, reference metadata) are flattened into
+ * a single Metadata column shown inline, mirroring the entity findings table.
+ */
+function HateSpeechTableRow({
   row,
   index,
   reportDedupeKeys
@@ -34,83 +45,86 @@ function HateSpeechRowDetail({
   index: number
   reportDedupeKeys?: Set<string>
 }) {
-  const [open, setOpen] = useState(false)
+  const [expanded, setExpanded] = useState(false)
   const reportItem = hateSpeechSnapshot(row)
   const inReport = reportDedupeKeys?.has(reportItem.dedupe_key) ?? false
-  const meta = referenceMetadataItems(row.reference_metadata)
+  const refMeta = referenceMetadataItems(row.reference_metadata)
   const chunkText = (row.chunk_text ?? row.text ?? '').trim()
   const source = row.source_ref ?? row.filename ?? 'Unknown source'
   const location = locationParts(row)
   const category = (row.category ?? 'unknown').trim()
   const reason = (row.reason ?? '').trim()
+  const canClamp = chunkText.length > TEXT_CLAMP_CHARS
+
+  const metadata: Array<{ label: string; value: string }> = []
+  if (reason) metadata.push({ label: 'Reason', value: reason })
+  if (row.confidence) metadata.push({ label: 'Confidence', value: String(row.confidence) })
+  if (row.chunk_id) metadata.push({ label: 'Chunk ID', value: row.chunk_id })
+  for (const item of refMeta) metadata.push(item)
+
   return (
-    <div className="rounded-md border border-border bg-zinc-900">
-      <div className="flex items-start gap-1 pr-2">
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          className="flex-1 min-w-0 flex items-start justify-between gap-2 px-3 py-2 text-left text-sm"
-        >
-          <span className="min-w-0 flex-1">
-            <span className="text-muted-foreground mr-2">{index}</span>
-            <span className="uppercase text-xs font-medium mr-2">{category}</span>
-            {reason && <span className="text-muted-foreground">{reason}</span>}
-            <span className="block text-xs text-muted-foreground truncate mt-0.5">
-              {source}
-              {location && <> · {location}</>}
-            </span>
-          </span>
-          <span aria-hidden="true" className="text-muted-foreground text-xs shrink-0 mt-0.5">
-            {open ? '▾' : '▸'}
-          </span>
-        </button>
-        {reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} className="mt-1.5" />}
+    <div
+      className="grid items-start gap-3 border-b border-border px-3 py-2.5 text-sm hover:bg-zinc-900/40"
+      style={{ gridTemplateColumns: HATE_GRID }}
+      data-testid="hate-speech-row"
+    >
+      <div className="text-xs text-muted-foreground tabular-nums pt-0.5">{index}</div>
+      <div className="text-xs font-medium uppercase break-words pt-0.5">{category}</div>
+      <div className="min-w-0 space-y-0.5">
+        <div className="break-words">{source}</div>
+        {location && <div className="text-xs text-muted-foreground">{location}</div>}
       </div>
-      {open && (
-        <div className="border-t border-border px-3 py-3 space-y-3 text-sm">
-          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-            <dt className="text-muted-foreground">Source</dt>
-            <dd className="break-words">{source}</dd>
-            {location && (
-              <>
-                <dt className="text-muted-foreground">Location</dt>
-                <dd>{location}</dd>
-              </>
-            )}
-            {row.confidence && (
-              <>
-                <dt className="text-muted-foreground">Confidence</dt>
-                <dd>{row.confidence}</dd>
-              </>
-            )}
-            {row.chunk_id && (
-              <>
-                <dt className="text-muted-foreground">Chunk ID</dt>
-                <dd className="break-all">{row.chunk_id}</dd>
-              </>
-            )}
-            {meta.map(({ label, value }) => (
+      <div className="min-w-0">
+        {metadata.length > 0 ? (
+          <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-xs">
+            {metadata.map(({ label, value }) => (
               <div key={label} className="contents">
-                <dt className="text-muted-foreground">{label}</dt>
+                <dt className="text-muted-foreground whitespace-nowrap">{label}</dt>
                 <dd className="break-words">{value}</dd>
               </div>
             ))}
           </dl>
-          {chunkText ? (
-            <div className="whitespace-pre-wrap leading-6 bg-zinc-950 rounded p-3">
+        ) : (
+          <span className="text-xs text-muted-foreground">—</span>
+        )}
+      </div>
+      <div className="min-w-0">
+        {chunkText ? (
+          <>
+            <p
+              className={cn(
+                'whitespace-pre-wrap leading-6 break-words',
+                canClamp && !expanded && 'line-clamp-4'
+              )}
+            >
               {chunkText}
-            </div>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              Chunk text unavailable for this record.
             </p>
-          )}
-        </div>
-      )}
+            {canClamp && (
+              <button
+                type="button"
+                onClick={() => setExpanded((v) => !v)}
+                className="mt-1 text-xs text-blue-400 hover:text-blue-300"
+              >
+                {expanded ? 'Show less' : 'Show more'}
+              </button>
+            )}
+          </>
+        ) : (
+          <span className="text-xs text-muted-foreground">Chunk text unavailable.</span>
+        )}
+      </div>
+      <div className="flex justify-end">
+        {reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
+      </div>
     </div>
   )
 }
 
+/**
+ * Hate-speech findings as a virtualized table — one flagged chunk per row, all
+ * secondary fields collapsed into a single Metadata column. Preserves the CSV
+ * export and per-row "Add to report" control.
+ */
 export function HateSpeechTable({
   rows,
   isFetching,
@@ -123,7 +137,7 @@ export function HateSpeechTable({
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 72,
+    estimateSize: () => 120,
     overscan: 8
   })
 
@@ -140,56 +154,68 @@ export function HateSpeechTable({
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
           {rows.length} flagged chunk{rows.length === 1 ? '' : 's'}
-          {hasNextPage ? '+' : ''}. Click a row for the full text and reference metadata.
+          {hasNextPage ? '+' : ''}.
         </p>
         {collection && (
-          <div className="flex gap-2">
-            <a
-              href={csvExportHref(collection, 'hate-speech')}
-              download
-              className="px-3 py-1 rounded-md border border-border text-sm"
-            >
-              CSV
-            </a>
-          </div>
+          <a
+            href={csvExportHref(collection, 'hate-speech')}
+            download
+            className="px-3 py-1 rounded-md border border-border text-sm"
+          >
+            CSV
+          </a>
         )}
       </div>
-      <div
-        ref={scrollRef}
-        className="max-h-[70vh] overflow-y-auto"
-        data-testid="hate-speech-scroll"
-      >
-        <ul
-          className="relative"
-          style={{ height: `${virtualizer.getTotalSize()}px` }}
+      <div className="rounded-md border border-border overflow-hidden">
+        <div
+          className="grid gap-3 px-3 py-2 bg-zinc-900 border-b border-border text-[11px] uppercase tracking-wide text-muted-foreground"
+          style={{ gridTemplateColumns: HATE_GRID }}
         >
-          {virtualizer.getVirtualItems().map((vRow) => {
-            const r = rows[vRow.index]
-            return (
-              <li
-                key={r.chunk_id ?? vRow.index}
-                data-index={vRow.index}
-                ref={virtualizer.measureElement}
-                className="absolute left-0 right-0 pb-2"
-                style={{ transform: `translateY(${vRow.start}px)` }}
-              >
-                <HateSpeechRowDetail row={r} index={vRow.index + 1} reportDedupeKeys={reportDedupeKeys} />
-              </li>
-            )
-          })}
-        </ul>
-        {hasNextPage && onLoadMore && (
-          <div className="flex justify-center pt-2">
-            <button
-              type="button"
-              onClick={onLoadMore}
-              disabled={isFetching}
-              className="px-3 py-1 rounded-md border border-border text-sm disabled:opacity-50"
-            >
-              {isFetching ? 'Loading…' : 'Load more'}
-            </button>
+          <span>#</span>
+          <span>Category</span>
+          <span>Source</span>
+          <span>Metadata</span>
+          <span>Text</span>
+          <span className="text-right">Report</span>
+        </div>
+        <div
+          ref={scrollRef}
+          className="max-h-[70vh] overflow-y-auto"
+          data-testid="hate-speech-scroll"
+        >
+          <div className="relative" style={{ height: `${virtualizer.getTotalSize()}px` }}>
+            {virtualizer.getVirtualItems().map((vRow) => {
+              const r = rows[vRow.index]
+              return (
+                <div
+                  key={r.chunk_id ?? vRow.index}
+                  data-index={vRow.index}
+                  ref={virtualizer.measureElement}
+                  className="absolute left-0 right-0"
+                  style={{ transform: `translateY(${vRow.start}px)` }}
+                >
+                  <HateSpeechTableRow
+                    row={r}
+                    index={vRow.index + 1}
+                    reportDedupeKeys={reportDedupeKeys}
+                  />
+                </div>
+              )
+            })}
           </div>
-        )}
+          {hasNextPage && onLoadMore && (
+            <div className="flex justify-center py-2">
+              <button
+                type="button"
+                onClick={onLoadMore}
+                disabled={isFetching}
+                className="px-3 py-1 rounded-md border border-border text-sm disabled:opacity-50"
+              >
+                {isFetching ? 'Loading…' : 'Load more'}
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )

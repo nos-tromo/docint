@@ -192,7 +192,7 @@ _HATE_SPEECH_CONFIDENCE_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 
 def _compact_entity_form(text: str) -> str:
     r"""Build the compact lookup form used by the frontend entity matcher.
 
-    Mirrors ``compactLookup`` in ``frontend/src/components/analysis/EntityInspector.tsx``:
+    Mirrors the compact-lookup form the SPA's entity matcher uses:
     keep unicode letters and digits, drop everything else, lowercase the result.
     Python's :meth:`str.isalnum` is unicode-aware so this matches the
     ``[^\p{L}\p{N}]+`` regex used in the SPA.
@@ -7192,7 +7192,7 @@ class RAG:
             entity_type (str | None): Entity type/label (e.g. ``"PERSON"``).
             entity_key (str | None): Raw ``"<text>::<type>"`` key, accepted as
                 a shorthand for ``entity_text``/``entity_type``. The SPA's
-                ``EntityInspector.keyOf`` produces this format.
+                ``Analysis.tsx`` ``keyOf`` produces this format.
             entity_merge_mode (EntityMergeMode): Clustering mode; ``"resolved"``
                 expands to the canonical entity's sibling aliases.
 

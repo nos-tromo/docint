@@ -1,23 +1,36 @@
-import { useEffect, useMemo, useState } from 'react'
-import { useHateSpeechPages, useNerSources, useNerStats } from '@/hooks/useNer'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useHateSpeechPages, useNerGraph, useNerSources, useNerStats } from '@/hooks/useNer'
 import { useReportDedupeKeys } from '@/hooks/useReports'
 import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
-import { EntityInspector } from '@/components/analysis/EntityInspector'
+import { EntitySelect } from '@/components/analysis/EntitySelect'
+import { EntityGraph } from '@/components/analysis/EntityGraph'
+import { EntityFindingsTable } from '@/components/analysis/EntityFindingsTable'
 import { HateSpeechTable } from '@/components/analysis/HateSpeechTable'
 import { SummaryPanel } from '@/components/analysis/SummaryPanel'
 import { warmCollectionNer } from '@/api/collections'
 import { MergeModeToggle } from '@/components/common/MergeModeToggle'
+import type { NerEntityRow } from '@/api/types'
 import { cn } from '@/lib/cn'
 
 const TABS = ['NER', 'Hate speech', 'Summary'] as const
 type Tab = (typeof TABS)[number]
+
+const NER_VIEWS = [
+  { value: 'table', label: 'Table' },
+  { value: 'graph', label: 'Graph' }
+] as const
+type NerView = (typeof NER_VIEWS)[number]['value']
+
+// Number of highest-mention entities the graph view renders.
+const GRAPH_TOP_K = 80
 
 const keyOf = (text: string | null | undefined, type: string | null | undefined) =>
   `${text ?? ''}::${type ?? ''}`
 
 export function Analysis() {
   const [tab, setTab] = useState<Tab>('NER')
+  const [nerView, setNerView] = useState<NerView>('table')
   const collection = useUiStore((s) => s.selectedCollection)
   const mergeMode = useUiStore((s) => s.entityMergeMode)
   // Report-builder context, computed once and threaded into both analysis
@@ -50,16 +63,50 @@ export function Analysis() {
     setSelectedEntityKey(null)
   }, [collection])
 
+  // Seed a sensible default selection (the top entity) once the list loads, so
+  // the findings panel and dropdown aren't empty on arrival.
+  useEffect(() => {
+    if (selectedEntityKey || entities.length === 0) return
+    const top = entities.find((e) => (e.text ?? '').trim().length > 0)
+    if (top) setSelectedEntityKey(keyOf(top.text, top.type))
+  }, [entities, selectedEntityKey])
+
+  // The selected entity row (for highlight terms / labels / CSV). Falls back to
+  // a minimal row parsed from the key so graph clicks on entities outside the
+  // currently-loaded stats page still drive the findings table.
+  const selectedEntity = useMemo<NerEntityRow | null>(() => {
+    if (!selectedEntityKey) return null
+    const hit = entities.find((e) => keyOf(e.text, e.type) === selectedEntityKey)
+    if (hit) return hit
+    const idx = selectedEntityKey.lastIndexOf('::')
+    if (idx < 0) return null
+    return {
+      text: selectedEntityKey.slice(0, idx),
+      type: selectedEntityKey.slice(idx + 2),
+      mentions: 0
+    }
+  }, [entities, selectedEntityKey])
+
   const ner = useNerSources(selectedEntityKey)
   const findings = useMemo(
     () => (ner.data?.pages ?? []).flatMap((p) => p.items),
     [ner.data]
   )
 
+  // Graph payload is only fetched while the graph view is active.
+  const graph = useNerGraph({ topKNodes: GRAPH_TOP_K, enabled: nerView === 'graph' })
+
   const hate = useHateSpeechPages()
   const hateRows = useMemo(
     () => (hate.data?.pages ?? []).flatMap((p) => p.items),
     [hate.data]
+  )
+
+  // Stable selection-key builders: an inline arrow would rebuild the graph
+  // simulation (resetting its layout) on every Analysis re-render.
+  const entityKeyOf = useCallback(
+    (e: { text: string; type: string }) => keyOf(e.text, e.type),
+    []
   )
 
   return (
@@ -83,9 +130,33 @@ export function Analysis() {
       {tab === 'NER' && (
         <div className="space-y-3">
           {collection && (
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <span>Merge mode</span>
-              <MergeModeToggle />
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div
+                role="group"
+                aria-label="Entity view"
+                className="inline-flex overflow-hidden rounded-md border border-border text-sm"
+              >
+                {NER_VIEWS.map((v) => (
+                  <button
+                    key={v.value}
+                    type="button"
+                    aria-pressed={nerView === v.value}
+                    onClick={() => setNerView(v.value)}
+                    className={cn(
+                      'px-3 py-1 transition-colors',
+                      nerView === v.value
+                        ? 'bg-zinc-800 text-foreground'
+                        : 'text-muted-foreground hover:text-foreground'
+                    )}
+                  >
+                    {v.label}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <span>Merge mode</span>
+                <MergeModeToggle />
+              </div>
             </div>
           )}
           {!collection ? (
@@ -94,20 +165,38 @@ export function Analysis() {
             </p>
           ) : stats.isLoading ? (
             <p className="text-sm text-muted-foreground">Loading entities…</p>
+          ) : entities.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No entities found in this collection.</p>
           ) : (
-            <EntityInspector
-              entities={entities}
-              selectedKey={selectedEntityKey}
-              onSelectEntity={setSelectedEntityKey}
-              findings={findings}
-              isFetchingFindings={ner.isFetching}
-              hasNextPage={!!ner.hasNextPage}
-              onLoadMore={() => ner.fetchNextPage()}
-              collection={collection}
-              keyOf={(e) => keyOf(e.text, e.type)}
-              entityMergeMode={mergeMode}
-              reportDedupeKeys={reportDedupeKeys}
-            />
+            <div className="space-y-4">
+              {nerView === 'table' ? (
+                <EntitySelect
+                  entities={entities}
+                  selectedKey={selectedEntityKey}
+                  onSelectEntity={setSelectedEntityKey}
+                  keyOf={entityKeyOf}
+                />
+              ) : (
+                <EntityGraph
+                  nodes={graph.data?.nodes ?? []}
+                  edges={graph.data?.edges ?? []}
+                  selectedKey={selectedEntityKey}
+                  onSelectEntity={setSelectedEntityKey}
+                  keyForNode={entityKeyOf}
+                  isLoading={graph.isLoading}
+                />
+              )}
+              <EntityFindingsTable
+                selected={selectedEntity}
+                findings={findings}
+                isFetchingFindings={ner.isFetching}
+                hasNextPage={!!ner.hasNextPage}
+                onLoadMore={() => ner.fetchNextPage()}
+                collection={collection}
+                entityMergeMode={mergeMode}
+                reportDedupeKeys={reportDedupeKeys}
+              />
+            </div>
           )}
         </div>
       )}
