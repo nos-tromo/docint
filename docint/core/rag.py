@@ -5188,6 +5188,7 @@ class RAG:
             ner_max_workers=pipeline.ner_max_workers,
             source_collection=self.qdrant_collection,
             image_ingestion_service=image_ingestion_service,
+            hierarchical_node_parser=getattr(pipeline, "hierarchical_node_parser", None),
         )
 
         ingest_failures: list[tuple[set[str], str]] = []
@@ -5421,6 +5422,7 @@ class RAG:
             ner_max_workers=pipeline.ner_max_workers,
             source_collection=self.qdrant_collection,
             image_ingestion_service=image_ingestion_service,
+            hierarchical_node_parser=getattr(pipeline, "hierarchical_node_parser", None),
         )
 
         ingest_failures: list[tuple[set[str], str]] = []

@@ -1337,7 +1337,11 @@ class PipelineConfig:
     vision_ocr_max_tokens: int
 
 
-PIPELINE_VERSION = "1.0.0"
+# 2.0.0: PDF chunking unified onto the hierarchical SentenceSplitter
+# (section-grouped coarse parents + sentence-clean fine children),
+# replacing the bespoke char-overlap chunker. Bumped so cached PDF
+# artifacts (chunks.jsonl) from the old chunker are regenerated.
+PIPELINE_VERSION = "2.0.0"
 
 
 def load_pipeline_config(

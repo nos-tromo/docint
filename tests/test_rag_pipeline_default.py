@@ -236,6 +236,7 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(monkeypatch: pytest.MonkeyPatch
             ner_max_workers: int = 1,
             source_collection: str | None = None,
             image_ingestion_service: Any = None,
+            hierarchical_node_parser: Any = None,
         ) -> None:
             """Initialise and discard all arguments."""
             _ = (
@@ -244,6 +245,7 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(monkeypatch: pytest.MonkeyPatch
                 ner_max_workers,
                 source_collection,
                 image_ingestion_service,
+                hierarchical_node_parser,
             )
             self.discovered_hashes = {"pdf-hash-1"}
 

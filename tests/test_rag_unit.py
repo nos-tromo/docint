@@ -4079,6 +4079,7 @@ class _FakeCorePDFReader:
         ner_max_workers: int = 1,
         source_collection: str | None = None,
         image_ingestion_service: Any = None,
+        hierarchical_node_parser: Any = None,
     ) -> None:
         """Record constructor args without touching the filesystem.
 
@@ -4088,6 +4089,7 @@ class _FakeCorePDFReader:
             ner_max_workers: Worker thread count (ignored).
             source_collection: Qdrant collection name (ignored).
             image_ingestion_service: Image ingestion service (ignored).
+            hierarchical_node_parser: Shared hierarchical parser (ignored).
         """
         _ = (
             data_dir,
@@ -4095,6 +4097,7 @@ class _FakeCorePDFReader:
             ner_max_workers,
             source_collection,
             image_ingestion_service,
+            hierarchical_node_parser,
         )
         self.discovered_hashes: set[str] = set()
 

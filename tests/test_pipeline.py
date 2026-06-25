@@ -17,7 +17,7 @@ from docint.core.readers.documents.artifacts import (
     save_page_text,
     save_table,
 )
-from docint.core.readers.documents.chunking import chunk_document
+from docint.core.readers.documents.chunking import build_coarse_units
 from docint.core.readers.documents.extraction import extract_images, extract_tables
 from docint.core.readers.documents.layout import (
     PypdfLayoutAnalyzer,
@@ -194,7 +194,7 @@ class TestPipelineConfig:
 
         cfg = load_pipeline_config()
         assert cfg.text_coverage_threshold == 0.01
-        assert cfg.pipeline_version == "1.0.0"
+        assert cfg.pipeline_version == "2.0.0"
         assert cfg.max_retries == 2
         assert cfg.force_reprocess is False
         assert cfg.max_workers == 4
@@ -354,7 +354,7 @@ class TestChunking:
     """Tests for the document chunking logic."""
 
     def test_basic_chunking(self, sample_layout_block: LayoutBlock) -> None:
-        """Single-block layout produces at least one chunk with correct metadata."""
+        """Single-block layout produces one coarse unit with correct metadata."""
         layout = {0: [sample_layout_block]}
         page_texts = {
             0: PageText(
@@ -363,14 +363,16 @@ class TestChunking:
                 source_mix="pdf_text",
             )
         }
-        chunks = chunk_document("doc123", layout, page_texts, [], [])
-        assert len(chunks) >= 1
-        assert chunks[0].doc_id == "doc123"
-        assert chunks[0].source_mix == "pdf_text"
-        assert chunks[0].section_path == []
+        units = build_coarse_units("doc123", layout, page_texts, [], [])
+        assert len(units) >= 1
+        assert units[0].doc_id == "doc123"
+        assert units[0].source_mix == "pdf_text"
+        assert units[0].section_path == []
+        # No heading present, so the body is the block text verbatim.
+        assert sample_layout_block.text in units[0].text
 
     def test_section_path_tracking(self) -> None:
-        """Chunks following a TITLE block should carry its section path."""
+        """Units following a TITLE carry its section path and prepend the heading."""
         title_block = LayoutBlock(
             block_id="title-0",
             page_index=0,
@@ -391,31 +393,65 @@ class TestChunking:
         )
         layout = {0: [title_block, text_block]}
         page_texts = {0: PageText(page_index=0, full_text="", source_mix="pdf_text")}
-        chunks = chunk_document("doc456", layout, page_texts, [], [])
-        # The text block chunk should have the section path from the title
-        text_chunks = [c for c in chunks if "introduction text" in c.text.lower()]
-        assert len(text_chunks) >= 1
-        assert "Chapter 1: Introduction" in text_chunks[0].section_path
+        units = build_coarse_units("doc456", layout, page_texts, [], [])
+        # The body unit carries the section path and prepends the heading text.
+        text_units = [u for u in units if "introduction text" in u.text.lower()]
+        assert len(text_units) >= 1
+        assert "Chapter 1: Introduction" in text_units[0].section_path
+        assert text_units[0].text.startswith("Chapter 1: Introduction")
+        # The heading is folded into its section's unit, never emitted alone.
+        assert all(u.text.strip() != "Chapter 1: Introduction" for u in units)
 
-    def test_chunk_size_respected(self) -> None:
-        """Long text should be split so no chunk exceeds the size limit."""
-        long_text = ". ".join(["Sentence number " + str(i) for i in range(100)])
-        block = LayoutBlock(
-            block_id="long-0",
-            page_index=0,
-            type=BlockType.TEXT,
-            bbox=BBox(x0=0, y0=0, x1=612, y1=792),
-            reading_order=0,
-            confidence=1.0,
-            text=long_text,
-        )
-        layout = {0: [block]}
-        page_texts = {0: PageText(page_index=0, full_text=long_text, source_mix="pdf_text")}
-        chunks = chunk_document("doc789", layout, page_texts, [], [], chunk_size=200)
-        assert len(chunks) > 1
-        for chunk in chunks:
-            # Allow some tolerance for sentence boundaries
-            assert len(chunk.text) <= 300
+    def test_coarse_units_respect_size_cap(self) -> None:
+        """Multiple blocks are grouped into units bounded by coarse_chunk_size."""
+        blocks = [
+            LayoutBlock(
+                block_id=f"t{i}",
+                page_index=0,
+                type=BlockType.TEXT,
+                bbox=BBox(x0=0, y0=0, x1=612, y1=792),
+                reading_order=i,
+                confidence=1.0,
+                text=f"Block {i} sentence one. Block {i} sentence two.",
+            )
+            for i in range(12)
+        ]
+        layout = {0: blocks}
+        page_texts = {0: PageText(page_index=0, full_text="", source_mix="pdf_text")}
+        cap = 120
+        units = build_coarse_units("doc789", layout, page_texts, [], [], coarse_chunk_size=cap)
+        assert len(units) > 1
+        longest_block = max(len(b.text) for b in blocks)
+        for unit in units:
+            # A unit may exceed the cap only by a single whole block.
+            assert len(unit.text) <= cap + longest_block
+
+    def test_units_never_start_mid_sentence(self) -> None:
+        """Regression: units begin at a block boundary, not an overlap fragment.
+
+        The retired char-overlap chunker prefixed every non-first chunk with
+        the last 64 characters of the previous chunk, producing mid-sentence
+        starts. build_coarse_units carries no overlap, so each unit body
+        begins exactly at a block's first character.
+        """
+        blocks = [
+            LayoutBlock(
+                block_id=f"b{i}",
+                page_index=0,
+                type=BlockType.TEXT,
+                bbox=BBox(x0=0, y0=0, x1=612, y1=792),
+                reading_order=i,
+                confidence=1.0,
+                text=f"Alpha sentence {i} ends here.",
+            )
+            for i in range(6)
+        ]
+        layout = {0: blocks}
+        page_texts = {0: PageText(page_index=0, full_text="", source_mix="pdf_text")}
+        units = build_coarse_units("nodup", layout, page_texts, [], [], coarse_chunk_size=40)
+        assert len(units) > 1
+        for unit in units:
+            assert unit.text.lstrip().startswith("Alpha sentence")
 
     def test_stable_chunk_ids(self) -> None:
         """Identical inputs should produce deterministic chunk IDs."""
@@ -430,14 +466,14 @@ class TestChunking:
         )
         layout = {0: [block]}
         page_texts = {0: PageText(page_index=0, full_text="", source_mix="pdf_text")}
-        c1 = chunk_document("same-doc", layout, page_texts, [], [])
-        c2 = chunk_document("same-doc", layout, page_texts, [], [])
+        c1 = build_coarse_units("same-doc", layout, page_texts, [], [])
+        c2 = build_coarse_units("same-doc", layout, page_texts, [], [])
         assert len(c1) == len(c2)
         for a, b in zip(c1, c2, strict=False):
             assert a.chunk_id == b.chunk_id
 
     def test_ocr_source_mix_propagated(self) -> None:
-        """Chunks from OCR pages should carry source_mix='ocr'."""
+        """Units from OCR pages should carry source_mix='ocr'."""
         block = LayoutBlock(
             block_id="ocr-block",
             page_index=0,
@@ -449,12 +485,12 @@ class TestChunking:
         )
         layout = {0: [block]}
         page_texts = {0: PageText(page_index=0, full_text="", source_mix="ocr", confidence=0.8)}
-        chunks = chunk_document("ocr-doc", layout, page_texts, [], [])
-        assert len(chunks) >= 1
-        assert chunks[0].source_mix == "ocr"
+        units = build_coarse_units("ocr-doc", layout, page_texts, [], [])
+        assert len(units) >= 1
+        assert units[0].source_mix == "ocr"
 
     def test_figure_only_page_with_ocr_text_produces_chunks(self) -> None:
-        """A page with only FIGURE blocks should chunk page_text.full_text via fallback."""
+        """A scanned page (FIGURE + synthetic OCR TEXT block) still yields a unit."""
         figure_block = LayoutBlock(
             block_id="fig-0",
             page_index=0,
@@ -482,10 +518,12 @@ class TestChunking:
                 confidence=0.7,
             )
         }
-        chunks = chunk_document("scan-doc", layout, page_texts, [], [])
-        assert len(chunks) >= 1
-        assert "Vision OCR" in chunks[0].text
-        assert chunks[0].source_mix == "ocr"
+        units = build_coarse_units("scan-doc", layout, page_texts, [], [])
+        assert len(units) >= 1
+        # Exactly one unit — the figure block must not duplicate the page text.
+        assert len(units) == 1
+        assert "Vision OCR" in units[0].text
+        assert units[0].source_mix == "ocr"
 
 
 # ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@ from docint.core.ingest.images_service import (
     IngestContext,
 )
 from docint.core.readers.documents.orchestrator import DocumentPipelineOrchestrator
+from docint.core.storage.hierarchical import HierarchicalNodeParser
 from docint.utils.hashing import compute_file_hash
 from docint.utils.mimetype import get_mimetype
 
@@ -38,6 +39,7 @@ class CorePDFPipelineReader:
     ner_max_workers: int = 1
     source_collection: str | None = None
     image_ingestion_service: ImageIngestionService | None = None
+    hierarchical_node_parser: HierarchicalNodeParser | None = None
     discovered_hashes: set[str] = field(default_factory=set, init=False)
 
     def _apply_ner(
@@ -280,21 +282,37 @@ class CorePDFPipelineReader:
         doc_id: str,
         pipeline_version: str,
         chunks: list[dict[str, Any]],
+        hierarchical_node_parser: HierarchicalNodeParser | None = None,
     ) -> tuple[list[Document], list[BaseNode]]:
         """Convert pipeline chunks into LlamaIndex documents and nodes.
+
+        Each chunk (a section-grouped *coarse* unit produced by
+        :func:`~docint.core.readers.documents.chunking.build_coarse_units`)
+        becomes one coarse ``TextNode``. When *hierarchical_node_parser* is
+        supplied, those coarse nodes are refined into Level-1 parents plus
+        sentence-clean Level-2 children via the same parser used for every
+        other file type, so PDFs participate in query-time parent-context
+        expansion. When it is ``None`` (hierarchical chunking disabled) the
+        coarse nodes are returned flat, preserving the legacy shape.
 
         Args:
             file_path (Path): Source PDF path.
             doc_id (str): Deterministic document hash.
             pipeline_version (str): Version reported by the pipeline manifest.
             chunks (list[dict[str, Any]]): Raw chunk payloads loaded from artifacts.
+            hierarchical_node_parser (HierarchicalNodeParser | None): Shared
+                parser used to refine coarse units into coarse+fine nodes.
+                When ``None``, nodes are emitted flat.
 
         Returns:
-            tuple[list[Document], list[BaseNode]]: Tuple of generated documents and nodes.
+            tuple[list[Document], list[BaseNode]]: Generated documents and
+                nodes. The node list contains coarse parents and fine
+                children when a parser is supplied, else one flat node per
+                chunk.
         """
         mimetype = get_mimetype(file_path)
         docs: list[Document] = []
-        nodes: list[BaseNode] = []
+        coarse_nodes: list[BaseNode] = []
         base_origin: dict[str, Any] = {
             "filename": file_path.name,
             "mimetype": mimetype,
@@ -352,7 +370,16 @@ class CorePDFPipelineReader:
                 metadata.update(extra_metadata)
 
             docs.append(Document(text=text, metadata=metadata, id_=point_id))
-            nodes.append(TextNode(text=text, metadata=dict(metadata), id_=point_id))
+            coarse_nodes.append(TextNode(text=text, metadata=dict(metadata), id_=point_id))
+
+        if hierarchical_node_parser is not None and coarse_nodes:
+            # Refine coarse units into Level-1 parents + sentence-clean
+            # Level-2 children using the shared parser (the same call the
+            # docx/markdown path makes). The coarse parents are returned
+            # too, so they reach the docstore for parent-context expansion.
+            nodes: list[BaseNode] = hierarchical_node_parser._parse_nodes(coarse_nodes)
+        else:
+            nodes = list(coarse_nodes)
 
         return docs, nodes
 
@@ -416,6 +443,7 @@ class CorePDFPipelineReader:
                 doc_id=manifest.doc_id,
                 pipeline_version=manifest.pipeline_version,
                 chunks=chunks,
+                hierarchical_node_parser=self.hierarchical_node_parser,
             )
 
             # Always attempt image ingestion — even when no text chunks
@@ -439,7 +467,11 @@ class CorePDFPipelineReader:
                 yield docs, nodes, manifest.doc_id
                 continue
 
-            self._apply_ner(nodes, progress_callback=progress_callback)
+            # Only the embedded (fine) nodes are ever retrieved/cited, so NER
+            # there avoids wasted extractor calls on coarse parents. Flat
+            # (non-hierarchical) collections carry no hier type — NER all.
+            ner_targets = [n for n in nodes if n.metadata.get("docint_hier_type") == "fine"] or nodes
+            self._apply_ner(ner_targets, progress_callback=progress_callback)
             emitted_hashes.add(manifest.doc_id)
             if progress_callback:
                 progress_callback(f"Core pipeline indexed {len(nodes)} chunks: {pdf_path.name}")

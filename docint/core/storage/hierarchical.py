@@ -64,6 +64,45 @@ class HierarchicalNodeParser(NodeParser):
             paragraph_separator="\n\n",
         )
 
+    @staticmethod
+    def _splitter_input_doc(text: str, metadata: dict[str, Any]) -> Document:
+        """Wrap *text* / *metadata* for a metadata-aware splitter, hiding the metadata.
+
+        llama-index's :class:`SentenceSplitter` is a ``MetadataAwareTextSplitter``:
+        it shrinks each chunk's token budget by the node's rendered metadata (the
+        longer of ``MetadataMode.EMBED`` / ``MetadataMode.LLM``), on the assumption
+        that the metadata is embedded alongside the text. docint does not embed
+        structural metadata — :mod:`docint.utils.embed_chunking` excludes every key
+        from ``MetadataMode.EMBED`` and the chat path curates ``MetadataMode.LLM``
+        via ``LLM_VISIBLE_METADATA_KEYS`` — so that reservation is
+        counter-productive: a PDF coarse unit's layout metadata (``block_ids`` /
+        ``image_ids`` / ``bbox_refs`` …) can render to more tokens than
+        ``fine_chunk_size``, which makes the splitter raise *"Metadata length (N)
+        is longer than chunk size (M)"* and abort ingestion instead of splitting
+        the text.
+
+        Excluding every key from both render modes makes the splitter operate on
+        the text alone. llama-index copies the exclusion lists onto each produced
+        split, so the children also render text-only in embed mode — matching the
+        sub-node contract in :mod:`docint.utils.embed_chunking`. The metadata
+        *dict* is untouched, so citations and image/table linking keep working.
+
+        Args:
+            text (str): Coarse-unit text to be split.
+            metadata (dict[str, Any]): Metadata to carry onto the produced nodes,
+                rendered into neither the embed nor the LLM payload.
+
+        Returns:
+            Document: A document whose metadata is hidden from both render modes.
+        """
+        keys = list(metadata.keys())
+        return Document(
+            text=text,
+            metadata=metadata,
+            excluded_embed_metadata_keys=keys,
+            excluded_llm_metadata_keys=keys,
+        )
+
     @override
     def _parse_nodes(self, nodes: Sequence[BaseNode], show_progress: bool = False, **kwargs: Any) -> list[BaseNode]:
         """Parse nodes into hierarchical chunks.
@@ -127,8 +166,9 @@ class HierarchicalNodeParser(NodeParser):
                     # SentenceSplitter works on Documents usually.
                     # We can wrap the node's text in a temporary Document or use `get_nodes_from_documents`.
 
-                    # Create a temp doc to split
-                    temp_doc = Document(text=node.get_content(), metadata=node.metadata)
+                    # Create a temp doc to split (metadata hidden from the
+                    # metadata-aware splitter so it splits on text alone).
+                    temp_doc = self._splitter_input_doc(node.get_content(), node.metadata)
                     coarse_candidates = self._coarse_splitter.get_nodes_from_documents([temp_doc])
                 else:
                     # It's fine as a coarse chunk
@@ -155,10 +195,13 @@ class HierarchicalNodeParser(NodeParser):
                 # We split the *content* of the coarse chunk
                 # We must ensure fine chunks link back to THIS coarse_node
 
-                # Create a temp doc for splitting to ensure easy usage of SentenceSplitter
-                temp_coarse_doc = Document(
-                    text=coarse_node.get_content(),
-                    metadata=deepcopy(coarse_node.metadata),
+                # Create a temp doc for splitting to ensure easy usage of
+                # SentenceSplitter (metadata hidden from the metadata-aware
+                # splitter so it splits on text alone, never reserving budget
+                # for layout metadata docint does not embed).
+                temp_coarse_doc = self._splitter_input_doc(
+                    coarse_node.get_content(),
+                    deepcopy(coarse_node.metadata),
                 )
 
                 fine_nodes = self._fine_splitter.get_nodes_from_documents([temp_coarse_doc])
@@ -175,6 +218,15 @@ class HierarchicalNodeParser(NodeParser):
 
                     # Ensure relationships
                     fine_node.relationships[NodeRelationship.PARENT] = coarse_node.as_related_node_info()
+
+                    # ``hier.parent_id`` / ``hier.doc_id`` are added after the
+                    # split, so refresh the exclusion lists to cover them too:
+                    # every metadata key stays a locator on the dict but is kept
+                    # out of the embed/LLM payloads (text-only embedding, like
+                    # the embed_chunking sub-node contract).
+                    fine_keys = list(fine_node.metadata.keys())
+                    fine_node.excluded_embed_metadata_keys = fine_keys
+                    fine_node.excluded_llm_metadata_keys = fine_keys
 
                     # Add to result
                     all_nodes.append(fine_node)
