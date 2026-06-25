@@ -184,3 +184,58 @@ def test_pdf_coarse_metadata_propagates_to_fine() -> None:
         assert fine.metadata["bbox_refs"] == [{"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}]
         assert fine.metadata["file_hash"] == "abc"
         assert fine.metadata["hier.parent_id"] == coarse.node_id
+
+
+def test_oversize_coarse_metadata_still_splits_into_fine_children() -> None:
+    """A coarse unit whose rendered metadata exceeds ``fine_chunk_size`` still splits.
+
+    PDF coarse units carry layout metadata (``block_ids`` / ``image_ids`` /
+    ``bbox_refs``) that, for a section spanning many blocks, renders to *more*
+    tokens than the fine chunk budget. llama-index's ``SentenceSplitter`` is
+    metadata-aware — it reserves part of each chunk for the node's rendered
+    metadata (the longer of ``MetadataMode.EMBED`` / ``MetadataMode.LLM``) — so
+    it raises *"Metadata length (N) is longer than chunk size (M)"* and aborts
+    the whole ingestion (production hit this with the default
+    ``fine_chunk_size=1024``).
+
+    docint never embeds structural metadata (``embed_chunking`` excludes it
+    from ``MetadataMode.EMBED`` and the chat path curates ``MetadataMode.LLM``
+    via ``LLM_VISIBLE_METADATA_KEYS``), so the fine splitter must split on the
+    text alone. The metadata dict must still ride onto the children (citations
+    and image/table linking read it), but it must not leak into the embedded
+    payload.
+    """
+    from llama_index.core.schema import MetadataMode, TextNode
+
+    # A block list whose repr dwarfs ``fine_chunk_size`` once rendered.
+    bulky_block_ids = [f"blk-{i:04d}-{'d' * 12}" for i in range(80)]
+    parser = HierarchicalNodeParser(coarse_chunk_size=2000, fine_chunk_size=64, fine_chunk_overlap=0)
+    coarse = TextNode(
+        text="First sentence here. Second sentence follows. Third sentence ends. Fourth wraps it up.",
+        metadata={
+            "page": 3,
+            "section_path": ["Results", "Subsection"],
+            "block_ids": bulky_block_ids,
+            "image_ids": bulky_block_ids,
+            "bbox_refs": [{"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}] * 40,
+        },
+    )
+
+    # Before the fix this raised ValueError("Metadata length ... is longer than
+    # chunk size ...") here, aborting ingestion.
+    nodes = parser._parse_nodes([coarse])
+
+    fine_nodes = [n for n in nodes if n.metadata.get("hier.level") == 2]
+    assert len(fine_nodes) >= 1, "the coarse unit must still produce fine children"
+
+    for fine in fine_nodes:
+        # Structural metadata still rides on the dict — citations / image-table
+        # linking read it directly.
+        assert fine.metadata["page"] == 3
+        assert fine.metadata["block_ids"] == bulky_block_ids
+        assert fine.metadata["hier.parent_id"] == coarse.node_id
+        # ...but it is hidden from the embedded payload: the EMBED rendering is
+        # exactly the chunk text, so vectors stay clean and metadata can never
+        # blow the embedding budget.
+        assert "blk-" not in fine.get_content(metadata_mode=MetadataMode.EMBED)
+        assert fine.get_content(metadata_mode=MetadataMode.EMBED) == fine.get_content(metadata_mode=MetadataMode.NONE)
