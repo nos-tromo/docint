@@ -85,7 +85,7 @@ export function EntityGraph({
   keyForNode,
   isLoading
 }: Props) {
-  const svgRef = useRef<SVGSVGElement>(null)
+  const svgRef = useRef<SVGSVGElement | null>(null)
 
   // Edge-count (degree) filter: hide any node with fewer than `minDegree`
   // incident edges. Default 0 shows every node.
@@ -231,11 +231,20 @@ export function EntityGraph({
     [view]
   )
 
-  const onWheel = useCallback(
-    (e: React.WheelEvent<SVGSVGElement>) => {
+  // Wheel-zoom, bound as a *non-passive* native listener via a ref callback
+  // rather than React's synthetic `onWheel`. React registers wheel listeners as
+  // passive, so a synthetic handler's preventDefault() is a no-op and the page
+  // scrolls behind the graph while zooming; a directly-attached
+  // { passive: false } listener lets us cancel that default scroll. The
+  // ref-callback form (with React 19's cleanup return) re-binds correctly if the
+  // <svg> unmounts and remounts — e.g. an initially-empty collection later fills
+  // in. setView's functional updater keeps the handler free of stale view state,
+  // so it never needs re-binding on its own.
+  const setSvgRef = useCallback((svg: SVGSVGElement | null) => {
+    svgRef.current = svg
+    if (!svg) return
+    const onWheel = (e: WheelEvent) => {
       e.preventDefault()
-      const svg = svgRef.current
-      if (!svg) return
       const rect = svg.getBoundingClientRect()
       const w = rect.width || WIDTH
       const h = rect.height || HEIGHT
@@ -249,9 +258,13 @@ export function EntityGraph({
         const ly = (py - v.y) / v.k
         return { k, x: px - lx * k, y: py - ly * k }
       })
-    },
-    []
-  )
+    }
+    svg.addEventListener('wheel', onWheel, { passive: false })
+    return () => {
+      svg.removeEventListener('wheel', onWheel)
+      svgRef.current = null
+    }
+  }, [])
 
   const zoomBy = useCallback((factor: number) => {
     setView((v) => {
@@ -261,6 +274,14 @@ export function EntityGraph({
       const ly = (CENTER_Y - v.y) / v.k
       return { k, x: CENTER_X - lx * k, y: CENTER_Y - ly * k }
     })
+  }, [])
+
+  // Reset every graph control back to its default, not just the viewport:
+  // edge filter (min edges → 0), edge length (→ 1x), and zoom/pan (→ home).
+  const resetControls = useCallback(() => {
+    setMinDegree(0)
+    setSpread(1)
+    setView({ x: 0, y: 0, k: 1 })
   }, [])
 
   // --- background pan ---
@@ -456,25 +477,29 @@ export function EntityGraph({
             >
               −
             </button>
-            <button
-              type="button"
-              onClick={() => setView({ x: 0, y: 0, k: 1 })}
-              className="h-7 px-2 rounded-md border border-border text-xs"
-            >
-              Reset
-            </button>
           </div>
+
+          <span aria-hidden="true" className="h-5 border-l border-border" />
+
+          {/* Standalone (not part of the Zoom group): resets every control. */}
+          <button
+            type="button"
+            onClick={resetControls}
+            title="Reset min edges, edge length, and zoom"
+            className="h-7 px-2 rounded-md border border-border text-xs"
+          >
+            Reset
+          </button>
         </div>
       </div>
 
       <div className="relative rounded-md border border-border bg-zinc-950 overflow-hidden">
         <svg
-          ref={svgRef}
+          ref={setSvgRef}
           viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
           className="w-full h-[60vh] touch-none select-none"
           role="application"
           aria-label="Entity relationship graph"
-          onWheel={onWheel}
         >
           {/* Background capture rect for panning. */}
           <rect

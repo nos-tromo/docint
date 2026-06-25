@@ -147,6 +147,71 @@ describe('EntityGraph', () => {
     expect(screen.getByRole('group', { name: /zoom/i })).toBeInTheDocument()
   })
 
+  it('reset restores min-edges, edge-length, and zoom to their defaults', async () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    // Move both filter controls off their defaults.
+    await userEvent.click(screen.getByRole('button', { name: /increase minimum edges/i }))
+    const slider = screen.getByRole('slider', { name: /edge length/i }) as HTMLInputElement
+    fireEvent.change(slider, { target: { value: '2.5' } })
+    // Sanity: they are now off-default (decrement enabled, slider at 2.5x).
+    expect(screen.getByRole('button', { name: /decrease minimum edges/i })).not.toBeDisabled()
+    expect(slider.value).toBe('2.5')
+
+    await userEvent.click(screen.getByRole('button', { name: /^reset$/i }))
+
+    // Reset returns min-edges to 0 (decrement disabled) and edge length to 1x.
+    expect(screen.getByRole('button', { name: /decrease minimum edges/i })).toBeDisabled()
+    expect((screen.getByRole('slider', { name: /edge length/i }) as HTMLInputElement).value).toBe(
+      '1'
+    )
+  })
+
+  it('attaches a non-passive wheel listener so wheel-zoom cannot scroll the page', () => {
+    // React registers wheel listeners as passive (and, failing jsdom's
+    // passive-support probe, with a boolean capture flag), where the handler's
+    // preventDefault() is a no-op and the page scrolls behind the graph. The
+    // component must attach its own { passive: false } listener instead — assert
+    // that exact registration happened. (jsdom gives DOM nodes their own
+    // EventTarget prototype, distinct from the global `EventTarget`, so we probe
+    // a real SVG element to find the prototype that actually owns
+    // addEventListener before spying on it.)
+    const probe = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    let proto: object | null = Object.getPrototypeOf(probe)
+    while (proto && !Object.prototype.hasOwnProperty.call(proto, 'addEventListener')) {
+      proto = Object.getPrototypeOf(proto)
+    }
+    const addSpy = vi.spyOn(proto as EventTarget, 'addEventListener')
+    try {
+      render(
+        <EntityGraph
+          nodes={nodes}
+          edges={edges}
+          selectedKey={null}
+          onSelectEntity={() => {}}
+          keyForNode={keyForNode}
+        />
+      )
+      const nonPassiveWheel = addSpy.mock.calls.some(
+        ([type, , opts]) =>
+          type === 'wheel' &&
+          typeof opts === 'object' &&
+          opts !== null &&
+          (opts as AddEventListenerOptions).passive === false
+      )
+      expect(nonPassiveWheel).toBe(true)
+    } finally {
+      addSpy.mockRestore()
+    }
+  })
+
   it('shows an empty state when there are no nodes', () => {
     render(
       <EntityGraph
