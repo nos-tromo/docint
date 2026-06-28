@@ -43,6 +43,19 @@ class DummySessionManager:
         """
         return [{"role": "user", "content": "hi"}]
 
+    def get_session_collection(self, session_id: str, owner: str | None = None) -> str | None:
+        """Return the collection a session is pinned to (stub: unpinned).
+
+        Args:
+            session_id (str): The ID of the session.
+            owner (str | None): The owning principal.
+
+        Returns:
+            str | None: ``None`` -- the stub never pins, so the endpoint's
+                collection-mismatch pre-flight is a no-op here.
+        """
+        return None
+
     def delete_session(self, session_id: str, owner: str | None = None) -> bool:
         """Delete a session by ID.
 
@@ -238,6 +251,8 @@ class DummyRAG:
         self,
         question: str,
         *,
+        session_id: str | None = None,
+        owner: str | None = None,
         metadata_filters: Any = None,
         metadata_filters_active: bool = False,
         metadata_filter_rules: Any = None,
@@ -247,6 +262,8 @@ class DummyRAG:
 
         Args:
             question (str): The question to ask the RAG system.
+            session_id (str | None): The threaded conversation id (ignored by the stub).
+            owner (str | None): The threaded owning principal (ignored by the stub).
             metadata_filters (Any): Optional compiled metadata filters.
             metadata_filters_active (bool): Whether request filters were active.
             metadata_filter_rules (Any): Optional raw request filter rules.
@@ -255,6 +272,7 @@ class DummyRAG:
         Returns:
             dict[str, Any]: The response from the RAG system.
         """
+        _ = session_id, owner
         self.seen_collections.append(self.qdrant_collection)
         self.chats.append(question)
         self.chat_filters.append(
@@ -285,6 +303,8 @@ class DummyRAG:
         self,
         question: str,
         *,
+        session_id: str | None = None,
+        owner: str | None = None,
         metadata_filters: Any = None,
         metadata_filters_active: bool = False,
         metadata_filter_rules: Any = None,
@@ -296,6 +316,8 @@ class DummyRAG:
 
         Args:
             question (str): The question to ask the RAG system.
+            session_id (str | None): The threaded conversation id (ignored by the stub).
+            owner (str | None): The threaded owning principal (ignored by the stub).
             metadata_filters (Any): Optional compiled metadata filters.
             metadata_filters_active (bool): Whether request filters were active.
             metadata_filter_rules (Any): Optional raw request filter rules.
@@ -306,6 +328,7 @@ class DummyRAG:
         Yields:
             str | dict[str, Any]: Chunks of the chat response as they are generated.
         """
+        _ = session_id, owner
         self.stream_filters.append(
             {
                 "filters": metadata_filters,

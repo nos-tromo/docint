@@ -44,6 +44,7 @@ from docint.cli import ingest as ingest_module
 from docint.core.auth.principal import resolve_principal
 from docint.core.rag import RAG, EmptyIngestionError
 from docint.core.retrieval_filters import build_metadata_filters, build_qdrant_filter
+from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.env_cfg import (
     load_host_env,
@@ -683,6 +684,10 @@ class AgentChatIn(BaseModel):
 
     message: str
     session_id: str | None = None
+    # Caller's *logical* collection name; owner-gated and resolved to the
+    # per-request physical collection. Falls back to the process default when
+    # omitted (legacy single-collection use).
+    collection: str | None = None
 
 
 class AgentChatOut(BaseModel):
@@ -913,6 +918,8 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                     )
                     data = rag.chat(
                         payload.question,
+                        session_id=session_id,
+                        owner=principal,
                         metadata_filters=metadata_filters,
                         metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
                         metadata_filter_rules=payload.metadata_filters,
@@ -980,6 +987,8 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
         }
     except HTTPException:
         raise
+    except SessionCollectionMismatchError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("Unexpected error processing query: {}", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -1015,6 +1024,16 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
         and payload.retrieval_mode != "stateless"
     ):
         session_owner = principal
+        # Up-front collection-pin check so a mismatch is a clean 409 rather than
+        # an in-stream SSE error: resuming an owned session against a different
+        # collection must be refused before any retrieval runs.
+        if payload.session_id:
+            pinned = rag.ensure_session_manager().get_session_collection(payload.session_id, session_owner)
+            if pinned is not None and pinned != physical:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Session '{payload.session_id}' is pinned to a different collection.",
+                )
 
     async def _stream_body() -> AsyncIterator[str]:
         """Generate SSE events for the streaming query.
@@ -1136,6 +1155,8 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                         "Iterator[Any]",
                         rag.stream_chat(
                             payload.question,
+                            session_id=session_id,
+                            owner=session_owner,
                             metadata_filters=metadata_filters,
                             metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
                             metadata_filter_rules=payload.metadata_filters,
@@ -2090,8 +2111,9 @@ def _collect_session_source_files(session_id: str, principal: str) -> list[tuple
     Each entry is ``(filename_in_zip, path_on_disk)``. Files that can't be
     resolved on disk are skipped — the ZIP is best-effort and surfaces only
     files the backend can still serve. Collection is resolved from each
-    source's ``collection`` field when present and falls back to the
-    currently active collection so behaviour matches ``/sources/preview``.
+    source's ``collection`` field when present and falls back to the session's
+    own *pinned* collection (owner-scoped), not any process-global active
+    collection, so the bundle stays correct under concurrent multi-tenant use.
 
     Args:
         session_id (str): The session whose citations should be packaged.
@@ -2101,8 +2123,9 @@ def _collect_session_source_files(session_id: str, principal: str) -> list[tuple
     Returns:
         list[tuple[str, Path]]: Pairs ready for :meth:`zipfile.ZipFile.write`.
     """
-    messages = rag.ensure_session_manager().get_session_history(session_id, principal)
-    active_collection = rag.qdrant_collection
+    sm = rag.ensure_session_manager()
+    messages = sm.get_session_history(session_id, principal)
+    session_collection = sm.get_session_collection(session_id, principal)
     selected: dict[str, tuple[str, Path]] = {}
     used_arcnames: set[str] = set()
     for message in messages:
@@ -2112,7 +2135,7 @@ def _collect_session_source_files(session_id: str, principal: str) -> list[tuple
             file_hash = source.get("file_hash")
             if not file_hash or file_hash in selected:
                 continue
-            collection = str(source.get("collection") or active_collection or "")
+            collection = str(source.get("collection") or session_collection or "")
             if not collection:
                 continue
             filename = str(source.get("filename") or "")
@@ -2509,27 +2532,35 @@ def agent_chat(payload: AgentChatIn, request: Request) -> AgentChatOut:
     """Agentic chat endpoint: understand → maybe clarify → retrieve/respond.
 
     Args:
-        payload (AgentChatIn): Message and optional session id.
+        payload (AgentChatIn): Message, optional session id, and optional
+            logical collection (owner-gated; falls back to the process default).
         request (Request): The incoming request used to resolve the calling principal.
 
     Returns:
         AgentChatOut: Clarification prompt or answer with sources.
+
+    Raises:
+        HTTPException: 400/404 from collection resolution; 409 when the session
+            is pinned to a different collection.
     """
-    if not rag.qdrant_collection:
-        raise HTTPException(status_code=400, detail="No collection selected")
-
-    # Ensure a session is active and get per-session agent context
     owner = resolve_principal(request)
-    session_id = rag.start_session(payload.session_id, owner=owner)
-    ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
+    physical = _resolve_request_collection(payload.collection, owner)
 
-    if ctx and rag.sessions:
-        ctx.history = rag.sessions.get_session_history(session_id, owner=owner)
+    # Scope every retrieval/generation call inside the turn to the resolved
+    # physical collection (per-request ContextVar), and thread the session id
+    # explicitly so the turn persists under the right conversation.
+    try:
+        with rag.collection_scope(physical):
+            session_id = rag.start_session(payload.session_id, owner=owner)
+            ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
+            if ctx and rag.sessions:
+                ctx.history = rag.sessions.get_session_history(session_id, owner=owner)
 
-    turn = Turn(user_input=payload.message, session_id=session_id)
-    orchestrator = _build_orchestrator()
-
-    result = orchestrator.handle_turn(turn, context=ctx)
+            turn = Turn(user_input=payload.message, session_id=session_id)
+            orchestrator = _build_orchestrator()
+            result = orchestrator.handle_turn(turn, context=ctx)
+    except SessionCollectionMismatchError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     if result.clarification is not None and result.clarification.needed:
         if ctx:
@@ -2636,87 +2667,108 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
     """Streaming variant of agent chat with token events and final metadata.
 
     Args:
-        payload (AgentChatIn): Message and optional session id.
+        payload (AgentChatIn): Message, optional session id, and optional logical
+            collection (owner-gated; falls back to the process default).
         request (Request): The incoming request used to resolve the calling principal.
 
     Returns:
         StreamingResponse: SSE stream with clarification or answer tokens and metadata.
+
+    Raises:
+        HTTPException: 400/404 from collection resolution; 409 when the session
+            is pinned to a different collection.
     """
     owner = resolve_principal(request)
+    physical = _resolve_request_collection(payload.collection, owner)
+    # Up-front collection-pin check so a mismatch is a clean 409 rather than an
+    # in-stream error event.
+    if payload.session_id:
+        pinned = rag.ensure_session_manager().get_session_collection(payload.session_id, owner)
+        if pinned is not None and pinned != physical:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Session '{payload.session_id}' is pinned to a different collection.",
+            )
 
     async def event_generator() -> AsyncIterator[str]:
         """Generate SSE events for the agent chat stream.
 
+        The request's physical collection is bound for the whole generator (so
+        it propagates into the anyio worker threads spawned for analysis and
+        generation), and the resolved session id is threaded explicitly into
+        ``stream_chat`` so the turn persists under the right conversation.
+
         Yields:
             AsyncIterator[str]: An asynchronous iterator yielding SSE events.
         """
-        if not rag.qdrant_collection:
-            yield _format_sse("error", {"detail": "No collection selected"})
-            return
+        with rag.collection_scope(physical):
 
-        def _prepare() -> tuple[str, Any, Any, Any]:
-            """Run the blocking session/understanding pre-amble off the loop.
+            def _prepare() -> tuple[str, Any, Any, Any]:
+                """Run the blocking session/understanding pre-amble off the loop.
 
-            Session start, history load, and intent analysis are synchronous
-            (and may issue LLM calls), so they run on a worker thread.
+                Session start, history load, and intent analysis are synchronous
+                (and may issue LLM calls), so they run on a worker thread.
 
-            Returns:
-                tuple[str, Any, Any, Any]: ``(session_id, ctx, analysis,
-                clarification_decision)``.
-            """
-            session_id = rag.start_session(payload.session_id, owner=owner)
-            ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
-            if ctx and rag.sessions:
-                ctx.history = rag.sessions.get_session_history(session_id, owner=owner)
-            turn = Turn(user_input=payload.message, session_id=session_id)
-            analysis = _select_understanding_agent().analyze(turn, context=ctx)
-            clarification_decision = _clarification_policy.evaluate(
-                analysis, clarifications_so_far=ctx.clarifications if ctx else 0
-            )
-            return session_id, ctx, analysis, clarification_decision
+                Returns:
+                    tuple[str, Any, Any, Any]: ``(session_id, ctx, analysis,
+                    clarification_decision)``.
+                """
+                session_id = rag.start_session(payload.session_id, owner=owner)
+                ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
+                if ctx and rag.sessions:
+                    ctx.history = rag.sessions.get_session_history(session_id, owner=owner)
+                turn = Turn(user_input=payload.message, session_id=session_id)
+                analysis = _select_understanding_agent().analyze(turn, context=ctx)
+                clarification_decision = _clarification_policy.evaluate(
+                    analysis, clarifications_so_far=ctx.clarifications if ctx else 0
+                )
+                return session_id, ctx, analysis, clarification_decision
 
-        session_id, ctx, analysis, clarification_decision = await to_thread.run_sync(_prepare)
+            session_id, ctx, analysis, clarification_decision = await to_thread.run_sync(_prepare)
 
-        if clarification_decision.needed:
-            if ctx:
-                ctx.clarifications += 1
-            payload_out = {
-                "status": "clarification",
-                "message": clarification_decision.message,
-                "reason": clarification_decision.reason,
-                "intent": analysis.intent,
-                "confidence": analysis.confidence,
-                "session_id": session_id,
-            }
-            yield _format_sse("clarification", payload_out)
-            return
-
-        # Stream via RAG chat (history-aware: rewritten query + prior turn)
-        query_text = analysis.rewritten_query or payload.message
-
-        def _make_agent_stream() -> Iterator[Any]:
-            """Build the blocking agent chat stream off the event loop.
-
-            Returns:
-                Iterator[Any]: The sync chat-chunk generator.
-            """
-            prior_turn = build_prior_turn(ctx.history) if ctx else None
-            return cast("Iterator[Any]", rag.stream_chat(query_text, prior_turn=prior_turn))
-
-        # Tokens
-        async for chunk in _aiter_sync_gen(_make_agent_stream, request):
-            if isinstance(chunk, str):
-                yield _format_sse("token", {"token": chunk})
-            elif isinstance(chunk, dict):
-                meta = {
-                    "status": "answer",
-                    "sources": chunk.get("sources", []),
-                    "session_id": chunk.get("session_id", session_id),
+            if clarification_decision.needed:
+                if ctx:
+                    ctx.clarifications += 1
+                payload_out = {
+                    "status": "clarification",
+                    "message": clarification_decision.message,
+                    "reason": clarification_decision.reason,
                     "intent": analysis.intent,
                     "confidence": analysis.confidence,
-                    "tool_used": "rag_chat",
+                    "session_id": session_id,
                 }
-                yield _format_sse("done", meta)
+                yield _format_sse("clarification", payload_out)
+                return
+
+            # Stream via RAG chat (history-aware: rewritten query + prior turn)
+            query_text = analysis.rewritten_query or payload.message
+
+            def _make_agent_stream() -> Iterator[Any]:
+                """Build the blocking agent chat stream off the event loop.
+
+                Returns:
+                    Iterator[Any]: The sync chat-chunk generator.
+                """
+                prior_turn = build_prior_turn(ctx.history) if ctx else None
+                return cast(
+                    "Iterator[Any]",
+                    rag.stream_chat(query_text, session_id=session_id, owner=owner, prior_turn=prior_turn),
+                )
+
+            # Tokens
+            async for chunk in _aiter_sync_gen(_make_agent_stream, request):
+                if isinstance(chunk, str):
+                    yield _format_sse("token", {"token": chunk})
+                elif isinstance(chunk, dict):
+                    meta = {
+                        "status": "answer",
+                        "sources": chunk.get("sources", []),
+                        "session_id": chunk.get("session_id", session_id),
+                        "intent": analysis.intent,
+                        "confidence": analysis.confidence,
+                        "tool_used": "rag_chat",
+                    }
+                    yield _format_sse("done", meta)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
