@@ -2144,63 +2144,6 @@ class RAG:
                 raise
             return default
 
-    @property
-    def session_id(self) -> str | None:
-        """Get the current session ID.
-
-        Returns:
-            str | None: The current session ID.
-        """
-        return self.sessions.session_id if self.sessions else None
-
-    @session_id.setter
-    def session_id(self, value: str | None) -> None:
-        """Set the current session ID.
-
-        Args:
-            value (str | None): The new session ID.
-        """
-        if self.sessions is not None:
-            self.sessions.session_id = value
-
-    @property
-    def chat_engine(self) -> Any | None:
-        """Get the current chat engine.
-
-        Returns:
-            Any | None: The current chat engine.
-        """
-        return self.sessions.chat_engine if self.sessions else None
-
-    @chat_engine.setter
-    def chat_engine(self, value: Any | None) -> None:
-        """Set the current chat engine.
-
-        Args:
-            value (Any | None): The new chat engine.
-        """
-        if self.sessions is not None:
-            self.sessions.chat_engine = value
-
-    @property
-    def chat_memory(self) -> Any | None:
-        """Get the current chat memory.
-
-        Returns:
-            Any | None: The current chat memory.
-        """
-        return self.sessions.chat_memory if self.sessions else None
-
-    @chat_memory.setter
-    def chat_memory(self, value: Any | None) -> None:
-        """Set the current chat memory.
-
-        Args:
-            value (Any | None): The new chat memory.
-        """
-        if self.sessions is not None:
-            self.sessions.chat_memory = value
-
     # --- Properties (lazy loading) ---
     @property
     def qdrant_src_dir(self) -> Path:
@@ -6068,6 +6011,8 @@ class RAG:
         self,
         user_msg: str,
         *,
+        session_id: str | None = None,
+        owner: str | None = None,
         metadata_filters: MetadataFilters | None = None,
         metadata_filters_active: bool = False,
         metadata_filter_rules: Sequence[Any] | None = None,
@@ -6079,6 +6024,9 @@ class RAG:
 
         Args:
             user_msg (str): The user's chat message.
+            session_id (str | None): The conversation to append the turn to,
+                threaded explicitly per request (mints a new one when ``None``).
+            owner (str | None): The principal that owns the session.
             metadata_filters (MetadataFilters | None): Optional request-scoped
                 metadata filters.
             metadata_filters_active (bool): Whether request-scoped metadata
@@ -6099,6 +6047,8 @@ class RAG:
         """
         return self.ensure_session_manager().chat(
             user_msg,
+            session_id=session_id,
+            owner=owner,
             metadata_filters=metadata_filters,
             metadata_filters_active=metadata_filters_active,
             metadata_filter_rules=metadata_filter_rules,
@@ -6111,6 +6061,8 @@ class RAG:
         self,
         user_msg: str,
         *,
+        session_id: str | None = None,
+        owner: str | None = None,
         metadata_filters: MetadataFilters | None = None,
         metadata_filters_active: bool = False,
         metadata_filter_rules: Sequence[Any] | None = None,
@@ -6122,6 +6074,9 @@ class RAG:
 
         Args:
             user_msg (str): The user's chat message.
+            session_id (str | None): The conversation to append the turn to,
+                threaded explicitly per request (mints a new one when ``None``).
+            owner (str | None): The principal that owns the session.
             metadata_filters (MetadataFilters | None): Optional request-scoped
                 metadata filters.
             metadata_filters_active (bool): Whether request-scoped metadata
@@ -6142,6 +6097,8 @@ class RAG:
         """
         return self.ensure_session_manager().stream_chat(
             user_msg,
+            session_id=session_id,
+            owner=owner,
             metadata_filters=metadata_filters,
             metadata_filters_active=metadata_filters_active,
             metadata_filter_rules=metadata_filter_rules,
