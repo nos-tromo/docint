@@ -35,8 +35,9 @@ uv run load-models          # pre-download model assets
 # Docker — single CPU image, no profile toggle.
 make network   # create the external inference-net + data-net (one-time)
 make volumes   # create the external Docker volumes (one-time)
-make up        # build + run docint (production shape, no host ports)
-make up-dev    # like 'up', but publishes the React SPA on the host
+make up        # run docint detached, no build (production shape, no host ports)
+make up-dev    # like 'up', but publishes the React SPA on the host (no build)
+make dev       # build, then up-dev
 # Merge duplicate/similar entities for a collection (one-off backend container,
 # so it reaches the qdrant/vllm-router aliases — production is Docker-only).
 make resolve                    # prompts for the collection name
