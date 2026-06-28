@@ -12,7 +12,7 @@ export function useNerStats(params: Parameters<typeof getNerStats>[0]) {
   const collection = useUiStore((s) => s.selectedCollection)
   return useQuery({
     queryKey: ['ner-stats', collection, params],
-    queryFn: () => getNerStats(params),
+    queryFn: () => getNerStats({ ...params, collection: collection ?? undefined }),
     enabled: !!collection
   })
 }
@@ -29,7 +29,11 @@ export function useNerGraph(params: { topKNodes?: number; enabled?: boolean }) {
   return useQuery({
     queryKey: ['ner-graph', collection, mergeMode, topKNodes],
     queryFn: () =>
-      getNerGraph({ top_k_nodes: topKNodes, entity_merge_mode: mergeMode }),
+      getNerGraph({
+        top_k_nodes: topKNodes,
+        entity_merge_mode: mergeMode,
+        collection: collection ?? undefined
+      }),
     enabled: !!collection && (params.enabled ?? true)
   })
 }
@@ -51,7 +55,8 @@ export function useNerSources(entityKey: string | null) {
         cursor: pageParam as string | null,
         limit: 50,
         entity_key: entityKey ?? undefined,
-        entity_merge_mode: mergeMode
+        entity_merge_mode: mergeMode,
+        collection: collection ?? undefined
       }),
     initialPageParam: null as string | null,
     getNextPageParam: (last) => last.next_cursor,
@@ -64,7 +69,11 @@ export function useHateSpeechPages() {
   return useInfiniteQuery({
     queryKey: ['hate-speech-pages', collection],
     queryFn: ({ pageParam }) =>
-      getHateSpeechPage({ cursor: pageParam as string | null, limit: 50 }),
+      getHateSpeechPage({
+        cursor: pageParam as string | null,
+        limit: 50,
+        collection: collection ?? undefined
+      }),
     initialPageParam: null as string | null,
     getNextPageParam: (last) => last.next_cursor,
     enabled: !!collection

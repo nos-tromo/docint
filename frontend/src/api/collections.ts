@@ -21,17 +21,33 @@ export const selectCollection = (name: string) =>
 export const deleteCollection = (name: string) =>
   apiDelete<{ ok: boolean }>(`/collections/${encodeURIComponent(name)}`)
 
-export const listDocuments = () =>
-  apiGet<{ documents: DocumentRecord[] }>('/collections/documents')
+// All analysis reads below are collection-scoped. WS2's stateless backend
+// owner-gates and scopes each request on the `collection` query param (the
+// caller's logical name); there is no server-side active collection. Callers
+// pass `useUiStore.selectedCollection` so concurrent users stay isolated.
 
-export const getDocumentsPage = (params: { cursor?: string | null; limit?: number }) =>
+export const listDocuments = (collection?: string) =>
+  apiGet<{ documents: DocumentRecord[] }>(
+    '/collections/documents',
+    collection ? { collection } : undefined
+  )
+
+export const getDocumentsPage = (params: {
+  cursor?: string | null
+  limit?: number
+  collection?: string
+}) =>
   apiGet<Page<DocumentRecord>>('/collections/documents', {
     cursor: params.cursor ?? undefined,
-    limit: params.limit ?? 50
+    limit: params.limit ?? 50,
+    collection: params.collection
   })
 
-export const getDocumentsCount = () =>
-  apiGet<{ count: number }>('/collections/documents/count')
+export const getDocumentsCount = (collection?: string) =>
+  apiGet<{ count: number }>(
+    '/collections/documents/count',
+    collection ? { collection } : undefined
+  )
 
 export const getNerStats = (params: {
   top_k?: number
@@ -39,6 +55,7 @@ export const getNerStats = (params: {
   entity_type?: string
   include_relations?: boolean
   entity_merge_mode?: EntityMergeMode
+  collection?: string
 }) => apiGet<NerStats>('/collections/ner/stats', params)
 
 export const getNerSourcesPage = (params: {
@@ -48,6 +65,7 @@ export const getNerSourcesPage = (params: {
   entity_text?: string
   entity_type?: string
   entity_merge_mode?: EntityMergeMode
+  collection?: string
 }) =>
   apiGet<Page<NerSourceRow>>('/collections/ner/sources', {
     cursor: params.cursor ?? undefined,
@@ -55,37 +73,48 @@ export const getNerSourcesPage = (params: {
     entity_key: params.entity_key,
     entity_text: params.entity_text,
     entity_type: params.entity_type,
-    entity_merge_mode: params.entity_merge_mode
+    entity_merge_mode: params.entity_merge_mode,
+    collection: params.collection
   })
 
 export const getNerGraph = (params: {
   top_k_nodes?: number
   min_edge_weight?: number
   entity_merge_mode?: EntityMergeMode
+  collection?: string
 }) =>
   apiGet<NerGraph>('/collections/ner/graph', {
     top_k_nodes: params.top_k_nodes,
     min_edge_weight: params.min_edge_weight,
-    entity_merge_mode: params.entity_merge_mode
+    entity_merge_mode: params.entity_merge_mode,
+    collection: params.collection
   })
 
-export const warmCollectionNer = () =>
-  apiPost<{ ok: boolean }>('/collections/ner/warm')
+export const warmCollectionNer = (collection?: string) =>
+  apiPost<{ ok: boolean }>(
+    '/collections/ner/warm' +
+      (collection ? `?collection=${encodeURIComponent(collection)}` : '')
+  )
 
-export const getHateSpeech = () =>
-  apiGet<{ results: HateSpeechRow[] }>('/collections/hate-speech')
+export const getHateSpeech = (collection?: string) =>
+  apiGet<{ results: HateSpeechRow[] }>(
+    '/collections/hate-speech',
+    collection ? { collection } : undefined
+  )
 
 export const getHateSpeechPage = (params: {
   cursor?: string | null
   limit?: number
   category?: string
   min_confidence?: string
+  collection?: string
 }) =>
   apiGet<Page<HateSpeechRow>>('/collections/hate-speech', {
     cursor: params.cursor ?? undefined,
     limit: params.limit ?? 50,
     category: params.category,
-    min_confidence: params.min_confidence
+    min_confidence: params.min_confidence,
+    collection: params.collection
   })
 
 export const getIeStats = (collection: string) =>

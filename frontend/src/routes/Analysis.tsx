@@ -49,7 +49,7 @@ export function Analysis() {
   // fire-and-forget so the slow scroll happens off the main interaction.
   useEffect(() => {
     if (!collection) return
-    warmCollectionNer().catch(() => {
+    warmCollectionNer(collection).catch(() => {
       /* warm is best-effort */
     })
   }, [collection])
