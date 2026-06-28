@@ -188,6 +188,33 @@ def _require_active_collection() -> str:
     return name
 
 
+def _require_owned_collection(logical_name: str, principal: str) -> str:
+    """Resolve a caller-owned logical collection to its physical Qdrant name.
+
+    The single ownership gate for collection-scoped endpoints. It mirrors
+    :func:`_get_owned_report`: a collection the caller does not own (or that
+    does not exist) is indistinguishable from "not found" (HTTP 404), so one
+    user's collection names never leak to another.
+
+    Args:
+        logical_name (str): The user-visible collection name from the request.
+        principal (str): The resolved calling principal.
+
+    Returns:
+        str: The physical (owner-namespaced) Qdrant collection name to use.
+
+    Raises:
+        HTTPException: 400 if the name is blank; 404 if the caller does not own it.
+    """
+    name = (logical_name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Collection name required")
+    physical = rag.ensure_collection_owner_manager().resolve(principal, name)
+    if physical is None:
+        raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
+    return physical
+
+
 def _resolve_qdrant_src_dir() -> Path:
     """Return the configured Qdrant sources directory (separate from collections).
 
@@ -666,42 +693,55 @@ class ReportListOut(BaseModel):
 
 
 @app.get("/collections/list", response_model=list[str], tags=["Collections"])
-def collections_list() -> list[str]:
-    """List existing collections.
+def collections_list(principal: str = Depends(resolve_principal)) -> list[str]:
+    """List the calling principal's collections (logical names).
+
+    Collections are owner-scoped: a caller only sees the collections they
+    ingested themselves. Names are the user-visible logical names, not the
+    owner-namespaced physical Qdrant names.
+
+    Args:
+        principal (str): The resolved request principal.
 
     Returns:
-        list[str]: A list of collection names.
+        list[str]: The caller's collection names, sorted.
 
     Raises:
         HTTPException: If an error occurs while listing collections.
     """
     try:
-        return rag.list_collections()
+        return rag.ensure_collection_owner_manager().list_for(principal)
     except Exception as e:
         logger.error("HTTPException: Error listing collections: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/collections/select", response_model=SelectCollectionOut, tags=["Collections"])
-def collections_select(payload: SelectCollectionIn) -> dict[str, bool | str]:
-    """Select a collection to use for queries.
+def collections_select(
+    payload: SelectCollectionIn, principal: str = Depends(resolve_principal)
+) -> dict[str, bool | str]:
+    """Select a collection the caller owns to use for queries.
+
+    Resolves the caller's logical name to its owner-namespaced physical Qdrant
+    collection; selecting a collection the caller does not own is a 404, so
+    another user's collections are never selectable.
 
     Args:
         payload (SelectCollectionIn): The payload containing the collection name.
+        principal (str): The resolved request principal.
 
     Returns:
-        dict[str, bool | str]: A dictionary indicating success and the selected collection name.
+        dict[str, bool | str]: A dictionary indicating success and the selected
+            (logical) collection name.
 
     Raises:
-        HTTPException: 400 if the collection name is missing, 404 if the
-            collection does not exist, 500 for any other backend failure.
+        HTTPException: 400 if the collection name is missing, 404 if the caller
+            does not own it, 500 for any other backend failure.
     """
     name = payload.name.strip()
-    if not name:
-        logger.error("HTTPException: Collection name required")
-        raise HTTPException(status_code=400, detail="Collection name required")
+    physical = _require_owned_collection(name, principal)
     try:
-        rag.select_collection(name)
+        rag.select_collection(physical)
     except HTTPException:
         raise
     except ValueError as e:
@@ -714,21 +754,31 @@ def collections_select(payload: SelectCollectionIn) -> dict[str, bool | str]:
 
 
 @app.delete("/collections/{name}", tags=["Collections"])
-def collections_delete(name: str) -> dict[str, bool]:
-    """Delete a collection.
+def collections_delete(name: str, principal: str = Depends(resolve_principal)) -> dict[str, bool]:
+    """Delete a collection the caller owns.
+
+    Deleting a collection the caller does not own (or one that does not exist)
+    is a 404, so a user can never delete another user's data. The Qdrant
+    collection is dropped first; only then is the ownership mapping removed, so
+    a failed Qdrant delete leaves ownership intact for retry.
 
     Args:
-        name (str): The name of the collection to delete.
+        name (str): The user-visible collection name to delete.
+        principal (str): The resolved request principal.
 
     Returns:
         dict[str, bool]: A dictionary indicating success.
 
     Raises:
-        HTTPException: If an error occurs while deleting the collection.
+        HTTPException: 404 if the caller does not own it; 500 on backend failure.
     """
+    physical = _require_owned_collection(name, principal)
     try:
-        rag.delete_collection(name)
+        rag.delete_collection(physical)
+        rag.ensure_collection_owner_manager().delete(principal, name)
         return {"ok": True}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("HTTPException: Error deleting collection: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -2366,11 +2416,17 @@ def agent_chat(payload: AgentChatIn, request: Request) -> AgentChatOut:
 
 
 @app.post("/ingest", response_model=IngestOut, tags=["Ingestion"])
-def ingest(payload: IngestIn) -> dict[str, bool | str]:
-    """Trigger ingestion for the requested collection using the configured data directory.
+def ingest(payload: IngestIn, request: Request) -> dict[str, bool | str]:
+    """Trigger ingestion for the caller's collection using the configured data directory.
+
+    The ``collection`` in the payload is the caller's *logical* name. Ingestion
+    registers ownership (the first ingester owns it) and resolves it to an
+    owner-namespaced physical Qdrant collection, so two users can ingest the
+    same logical name without colliding.
 
     Args:
         payload (IngestIn): The ingestion payload containing the collection name and hybrid flag.
+        request (Request): The incoming request used to resolve the calling principal.
 
     Returns:
         dict[str, bool | str]: A dictionary with keys ``ok``, ``collection``, ``data_dir``,
@@ -2387,6 +2443,9 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
         logger.error("HTTPException: Collection name required")
         raise HTTPException(status_code=400, detail="Collection name required")
 
+    principal = resolve_principal(request)
+    physical = rag.ensure_collection_owner_manager().register(principal, name)
+
     data_dir = _resolve_data_dir()
     if not data_dir.is_dir():
         logger.error("HTTPException: Data directory does not exist: {}", data_dir)
@@ -2397,7 +2456,7 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
 
     try:
         ingest_module.ingest_docs(
-            name,
+            physical,
             data_dir,
             hybrid=payload.hybrid if payload.hybrid is not None else True,
         )
@@ -2546,6 +2605,12 @@ async def ingest_upload(
         logger.error("HTTPException: At least one file is required for upload")
         raise HTTPException(status_code=400, detail="At least one file is required")
 
+    # Ownership: the first uploader owns the logical name; resolve it to an
+    # owner-namespaced physical collection so two users uploading the same
+    # logical name keep separate Qdrant collections and source-file stores.
+    principal = resolve_principal(request)
+    physical = rag.ensure_collection_owner_manager().register(principal, name)
+
     # We use a persistent directory for uploads to support previewing files later.
     # The files are ingested into Qdrant and kept in the collection directory.
 
@@ -2560,7 +2625,7 @@ async def ingest_upload(
         """
         # Use the dedicated sources directory (sibling to Qdrant collections) to store uploaded files
         qdrant_src_dir = _resolve_qdrant_src_dir()
-        batch_dir = qdrant_src_dir / name
+        batch_dir = qdrant_src_dir / physical
         batch_dir.mkdir(parents=True, exist_ok=True)
 
         yield _format_sse(
@@ -2660,7 +2725,7 @@ async def ingest_upload(
                 try:
                     await to_thread.run_sync(
                         ingest_module.ingest_docs,
-                        name,
+                        physical,
                         batch_dir,
                         hybrid if hybrid is not None else True,
                         progress_callback,

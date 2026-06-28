@@ -54,6 +54,7 @@ from docint.utils.env_cfg import (
     load_ner_env,
     load_openai_env,
     load_path_env,
+    load_principal_env,
     load_rerank_client_env,
     load_resolution_env,
     load_retrieval_env,
@@ -139,6 +140,7 @@ from docint.core.ner import (
 )
 from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.retrieval_filters import matches_metadata_filters
+from docint.core.state.collection_owner_manager import CollectionOwnerManager
 from docint.core.state.report_manager import ReportManager
 from docint.core.state.session_manager import SessionManager
 from docint.core.storage.ingest_manifest import (
@@ -1753,6 +1755,8 @@ class RAG:
     query_engine: RetrieverQueryEngine | None = field(default=None, init=False)
     sessions: SessionManager | None = field(default=None, init=False)
     reports: ReportManager | None = field(default=None, init=False)
+    collection_owners: CollectionOwnerManager | None = field(default=None, init=False)
+    _collection_backfill_done: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Post-initialization to set up any necessary components.
@@ -5824,6 +5828,31 @@ class RAG:
         if self.reports is None:
             self.reports = ReportManager(self)
         return self.reports
+
+    def ensure_collection_owner_manager(self) -> CollectionOwnerManager:
+        """Ensure the CollectionOwnerManager is initialized and return it.
+
+        Parallels :meth:`ensure_report_manager`. On first successful use it
+        backfills any pre-existing Qdrant collections (created before ownership
+        shipped) to the configured default identity, so the current operator
+        keeps access to legacy data. The backfill is best-effort and retried on
+        subsequent calls until it succeeds once (e.g. if Qdrant was briefly
+        unreachable at startup).
+
+        Returns:
+            CollectionOwnerManager: The initialized manager for this RAG instance.
+        """
+        if self.collection_owners is None:
+            self.collection_owners = CollectionOwnerManager(self)
+        if not self._collection_backfill_done:
+            try:
+                default_owner = load_principal_env().default_identity
+                if default_owner:
+                    self.collection_owners.backfill_legacy(self.list_collections(), default_owner)
+                self._collection_backfill_done = True
+            except Exception as exc:
+                logger.warning("Collection ownership backfill skipped (will retry): {}", exc)
+        return self.collection_owners
 
     def export_session(self, session_id: str | None = None, out_dir: str | Path = "session") -> Path:
         """Delegate session export to SessionManager.

@@ -72,12 +72,42 @@ class DummySessionManager:
         return Ctx()
 
 
+class _DummyOwners:
+    """Passthrough collection-ownership manager for endpoint tests.
+
+    Ownership is a no-op here (physical name == logical name, every name is
+    "owned"), so these tests stay focused on endpoint behavior; real owner
+    scoping is covered in ``test_api_collections_ownership.py``. ``list_for``
+    delegates to ``list_collections`` so failure-injection on the RAG still
+    surfaces through ``/collections/list``.
+    """
+
+    def __init__(self, rag: "DummyRAG") -> None:
+        self._rag = rag
+
+    def register(self, owner: str | None, logical: str) -> str:
+        return logical
+
+    def resolve(self, owner: str | None, logical: str) -> str | None:
+        return logical
+
+    def list_for(self, owner: str | None) -> list[str]:
+        return self._rag.list_collections()
+
+    def delete(self, owner: str | None, logical: str) -> str | None:
+        return logical
+
+    def backfill_legacy(self, physical_names: list[str], default_owner: str | None) -> None:
+        return None
+
+
 class DummyRAG:
     """Dummy Retrieval-Augmented Generation (RAG) class for testing purposes."""
 
     def __init__(self) -> None:
         """Initialize the DummyRAG instance."""
         self.qdrant_collection = "alpha"
+        self._owners = _DummyOwners(self)
         self.summarize_prompt = "Summarize collection"
         self.index = object()
         self.query_engine = object()
@@ -157,6 +187,14 @@ class DummyRAG:
             DummySessionManager: The pre-initialized session manager stub.
         """
         return self.sessions
+
+    def ensure_collection_owner_manager(self) -> "_DummyOwners":
+        """Return the passthrough ownership manager stub.
+
+        Returns:
+            _DummyOwners: The no-op ownership manager.
+        """
+        return self._owners
 
     def start_session(self, session_id: str | None = None, owner: str | None = None) -> str:
         """Start a new session or resume an existing one.
