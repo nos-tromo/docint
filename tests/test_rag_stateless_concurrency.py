@@ -182,3 +182,101 @@ def test_query_engine_cached_per_physical_collection(monkeypatch: pytest.MonkeyP
         assert rag.query_engine is engine_a
     # No scope active -> the empty process default, which never cached an engine.
     assert rag.query_engine is None
+
+
+def test_concurrent_query_requests_isolated_per_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two concurrent HTTP ``/query`` requests for two owners are fully isolated.
+
+    Alice and Bob both query the *same* logical collection (``docs``) at the same
+    time on different threads. The owner manager maps each to a distinct physical
+    collection; the engine builder rendezvous on a barrier so both requests are
+    in flight simultaneously. Each response must contain only its own owner's
+    physical collection — the end-to-end proof that the read/query path carries
+    no shared active-collection state. Under the old global model both responses
+    would echo whichever request wrote the singleton last.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+    """
+    from fastapi.testclient import TestClient
+
+    import docint.core.api as api_module
+
+    entered_barrier = threading.Barrier(2)
+    read_barrier = threading.Barrier(2)
+
+    def _fake_build(self: RAG, **_kwargs: Any) -> Any:
+        rag_ref = self
+
+        class _Engine:
+            def query(self, prompt: str) -> Response:
+                # Two rendezvous, both inside the request's collection scope:
+                #   1. wait until BOTH requests have entered their scope, so a
+                #      shared global already holds the last writer's value;
+                #   2. read, then wait again so NEITHER request exits (and
+                #      restores) its scope before both have read.
+                # With the per-request ContextVar each read sees only its own
+                # collection; with a shared global both see the last writer and
+                # the assertions below fail.
+                entered_barrier.wait(timeout=10)
+                value = rag_ref.qdrant_collection
+                read_barrier.wait(timeout=10)
+                return Response(response=value, source_nodes=[])
+
+        return _Engine()
+
+    class _Owners:
+        """Owner-manager stub mapping (owner, logical) to a per-owner physical name."""
+
+        def resolve(self, owner: str | None, logical: str) -> str:
+            return f"u_{owner}__{logical}"
+
+    monkeypatch.setattr(RAG, "build_query_engine", _fake_build)
+    monkeypatch.setattr(RAG, "create_index", lambda self: None)
+    monkeypatch.setattr(RAG, "expand_query_with_graph_with_debug", lambda self, q: (q, {}))
+    monkeypatch.setattr(
+        RAG,
+        "_normalize_response_data",
+        lambda self, prompt, result, **kw: {"response": result.response, "sources": [{"collection": result.response}]},
+    )
+    monkeypatch.setattr(
+        RAG,
+        "_resolve_runtime_retrieval_settings",
+        lambda self, *a, **k: {
+            "vector_store_query_mode": _VectorStoreQueryModeStub.DEFAULT,
+            "label": "test",
+            "parent_context_enabled": False,
+        },
+    )
+    monkeypatch.setattr(RAG, "ensure_collection_owner_manager", lambda self: _Owners())
+
+    rag = RAG(qdrant_collection="")
+    monkeypatch.setattr(api_module, "rag", rag)
+    monkeypatch.setattr(api_module, "_validation_payload", lambda **kwargs: {})
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+
+    client = TestClient(api_module.app)
+    results: dict[str, Any] = {}
+    errors: dict[str, BaseException] = {}
+
+    def call(user: str) -> None:
+        try:
+            results[user] = client.post(
+                "/query",
+                json={"question": "q", "collection": "docs", "retrieval_mode": "stateless"},
+                headers={"X-Auth-User": user},
+            )
+        except BaseException as exc:
+            errors[user] = exc
+
+    threads = [threading.Thread(target=call, args=(u,)) for u in ("alice", "bob")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, errors
+    assert results["alice"].status_code == 200, results["alice"].text
+    assert results["bob"].status_code == 200, results["bob"].text
+    assert results["alice"].json()["sources"] == [{"collection": "u_alice__docs"}]
+    assert results["bob"].json()["sources"] == [{"collection": "u_bob__docs"}]
