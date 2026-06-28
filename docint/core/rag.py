@@ -5905,11 +5905,16 @@ class RAG:
             self._resolved_index_cache.clear()
             return
 
-        stale_aggregate_keys = [key for key in self.ner_aggregate_cache if key[0] == collection]
+        # Snapshot keys with list() before filtering. Collections are now
+        # per-request/concurrent, so a parallel NER request may write these
+        # caches while we scan; iterating the dict live would raise "dictionary
+        # changed size during iteration". list(dict) materializes the keys
+        # atomically under the GIL, and pop(..., None) tolerates a racing delete.
+        stale_aggregate_keys = [key for key in list(self.ner_aggregate_cache) if key[0] == collection]
         for aggregate_key in stale_aggregate_keys:
             self.ner_aggregate_cache.pop(aggregate_key, None)
         stale_graph_keys: list[tuple[str, str, int, int]] = [
-            key for key in self.ner_graph_cache if key[0] == collection
+            key for key in list(self.ner_graph_cache) if key[0] == collection
         ]
         for graph_key in stale_graph_keys:
             self.ner_graph_cache.pop(graph_key, None)
