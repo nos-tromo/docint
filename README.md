@@ -78,13 +78,22 @@ and chat. It ships with:
 - Session persistence uses one SQLite file path. Set `SESSIONS_DB_PATH` for
   the normal case or `SESSION_STORE` if you want to supply a full SQLAlchemy
   database URL.
-- The React SPA does not add an authenticated user header by itself. For
-   single-user Docker or local setups, set `DOCINT_DEFAULT_IDENTITY` in `.env`
-   so session-backed chat and `/sessions/list` share one owner. If you run
-   behind a trusted proxy that injects a user header, set
-   `DOCINT_AUTH_HEADER` to that header name instead. Existing legacy sessions
-   with `owner = NULL` are backfilled to `DOCINT_DEFAULT_IDENTITY` when the
-   backend initializes the session store.
+- **Multi-user / data isolation.** Collections, chat sessions, and reports are
+   owner-scoped: each user sees and operates only on the collections they
+   ingested and the reports they created. Collection names are per-user — two
+   users can each have a `my_collection` without collision (the physical Qdrant
+   collection is namespaced per owner; the bare name is shown in the UI). Every
+   collection-scoped request carries its collection explicitly and is owner-gated
+   (cross-owner access is a 404), and the active collection is resolved
+   per-request, so concurrent users on different collections never interfere.
+- **Identity.** The React SPA does not add an authenticated-user header itself.
+   For single-user Docker or local setups, set `DOCINT_DEFAULT_IDENTITY` in
+   `.env` so every request shares one owner. To run multi-user, put docint behind
+   a trusted proxy that authenticates each user and injects a user header, and
+   set `DOCINT_AUTH_HEADER` to that header name (default `X-Auth-User`); a request
+   with no header falls back to `DOCINT_DEFAULT_IDENTITY` (or 401 if neither is
+   set). Legacy sessions and collections with no owner are backfilled to
+   `DOCINT_DEFAULT_IDENTITY` when the backend initializes.
 
 ### Shared Docker Volumes
 
@@ -204,11 +213,10 @@ that would otherwise tax the SPA:
 
 ```bash
 # Server-streamed CSV from anywhere with HTTP access to the backend.
-# Selects the active collection first (the SPA does this automatically;
-# the example assumes the API is reachable on port 8000).
-curl -X POST http://localhost:8000/collections/select \
-  -H 'Content-Type: application/json' \
-  -d '{"name": "my_collection"}'
+# Export endpoints are owner-gated by the collection name in the path — there is
+# no "select" step. Behind a trusted proxy, pass the user header
+# (e.g. -H 'X-Auth-User: alice'); with DOCINT_DEFAULT_IDENTITY set the header is
+# optional. The example assumes the API is reachable on port 8000.
 curl -O "http://localhost:8000/collections/my_collection/export/entities.csv"
 curl -O "http://localhost:8000/collections/my_collection/export/hate-speech.csv"
 curl -O "http://localhost:8000/collections/my_collection/export/documents.csv"
