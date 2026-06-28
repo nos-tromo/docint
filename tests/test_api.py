@@ -1,9 +1,10 @@
 """Tests for the FastAPI application endpoints."""
 
 import asyncio
+import contextlib
 import io
 import types
-from collections.abc import Generator
+from collections.abc import Generator, Iterator
 from pathlib import Path
 from typing import Any, cast
 
@@ -114,6 +115,9 @@ class DummyRAG:
         self.selected: list[str] = []
         self.sessions = DummySessionManager()
         self.chats: list[str] = []
+        # Physical collection observed (via the active scope) at call time, so
+        # tests can assert /query and /stream_query thread the resolved name in.
+        self.seen_collections: list[str] = []
         self.stateless_queries: list[str] = []
         self.stateless_query_filters: list[dict[str, Any]] = []
         self.entity_occurrence_queries: list[str] = []
@@ -169,6 +173,27 @@ class DummyRAG:
         self.qdrant_collection = name
         self.index = None
         self.query_engine = None
+
+    @contextlib.contextmanager
+    def collection_scope(self, physical: str) -> Iterator[None]:
+        """Mirror :meth:`RAG.collection_scope` for the stub.
+
+        Sets the active collection for the duration of the block and restores
+        the previous value on exit, so endpoint code that scopes a request sees
+        the resolved physical name on this stub.
+
+        Args:
+            physical (str): The physical collection name to make active.
+
+        Yields:
+            None: Control returns with the scope active.
+        """
+        prev = self.qdrant_collection
+        self.qdrant_collection = physical
+        try:
+            yield
+        finally:
+            self.qdrant_collection = prev
 
     def create_index(self) -> None:
         """Create a new index for the selected collection."""
@@ -230,6 +255,7 @@ class DummyRAG:
         Returns:
             dict[str, Any]: The response from the RAG system.
         """
+        self.seen_collections.append(self.qdrant_collection)
         self.chats.append(question)
         self.chat_filters.append(
             {
@@ -328,6 +354,7 @@ class DummyRAG:
         _ = metadata_filters
         _ = metadata_filter_rules
         _ = vector_store_kwargs
+        self.seen_collections.append(self.qdrant_collection)
         self.stateless_queries.append(prompt)
         return {
             "response": "answer",
@@ -803,42 +830,31 @@ def test_collections_list_failure(monkeypatch: pytest.MonkeyPatch, client: TestC
     assert response.json()["detail"] == "boom"
 
 
-def test_collections_select_success(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
-    """Selecting a collection must succeed without warming the query engine.
+def test_collections_select_is_nonmutating(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """Selecting a collection is a non-mutating ownership check (WS2).
 
-    Regression guard for the same OOM pattern that commit 18a47a6 removed
-    from ``/ingest`` and ``/ingest/upload``: ``/collections/select``
-    previously called ``rag.create_index`` + ``rag.create_query_engine`` +
-    ``rag.get_collection_ner(refresh=True)`` immediately after
-    ``rag.select_collection``. That chain loads bge-m3 (~2 GB),
-    bge-reranker-v2-m3 (~1 GB), and GLiNER on every collection switch,
-    causing OOM-kill on CPU Docker. The query engine is now built lazily
-    on the first chat query.
+    ``/collections/select`` no longer changes any server-side state: it neither
+    switches the active collection nor warms the index/query engine. Selection
+    is purely client-side; the server only confirms ownership (200 with the
+    name) so the request path stays stateless and concurrency-safe. This also
+    subsumes the prior OOM guard (no eager bge-m3 / reranker / GLiNER load).
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         client (TestClient): The TestClient instance.
     """
+    rag = cast(Any, api_module.rag)
+    before = rag.qdrant_collection
     response = client.post("/collections/select", json={"name": " gamma "})
     assert response.status_code == 200
-    payload = response.json()
-    assert payload == {"ok": True, "name": "gamma"}
-    rag = cast(Any, api_module.rag)
-    assert rag.qdrant_collection == "gamma"
-    # Neither the index nor the query engine may be built eagerly on select.
-    assert rag.created_index == 0, (
-        "rag.create_index() must NOT be called from /collections/select; "
-        "it triggers bge-m3 load and OOM-kills CPU Docker on collection switch."
-    )
-    assert rag.created_query_engine == 0, (
-        "rag.create_query_engine() must NOT be called from /collections/select; "
-        "it triggers reranker + embedding loads and OOM-kills CPU Docker."
-    )
-    # NER pre-warm must also be skipped — it previously triggered GLiNER on select.
-    assert rag.ner_refresh_calls == [], (
-        "get_collection_ner() must NOT be called from /collections/select; "
-        "it triggers GLiNER load and compounds warmup memory pressure."
-    )
+    assert response.json() == {"ok": True, "name": "gamma"}
+    # No server-side state may change: active collection, selection log, and the
+    # index/engine/NER warmup counters must all be untouched.
+    assert rag.qdrant_collection == before
+    assert rag.selected == []
+    assert rag.created_index == 0
+    assert rag.created_query_engine == 0
+    assert rag.ner_refresh_calls == []
 
 
 def test_collections_select_blank_name(client: TestClient) -> None:
@@ -856,52 +872,23 @@ def test_collections_select_blank_name(client: TestClient) -> None:
     assert "Collection name required" in response.json()["detail"]
 
 
-def test_collections_select_returns_404_on_nonexistent_collection(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient
-) -> None:
-    """``ValueError`` from ``select_collection`` must surface as HTTP 404.
+def test_collections_select_returns_404_when_not_owned(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """A collection the caller does not own resolves to HTTP 404.
 
-    Regression guard for the post-ingest navigation bug: when the
-    sidebar (or the ingest page) POSTs ``/collections/select`` for a
-    collection that Qdrant hasn't yet exposed, ``rag.select_collection``
-    raises ``ValueError``. The handler previously only caught
-    ``HTTPException``, so the ``ValueError`` escaped as an unhandled
-    server exception, the UI logged "Failed to select collection" with
-    no usable detail, and ``st.session_state.selected_collection`` was
-    left stale. The endpoint must now translate this into a structured
-    404 so the UI can react and recover.
+    Selection is now an ownership check: when the owner manager cannot resolve
+    the logical name for this principal (unowned or nonexistent), the endpoint
+    returns 404 without leaking whether the name exists. This replaces the old
+    ``ValueError``-from-``select_collection`` path (select no longer mutates).
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         client (TestClient): The TestClient instance.
     """
-
-    def raise_missing(name: str) -> None:
-        raise ValueError(f"Collection '{name}' does not exist")
-
-    monkeypatch.setattr(api_module.rag, "select_collection", raise_missing)
+    rag = cast(Any, api_module.rag)
+    monkeypatch.setattr(rag._owners, "resolve", lambda owner, logical: None)
     response = client.post("/collections/select", json={"name": "ghost"})
     assert response.status_code == 404
-    assert "does not exist" in response.json()["detail"]
-
-
-def test_collections_select_returns_500_on_unexpected_error(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient
-) -> None:
-    """Unexpected backend exceptions must surface as HTTP 500 with detail.
-
-    Args:
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
-        client (TestClient): The TestClient instance.
-    """
-
-    def raise_unexpected(name: str) -> None:
-        raise RuntimeError("qdrant exploded")
-
-    monkeypatch.setattr(api_module.rag, "select_collection", raise_unexpected)
-    response = client.post("/collections/select", json={"name": "alpha"})
-    assert response.status_code == 500
-    assert "qdrant exploded" in response.json()["detail"]
+    assert "not found" in response.json()["detail"].lower()
 
 
 def test_collections_ner_success(client: TestClient) -> None:
@@ -1579,6 +1566,62 @@ def test_query_stateless_mode_skips_session_chat(client: TestClient) -> None:
     assert len(rag.chats) == before_chats
     assert rag.stateless_queries[-1].startswith("What?")
     assert body["graph_debug"]["applied"] is True
+
+
+def test_query_collection_field_resolves_and_scopes_physical(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """`/query` resolves the logical `collection` to its physical name and scopes the engine (WS2).
+
+    The owner manager maps the caller's logical name to an owner-namespaced
+    physical collection; the engine must run under that physical name, not the
+    process-default active collection.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    rag = cast(Any, api_module.rag)
+    monkeypatch.setattr(rag._owners, "resolve", lambda owner, logical: f"phys__{logical}")
+    response = client.post(
+        "/query",
+        json={"question": "What?", "collection": "alpha", "retrieval_mode": "stateless"},
+    )
+    assert response.status_code == 200
+    # The engine saw the resolved physical name while scoped, not "alpha".
+    assert rag.seen_collections[-1] == "phys__alpha"
+
+
+def test_query_collection_field_404_when_not_owned(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """`/query` with a `collection` the caller does not own returns 404 (WS2).
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    rag = cast(Any, api_module.rag)
+    monkeypatch.setattr(rag._owners, "resolve", lambda owner, logical: None)
+    response = client.post(
+        "/query",
+        json={"question": "What?", "collection": "ghost", "retrieval_mode": "stateless"},
+    )
+    assert response.status_code == 404
+
+
+def test_stream_query_collection_field_404_when_not_owned(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """`/stream_query` gates the `collection` upfront — an unowned name 404s before streaming (WS2).
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+    """
+    rag = cast(Any, api_module.rag)
+    monkeypatch.setattr(rag._owners, "resolve", lambda owner, logical: None)
+    response = client.post(
+        "/stream_query",
+        json={"question": "What?", "collection": "ghost", "retrieval_mode": "stateless"},
+    )
+    assert response.status_code == 404
 
 
 def test_stream_query_stateless_mode_emits_tokens(client: TestClient) -> None:
@@ -3052,11 +3095,18 @@ def test_export_documents_csv_streams(client: TestClient) -> None:
     assert rows[1][-1] == "PERSON;ORG"
 
 
-def test_export_rejects_collection_mismatch(client: TestClient) -> None:
-    """The URL path's collection name must match the active collection (409 otherwise)."""
-    _select_alpha(client)
+def test_export_404_when_not_owned(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """Exporting a collection the caller does not own returns 404 (WS2).
+
+    Exports are now owner-gated on the URL path collection rather than coupled
+    to a global active collection (the old 409 "mismatch" path is gone). When
+    the owner manager cannot resolve the name for this principal, the endpoint
+    404s without leaking existence.
+    """
+    rag = cast(Any, api_module.rag)
+    monkeypatch.setattr(rag._owners, "resolve", lambda owner, logical: None)
     response = client.get("/collections/beta/export/documents.csv")
-    assert response.status_code == 409
+    assert response.status_code == 404
 
 
 def test_export_entities_csv_uses_ner_stats(client: TestClient) -> None:
@@ -3126,11 +3176,16 @@ def test_export_hate_speech_csv_passes_through_rows(client: TestClient) -> None:
     assert rows[1][4] == "Hateful"
 
 
-def test_export_requires_active_collection(client: TestClient) -> None:
-    """Export endpoints reject calls when no collection is active (HTTP 400)."""
+def test_export_independent_of_global_active_collection(client: TestClient) -> None:
+    """Exports resolve the path collection by ownership, not the global active one (WS2).
+
+    Clearing the process-default active collection must not affect an export of
+    an owned collection: the path name is owner-gated and scoped per request, so
+    exports are stateless.
+    """
     api_module.rag.qdrant_collection = ""
     response = client.get("/collections/alpha/export/documents.csv")
-    assert response.status_code == 400
+    assert response.status_code == 200
 
 
 def test_select_does_not_warm_documents_or_hate_speech_caches(client: TestClient) -> None:

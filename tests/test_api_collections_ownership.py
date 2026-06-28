@@ -119,12 +119,14 @@ def test_same_logical_name_is_independent_per_user(client: TestClient, _patch_ra
 
 
 def test_select_is_owner_gated(client: TestClient, _patch_rag: _OwnRAG) -> None:
-    """A user can select a collection they own; selecting another's is 404."""
+    """Select validates ownership (200 owned / 404 not) and never mutates state (WS2)."""
     _ingest(client, "alice", "alpha")
     assert (
         client.post("/collections/select", json={"name": "alpha"}, headers={"X-Auth-User": "alice"}).status_code == 200
     )
-    assert _patch_rag.active != "" and _patch_rag.active != "alpha"  # active is the physical name
+    # WS2: selection is a non-mutating ownership check — no server-side active
+    # collection is set, so concurrent users cannot clobber each other.
+    assert _patch_rag.active == ""
     resp = client.post("/collections/select", json={"name": "alpha"}, headers={"X-Auth-User": "bob"})
     assert resp.status_code == 404
 
