@@ -68,6 +68,12 @@ export type RetrievalMode = 'stateless' | 'session'
 export interface ChatRequest {
   question: string
   session_id?: string
+  // Caller's logical collection (`useUiStore.selectedCollection`). The WS2
+  // backend is stateless per request: `/query` and `/stream_query` owner-gate
+  // and scope on this field, so concurrent users on different collections no
+  // longer clobber a shared server-side "active collection". Omitted only when
+  // nothing is selected yet.
+  collection?: string
   metadata_filters?: MetadataFilter[]
   retrieval_mode?: RetrievalMode
   query_mode?: QueryMode

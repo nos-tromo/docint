@@ -68,6 +68,7 @@ export function Chat() {
   const sessionIdParam = params.sessionId ?? null
   const setCurrentSessionId = useUiStore((s) => s.setCurrentSessionId)
   const currentSessionId = useUiStore((s) => s.currentSessionId)
+  const selectedCollection = useUiStore((s) => s.selectedCollection)
   const activeReportId = useReportStore((s) => s.activeReportId)
   const reportDedupeKeys = useReportDedupeKeys(activeReportId)
   const filters = useChatFiltersStore()
@@ -119,6 +120,10 @@ export function Chat() {
         {
           question: message,
           session_id: currentSessionId ?? undefined,
+          // WS2 backend resolves + owner-gates the collection per request; the
+          // client selection is the single source of truth (no server-side
+          // active collection anymore).
+          collection: selectedCollection ?? undefined,
           metadata_filters: filters.buildPayload(),
           query_mode: filters.queryMode,
           retrieval_mode: filters.retrievalMode
