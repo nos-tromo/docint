@@ -150,6 +150,40 @@ def test_legacy_collections_backfilled_to_default_identity(client: TestClient, _
     assert _list(client, "alice") == []
 
 
+def test_preview_source_is_owner_gated_and_uses_physical(
+    client: TestClient, _patch_rag: _OwnRAG, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """/sources/preview owner-gates the logical name and resolves it to physical.
+
+    A non-owner gets 404 (and no file lookup is attempted); the owner's request
+    resolves the logical name to its owner-namespaced physical collection before
+    touching the source store, so previews work for namespaced users.
+    """
+    _ingest(client, "alice", "docs")
+    captured: dict[str, str] = {}
+    src = tmp_path / "x.txt"
+    src.write_text("hi", encoding="utf-8")
+
+    def _fake_resolve(collection: str, file_hash: str, **_kw: Any) -> Path:
+        captured["collection"] = collection
+        return src
+
+    monkeypatch.setattr(api_module, "_resolve_source_file_path", _fake_resolve)
+
+    ok = client.get(
+        "/sources/preview", params={"collection": "docs", "file_hash": "h"}, headers={"X-Auth-User": "alice"}
+    )
+    assert ok.status_code == 200, ok.text
+    assert captured["collection"] != "docs"  # resolved to the owner-namespaced physical name
+
+    captured.clear()
+    denied = client.get(
+        "/sources/preview", params={"collection": "docs", "file_hash": "h"}, headers={"X-Auth-User": "bob"}
+    )
+    assert denied.status_code == 404
+    assert captured == {}  # gate rejected before any source lookup
+
+
 def test_upload_registers_ownership(
     client: TestClient, _patch_rag: _OwnRAG, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

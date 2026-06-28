@@ -3012,20 +3012,29 @@ async def ingest_upload(
 
 
 @app.get("/sources/preview", tags=["Sources"])
-def preview_source(collection: str, file_hash: str) -> FileResponse:
-    """Serve a previously ingested source file for preview purposes.
+def preview_source(collection: str, file_hash: str, principal: str = Depends(resolve_principal)) -> FileResponse:
+    """Serve a previously ingested source file the caller owns.
+
+    ``collection`` is the caller's *logical* name; it is owner-gated and
+    resolved to its owner-namespaced physical collection before the source
+    store is touched (404 when the caller does not own it). This both prevents
+    one user from previewing another's files and makes previews resolve under
+    the correct physical path for namespaced users.
 
     Args:
-        collection (str): The name of the collection.
+        collection (str): The caller's logical collection name.
         file_hash (str): The hash of the file to preview.
+        principal (str): The resolved request principal.
 
     Returns:
         FileResponse: A response containing the requested file.
 
     Raises:
-        HTTPException: If an error occurs while retrieving the source preview.
+        HTTPException: 404 when the caller does not own the collection or the
+            file cannot be found.
     """
-    path = _resolve_source_file_path(collection, file_hash)
+    physical = _require_owned_collection(collection, principal)
+    path = _resolve_source_file_path(physical, file_hash)
     if path is None:
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(path)
