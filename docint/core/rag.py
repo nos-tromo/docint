@@ -17,7 +17,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -1614,6 +1614,13 @@ class VLLMSparseEncoder:
 # ``to_thread.run_sync`` hops used by the streaming endpoints.
 _active_collection: ContextVar[str | None] = ContextVar("docint_active_collection", default=None)
 
+# Upper bound on the per-collection retrieval-handle caches (``index`` /
+# ``query_engine``). Each cached handle pins a SQLite docstore connection, so an
+# unbounded cache would leak file descriptors on a host with many collections.
+# Evicted handles are dropped from the cache only (not closed): an in-flight
+# request keeps its own reference and the OS reclaims the fd once it is gone.
+_RETRIEVAL_HANDLE_CACHE_MAX = 32
+
 
 # ``slots=True`` is intentionally NOT used here. ``qdrant_collection`` is a
 # normal field for the type checker / generated ``__init__`` signature, but its
@@ -1795,8 +1802,10 @@ class RAG:
     # so the generated ``__init__`` does not re-assign it and clobber the value
     # the ``qdrant_collection`` field's init assignment routes here.
     _collection_default: str = field(default="", init=False, repr=False)
-    _index_cache: dict[str, VectorStoreIndex] = field(default_factory=dict, init=False, repr=False)
-    _query_engine_cache: dict[str, RetrieverQueryEngine] = field(default_factory=dict, init=False, repr=False)
+    _index_cache: OrderedDict[str, VectorStoreIndex] = field(default_factory=OrderedDict, init=False, repr=False)
+    _query_engine_cache: OrderedDict[str, RetrieverQueryEngine] = field(
+        default_factory=OrderedDict, init=False, repr=False
+    )
     _retrieval_cache_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     sessions: SessionManager | None = field(default=None, init=False)
     reports: ReportManager | None = field(default=None, init=False)
@@ -2026,6 +2035,44 @@ class RAG:
         finally:
             _active_collection.reset(token)
 
+    def _cache_get(self, cache: OrderedDict[str, Any], key: str) -> Any:
+        """Return a cached handle for ``key``, marking it most-recently-used.
+
+        Args:
+            cache (OrderedDict[str, Any]): The bounded LRU cache to read.
+            key (str): The active physical collection name.
+
+        Returns:
+            Any: The cached handle, or ``None`` when absent.
+        """
+        with self._retrieval_cache_lock:
+            value = cache.get(key)
+            if value is not None:
+                cache.move_to_end(key)
+            return value
+
+    def _cache_put(self, cache: OrderedDict[str, Any], key: str, value: Any) -> None:
+        """Store (or evict) a cached handle for ``key`` under the cache bound.
+
+        A ``None`` value evicts the entry (preserving the previous reset
+        semantics of ``self.index = None``). Otherwise the entry is inserted as
+        most-recently-used and the oldest entries are dropped until the cache is
+        within :data:`_RETRIEVAL_HANDLE_CACHE_MAX`.
+
+        Args:
+            cache (OrderedDict[str, Any]): The bounded LRU cache to mutate.
+            key (str): The active physical collection name.
+            value (Any): The handle to cache, or ``None`` to evict.
+        """
+        with self._retrieval_cache_lock:
+            if value is None:
+                cache.pop(key, None)
+                return
+            cache[key] = value
+            cache.move_to_end(key)
+            while len(cache) > _RETRIEVAL_HANDLE_CACHE_MAX:
+                cache.popitem(last=False)
+
     @property
     def index(self) -> VectorStoreIndex | None:
         """Return the cached :class:`VectorStoreIndex` for the active collection.
@@ -2034,7 +2081,7 @@ class RAG:
             VectorStoreIndex | None: The per-collection index, or ``None`` when
             one has not been built yet.
         """
-        return self._index_cache.get(self.qdrant_collection)
+        return cast("VectorStoreIndex | None", self._cache_get(self._index_cache, self.qdrant_collection))
 
     @index.setter
     def index(self, value: VectorStoreIndex | None) -> None:
@@ -2042,14 +2089,9 @@ class RAG:
 
         Args:
             value (VectorStoreIndex | None): The index to cache; ``None`` evicts
-                the active collection's entry (preserving the previous reset
-                semantics of ``self.index = None``).
+                the active collection's entry.
         """
-        key = self.qdrant_collection
-        if value is None:
-            self._index_cache.pop(key, None)
-        else:
-            self._index_cache[key] = value
+        self._cache_put(self._index_cache, self.qdrant_collection, value)
 
     @property
     def query_engine(self) -> RetrieverQueryEngine | None:
@@ -2059,7 +2101,7 @@ class RAG:
             RetrieverQueryEngine | None: The per-collection query engine, or
             ``None`` when one has not been built yet.
         """
-        return self._query_engine_cache.get(self.qdrant_collection)
+        return cast("RetrieverQueryEngine | None", self._cache_get(self._query_engine_cache, self.qdrant_collection))
 
     @query_engine.setter
     def query_engine(self, value: RetrieverQueryEngine | None) -> None:
@@ -2069,11 +2111,7 @@ class RAG:
             value (RetrieverQueryEngine | None): The engine to cache; ``None``
                 evicts the active collection's entry.
         """
-        key = self.qdrant_collection
-        if value is None:
-            self._query_engine_cache.pop(key, None)
-        else:
-            self._query_engine_cache[key] = value
+        self._cache_put(self._query_engine_cache, self.qdrant_collection, value)
 
     @staticmethod
     def _load_prompt_text(
@@ -4861,8 +4899,9 @@ class RAG:
         #     Qdrant collection and its removed SQLite docstore. This is keyed by
         #     ``target`` directly, independent of the (possibly unscoped) active
         #     collection — the API delete path runs without a request scope.
-        self._index_cache.pop(target, None)
-        self._query_engine_cache.pop(target, None)
+        with self._retrieval_cache_lock:
+            self._index_cache.pop(target, None)
+            self._query_engine_cache.pop(target, None)
 
         # 1b. If the deleted collection happens to be the active one, also clear
         #     the rest of the per-collection runtime so the next query does not

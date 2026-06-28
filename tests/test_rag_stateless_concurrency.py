@@ -184,6 +184,30 @@ def test_query_engine_cached_per_physical_collection(monkeypatch: pytest.MonkeyP
     assert rag.query_engine is None
 
 
+def test_retrieval_handle_cache_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The per-collection handle cache evicts least-recently-used entries.
+
+    An unbounded cache would pin a SQLite docstore connection per collection and
+    leak file descriptors. With the bound set to 2, querying three collections
+    must drop the oldest, keeping the cache within the bound.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+    """
+    import docint.core.rag as rag_module
+
+    _patch_engine_factory(monkeypatch)
+    monkeypatch.setattr(rag_module, "_RETRIEVAL_HANDLE_CACHE_MAX", 2)
+    rag = RAG(qdrant_collection="")
+
+    for name in ("c1", "c2", "c3"):
+        with rag.collection_scope(name):
+            rag.run_query("q")
+
+    assert len(rag._query_engine_cache) == 2
+    assert set(rag._query_engine_cache.keys()) == {"c2", "c3"}  # c1 (oldest) evicted
+
+
 def test_concurrent_query_requests_isolated_per_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     """Two concurrent HTTP ``/query`` requests for two owners are fully isolated.
 
