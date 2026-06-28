@@ -111,8 +111,8 @@ class SessionManager:
         engine = self.rag.query_engine
         if engine is None:
             logger.debug("Query engine not initialized; building lazily for start_session.")
-            self.rag.query_engine = self.rag.build_query_engine()
-            engine = self.rag.query_engine
+            engine = self.rag.build_query_engine()
+            self.rag.query_engine = engine
 
         self.chat_engine = CondenseQuestionChatEngine.from_defaults(
             query_engine=engine,
@@ -276,8 +276,8 @@ class SessionManager:
             # Mirror RAG.run_query's lazy fallback: a default-path chat after a
             # collection switch can legitimately see query_engine=None.
             logger.debug("Query engine not initialized; building lazily for SessionManager.chat.")
-            self.rag.query_engine = self.rag.build_query_engine()
-            engine = self.rag.query_engine
+            engine = self.rag.build_query_engine()
+            self.rag.query_engine = engine
 
         session_id = self.session_id
         if self.chat_engine is None or session_id is None:

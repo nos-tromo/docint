@@ -13,11 +13,14 @@ import re
 import shutil
 import stat
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1602,16 +1605,48 @@ class VLLMSparseEncoder:
         return [token_id for token_id, _ in ordered], [score for _, score in ordered]
 
 
-@dataclass(slots=True)
+# Per-request active physical collection. Backs the ``RAG.qdrant_collection``
+# property so concurrent requests for different collections never clobber a
+# shared field (the WS2 multi-tenant fix). Unset (``None``) outside a request
+# scope, where the engine falls back to its process default; bound for the
+# duration of a request by :meth:`RAG.collection_scope`. ContextVars copy into
+# anyio worker threads via ``copy_context()``, so the override survives the
+# ``to_thread.run_sync`` hops used by the streaming endpoints.
+_active_collection: ContextVar[str | None] = ContextVar("docint_active_collection", default=None)
+
+
+# ``slots=True`` is intentionally NOT used here. ``qdrant_collection`` is a
+# normal field for the type checker / generated ``__init__`` signature, but its
+# reads and writes are intercepted by a property attached after the class body
+# (see ``_rag_qdrant_collection_get`` / ``_set`` at the end of the module).
+# Under ``slots`` the field's slot descriptor would capture the constructor
+# value and the post-class property would never see it; without slots the
+# property cleanly shadows the (never-stored) field.
+@dataclass
 class RAG:
     """Retrieval-Augmented Generation engine.
 
     Handles configuration, initialization, and interaction with embedding models, generation
     models, and vector stores. Provides methods to start sessions, retrieve information, and
     manage document ingestion.
+
+    Collection statelessness:
+        ``qdrant_collection`` reads/writes go through a property (attached after
+        the class body) layered over a per-request
+        :class:`contextvars.ContextVar` (see :meth:`collection_scope`) with a
+        process-default fallback (``_collection_default``). The derived
+        ``index`` and ``query_engine`` are likewise per-collection: properties
+        backed by caches keyed on the active physical name, holding read-only
+        handles that are safe to share across threads. Concurrent requests for
+        different collections are therefore isolated without any global mutation.
     """
 
     # --- Constructor args ---
+    # Declared as a plain field so ``RAG(qdrant_collection=...)`` type-checks and
+    # internal ``self.qdrant_collection`` reads resolve to ``str``; the value is
+    # never actually stored on this attribute -- the post-class property routes
+    # writes into ``_collection_default`` (or the request ContextVar). MUST stay
+    # the first field so its init assignment runs before ``_collection_default``.
     qdrant_collection: str
     enable_hybrid: bool = field(default=True)
 
@@ -1750,9 +1785,19 @@ class RAG:
     docs: list[Document] = field(default_factory=list, init=False)
     nodes: list[BaseNode] = field(default_factory=list, init=False)
 
-    # --- Built components (lazy loaded) ---
-    index: VectorStoreIndex | None = field(default=None, init=False)
-    query_engine: RetrieverQueryEngine | None = field(default=None, init=False)
+    # --- Built components (lazy loaded, per physical collection) ---
+    # ``index`` / ``query_engine`` are exposed as properties backed by these
+    # per-collection caches so concurrent requests on different collections do
+    # not share a single handle. Handles are read-only (a Qdrant vector store +
+    # HTTP clients) and therefore safe to share across threads.
+    # Process-default active collection (the property's fallback when no request
+    # scope is bound). MUST keep a simple ``default`` (never ``default_factory``)
+    # so the generated ``__init__`` does not re-assign it and clobber the value
+    # the ``qdrant_collection`` field's init assignment routes here.
+    _collection_default: str = field(default="", init=False, repr=False)
+    _index_cache: dict[str, VectorStoreIndex] = field(default_factory=dict, init=False, repr=False)
+    _query_engine_cache: dict[str, RetrieverQueryEngine] = field(default_factory=dict, init=False, repr=False)
+    _retrieval_cache_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     sessions: SessionManager | None = field(default=None, init=False)
     reports: ReportManager | None = field(default=None, init=False)
     collection_owners: CollectionOwnerManager | None = field(default=None, init=False)
@@ -1760,6 +1805,13 @@ class RAG:
 
     def __post_init__(self) -> None:
         """Post-initialization to set up any necessary components.
+
+        The constructor's ``qdrant_collection`` argument has, by this point,
+        already been routed into ``_collection_default`` by the property setter
+        (the generated ``__init__`` assigns the first field before calling this
+        hook). Per-request overrides are applied via :meth:`collection_scope`;
+        reads fall back to the default when no request scope is active (CLI /
+        single-collection usage).
 
         Raises:
             ValueError: If summarize_prompt_path is not set.
@@ -1939,6 +1991,89 @@ class RAG:
         self.social_summary_enabled = self.summary_config.social_chunking_enabled
         self.social_summary_candidate_pool = self.summary_config.social_candidate_pool
         self.social_summary_diversity_limit = self.summary_config.social_diversity_limit
+
+    # --- Active collection (stateless, per-request) ---
+    # NOTE: ``qdrant_collection`` is exposed as a property, but it is attached
+    # *after* the class body (see ``_rag_qdrant_collection_get`` / ``_set``
+    # below) rather than declared here. A same-named property in the body would
+    # hide the ``InitVar`` field from the dataclass-generated ``__init__``
+    # signature (and from the type checker), breaking ``RAG(qdrant_collection=
+    # ...)`` at every call site. Reads resolve to the per-request ContextVar
+    # override when a ``collection_scope`` is active, else the process default.
+
+    @contextmanager
+    def collection_scope(self, physical: str) -> Iterator[None]:
+        """Bind ``physical`` as the active collection for the enclosed block.
+
+        Sets the per-request :data:`_active_collection` ContextVar so every
+        ``self.qdrant_collection`` read (and the derived ``index`` /
+        ``query_engine`` caches) resolves to ``physical`` for the duration of
+        the block, then restores the previous value. The binding is scoped to
+        the current context, so concurrent requests on different threads — and
+        the anyio worker threads they spawn via ``to_thread.run_sync`` — each
+        observe only their own collection.
+
+        Args:
+            physical (str): The physical (owner-namespaced) Qdrant collection
+                name to make active.
+
+        Yields:
+            None: Control returns to the caller with the scope active.
+        """
+        token = _active_collection.set(physical)
+        try:
+            yield
+        finally:
+            _active_collection.reset(token)
+
+    @property
+    def index(self) -> VectorStoreIndex | None:
+        """Return the cached :class:`VectorStoreIndex` for the active collection.
+
+        Returns:
+            VectorStoreIndex | None: The per-collection index, or ``None`` when
+            one has not been built yet.
+        """
+        return self._index_cache.get(self.qdrant_collection)
+
+    @index.setter
+    def index(self, value: VectorStoreIndex | None) -> None:
+        """Cache (or evict) the index for the active collection.
+
+        Args:
+            value (VectorStoreIndex | None): The index to cache; ``None`` evicts
+                the active collection's entry (preserving the previous reset
+                semantics of ``self.index = None``).
+        """
+        key = self.qdrant_collection
+        if value is None:
+            self._index_cache.pop(key, None)
+        else:
+            self._index_cache[key] = value
+
+    @property
+    def query_engine(self) -> RetrieverQueryEngine | None:
+        """Return the cached query engine for the active collection.
+
+        Returns:
+            RetrieverQueryEngine | None: The per-collection query engine, or
+            ``None`` when one has not been built yet.
+        """
+        return self._query_engine_cache.get(self.qdrant_collection)
+
+    @query_engine.setter
+    def query_engine(self, value: RetrieverQueryEngine | None) -> None:
+        """Cache (or evict) the query engine for the active collection.
+
+        Args:
+            value (RetrieverQueryEngine | None): The engine to cache; ``None``
+                evicts the active collection's entry.
+        """
+        key = self.qdrant_collection
+        if value is None:
+            self._query_engine_cache.pop(key, None)
+        else:
+            self._query_engine_cache[key] = value
 
     @staticmethod
     def _load_prompt_text(
@@ -5632,8 +5767,8 @@ class RAG:
             # ``build_query_engine`` is typed non-Optional and raises on
             # its own failure modes, so no second None guard is needed.
             logger.debug("Query engine not initialized; building lazily for run_query.")
-            self.query_engine = self.build_query_engine()
-            engine = self.query_engine
+            engine = self.build_query_engine()
+            self.query_engine = engine
         try:
             result = engine.query(prompt)
         except ValueError as exc:
@@ -5715,8 +5850,8 @@ class RAG:
             # ``build_query_engine`` raises on its own failure modes;
             # no second None guard is needed here.
             logger.debug("Query engine not initialized; building lazily for run_query_async.")
-            self.query_engine = self.build_query_engine()
-            engine = self.query_engine
+            engine = self.build_query_engine()
+            self.query_engine = engine
         try:
             result = await engine.aquery(prompt)
         except ValueError as exc:
@@ -7765,3 +7900,48 @@ class RAG:
 
         gc.collect()
         logger.info("Models unloaded and memory cleared.")
+
+
+# --- ``RAG.qdrant_collection`` property (attached post-class) ---
+# Defined here, not in the class body, so the dataclass-generated ``__init__``
+# (and the type checker) keep seeing ``qdrant_collection`` as the ``InitVar``
+# constructor parameter. A property of the same name inside the body would
+# shadow that field and break ``RAG(qdrant_collection=...)`` everywhere.
+
+
+def _rag_qdrant_collection_get(self: RAG) -> str:
+    """Return the active physical collection for the current request.
+
+    Resolves to the per-request override bound by :meth:`RAG.collection_scope`
+    when one is active, otherwise the process default seeded at construction.
+    Reads are therefore isolated across concurrent requests/threads.
+
+    Args:
+        self (RAG): The RAG instance (bound by the property).
+
+    Returns:
+        str: The active physical Qdrant collection name.
+    """
+    override = _active_collection.get()
+    return override if override is not None else self._collection_default
+
+
+def _rag_qdrant_collection_set(self: RAG, value: str) -> None:
+    """Set the active collection for the current scope.
+
+    Within a :meth:`RAG.collection_scope` the per-request override is updated
+    (keeping the change request-local); outside any scope the process default is
+    updated -- the CLI / single-collection path, and pre-existing tests that
+    assign ``rag.qdrant_collection`` directly.
+
+    Args:
+        self (RAG): The RAG instance (bound by the property).
+        value (str): The collection name to make active.
+    """
+    if _active_collection.get() is not None:
+        _active_collection.set(value)
+    else:
+        self._collection_default = value
+
+
+RAG.qdrant_collection = property(_rag_qdrant_collection_get, _rag_qdrant_collection_set)  # type: ignore[assignment]
