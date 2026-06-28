@@ -4,7 +4,7 @@
 # rerank, NER, CLIP) is delegated over HTTP to the external vllm-service
 # stack — see CLAUDE.md. There is no PROFILE / CUDA toggle here.
 #
-# The compose lifecycle (network/volumes/build/bundle/up/up-dev/stop/down/
+# The compose lifecycle (network/volumes/build/bundle/up/up-dev/dev/stop/down/
 # logs/pre-commit/test) + the versioned image tag come from make/common.mk,
 # vendored from nos-tromo/.github. Only docint-specific config, the help
 # text, and the `resolve` target live here.
@@ -14,7 +14,6 @@
 REPO     := docint
 NETWORKS := inference-net data-net
 VOLUMES  := docling-cache huggingface-cache ollama-cache sessions-storage source-preview-cache
-UP_ENV   := DOCKER_BUILDKIT=1
 include make/common.mk
 
 .PHONY: help resolve
@@ -26,8 +25,9 @@ help:
 	@echo "  make volumes    create the external Docker volumes"
 	@echo "  make build      build images"
 	@echo "  make bundle     ship the built images as a versioned .tar.gz"
-	@echo "  make up         build + run docint (production shape, no host ports)"
-	@echo "  make up-dev     like 'up', but publishes the frontend port on the host"
+	@echo "  make up         run docint detached, no build (production shape, no host ports)"
+	@echo "  make up-dev     like 'up', but publishes the frontend port on the host (no build)"
+	@echo "  make dev        build, then up-dev"
 	@echo "  make stop       stop docint containers"
 	@echo "  make down       stop + remove containers (never touches data-plane state)"
 	@echo "  make resolve    merge duplicate/similar entities (COLLECTION=<name> optional)"
