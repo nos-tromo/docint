@@ -4855,13 +4855,18 @@ class RAG:
             )
             raise
 
-        # 1a. If the deleted collection was the active one, clear cached
-        #     handles so the next query does not point at a tombstone.
-        #     Without this, ``self.qdrant_collection`` would still equal
-        #     ``target`` and ``self.index`` / ``self.query_engine`` would
-        #     wrap a vector store for a collection Qdrant no longer has —
-        #     the next ``/stream_query`` would bypass the empty-name gate
-        #     and surface Qdrant's raw 404 to the user.
+        # 1a. Always evict the deleted collection's cached retrieval handles so
+        #     a later re-ingest of the same (owner, logical) -> same physical
+        #     name does not reuse an index/query engine bound to the now-deleted
+        #     Qdrant collection and its removed SQLite docstore. This is keyed by
+        #     ``target`` directly, independent of the (possibly unscoped) active
+        #     collection — the API delete path runs without a request scope.
+        self._index_cache.pop(target, None)
+        self._query_engine_cache.pop(target, None)
+
+        # 1b. If the deleted collection happens to be the active one, also clear
+        #     the rest of the per-collection runtime so the next query does not
+        #     point at a tombstone.
         if target == self.qdrant_collection:
             self.qdrant_collection = ""
             self.docs.clear()
