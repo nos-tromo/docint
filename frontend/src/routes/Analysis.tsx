@@ -25,7 +25,6 @@ const NER_VIEWS = [
 ] as const
 type NerView = (typeof NER_VIEWS)[number]['value']
 
-
 const keyOf = (text: string | null | undefined, type: string | null | undefined) =>
   `${text ?? ''}::${type ?? ''}`
 

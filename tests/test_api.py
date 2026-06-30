@@ -3482,9 +3482,7 @@ def test_stream_query_surfaces_generator_error(monkeypatch: pytest.MonkeyPatch, 
     assert '"error"' in body
 
 
-def test_get_config_returns_graph_settings(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_get_config_returns_graph_settings(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """`GET /config` reports the env-driven graph node defaults.
 
     Args:
@@ -3503,9 +3501,7 @@ def test_get_config_returns_graph_settings(
     assert "collection_timeout" in body
 
 
-def test_ner_graph_uses_env_default_when_top_k_omitted(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_ner_graph_uses_env_default_when_top_k_omitted(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Omitting `top_k_nodes` falls back to `NER_GRAPH_TOP_K`.
 
     Args:
@@ -3521,9 +3517,7 @@ def test_ner_graph_uses_env_default_when_top_k_omitted(
     assert cast(DummyRAG, api_module.rag).ner_graph_top_ks[-1] == 150
 
 
-def test_ner_graph_accepts_value_above_legacy_500_cap(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_ner_graph_accepts_value_above_legacy_500_cap(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """With a raised ceiling, > 500 nodes are honoured (old hard cap removed).
 
     Args:
@@ -3538,9 +3532,7 @@ def test_ner_graph_accepts_value_above_legacy_500_cap(
     assert cast(DummyRAG, api_module.rag).ner_graph_top_ks[-1] == 800
 
 
-def test_ner_graph_clamps_top_k_to_configured_max(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_ner_graph_clamps_top_k_to_configured_max(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """A request above the ceiling is clamped down, not rejected.
 
     Args:
