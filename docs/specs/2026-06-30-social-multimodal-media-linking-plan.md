@@ -1321,15 +1321,164 @@ git add docint/core/ingest/social_linker.py tests/test_social_linker_join.py
 git commit -m "feat(linker): social join core (counter strip, recursive resolve)" -m "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
 
+### Task 9b: IngestManifest transcript cache (column + methods)
+
+**Files:**
+- Modify: `docint/core/storage/ingest_manifest.py` (add a `nextext_jsonl` column + migration; `cache_nextext_transcript` / `get_nextext_transcript`; mirror no-ops on `NullIngestManifest` at `ingest_manifest.py:373`)
+- Test: `tests/test_ingest_manifest_cache.py` (create)
+
+**Interfaces:**
+- Produces: `IngestManifest.cache_nextext_transcript(collection: str, file_hash: str, jsonl: str) -> None` and `IngestManifest.get_nextext_transcript(collection: str, file_hash: str) -> str | None` (and the same as no-ops on `NullIngestManifest`).
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_ingest_manifest_cache.py
+from docint.core.storage.ingest_manifest import IngestManifest
+
+
+def test_cache_and_get_nextext_transcript(tmp_path) -> None:
+    manifest = IngestManifest(tmp_path / "m.db")
+    assert manifest.get_nextext_transcript("c", "h1") is None
+    manifest.cache_nextext_transcript("c", "h1", '{"text":"x"}\n')
+    assert manifest.get_nextext_transcript("c", "h1") == '{"text":"x"}\n'
+    assert manifest.get_nextext_transcript("other", "h1") is None  # scoped by (collection, file_hash)
+    manifest.close()
+
+
+def test_cache_survives_reopen(tmp_path) -> None:
+    db = tmp_path / "m.db"
+    m1 = IngestManifest(db)
+    m1.cache_nextext_transcript("c", "h1", "data\n")
+    m1.close()
+    m2 = IngestManifest(db)  # migration guard runs again; column persists
+    assert m2.get_nextext_transcript("c", "h1") == "data\n"
+    m2.close()
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest tests/test_ingest_manifest_cache.py -v`
+Expected: FAIL — `AttributeError: 'IngestManifest' object has no attribute 'get_nextext_transcript'`
+
+- [ ] **Step 3: Add the column + migration + methods**
+
+In `docint/core/storage/ingest_manifest.py`, add the column to the `CREATE TABLE` in `_SCHEMA` (fresh DBs) — insert `    nextext_jsonl   TEXT,` before the `PRIMARY KEY` line:
+
+```python
+CREATE TABLE IF NOT EXISTS ingest_manifest (
+    collection      TEXT NOT NULL,
+    file_hash       TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    started_at      REAL NOT NULL,
+    updated_at      REAL NOT NULL,
+    error_message   TEXT,
+    nextext_jsonl   TEXT,
+    PRIMARY KEY (collection, file_hash)
+);
+```
+
+In `__init__`, immediately after `self._conn.executescript(_SCHEMA)` (ingest_manifest.py:141), add a migration guard for pre-existing DBs (SQLite has no `ADD COLUMN IF NOT EXISTS`):
+
+```python
+        existing_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(ingest_manifest)").fetchall()}
+        if "nextext_jsonl" not in existing_columns:
+            self._conn.execute("ALTER TABLE ingest_manifest ADD COLUMN nextext_jsonl TEXT")
+            self._conn.commit()
+```
+
+Add the two methods after `mark_failed` (uses the existing `STATUS_COMPLETED` constant + `_execute` helper):
+
+```python
+    def cache_nextext_transcript(self, collection: str, file_hash: str, jsonl: str) -> None:
+        """Persist a Nextext transcript (NDJSON) keyed by media file hash.
+
+        Lets re-ingestion of an unchanged media file reuse the transcript
+        instead of re-running the (expensive) remote Nextext job.
+
+        Args:
+            collection (str): Logical Qdrant collection name.
+            file_hash (str): SHA-256 of the media file.
+            jsonl (str): The transcript NDJSON text to cache.
+        """
+        if not collection or not file_hash:
+            return
+        now = time.time()
+
+        def _do() -> None:
+            self._conn.execute(
+                """
+                INSERT INTO ingest_manifest
+                    (collection, file_hash, status, started_at, updated_at, nextext_jsonl)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(collection, file_hash) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    nextext_jsonl = excluded.nextext_jsonl
+                """,
+                (collection, file_hash, STATUS_COMPLETED, now, now, jsonl),
+            )
+            self._conn.commit()
+
+        self._execute("cache_nextext_transcript", _do)
+
+    def get_nextext_transcript(self, collection: str, file_hash: str) -> str | None:
+        """Return a cached Nextext transcript, or ``None`` when absent.
+
+        Args:
+            collection (str): Logical Qdrant collection name.
+            file_hash (str): SHA-256 of the media file.
+
+        Returns:
+            str | None: The cached NDJSON text, or ``None``.
+        """
+        if not collection or not file_hash:
+            return None
+
+        def _do() -> str | None:
+            row = self._conn.execute(
+                "SELECT nextext_jsonl FROM ingest_manifest WHERE collection = ? AND file_hash = ?",
+                (collection, file_hash),
+            ).fetchone()
+            return row[0] if row and row[0] is not None else None
+
+        return self._execute("get_nextext_transcript", _do)
+```
+
+- [ ] **Step 4: Mirror no-ops on `NullIngestManifest`**
+
+In the `NullIngestManifest` stub (ingest_manifest.py:373), add:
+
+```python
+    def cache_nextext_transcript(self, collection: str, file_hash: str, jsonl: str) -> None:
+        """No-op cache write (manifest disabled)."""
+
+    def get_nextext_transcript(self, collection: str, file_hash: str) -> str | None:
+        """Return ``None`` — caching disabled."""
+        return None
+```
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `uv run pytest tests/test_ingest_manifest_cache.py -v`
+Expected: PASS (2 passed)
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add docint/core/storage/ingest_manifest.py tests/test_ingest_manifest_cache.py
+git commit -m "feat(manifest): cache Nextext transcripts by media file hash" -m "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+```
+
 ### Task 10: Social linker — routing + transcript ingestion + caching
 
 **Files:**
-- Modify: `docint/core/ingest/social_linker.py` (add `SocialLinker` class)
+- Modify: `docint/core/ingest/social_linker.py` (add `SocialLinker` class with a manifest-backed transcript cache)
 - Test: `tests/test_social_linker_routing.py` (create)
 
 **Interfaces:**
 - Consumes: `NextextClient` (Task 6), `ImageIngestionService` (`ingest_image` + `ingest_keyframe_set`, Task 7), `CustomJSONReader` (Task 8), join helpers (Task 9), `is_media_manifest` + `TableReader.schema_profiles` (Task 4).
-- Produces: `SocialLinker(image_service, nextext_client, target_collection).run(data_dir: Path) -> SocialLinkResult(consumed_paths: set[Path], transcript_documents: list[Document])`.
+- Consumes (also): `IngestManifest.get_nextext_transcript` / `cache_nextext_transcript` (Task 9b).
+- Produces: `SocialLinker(image_service, nextext_client, target_collection, manifest=None).run(data_dir: Path) -> SocialLinkResult(consumed_paths: set[Path], transcript_documents: list[Document])`.
 
 - [ ] **Step 1: Write the failing test (fakes for both services)**
 
@@ -1399,6 +1548,53 @@ def test_run_routes_image_and_video_and_links(tmp_path: Path) -> None:
     assert {"media.csv", "pic.jpg", "clip.mp4"}.issubset(consumed_names)
     # postings.csv is NOT consumed (the sweep ingests it as text nodes).
     assert "postings.csv" not in consumed_names
+
+
+class _CountingNextext:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def process_media(self, file_path: Path) -> NextextResult:
+        self.calls += 1
+        return NextextResult(
+            status="completed",
+            transcript_jsonl=b'{"text":"x","start_seconds":0,"end_seconds":1}\n',
+            keyframes=[],
+        )
+
+
+class _FakeManifest:
+    def __init__(self, cached: str | None = None) -> None:
+        self._cached = cached
+        self.saved: list[tuple[str, str, str]] = []
+
+    def get_nextext_transcript(self, collection: str, file_hash: str) -> str | None:
+        return self._cached
+
+    def cache_nextext_transcript(self, collection: str, file_hash: str, jsonl: str) -> None:
+        self.saved.append((collection, file_hash, jsonl))
+
+
+def test_cached_transcript_skips_nextext(tmp_path: Path) -> None:
+    _write_export(tmp_path)
+    nx = _CountingNextext()
+    manifest = _FakeManifest(cached='{"text":"cached","start_seconds":0,"end_seconds":1}\n')
+    result = SocialLinker(
+        image_service=_FakeImageService(), nextext_client=nx, target_collection="c", manifest=manifest
+    ).run(tmp_path)
+    assert nx.calls == 0  # cache hit -> Nextext job not submitted
+    assert any(d.metadata.get("posting_uuid") == "u2" for d in result.transcript_documents)
+
+
+def test_cache_miss_persists_transcript(tmp_path: Path) -> None:
+    _write_export(tmp_path)
+    nx = _CountingNextext()
+    manifest = _FakeManifest(cached=None)
+    SocialLinker(
+        image_service=_FakeImageService(), nextext_client=nx, target_collection="c", manifest=manifest
+    ).run(tmp_path)
+    assert nx.calls == 1
+    assert manifest.saved and manifest.saved[0][0] == "c"
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -1419,6 +1615,7 @@ from llama_index.core import Document
 from docint.core.ingest.images_service import ImageAsset, IngestContext
 from docint.core.readers.json import CustomJSONReader
 from docint.core.readers.tables import TableReader, is_media_manifest
+from docint.utils.hashing import compute_file_hash
 
 _POSTINGS_HEADERS = next(
     (p.normalized_headers for p in TableReader.schema_profiles if p.style == "postings"),
@@ -1441,6 +1638,7 @@ class SocialLinker:
     image_service: Any
     nextext_client: Any
     target_collection: str | None
+    manifest: Any = None
 
     def _find_tables(self, data_dir: Path) -> tuple[Path | None, Path | None]:
         """Locate the postings table and media manifest anywhere in the tree.
@@ -1506,22 +1704,29 @@ class SocialLinker:
     def _route_media_clip(self, link: MediaLink, context: IngestContext, result: SocialLinkResult) -> None:
         """Send one video/audio file to Nextext; ingest transcript + keyframes.
 
+        The transcript is cached in the ingest manifest keyed by the media
+        file's content hash, so re-ingesting an unchanged file reuses it instead
+        of re-running the (expensive) Nextext job. On a cache hit Nextext is not
+        called at all — the keyframe points already persist in the ``_images``
+        companion from the first run.
+
         Args:
             link (MediaLink): The resolved media file and its posting linkage.
             context (IngestContext): Collection-resolution context.
             result (SocialLinkResult): Accumulator for transcript Documents.
         """
-        sidecar = link.path.with_suffix(link.path.suffix + ".nextext.jsonl")
-        if sidecar.is_file():
-            transcript = sidecar.read_bytes()  # cached: skip the (expensive) re-run
-            keyframes: list[bytes] = []
+        collection = self.target_collection or ""
+        media_hash = compute_file_hash(link.path)
+        cached = self.manifest.get_nextext_transcript(collection, media_hash) if self.manifest else None
+        keyframes: list[bytes] = []
+        if cached is not None:
+            transcript: bytes | None = cached.encode("utf-8")
         else:
             outcome = self.nextext_client.process_media(link.path)
             transcript = outcome.transcript_jsonl
             keyframes = outcome.keyframes
-            if transcript:
-                sidecar.write_bytes(transcript)
-                result.consumed_paths.add(sidecar)
+            if transcript is not None and self.manifest is not None:
+                self.manifest.cache_nextext_transcript(collection, media_hash, transcript.decode("utf-8"))
         extra = {"posting_id": link.posting_id, "media_id": link.media_id, "source_type": "social_media"}
         if keyframes:
             self.image_service.ingest_keyframe_set(
@@ -1531,25 +1736,26 @@ class SocialLinker:
                 extra_metadata={**extra, "posting_uuid": link.posting_uuid},
             )
         if transcript:
-            result.consumed_paths.add(sidecar)
-            self._ingest_transcript(sidecar if sidecar.is_file() else link.path, transcript, link, result)
+            self._ingest_transcript(link, transcript, result)
 
-    def _ingest_transcript(
-        self, sidecar: Path, transcript: bytes, link: MediaLink, result: SocialLinkResult
-    ) -> None:
+    def _ingest_transcript(self, link: MediaLink, transcript: bytes, result: SocialLinkResult) -> None:
         """Parse transcript JSONL into segment Documents stamped with the posting link.
 
+        Writes a transient ``.nextext.jsonl`` next to the media file purely so
+        ``CustomJSONReader`` (which reads from a path) can parse it; that
+        transient file is marked consumed so the generic sweep ignores it. The
+        durable cache of record is the ingest manifest (Task 9b), not this file.
+
         Args:
-            sidecar (Path): Path of the persisted transcript JSONL.
-            transcript (bytes): The transcript NDJSON bytes.
             link (MediaLink): The posting linkage to stamp.
+            transcript (bytes): The transcript NDJSON bytes.
             result (SocialLinkResult): Accumulator for the produced Documents.
         """
-        if not sidecar.is_file():
-            sidecar.write_bytes(transcript)
-            result.consumed_paths.add(sidecar)
+        transient = link.path.with_suffix(link.path.suffix + ".nextext.jsonl")
+        transient.write_bytes(transcript)
+        result.consumed_paths.add(transient)
         docs = CustomJSONReader(is_jsonl=True).iter_documents(
-            sidecar,
+            transient,
             extra_info={
                 "posting_uuid": link.posting_uuid,
                 "posting_id": link.posting_id,
@@ -1648,13 +1854,25 @@ Add a method to run the linker (call it from `_load_doc_readers` end, after `sel
         postings table and a media manifest.
         """
         from docint.core.ingest.social_linker import SocialLinker
+        from docint.core.storage.ingest_manifest import IngestManifest, NullIngestManifest
+        from docint.utils.env_cfg import load_ingestion_env, load_path_env
         from docint.utils.nextext_client import NextextClient
+
+        manifest: IngestManifest | NullIngestManifest = NullIngestManifest()
+        try:
+            sources_root = load_path_env().qdrant_sources
+            if load_ingestion_env().ingest_manifest_enabled and sources_root and self.target_collection:
+                target = self.target_collection
+                manifest = IngestManifest(sources_root / target / f"{target}_ingest_manifest.db")
+        except Exception as exc:  # pragma: no cover - fail-soft guard
+            logger.debug("Manifest unavailable for social linker cache: {}", exc)
 
         try:
             result = SocialLinker(
                 image_service=self.image_ingestion_service or ImageIngestionService(),
                 nextext_client=NextextClient(),
                 target_collection=self.target_collection,
+                manifest=manifest,
             ).run(self.data_dir)
         except Exception as exc:  # pragma: no cover - fail-soft guard
             logger.warning("Social linker skipped due to error: {}", exc)
@@ -2183,7 +2401,7 @@ git commit -m "feat(retrieval): group sources by posting; document social multim
 - Routing: image→CLIP; video/audio→Nextext transcript + keyframes → Task 10 (+ Task 6 client, Task 7 keyframe dedup).
 - Keyframe rate-sampling + cosine prune before captioning → Task 5 (knobs), Task 7 (prune), Nextext plan (sampling).
 - `posting_uuid` linkage on every artifact → Task 7 (images/keyframes), Task 8 (transcripts), postings already carry `reference_metadata.uuid`.
-- Caching (don't re-transcribe) → Task 10 (`.nextext.jsonl` sidecar). *Note:* this realizes the spec's "don't re-run Nextext" intent via a persisted-artifact sidecar rather than an `IngestManifest` column — simpler and reuses the filesystem; update the spec's Idempotency section to match.
+- Caching (don't re-transcribe) → Task 9b (`IngestManifest.nextext_jsonl` column + `cache_nextext_transcript`/`get_nextext_transcript`) + Task 10 (linker reads/writes it, keyed by media file hash) + Task 11 (pipeline builds the per-collection manifest). Matches the spec's Idempotency section.
 - Fail-soft degradation → Tasks 6, 10, 11, 12, 13 (all media/scroll/job paths log-and-skip).
 - Retrieval link-following (bidirectional, grouped) → Tasks 12–15.
 - Payload indexes on `posting_uuid` (both collections) → Task 11 (images), Task 14 (main).
