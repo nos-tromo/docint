@@ -10,6 +10,7 @@ export function Dropzone({
 }) {
   const [hover, setHover] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+  const folderInputRef = useRef<HTMLInputElement>(null)
 
   const handle = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault()
@@ -35,11 +36,33 @@ export function Dropzone({
       )}
     >
       <p>Drop files here or click to choose.</p>
+      <button
+        type="button"
+        className="mt-3 underline"
+        onClick={(e) => {
+          e.stopPropagation()
+          folderInputRef.current?.click()
+        }}
+      >
+        Or choose a folder
+      </button>
       <input
         ref={inputRef}
         type="file"
         multiple
         className="hidden"
+        onChange={(e) => {
+          const list = Array.from(e.target.files ?? [])
+          if (list.length) onFiles(list)
+          e.target.value = ''
+        }}
+      />
+      <input
+        ref={folderInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
         onChange={(e) => {
           const list = Array.from(e.target.files ?? [])
           if (list.length) onFiles(list)
