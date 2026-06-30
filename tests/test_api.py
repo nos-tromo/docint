@@ -3478,3 +3478,72 @@ def test_stream_query_surfaces_generator_error(monkeypatch: pytest.MonkeyPatch, 
 
     assert '"token": "tok ' in body
     assert '"error"' in body
+
+
+def test_safe_relative_dest_preserves_subdirs(tmp_path: Path) -> None:
+    """_safe_relative_dest preserves subdirectories from browser folder upload."""
+    assert api_module._safe_relative_dest(tmp_path, "media/sub/a.jpg") == tmp_path / "media" / "sub" / "a.jpg"
+
+
+def test_safe_relative_dest_strips_traversal(tmp_path: Path) -> None:
+    """_safe_relative_dest neutralizes path traversal attempts."""
+    dest = api_module._safe_relative_dest(tmp_path, "../../etc/passwd")
+    assert dest == tmp_path / "etc" / "passwd"
+
+
+def test_safe_relative_dest_drops_absolute_leading_slash(tmp_path: Path) -> None:
+    """_safe_relative_dest converts absolute paths to relative."""
+    assert api_module._safe_relative_dest(tmp_path, "/abs/x.jpg") == tmp_path / "abs" / "x.jpg"
+
+
+def test_safe_relative_dest_normalizes_backslashes(tmp_path: Path) -> None:
+    """_safe_relative_dest normalizes backslashes to forward slashes."""
+    assert api_module._safe_relative_dest(tmp_path, "media\\sub\\b.png") == tmp_path / "media" / "sub" / "b.png"
+
+
+def test_safe_relative_dest_empty_falls_back(tmp_path: Path) -> None:
+    """_safe_relative_dest falls back to 'upload' when given empty string."""
+    assert api_module._safe_relative_dest(tmp_path, "") == tmp_path / "upload"
+
+
+def test_ingest_upload_preserves_subdir_structure(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """Endpoint test: /ingest/upload preserves subdirectory structure.
+
+    Verifies that when a file with a relative path (webkitRelativePath)
+    is uploaded, the directory structure is preserved in the target directory.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture.
+    """
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+
+    def fake_ingest(
+        collection: str,
+        path: Path,
+        hybrid: bool = True,
+        progress_callback: Any = None,
+    ) -> None:
+        """Simulate an ingestion run.
+
+        Args:
+            collection (str): Collection name.
+            path (Path): Source directory path (ignored).
+            hybrid (bool): Whether hybrid retrieval was requested (ignored).
+            progress_callback (Any): Optional progress callback (ignored).
+        """
+        _ = (collection, path, hybrid, progress_callback)
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", fake_ingest)
+
+    response = client.post(
+        "/ingest/upload",
+        data={"collection": "tree", "hybrid": "false"},
+        files=[("files", ("media/sub/a.jpg", b"\xff\xd8\xff", "image/jpeg"))],
+    )
+
+    assert response.status_code == 200
+    assert (tmp_path / "tree" / "media" / "sub" / "a.jpg").is_file()
