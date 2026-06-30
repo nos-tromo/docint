@@ -55,6 +55,7 @@ CREATE INDEX IF NOT EXISTS idx_manifest_status
 STATUS_IN_PROGRESS = "in_progress"
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
+STATUS_CACHED = "cached"
 
 _ERROR_MESSAGE_MAX_LENGTH = 512
 
@@ -311,7 +312,7 @@ class IngestManifest:
                     updated_at = excluded.updated_at,
                     nextext_jsonl = excluded.nextext_jsonl
                 """,
-                (collection, file_hash, STATUS_COMPLETED, now, now, jsonl),
+                (collection, file_hash, STATUS_CACHED, now, now, jsonl),
             )
             self._conn.commit()
 
