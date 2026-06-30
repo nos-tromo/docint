@@ -99,3 +99,22 @@ def test_process_media_disabled_no_network_call(tmp_path: Path) -> None:
     assert result.status == "disabled"
     assert result.transcript_jsonl is None
     assert result.keyframes == []
+
+
+def test_process_media_poll_error_status(tmp_path: Path) -> None:
+    """Test that HTTP errors during polling return poll_error status."""
+    media = tmp_path / "clip.mp4"
+    media.write_bytes(b"x")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/jobs":
+            return httpx.Response(201, json={"job_id": "J9", "status": "queued"})
+        if request.url.path == "/jobs/J9" and request.method == "GET":
+            return httpx.Response(503)
+        return httpx.Response(404)
+
+    client = httpx.Client(base_url="http://nextext.test", transport=httpx.MockTransport(handler))
+    result = NextextClient(_cfg(), client=client).process_media(media)
+    assert result.status == "poll_error"
+    assert result.transcript_jsonl is None
+    assert result.keyframes == []

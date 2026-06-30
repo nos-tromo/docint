@@ -6,8 +6,9 @@ Whisper, and exposes a ``docint.jsonl`` transcript plus a ``keyframes.zip``
 artifact. docint stays CPU-only and media-dependency-free.
 
 All failures are fail-soft: ``process_media`` returns a ``NextextResult`` with
-``status='error'`` and empty payloads rather than raising, so one bad clip
-never aborts a batch.
+a non-``completed`` status (``disabled``, ``timeout``, ``poll_error``, a server
+terminal-fail status, or ``error``) and empty payloads rather than raising, so
+one bad clip never aborts a batch.
 """
 
 from __future__ import annotations
@@ -87,7 +88,6 @@ class NextextClient:
                 resp = self._client.get(f"/jobs/{job_id}")
                 resp.raise_for_status()
             except httpx.HTTPError:
-                logger.warning("Nextext poll error for job {}", job_id)
                 return "poll_error"
             status = str(resp.json().get("status") or "").lower()
             if status == _TERMINAL_OK or status in _TERMINAL_FAIL:
