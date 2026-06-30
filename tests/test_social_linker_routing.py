@@ -78,16 +78,55 @@ class _FakeNextext:
 def _write_export(root: Path) -> None:
     """Write a minimal social export tree under *root* for testing.
 
+    The fixture includes a ``comments.csv`` that contains both ``UUID`` and
+    ``Posting ID`` columns to guard against subset-collision with the postings
+    profile detection — it must NOT be misdetected as the postings table.
+
     Args:
         root: Temporary directory in which to create the export.
     """
     (root / "tables").mkdir(parents=True)
     (root / "media").mkdir()
-    pd.DataFrame({"Posting ID": ["P_1", "P_2"], "UUID": ["u1", "u2"], "Text Content": ["a", "b"]}).to_csv(
-        root / "tables" / "postings.csv", index=False
-    )
+    # Full 25-column postings profile — exact-match required by _find_tables.
+    postings_cols = [
+        "UUID",
+        "Posting ID",
+        "URL",
+        "Date last updated",
+        "Timestamp",
+        "Timezone",
+        "Crawled at",
+        "Postings Connections",
+        "Network Posting ID",
+        "Location",
+        "Author ID",
+        "Author",
+        "Vanity Name",
+        "Co-Author",
+        "Quoted User",
+        "Expected Reactions",
+        "Collected Reactions",
+        "Expected Comments",
+        "Collected Comments",
+        "Network",
+        "Posted in Group",
+        "Task",
+        "Text Content",
+        "Filename",
+        "Tags",
+    ]
+    postings_data = {col: ["", ""] for col in postings_cols}
+    postings_data["UUID"] = ["u1", "u2"]
+    postings_data["Posting ID"] = ["P_1", "P_2"]
+    postings_data["Text Content"] = ["a", "b"]
+    pd.DataFrame(postings_data).to_csv(root / "tables" / "postings.csv", index=False)
     pd.DataFrame({"Media ID": ["P_1_0", "P_2_0"], "Exported media filename": ["pic.jpg", "clip.mp4"]}).to_csv(
         root / "tables" / "media.csv", index=False
+    )
+    # comments.csv contains UUID + Posting ID but is NOT the full postings header set;
+    # it must NOT be misdetected as the postings table (guards subset-collision regression).
+    pd.DataFrame({"UUID": ["c1"], "Posting ID": ["P_1"], "Text Content": ["comment text"]}).to_csv(
+        root / "tables" / "comments.csv", index=False
     )
     (root / "media" / "pic.jpg").write_bytes(b"\xff\xd8\xff")
     (root / "media" / "clip.mp4").write_bytes(b"video")
@@ -149,6 +188,7 @@ class _FakeManifest:
         """
         self._cached = cached
         self.saved: list[tuple[str, str, str]] = []
+        self.lookup_calls: int = 0
 
     def get_nextext_transcript(self, collection: str, file_hash: str) -> str | None:
         """Return the pre-seeded cached transcript (ignores collection/hash).
@@ -160,6 +200,7 @@ class _FakeManifest:
         Returns:
             The pre-seeded transcript string, or None.
         """
+        self.lookup_calls += 1
         return self._cached
 
     def cache_nextext_transcript(self, collection: str, file_hash: str, jsonl: str) -> None:
@@ -182,6 +223,7 @@ def test_cached_transcript_skips_nextext(tmp_path: Path) -> None:
         image_service=_FakeImageService(), nextext_client=nx, target_collection="c", manifest=manifest
     ).run(tmp_path)
     assert nx.calls == 0  # cache hit -> Nextext job not submitted
+    assert manifest.lookup_calls >= 1  # manifest was consulted for the cache lookup
     assert any(d.metadata.get("posting_uuid") == "u2" for d in result.transcript_documents)
 
 

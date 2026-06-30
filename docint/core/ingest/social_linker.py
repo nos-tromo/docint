@@ -157,11 +157,15 @@ from llama_index.core import Document  # noqa: E402
 
 from docint.core.ingest.images_service import ImageAsset, IngestContext  # noqa: E402
 from docint.core.readers.json import CustomJSONReader  # noqa: E402
-from docint.core.readers.tables import is_media_manifest  # noqa: E402
+from docint.core.readers.tables import TableReader, is_media_manifest  # noqa: E402
 from docint.utils.hashing import compute_file_hash  # noqa: E402
 
-# Minimum columns that identify a postings table (subset check, mirrors is_media_manifest).
-_POSTINGS_REQUIRED_COLUMNS: frozenset[str] = frozenset({"posting id", "uuid"})
+# Exact header set for the postings profile — derived from the single source of truth in
+# TableReader so _find_tables stays in sync whenever the profile header list changes.
+_POSTINGS_HEADERS: set[str] = next(
+    (profile.normalized_headers for profile in TableReader.schema_profiles if profile.style == "postings"),
+    set(),
+)
 
 
 @dataclass
@@ -200,7 +204,7 @@ class SocialLinker:
             normalized = {str(c).strip().casefold() for c in columns}
             if media is None and is_media_manifest(columns):
                 media = path
-            elif postings is None and _POSTINGS_REQUIRED_COLUMNS.issubset(normalized):
+            elif postings is None and normalized == _POSTINGS_HEADERS:
                 postings = path
         return postings, media
 
