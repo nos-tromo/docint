@@ -25,7 +25,14 @@ def test_resolve_matches_by_known_posting_id_and_finds_file_recursively(tmp_path
     img.write_bytes(b"\xff\xd8\xff")
 
     postings = pd.DataFrame({"Posting ID": ["P_1"], "UUID": ["uuid-1"]})
-    media = pd.DataFrame({"Media ID": ["P_1_0", "ORPHAN_0"], "Exported media filename": ["a.jpg", "missing.jpg"]})
+    # ORPHAN_0 is skipped as an orphan before file resolution.
+    # P_1_1 exercises the missing-file skip branch (known posting, file not on disk).
+    media = pd.DataFrame(
+        {
+            "Media ID": ["P_1_0", "ORPHAN_0", "P_1_1"],
+            "Exported media filename": ["a.jpg", "ignored.jpg", "nope.jpg"],
+        }
+    )
 
     links = resolve_media_rows(
         media,
