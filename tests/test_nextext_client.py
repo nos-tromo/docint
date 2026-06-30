@@ -72,3 +72,30 @@ def test_process_media_failsoft_on_job_failure(tmp_path: Path) -> None:
     assert result.status == "failed"
     assert result.transcript_jsonl is None
     assert result.keyframes == []
+
+
+def test_process_media_disabled_no_network_call(tmp_path: Path) -> None:
+    """Test that disabled config prevents any network calls."""
+    media = tmp_path / "clip.mp4"
+    media.write_bytes(b"x")
+
+    def error_handler(request: httpx.Request) -> httpx.Response:
+        raise RuntimeError("Network call should not be made when disabled")
+
+    cfg = NextextConfig(
+        api_base="http://nextext.test",
+        api_key=None,
+        timeout=5.0,
+        poll_interval=0.0,
+        poll_max_seconds=5.0,
+        enabled=False,
+        keyframes_per_minute=4,
+        keyframes_max=20,
+        keyframe_dedup_cosine=0.95,
+    )
+
+    client = httpx.Client(base_url="http://nextext.test", transport=httpx.MockTransport(error_handler))
+    result = NextextClient(cfg, client=client).process_media(media)
+    assert result.status == "disabled"
+    assert result.transcript_jsonl is None
+    assert result.keyframes == []

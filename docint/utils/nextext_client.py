@@ -61,6 +61,8 @@ class NextextClient:
 
     def _options_payload(self) -> str:
         """Return the JSON ``options`` form field forwarded to Nextext."""
+        # Note: keyframe_dedup_cosine is NOT forwarded; near-duplicate pruning
+        # is applied client-side in docint's image service.
         return json.dumps(
             {
                 "keyframes_per_minute": self._cfg.keyframes_per_minute,
@@ -75,12 +77,18 @@ class NextextClient:
             job_id (str): The job identifier returned by submission.
 
         Returns:
-            str: The terminal status string (``'completed'`` on success).
+            str: Terminal status (``'completed'`` on success, server terminal
+                statuses from ``_TERMINAL_FAIL`` on job failure, ``'timeout'``
+                on poll expiry, ``'poll_error'`` on HTTP/transport failure).
         """
         deadline = time.monotonic() + self._cfg.poll_max_seconds
         while True:
-            resp = self._client.get(f"/jobs/{job_id}")
-            resp.raise_for_status()
+            try:
+                resp = self._client.get(f"/jobs/{job_id}")
+                resp.raise_for_status()
+            except httpx.HTTPError:
+                logger.warning("Nextext poll error for job {}", job_id)
+                return "poll_error"
             status = str(resp.json().get("status") or "").lower()
             if status == _TERMINAL_OK or status in _TERMINAL_FAIL:
                 return status
@@ -116,8 +124,12 @@ class NextextClient:
 
         Returns:
             NextextResult: Transcript JSONL bytes (or ``None`` when no speech)
-                and keyframe JPEG bytes. Fail-soft: transport/HTTP/job errors
-                yield ``status='error'`` with empty payloads.
+                and keyframe JPEG bytes. Possible statuses: ``'completed'`` on
+                success, server terminal statuses (``'failed'``, ``'error'``,
+                ``'cancelled'``), ``'timeout'`` if polling expires, ``'poll_error'``
+                on HTTP failures during polling, ``'error'`` on submission/fetch
+                exceptions, ``'disabled'`` if Nextext is not enabled. Fail-soft:
+                non-``completed`` statuses yield empty payloads.
         """
         if not self._cfg.enabled:
             return NextextResult(status="disabled")
