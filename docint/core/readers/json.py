@@ -547,6 +547,11 @@ class CustomJSONReader(BaseReader):
         if speaker_str is not None:
             reference_metadata["speaker"] = speaker_str
 
+        for link_field in ("posting_uuid", "posting_id", "media_id"):
+            link_value = base.get(link_field)
+            if link_value:
+                reference_metadata[link_field] = link_value
+
         metadata["reference_metadata"] = reference_metadata
         return metadata
 
