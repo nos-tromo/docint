@@ -957,6 +957,73 @@ def load_ner_client_env(
 
 
 @dataclass(frozen=True)
+class NextextConfig:
+    """Remote Nextext media-processing client + keyframe-sampling configuration."""
+
+    api_base: str
+    api_key: str | None
+    timeout: float
+    poll_interval: float
+    poll_max_seconds: float
+    enabled: bool
+    keyframes_per_minute: int
+    keyframes_max: int
+    keyframe_dedup_cosine: float
+
+
+def load_nextext_env(
+    default_api_base: str = "",
+    default_timeout: float = 30.0,
+    default_poll_interval: float = 2.0,
+    default_poll_max_seconds: float = 1800.0,
+    default_keyframes_per_minute: int = 4,
+    default_keyframes_max: int = 20,
+    default_keyframe_dedup_cosine: float = 0.95,
+) -> NextextConfig:
+    """Load Nextext client + keyframe settings from the environment.
+
+    docint forwards video/audio to Nextext, which returns a ``docint.jsonl``
+    transcript and a ``keyframes.zip`` artifact. The two sampling knobs ride
+    along as Nextext job options; the cosine threshold is applied docint-side.
+    The client is disabled unless ``NEXTEXT_API_BASE`` is set, so non-social
+    dev hosts skip video/audio rows rather than erroring.
+
+    Args:
+        default_api_base (str): Fallback base URL (empty ⇒ disabled).
+        default_timeout (float): Per-request HTTP timeout (seconds).
+        default_poll_interval (float): Delay between job status polls (seconds).
+        default_poll_max_seconds (float): Max wall-clock to await a job (seconds).
+        default_keyframes_per_minute (int): Frame sampling rate forwarded to Nextext.
+        default_keyframes_max (int): Hard candidate-frame ceiling forwarded to Nextext.
+        default_keyframe_dedup_cosine (float): Drop a frame whose cosine similarity
+            to a kept frame is >= this value. Must be within [0, 1].
+
+    Returns:
+        NextextConfig: Resolved configuration.
+
+    Raises:
+        ValueError: If ``KEYFRAME_DEDUP_COSINE`` is not within [0, 1].
+    """
+    raw_base = os.getenv("NEXTEXT_API_BASE", default_api_base).strip()
+    raw_key = os.getenv("NEXTEXT_API_KEY")
+    api_key = raw_key.strip() if raw_key and raw_key.strip() else None
+    cosine = float(os.getenv("KEYFRAME_DEDUP_COSINE", default_keyframe_dedup_cosine))
+    if not (0.0 <= cosine <= 1.0):
+        raise ValueError(f"KEYFRAME_DEDUP_COSINE={cosine!r} is out of range — must be within [0, 1].")
+    return NextextConfig(
+        api_base=raw_base.rstrip("/"),
+        api_key=api_key,
+        timeout=float(os.getenv("NEXTEXT_TIMEOUT", default_timeout)),
+        poll_interval=float(os.getenv("NEXTEXT_POLL_INTERVAL", default_poll_interval)),
+        poll_max_seconds=float(os.getenv("NEXTEXT_POLL_MAX_SECONDS", default_poll_max_seconds)),
+        enabled=bool(raw_base),
+        keyframes_per_minute=int(os.getenv("KEYFRAMES_PER_MINUTE", default_keyframes_per_minute)),
+        keyframes_max=int(os.getenv("KEYFRAMES_MAX", default_keyframes_max)),
+        keyframe_dedup_cosine=cosine,
+    )
+
+
+@dataclass(frozen=True)
 class ResolutionConfig:
     """Dataclass for entity-resolution clustering parameters.
 

@@ -560,6 +560,31 @@ def _extract_node_file_hashes(nodes: list[BaseNode]) -> set[str]:
     return hashes
 
 
+def _attach_posting_group(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Tag each source with its posting UUID group key when linkable.
+
+    Reads the posting UUID from a top-level ``posting_uuid`` or from
+    ``reference_metadata.uuid``/``reference_metadata.posting_uuid`` and writes
+    it as ``posting_group`` so the UI can render a post and its media as one
+    entity. Sources without a link are left untouched.
+
+    Args:
+        sources (list[dict[str, Any]]): Normalized source dicts.
+
+    Returns:
+        list[dict[str, Any]]: The same list, mutated with ``posting_group``.
+    """
+    for source in sources:
+        group = str(source.get("posting_uuid") or "").strip()
+        if not group:
+            reference_metadata = source.get("reference_metadata")
+            if isinstance(reference_metadata, dict):
+                group = str(reference_metadata.get("posting_uuid") or reference_metadata.get("uuid") or "").strip()
+        if group:
+            source["posting_group"] = group
+    return sources
+
+
 class EmptyIngestionError(Exception):
     """Raised when an ingestion run produced zero documents/nodes for a fresh collection.
 
@@ -710,6 +735,86 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
             filtered.append(node)
 
         return filtered
+
+
+class LinkFollowingPostprocessor(BaseNodePostprocessor):
+    """Expand each retrieved post to include its linked media (and vice versa).
+
+    For every hit, resolves the posting UUID (``reference_metadata.uuid`` or a
+    top-level ``posting_uuid``) and appends the post's sibling artifacts —
+    transcript segments and image/keyframe captions — so the generator sees a
+    post and its media as one evidence block. Bounded by ``max_per_post`` and
+    deduplicated by node id; triggering is bidirectional (a media hit pulls in
+    its post's siblings too).
+
+    Attributes:
+        rag: A :class:`RAG` instance exposing ``_fetch_posting_entity_nodes``.
+        max_per_post: Maximum number of sibling nodes to append per posting UUID.
+    """
+
+    rag: Any
+    max_per_post: int = 12
+
+    @override
+    @classmethod
+    def class_name(cls) -> str:
+        """Return a stable class identifier."""
+        return "LinkFollowingPostprocessor"
+
+    @staticmethod
+    def _posting_uuid(node: NodeWithScore) -> str:
+        """Extract the posting UUID link key from a node's metadata.
+
+        Args:
+            node (NodeWithScore): The node from which to extract the posting UUID.
+
+        Returns:
+            str: The posting UUID if found, otherwise an empty string.
+        """
+        metadata = getattr(node, "metadata", {}) or {}
+        direct = str(metadata.get("posting_uuid") or "").strip()
+        if direct:
+            return direct
+        reference_metadata = metadata.get("reference_metadata")
+        if isinstance(reference_metadata, dict):
+            return str(reference_metadata.get("posting_uuid") or reference_metadata.get("uuid") or "").strip()
+        return ""
+
+    @override
+    def _postprocess_nodes(
+        self,
+        nodes: list[NodeWithScore],
+        query_bundle: QueryBundle | None = None,
+    ) -> list[NodeWithScore]:
+        """Append linked sibling artifacts for each retrieved posting.
+
+        Args:
+            nodes (list[NodeWithScore]): Retrieved nodes.
+            query_bundle (QueryBundle | None): Unused.
+
+        Returns:
+            list[NodeWithScore]: Original nodes plus bounded, deduped siblings.
+        """
+        _ = query_bundle
+        present: set[str] = {n.node.node_id for n in nodes}
+        additions: list[NodeWithScore] = []
+        seen_posts: set[str] = set()
+        for node in nodes:
+            posting_uuid = self._posting_uuid(node)
+            if not posting_uuid or posting_uuid in seen_posts:
+                continue
+            seen_posts.add(posting_uuid)
+            try:
+                siblings = self.rag._fetch_posting_entity_nodes(posting_uuid, exclude_node_ids=present)
+            except Exception as exc:
+                logger.warning("Link-following expansion failed for {}: {}", posting_uuid, exc)
+                continue
+            for sibling in siblings[: self.max_per_post]:
+                sid = sibling.node.node_id
+                if sid not in present:
+                    present.add(sid)
+                    additions.append(sibling)
+        return nodes + additions
 
 
 class ParentContextPostprocessor(BaseNodePostprocessor):
@@ -2445,6 +2550,89 @@ class RAG:
             image_ingestion_service=self._image_ingestion_service,
         )
 
+    def _image_collection_name(self) -> str:
+        """Return the ``_images`` companion collection name for the active collection."""
+        if self._image_ingestion_service is None:
+            self._image_ingestion_service = ImageIngestionService()
+        return self._image_ingestion_service._resolve_collection_name(self.qdrant_collection)
+
+    def _fetch_posting_entity_nodes(self, posting_uuid: str, *, exclude_node_ids: set[str]) -> list[NodeWithScore]:
+        """Fetch a posting's sibling artifacts across both collections.
+
+        Gathers transcript/text nodes (main collection) and image/keyframe
+        caption nodes (``_images``) whose payload carries ``posting_uuid``, so a
+        post and its media surface together. Fail-soft: scroll errors yield
+        whatever was collected so far.
+
+        Args:
+            posting_uuid (str): The posting UUID link key.
+            exclude_node_ids (set[str]): Node ids already present in the result
+                set (skip to avoid duplicates).
+
+        Returns:
+            list[NodeWithScore]: Sibling nodes with score ``None``.
+        """
+        if not posting_uuid:
+            return []
+        # Main collection: OR on posting_uuid OR reference_metadata.uuid so that
+        # posting TEXT nodes (which carry the link only as reference_metadata.uuid)
+        # are collected even when retrieval started from a media/transcript hit.
+        main_flt = qdrant_models.Filter(
+            should=[
+                qdrant_models.FieldCondition(key="posting_uuid", match=qdrant_models.MatchValue(value=posting_uuid)),
+                qdrant_models.FieldCondition(
+                    key="reference_metadata.uuid", match=qdrant_models.MatchValue(value=posting_uuid)
+                ),
+            ]
+        )
+        # Images companion: top-level posting_uuid is always populated on image payloads.
+        images_flt = qdrant_models.Filter(
+            must=[qdrant_models.FieldCondition(key="posting_uuid", match=qdrant_models.MatchValue(value=posting_uuid))]
+        )
+        collected: list[NodeWithScore] = []
+        image_collection = self._image_collection_name()
+        targets = [(self.qdrant_collection, "text"), (image_collection, "image")]
+        for collection_name, kind in targets:
+            if not collection_name or not qdrant_collection_exists(self.qdrant_client, collection_name):
+                continue
+            flt = images_flt if collection_name == image_collection else main_flt
+            try:
+                points, _ = self.qdrant_client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=flt,
+                    limit=64,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+            except Exception as exc:
+                logger.warning("Link-following scroll failed for {}: {}", collection_name, exc)
+                continue
+            for point in points:
+                point_id = str(getattr(point, "id", ""))
+                if not point_id or point_id in exclude_node_ids:
+                    continue
+                payload = dict(getattr(point, "payload", {}) or {})
+                if kind == "image":
+                    text = str(payload.get("llm_description") or "").strip()
+                    tags = payload.get("llm_tags")
+                    if isinstance(tags, list) and tags:
+                        text = f"{text}\n\nTags: {', '.join(str(t) for t in tags)}".strip()
+                else:
+                    text = str(payload.get("text") or "").strip()
+                    if not text:
+                        raw = payload.get("_node_content")
+                        if isinstance(raw, str) and raw:
+                            try:
+                                parsed = json.loads(raw)
+                                text = str(parsed.get("text") or "").strip() if isinstance(parsed, dict) else ""
+                            except (json.JSONDecodeError, ValueError):
+                                text = ""
+                if not text:
+                    continue
+                exclude_node_ids.add(point_id)
+                collected.append(NodeWithScore(node=TextNode(id_=point_id, text=text, metadata=payload), score=None))
+        return collected
+
     def _retrieve_image_sources(
         self,
         query: str,
@@ -2542,6 +2730,8 @@ class RAG:
             bbox = payload.get("bbox")
             if isinstance(bbox, dict):
                 src["bbox"] = bbox
+            if payload.get("posting_uuid"):
+                src["posting_uuid"] = payload["posting_uuid"]
             results.append(src)
 
         return results
@@ -3265,6 +3455,9 @@ class RAG:
                 "n_cols": table_meta.get("n_cols"),
                 "style": table_meta.get("style"),
             }
+        posting_uuid = payload.get("posting_uuid")
+        if posting_uuid:
+            src["posting_uuid"] = posting_uuid
         return src
 
     def get_source_by_node_id(
@@ -3401,6 +3594,8 @@ class RAG:
         """Materialize a VectorStoreIndex.
 
         If nodes are present in memory, create from nodes; otherwise, load from vector store.
+        Also best-effort-indexes the ``posting_uuid`` payload field on the main collection
+        so link-following scrolls run against an index rather than a full scan at scale.
         """
         vector_store = self._vector_store()
         storage_ctx = self._storage_context(vector_store)
@@ -3414,6 +3609,18 @@ class RAG:
                 embed_model=self.embed_model,
                 storage_context=storage_ctx,
             )
+
+        # Best-effort: index posting_uuid on the main collection so that
+        # _fetch_posting_entity_nodes scrolls use an index rather than a full scan.
+        # Idempotent (Qdrant ignores duplicate index creation) and fail-soft.
+        try:
+            self.qdrant_client.create_payload_index(
+                collection_name=self.qdrant_collection,
+                field_name="posting_uuid",
+                field_schema=qdrant_models.PayloadSchemaType.KEYWORD,
+            )
+        except Exception as idx_exc:
+            logger.debug("posting_uuid index on {} skipped: {}", self.qdrant_collection, idx_exc)
 
     def create_query_engine(self) -> None:
         """Create the query engine with a retriever and reranker.
@@ -3961,6 +4168,7 @@ class RAG:
             node_postprocessors.append(
                 SocialSourceDiversityPostprocessor(diversity_limit=max(1, int(self.social_summary_diversity_limit)))
             )
+            node_postprocessors.append(LinkFollowingPostprocessor(rag=self))
 
         return RetrieverQueryEngine.from_args(
             retriever=self._build_retriever(
@@ -4138,6 +4346,8 @@ class RAG:
                     metadata_filter_rules=image_filter_rules,
                 )
             )
+
+        sources = _attach_posting_group(sources)
 
         normalized_resp_text = str(resp_text or "").strip()
         if normalized_resp_text.lower() in {"empty response", "no response"}:
