@@ -182,6 +182,8 @@ class DocumentIngestionPipeline:
     hate_speech_prompt: str | None = field(default=None, init=False)
 
     dir_reader: SimpleDirectoryReader | None = field(default=None, init=False)
+    social_link_consumed: set[Path] = field(default_factory=set, init=False)
+    social_link_documents: list[Document] = field(default_factory=list, init=False)
     md_node_parser: MarkdownNodeParser | None = field(default=None, init=False)
     docling_node_parser: DoclingNodeParser | None = field(default=None, init=False)
     sentence_splitter: SentenceSplitter = field(default_factory=SentenceSplitter, init=False)
@@ -390,6 +392,8 @@ class DocumentIngestionPipeline:
         dir_reader = self.dir_reader
 
         for input_file in dir_reader.input_files:
+            if Path(input_file) in self.social_link_consumed:
+                continue
             ext = input_file.suffix.lower()
             reader = dir_reader.file_extractor.get(ext) if dir_reader.file_extractor else None
             if self.streaming_readers_enabled and reader is not None and hasattr(reader, "iter_documents"):
@@ -408,6 +412,8 @@ class DocumentIngestionPipeline:
                 )
             if docs:
                 yield dir_reader._exclude_metadata(docs)
+        if self.social_link_documents:
+            yield self.social_link_documents
 
     def _process_batch(
         self, docs: list[Document], existing_hashes: set[str] | None
@@ -842,6 +848,40 @@ class DocumentIngestionPipeline:
                 ".rtf": RTFReader(),
             },
         )
+        self._run_social_linker()
+
+    def _run_social_linker(self) -> None:
+        """Run the social linker; record consumed paths + transcript Documents.
+
+        No-op (and fail-soft) unless the batch is a social export with both a
+        postings table and a media manifest.
+        """
+        from docint.core.ingest.social_linker import SocialLinker
+        from docint.core.storage.ingest_manifest import IngestManifest, NullIngestManifest
+        from docint.utils.env_cfg import load_ingestion_env, load_path_env
+        from docint.utils.nextext_client import NextextClient
+
+        manifest: IngestManifest | NullIngestManifest = NullIngestManifest()
+        try:
+            sources_root = load_path_env().qdrant_sources
+            if load_ingestion_env().ingest_manifest_enabled and sources_root and self.target_collection:
+                target = self.target_collection
+                manifest = IngestManifest(sources_root / target / f"{target}_ingest_manifest.db")
+        except Exception as exc:  # pragma: no cover - fail-soft guard
+            logger.debug("Manifest unavailable for social linker cache: {}", exc)
+
+        try:
+            result = SocialLinker(
+                image_service=self.image_ingestion_service or ImageIngestionService(),
+                nextext_client=NextextClient(),
+                target_collection=self.target_collection,
+                manifest=manifest,
+            ).run(self.data_dir)
+        except Exception as exc:  # pragma: no cover - fail-soft guard
+            logger.warning("Social linker skipped due to error: {}", exc)
+            return
+        self.social_link_consumed = result.consumed_paths
+        self.social_link_documents = result.transcript_documents
 
     def _load_node_parsers(self) -> None:
         """Load document parsers for various file types."""

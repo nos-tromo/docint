@@ -700,6 +700,14 @@ class ImageIngestionService:
                 )
             except Exception as idx_exc:
                 logger.debug("Payload index creation on image_id skipped: {}", idx_exc)
+            try:
+                self.qdrant_client.create_payload_index(
+                    collection_name=collection_name,
+                    field_name="posting_uuid",
+                    field_schema=models.PayloadSchemaType.KEYWORD,
+                )
+            except Exception as idx_exc:
+                logger.debug("Payload index creation on posting_uuid skipped: {}", idx_exc)
             logger.info(
                 "Created image collection '{}' with vector '{}'",
                 collection_name,
