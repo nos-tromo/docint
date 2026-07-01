@@ -560,6 +560,31 @@ def _extract_node_file_hashes(nodes: list[BaseNode]) -> set[str]:
     return hashes
 
 
+def _attach_posting_group(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Tag each source with its posting UUID group key when linkable.
+
+    Reads the posting UUID from a top-level ``posting_uuid`` or from
+    ``reference_metadata.uuid``/``reference_metadata.posting_uuid`` and writes
+    it as ``posting_group`` so the UI can render a post and its media as one
+    entity. Sources without a link are left untouched.
+
+    Args:
+        sources (list[dict[str, Any]]): Normalized source dicts.
+
+    Returns:
+        list[dict[str, Any]]: The same list, mutated with ``posting_group``.
+    """
+    for source in sources:
+        group = str(source.get("posting_uuid") or "").strip()
+        if not group:
+            reference_metadata = source.get("reference_metadata")
+            if isinstance(reference_metadata, dict):
+                group = str(reference_metadata.get("posting_uuid") or reference_metadata.get("uuid") or "").strip()
+        if group:
+            source["posting_group"] = group
+    return sources
+
+
 class EmptyIngestionError(Exception):
     """Raised when an ingestion run produced zero documents/nodes for a fresh collection.
 
@@ -4302,6 +4327,8 @@ class RAG:
                     metadata_filter_rules=image_filter_rules,
                 )
             )
+
+        sources = _attach_posting_group(sources)
 
         normalized_resp_text = str(resp_text or "").strip()
         if normalized_resp_text.lower() in {"empty response", "no response"}:
