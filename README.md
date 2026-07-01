@@ -303,12 +303,16 @@ single entity.
 external Nextext service. Set:
 
 ```bash
-NEXTEXT_API_BASE=https://<nextext-host>   # required to enable social-media ingestion
-NEXTEXT_API_KEY=<token>                   # if the endpoint requires auth
-NEXTEXT_TIMEOUT=120                       # per-request HTTP timeout (seconds)
-NEXTEXT_POLL_INTERVAL=5                   # polling interval while waiting for job (seconds)
-NEXTEXT_POLL_MAX_SECONDS=600              # hard deadline per transcription job (seconds)
+NEXTEXT_API_BASE=https://<nextext-host>/api/v1   # required to enable social-media ingestion
+NEXTEXT_API_KEY=<token>                          # if the endpoint requires auth
+NEXTEXT_TIMEOUT=120                              # per-request HTTP timeout (seconds)
+NEXTEXT_POLL_INTERVAL=5                          # polling interval while waiting for job (seconds)
+NEXTEXT_POLL_MAX_SECONDS=600                     # hard deadline per transcription job (seconds)
 ```
+
+The `/api/v1` suffix is required: docint's client calls `{NEXTEXT_API_BASE}/jobs`,
+and Nextext mounts its jobs router under `/api/v1` — a base URL without that
+suffix will 404 on every request.
 
 When `NEXTEXT_API_BASE` is unset, the Nextext client is disabled and
 video/audio files are skipped gracefully — non-social collections are
