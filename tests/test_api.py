@@ -101,6 +101,7 @@ class DummyRAG:
         self.ner_stats_merge_modes: list[str] = []
         self.ner_search_merge_modes: list[str] = []
         self.ner_graph_merge_modes: list[str] = []
+        self.ner_graph_top_ks: list[int] = []
         self.hate_speech_rows: list[dict[str, Any]] = []
         self.documents: list[dict[str, Any]] = []
         self.summary_refresh_calls: list[bool] = []
@@ -677,7 +678,8 @@ class DummyRAG:
         Returns:
             dict[str, Any]: Graph payload with nodes, edges, and meta counts.
         """
-        _ = (top_k_nodes, min_edge_weight)
+        _ = min_edge_weight
+        self.ner_graph_top_ks.append(top_k_nodes)
         self.ner_graph_merge_modes.append(entity_merge_mode)
         return {
             "nodes": [
@@ -3478,3 +3480,68 @@ def test_stream_query_surfaces_generator_error(monkeypatch: pytest.MonkeyPatch, 
 
     assert '"token": "tok ' in body
     assert '"error"' in body
+
+
+def test_get_config_returns_graph_settings(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`GET /config` reports the env-driven graph node defaults.
+
+    Args:
+        client (TestClient): The TestClient instance.
+        monkeypatch (pytest.MonkeyPatch): Fixture to override env vars.
+    """
+    monkeypatch.setenv("NER_GRAPH_TOP_K", "120")
+    monkeypatch.setenv("NER_GRAPH_MAX_TOP_K", "900")
+
+    response = client.get("/config")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["graph_top_k"] == 120
+    assert body["graph_max_top_k"] == 900
+    assert "collection_timeout" in body
+
+
+def test_ner_graph_uses_env_default_when_top_k_omitted(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Omitting `top_k_nodes` falls back to `NER_GRAPH_TOP_K`.
+
+    Args:
+        client (TestClient): The TestClient instance.
+        monkeypatch (pytest.MonkeyPatch): Fixture to override env vars.
+    """
+    monkeypatch.setenv("NER_GRAPH_TOP_K", "150")
+    monkeypatch.delenv("NER_GRAPH_MAX_TOP_K", raising=False)
+
+    response = client.get("/collections/ner/graph")
+
+    assert response.status_code == 200
+    assert cast(DummyRAG, api_module.rag).ner_graph_top_ks[-1] == 150
+
+
+def test_ner_graph_accepts_value_above_legacy_500_cap(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a raised ceiling, > 500 nodes are honoured (old hard cap removed).
+
+    Args:
+        client (TestClient): The TestClient instance.
+        monkeypatch (pytest.MonkeyPatch): Fixture to override env vars.
+    """
+    monkeypatch.setenv("NER_GRAPH_MAX_TOP_K", "800")
+
+    response = client.get("/collections/ner/graph", params={"top_k_nodes": 800})
+
+    assert response.status_code == 200
+    assert cast(DummyRAG, api_module.rag).ner_graph_top_ks[-1] == 800
+
+
+def test_ner_graph_clamps_top_k_to_configured_max(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A request above the ceiling is clamped down, not rejected.
+
+    Args:
+        client (TestClient): The TestClient instance.
+        monkeypatch (pytest.MonkeyPatch): Fixture to override env vars.
+    """
+    monkeypatch.setenv("NER_GRAPH_MAX_TOP_K", "300")
+
+    response = client.get("/collections/ner/graph", params={"top_k_nodes": 5000})
+
+    assert response.status_code == 200
+    assert cast(DummyRAG, api_module.rag).ner_graph_top_ks[-1] == 300

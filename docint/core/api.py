@@ -45,6 +45,7 @@ from docint.core.rag import RAG, EmptyIngestionError
 from docint.core.retrieval_filters import build_metadata_filters, build_qdrant_filter
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.env_cfg import (
+    load_frontend_env,
     load_host_env,
     load_path_env,
     load_response_validation_env,
@@ -591,6 +592,14 @@ class NERGraphOut(BaseModel):
     meta: dict[str, int] = {}
 
 
+class FrontendConfigOut(BaseModel):
+    """Deploy-time frontend configuration served to the SPA."""
+
+    graph_top_k: int
+    graph_max_top_k: int
+    collection_timeout: int
+
+
 class AgentChatIn(BaseModel):
     """Request payload for a single agent chat turn."""
 
@@ -663,6 +672,26 @@ class ReportListOut(BaseModel):
 
 
 # --- API Endpoints ---
+
+
+@app.get("/config", response_model=FrontendConfigOut, tags=["Meta"])
+def get_frontend_config() -> dict[str, int]:
+    """Return deploy-time frontend configuration for the SPA.
+
+    Served without a principal dependency so the SPA can read it on first load,
+    before any collection or session exists. Values are read from environment
+    variables on each call (see :func:`docint.utils.env_cfg.load_frontend_env`).
+
+    Returns:
+        dict[str, int]: ``graph_top_k``, ``graph_max_top_k`` and
+        ``collection_timeout``.
+    """
+    cfg = load_frontend_env()
+    return {
+        "graph_top_k": cfg.graph_top_k,
+        "graph_max_top_k": cfg.graph_max_top_k,
+        "collection_timeout": cfg.collection_timeout,
+    }
 
 
 @app.get("/collections/list", response_model=list[str], tags=["Collections"])
@@ -1456,7 +1485,7 @@ def search_collection_ner_entities(
 
 @app.get("/collections/ner/graph", response_model=NERGraphOut, tags=["Query"])
 def get_collection_ner_graph(
-    top_k_nodes: int = Query(default=80, ge=1, le=500),
+    top_k_nodes: int | None = Query(default=None, ge=1),
     min_edge_weight: int = Query(default=1, ge=1),
     entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
 ) -> dict[str, Any]:
@@ -1470,7 +1499,9 @@ def get_collection_ner_graph(
     an entity for drill-down via its ``text``/``type`` fields.
 
     Args:
-        top_k_nodes (int): Maximum number of highest-mention entity nodes (1-500).
+        top_k_nodes (int | None): Maximum number of highest-mention entity
+            nodes. Defaults to ``NER_GRAPH_TOP_K`` (80) when omitted and is
+            clamped to ``[1, NER_GRAPH_MAX_TOP_K]`` (default ceiling 500).
         min_edge_weight (int): Minimum edge weight to include.
         entity_merge_mode (Literal["orthographic", "exact", "resolved"]): Entity
             clustering mode used for derived views ("resolved" groups by durable
@@ -1484,9 +1515,12 @@ def get_collection_ner_graph(
     """
     if not rag.qdrant_collection:
         raise HTTPException(status_code=400, detail="No collection selected")
+    cfg = load_frontend_env()
+    requested = cfg.graph_top_k if top_k_nodes is None else top_k_nodes
+    effective_top_k = min(max(1, requested), cfg.graph_max_top_k)
     try:
         return rag.get_collection_ner_graph(
-            top_k_nodes=top_k_nodes,
+            top_k_nodes=effective_top_k,
             min_edge_weight=min_edge_weight,
             entity_merge_mode=entity_merge_mode,
         )

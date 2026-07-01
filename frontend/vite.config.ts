@@ -16,6 +16,7 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       '/collections': 'http://localhost:8000',
+      '/config': 'http://localhost:8000',
       '/sessions': 'http://localhost:8000',
       '/reports': 'http://localhost:8000',
       '/sources': 'http://localhost:8000',
