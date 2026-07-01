@@ -7,6 +7,7 @@ import {
   type ForceLink,
   type ForceNode
 } from '@/lib/forceGraph'
+import { GraphTopKControl } from './GraphTopKControl'
 
 const WIDTH = 960
 const HEIGHT = 620
@@ -17,9 +18,11 @@ const MAX_ZOOM = 4
 const DRAG_THRESHOLD = 4 // px of movement before a press counts as a drag
 // Edge-length ("spread") slider: bounds + the base spacing it scales. The bases
 // mirror forceGraph's DEFAULTS (linkDistance 70, repulsion 320); a multiplier of
-// 1 reproduces today's density, higher values push nodes farther apart.
+// 1 reproduces today's density, higher values push nodes farther apart. The max
+// is deliberately generous (8×) so dense graphs can be pulled fully apart — pair
+// it with zoom-out to fit the widened layout on screen.
 const MIN_SPREAD = 0.5
-const MAX_SPREAD = 3
+const MAX_SPREAD = 8
 const BASE_LINK_DISTANCE = 70
 const BASE_REPULSION = 320
 
@@ -113,6 +116,16 @@ interface Props {
   /** Map a graph node to the `${text}::${type}` selection key used elsewhere. */
   keyForNode: (n: NerGraphNode) => string
   isLoading?: boolean
+  /**
+   * Node-count control, rendered inline with the other graph controls. The
+   * parent owns this state (it drives the graph fetch + is persisted), so it is
+   * threaded in rather than held locally. Omit the handlers to hide the control.
+   */
+  nodeCount?: number
+  nodeCountMax?: number
+  onNodeCountChange?: (n: number) => void
+  /** Reset the node count to the deploy default (env `NER_GRAPH_TOP_K`). */
+  onResetNodeCount?: () => void
 }
 
 /**
@@ -128,7 +141,11 @@ export function EntityGraph({
   selectedKey,
   onSelectEntity,
   keyForNode,
-  isLoading
+  isLoading,
+  nodeCount,
+  nodeCountMax,
+  onNodeCountChange,
+  onResetNodeCount
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null)
 
@@ -348,12 +365,15 @@ export function EntityGraph({
   }, [])
 
   // Reset every graph control back to its default, not just the viewport:
-  // edge filter (min edges → 0), edge length (→ 1x), and zoom/pan (→ home).
+  // node count (→ deploy default), edge filter (min edges → 0), edge length
+  // (→ 1x), and zoom/pan (→ home). The node count is parent-owned, so defer to
+  // its reset callback when wired.
   const resetControls = useCallback(() => {
     setMinDegree(0)
     setSpread(1)
     setView({ x: 0, y: 0, k: 1 })
-  }, [])
+    onResetNodeCount?.()
+  }, [onResetNodeCount])
 
   // --- background pan ---
   const onBackgroundPointerDown = useCallback(
@@ -492,6 +512,17 @@ export function EntityGraph({
             : `${visibleNodes.length} entit${visibleNodes.length === 1 ? 'y' : 'ies'} · ${visibleEdges.length} link${visibleEdges.length === 1 ? '' : 's'}${minDegree > 0 ? ` · ≥${minDegree} edge${minDegree === 1 ? '' : 's'}` : ''}. Scroll to zoom, drag to move, click a node to inspect.`}
         </p>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-border pt-2">
+          {nodeCount != null && onNodeCountChange && (
+            <>
+              <GraphTopKControl
+                value={nodeCount}
+                max={nodeCountMax ?? nodeCount}
+                onChange={onNodeCountChange}
+              />
+              <span aria-hidden="true" className="h-5 border-l border-border" />
+            </>
+          )}
+
           <div className="flex items-center gap-1" role="group" aria-label="Minimum edges per node">
             <span className="text-xs text-muted-foreground">Min edges</span>
             <button
