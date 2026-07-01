@@ -7,6 +7,7 @@ pipelines (CLIP / Nextext) lives in :class:`SocialLinker` (Task 10).
 
 from __future__ import annotations
 
+import csv
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +39,33 @@ def strip_counter(media_id: str) -> str:
         str: The candidate posting id (``media_id`` itself if no counter).
     """
     return _COUNTER_SUFFIX.sub("", str(media_id), count=1)
+
+
+_CSV_DELIMITERS = (",", ";", "\t", "|")
+
+
+def _sniff_delimiter(path: Path) -> str:
+    """Detect a social export's CSV delimiter (often ';'); fall back to ','.
+
+    Args:
+        path (Path): The CSV file to inspect.
+
+    Returns:
+        str: The detected delimiter, or ``","`` when detection is inconclusive.
+    """
+    try:
+        sample = path.read_text(encoding="utf-8-sig", errors="replace")[:8192]
+    except OSError:
+        return ","
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters="".join(_CSV_DELIMITERS))
+        if dialect.delimiter in _CSV_DELIMITERS:
+            return dialect.delimiter
+    except csv.Error:
+        pass
+    counts = {d: sample.count(d) for d in _CSV_DELIMITERS}
+    best = max(counts, key=lambda d: counts[d])
+    return best if counts[best] else ","
 
 
 def build_posting_index(postings_df: pd.DataFrame) -> dict[str, str]:
@@ -78,16 +106,23 @@ def _resolve_path(
     exported_filename: str,
     file_index: dict[str, list[Path]],
     tables_dir: Path,
+    root: Path,
 ) -> Path | None:
     """Resolve an ``Exported media filename`` to a file in the batch tree.
 
     Prefers a path relative to the tables folder when the value carries one;
     otherwise matches by basename across the tree, logging on collision.
+    Resolution is confined to the batch tree: a path-branch candidate that
+    resolves outside ``root`` (an absolute path, or a ``../`` escape) is
+    refused rather than returned, falling through to the basename index —
+    which is itself already scoped to ``root`` via :func:`build_file_index`.
 
     Args:
         exported_filename (str): The manifest's filename (basename or rel path).
         file_index (dict[str, list[Path]]): Recursive basename index.
         tables_dir (Path): Directory holding the manifest (relative-path anchor).
+        root (Path): The batch tree root; path-branch resolution outside this
+            tree is refused.
 
     Returns:
         Path | None: The resolved file, or ``None`` when missing.
@@ -98,7 +133,9 @@ def _resolve_path(
     if "/" in name:
         candidate = (tables_dir / name).resolve()
         if candidate.is_file():
-            return candidate
+            if candidate.is_relative_to(root.resolve()):
+                return candidate
+            logger.warning("Media reference {!r} resolves outside the batch tree; refusing.", name)
     matches = file_index.get(Path(name).name.lower(), [])
     if not matches:
         return None
@@ -113,6 +150,7 @@ def resolve_media_rows(
     file_index: dict[str, list[Path]],
     *,
     tables_dir: Path,
+    root: Path | None = None,
 ) -> list[MediaLink]:
     """Resolve manifest rows to ``MediaLink``s, skipping orphans and missing files.
 
@@ -121,10 +159,13 @@ def resolve_media_rows(
         posting_uuids (dict[str, str]): ``Posting ID → UUID`` from the postings table.
         file_index (dict[str, list[Path]]): Recursive basename index.
         tables_dir (Path): Manifest directory (relative-path anchor).
+        root (Path | None): Batch tree root that resolution must stay within;
+            defaults to ``tables_dir`` when omitted.
 
     Returns:
         list[MediaLink]: One per row whose posting is known and file exists.
     """
+    effective_root = root if root is not None else tables_dir
     links: list[MediaLink] = []
     for _, row in media_df.iterrows():
         media_id = str(row.get("Media ID") or "").strip()
@@ -135,7 +176,7 @@ def resolve_media_rows(
         if uuid is None:
             logger.debug("Orphan media row {!r} (no posting {!r})", media_id, posting_id)
             continue
-        path = _resolve_path(str(row.get("Exported media filename") or ""), file_index, tables_dir)
+        path = _resolve_path(str(row.get("Exported media filename") or ""), file_index, tables_dir, root=effective_root)
         if path is None:
             logger.warning("Media file for {!r} not found; skipping.", media_id)
             continue
@@ -199,7 +240,7 @@ class SocialLinker:
         media: Path | None = None
         for path in sorted(data_dir.rglob("*.csv")):
             try:
-                columns = pd.read_csv(path, nrows=0).columns
+                columns = pd.read_csv(path, sep=_sniff_delimiter(path), nrows=0, encoding="utf-8-sig").columns
             except Exception:
                 continue
             normalized = {str(c).strip().casefold() for c in columns}
@@ -223,10 +264,12 @@ class SocialLinker:
         if postings_csv is None or media_csv is None:
             return result
 
-        posting_uuids = build_posting_index(pd.read_csv(postings_csv, dtype=str))
-        media_df = pd.read_csv(media_csv, dtype=str)
+        posting_uuids = build_posting_index(
+            pd.read_csv(postings_csv, sep=_sniff_delimiter(postings_csv), dtype=str, encoding="utf-8-sig")
+        )
+        media_df = pd.read_csv(media_csv, sep=_sniff_delimiter(media_csv), dtype=str, encoding="utf-8-sig")
         file_index = build_file_index(data_dir)
-        links = resolve_media_rows(media_df, posting_uuids, file_index, tables_dir=media_csv.parent)
+        links = resolve_media_rows(media_df, posting_uuids, file_index, tables_dir=media_csv.parent, root=data_dir)
 
         result.consumed_paths.add(media_csv)
         context = IngestContext(source_collection=self.target_collection)

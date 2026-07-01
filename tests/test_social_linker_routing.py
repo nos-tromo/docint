@@ -258,3 +258,145 @@ def test_configured_keyframe_dedup_cosine_reaches_image_service(tmp_path: Path) 
 
     assert img.keyframe_calls
     assert img.keyframe_calls[0]["dedup_cosine"] == 0.5
+
+
+_SEMICOLON_POSTINGS_COLUMNS = [
+    "UUID",
+    "Posting ID",
+    "URL",
+    "Date last updated",
+    "Timestamp",
+    "Timezone",
+    "Crawled at",
+    "Postings Connections",
+    "Network Posting ID",
+    "Location",
+    "Author ID",
+    "Author",
+    "Vanity Name",
+    "Co-Author",
+    "Quoted User",
+    "Expected Reactions",
+    "Collected Reactions",
+    "Expected Comments",
+    "Collected Comments",
+    "Network",
+    "Posted in Group",
+    "Task",
+    "Text Content",
+    "Filename",
+    "Tags",
+]
+
+
+def _write_semicolon_postings(root: Path, media_rows: dict[str, str]) -> None:
+    """Write a semicolon-delimited, BOM-prefixed postings + media manifest pair.
+
+    Mirrors :func:`_write_export`'s full 25-column postings profile (postings
+    ``u1``/``P_1`` and ``u2``/``P_2``) but serializes both tables with ``;``
+    as the delimiter and a UTF-8 BOM, matching real social-platform exports,
+    so tests can exercise delimiter sniffing end to end. Each test supplies
+    its own media manifest rows.
+
+    Args:
+        root: Temporary directory in which to create the export.
+        media_rows: Mapping of ``Media ID`` to ``Exported media filename``
+            for the media manifest.
+    """
+    (root / "tables").mkdir(parents=True)
+    (root / "media").mkdir()
+    postings_data = {col: ["", ""] for col in _SEMICOLON_POSTINGS_COLUMNS}
+    postings_data["UUID"] = ["u1", "u2"]
+    postings_data["Posting ID"] = ["P_1", "P_2"]
+    postings_data["Text Content"] = ["a", "b"]
+    pd.DataFrame(postings_data).to_csv(root / "tables" / "postings.csv", index=False, sep=";", encoding="utf-8-sig")
+    pd.DataFrame(
+        {
+            "Media ID": list(media_rows.keys()),
+            "Exported media filename": list(media_rows.values()),
+        }
+    ).to_csv(root / "tables" / "media.csv", index=False, sep=";", encoding="utf-8-sig")
+
+
+def test_run_detects_semicolon_delimited_export(tmp_path: Path) -> None:
+    """A semicolon-delimited, BOM-prefixed export is still detected and linked.
+
+    Regression guard for the delimiter bug: plain ``pd.read_csv`` defaults to
+    a comma separator, so a ``;``-delimited header collapsed into a single
+    column and both ``is_media_manifest`` and the postings-profile exact
+    match failed, making the linker silently no-op on real social exports
+    (which are semicolon-delimited with a UTF-8 BOM).
+    """
+    _write_semicolon_postings(tmp_path, {"P_1_0": "pic.jpg"})
+    (tmp_path / "media" / "pic.jpg").write_bytes(b"\xff\xd8\xff")
+    img = _FakeImageService()
+    result = SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c").run(tmp_path)
+
+    assert len(img.images) == 1
+    assert img.images[0].source_doc_id == "u1"
+    consumed_names = {p.name for p in result.consumed_paths}
+    assert {"media.csv", "pic.jpg"}.issubset(consumed_names)
+
+
+def test_run_links_only_present_media(tmp_path: Path) -> None:
+    """Only manifest rows whose media file exists in the batch are ingested.
+
+    Mirrors a full manifest that references files never copied into the
+    batch (a common real-export shape): the row with no matching file must
+    be skipped rather than erroring, while the two present rows still
+    resolve and route.
+    """
+    _write_semicolon_postings(
+        tmp_path,
+        {"P_1_0": "pic.jpg", "P_2_0": "clip.mp4", "P_1_1": "missing.jpg"},
+    )
+    (tmp_path / "media" / "pic.jpg").write_bytes(b"\xff\xd8\xff")
+    (tmp_path / "media" / "clip.mp4").write_bytes(b"video")
+    img = _FakeImageService()
+    result = SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c").run(tmp_path)
+
+    assert len(img.images) == 1
+    assert img.images[0].source_doc_id == "u1"
+    assert img.keyframe_calls and img.keyframe_calls[0]["source_doc_id"] == "u2"
+    consumed_names = {p.name for p in result.consumed_paths}
+    assert {"pic.jpg", "clip.mp4"}.issubset(consumed_names)
+    assert "missing.jpg" not in consumed_names
+
+
+def test_resolve_refuses_out_of_batch_reference(tmp_path: Path) -> None:
+    """An absolute or ``../`` manifest path outside the batch tree is refused.
+
+    Security regression guard: ``_resolve_path``'s path branch had no
+    containment check, so a manifest row's ``Exported media filename`` could
+    point anywhere on the filesystem — an absolute path, or a ``../`` escape
+    — and the linker would happily ingest it. Both shapes must now be
+    refused and fall through to (and fail) the basename lookup, which is
+    itself scoped to the batch tree.
+    """
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir(parents=True)
+    outside_file = outside_dir / "secret.jpg"
+    outside_file.write_bytes(b"\xff\xd8\xff")
+
+    batch = tmp_path / "batch"
+    batch.mkdir()
+    postings_data = {col: ["", ""] for col in _SEMICOLON_POSTINGS_COLUMNS}
+    postings_data["UUID"] = ["u1", "u2"]
+    postings_data["Posting ID"] = ["P_1", "P_2"]
+    postings_data["Text Content"] = ["a", "b"]
+    pd.DataFrame(postings_data).to_csv(batch / "postings.csv", index=False, sep=";", encoding="utf-8-sig")
+    # One row escapes via an absolute path, the other via a "../" traversal;
+    # both point at the same real file living outside the batch tree.
+    pd.DataFrame(
+        {
+            "Media ID": ["P_1_0", "P_2_0"],
+            "Exported media filename": [str(outside_file.resolve()), "../outside/secret.jpg"],
+        }
+    ).to_csv(batch / "media.csv", index=False, sep=";", encoding="utf-8-sig")
+
+    img = _FakeImageService()
+    result = SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c").run(batch)
+
+    assert img.images == []
+    assert not img.keyframe_calls
+    assert not result.transcript_documents
