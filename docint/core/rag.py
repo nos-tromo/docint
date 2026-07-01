@@ -712,6 +712,86 @@ class SocialSourceDiversityPostprocessor(BaseNodePostprocessor):
         return filtered
 
 
+class LinkFollowingPostprocessor(BaseNodePostprocessor):
+    """Expand each retrieved post to include its linked media (and vice versa).
+
+    For every hit, resolves the posting UUID (``reference_metadata.uuid`` or a
+    top-level ``posting_uuid``) and appends the post's sibling artifacts —
+    transcript segments and image/keyframe captions — so the generator sees a
+    post and its media as one evidence block. Bounded by ``max_per_post`` and
+    deduplicated by node id; triggering is bidirectional (a media hit pulls in
+    its post's siblings too).
+
+    Attributes:
+        rag: A :class:`RAG` instance exposing ``_fetch_posting_entity_nodes``.
+        max_per_post: Maximum number of sibling nodes to append per posting UUID.
+    """
+
+    rag: Any
+    max_per_post: int = 12
+
+    @override
+    @classmethod
+    def class_name(cls) -> str:
+        """Return a stable class identifier."""
+        return "LinkFollowingPostprocessor"
+
+    @staticmethod
+    def _posting_uuid(node: NodeWithScore) -> str:
+        """Extract the posting UUID link key from a node's metadata.
+
+        Args:
+            node (NodeWithScore): The node from which to extract the posting UUID.
+
+        Returns:
+            str: The posting UUID if found, otherwise an empty string.
+        """
+        metadata = getattr(node, "metadata", {}) or {}
+        direct = str(metadata.get("posting_uuid") or "").strip()
+        if direct:
+            return direct
+        reference_metadata = metadata.get("reference_metadata")
+        if isinstance(reference_metadata, dict):
+            return str(reference_metadata.get("posting_uuid") or reference_metadata.get("uuid") or "").strip()
+        return ""
+
+    @override
+    def _postprocess_nodes(
+        self,
+        nodes: list[NodeWithScore],
+        query_bundle: QueryBundle | None = None,
+    ) -> list[NodeWithScore]:
+        """Append linked sibling artifacts for each retrieved posting.
+
+        Args:
+            nodes (list[NodeWithScore]): Retrieved nodes.
+            query_bundle (QueryBundle | None): Unused.
+
+        Returns:
+            list[NodeWithScore]: Original nodes plus bounded, deduped siblings.
+        """
+        _ = query_bundle
+        present: set[str] = {n.node.node_id for n in nodes}
+        additions: list[NodeWithScore] = []
+        seen_posts: set[str] = set()
+        for node in nodes:
+            posting_uuid = self._posting_uuid(node)
+            if not posting_uuid or posting_uuid in seen_posts:
+                continue
+            seen_posts.add(posting_uuid)
+            try:
+                siblings = self.rag._fetch_posting_entity_nodes(posting_uuid, exclude_node_ids=present)
+            except Exception as exc:
+                logger.warning("Link-following expansion failed for {}: {}", posting_uuid, exc)
+                continue
+            for sibling in siblings[: self.max_per_post]:
+                sid = sibling.node.node_id
+                if sid not in present:
+                    present.add(sid)
+                    additions.append(sibling)
+        return nodes + additions
+
+
 class ParentContextPostprocessor(BaseNodePostprocessor):
     """Promote fine-grained retrieval hits to their hierarchical parent context.
 
