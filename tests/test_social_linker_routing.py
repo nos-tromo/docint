@@ -52,7 +52,7 @@ class _FakeImageService:
         Returns:
             An empty list (no records stored in the stub).
         """
-        self.keyframe_calls.append({"frames": frames, "source_doc_id": source_doc_id})
+        self.keyframe_calls.append({"frames": frames, "source_doc_id": source_doc_id, "dedup_cosine": dedup_cosine})
         return []
 
 
@@ -237,3 +237,24 @@ def test_cache_miss_persists_transcript(tmp_path: Path) -> None:
     )
     assert nx.calls == 1
     assert manifest.saved and manifest.saved[0][0] == "c"
+
+
+def test_configured_keyframe_dedup_cosine_reaches_image_service(tmp_path: Path) -> None:
+    """The linker's configured ``keyframe_dedup_cosine`` must be forwarded to ``ingest_keyframe_set``.
+
+    Regression guard for the cosine threshold being silently dropped on the
+    way to the image service (it previously always fell back to that
+    method's hardcoded default, so ``KEYFRAME_DEDUP_COSINE`` had no effect).
+    """
+    _write_export(tmp_path)
+    img = _FakeImageService()
+    linker = SocialLinker(
+        image_service=img,
+        nextext_client=_FakeNextext(),
+        target_collection="c",
+        keyframe_dedup_cosine=0.5,
+    )
+    linker.run(tmp_path)
+
+    assert img.keyframe_calls
+    assert img.keyframe_calls[0]["dedup_cosine"] == 0.5

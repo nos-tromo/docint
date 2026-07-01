@@ -858,7 +858,7 @@ class DocumentIngestionPipeline:
         """
         from docint.core.ingest.social_linker import SocialLinker
         from docint.core.storage.ingest_manifest import IngestManifest, NullIngestManifest
-        from docint.utils.env_cfg import load_ingestion_env, load_path_env
+        from docint.utils.env_cfg import load_ingestion_env, load_nextext_env, load_path_env
         from docint.utils.nextext_client import NextextClient
 
         manifest: IngestManifest | NullIngestManifest = NullIngestManifest()
@@ -871,11 +871,13 @@ class DocumentIngestionPipeline:
             logger.debug("Manifest unavailable for social linker cache: {}", exc)
 
         try:
+            nextext_cfg = load_nextext_env()
             result = SocialLinker(
                 image_service=self.image_ingestion_service or ImageIngestionService(),
-                nextext_client=NextextClient(),
+                nextext_client=NextextClient(nextext_cfg),
                 target_collection=self.target_collection,
                 manifest=manifest,
+                keyframe_dedup_cosine=nextext_cfg.keyframe_dedup_cosine,
             ).run(self.data_dir)
         except Exception as exc:  # pragma: no cover - fail-soft guard
             logger.warning("Social linker skipped due to error: {}", exc)

@@ -184,6 +184,7 @@ class SocialLinker:
     nextext_client: Any
     target_collection: str | None
     manifest: Any = None
+    keyframe_dedup_cosine: float = 0.95
 
     def _find_tables(self, data_dir: Path) -> tuple[Path | None, Path | None]:
         """Locate the postings table and media manifest anywhere in the tree.
@@ -279,6 +280,7 @@ class SocialLinker:
                 context=context,
                 source_doc_id=link.posting_uuid,
                 extra_metadata={**extra, "posting_uuid": link.posting_uuid},
+                dedup_cosine=self.keyframe_dedup_cosine,
             )
         if transcript:
             self._ingest_transcript(link, transcript, result)
