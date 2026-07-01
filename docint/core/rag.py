@@ -2574,14 +2574,28 @@ class RAG:
         """
         if not posting_uuid:
             return []
-        flt = qdrant_models.Filter(
+        # Main collection: OR on posting_uuid OR reference_metadata.uuid so that
+        # posting TEXT nodes (which carry the link only as reference_metadata.uuid)
+        # are collected even when retrieval started from a media/transcript hit.
+        main_flt = qdrant_models.Filter(
+            should=[
+                qdrant_models.FieldCondition(key="posting_uuid", match=qdrant_models.MatchValue(value=posting_uuid)),
+                qdrant_models.FieldCondition(
+                    key="reference_metadata.uuid", match=qdrant_models.MatchValue(value=posting_uuid)
+                ),
+            ]
+        )
+        # Images companion: top-level posting_uuid is always populated on image payloads.
+        images_flt = qdrant_models.Filter(
             must=[qdrant_models.FieldCondition(key="posting_uuid", match=qdrant_models.MatchValue(value=posting_uuid))]
         )
         collected: list[NodeWithScore] = []
-        targets = [(self.qdrant_collection, "text"), (self._image_collection_name(), "image")]
+        image_collection = self._image_collection_name()
+        targets = [(self.qdrant_collection, "text"), (image_collection, "image")]
         for collection_name, kind in targets:
             if not collection_name or not qdrant_collection_exists(self.qdrant_client, collection_name):
                 continue
+            flt = images_flt if collection_name == image_collection else main_flt
             try:
                 points, _ = self.qdrant_client.scroll(
                     collection_name=collection_name,
@@ -2716,6 +2730,8 @@ class RAG:
             bbox = payload.get("bbox")
             if isinstance(bbox, dict):
                 src["bbox"] = bbox
+            if payload.get("posting_uuid"):
+                src["posting_uuid"] = payload["posting_uuid"]
             results.append(src)
 
         return results
@@ -3439,6 +3455,9 @@ class RAG:
                 "n_cols": table_meta.get("n_cols"),
                 "style": table_meta.get("style"),
             }
+        posting_uuid = payload.get("posting_uuid")
+        if posting_uuid:
+            src["posting_uuid"] = posting_uuid
         return src
 
     def get_source_by_node_id(

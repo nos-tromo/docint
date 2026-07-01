@@ -880,6 +880,8 @@ class DocumentIngestionPipeline:
         except Exception as exc:  # pragma: no cover - fail-soft guard
             logger.warning("Social linker skipped due to error: {}", exc)
             return
+        finally:
+            manifest.close()
         self.social_link_consumed = result.consumed_paths
         self.social_link_documents = result.transcript_documents
 
