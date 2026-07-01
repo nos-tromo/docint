@@ -2802,8 +2802,9 @@ def test_build_query_engine_uses_refine_prompts_for_social_table_collection(
     assert engine is sentinel
     assert captured["response_mode"] == rag_module.ResponseMode.REFINE
     postprocessors = captured["node_postprocessors"]
-    assert len(postprocessors) == 2
+    assert len(postprocessors) == 3
     assert isinstance(postprocessors[1], rag_module.SocialSourceDiversityPostprocessor)
+    assert isinstance(postprocessors[2], rag_module.LinkFollowingPostprocessor)
     assert "keep each post distinct" in captured["text_qa_template"].template.lower()
 
 
