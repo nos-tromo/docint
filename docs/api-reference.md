@@ -20,6 +20,7 @@ this doc are declared at the top of `docint/core/api.py:208` and onward.
 
 | Method | Path | Tag | Purpose |
 |---|---|---|---|
+| `GET`  | `/config` | `Meta` | Deploy-time frontend config (graph node default + ceiling, collection timeout). |
 | `GET`  | `/collections/list` | `Collections` | List all Qdrant collections. |
 | `POST` | `/collections/select` | `Collections` | Activate a collection, pre-warms the NER cache. |
 | `DELETE` | `/collections/{name}` | `Collections` | Delete a collection. |
@@ -41,6 +42,15 @@ this doc are declared at the top of `docint/core/api.py:208` and onward.
 | `POST` | `/ingest` | `Ingestion` | Trigger ingestion of the configured `DATA_PATH` into a collection. |
 | `POST` | `/ingest/upload` | `Ingestion` | Upload + ingest a single file with streaming progress events. |
 | `GET`  | `/sources/preview` | `Sources` | Return a preview of a source file staged under `QDRANT_SRC_DIR`. |
+
+## Meta
+
+### `GET /config`
+
+Deploy-time frontend configuration for the SPA, read once on load and served
+without a principal. Returns `graph_top_k`, `graph_max_top_k`, and
+`collection_timeout` (`FrontendConfigOut`); the first two come from
+`NER_GRAPH_TOP_K` / `NER_GRAPH_MAX_TOP_K` (see Configuration).
 
 ## Collections
 

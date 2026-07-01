@@ -13,9 +13,11 @@ interface UiState {
   currentSessionId: string | null
   previewModal: PreviewModal | null
   entityMergeMode: EntityMergeMode
+  graphTopK: number | null
   setSelectedCollection: (name: string | null) => void
   setCurrentSessionId: (id: string | null) => void
   setEntityMergeMode: (mode: EntityMergeMode) => void
+  setGraphTopK: (n: number | null) => void
   openPreview: (modal: PreviewModal) => void
   closePreview: () => void
 }
@@ -27,9 +29,11 @@ export const useUiStore = create<UiState>()(
       currentSessionId: null,
       previewModal: null,
       entityMergeMode: 'resolved',
+      graphTopK: null,
       setSelectedCollection: (name) => set({ selectedCollection: name }),
       setCurrentSessionId: (id) => set({ currentSessionId: id }),
       setEntityMergeMode: (mode) => set({ entityMergeMode: mode }),
+      setGraphTopK: (n) => set({ graphTopK: n }),
       openPreview: (modal) => set({ previewModal: modal }),
       closePreview: () => set({ previewModal: null })
     }),
@@ -42,7 +46,8 @@ export const useUiStore = create<UiState>()(
       // and the user must deliberately lock in a collection.
       partialize: (s) => ({
         currentSessionId: s.currentSessionId,
-        entityMergeMode: s.entityMergeMode
+        entityMergeMode: s.entityMergeMode,
+        graphTopK: s.graphTopK
       }),
       // v0 builds saved `selectedCollection` to localStorage. Strip it on
       // rehydrate so existing users do not inherit a stale selection that

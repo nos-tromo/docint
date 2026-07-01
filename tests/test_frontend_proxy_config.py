@@ -27,3 +27,10 @@ def test_ingest_proxy_uses_configurable_request_limit() -> None:
 
     assert "client_max_body_size ${DOCINT_CLIENT_MAX_BODY_SIZE};" in nginx_conf
     assert "client_max_body_size 200m;" not in nginx_conf
+
+
+def test_frontend_nginx_proxies_config_endpoint() -> None:
+    """The SPA's /config fetch must reach the backend, not the SPA fallback."""
+    nginx_conf = (REPO_ROOT / "frontend" / "nginx" / "default.conf").read_text(encoding="utf-8")
+
+    assert "query|summarize|agent|config|docs" in nginx_conf

@@ -10,6 +10,9 @@ import { HateSpeechTable } from '@/components/analysis/HateSpeechTable'
 import { SummaryPanel } from '@/components/analysis/SummaryPanel'
 import { warmCollectionNer } from '@/api/collections'
 import { MergeModeToggle } from '@/components/common/MergeModeToggle'
+import { useConfig } from '@/hooks/useConfig'
+import { resolveGraphTopK } from '@/lib/graphTopK'
+import { GraphTopKControl } from '@/components/analysis/GraphTopKControl'
 import type { NerEntityRow } from '@/api/types'
 import { cn } from '@/lib/cn'
 
@@ -22,9 +25,6 @@ const NER_VIEWS = [
 ] as const
 type NerView = (typeof NER_VIEWS)[number]['value']
 
-// Number of highest-mention entities the graph view renders.
-const GRAPH_TOP_K = 80
-
 const keyOf = (text: string | null | undefined, type: string | null | undefined) =>
   `${text ?? ''}::${type ?? ''}`
 
@@ -33,6 +33,11 @@ export function Analysis() {
   const [nerView, setNerView] = useState<NerView>('table')
   const collection = useUiStore((s) => s.selectedCollection)
   const mergeMode = useUiStore((s) => s.entityMergeMode)
+  const cfg = useConfig()
+  const graphTopK = useUiStore((s) => s.graphTopK)
+  const setGraphTopK = useUiStore((s) => s.setGraphTopK)
+  const effectiveTopK = resolveGraphTopK(graphTopK, cfg.data)
+  const graphMax = cfg.data?.graph_max_top_k ?? 500
   // Report-builder context, computed once and threaded into both analysis
   // views so each virtualized row only does a Set lookup (no per-row query).
   const activeReportId = useReportStore((s) => s.activeReportId)
@@ -94,7 +99,7 @@ export function Analysis() {
   )
 
   // Graph payload is only fetched while the graph view is active.
-  const graph = useNerGraph({ topKNodes: GRAPH_TOP_K, enabled: nerView === 'graph' })
+  const graph = useNerGraph({ topKNodes: effectiveTopK, enabled: nerView === 'graph' })
 
   const hate = useHateSpeechPages()
   const hateRows = useMemo(
@@ -154,6 +159,9 @@ export function Analysis() {
                 ))}
               </div>
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                {nerView === 'graph' && (
+                  <GraphTopKControl value={effectiveTopK} max={graphMax} onChange={setGraphTopK} />
+                )}
                 <span>Merge mode</span>
                 <MergeModeToggle />
               </div>

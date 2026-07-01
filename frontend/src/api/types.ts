@@ -312,3 +312,9 @@ export interface SummaryResponse extends ValidationFields {
   sources: Source[]
   summary_diagnostics?: SummaryDiagnostics
 }
+
+export interface AppConfig {
+  graph_top_k: number
+  graph_max_top_k: number
+  collection_timeout: number
+}

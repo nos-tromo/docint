@@ -290,21 +290,38 @@ class FrontendConfig:
     """Dataclass for frontend configuration."""
 
     collection_timeout: int
+    graph_top_k: int
+    graph_max_top_k: int
 
 
 def load_frontend_env(
     default_collection_timeout: int = 120,
+    default_graph_top_k: int = 80,
+    default_graph_max_top_k: int = 500,
 ) -> FrontendConfig:
     """Loads frontend configuration from environment variables or defaults.
 
     Args:
-        default_collection_timeout (int): Default timeout in seconds for fetching collections from the backend.
+        default_collection_timeout (int): Default seconds the UI waits for the
+            collections list before falling back.
+        default_graph_top_k (int): Default number of highest-mention nodes the
+            Analysis graph view requests.
+        default_graph_max_top_k (int): Ceiling for the graph node count, used
+            for both the API clamp and the UI control's upper bound.
 
     Returns:
-        FrontendConfig: Dataclass containing frontend configuration.
-        - collection_timeout (int): Timeout in seconds for fetching collections from the backend.
+        FrontendConfig: Parsed frontend configuration.
+        - collection_timeout (int): Collection-fetch timeout in seconds.
+        - graph_top_k (int): Default graph node count (clamped to >= 1).
+        - graph_max_top_k (int): Graph node ceiling (clamped to >= graph_top_k).
     """
-    return FrontendConfig(collection_timeout=int(os.getenv("FRONTEND_COLLECTION_TIMEOUT", default_collection_timeout)))
+    graph_top_k = max(1, int(os.getenv("NER_GRAPH_TOP_K", default_graph_top_k)))
+    graph_max_top_k = max(graph_top_k, int(os.getenv("NER_GRAPH_MAX_TOP_K", default_graph_max_top_k)))
+    return FrontendConfig(
+        collection_timeout=int(os.getenv("FRONTEND_COLLECTION_TIMEOUT", default_collection_timeout)),
+        graph_top_k=graph_top_k,
+        graph_max_top_k=graph_max_top_k,
+    )
 
 
 @dataclass(frozen=True)
