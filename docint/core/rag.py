@@ -2499,7 +2499,15 @@ class RAG:
                     if isinstance(tags, list) and tags:
                         text = f"{text}\n\nTags: {', '.join(str(t) for t in tags)}".strip()
                 else:
-                    text = str(payload.get("text") or payload.get("_node_content") or "").strip()
+                    text = str(payload.get("text") or "").strip()
+                    if not text:
+                        raw = payload.get("_node_content")
+                        if isinstance(raw, str) and raw:
+                            try:
+                                parsed = json.loads(raw)
+                                text = str(parsed.get("text") or "").strip() if isinstance(parsed, dict) else ""
+                            except (json.JSONDecodeError, ValueError):
+                                text = ""
                 if not text:
                     continue
                 exclude_node_ids.add(point_id)
