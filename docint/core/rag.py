@@ -3550,6 +3550,8 @@ class RAG:
         """Materialize a VectorStoreIndex.
 
         If nodes are present in memory, create from nodes; otherwise, load from vector store.
+        Also best-effort-indexes the ``posting_uuid`` payload field on the main collection
+        so link-following scrolls run against an index rather than a full scan at scale.
         """
         vector_store = self._vector_store()
         storage_ctx = self._storage_context(vector_store)
@@ -3563,6 +3565,18 @@ class RAG:
                 embed_model=self.embed_model,
                 storage_context=storage_ctx,
             )
+
+        # Best-effort: index posting_uuid on the main collection so that
+        # _fetch_posting_entity_nodes scrolls use an index rather than a full scan.
+        # Idempotent (Qdrant ignores duplicate index creation) and fail-soft.
+        try:
+            self.qdrant_client.create_payload_index(
+                collection_name=self.qdrant_collection,
+                field_name="posting_uuid",
+                field_schema=qdrant_models.PayloadSchemaType.KEYWORD,
+            )
+        except Exception as idx_exc:
+            logger.debug("posting_uuid index on {} skipped: {}", self.qdrant_collection, idx_exc)
 
     def create_query_engine(self) -> None:
         """Create the query engine with a retriever and reranker.
@@ -4110,6 +4124,7 @@ class RAG:
             node_postprocessors.append(
                 SocialSourceDiversityPostprocessor(diversity_limit=max(1, int(self.social_summary_diversity_limit)))
             )
+            node_postprocessors.append(LinkFollowingPostprocessor(rag=self))
 
         return RetrieverQueryEngine.from_args(
             retriever=self._build_retriever(
