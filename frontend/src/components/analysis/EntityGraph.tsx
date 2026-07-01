@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { NerGraphEdge, NerGraphNode } from '@/api/types'
+import { cn } from '@/lib/cn'
 import {
   createForceSimulation,
   phyllotaxisSeed,
@@ -45,6 +46,50 @@ function colorForType(type: string): string {
 
 function radiusForMentions(mentions: number): number {
   return Math.min(34, 7 + Math.sqrt(Math.max(1, mentions)) * 2.4)
+}
+
+// Two-diagonal-arrows "expand to corners" glyph (lucide maximize-2).
+function ExpandIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <polyline points="15 3 21 3 21 9" />
+      <polyline points="9 21 3 21 3 15" />
+      <line x1="21" y1="3" x2="14" y2="10" />
+      <line x1="3" y1="21" x2="10" y2="14" />
+    </svg>
+  )
+}
+
+// Arrows pointing inward "collapse" glyph (lucide minimize-2).
+function CollapseIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <polyline points="4 14 10 14 10 20" />
+      <polyline points="20 10 14 10 14 4" />
+      <line x1="14" y1="10" x2="21" y2="3" />
+      <line x1="3" y1="21" x2="10" y2="14" />
+    </svg>
+  )
 }
 
 interface NodeMeta {
@@ -94,6 +139,9 @@ export function EntityGraph({
   // Edge-length multiplier from the "Edge length" slider; 1 = today's density.
   // Applied to the live sim's link rest-length + repulsion (see effect below).
   const [spread, setSpread] = useState(1)
+
+  // In-app "maximize": grows the whole panel to a full-window overlay.
+  const [isMaximized, setIsMaximized] = useState(false)
 
   // Incident-edge count per node id, from the full edge set.
   const degreeById = useMemo(() => {
@@ -215,6 +263,29 @@ export function EntityGraph({
     sim.reheat()
     runLoop()
   }, [sim, spread, runLoop])
+
+  // While maximized: Escape exits, and body scroll is locked so the page behind
+  // can't scroll under the overlay. Both are torn down on collapse/unmount.
+  useEffect(() => {
+    if (!isMaximized) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setIsMaximized(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      document.body.style.overflow = prevOverflow
+    }
+  }, [isMaximized])
+
+  // If the graph empties (e.g. collection switch) the early return below would
+  // bypass the overlay while leaving body scroll locked — auto-collapse to keep
+  // the teardown effect honest.
+  useEffect(() => {
+    if (nodes.length === 0) setIsMaximized(false)
+  }, [nodes.length])
 
   /** Convert client (screen) coords to layout-space coords. */
   const screenToLayout = useCallback(
@@ -407,7 +478,13 @@ export function EntityGraph({
   const transform = `translate(${view.x} ${view.y}) scale(${view.k})`
 
   return (
-    <div className="space-y-2">
+    <div
+      data-maximized={isMaximized}
+      className={cn(
+        'space-y-2',
+        isMaximized && 'fixed inset-0 z-50 flex flex-col bg-zinc-950 p-4'
+      )}
+    >
       <div className="space-y-2">
         <p className="text-sm text-muted-foreground">
           {isLoading
@@ -493,11 +570,16 @@ export function EntityGraph({
         </div>
       </div>
 
-      <div className="relative rounded-md border border-border bg-zinc-950 overflow-hidden">
+      <div
+        className={cn(
+          'relative rounded-md border border-border bg-zinc-950 overflow-hidden',
+          isMaximized && 'flex-1 min-h-0'
+        )}
+      >
         <svg
           ref={setSvgRef}
           viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
-          className="w-full h-[60vh] touch-none select-none"
+          className={cn('w-full touch-none select-none', isMaximized ? 'h-full' : 'h-[60vh]')}
           role="application"
           aria-label="Entity relationship graph"
         >
@@ -584,6 +666,17 @@ export function EntityGraph({
             })}
           </g>
         </svg>
+
+        <button
+          type="button"
+          aria-label={isMaximized ? 'Collapse graph' : 'Expand graph'}
+          aria-pressed={isMaximized}
+          title={isMaximized ? 'Collapse graph' : 'Expand graph'}
+          onClick={() => setIsMaximized((m) => !m)}
+          className="absolute left-2 top-2 z-10 rounded-md border border-border bg-zinc-900/90 p-1.5 text-muted-foreground hover:text-foreground"
+        >
+          {isMaximized ? <CollapseIcon /> : <ExpandIcon />}
+        </button>
 
         {legendTypes.length > 0 && (
           <div className="absolute right-2 top-2 max-w-[12rem] rounded-md border border-border bg-zinc-900/90 p-2 text-xs space-y-1">

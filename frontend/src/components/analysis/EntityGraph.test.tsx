@@ -224,4 +224,63 @@ describe('EntityGraph', () => {
     )
     expect(screen.getByText(/no entity relationships to graph/i)).toBeInTheDocument()
   })
+
+  it('toggles maximize via the expand/collapse button', async () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    const expandBtn = screen.getByRole('button', { name: 'Expand graph' })
+    expect(expandBtn).toHaveAttribute('aria-pressed', 'false')
+
+    await userEvent.click(expandBtn)
+
+    const collapseBtn = screen.getByRole('button', { name: 'Collapse graph' })
+    expect(collapseBtn).toHaveAttribute('aria-pressed', 'true')
+    expect(document.querySelector('[data-maximized="true"]')).not.toBeNull()
+
+    await userEvent.click(collapseBtn)
+    expect(screen.getByRole('button', { name: 'Expand graph' })).toHaveAttribute(
+      'aria-pressed',
+      'false'
+    )
+    expect(document.querySelector('[data-maximized="true"]')).toBeNull()
+  })
+
+  it('exits maximize when Escape is pressed', async () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Expand graph' }))
+    expect(screen.getByRole('button', { name: 'Collapse graph' })).toBeInTheDocument()
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+
+    expect(screen.getByRole('button', { name: 'Expand graph' })).toBeInTheDocument()
+  })
+
+  it('still renders nodes while maximized', async () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Expand graph' }))
+    expect(screen.getByText('Acme')).toBeInTheDocument()
+  })
 })
