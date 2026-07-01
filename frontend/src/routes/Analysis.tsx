@@ -12,7 +12,6 @@ import { warmCollectionNer } from '@/api/collections'
 import { MergeModeToggle } from '@/components/common/MergeModeToggle'
 import { useConfig } from '@/hooks/useConfig'
 import { resolveGraphTopK } from '@/lib/graphTopK'
-import { GraphTopKControl } from '@/components/analysis/GraphTopKControl'
 import type { NerEntityRow } from '@/api/types'
 import { cn } from '@/lib/cn'
 
@@ -38,6 +37,10 @@ export function Analysis() {
   const setGraphTopK = useUiStore((s) => s.setGraphTopK)
   const effectiveTopK = resolveGraphTopK(graphTopK, cfg.data)
   const graphMax = cfg.data?.graph_max_top_k ?? 500
+  // Reset the node count to the deploy default by clearing the user override;
+  // resolveGraphTopK then falls back to the server's graph_top_k (env
+  // `NER_GRAPH_TOP_K`, default 80). Stable so it doesn't rebuild the graph sim.
+  const resetGraphTopK = useCallback(() => setGraphTopK(null), [setGraphTopK])
   // Report-builder context, computed once and threaded into both analysis
   // views so each virtualized row only does a Set lookup (no per-row query).
   const activeReportId = useReportStore((s) => s.activeReportId)
@@ -159,9 +162,6 @@ export function Analysis() {
                 ))}
               </div>
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                {nerView === 'graph' && (
-                  <GraphTopKControl value={effectiveTopK} max={graphMax} onChange={setGraphTopK} />
-                )}
                 <span>Merge mode</span>
                 <MergeModeToggle />
               </div>
@@ -192,6 +192,10 @@ export function Analysis() {
                   onSelectEntity={setSelectedEntityKey}
                   keyForNode={entityKeyOf}
                   isLoading={graph.isLoading}
+                  nodeCount={effectiveTopK}
+                  nodeCountMax={graphMax}
+                  onNodeCountChange={setGraphTopK}
+                  onResetNodeCount={resetGraphTopK}
                 />
               )}
               <EntityFindingsTable

@@ -38,7 +38,7 @@ export function GraphTopKControl({ value, max, onChange }: Props) {
   }
 
   return (
-    <label className="flex items-center gap-2 text-sm text-muted-foreground">
+    <label className="flex items-center gap-2 text-xs text-muted-foreground">
       <span>Nodes</span>
       <input
         type="number"
@@ -51,7 +51,7 @@ export function GraphTopKControl({ value, max, onChange }: Props) {
         onKeyDown={(e) => {
           if (e.key === 'Enter') commit((e.target as HTMLInputElement).value)
         }}
-        className="w-20 rounded-md border border-border bg-transparent px-2 py-1 text-foreground"
+        className="h-7 w-20 rounded-md border border-border bg-transparent px-2 text-sm text-foreground"
       />
     </label>
   )
