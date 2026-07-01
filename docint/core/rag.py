@@ -2445,6 +2445,67 @@ class RAG:
             image_ingestion_service=self._image_ingestion_service,
         )
 
+    def _image_collection_name(self) -> str:
+        """Return the ``_images`` companion collection name for the active collection."""
+        if self._image_ingestion_service is None:
+            self._image_ingestion_service = ImageIngestionService()
+        return self._image_ingestion_service._resolve_collection_name(self.qdrant_collection)
+
+    def _fetch_posting_entity_nodes(self, posting_uuid: str, *, exclude_node_ids: set[str]) -> list[NodeWithScore]:
+        """Fetch a posting's sibling artifacts across both collections.
+
+        Gathers transcript/text nodes (main collection) and image/keyframe
+        caption nodes (``_images``) whose payload carries ``posting_uuid``, so a
+        post and its media surface together. Fail-soft: scroll errors yield
+        whatever was collected so far.
+
+        Args:
+            posting_uuid (str): The posting UUID link key.
+            exclude_node_ids (set[str]): Node ids already present in the result
+                set (skip to avoid duplicates).
+
+        Returns:
+            list[NodeWithScore]: Sibling nodes with score ``None``.
+        """
+        if not posting_uuid:
+            return []
+        flt = qdrant_models.Filter(
+            must=[qdrant_models.FieldCondition(key="posting_uuid", match=qdrant_models.MatchValue(value=posting_uuid))]
+        )
+        collected: list[NodeWithScore] = []
+        targets = [(self.qdrant_collection, "text"), (self._image_collection_name(), "image")]
+        for collection_name, kind in targets:
+            if not collection_name or not qdrant_collection_exists(self.qdrant_client, collection_name):
+                continue
+            try:
+                points, _ = self.qdrant_client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=flt,
+                    limit=64,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+            except Exception as exc:
+                logger.warning("Link-following scroll failed for {}: {}", collection_name, exc)
+                continue
+            for point in points:
+                point_id = str(getattr(point, "id", ""))
+                if not point_id or point_id in exclude_node_ids:
+                    continue
+                payload = dict(getattr(point, "payload", {}) or {})
+                if kind == "image":
+                    text = str(payload.get("llm_description") or "").strip()
+                    tags = payload.get("llm_tags")
+                    if isinstance(tags, list) and tags:
+                        text = f"{text}\n\nTags: {', '.join(str(t) for t in tags)}".strip()
+                else:
+                    text = str(payload.get("text") or payload.get("_node_content") or "").strip()
+                if not text:
+                    continue
+                exclude_node_ids.add(point_id)
+                collected.append(NodeWithScore(node=TextNode(id_=point_id, text=text, metadata=payload), score=None))
+        return collected
+
     def _retrieve_image_sources(
         self,
         query: str,
