@@ -63,12 +63,12 @@ def _persist_owned_turn(sm: SessionManager, session_id: str, owner: str) -> None
     resp_mock = MagicMock()
     resp_mock.metadata = cast(dict[str, Any], {})
     resp_mock.source_nodes = cast(list[Any], [])
-    sm._owner = owner
     sm._persist_turn(
         session_id,
         "hello",
         resp_mock,
         {"response": "world", "reasoning": None},
+        owner=owner,
     )
 
 

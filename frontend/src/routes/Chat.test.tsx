@@ -67,6 +67,36 @@ describe('Chat SSE handling', () => {
     })
   })
 
+  it('sends the selected collection in the /stream_query request body', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({
+        ok: true,
+        status: 200,
+        body: bodyFromString(
+          'data: {"response":"ok","sources":[],"session_id":"s"}\n\n'
+        )
+      })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'test-collection' })
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    await waitFor(() => {
+      const streamCall = fetchMock.mock.calls.find(([u]) =>
+        String(u).includes('/stream_query')
+      )
+      expect(streamCall).toBeDefined()
+      expect(JSON.parse(streamCall![1].body)).toMatchObject({
+        question: 'hi',
+        collection: 'test-collection'
+      })
+    })
+  })
+
   it('marks the turn done on an untyped error frame instead of waiting forever', async () => {
     const frames = 'data: {"error":"boom"}\n\n'
 

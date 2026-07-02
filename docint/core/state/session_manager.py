@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -14,10 +15,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pandas as pd
 from llama_index.core import Response
-from llama_index.core.chat_engine import CondenseQuestionChatEngine
-from llama_index.core.llms import ChatMessage, MessageRole
-from llama_index.core.memory import ChatMemoryBuffer
-from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.schema import BaseNode
 from llama_index.core.vector_stores.types import MetadataFilters
 from loguru import logger
@@ -34,18 +31,49 @@ if TYPE_CHECKING:
     from docint.core.rag import RAG
 
 
+class SessionCollectionMismatchError(Exception):
+    """Raised when a chat turn targets a session pinned to another collection.
+
+    A conversation is pinned (on creation) to the physical collection it was
+    started under. Resuming it against a different collection would retrieve
+    evidence from the wrong corpus, so the runtime refuses the turn and the API
+    layer surfaces it as HTTP 409.
+    """
+
+    def __init__(self, *, session_id: str, pinned: str, requested: str) -> None:
+        """Initialize the mismatch error.
+
+        Args:
+            session_id (str): The conversation id that was reused.
+            pinned (str): The physical collection the session is pinned to.
+            requested (str): The physical collection the request resolved to.
+        """
+        self.session_id = session_id
+        self.pinned = pinned
+        self.requested = requested
+        super().__init__(f"Session '{session_id}' is pinned to collection '{pinned}', not '{requested}'.")
+
+
 @dataclass(slots=True)
 class SessionManager:
-    """Owns chat session state, persistence, and exports."""
+    """Owns chat session state, persistence, and exports.
+
+    The runtime is **per request, not per instance**: ``start_session`` only
+    ensures the persistent conversation row exists and ``chat`` / ``stream_chat``
+    take the ``(session_id, owner)`` explicitly and build their engine + memory
+    as locals. No per-turn state (active session id, owner, chat engine) is held
+    on the instance, so concurrent turns from different principals on the shared
+    FastAPI threadpool can never cross-attribute. The active *collection* is
+    likewise per request, carried by :meth:`docint.core.rag.RAG.collection_scope`
+    (a :class:`contextvars.ContextVar`), and read here via
+    ``self.rag.qdrant_collection``.
+    """
 
     rag: RAG
-    chat_engine: RetrieverQueryEngine | CondenseQuestionChatEngine | None = field(default=None, init=False)
-    chat_memory: ChatMemoryBuffer | None = field(default=None, init=False)
     agent_contexts: dict[str, AgentTurnContext] = field(default_factory=dict, init=False)
+    _agent_contexts_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _SessionMaker: Any | None = field(default=None, init=False, repr=False)
-    session_id: str | None = field(default=None, init=False)
     session_store: str = field(default="", init=False)
-    _owner: str | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """Post-initialization to set up the session store."""
@@ -62,67 +90,55 @@ class SessionManager:
         self._SessionMaker = _make_session_maker(self.session_store)
 
     def reset_runtime(self) -> None:
-        """Reset the runtime state."""
-        self.session_id = None
-        self.chat_engine = None
-        self.chat_memory = None
-        self._owner = None
+        """No-op retained for backward compatibility.
+
+        Per-turn chat state is no longer held on the instance -- it is threaded
+        per request and built as locals -- so there is nothing to reset. The
+        method (and its caller ``RAG.reset_session_state``) is kept so
+        collection switches and existing call sites/tests work unchanged.
+        """
+        return None
 
     def start_session(self, requested_id: str | None = None, owner: str | None = None) -> str:
-        """Start a new chat session.
+        """Ensure a conversation row exists and return its id (no runtime state).
 
-        After ``RAG.select_collection`` switches collections it deliberately
-        resets ``rag.query_engine`` and ``rag.index`` to ``None``. To avoid
-        forcing callers to rebuild before every session, this method mirrors
-        the lazy-init pattern already used by ``RAG.run_query`` and builds the
-        query engine on demand when it is missing.
+        Pure and idempotent: it mints an id when none is supplied, ensures the
+        per-session agent context, and ensures the persistent ``Conversation``
+        row (stamping ``owner`` and the active ``collection_name`` on creation
+        via :meth:`_load_or_create_convo`). It deliberately builds **no** chat
+        engine or memory and mutates **no** instance state, so concurrent
+        callers never interfere; the engine is built per turn inside
+        :meth:`chat` / :meth:`stream_chat`.
 
         Args:
-            requested_id (str | None, optional): The ID of the session to start. Defaults to None.
-            owner (str | None, optional): The principal that owns this
-                session. Stamped on a newly created conversation and
-                reused by ``_persist_turn``. Defaults to None.
+            requested_id (str | None, optional): The ID of the session to start
+                or resume. A new UUID is minted when omitted. Defaults to None.
+            owner (str | None, optional): The principal that owns this session.
+                Stamped on a newly created conversation only. Defaults to None.
 
         Returns:
-            str: The ID of the started session.
+            str: The ID of the started or resumed session.
+
+        Raises:
+            SessionCollectionMismatchError: If ``requested_id`` names an existing
+                conversation pinned to a different collection than the request's
+                active collection.
         """
         if not requested_id:
             requested_id = str(uuid.uuid4())
-        self.session_id = requested_id
-        if owner is not None:
-            self._owner = owner
 
-        # Initialize agent context for this session
-        self.agent_contexts.setdefault(requested_id, AgentTurnContext(session_id=requested_id))
+        # Ensure the per-session agent context exists (thread-safe).
+        self.get_agent_context(requested_id)
 
         with self._session_scope() as s:
-            self._load_or_create_convo(s, requested_id, self._owner)
-
-        rolling = self._get_rolling_summary(requested_id)
-        self.chat_memory = ChatMemoryBuffer.from_defaults(token_limit=2000, chat_history=[])
-        if rolling and self.chat_memory is not None:
-            self.chat_memory.put(
-                ChatMessage(
-                    role=MessageRole.SYSTEM,
-                    content=f"Conversation summary so far:\n{rolling}",
-                )
-            )
-
-        engine = self.rag.query_engine
-        if engine is None:
-            logger.debug("Query engine not initialized; building lazily for start_session.")
-            self.rag.query_engine = self.rag.build_query_engine()
-            engine = self.rag.query_engine
-
-        self.chat_engine = CondenseQuestionChatEngine.from_defaults(
-            query_engine=engine,
-            memory=self.chat_memory,
-            llm=self.rag.text_model,
-        )
+            self._load_or_create_convo(s, requested_id, owner)
         return requested_id
 
     def get_agent_context(self, session_id: str) -> AgentTurnContext:
         """Return the agent context for a session, creating it if missing.
+
+        Access is guarded by a lock so concurrent turns for distinct sessions
+        can initialize their contexts without racing on the shared dict.
 
         Args:
             session_id (str): The ID of the session.
@@ -130,7 +146,8 @@ class SessionManager:
         Returns:
             AgentTurnContext: The agent context for the session.
         """
-        return self.agent_contexts.setdefault(session_id, AgentTurnContext(session_id=session_id))
+        with self._agent_contexts_lock:
+            return self.agent_contexts.setdefault(session_id, AgentTurnContext(session_id=session_id))
 
     def _get_session_context(self, session_id: str) -> str:
         """Build a context string from rolling summary plus recent unsummarized turns.
@@ -222,6 +239,8 @@ class SessionManager:
         self,
         user_msg: str,
         *,
+        session_id: str | None = None,
+        owner: str | None = None,
         metadata_filters: MetadataFilters | None = None,
         metadata_filters_active: bool = False,
         metadata_filter_rules: Sequence[Any] | None = None,
@@ -233,6 +252,12 @@ class SessionManager:
 
         Args:
             user_msg (str): The message from the user.
+            session_id (str | None): The conversation to append this turn to.
+                Threaded explicitly per request (never read from shared state);
+                a new session is minted when ``None``.
+            owner (str | None): The principal that owns the session. Used when
+                creating the conversation row so the turn is attributed
+                correctly under concurrency.
             metadata_filters (MetadataFilters | None): Optional vector-store
                 metadata filters for this turn only.
             metadata_filters_active (bool): Whether a request-scoped metadata
@@ -276,12 +301,13 @@ class SessionManager:
             # Mirror RAG.run_query's lazy fallback: a default-path chat after a
             # collection switch can legitimately see query_engine=None.
             logger.debug("Query engine not initialized; building lazily for SessionManager.chat.")
-            self.rag.query_engine = self.rag.build_query_engine()
-            engine = self.rag.query_engine
+            engine = self.rag.build_query_engine()
+            self.rag.query_engine = engine
 
-        session_id = self.session_id
-        if self.chat_engine is None or session_id is None:
-            session_id = self.start_session(session_id)
+        # Resolve the session per request: ``start_session`` is pure/idempotent
+        # (ensures the row, enforces the collection pin) and returns the id we
+        # persist under -- no shared instance field is read.
+        session_id = self.start_session(session_id, owner=owner)
 
         # ``skip_query_rewrite`` decouples "bind the prior turn for generation"
         # from "skip the internal retrieval rewrite". Default (``None``) skips
@@ -317,7 +343,7 @@ class SessionManager:
             retrieval_mode=retrieval_mode,
         )
         response["graph_debug"] = graph_debug
-        self._persist_turn(session_id, user_msg, resp, response)
+        self._persist_turn(session_id, user_msg, resp, response, owner=owner)
         self._maybe_update_summary(session_id)
         return response
 
@@ -325,6 +351,8 @@ class SessionManager:
         self,
         user_msg: str,
         *,
+        session_id: str | None = None,
+        owner: str | None = None,
         metadata_filters: MetadataFilters | None = None,
         metadata_filters_active: bool = False,
         metadata_filter_rules: Sequence[Any] | None = None,
@@ -336,6 +364,12 @@ class SessionManager:
 
         Args:
             user_msg (str): The message from the user.
+            session_id (str | None): The conversation to append this turn to.
+                Threaded explicitly per request (never read from shared state);
+                a new session is minted when ``None``.
+            owner (str | None): The principal that owns the session. Used when
+                creating the conversation row so the turn is attributed
+                correctly under concurrency.
             metadata_filters (MetadataFilters | None): Optional vector-store
                 metadata filters for this turn only.
             metadata_filters_active (bool): Whether a request-scoped metadata
@@ -374,9 +408,9 @@ class SessionManager:
             vector_store_kwargs=vector_store_kwargs,
         )
 
-        session_id = self.session_id
-        if self.chat_engine is None or session_id is None:
-            session_id = self.start_session(session_id)
+        # Resolve the session per request (see :meth:`chat`): pure/idempotent,
+        # enforces the collection pin, returns the id we persist under.
+        session_id = self.start_session(session_id, owner=owner)
 
         # See :meth:`chat`: ``skip_query_rewrite`` decouples prior-turn binding
         # from the internal rewrite (``None`` -> skip iff ``prior_turn`` given).
@@ -428,7 +462,7 @@ class SessionManager:
             retrieval_mode=retrieval_mode,
         )
         normalized["graph_debug"] = graph_debug
-        turn_idx = self._persist_turn(session_id, user_msg, final_response, normalized)
+        turn_idx = self._persist_turn(session_id, user_msg, final_response, normalized, owner=owner)
         self._maybe_update_summary(session_id)
 
         # Yield metadata. ``turn_idx`` is an internal join key the API layer
@@ -461,8 +495,6 @@ class SessionManager:
             RuntimeError: If the session store is not initialized.
         """
         with self._session_scope() as s:
-            if not session_id and self.session_id is not None:
-                session_id = self.session_id
             if session_id is None:
                 raise ValueError("Session ID cannot be None.")
             conv = s.get(Conversation, session_id)
@@ -547,9 +579,13 @@ class SessionManager:
     def _load_or_create_convo(self, session: Session, session_id: str, owner: str | None = None) -> Conversation:
         """Load an existing conversation or create a new one.
 
-        A pre-existing conversation keeps its recorded owner; ``owner`` is
-        only stamped when the row is created, so a second principal cannot
-        rebind an existing session id.
+        A pre-existing conversation keeps its recorded owner and collection;
+        ``owner`` and the active collection are stamped only when the row is
+        created, so a second principal cannot rebind an existing session id. The
+        active collection is read from ``self.rag.qdrant_collection`` -- the
+        per-request value bound by :meth:`docint.core.rag.RAG.collection_scope`.
+        An existing conversation pinned to a different collection than the
+        request's active one is refused.
 
         Args:
             session (Session): The database session.
@@ -559,35 +595,62 @@ class SessionManager:
 
         Returns:
             Conversation: The loaded or created conversation.
+
+        Raises:
+            SessionCollectionMismatchError: When an existing conversation is
+                pinned to a collection other than the request's active one.
         """
+        active_collection = self.rag.qdrant_collection
         conv = session.get(Conversation, session_id)
         if conv is None:
             conv = Conversation(id=session_id)
-            if self.rag.qdrant_collection:
-                conv.collection_name = cast(Any, self.rag.qdrant_collection)
+            if active_collection:
+                conv.collection_name = cast(Any, active_collection)
             if owner is not None:
                 conv.owner = cast(Any, owner)
             session.add(conv)
             session.commit()
+            return conv
+
+        pinned = cast(str | None, conv.collection_name)
+        if (
+            isinstance(active_collection, str)
+            and active_collection
+            and isinstance(pinned, str)
+            and pinned
+            and pinned != active_collection
+        ):
+            raise SessionCollectionMismatchError(session_id=session_id, pinned=pinned, requested=active_collection)
         return conv
 
-    def _get_rolling_summary(self, session_id: str) -> str:
-        """Get the rolling summary for a conversation.
+    def get_session_collection(self, session_id: str, owner: str | None) -> str | None:
+        """Return the collection a session the caller owns is pinned to.
+
+        Owner-scoped like :meth:`get_session_history`: a session that does not
+        exist or belongs to another principal yields ``None`` (no existence
+        leak), so the caller cannot probe other users' sessions. Used to resolve
+        the physical collection for session-scoped helpers (e.g. the session
+        source-bundle ZIP) without relying on any process-global active
+        collection.
 
         Args:
-            session_id (str): The ID of the session.
+            session_id (str): The session id to resolve.
+            owner (str | None): The principal requesting the lookup; ``None``
+                matches legacy un-owned rows.
 
         Returns:
-            str: The rolling summary for the conversation.
+            str | None: The pinned physical collection name, or ``None`` when
+                the session is missing or not owned by ``owner``.
         """
         with self._session_scope() as s:
-            conv = s.get(Conversation, session_id)
-            if conv is None:
-                return ""
-            summary_text = cast(str | None, conv.rolling_summary)
-            return summary_text or ""
+            conv = s.query(Conversation).filter_by(id=session_id).first()
+            if not conv or conv.owner != owner:
+                return None
+            return cast(str | None, conv.collection_name)
 
-    def _persist_turn(self, session_id: str, user_msg: str, resp: Any, data: dict[str, Any]) -> int:
+    def _persist_turn(
+        self, session_id: str, user_msg: str, resp: Any, data: dict[str, Any], *, owner: str | None = None
+    ) -> int:
         """Persist a user message and the assistant's response in the database.
 
         Args:
@@ -595,6 +658,9 @@ class SessionManager:
             user_msg (str): The user message.
             resp (Any): The assistant's response.
             data (dict): Additional data to persist.
+            owner (str | None): The principal that owns the session. Threaded
+                from the chat turn and used only if the conversation row has to
+                be created here as a fallback (it normally already exists).
 
         Returns:
             int: The 0-based index of the newly persisted turn within the
@@ -602,7 +668,7 @@ class SessionManager:
                 results that complete after this row is written.
         """
         with self._session_scope() as s:
-            conv = self._load_or_create_convo(s, session_id, self._owner)
+            conv = self._load_or_create_convo(s, session_id, owner)
 
             meta = getattr(resp, "metadata", {}) or {}
             rewritten_candidate = (

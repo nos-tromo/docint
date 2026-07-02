@@ -51,7 +51,7 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
   const generate = async (refresh: boolean) => {
     dispatch({ type: 'start' })
     try {
-      for await (const ev of streamSummary(refresh)) {
+      for await (const ev of streamSummary(refresh, collection ?? undefined)) {
         // /summarize/stream emits untyped SSE frames; discriminate by
         // payload shape (mirrors Chat).
         const data = ev.data as Record<string, unknown> | string
