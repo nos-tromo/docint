@@ -33,4 +33,11 @@ def test_frontend_nginx_proxies_config_endpoint() -> None:
     """The SPA's /config fetch must reach the backend, not the SPA fallback."""
     nginx_conf = (REPO_ROOT / "frontend" / "nginx" / "default.conf").read_text(encoding="utf-8")
 
-    assert "query|summarize|agent|config|docs" in nginx_conf
+    assert "query|summarize|agent|config|version" in nginx_conf
+
+
+def test_frontend_nginx_proxies_version_endpoint() -> None:
+    """The SPA's /version fetch must reach the backend, not the SPA fallback."""
+    nginx_conf = (REPO_ROOT / "frontend" / "nginx" / "default.conf").read_text(encoding="utf-8")
+
+    assert "config|version|docs" in nginx_conf

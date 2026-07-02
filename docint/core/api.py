@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from qdrant_client import models
 from starlette.middleware.cors import CORSMiddleware
 
+from docint import __version__
 from docint.agents import (
     AgentOrchestrator,
     ClarificationConfig,
@@ -688,6 +689,12 @@ class FrontendConfigOut(BaseModel):
     collection_timeout: int
 
 
+class VersionOut(BaseModel):
+    """App release version."""
+
+    version: str
+
+
 class AgentChatIn(BaseModel):
     """Request payload for a single agent chat turn."""
 
@@ -784,6 +791,12 @@ def get_frontend_config() -> dict[str, int]:
         "graph_max_top_k": cfg.graph_max_top_k,
         "collection_timeout": cfg.collection_timeout,
     }
+
+
+@app.get("/version", response_model=VersionOut, tags=["Meta"])
+def get_version() -> VersionOut:
+    """Return the running app version (unauthenticated, no principal)."""
+    return VersionOut(version=__version__)
 
 
 @app.get("/collections/list", response_model=list[str], tags=["Collections"])
