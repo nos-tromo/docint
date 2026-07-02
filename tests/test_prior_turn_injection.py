@@ -75,10 +75,7 @@ def test_chat_skips_rewrite_when_prior_turn_supplied(
         "response": "ok",
         "sources": [],
     }
-    session_manager.session_id = "s1"
-    session_manager.chat_engine = object()  # type: ignore[assignment]
-
-    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args: None)
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args, **kwargs: None)
     monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
 
     prior = PriorTurn(
@@ -114,10 +111,7 @@ def test_chat_binds_prior_turn_context_via_update_prompts(
         "response": "ok",
         "sources": [],
     }
-    session_manager.session_id = "s1"
-    session_manager.chat_engine = object()  # type: ignore[assignment]
-
-    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args: None)
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args, **kwargs: None)
     monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
 
     prior = PriorTurn(
@@ -158,10 +152,7 @@ def test_chat_default_path_still_rewrites(
         "response": "ok",
         "sources": [],
     }
-    session_manager.session_id = "s1"
-    session_manager.chat_engine = object()  # type: ignore[assignment]
-
-    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args: None)
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args, **kwargs: None)
     monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
 
     session_manager.chat("Please elaborate.")

@@ -13,11 +13,14 @@ import re
 import shutil
 import stat
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
-from collections import defaultdict
-from collections.abc import Callable, Iterable, Sequence
+from collections import OrderedDict, defaultdict
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -54,6 +57,7 @@ from docint.utils.env_cfg import (
     load_ner_env,
     load_openai_env,
     load_path_env,
+    load_principal_env,
     load_rerank_client_env,
     load_resolution_env,
     load_retrieval_env,
@@ -139,6 +143,7 @@ from docint.core.ner import (
 )
 from docint.core.readers.documents import CorePDFPipelineReader
 from docint.core.retrieval_filters import matches_metadata_filters
+from docint.core.state.collection_owner_manager import CollectionOwnerManager
 from docint.core.state.report_manager import ReportManager
 from docint.core.state.session_manager import SessionManager
 from docint.core.storage.ingest_manifest import (
@@ -1600,16 +1605,55 @@ class VLLMSparseEncoder:
         return [token_id for token_id, _ in ordered], [score for _, score in ordered]
 
 
-@dataclass(slots=True)
+# Per-request active physical collection. Backs the ``RAG.qdrant_collection``
+# property so concurrent requests for different collections never clobber a
+# shared field (the WS2 multi-tenant fix). Unset (``None``) outside a request
+# scope, where the engine falls back to its process default; bound for the
+# duration of a request by :meth:`RAG.collection_scope`. ContextVars copy into
+# anyio worker threads via ``copy_context()``, so the override survives the
+# ``to_thread.run_sync`` hops used by the streaming endpoints.
+_active_collection: ContextVar[str | None] = ContextVar("docint_active_collection", default=None)
+
+# Upper bound on the per-collection retrieval-handle caches (``index`` /
+# ``query_engine``). Each cached handle pins a SQLite docstore connection, so an
+# unbounded cache would leak file descriptors on a host with many collections.
+# Evicted handles are dropped from the cache only (not closed): an in-flight
+# request keeps its own reference and the OS reclaims the fd once it is gone.
+_RETRIEVAL_HANDLE_CACHE_MAX = 32
+
+
+# ``slots=True`` is intentionally NOT used here. ``qdrant_collection`` is a
+# normal field for the type checker / generated ``__init__`` signature, but its
+# reads and writes are intercepted by a property attached after the class body
+# (see ``_rag_qdrant_collection_get`` / ``_set`` at the end of the module).
+# Under ``slots`` the field's slot descriptor would capture the constructor
+# value and the post-class property would never see it; without slots the
+# property cleanly shadows the (never-stored) field.
+@dataclass
 class RAG:
     """Retrieval-Augmented Generation engine.
 
     Handles configuration, initialization, and interaction with embedding models, generation
     models, and vector stores. Provides methods to start sessions, retrieve information, and
     manage document ingestion.
+
+    Collection statelessness:
+        ``qdrant_collection`` reads/writes go through a property (attached after
+        the class body) layered over a per-request
+        :class:`contextvars.ContextVar` (see :meth:`collection_scope`) with a
+        process-default fallback (``_collection_default``). The derived
+        ``index`` and ``query_engine`` are likewise per-collection: properties
+        backed by caches keyed on the active physical name, holding read-only
+        handles that are safe to share across threads. Concurrent requests for
+        different collections are therefore isolated without any global mutation.
     """
 
     # --- Constructor args ---
+    # Declared as a plain field so ``RAG(qdrant_collection=...)`` type-checks and
+    # internal ``self.qdrant_collection`` reads resolve to ``str``; the value is
+    # never actually stored on this attribute -- the post-class property routes
+    # writes into ``_collection_default`` (or the request ContextVar). MUST stay
+    # the first field so its init assignment runs before ``_collection_default``.
     qdrant_collection: str
     enable_hybrid: bool = field(default=True)
 
@@ -1748,14 +1792,35 @@ class RAG:
     docs: list[Document] = field(default_factory=list, init=False)
     nodes: list[BaseNode] = field(default_factory=list, init=False)
 
-    # --- Built components (lazy loaded) ---
-    index: VectorStoreIndex | None = field(default=None, init=False)
-    query_engine: RetrieverQueryEngine | None = field(default=None, init=False)
+    # --- Built components (lazy loaded, per physical collection) ---
+    # ``index`` / ``query_engine`` are exposed as properties backed by these
+    # per-collection caches so concurrent requests on different collections do
+    # not share a single handle. Handles are read-only (a Qdrant vector store +
+    # HTTP clients) and therefore safe to share across threads.
+    # Process-default active collection (the property's fallback when no request
+    # scope is bound). MUST keep a simple ``default`` (never ``default_factory``)
+    # so the generated ``__init__`` does not re-assign it and clobber the value
+    # the ``qdrant_collection`` field's init assignment routes here.
+    _collection_default: str = field(default="", init=False, repr=False)
+    _index_cache: OrderedDict[str, VectorStoreIndex] = field(default_factory=OrderedDict, init=False, repr=False)
+    _query_engine_cache: OrderedDict[str, RetrieverQueryEngine] = field(
+        default_factory=OrderedDict, init=False, repr=False
+    )
+    _retrieval_cache_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     sessions: SessionManager | None = field(default=None, init=False)
     reports: ReportManager | None = field(default=None, init=False)
+    collection_owners: CollectionOwnerManager | None = field(default=None, init=False)
+    _collection_backfill_done: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Post-initialization to set up any necessary components.
+
+        The constructor's ``qdrant_collection`` argument has, by this point,
+        already been routed into ``_collection_default`` by the property setter
+        (the generated ``__init__`` assigns the first field before calling this
+        hook). Per-request overrides are applied via :meth:`collection_scope`;
+        reads fall back to the default when no request scope is active (CLI /
+        single-collection usage).
 
         Raises:
             ValueError: If summarize_prompt_path is not set.
@@ -1936,6 +2001,118 @@ class RAG:
         self.social_summary_candidate_pool = self.summary_config.social_candidate_pool
         self.social_summary_diversity_limit = self.summary_config.social_diversity_limit
 
+    # --- Active collection (stateless, per-request) ---
+    # NOTE: ``qdrant_collection`` is exposed as a property, but it is attached
+    # *after* the class body (see ``_rag_qdrant_collection_get`` / ``_set``
+    # below) rather than declared here. A same-named property in the body would
+    # hide the ``InitVar`` field from the dataclass-generated ``__init__``
+    # signature (and from the type checker), breaking ``RAG(qdrant_collection=
+    # ...)`` at every call site. Reads resolve to the per-request ContextVar
+    # override when a ``collection_scope`` is active, else the process default.
+
+    @contextmanager
+    def collection_scope(self, physical: str) -> Iterator[None]:
+        """Bind ``physical`` as the active collection for the enclosed block.
+
+        Sets the per-request :data:`_active_collection` ContextVar so every
+        ``self.qdrant_collection`` read (and the derived ``index`` /
+        ``query_engine`` caches) resolves to ``physical`` for the duration of
+        the block, then restores the previous value. The binding is scoped to
+        the current context, so concurrent requests on different threads — and
+        the anyio worker threads they spawn via ``to_thread.run_sync`` — each
+        observe only their own collection.
+
+        Args:
+            physical (str): The physical (owner-namespaced) Qdrant collection
+                name to make active.
+
+        Yields:
+            None: Control returns to the caller with the scope active.
+        """
+        token = _active_collection.set(physical)
+        try:
+            yield
+        finally:
+            _active_collection.reset(token)
+
+    def _cache_get(self, cache: OrderedDict[str, Any], key: str) -> Any:
+        """Return a cached handle for ``key``, marking it most-recently-used.
+
+        Args:
+            cache (OrderedDict[str, Any]): The bounded LRU cache to read.
+            key (str): The active physical collection name.
+
+        Returns:
+            Any: The cached handle, or ``None`` when absent.
+        """
+        with self._retrieval_cache_lock:
+            value = cache.get(key)
+            if value is not None:
+                cache.move_to_end(key)
+            return value
+
+    def _cache_put(self, cache: OrderedDict[str, Any], key: str, value: Any) -> None:
+        """Store (or evict) a cached handle for ``key`` under the cache bound.
+
+        A ``None`` value evicts the entry (preserving the previous reset
+        semantics of ``self.index = None``). Otherwise the entry is inserted as
+        most-recently-used and the oldest entries are dropped until the cache is
+        within :data:`_RETRIEVAL_HANDLE_CACHE_MAX`.
+
+        Args:
+            cache (OrderedDict[str, Any]): The bounded LRU cache to mutate.
+            key (str): The active physical collection name.
+            value (Any): The handle to cache, or ``None`` to evict.
+        """
+        with self._retrieval_cache_lock:
+            if value is None:
+                cache.pop(key, None)
+                return
+            cache[key] = value
+            cache.move_to_end(key)
+            while len(cache) > _RETRIEVAL_HANDLE_CACHE_MAX:
+                cache.popitem(last=False)
+
+    @property
+    def index(self) -> VectorStoreIndex | None:
+        """Return the cached :class:`VectorStoreIndex` for the active collection.
+
+        Returns:
+            VectorStoreIndex | None: The per-collection index, or ``None`` when
+            one has not been built yet.
+        """
+        return cast("VectorStoreIndex | None", self._cache_get(self._index_cache, self.qdrant_collection))
+
+    @index.setter
+    def index(self, value: VectorStoreIndex | None) -> None:
+        """Cache (or evict) the index for the active collection.
+
+        Args:
+            value (VectorStoreIndex | None): The index to cache; ``None`` evicts
+                the active collection's entry.
+        """
+        self._cache_put(self._index_cache, self.qdrant_collection, value)
+
+    @property
+    def query_engine(self) -> RetrieverQueryEngine | None:
+        """Return the cached query engine for the active collection.
+
+        Returns:
+            RetrieverQueryEngine | None: The per-collection query engine, or
+            ``None`` when one has not been built yet.
+        """
+        return cast("RetrieverQueryEngine | None", self._cache_get(self._query_engine_cache, self.qdrant_collection))
+
+    @query_engine.setter
+    def query_engine(self, value: RetrieverQueryEngine | None) -> None:
+        """Cache (or evict) the query engine for the active collection.
+
+        Args:
+            value (RetrieverQueryEngine | None): The engine to cache; ``None``
+                evicts the active collection's entry.
+        """
+        self._cache_put(self._query_engine_cache, self.qdrant_collection, value)
+
     @staticmethod
     def _load_prompt_text(
         path: Path | None,
@@ -1966,63 +2143,6 @@ class RAG:
             if required:
                 raise
             return default
-
-    @property
-    def session_id(self) -> str | None:
-        """Get the current session ID.
-
-        Returns:
-            str | None: The current session ID.
-        """
-        return self.sessions.session_id if self.sessions else None
-
-    @session_id.setter
-    def session_id(self, value: str | None) -> None:
-        """Set the current session ID.
-
-        Args:
-            value (str | None): The new session ID.
-        """
-        if self.sessions is not None:
-            self.sessions.session_id = value
-
-    @property
-    def chat_engine(self) -> Any | None:
-        """Get the current chat engine.
-
-        Returns:
-            Any | None: The current chat engine.
-        """
-        return self.sessions.chat_engine if self.sessions else None
-
-    @chat_engine.setter
-    def chat_engine(self, value: Any | None) -> None:
-        """Set the current chat engine.
-
-        Args:
-            value (Any | None): The new chat engine.
-        """
-        if self.sessions is not None:
-            self.sessions.chat_engine = value
-
-    @property
-    def chat_memory(self) -> Any | None:
-        """Get the current chat memory.
-
-        Returns:
-            Any | None: The current chat memory.
-        """
-        return self.sessions.chat_memory if self.sessions else None
-
-    @chat_memory.setter
-    def chat_memory(self, value: Any | None) -> None:
-        """Set the current chat memory.
-
-        Args:
-            value (Any | None): The new chat memory.
-        """
-        if self.sessions is not None:
-            self.sessions.chat_memory = value
 
     # --- Properties (lazy loading) ---
     @property
@@ -4716,13 +4836,19 @@ class RAG:
             )
             raise
 
-        # 1a. If the deleted collection was the active one, clear cached
-        #     handles so the next query does not point at a tombstone.
-        #     Without this, ``self.qdrant_collection`` would still equal
-        #     ``target`` and ``self.index`` / ``self.query_engine`` would
-        #     wrap a vector store for a collection Qdrant no longer has —
-        #     the next ``/stream_query`` would bypass the empty-name gate
-        #     and surface Qdrant's raw 404 to the user.
+        # 1a. Always evict the deleted collection's cached retrieval handles so
+        #     a later re-ingest of the same (owner, logical) -> same physical
+        #     name does not reuse an index/query engine bound to the now-deleted
+        #     Qdrant collection and its removed SQLite docstore. This is keyed by
+        #     ``target`` directly, independent of the (possibly unscoped) active
+        #     collection — the API delete path runs without a request scope.
+        with self._retrieval_cache_lock:
+            self._index_cache.pop(target, None)
+            self._query_engine_cache.pop(target, None)
+
+        # 1b. If the deleted collection happens to be the active one, also clear
+        #     the rest of the per-collection runtime so the next query does not
+        #     point at a tombstone.
         if target == self.qdrant_collection:
             self.qdrant_collection = ""
             self.docs.clear()
@@ -5628,8 +5754,8 @@ class RAG:
             # ``build_query_engine`` is typed non-Optional and raises on
             # its own failure modes, so no second None guard is needed.
             logger.debug("Query engine not initialized; building lazily for run_query.")
-            self.query_engine = self.build_query_engine()
-            engine = self.query_engine
+            engine = self.build_query_engine()
+            self.query_engine = engine
         try:
             result = engine.query(prompt)
         except ValueError as exc:
@@ -5711,8 +5837,8 @@ class RAG:
             # ``build_query_engine`` raises on its own failure modes;
             # no second None guard is needed here.
             logger.debug("Query engine not initialized; building lazily for run_query_async.")
-            self.query_engine = self.build_query_engine()
-            engine = self.query_engine
+            engine = self.build_query_engine()
+            self.query_engine = engine
         try:
             result = await engine.aquery(prompt)
         except ValueError as exc:
@@ -5779,11 +5905,16 @@ class RAG:
             self._resolved_index_cache.clear()
             return
 
-        stale_aggregate_keys = [key for key in self.ner_aggregate_cache if key[0] == collection]
+        # Snapshot keys with list() before filtering. Collections are now
+        # per-request/concurrent, so a parallel NER request may write these
+        # caches while we scan; iterating the dict live would raise "dictionary
+        # changed size during iteration". list(dict) materializes the keys
+        # atomically under the GIL, and pop(..., None) tolerates a racing delete.
+        stale_aggregate_keys = [key for key in list(self.ner_aggregate_cache) if key[0] == collection]
         for aggregate_key in stale_aggregate_keys:
             self.ner_aggregate_cache.pop(aggregate_key, None)
         stale_graph_keys: list[tuple[str, str, int, int]] = [
-            key for key in self.ner_graph_cache if key[0] == collection
+            key for key in list(self.ner_graph_cache) if key[0] == collection
         ]
         for graph_key in stale_graph_keys:
             self.ner_graph_cache.pop(graph_key, None)
@@ -5825,6 +5956,31 @@ class RAG:
             self.reports = ReportManager(self)
         return self.reports
 
+    def ensure_collection_owner_manager(self) -> CollectionOwnerManager:
+        """Ensure the CollectionOwnerManager is initialized and return it.
+
+        Parallels :meth:`ensure_report_manager`. On first successful use it
+        backfills any pre-existing Qdrant collections (created before ownership
+        shipped) to the configured default identity, so the current operator
+        keeps access to legacy data. The backfill is best-effort and retried on
+        subsequent calls until it succeeds once (e.g. if Qdrant was briefly
+        unreachable at startup).
+
+        Returns:
+            CollectionOwnerManager: The initialized manager for this RAG instance.
+        """
+        if self.collection_owners is None:
+            self.collection_owners = CollectionOwnerManager(self)
+        if not self._collection_backfill_done:
+            try:
+                default_owner = load_principal_env().default_identity
+                if default_owner:
+                    self.collection_owners.backfill_legacy(self.list_collections(), default_owner)
+                self._collection_backfill_done = True
+            except Exception as exc:
+                logger.warning("Collection ownership backfill skipped (will retry): {}", exc)
+        return self.collection_owners
+
     def export_session(self, session_id: str | None = None, out_dir: str | Path = "session") -> Path:
         """Delegate session export to SessionManager.
 
@@ -5860,6 +6016,8 @@ class RAG:
         self,
         user_msg: str,
         *,
+        session_id: str | None = None,
+        owner: str | None = None,
         metadata_filters: MetadataFilters | None = None,
         metadata_filters_active: bool = False,
         metadata_filter_rules: Sequence[Any] | None = None,
@@ -5871,6 +6029,9 @@ class RAG:
 
         Args:
             user_msg (str): The user's chat message.
+            session_id (str | None): The conversation to append the turn to,
+                threaded explicitly per request (mints a new one when ``None``).
+            owner (str | None): The principal that owns the session.
             metadata_filters (MetadataFilters | None): Optional request-scoped
                 metadata filters.
             metadata_filters_active (bool): Whether request-scoped metadata
@@ -5891,6 +6052,8 @@ class RAG:
         """
         return self.ensure_session_manager().chat(
             user_msg,
+            session_id=session_id,
+            owner=owner,
             metadata_filters=metadata_filters,
             metadata_filters_active=metadata_filters_active,
             metadata_filter_rules=metadata_filter_rules,
@@ -5903,6 +6066,8 @@ class RAG:
         self,
         user_msg: str,
         *,
+        session_id: str | None = None,
+        owner: str | None = None,
         metadata_filters: MetadataFilters | None = None,
         metadata_filters_active: bool = False,
         metadata_filter_rules: Sequence[Any] | None = None,
@@ -5914,6 +6079,9 @@ class RAG:
 
         Args:
             user_msg (str): The user's chat message.
+            session_id (str | None): The conversation to append the turn to,
+                threaded explicitly per request (mints a new one when ``None``).
+            owner (str | None): The principal that owns the session.
             metadata_filters (MetadataFilters | None): Optional request-scoped
                 metadata filters.
             metadata_filters_active (bool): Whether request-scoped metadata
@@ -5934,6 +6102,8 @@ class RAG:
         """
         return self.ensure_session_manager().stream_chat(
             user_msg,
+            session_id=session_id,
+            owner=owner,
             metadata_filters=metadata_filters,
             metadata_filters_active=metadata_filters_active,
             metadata_filter_rules=metadata_filter_rules,
@@ -7736,3 +7906,48 @@ class RAG:
 
         gc.collect()
         logger.info("Models unloaded and memory cleared.")
+
+
+# --- ``RAG.qdrant_collection`` property (attached post-class) ---
+# Defined here, not in the class body, so the dataclass-generated ``__init__``
+# (and the type checker) keep seeing ``qdrant_collection`` as the ``InitVar``
+# constructor parameter. A property of the same name inside the body would
+# shadow that field and break ``RAG(qdrant_collection=...)`` everywhere.
+
+
+def _rag_qdrant_collection_get(self: RAG) -> str:
+    """Return the active physical collection for the current request.
+
+    Resolves to the per-request override bound by :meth:`RAG.collection_scope`
+    when one is active, otherwise the process default seeded at construction.
+    Reads are therefore isolated across concurrent requests/threads.
+
+    Args:
+        self (RAG): The RAG instance (bound by the property).
+
+    Returns:
+        str: The active physical Qdrant collection name.
+    """
+    override = _active_collection.get()
+    return override if override is not None else self._collection_default
+
+
+def _rag_qdrant_collection_set(self: RAG, value: str) -> None:
+    """Set the active collection for the current scope.
+
+    Within a :meth:`RAG.collection_scope` the per-request override is updated
+    (keeping the change request-local); outside any scope the process default is
+    updated -- the CLI / single-collection path, and pre-existing tests that
+    assign ``rag.qdrant_collection`` directly.
+
+    Args:
+        self (RAG): The RAG instance (bound by the property).
+        value (str): The collection name to make active.
+    """
+    if _active_collection.get() is not None:
+        _active_collection.set(value)
+    else:
+        self._collection_default = value
+
+
+RAG.qdrant_collection = property(_rag_qdrant_collection_get, _rag_qdrant_collection_set)  # type: ignore[assignment]

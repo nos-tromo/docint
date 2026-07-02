@@ -212,10 +212,7 @@ def test_chat_uses_request_scoped_filtered_engine(
         "response": "Hi",
         "sources": [],
     }
-    session_manager.session_id = "session-1"
-    session_manager.chat_engine = object()  # type: ignore[assignment]
-
-    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args: None)
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args, **kwargs: None)
     monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
 
     response = session_manager.chat(
@@ -270,15 +267,14 @@ def test_stream_chat_includes_final_response_when_no_tokens(
         "retrieval_mode": "rewrite_compact",
     }
     session_manager.rag.index = object()  # type: ignore[assignment]
-    session_manager.session_id = "session-1"
-    session_manager.chat_engine = object()  # type: ignore[assignment]
 
-    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args: 0)
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args, **kwargs: 0)
     monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
 
     chunks = list(
         session_manager.stream_chat(
             "hello",
+            session_id="session-1",
             metadata_filters_active=True,
             metadata_filter_rules=[{"field": "mimetype", "operator": "mime_match"}],
         )
@@ -346,10 +342,7 @@ def test_chat_skips_rewrite_when_prior_turn_supplied(
         "response": "ok",
         "sources": [],
     }
-    session_manager.session_id = "s1"
-    session_manager.chat_engine = object()  # type: ignore[assignment]
-
-    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args: None)
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args, **kwargs: None)
     monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
 
     session_manager.chat(
@@ -407,15 +400,14 @@ def test_stream_chat_binds_prior_turn_but_keeps_rewrite_when_not_skipped(
         "retrieval_mode": "rewrite_compact",
     }
     session_manager.rag.index = object()  # type: ignore[assignment]
-    session_manager.session_id = "session-1"
-    session_manager.chat_engine = object()  # type: ignore[assignment]
 
-    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args: 0)
+    monkeypatch.setattr(SessionManager, "_persist_turn", lambda *args, **kwargs: 0)
     monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
 
     list(
         session_manager.stream_chat(
             "Enthält es Menschen?",
+            session_id="session-1",
             prior_turn=PriorTurn(user_text="Was ist sichtbar?", assistant_text="Ein Baum."),
             skip_query_rewrite=False,
         )
@@ -461,12 +453,9 @@ def test_chat_rewrites_retrieval_query_without_prefixing_session_context(
         "response": "Grounded answer",
         "sources": [],
     }
-    session_manager.session_id = "rewrite-session"
-    session_manager.chat_engine = object()  # type: ignore[assignment]
-
     monkeypatch.setattr(SessionManager, "_maybe_update_summary", lambda *args: None)
 
-    session_manager.chat("What did she post?")
+    session_manager.chat("What did she post?", session_id="rewrite-session")
 
     rewrite_context = session_manager.rag.rewrite_retrieval_query.call_args.kwargs["conversation_context"]  # type: ignore[attr-defined]
     assert "Tell me about Alice" in rewrite_context
