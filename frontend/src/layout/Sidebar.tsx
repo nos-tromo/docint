@@ -5,6 +5,7 @@ import { useCollections, useDeleteCollection, useSelectCollection } from '@/hook
 import { useDeleteSession, useSessions } from '@/hooks/useSessions'
 import { useUiStore } from '@/stores/ui'
 import { cn } from '@/lib/cn'
+import { VersionBadge } from '@/components/VersionBadge'
 
 const NAV = [
   { to: '/', label: 'Dashboard' },
@@ -211,6 +212,9 @@ export function Sidebar() {
           })}
         </ul>
       </section>
+      <div className="pt-4">
+        <VersionBadge />
+      </div>
     </aside>
   )
 }
