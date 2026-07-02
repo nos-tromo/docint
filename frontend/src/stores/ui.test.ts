@@ -7,7 +7,8 @@ beforeEach(() => {
     selectedCollection: null,
     currentSessionId: null,
     previewModal: null,
-    entityMergeMode: 'resolved'
+    entityMergeMode: 'resolved',
+    graphTopK: null
   })
 })
 
@@ -42,5 +43,20 @@ describe('useUiStore', () => {
     useUiStore.getState().setEntityMergeMode('exact')
     const persisted = JSON.parse(localStorage.getItem('docint-ui')!).state
     expect(persisted.entityMergeMode).toBe('exact')
+  })
+
+  it('defaults graphTopK to null', () => {
+    expect(useUiStore.getState().graphTopK).toBeNull()
+  })
+
+  it('updates graphTopK', () => {
+    useUiStore.getState().setGraphTopK(200)
+    expect(useUiStore.getState().graphTopK).toBe(200)
+  })
+
+  it('persists graphTopK across reloads', () => {
+    useUiStore.getState().setGraphTopK(150)
+    const persisted = JSON.parse(localStorage.getItem('docint-ui')!).state
+    expect(persisted.graphTopK).toBe(150)
   })
 })

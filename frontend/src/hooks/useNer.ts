@@ -22,10 +22,10 @@ export function useNerStats(params: Parameters<typeof getNerStats>[0]) {
  * `enabled` so it only fetches while the graph view is mounted — the force
  * layout and Qdrant scroll are wasted work in the table view.
  */
-export function useNerGraph(params: { topKNodes?: number; enabled?: boolean }) {
+export function useNerGraph(params: { topKNodes: number; enabled?: boolean }) {
   const collection = useUiStore((s) => s.selectedCollection)
   const mergeMode = useUiStore((s) => s.entityMergeMode)
-  const topKNodes = params.topKNodes ?? 80
+  const topKNodes = params.topKNodes
   return useQuery({
     queryKey: ['ner-graph', collection, mergeMode, topKNodes],
     queryFn: () =>

@@ -40,7 +40,9 @@ and chat. It ships with:
 
    `make up-dev` layers `docker/compose.override.yaml` so host ports are
    published for local development; `make up` runs the base
-   `docker/compose.yaml` alone (production shape, no host ports).
+   `docker/compose.yaml` alone (production shape, no host ports). Both are
+   detached and never build (`up -d --no-build`) — run `make build` first
+   (as above), or use `make dev` to build then `up-dev`.
 
 4. Open the app:
 

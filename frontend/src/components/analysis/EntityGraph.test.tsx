@@ -115,8 +115,10 @@ describe('EntityGraph', () => {
     )
     const slider = screen.getByRole('slider', { name: /edge length/i }) as HTMLInputElement
     expect(slider).toBeInTheDocument()
-    // Default keeps today's density (1x); users widen toward 3x or compact to 0.5x.
+    // Default keeps today's density (1x); users widen toward 8x or compact to 0.5x.
     expect(slider.value).toBe('1')
+    // The upper bound is generous so even dense graphs can be pulled fully apart.
+    expect(slider.max).toBe('8')
   })
 
   it('updates the edge-length value when the slider is dragged', () => {
@@ -174,6 +176,56 @@ describe('EntityGraph', () => {
     )
   })
 
+  it('renders the node-count control inline with the other graph controls', () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+        nodeCount={80}
+        nodeCountMax={500}
+        onNodeCountChange={() => {}}
+        onResetNodeCount={() => {}}
+      />
+    )
+    // The Nodes selector now sits in the controls row alongside Min edges.
+    expect(screen.getByLabelText('Graph node count')).toHaveValue(80)
+  })
+
+  it('hides the node-count control when no handler is wired', () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    expect(screen.queryByLabelText('Graph node count')).not.toBeInTheDocument()
+  })
+
+  it('reset delegates the node count back to its deploy default', async () => {
+    const onResetNodeCount = vi.fn()
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+        nodeCount={250}
+        nodeCountMax={500}
+        onNodeCountChange={() => {}}
+        onResetNodeCount={onResetNodeCount}
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: /^reset$/i }))
+    expect(onResetNodeCount).toHaveBeenCalledTimes(1)
+  })
+
   it('attaches a non-passive wheel listener so wheel-zoom cannot scroll the page', () => {
     // React registers wheel listeners as passive (and, failing jsdom's
     // passive-support probe, with a boolean capture flag), where the handler's
@@ -223,5 +275,64 @@ describe('EntityGraph', () => {
       />
     )
     expect(screen.getByText(/no entity relationships to graph/i)).toBeInTheDocument()
+  })
+
+  it('toggles maximize via the expand/collapse button', async () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    const expandBtn = screen.getByRole('button', { name: 'Expand graph' })
+    expect(expandBtn).toHaveAttribute('aria-pressed', 'false')
+
+    await userEvent.click(expandBtn)
+
+    const collapseBtn = screen.getByRole('button', { name: 'Collapse graph' })
+    expect(collapseBtn).toHaveAttribute('aria-pressed', 'true')
+    expect(document.querySelector('[data-maximized="true"]')).not.toBeNull()
+
+    await userEvent.click(collapseBtn)
+    expect(screen.getByRole('button', { name: 'Expand graph' })).toHaveAttribute(
+      'aria-pressed',
+      'false'
+    )
+    expect(document.querySelector('[data-maximized="true"]')).toBeNull()
+  })
+
+  it('exits maximize when Escape is pressed', async () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Expand graph' }))
+    expect(screen.getByRole('button', { name: 'Collapse graph' })).toBeInTheDocument()
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+
+    expect(screen.getByRole('button', { name: 'Expand graph' })).toBeInTheDocument()
+  })
+
+  it('still renders nodes while maximized', async () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Expand graph' }))
+    expect(screen.getByText('Acme')).toBeInTheDocument()
   })
 })

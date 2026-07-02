@@ -305,6 +305,8 @@ Loaded by `load_frontend_env()` (`env_cfg.py:111`).
 | Variable | Default | Description |
 |---|---|---|
 | `FRONTEND_COLLECTION_TIMEOUT` | `120` | Seconds the UI will wait for `/collections/list` before falling back. |
+| `NER_GRAPH_TOP_K` | `80` | Default node count for the Analysis entity-graph view; the SPA seeds its control from this. |
+| `NER_GRAPH_MAX_TOP_K` | `500` | Ceiling for the graph node count (API clamp + UI control max). Raise for large corpora. |
 
 ## Runtime device — `RuntimeConfig`
 

@@ -20,6 +20,7 @@ import pytest
 
 from docint.utils.env_cfg import (
     load_embedding_env,
+    load_frontend_env,
     load_model_env,
     load_resolution_env,
     load_retrieval_env,
@@ -580,3 +581,77 @@ def test_resolution_config_rejects_non_positive_vector_k(
         monkeypatch.setenv("RES_VECTOR_K", bad)
         with pytest.raises(ValueError, match="RES_VECTOR_K"):
             load_resolution_env()
+
+
+# ---------------------------------------------------------------------------
+# FrontendConfig graph node-count fields
+# ---------------------------------------------------------------------------
+
+
+def _clear_frontend_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove frontend env overrides so loader defaults are observable.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    for var in ("FRONTEND_COLLECTION_TIMEOUT", "NER_GRAPH_TOP_K", "NER_GRAPH_MAX_TOP_K"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_frontend_config_graph_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Defaults are 80 nodes with a 500 ceiling.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    _clear_frontend_env(monkeypatch)
+
+    cfg = load_frontend_env()
+
+    assert cfg.graph_top_k == 80
+    assert cfg.graph_max_top_k == 500
+
+
+def test_frontend_config_graph_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Operator env vars set both the default and the ceiling.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.setenv("NER_GRAPH_TOP_K", "200")
+    monkeypatch.setenv("NER_GRAPH_MAX_TOP_K", "1000")
+
+    cfg = load_frontend_env()
+
+    assert cfg.graph_top_k == 200
+    assert cfg.graph_max_top_k == 1000
+
+
+def test_frontend_config_clamps_top_k_to_at_least_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A zero/negative default is clamped up to 1.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    _clear_frontend_env(monkeypatch)
+    monkeypatch.setenv("NER_GRAPH_TOP_K", "0")
+
+    cfg = load_frontend_env()
+
+    assert cfg.graph_top_k == 1
+
+
+def test_frontend_config_max_never_below_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ceiling is raised to the default when configured below it.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    _clear_frontend_env(monkeypatch)
+    monkeypatch.setenv("NER_GRAPH_TOP_K", "300")
+    monkeypatch.setenv("NER_GRAPH_MAX_TOP_K", "100")
+
+    cfg = load_frontend_env()
+
+    assert cfg.graph_top_k == 300
+    assert cfg.graph_max_top_k == 300
