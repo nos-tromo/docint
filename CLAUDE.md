@@ -38,6 +38,8 @@ make volumes   # create the external Docker volumes (one-time)
 make up        # run docint detached, no build (production shape, no host ports)
 make up-dev    # like 'up', but publishes the React SPA on the host (no build)
 make dev       # build, then up-dev
+make bundle     # airgap image tarball built from the latest annotated release tag (production)
+make bundle-dev # airgap tarball of the current working tree (dev/soak)
 # Merge duplicate/similar entities for a collection (one-off backend container,
 # so it reaches the qdrant/vllm-router aliases — production is Docker-only).
 make resolve                    # prompts for the collection name
