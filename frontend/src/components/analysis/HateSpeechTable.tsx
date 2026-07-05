@@ -4,6 +4,7 @@ import { csvExportHref } from '@/api/collections'
 import type { HateSpeechRow } from '@/api/types'
 import { referenceMetadataItems } from '@/lib/referenceMetadata'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
+import { TranslateControl, type TranslationPayload } from '@/components/common/TranslateControl'
 import { hateSpeechSnapshot } from '@/lib/reportSnapshots'
 import { cn } from '@/lib/cn'
 
@@ -46,7 +47,8 @@ function HateSpeechTableRow({
   reportDedupeKeys?: Set<string>
 }) {
   const [expanded, setExpanded] = useState(false)
-  const reportItem = hateSpeechSnapshot(row)
+  const [translation, setTranslation] = useState<TranslationPayload | null>(null)
+  const reportItem = hateSpeechSnapshot(row, translation ?? undefined)
   const inReport = reportDedupeKeys?.has(reportItem.dedupe_key) ?? false
   const refMeta = referenceMetadataItems(row.reference_metadata)
   const chunkText = (row.chunk_text ?? row.text ?? '').trim()
@@ -64,7 +66,7 @@ function HateSpeechTableRow({
 
   return (
     <div
-      className="grid items-start gap-3 border-b border-border px-3 py-2.5 text-sm hover:bg-zinc-900/40"
+      className="group grid items-start gap-3 border-b border-border px-3 py-2.5 text-sm hover:bg-zinc-900/40"
       style={{ gridTemplateColumns: HATE_GRID }}
       data-testid="hate-speech-row"
     >
@@ -113,7 +115,8 @@ function HateSpeechTableRow({
           <span className="text-xs text-muted-foreground">Chunk text unavailable.</span>
         )}
       </div>
-      <div className="flex justify-end">
+      <div className="flex items-center justify-end gap-1">
+        {chunkText && <TranslateControl text={chunkText} onTranslated={setTranslation} />}
         {reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
       </div>
     </div>
