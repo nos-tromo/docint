@@ -36,7 +36,11 @@ export function chatAnswerSnapshot(params: {
   }
 }
 
-export function entityFindingSnapshot(row: NerSourceRow, entityLabel: string): ReportItemInput {
+export function entityFindingSnapshot(
+  row: NerSourceRow,
+  entityLabel: string,
+  translation?: { text: string; target_lang: string; model: string }
+): ReportItemInput {
   const chunkId = row.chunk_id ?? ''
   return {
     artifact_type: 'entity_finding',
@@ -50,7 +54,8 @@ export function entityFindingSnapshot(row: NerSourceRow, entityLabel: string): R
       row: row.row ?? null,
       score: row.score ?? null,
       entities: (row.entities ?? []).map((e) => ({ text: e.text, type: e.type, score: e.score ?? null })),
-      reference_metadata: row.reference_metadata ?? null
+      reference_metadata: row.reference_metadata ?? null,
+      ...(translation ? { translation } : {})
     }
   }
 }

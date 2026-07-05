@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { EntityFinding } from './EntityFinding'
 import { useUiStore } from '@/stores/ui'
+import { entityFindingSnapshot } from '@/lib/reportSnapshots'
 import type { NerSourceRow } from '@/api/types'
 
 const GRID = '2.5rem 1fr 1fr 2fr 6rem'
@@ -30,14 +31,17 @@ describe('EntityFinding', () => {
       reference_metadata: { author: 'Bob' },
       entities: [{ text: 'fox', type: 'ANIMAL', score: 0.91 }]
     }
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     render(
-      <EntityFinding
-        index={1}
-        source={source}
-        highlightTerms={['fox']}
-        selectedTypeLower="animal"
-        gridTemplate={GRID}
-      />
+      <QueryClientProvider client={qc}>
+        <EntityFinding
+          index={1}
+          source={source}
+          highlightTerms={['fox']}
+          selectedTypeLower="animal"
+          gridTemplate={GRID}
+        />
+      </QueryClientProvider>
     )
     // Source column.
     expect(screen.getByText('paper.pdf')).toBeInTheDocument()
@@ -67,14 +71,17 @@ describe('EntityFinding', () => {
         { text: 'Paris', type: 'LOC', score: 0.5 }
       ]
     }
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     render(
-      <EntityFinding
-        index={1}
-        source={source}
-        highlightTerms={['Berlin']}
-        selectedTypeLower="loc"
-        gridTemplate={GRID}
-      />
+      <QueryClientProvider client={qc}>
+        <EntityFinding
+          index={1}
+          source={source}
+          highlightTerms={['Berlin']}
+          selectedTypeLower="loc"
+          gridTemplate={GRID}
+        />
+      </QueryClientProvider>
     )
     const mentions = screen.getByLabelText(/matched mentions/i)
     expect(within(mentions).getAllByText('Berlin')).toHaveLength(2)
@@ -84,34 +91,42 @@ describe('EntityFinding', () => {
   })
 
   it('renders an Open original link only when collection and file_hash are present', () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const { rerender } = render(
-      <EntityFinding
-        index={1}
-        source={{ chunk_id: 'c', filename: 'a.pdf', file_hash: 'hash', chunk_text: 't', entities: [] }}
-        highlightTerms={[]}
-        gridTemplate={GRID}
-      />
+      <QueryClientProvider client={qc}>
+        <EntityFinding
+          index={1}
+          source={{ chunk_id: 'c', filename: 'a.pdf', file_hash: 'hash', chunk_text: 't', entities: [] }}
+          highlightTerms={[]}
+          gridTemplate={GRID}
+        />
+      </QueryClientProvider>
     )
     expect(screen.getByText(/open original/i)).toBeInTheDocument()
     rerender(
-      <EntityFinding
-        index={1}
-        source={{ chunk_id: 'c', filename: 'a.pdf', chunk_text: 't', entities: [] }}
-        highlightTerms={[]}
-        gridTemplate={GRID}
-      />
+      <QueryClientProvider client={qc}>
+        <EntityFinding
+          index={1}
+          source={{ chunk_id: 'c', filename: 'a.pdf', chunk_text: 't', entities: [] }}
+          highlightTerms={[]}
+          gridTemplate={GRID}
+        />
+      </QueryClientProvider>
     )
     expect(screen.queryByText(/open original/i)).not.toBeInTheDocument()
   })
 
   it('clamps long chunk text behind a Show more / Show less toggle', async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     render(
-      <EntityFinding
-        index={1}
-        source={{ chunk_id: 'c', filename: 'a.pdf', chunk_text: 'x'.repeat(300), entities: [] }}
-        highlightTerms={[]}
-        gridTemplate={GRID}
-      />
+      <QueryClientProvider client={qc}>
+        <EntityFinding
+          index={1}
+          source={{ chunk_id: 'c', filename: 'a.pdf', chunk_text: 'x'.repeat(300), entities: [] }}
+          highlightTerms={[]}
+          gridTemplate={GRID}
+        />
+      </QueryClientProvider>
     )
     await userEvent.click(screen.getByRole('button', { name: /show more/i }))
     expect(screen.getByRole('button', { name: /show less/i })).toBeInTheDocument()
@@ -132,5 +147,14 @@ describe('EntityFinding', () => {
       </QueryClientProvider>
     )
     expect(screen.getByRole('button', { name: /\+ report/i })).toBeInTheDocument()
+  })
+
+  it('includes the translation in the report snapshot after translating', () => {
+    const snap = entityFindingSnapshot(
+      { chunk_id: 'c1', chunk_text: 'orig' } as never,
+      'ACME',
+      { text: 'übersetzt', target_lang: 'de', model: 'm' }
+    )
+    expect(snap.snapshot.translation).toEqual({ text: 'übersetzt', target_lang: 'de', model: 'm' })
   })
 })

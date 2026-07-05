@@ -5,6 +5,7 @@ import { sourcePreviewUrl } from '@/api/ingest'
 import { referenceMetadataItems } from '@/lib/referenceMetadata'
 import { highlightSegments } from '@/lib/highlight'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
+import { TranslateControl } from '@/components/common/TranslateControl'
 import { entityFindingSnapshot } from '@/lib/reportSnapshots'
 import { cn } from '@/lib/cn'
 
@@ -71,7 +72,11 @@ export function EntityFinding({
   gridTemplate
 }: Props) {
   const [expanded, setExpanded] = useState(false)
-  const reportItem = entityLabel != null ? entityFindingSnapshot(source, entityLabel) : null
+  const [translation, setTranslation] = useState<
+    { text: string; target_lang: string; model: string } | null
+  >(null)
+  const reportItem =
+    entityLabel != null ? entityFindingSnapshot(source, entityLabel, translation ?? undefined) : null
   const inReport = reportItem != null && (reportDedupeKeys?.has(reportItem.dedupe_key) ?? false)
   const collection = useUiStore((s) => s.selectedCollection)
   const refMeta = referenceMetadataItems(source.reference_metadata)
@@ -100,7 +105,7 @@ export function EntityFinding({
 
   return (
     <div
-      className="grid items-start gap-3 border-b border-border px-3 py-2.5 text-sm hover:bg-zinc-900/40"
+      className="group grid items-start gap-3 border-b border-border px-3 py-2.5 text-sm hover:bg-zinc-900/40"
       style={{ gridTemplateColumns: gridTemplate }}
       data-testid="entity-finding-row"
     >
@@ -188,7 +193,8 @@ export function EntityFinding({
         )}
       </div>
 
-      <div className="flex justify-end">
+      <div className="flex items-center justify-end gap-1">
+        {chunkText && <TranslateControl text={chunkText} onTranslated={setTranslation} />}
         {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
       </div>
     </div>
