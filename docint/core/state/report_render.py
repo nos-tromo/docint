@@ -22,6 +22,7 @@ from collections import OrderedDict
 from datetime import datetime
 from typing import Any
 
+from docint.utils.env_cfg import language_endonym
 from docint.utils.reference_metadata import BODY_TEXT_FIELDS, reference_metadata_items
 from docint.utils.ui_strings import ui_string
 
@@ -79,6 +80,25 @@ def _truncate(text: str, limit: int = _CHUNK_MAX_CHARS) -> str:
     return text
 
 
+def _translation_label(lang: str) -> str:
+    """Build the machine-translation heading, suffixed with the target language's endonym.
+
+    Shared by the Markdown (:func:`_translation_lines`) and HTML
+    (:func:`_html_translation`) renderers so the label stays identical
+    across export formats.
+
+    Args:
+        lang (str): The raw ``target_lang`` code (e.g. ``"de"``), or ``""``.
+
+    Returns:
+        str: ``"Machine translation (→ Deutsch)"`` when ``lang`` is set
+        (rendered via :func:`docint.utils.env_cfg.language_endonym`), or the
+        bare heading when ``lang`` is empty.
+    """
+    heading = ui_string("report_label_machine_translation")
+    return f"{heading} (→ {language_endonym(lang)})" if lang else heading
+
+
 def _translation_lines(snap: dict[str, Any]) -> list[str]:
     """Markdown lines for an optional machine-translation block, or []."""
     tr = snap.get("translation") or {}
@@ -86,8 +106,7 @@ def _translation_lines(snap: dict[str, Any]) -> list[str]:
     if not text:
         return []
     lang = str(tr.get("target_lang") or "").strip()
-    heading = ui_string("report_label_machine_translation")
-    label = f"{heading} (→ {lang})" if lang else heading
+    label = _translation_label(lang)
     return ["", f"*{label}:*", "> " + "\n> ".join(text.splitlines())]
 
 
@@ -462,8 +481,7 @@ def _html_translation(snap: dict[str, Any]) -> str:
     if not text:
         return ""
     lang = str(tr.get("target_lang") or "").strip()
-    heading = ui_string("report_label_machine_translation")
-    label = f"{heading} (→ {lang})" if lang else heading
+    label = _translation_label(lang)
     return (
         f'<div class="translation"><span class="label">{_esc(label)}:</span> '
         f'<div class="chunk">{_esc(text)}</div></div>'

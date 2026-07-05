@@ -6,6 +6,7 @@ import pytest
 
 from docint.core.state import report_render as rr
 from docint.utils import csv_stream as cs
+from docint.utils.env_cfg import language_endonym
 
 
 def _entity_snap(**extra: Any) -> dict[str, Any]:
@@ -46,6 +47,34 @@ def test_html_hate_renders_translation_block(monkeypatch: pytest.MonkeyPatch) ->
     assert "Machine translation" in out
     assert "übersetzt" in out
     assert "orig" in out  # original preserved
+
+
+def test_md_entity_translation_label_shows_endonym(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Markdown translation heading shows the language endonym, not the raw code."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    snap = _entity_snap(translation={"text": "übersetzter Text", "target_lang": "de", "model": "m"})
+    out = "\n".join(rr._md_entity(snap, None))
+    assert "Machine translation (→ Deutsch)" in out
+
+
+def test_html_hate_translation_label_shows_endonym(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The HTML translation heading shows the language endonym for target_lang='en'."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    snap: dict[str, Any] = {
+        "category": "X",
+        "confidence": "high",
+        "chunk_text": "orig",
+        "translation": {"text": "translated", "target_lang": "en", "model": "m"},
+    }
+    out = rr._html_hate(snap, None)
+    assert "Machine translation (→ English)" in out
+
+
+def test_language_endonym_known_and_unknown_codes() -> None:
+    """language_endonym resolves the supported codes and falls back to unknown ones."""
+    assert language_endonym("de") == "Deutsch"
+    assert language_endonym("en") == "English"
+    assert language_endonym("xx") == "xx"
 
 
 def test_ner_row_includes_translation() -> None:

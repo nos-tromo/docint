@@ -396,6 +396,24 @@ def load_hate_speech_env(
 
 SUPPORTED_LANGUAGES: tuple[str, ...] = ("en", "de")
 
+# Endonym (native name) per supported language code, for human-facing labels
+# (e.g. the report export's "Machine translation (→ Deutsch)" heading) that
+# should not show a raw locale code. Covers exactly SUPPORTED_LANGUAGES.
+LANGUAGE_ENDONYMS: dict[str, str] = {"en": "English", "de": "Deutsch"}
+
+
+def language_endonym(code: str) -> str:
+    """Return a language's endonym (its name in its own language).
+
+    Args:
+        code (str): A language code, e.g. ``"de"``.
+
+    Returns:
+        str: The endonym (e.g. ``"Deutsch"`` for ``"de"``) when ``code`` is
+        one of :data:`SUPPORTED_LANGUAGES`; otherwise ``code`` unchanged.
+    """
+    return LANGUAGE_ENDONYMS.get(code, code)
+
 
 @dataclass(frozen=True)
 class LanguageConfig:
