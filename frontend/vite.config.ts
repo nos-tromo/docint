@@ -25,7 +25,8 @@ export default defineConfig({
       '/stream_query': 'http://localhost:8000',
       '/summarize': 'http://localhost:8000',
       '/ingest': 'http://localhost:8000',
-      '/agent': 'http://localhost:8000'
+      '/agent': 'http://localhost:8000',
+      '/translate': 'http://localhost:8000'
     }
   },
   test: {

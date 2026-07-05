@@ -55,6 +55,7 @@ from docint.utils.env_cfg import (
 )
 from docint.utils.hashing import compute_file_hash
 from docint.utils.logger_cfg import init_logger
+from docint.utils.translate_client import translate
 
 # Names re-exported for test monkey-patching. pyrefly treats these as
 # private re-exports without an explicit ``__all__``.
@@ -750,6 +751,12 @@ class ReportItemIn(BaseModel):
     dedupe_key: str
     snapshot: dict[str, Any]
     note: str | None = None
+
+
+class TranslateIn(BaseModel):
+    """Request payload for on-demand snippet translation."""
+
+    text: str
 
 
 class ReportItemNoteIn(BaseModel):
@@ -3085,3 +3092,28 @@ def preview_source(collection: str, file_hash: str, principal: str = Depends(res
     if path is None:
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(path)
+
+
+@app.post("/translate", tags=["Translate"])
+def translate_text(payload: TranslateIn, principal: str = Depends(resolve_principal)) -> dict[str, Any]:
+    """Translate a client-supplied snippet into the operator's locale.
+
+    Authenticated for consistency, but not collection-scoped: it translates text
+    the caller already holds, so there is nothing to leak and no store re-fetch.
+    Fail-soft — a transport error returns ``ok: false`` with the original shape.
+
+    Args:
+        payload (TranslateIn): The snippet to translate.
+        principal (str): The resolved request principal.
+
+    Returns:
+        dict[str, Any]: ``{ok, translation, model, target_lang, error}``.
+    """
+    result = translate(payload.text)
+    return {
+        "ok": result.ok,
+        "translation": result.translation,
+        "model": result.model,
+        "target_lang": result.target_lang,
+        "error": result.error,
+    }
