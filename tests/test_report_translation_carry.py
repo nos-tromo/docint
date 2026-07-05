@@ -45,6 +45,7 @@ def test_html_hate_renders_translation_block(monkeypatch: pytest.MonkeyPatch) ->
     out = rr._html_hate(snap, None)
     assert "Machine translation" in out
     assert "übersetzt" in out
+    assert "orig" in out  # original preserved
 
 
 def test_ner_row_includes_translation() -> None:

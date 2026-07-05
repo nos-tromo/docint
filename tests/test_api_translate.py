@@ -47,3 +47,12 @@ def test_translate_failsoft_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     assert body["error"] == "unavailable"
     assert body["translation"] is None
     assert body["model"] == "m"
+
+
+def test_translate_requires_principal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /translate 401s with no trusted header and no configured default identity."""
+    monkeypatch.delenv("DOCINT_AUTH_HEADER", raising=False)
+    monkeypatch.delenv("DOCINT_DEFAULT_IDENTITY", raising=False)
+
+    r = client.post("/translate", json={"text": "Hello"})
+    assert r.status_code == 401
