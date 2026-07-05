@@ -287,6 +287,28 @@ and Noto fonts for multi-script text. It needs WeasyPrint's native libraries,
 which the backend image installs; if they are absent the `.pdf` route returns
 503 while every other format keeps working.
 
+## Translation
+
+Chat source citations, entity findings, and hate-speech findings each show a
+hover/focus-revealed **Translate** control. Clicking it fetches an on-demand
+machine translation into the operator's active locale (`RESPONSE_LANGUAGE`)
+and displays it alongside the original — the original is never replaced — and
+a second click hides it again. This is a display-time overlay only: nothing
+ingested or stored is ever translated.
+
+Translating a finding before adding it to a report carries that translation
+into the report's snapshot, so exports (Markdown, HTML, PDF, CSV, JSON) show
+it as an additive labeled block or column next to the original — e.g.
+"Machine translation (→ Deutsch)" when the active locale is German.
+
+Translation reuses the same chat model as the rest of docint over the same
+router endpoint — there is no dedicated translation runtime and no
+`TRANSLATE_API_BASE` to configure. Set `TRANSLATE_MODEL` in `.env` to use a
+different model than chat's `TEXT_MODEL`; it defaults to `TEXT_MODEL`.
+Airgap-safe: no new container and no new network egress target. A
+target-language override (translating into a language other than the active
+locale) is not yet supported.
+
 ## Standalone vLLM App
 
 The standalone deployment lives in
