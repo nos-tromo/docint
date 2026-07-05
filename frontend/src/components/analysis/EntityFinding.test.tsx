@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach } from 'vitest'
-import { render, screen, within } from '@testing-library/react'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { render, screen, within, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { EntityFinding } from './EntityFinding'
@@ -16,6 +16,8 @@ beforeEach(() => {
     previewModal: null
   })
 })
+
+afterEach(() => vi.restoreAllMocks())
 
 describe('EntityFinding', () => {
   it('shows source, locator and reference metadata inline (no expansion needed)', () => {
@@ -147,6 +149,36 @@ describe('EntityFinding', () => {
       </QueryClientProvider>
     )
     expect(screen.getByRole('button', { name: /\+ report/i })).toBeInTheDocument()
+  })
+
+  it('reveals a Translate toggle in the actions cell that swaps the chunk text in place', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, translation: 'übersetzt', model: 'm', target_lang: 'de' })
+      }))
+    )
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } }
+    })
+    render(
+      <QueryClientProvider client={qc}>
+        <EntityFinding
+          index={1}
+          source={{ chunk_id: 'c', filename: 'a.pdf', chunk_text: 'Original chunk text.', entities: [] }}
+          highlightTerms={[]}
+          gridTemplate={GRID}
+        />
+      </QueryClientProvider>
+    )
+    // The icon lives in the actions cell, separate from the chunk-text cell,
+    // yet both share the same useTranslatable state.
+    await userEvent.click(screen.getByRole('button', { name: /^translate$/i }))
+    await waitFor(() => expect(screen.getByText('übersetzt')).toBeInTheDocument())
+    expect(screen.queryByText('Original chunk text.')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /show original/i })).toBeInTheDocument()
   })
 
   it('includes the translation in the report snapshot after translating', () => {

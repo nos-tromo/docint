@@ -32,12 +32,7 @@ export function Citation({ source }: { source: Source }) {
               ))}
             </dl>
           )}
-          {source.text && (
-            <div className="group relative whitespace-pre-wrap text-xs bg-zinc-950 p-2 rounded">
-              <TranslateControl text={source.text} className="absolute right-1 top-1" />
-              {source.text}
-            </div>
-          )}
+          {source.text && <TranslateControl rawText={source.text} />}
           {collection && source.file_hash && (
             <a
               href={sourcePreviewUrl(collection, source.file_hash)}

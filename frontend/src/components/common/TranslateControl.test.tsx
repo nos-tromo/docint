@@ -13,14 +13,19 @@ function renderControl(onTranslated?: (t: unknown) => void) {
   return render(
     <QueryClientProvider client={qc}>
       <div className="group">
-        <TranslateControl text="Hello world" onTranslated={onTranslated} />
+        <TranslateControl rawText="Hello world" onTranslated={onTranslated} />
       </div>
     </QueryClientProvider>
   )
 }
 
 describe('TranslateControl', () => {
-  it('translates on click, shows the Translation block, and reports it up', async () => {
+  it('renders the original text', () => {
+    renderControl()
+    expect(screen.getByText('Hello world')).toBeInTheDocument()
+  })
+
+  it('swaps the translation in for the original in place, and reports it up', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => ({
@@ -33,11 +38,30 @@ describe('TranslateControl', () => {
     renderControl(onTranslated)
     await userEvent.click(screen.getByRole('button', { name: /translate/i }))
     await waitFor(() => expect(screen.getByText('Hallo Welt')).toBeInTheDocument())
-    expect(screen.getByText(/translation/i)).toBeInTheDocument()
+    // In-place swap: the original is gone, only the translation is rendered.
+    expect(screen.queryByText('Hello world')).not.toBeInTheDocument()
+    expect(screen.getByText(/^translation$/i)).toBeInTheDocument()
     expect(onTranslated).toHaveBeenCalledWith({ text: 'Hallo Welt', target_lang: 'de', model: 'm' })
   })
 
-  it('shows a fail-soft message when the endpoint reports ok:false', async () => {
+  it('toggles back to the original on a second click ("Show original")', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, translation: 'Hallo Welt', model: 'm', target_lang: 'de' })
+      }))
+    )
+    renderControl()
+    await userEvent.click(screen.getByRole('button', { name: /translate/i }))
+    await waitFor(() => expect(screen.getByText('Hallo Welt')).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('button', { name: /show original/i }))
+    expect(screen.getByText('Hello world')).toBeInTheDocument()
+    expect(screen.queryByText('Hallo Welt')).not.toBeInTheDocument()
+  })
+
+  it('shows a fail-soft message (and keeps the original) when the endpoint reports ok:false', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => ({
@@ -46,9 +70,12 @@ describe('TranslateControl', () => {
         json: async () => ({ ok: false, translation: null, model: 'm', target_lang: 'de', error: 'unavailable' })
       }))
     )
-    renderControl()
+    const onTranslated = vi.fn()
+    renderControl(onTranslated)
     await userEvent.click(screen.getByRole('button', { name: /translate/i }))
     await waitFor(() => expect(screen.getByText(/unavailable/i)).toBeInTheDocument())
+    expect(screen.getByText('Hello world')).toBeInTheDocument()
+    expect(onTranslated).not.toHaveBeenCalled()
   })
 
   it('fails soft (and does not report up) when the fetch rejects at the transport layer', async () => {
@@ -62,6 +89,7 @@ describe('TranslateControl', () => {
     renderControl(onTranslated)
     await userEvent.click(screen.getByRole('button', { name: /translate/i }))
     await waitFor(() => expect(screen.getByText(/unavailable/i)).toBeInTheDocument())
+    expect(screen.getByText('Hello world')).toBeInTheDocument()
     expect(onTranslated).not.toHaveBeenCalled()
   })
 })

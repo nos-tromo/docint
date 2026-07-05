@@ -4,16 +4,16 @@ import { csvExportHref } from '@/api/collections'
 import type { HateSpeechRow } from '@/api/types'
 import { referenceMetadataItems } from '@/lib/referenceMetadata'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
-import { TranslateControl, type TranslationPayload } from '@/components/common/TranslateControl'
+import { useTranslatable, type TranslationPayload } from '@/hooks/useTranslatable'
+import { TranslateToggle } from '@/components/common/TranslateToggle'
+import { ClampedText } from '@/components/common/ClampedText'
 import { hateSpeechSnapshot } from '@/lib/reportSnapshots'
-import { cn } from '@/lib/cn'
 
 export type { HateSpeechRow }
 
 // Shared column template for the header row and every body row. Metadata is a
 // single column (reason / confidence / chunk id / reference metadata).
 const HATE_GRID = '2.5rem 6.5rem minmax(8rem,0.8fr) minmax(9rem,1.1fr) minmax(12rem,1.8fr) 6rem'
-const TEXT_CLAMP_CHARS = 240
 
 interface Props {
   rows: HateSpeechRow[]
@@ -46,17 +46,16 @@ function HateSpeechTableRow({
   index: number
   reportDedupeKeys?: Set<string>
 }) {
-  const [expanded, setExpanded] = useState(false)
   const [translation, setTranslation] = useState<TranslationPayload | null>(null)
   const reportItem = hateSpeechSnapshot(row, translation ?? undefined)
   const inReport = reportDedupeKeys?.has(reportItem.dedupe_key) ?? false
   const refMeta = referenceMetadataItems(row.reference_metadata)
   const chunkText = (row.chunk_text ?? row.text ?? '').trim()
+  const t = useTranslatable(chunkText, setTranslation)
   const source = row.source_ref ?? row.filename ?? 'Unknown source'
   const location = locationParts(row)
   const category = (row.category ?? 'unknown').trim()
   const reason = (row.reason ?? '').trim()
-  const canClamp = chunkText.length > TEXT_CLAMP_CHARS
 
   const metadata: Array<{ label: string; value: string }> = []
   if (reason) metadata.push({ label: 'Reason', value: reason })
@@ -93,22 +92,14 @@ function HateSpeechTableRow({
       <div className="min-w-0">
         {chunkText ? (
           <>
-            <p
-              className={cn(
-                'whitespace-pre-wrap leading-6 break-words',
-                canClamp && !expanded && 'line-clamp-4'
-              )}
-            >
-              {chunkText}
-            </p>
-            {canClamp && (
-              <button
-                type="button"
-                onClick={() => setExpanded((v) => !v)}
-                className="mt-1 text-xs text-blue-400 hover:text-blue-300"
-              >
-                {expanded ? 'Show less' : 'Show more'}
-              </button>
+            {t.shown && (
+              <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                Translation
+              </div>
+            )}
+            <ClampedText length={(t.translation ?? chunkText).length}>{t.translation ?? chunkText}</ClampedText>
+            {t.failed && (
+              <div className="mt-1 text-[11px] text-muted-foreground">Translation unavailable — showing original.</div>
             )}
           </>
         ) : (
@@ -116,7 +107,7 @@ function HateSpeechTableRow({
         )}
       </div>
       <div className="flex items-center justify-end gap-1">
-        {chunkText && <TranslateControl text={chunkText} onTranslated={setTranslation} />}
+        {chunkText && <TranslateToggle shown={t.shown} busy={t.busy} onClick={t.toggle} />}
         {reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
       </div>
     </div>

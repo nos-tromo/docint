@@ -1,5 +1,5 @@
 import type { HateSpeechRow, NerSourceRow, ReportItemInput, Source } from '@/api/types'
-import type { TranslationPayload } from '@/components/common/TranslateControl'
+import type { TranslationPayload } from '@/hooks/useTranslatable'
 
 /**
  * Pure builders that turn a view's already-loaded artifact data into a

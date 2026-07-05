@@ -292,9 +292,11 @@ which the backend image installs; if they are absent the `.pdf` route returns
 Chat source citations, entity findings, and hate-speech findings each show a
 hover/focus-revealed **Translate** control. Clicking it fetches an on-demand
 machine translation into the operator's active locale (`RESPONSE_LANGUAGE`)
-and displays it alongside the original — the original is never replaced — and
-a second click hides it again. This is a display-time overlay only: nothing
-ingested or stored is ever translated.
+and swaps it in for the original in place — a "Translation" label marks the
+swapped view, and a second click ("Show original") brings the original back;
+the original is always one click away, never discarded. Long chunks stay
+clamped to four lines behind a "Show more" toggle in either view. This is a
+display-time overlay only: nothing ingested or stored is ever translated.
 
 Translating a finding before adding it to a report carries that translation
 into the report's snapshot, so exports (Markdown, HTML, PDF, CSV, JSON) show
