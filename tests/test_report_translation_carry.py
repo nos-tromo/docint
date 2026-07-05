@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from docint.core.state import report_render as rr
+from docint.utils import csv_stream as cs
 
 
 def _entity_snap(**extra: Any) -> dict[str, Any]:
@@ -44,3 +45,20 @@ def test_html_hate_renders_translation_block(monkeypatch: pytest.MonkeyPatch) ->
     out = rr._html_hate(snap, None)
     assert "Machine translation" in out
     assert "übersetzt" in out
+
+
+def test_ner_row_includes_translation() -> None:
+    """A translated chunk carries its translated text into the entity CSV row."""
+    row = cs.ner_source_row(
+        {"chunk_id": "c1", "chunk_text": "orig", "translation": {"text": "übersetzt"}},
+        entity_label="ACME",
+    )
+    assert "translation" in cs.NER_SOURCE_COLUMNS
+    assert row["translation"] == "übersetzt"
+
+
+def test_hate_row_translation_absent_is_blank() -> None:
+    """Absent translation renders as a blank cell (existing rows stay unchanged)."""
+    row = cs.hate_speech_row({"chunk_id": "c1", "chunk_text": "orig"})
+    assert "translation" in cs.HATE_SPEECH_COLUMNS
+    assert row["translation"] == ""
