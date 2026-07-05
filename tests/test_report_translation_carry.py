@@ -57,6 +57,20 @@ def test_ner_row_includes_translation() -> None:
     assert row["translation"] == "übersetzt"
 
 
+def test_ner_row_translation_absent_is_blank() -> None:
+    """Absent translation renders as a blank cell in the entity CSV row."""
+    row = cs.ner_source_row({"chunk_id": "c1", "chunk_text": "orig"}, entity_label="X")
+    assert "translation" in cs.NER_SOURCE_COLUMNS
+    assert row["translation"] == ""
+
+
+def test_hate_row_includes_translation() -> None:
+    """A translated chunk carries its translated text into the hate-speech CSV row."""
+    row = cs.hate_speech_row({"chunk_id": "c1", "chunk_text": "orig", "translation": {"text": "x"}})
+    assert "translation" in cs.HATE_SPEECH_COLUMNS
+    assert row["translation"] == "x"
+
+
 def test_hate_row_translation_absent_is_blank() -> None:
     """Absent translation renders as a blank cell (existing rows stay unchanged)."""
     row = cs.hate_speech_row({"chunk_id": "c1", "chunk_text": "orig"})

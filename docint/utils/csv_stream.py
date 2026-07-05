@@ -2,7 +2,8 @@
 
 Column schemas are kept in lockstep with ``frontend/src/lib/exports.ts`` and the
 CLI's existing output so all three paths (UI download, HTTP stream, CLI batch)
-produce identical CSV files.
+produce identical CSV files. (Exception: the ``translation`` column is
+server-side only; the frontend ``exports.ts`` parity is deferred.)
 """
 
 from __future__ import annotations
