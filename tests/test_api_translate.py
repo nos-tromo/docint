@@ -29,6 +29,8 @@ def test_translate_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     assert body["ok"] is True
     assert body["translation"] == "Hallo"
     assert body["target_lang"] == "de"
+    assert body["model"] == "m"
+    assert body["error"] is None
 
 
 def test_translate_failsoft_shape(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -43,3 +45,5 @@ def test_translate_failsoft_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     body = r.json()
     assert body["ok"] is False
     assert body["error"] == "unavailable"
+    assert body["translation"] is None
+    assert body["model"] == "m"
