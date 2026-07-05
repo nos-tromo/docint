@@ -45,10 +45,15 @@ export function TranslateControl({ text, onTranslated, className }: Props) {
       setShown(true)
       return
     }
-    const res = await mutateAsync(text)
-    if (res.ok && res.translation != null) {
-      setShown(true)
-      onTranslated?.({ text: res.translation, target_lang: res.target_lang, model: res.model })
+    try {
+      const res = await mutateAsync(text)
+      if (res.ok && res.translation != null) {
+        setShown(true)
+        onTranslated?.({ text: res.translation, target_lang: res.target_lang, model: res.model })
+      }
+    } catch {
+      // A true transport failure flips useMutation status to 'error', which drives
+      // the fail-soft message below; nothing else to do.
     }
   }
 

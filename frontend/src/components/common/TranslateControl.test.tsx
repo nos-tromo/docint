@@ -7,7 +7,9 @@ import { TranslateControl } from './TranslateControl'
 afterEach(() => vi.restoreAllMocks())
 
 function renderControl(onTranslated?: (t: unknown) => void) {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } }
+  })
   return render(
     <QueryClientProvider client={qc}>
       <div className="group">
@@ -47,5 +49,19 @@ describe('TranslateControl', () => {
     renderControl()
     await userEvent.click(screen.getByRole('button', { name: /translate/i }))
     await waitFor(() => expect(screen.getByText(/unavailable/i)).toBeInTheDocument())
+  })
+
+  it('fails soft (and does not report up) when the fetch rejects at the transport layer', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('network')
+      })
+    )
+    const onTranslated = vi.fn()
+    renderControl(onTranslated)
+    await userEvent.click(screen.getByRole('button', { name: /translate/i }))
+    await waitFor(() => expect(screen.getByText(/unavailable/i)).toBeInTheDocument())
+    expect(onTranslated).not.toHaveBeenCalled()
   })
 })
