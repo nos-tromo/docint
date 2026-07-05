@@ -61,17 +61,20 @@ def _translate_cached(text: str, target_lang: str, model: str) -> str:
     return _pipeline().call_chat(text, system_prompt=system_prompt, model=model).strip()
 
 
-def translate(text: str, *, target: str | None = None) -> TranslateResult:
-    """Translate a snippet into the operator's locale (or ``target`` if given).
+def translate(text: str) -> TranslateResult:
+    """Translate a snippet into the operator's active locale.
+
+    The destination is always the active locale (``RESPONSE_LANGUAGE``) — the
+    locale translate prompt encodes it. A distinct target-language override is
+    deferred (see the design doc §10).
 
     Args:
         text: The source snippet (already held by the caller).
-        target: Optional destination locale code; defaults to the active locale.
 
     Returns:
         TranslateResult: Fail-soft — never raises.
     """
-    target_lang = target or load_language_env().code
+    target_lang = load_language_env().code
     model = load_model_env().translate_model
     if not text or not text.strip():
         return TranslateResult(ok=True, translation="", model=model, target_lang=target_lang)

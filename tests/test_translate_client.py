@@ -209,11 +209,32 @@ def test_translate_failsoft(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_translate_blank_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Blank (whitespace-only) input is a no-op success; the pipeline is never called.
+    """Blank/whitespace input short-circuits without touching the pipeline.
 
     Args:
-        monkeypatch: Unused; kept for signature consistency with sibling tests.
+        monkeypatch: Fixture used to patch the module-level pipeline factory.
     """
+    calls: dict[str, int] = {"n": 0}
+
+    class _CountingPipe:
+        """Fake chat pipeline counting each ``call_chat`` invocation."""
+
+        def call_chat(self, prompt: str, system_prompt: str | None = None, model: str | None = None) -> str:
+            """Increment the call counter and return a canned translation.
+
+            Args:
+                prompt: The user prompt (the source text to translate).
+                system_prompt: Optional system prompt (unused by the fake).
+                model: Optional model override (unused by the fake).
+
+            Returns:
+                str: A canned translation (never reached for blank input).
+            """
+            calls["n"] += 1
+            return "x"
+
+    monkeypatch.setattr(tc, "_pipeline", lambda: _CountingPipe())
     res = tc.translate("   ")
     assert res.ok is True
     assert res.translation == ""
+    assert calls["n"] == 0
