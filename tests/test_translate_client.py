@@ -9,9 +9,12 @@ Pins the default-to-chat-model behavior and env override for the
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from docint.utils.env_cfg import load_model_env
+from docint.utils.openai_cfg import OpenAIPipeline
 
 
 def test_translate_model_defaults_to_text_model(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -40,3 +43,56 @@ def test_translate_model_override(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = load_model_env()
 
     assert cfg.translate_model == "special-mt-model"
+
+
+class _FakeResponse:
+    """Minimal stand-in for an OpenAI ChatCompletion response object."""
+
+    def __init__(self, content: str = "ok") -> None:
+        """Build a fake response exposing ``choices[0].message.content``.
+
+        Args:
+            content: Text to surface as the completion's message content.
+        """
+        message = type("_Msg", (), {"content": content})()
+        self.choices = [type("_Choice", (), {"message": message})()]
+
+
+def test_call_chat_uses_model_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit ``model`` kwarg must override the pipeline's default text model.
+
+    Args:
+        monkeypatch: Fixture used to patch the fake chat-completions client.
+    """
+    pipe = OpenAIPipeline()
+    captured: dict[str, Any] = {}
+
+    def _fake_create(**kwargs: Any) -> _FakeResponse:
+        captured.update(kwargs)
+        return _FakeResponse("ok")
+
+    monkeypatch.setattr(pipe.client.chat.completions, "create", _fake_create)
+    out = pipe.call_chat("hello", system_prompt="sys", model="override-model")
+
+    assert out == "ok"
+    assert captured["model"] == "override-model"
+    assert captured["messages"][0] == {"role": "system", "content": "sys"}
+
+
+def test_call_chat_defaults_to_text_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Omitting ``model`` must fall back to the pipeline's configured text model.
+
+    Args:
+        monkeypatch: Fixture used to patch the fake chat-completions client.
+    """
+    pipe = OpenAIPipeline()
+    captured: dict[str, Any] = {}
+
+    def _fake_create(**kwargs: Any) -> _FakeResponse:
+        captured.update(kwargs)
+        return _FakeResponse("x")
+
+    monkeypatch.setattr(pipe.client.chat.completions, "create", _fake_create)
+    pipe.call_chat("hi")
+
+    assert captured["model"] == pipe.text_model_id
