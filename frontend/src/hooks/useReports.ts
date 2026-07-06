@@ -6,6 +6,7 @@ import {
   deleteReport,
   getReport,
   listReports,
+  refreshCollectionOverview,
   removeReportItem,
   reorderReportItems,
   updateReport,
@@ -55,6 +56,7 @@ export function useUpdateReport() {
       operator?: string
       reference_number?: string
       show_toc?: boolean
+      show_collection_overview?: boolean
     }) => updateReport(id, body),
     onSuccess: invalidate
   })
@@ -97,6 +99,11 @@ export function useReorderReportItems() {
       reorderReportItems(reportId, itemIds),
     onSuccess: invalidate
   })
+}
+
+export function useRefreshCollectionOverview() {
+  const invalidate = useReportInvalidator()
+  return useMutation({ mutationFn: (id: number) => refreshCollectionOverview(id), onSuccess: invalidate })
 }
 
 /** Dedupe keys already in the active report, for the "already added" UI state. */

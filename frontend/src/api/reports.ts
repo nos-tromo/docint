@@ -11,7 +11,7 @@ export const createReport = (body: { title: string; collection_name?: string | n
 
 export const updateReport = (
   id: number,
-  body: { title?: string; operator?: string; reference_number?: string; show_toc?: boolean }
+  body: { title?: string; operator?: string; reference_number?: string; show_toc?: boolean; show_collection_overview?: boolean }
 ) => apiPatch<Report>(`/reports/${id}`, body)
 
 export const deleteReport = (id: number) => apiDelete<{ ok: boolean }>(`/reports/${id}`)
@@ -27,6 +27,9 @@ export const removeReportItem = (id: number, itemId: number) =>
 
 export const reorderReportItems = (id: number, itemIds: number[]) =>
   apiPost<Report>(`/reports/${id}/items/reorder`, { item_ids: itemIds })
+
+export const refreshCollectionOverview = (id: number) =>
+  apiPost<Report>(`/reports/${id}/collection-overview/refresh`, {})
 
 /**
  * Build an absolute URL for one of the report export endpoints. Use as the

@@ -68,6 +68,7 @@ describe('AddToReportButton', () => {
       operator: null,
       reference_number: null,
       show_toc: true,
+      show_collection_overview: false,
       session_id: null,
       created_at: null,
       updated_at: null,
@@ -82,7 +83,8 @@ describe('AddToReportButton', () => {
           snapshot: {},
           created_at: null
         }
-      ]
+      ],
+      collection_overview: null
     }
     qc.setQueryData(reportKey(1), report)
 

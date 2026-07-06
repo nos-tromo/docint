@@ -5,6 +5,7 @@ import {
   deleteReport,
   getReport,
   listReports,
+  refreshCollectionOverview,
   removeReportItem,
   reorderReportItems,
   reportExportHref,
@@ -106,5 +107,13 @@ describe('reports api', () => {
     expect(reportExportHref(7, 'pdf')).toContain('/reports/7/export.pdf')
     expect(reportExportHref(7, 'zip')).toContain('/reports/7/export.zip')
     expect(reportExportHref(7, 'md')).toContain('/reports/7/export.md')
+  })
+
+  it('refreshCollectionOverview POSTs to the refresh route', async () => {
+    mockFetch({ id: 7 })
+    await refreshCollectionOverview(7)
+    const call = lastCall()
+    expect(String(call[0])).toContain('/reports/7/collection-overview/refresh')
+    expect(call[1].method).toBe('POST')
   })
 })
