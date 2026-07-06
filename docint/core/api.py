@@ -742,6 +742,7 @@ class ReportUpdateIn(BaseModel):
     operator: str | None = None
     reference_number: str | None = None
     show_toc: bool | None = None
+    show_collection_overview: bool | None = None
 
 
 class ReportItemIn(BaseModel):
@@ -1939,6 +1940,31 @@ def _get_owned_report(report_id: int, principal: str) -> dict[str, Any]:
     return report
 
 
+def _capture_collection_overview(report_id: int, collection: str, principal: str) -> dict[str, Any] | None:
+    """Build and persist a report's frozen document-overview snapshot.
+
+    Reads the full document list under the caller's scoped collection and stores
+    the aggregated manifest on the report. Raises on failure — callers decide
+    whether to swallow it (create: fail-soft) or surface it (refresh: 502).
+
+    Args:
+        report_id (int): The report id.
+        collection (str): The report's logical collection.
+        principal (str): The resolved request principal (owner).
+
+    Returns:
+        dict | None: The updated report, or ``None`` when the report is not owned.
+    """
+    from datetime import UTC, datetime
+
+    from docint.core.collection_overview import build_collection_overview
+
+    with _scoped_collection(collection, principal):
+        documents = rag.list_documents()
+    overview = build_collection_overview(documents, collection, datetime.now(UTC))
+    return rag.ensure_report_manager().set_collection_overview_snapshot(report_id, principal, overview)
+
+
 @app.get("/collections/{name}/export/documents.csv", tags=["Query"])
 def export_documents_csv(name: str, principal: str = Depends(resolve_principal)) -> StreamingResponse:
     """Stream the documents table as CSV.
@@ -2312,7 +2338,7 @@ def create_report(payload: ReportCreateIn, principal: str = Depends(resolve_prin
         dict[str, Any]: The created report.
     """
     try:
-        return rag.ensure_report_manager().create_report(
+        report = rag.ensure_report_manager().create_report(
             title=payload.title,
             owner=principal,
             collection_name=payload.collection_name,
@@ -2323,6 +2349,18 @@ def create_report(payload: ReportCreateIn, principal: str = Depends(resolve_prin
     except Exception as e:
         logger.error("Error creating report: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+    # Default-on document overview: capture once at create. Fail-soft — a Qdrant
+    # hiccup must not fail report creation; the snapshot stays null until a
+    # successful refresh.
+    if payload.collection_name:
+        try:
+            enriched = _capture_collection_overview(report["id"], payload.collection_name, principal)
+            if enriched is not None:
+                report = enriched
+        except Exception as e:
+            logger.warning("Collection-overview capture failed for report {}: {}", report["id"], e)
+    return report
 
 
 @app.get("/reports", response_model=ReportListOut, tags=["Reports"])
@@ -2386,10 +2424,31 @@ def update_report(
         operator=payload.operator,
         reference_number=payload.reference_number,
         show_toc=payload.show_toc,
+        show_collection_overview=payload.show_collection_overview,
     )
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found.")
     return report
+
+
+@app.post("/reports/{report_id}/collection-overview/refresh", tags=["Reports"])
+def refresh_report_collection_overview(report_id: int, principal: str = Depends(resolve_principal)) -> dict[str, Any]:
+    """Recapture a report's document-overview snapshot from its collection.
+
+    Point-in-time refresh: rebuilds the frozen manifest from the collection's
+    *current* documents. Owner-gated (404 cross-owner); 400 when the report has
+    no collection; 502 when the manifest cannot be built.
+    """
+    report = _get_owned_report(report_id, principal)
+    collection = report.get("collection_name")
+    if not collection:
+        raise HTTPException(status_code=400, detail="Report has no collection to summarize.")
+    try:
+        updated = _capture_collection_overview(report_id, collection, principal)
+    except Exception as e:
+        logger.error("Collection-overview refresh failed for report {}: {}", report_id, e)
+        raise HTTPException(status_code=502, detail="Failed to build the document overview.") from e
+    return updated if updated is not None else report
 
 
 @app.delete("/reports/{report_id}", tags=["Reports"])
