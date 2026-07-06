@@ -167,6 +167,8 @@ def resolve_media_rows(
     """
     effective_root = root if root is not None else tables_dir
     links: list[MediaLink] = []
+    orphan_skips = 0
+    missing_skips = 0
     for _, row in media_df.iterrows():
         media_id = str(row.get("Media ID") or "").strip()
         if not media_id:
@@ -174,13 +176,26 @@ def resolve_media_rows(
         posting_id = strip_counter(media_id)
         uuid = posting_uuids.get(posting_id)
         if uuid is None:
-            logger.debug("Orphan media row {!r} (no posting {!r})", media_id, posting_id)
+            orphan_skips += 1
             continue
         path = _resolve_path(str(row.get("Exported media filename") or ""), file_index, tables_dir, root=effective_root)
         if path is None:
-            logger.warning("Media file for {!r} not found; skipping.", media_id)
+            missing_skips += 1
             continue
         links.append(MediaLink(posting_uuid=uuid, posting_id=posting_id, media_id=media_id, path=path))
+    if orphan_skips or missing_skips:
+        # Aggregate rather than log per row: a full manifest dropped in with only a few
+        # referenced files present would otherwise emit one line per row (tens of
+        # thousands). A single summary keeps large drop-ins robust and quiet.
+        logger.info(
+            "Social linker: {} media linked, {} skipped ({} with no matching posting, "
+            "{} with no local file) across {} manifest rows.",
+            len(links),
+            orphan_skips + missing_skips,
+            orphan_skips,
+            missing_skips,
+            len(media_df),
+        )
     return links
 
 
