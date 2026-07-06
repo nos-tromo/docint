@@ -99,6 +99,7 @@ _CHUNK_MAX_CHARS = 1500
 # reuse the canonical schemas in ``docint.utils.csv_stream``).
 CHAT_ANSWER_COLUMNS: tuple[str, ...] = ("session_id", "turn_idx", "question", "answer", "sources")
 SUMMARY_COLUMNS: tuple[str, ...] = ("collection", "summary")
+COLLECTION_OVERVIEW_COLUMNS: tuple[str, ...] = ("filename", "type", "pages", "rows", "nodes", "hash")
 
 
 class PdfEngineUnavailableError(RuntimeError):
@@ -851,13 +852,28 @@ def _summary_csv_row(snap: dict[str, Any]) -> dict[str, Any]:
     return {"collection": snap.get("collection") or "", "summary": snap.get("text") or ""}
 
 
+def _overview_csv_row(doc: dict[str, Any]) -> dict[str, Any]:
+    """CSV row for one document-overview manifest entry (full, untruncated hash)."""
+    return {
+        "filename": doc.get("filename") or "",
+        "type": doc.get("type_label") or "",
+        "pages": doc.get("page_count") or "",
+        "rows": doc.get("row_count") or "",
+        "nodes": doc.get("node_count") if doc.get("node_count") is not None else "",
+        "hash": doc.get("file_hash") or "",  # full hash — evidentiary integrity
+    }
+
+
 def report_csv_bundle(report: dict[str, Any]) -> bytes:
     """Build a ZIP of per-type CSVs containing only the report's selected rows.
 
     Entity and hate-speech CSVs reuse the canonical schemas/row builders from
     :mod:`docint.utils.csv_stream` so they match the existing collection
     exports column-for-column; chat answers and summaries get report-local
-    schemas.
+    schemas. When the trailing document-overview section is present (see
+    :func:`_overview_snapshot`), an additional ``collection-overview.csv``
+    manifest is included, carrying the *full* file hash (unlike the truncated
+    display copy in the Markdown/HTML renderers) for evidentiary integrity.
     """
     from docint.utils.csv_stream import (
         HATE_SPEECH_COLUMNS,
@@ -893,7 +909,12 @@ def report_csv_bundle(report: dict[str, Any]) -> bytes:
             rows = (_summary_csv_row(i.get("snapshot") or {}) for i in summaries)
             zf.writestr("summaries.csv", b"".join(stream_csv(rows, SUMMARY_COLUMNS)))
 
-        if not any(grouped.values()):
+        overview = _overview_snapshot(report)
+        if overview is not None:
+            rows = (_overview_csv_row(d) for d in overview.get("documents") or [])
+            zf.writestr("collection-overview.csv", b"".join(stream_csv(rows, COLLECTION_OVERVIEW_COLUMNS)))
+
+        if not any(grouped.values()) and overview is None:
             zf.writestr("README.txt", "This report has no items yet.\n")
 
     buffer.seek(0)

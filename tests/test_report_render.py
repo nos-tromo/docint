@@ -568,3 +568,17 @@ def test_overview_renders_after_items_in_markdown(monkeypatch: pytest.MonkeyPatc
     # Match the "## " section heading, not the "- " TOC entry (which precedes the
     # item body): the guarantee under test is that the overview *section* trails.
     assert md.index("## Document overview") > md.index("UNIQUE_ITEM_BODY_MARKER")
+
+
+def test_csv_bundle_includes_overview_with_full_hash() -> None:
+    """The CSV bundle carries collection-overview.csv with the untruncated hash."""
+    zf = zipfile.ZipFile(io.BytesIO(R.report_csv_bundle(_overview_report())))
+    assert "collection-overview.csv" in zf.namelist()
+    body = zf.read("collection-overview.csv").decode()
+    assert "a.pdf" in body and "0123456789abcdefff" in body  # full hash in CSV, unlike the display truncation
+
+
+def test_csv_bundle_omits_overview_when_off() -> None:
+    """No collection-overview.csv when the overview toggle is off."""
+    zf = zipfile.ZipFile(io.BytesIO(R.report_csv_bundle(_overview_report(show_collection_overview=False))))
+    assert "collection-overview.csv" not in zf.namelist()
