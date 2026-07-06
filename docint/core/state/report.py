@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from docint.core.state.base import Base
@@ -32,6 +32,13 @@ class Report(Base):  # type: ignore[misc]
     # Render a contents section (Inhaltsverzeichnis) in the document exports; on by
     # default, toggled off per report for short reports that don't warrant one.
     show_toc = Column(Boolean, nullable=False, default=True)
+    # Render the collection's document overview (Dokumentenübersicht) as the
+    # trailing report section; on by default, toggled off per report — the twin
+    # of ``show_toc``. The manifest is frozen point-in-time in
+    # ``collection_overview_snapshot`` (JSON), immune to re-ingestion until
+    # explicitly refreshed.
+    show_collection_overview = Column(Boolean, nullable=False, default=True)
+    collection_overview_snapshot = Column(Text, nullable=True)
     session_id = Column(String, ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
     updated_at = Column(

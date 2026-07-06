@@ -258,3 +258,25 @@ def test_list_dedupe_keys_is_owner_scoped(report_manager: ReportManager) -> None
 
     assert set(report_manager.list_dedupe_keys(rid, "alice")) == {"entity:c1", "entity:c2"}
     assert report_manager.list_dedupe_keys(rid, "bob") == []
+
+
+def test_report_model_has_collection_overview_columns() -> None:
+    """The Report ORM exposes the two document-overview columns."""
+    from docint.core.state.report import Report
+
+    assert "show_collection_overview" in Report.__table__.columns
+    assert "collection_overview_snapshot" in Report.__table__.columns
+
+
+def test_migration_backfills_overview_columns_on_legacy_reports_table() -> None:
+    """`_ensure_report_columns` adds the new columns to a pre-existing table."""
+    from sqlalchemy import create_engine, inspect, text
+
+    from docint.core.state.base import _ensure_report_columns
+
+    engine = create_engine("sqlite://")  # in-memory
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE reports (id INTEGER PRIMARY KEY, title TEXT)"))
+    _ensure_report_columns(engine)
+    cols = {c["name"] for c in inspect(engine).get_columns("reports")}
+    assert {"show_collection_overview", "collection_overview_snapshot"} <= cols
