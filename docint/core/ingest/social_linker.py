@@ -346,6 +346,14 @@ class SocialLinker:
             keyframes = outcome.keyframes
             if transcript is not None and self.manifest is not None:
                 self.manifest.cache_nextext_transcript(collection, media_hash, transcript.decode("utf-8"))
+            if outcome.status != "completed":
+                logger.warning(
+                    "Nextext did not process linked media {!r} (status={!r}); no transcript/keyframes "
+                    "ingested. If unexpected, set NEXTEXT_API_BASE (include the /api/v1 suffix) and ensure "
+                    "the Nextext service is reachable.",
+                    link.path.name,
+                    outcome.status,
+                )
         extra = {"posting_id": link.posting_id, "media_id": link.media_id, "source_type": "social_media"}
         if keyframes:
             self.image_service.ingest_keyframe_set(

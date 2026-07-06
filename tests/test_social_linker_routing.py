@@ -6,7 +6,7 @@ from typing import Any
 import pandas as pd
 
 from docint.core.ingest.images_service import IngestContext
-from docint.core.ingest.social_linker import SocialLinker
+from docint.core.ingest.social_linker import MediaLink, SocialLinker, SocialLinkResult
 from docint.utils.nextext_client import NextextResult
 
 
@@ -403,3 +403,26 @@ def test_run_skips_absolute_or_traversal_media_reference(tmp_path: Path) -> None
     assert img.images == []
     assert not img.keyframe_calls
     assert not result.transcript_documents
+
+
+def test_route_media_clip_warns_when_nextext_not_completed(tmp_path: Path) -> None:
+    """A linked video Nextext can't process (e.g. disabled) logs a warning, not silence."""
+    from loguru import logger
+
+    class _DisabledNextext:
+        def process_media(self, file_path: Path) -> NextextResult:
+            return NextextResult(status="disabled")
+
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"\x00")
+    linker = SocialLinker(image_service=_FakeImageService(), nextext_client=_DisabledNextext(), target_collection="c")
+    link = MediaLink(posting_uuid="u", posting_id="p", media_id="m", path=clip)
+
+    lines: list[str] = []
+    sink_id = logger.add(lambda message: lines.append(str(message)), level="WARNING", format="{message}")
+    try:
+        linker._route_media_clip(link, IngestContext(source_collection="c"), SocialLinkResult())
+    finally:
+        logger.remove(sink_id)
+
+    assert any("did not process" in line and "clip.mp4" in line and "disabled" in line for line in lines)
