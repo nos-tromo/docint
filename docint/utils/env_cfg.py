@@ -396,6 +396,24 @@ def load_hate_speech_env(
 
 SUPPORTED_LANGUAGES: tuple[str, ...] = ("en", "de")
 
+# Endonym (native name) per supported language code, for human-facing labels
+# (e.g. the report export's "Machine translation (→ Deutsch)" heading) that
+# should not show a raw locale code. Covers exactly SUPPORTED_LANGUAGES.
+LANGUAGE_ENDONYMS: dict[str, str] = {"en": "English", "de": "Deutsch"}
+
+
+def language_endonym(code: str) -> str:
+    """Return a language's endonym (its name in its own language).
+
+    Args:
+        code (str): A language code, e.g. ``"de"``.
+
+    Returns:
+        str: The endonym (e.g. ``"Deutsch"`` for ``"de"``) when ``code`` is
+        one of :data:`SUPPORTED_LANGUAGES`; otherwise ``code`` unchanged.
+    """
+    return LANGUAGE_ENDONYMS.get(code, code)
+
 
 @dataclass(frozen=True)
 class LanguageConfig:
@@ -807,6 +825,7 @@ class ModelConfig:
     rerank_model: str
     sparse_model: str
     text_model: str
+    translate_model: str
     vision_model: str
 
 
@@ -839,6 +858,9 @@ def load_model_env(
         - rerank_model (str): The reranker model identifier.
         - sparse_model (str): The sparse model identifier.
         - text_model (str): The text model identifier.
+        - translate_model (str): The translation model identifier. Defaults
+          to the resolved ``text_model`` so translation reuses the
+          configured chat model unless an operator points it elsewhere.
         - vision_model (str): The vision model identifier.
     """
     inference_provider = os.getenv("INFERENCE_PROVIDER", "ollama").strip().lower()
@@ -857,13 +879,15 @@ def load_model_env(
         default_vision_model = "gpt-4o"
         default_embed_tokenizer_repo = ""
 
+    text_model = os.getenv("TEXT_MODEL", default_text_model)
     return ModelConfig(
         embed_model=os.getenv("EMBED_MODEL", default_embed_model),
         embed_tokenizer_repo=os.getenv("EMBED_TOKENIZER_REPO", default_embed_tokenizer_repo),
         ner_model=os.getenv("NER_MODEL", default_ner_model),
         rerank_model=os.getenv("RERANK_MODEL", default_rerank_model),
         sparse_model=os.getenv("SPARSE_MODEL", default_sparse_model),
-        text_model=os.getenv("TEXT_MODEL", default_text_model),
+        text_model=text_model,
+        translate_model=os.getenv("TRANSLATE_MODEL", text_model),
         vision_model=os.getenv("VISION_MODEL", default_vision_model),
     )
 

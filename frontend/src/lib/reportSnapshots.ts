@@ -1,4 +1,5 @@
 import type { HateSpeechRow, NerSourceRow, ReportItemInput, Source } from '@/api/types'
+import type { TranslationPayload } from '@/hooks/useTranslatable'
 
 /**
  * Pure builders that turn a view's already-loaded artifact data into a
@@ -36,7 +37,11 @@ export function chatAnswerSnapshot(params: {
   }
 }
 
-export function entityFindingSnapshot(row: NerSourceRow, entityLabel: string): ReportItemInput {
+export function entityFindingSnapshot(
+  row: NerSourceRow,
+  entityLabel: string,
+  translation?: { text: string; target_lang: string; model: string }
+): ReportItemInput {
   const chunkId = row.chunk_id ?? ''
   return {
     artifact_type: 'entity_finding',
@@ -50,7 +55,8 @@ export function entityFindingSnapshot(row: NerSourceRow, entityLabel: string): R
       row: row.row ?? null,
       score: row.score ?? null,
       entities: (row.entities ?? []).map((e) => ({ text: e.text, type: e.type, score: e.score ?? null })),
-      reference_metadata: row.reference_metadata ?? null
+      reference_metadata: row.reference_metadata ?? null,
+      ...(translation ? { translation } : {})
     }
   }
 }
@@ -63,7 +69,7 @@ export function summarySnapshot(params: { collection: string; text: string }): R
   }
 }
 
-export function hateSpeechSnapshot(row: HateSpeechRow): ReportItemInput {
+export function hateSpeechSnapshot(row: HateSpeechRow, translation?: TranslationPayload): ReportItemInput {
   const chunkId = row.chunk_id ?? ''
   return {
     artifact_type: 'hate_speech_finding',
@@ -77,7 +83,8 @@ export function hateSpeechSnapshot(row: HateSpeechRow): ReportItemInput {
       filename: row.filename ?? row.source_ref ?? '',
       page: row.page ?? null,
       row: row.row ?? null,
-      reference_metadata: row.reference_metadata ?? null
+      reference_metadata: row.reference_metadata ?? null,
+      ...(translation ? { translation } : {})
     }
   }
 }

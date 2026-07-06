@@ -2,7 +2,8 @@
 
 Column schemas are kept in lockstep with ``frontend/src/lib/exports.ts`` and the
 CLI's existing output so all three paths (UI download, HTTP stream, CLI batch)
-produce identical CSV files.
+produce identical CSV files. (Exception: the ``translation`` column is
+server-side only; the frontend ``exports.ts`` parity is deferred.)
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ NER_SOURCE_COLUMNS: tuple[str, ...] = (
     "text_id",
     "anchor_text",
     "parent_text",
+    "translation",
 )
 
 HATE_SPEECH_COLUMNS: tuple[str, ...] = (
@@ -59,6 +61,7 @@ HATE_SPEECH_COLUMNS: tuple[str, ...] = (
     "text_id",
     "anchor_text",
     "parent_text",
+    "translation",
 )
 
 DOCUMENT_COLUMNS: tuple[str, ...] = (
@@ -193,6 +196,7 @@ def ner_source_row(chunk: dict[str, Any], *, entity_label: str) -> dict[str, Any
         "text_id": _reference_field(ref, "text_id"),
         "anchor_text": _reference_field(ref, "anchor_text"),
         "parent_text": _reference_field(ref, "parent_text"),
+        "translation": (chunk.get("translation") or {}).get("text") or "",
     }
 
 
@@ -221,6 +225,7 @@ def hate_speech_row(chunk: dict[str, Any]) -> dict[str, Any]:
         "text_id": _reference_field(ref, "text_id"),
         "anchor_text": _reference_field(ref, "anchor_text"),
         "parent_text": _reference_field(ref, "parent_text"),
+        "translation": (chunk.get("translation") or {}).get("text") or "",
     }
 
 
