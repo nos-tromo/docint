@@ -421,8 +421,88 @@ def test_route_media_clip_warns_when_nextext_not_completed(tmp_path: Path) -> No
     lines: list[str] = []
     sink_id = logger.add(lambda message: lines.append(str(message)), level="WARNING", format="{message}")
     try:
-        linker._route_media_clip(link, IngestContext(source_collection="c"), SocialLinkResult())
+        linker._route_media_clips([link], IngestContext(source_collection="c"), SocialLinkResult())
     finally:
         logger.remove(sink_id)
 
     assert any("did not process" in line and "clip.mp4" in line and "disabled" in line for line in lines)
+
+
+def test_route_media_clips_processes_all_clips(tmp_path: Path) -> None:
+    """A batch of clips is processed concurrently but each is fully ingested.
+
+    Every clip must end up with its keyframes ingested and exactly one
+    transcript Document, and every clip's path must be recorded as consumed —
+    proving the bounded thread pool used for the Nextext round-trips does not
+    drop or duplicate work for any clip in the batch.
+    """
+    img = _FakeImageService()
+    linker = SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c")
+    clips = []
+    for i in range(3):
+        path = tmp_path / f"clip{i}.mp4"
+        path.write_bytes(f"video-{i}".encode())
+        clips.append(MediaLink(posting_uuid=f"u{i}", posting_id=f"p{i}", media_id=f"m{i}", path=path))
+
+    result = SocialLinkResult()
+    linker._route_media_clips(clips, IngestContext(source_collection="c"), result)
+
+    assert len(img.keyframe_calls) == 3
+    assert len(result.transcript_documents) == 3
+    clip_paths = {link.path for link in clips}
+    assert clip_paths.issubset(result.consumed_paths)
+
+
+def test_route_media_clips_isolates_a_failed_clip(tmp_path: Path) -> None:
+    """A clip that errors out at Nextext must not block the other clips in the batch.
+
+    One of three clips returns a Nextext ``error`` status (no transcript, no
+    keyframes); the other two are ``completed``. The two good clips must still
+    be fully ingested, and a warning naming the failed file must be logged —
+    proving a single bad clip degrades gracefully instead of aborting the batch
+    or silently losing sibling results.
+    """
+    from loguru import logger
+
+    clips = []
+    for i in range(3):
+        path = tmp_path / f"clip{i}.mp4"
+        path.write_bytes(f"video-{i}".encode())
+        clips.append(MediaLink(posting_uuid=f"u{i}", posting_id=f"p{i}", media_id=f"m{i}", path=path))
+    failing_path = clips[1].path
+
+    class _SelectiveNextext:
+        """Nextext stub that fails one specific path and completes the rest."""
+
+        def process_media(self, file_path: Path) -> NextextResult:
+            """Return an error result for the failing path, completed otherwise.
+
+            Args:
+                file_path: Path to the media file.
+
+            Returns:
+                A ``status="error"`` NextextResult for ``failing_path``, else a
+                completed NextextResult with one transcript segment and one keyframe.
+            """
+            if file_path == failing_path:
+                return NextextResult(status="error")
+            return NextextResult(
+                status="completed",
+                transcript_jsonl=b'{"text":"spoken","start_seconds":0,"end_seconds":1}\n',
+                keyframes=[b"\xff\xd8\xff0"],
+            )
+
+    img = _FakeImageService()
+    linker = SocialLinker(image_service=img, nextext_client=_SelectiveNextext(), target_collection="c")
+    result = SocialLinkResult()
+
+    lines: list[str] = []
+    sink_id = logger.add(lambda message: lines.append(str(message)), level="WARNING", format="{message}")
+    try:
+        linker._route_media_clips(clips, IngestContext(source_collection="c"), result)
+    finally:
+        logger.remove(sink_id)
+
+    assert len(img.keyframe_calls) == 2
+    assert len(result.transcript_documents) == 2
+    assert any("did not process" in line and failing_path.name in line for line in lines)

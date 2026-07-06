@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -230,6 +231,7 @@ from docint.core.ingest.images_service import ImageAsset, IngestContext  # noqa:
 from docint.core.readers.json import CustomJSONReader  # noqa: E402
 from docint.core.readers.tables import TableReader, is_media_manifest  # noqa: E402
 from docint.utils.hashing import compute_file_hash  # noqa: E402
+from docint.utils.nextext_client import NextextResult  # noqa: E402
 
 # Exact header set for the postings profile — derived from the single source of truth in
 # TableReader so _find_tables stays in sync whenever the profile header list changes.
@@ -256,6 +258,7 @@ class SocialLinker:
     target_collection: str | None
     manifest: Any = None
     keyframe_dedup_cosine: float = 0.95
+    nextext_max_concurrency: int = 4
 
     def _find_tables(self, data_dir: Path) -> tuple[Path | None, Path | None]:
         """Locate the postings table and media manifest anywhere in the tree.
@@ -303,10 +306,11 @@ class SocialLinker:
 
         result.consumed_paths.add(media_csv)
         context = IngestContext(source_collection=self.target_collection)
+        clips: list[MediaLink] = []
         for link in links:
-            result.consumed_paths.add(link.path)
-            extra = {"posting_id": link.posting_id, "media_id": link.media_id, "source_type": "social_media"}
             if is_image(link.path):
+                result.consumed_paths.add(link.path)
+                extra = {"posting_id": link.posting_id, "media_id": link.media_id, "source_type": "social_media"}
                 self.image_service.ingest_image(
                     ImageAsset.from_path(
                         path=link.path,
@@ -317,11 +321,18 @@ class SocialLinker:
                     context=context,
                 )
             else:
-                self._route_media_clip(link, context, result)
+                clips.append(link)
+        self._route_media_clips(clips, context, result)
         return result
 
-    def _route_media_clip(self, link: MediaLink, context: IngestContext, result: SocialLinkResult) -> None:
-        """Send one video/audio file to Nextext; ingest transcript + keyframes.
+    def _route_media_clips(self, clips: list[MediaLink], context: IngestContext, result: SocialLinkResult) -> None:
+        """Send video/audio clips to Nextext concurrently; ingest results serially.
+
+        The Nextext round-trips (submit + poll — the slow part) run in a bounded
+        thread pool so a batch of clips overlaps instead of serializing. Cache
+        lookups and the ingestion of results (keyframes -> CLIP, transcript ->
+        Documents, transcript-cache writes) run on the calling thread, keeping
+        Qdrant / image-service / manifest writes single-threaded.
 
         The transcript is cached in the ingest manifest keyed by the media
         file's content hash, so re-ingesting an unchanged file reuses it instead
@@ -330,22 +341,50 @@ class SocialLinker:
         companion from the first run.
 
         Args:
-            link (MediaLink): The resolved media file and its posting linkage.
+            clips (list[MediaLink]): Resolved video/audio links to process.
             context (IngestContext): Collection-resolution context.
-            result (SocialLinkResult): Accumulator for transcript Documents.
+            result (SocialLinkResult): Accumulator for consumed paths + Documents.
         """
+        if not clips:
+            return
         collection = self.target_collection or ""
-        media_hash = compute_file_hash(link.path)
-        cached = self.manifest.get_nextext_transcript(collection, media_hash) if self.manifest else None
-        keyframes: list[bytes] = []
-        if cached is not None:
-            transcript: bytes | None = cached.encode("utf-8")
-        else:
-            outcome = self.nextext_client.process_media(link.path)
-            transcript = outcome.transcript_jsonl
-            keyframes = outcome.keyframes
-            if transcript is not None and self.manifest is not None:
-                self.manifest.cache_nextext_transcript(collection, media_hash, transcript.decode("utf-8"))
+        for link in clips:
+            result.consumed_paths.add(link.path)
+        # Phase 1 (serial): hash + transcript-cache lookup.
+        hashes: dict[Path, str] = {}
+        cached: dict[Path, bytes] = {}
+        to_fetch: list[MediaLink] = []
+        for link in clips:
+            media_hash = compute_file_hash(link.path)
+            hashes[link.path] = media_hash
+            hit = self.manifest.get_nextext_transcript(collection, media_hash) if self.manifest else None
+            if hit is not None:
+                cached[link.path] = hit.encode("utf-8")
+            else:
+                to_fetch.append(link)
+        # Phase 2 (concurrent): Nextext round-trips only (HTTP is concurrency-safe).
+        outcomes: dict[Path, NextextResult] = {}
+        if to_fetch:
+            workers = max(1, min(self.nextext_max_concurrency, len(to_fetch)))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(self.nextext_client.process_media, link.path): link for link in to_fetch}
+                for future in as_completed(futures):
+                    link = futures[future]
+                    try:
+                        outcomes[link.path] = future.result()
+                    except Exception as exc:  # defensive: a raised call must not abort the batch
+                        logger.warning("Nextext call raised for {!r}: {}", link.path.name, exc)
+                        outcomes[link.path] = NextextResult(status="error", error=str(exc))
+        # Phase 3 (serial): ingest each clip's transcript + keyframes.
+        for link in clips:
+            if link.path in cached:
+                self._ingest_transcript(link, cached[link.path], result)
+                continue
+            outcome = outcomes[link.path]
+            if outcome.transcript_jsonl is not None and self.manifest is not None:
+                self.manifest.cache_nextext_transcript(
+                    collection, hashes[link.path], outcome.transcript_jsonl.decode("utf-8")
+                )
             if outcome.status != "completed":
                 logger.warning(
                     "Nextext did not process linked media {!r} (status={!r}); no transcript/keyframes "
@@ -354,17 +393,17 @@ class SocialLinker:
                     link.path.name,
                     outcome.status,
                 )
-        extra = {"posting_id": link.posting_id, "media_id": link.media_id, "source_type": "social_media"}
-        if keyframes:
-            self.image_service.ingest_keyframe_set(
-                keyframes,
-                context=context,
-                source_doc_id=link.posting_uuid,
-                extra_metadata={**extra, "posting_uuid": link.posting_uuid},
-                dedup_cosine=self.keyframe_dedup_cosine,
-            )
-        if transcript:
-            self._ingest_transcript(link, transcript, result)
+            extra = {"posting_id": link.posting_id, "media_id": link.media_id, "source_type": "social_media"}
+            if outcome.keyframes:
+                self.image_service.ingest_keyframe_set(
+                    outcome.keyframes,
+                    context=context,
+                    source_doc_id=link.posting_uuid,
+                    extra_metadata={**extra, "posting_uuid": link.posting_uuid},
+                    dedup_cosine=self.keyframe_dedup_cosine,
+                )
+            if outcome.transcript_jsonl:
+                self._ingest_transcript(link, outcome.transcript_jsonl, result)
 
     def _ingest_transcript(self, link: MediaLink, transcript: bytes, result: SocialLinkResult) -> None:
         """Parse transcript JSONL into segment Documents stamped with the posting link.

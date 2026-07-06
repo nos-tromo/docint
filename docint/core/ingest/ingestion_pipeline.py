@@ -878,6 +878,7 @@ class DocumentIngestionPipeline:
                 target_collection=self.target_collection,
                 manifest=manifest,
                 keyframe_dedup_cosine=nextext_cfg.keyframe_dedup_cosine,
+                nextext_max_concurrency=nextext_cfg.nextext_max_concurrency,
             ).run(self.data_dir)
         except Exception as exc:  # pragma: no cover - fail-soft guard
             logger.warning("Social linker skipped due to error: {}", exc)

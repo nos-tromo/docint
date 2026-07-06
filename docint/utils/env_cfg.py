@@ -969,6 +969,7 @@ class NextextConfig:
     keyframes_per_minute: int
     keyframes_max: int
     keyframe_dedup_cosine: float
+    nextext_max_concurrency: int
 
 
 def load_nextext_env(
@@ -979,6 +980,7 @@ def load_nextext_env(
     default_keyframes_per_minute: int = 4,
     default_keyframes_max: int = 20,
     default_keyframe_dedup_cosine: float = 0.95,
+    default_nextext_max_concurrency: int = 4,
 ) -> NextextConfig:
     """Load Nextext client + keyframe settings from the environment.
 
@@ -997,6 +999,9 @@ def load_nextext_env(
         default_keyframes_max (int): Hard candidate-frame ceiling forwarded to Nextext.
         default_keyframe_dedup_cosine (float): Drop a frame whose cosine similarity
             to a kept frame is >= this value. Must be within [0, 1].
+        default_nextext_max_concurrency (int): Default ceiling on how many
+            video/audio clips are submitted to Nextext in parallel per ingest
+            batch (floored at 1).
 
     Returns:
         NextextConfig: Resolved configuration.
@@ -1020,6 +1025,7 @@ def load_nextext_env(
         keyframes_per_minute=int(os.getenv("KEYFRAMES_PER_MINUTE", default_keyframes_per_minute)),
         keyframes_max=int(os.getenv("KEYFRAMES_MAX", default_keyframes_max)),
         keyframe_dedup_cosine=cosine,
+        nextext_max_concurrency=max(1, int(os.getenv("NEXTEXT_MAX_CONCURRENCY", default_nextext_max_concurrency))),
     )
 
 

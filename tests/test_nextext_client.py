@@ -21,6 +21,7 @@ def _cfg() -> NextextConfig:
         keyframes_per_minute=4,
         keyframes_max=20,
         keyframe_dedup_cosine=0.95,
+        nextext_max_concurrency=4,
     )
 
 
@@ -92,6 +93,7 @@ def test_process_media_disabled_no_network_call(tmp_path: Path) -> None:
         keyframes_per_minute=4,
         keyframes_max=20,
         keyframe_dedup_cosine=0.95,
+        nextext_max_concurrency=4,
     )
 
     client = httpx.Client(base_url="http://nextext.test", transport=httpx.MockTransport(error_handler))
