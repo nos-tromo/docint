@@ -304,3 +304,12 @@ def test_toggle_and_snapshot_roundtrip(report_manager: ReportManager) -> None:
     # clearing sets it back to None
     cleared = _ok(report_manager.set_collection_overview_snapshot(r["id"], "alice", None))
     assert cleared["collection_overview"] is None
+
+
+def test_set_snapshot_empty_dict_is_stored_not_cleared(report_manager: ReportManager) -> None:
+    """An empty dict persists as ``{}``; only ``None`` clears the snapshot."""
+    r = report_manager.create_report(title="C", owner="alice")
+    stored = _ok(report_manager.set_collection_overview_snapshot(r["id"], "alice", {}))
+    assert stored["collection_overview"] == {}  # {} persists as an empty dict...
+    cleared = _ok(report_manager.set_collection_overview_snapshot(r["id"], "alice", None))
+    assert cleared["collection_overview"] is None  # ...only None clears

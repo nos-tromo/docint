@@ -273,7 +273,7 @@ class ReportManager:
             if report is None or report.owner != owner:
                 return None
             report.collection_overview_snapshot = cast(
-                Any, json.dumps(snapshot, ensure_ascii=False) if snapshot else None
+                Any, json.dumps(snapshot, ensure_ascii=False) if snapshot is not None else None
             )
             s.commit()
             s.refresh(report)
