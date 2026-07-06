@@ -39,6 +39,7 @@ services:
       - "8000"
     environment:
       <<: *no-proxy-env
+      NEXTEXT_API_BASE: ${NEXTEXT_API_BASE:-http://nextext-backend:8000/api/v1}
       QDRANT_HOST: http://qdrant:6333
       QDRANT_SRC_DIR: /var/lib/docint/sources
       SESSIONS_DB_PATH: /var/lib/docint/sessions/sessions.sqlite3

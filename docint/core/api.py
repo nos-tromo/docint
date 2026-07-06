@@ -289,6 +289,28 @@ def _resolve_qdrant_src_dir() -> Path:
     return path_config.qdrant_sources
 
 
+def _safe_relative_dest(batch_dir: Path, raw_name: str) -> Path:
+    """Resolve an uploaded file's relative path safely under ``batch_dir``.
+
+    Preserves subdirectories from a browser folder upload (the
+    ``webkitRelativePath`` sent as the multipart filename) while neutralizing
+    path traversal: backslashes are normalized to ``/`` and empty, ``.`` and
+    ``..`` segments are dropped, so the result can never escape ``batch_dir``.
+
+    Args:
+        batch_dir (Path): The collection's upload directory (containment root).
+        raw_name (str): Client-supplied name, possibly a relative path.
+
+    Returns:
+        Path: A path strictly inside ``batch_dir``.
+    """
+    raw = (raw_name or "upload").replace("\\", "/")
+    parts = [segment for segment in raw.split("/") if segment not in ("", ".", "..")]
+    if not parts:
+        parts = ["upload"]
+    return batch_dir.joinpath(*parts)
+
+
 def _resolve_source_file_path(
     collection: str,
     file_hash: str,
@@ -2891,8 +2913,9 @@ async def ingest_upload(
         )
 
         for upload in files:
-            filename = Path(upload.filename or "upload").name
-            dest = batch_dir / filename
+            dest = _safe_relative_dest(batch_dir, upload.filename or "upload")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            filename = str(dest.relative_to(batch_dir))
             bytes_written = 0
             try:
                 with dest.open("wb") as buffer:

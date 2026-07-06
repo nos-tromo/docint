@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS ingest_manifest (
     started_at      REAL NOT NULL,
     updated_at      REAL NOT NULL,
     error_message   TEXT,
+    nextext_jsonl   TEXT,
     PRIMARY KEY (collection, file_hash)
 );
 CREATE INDEX IF NOT EXISTS idx_manifest_status
@@ -54,6 +55,7 @@ CREATE INDEX IF NOT EXISTS idx_manifest_status
 STATUS_IN_PROGRESS = "in_progress"
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
+STATUS_CACHED = "cached"
 
 _ERROR_MESSAGE_MAX_LENGTH = 512
 
@@ -139,6 +141,10 @@ class IngestManifest:
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
+        existing_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(ingest_manifest)").fetchall()}
+        if "nextext_jsonl" not in existing_columns:
+            self._conn.execute("ALTER TABLE ingest_manifest ADD COLUMN nextext_jsonl TEXT")
+            self._conn.commit()
         logger.debug("IngestManifest initialised at {}", self.db_path)
 
     @property
@@ -281,6 +287,59 @@ class IngestManifest:
 
         self._execute("mark_failed", _do)
 
+    def cache_nextext_transcript(self, collection: str, file_hash: str, jsonl: str) -> None:
+        """Persist a Nextext transcript (NDJSON) keyed by media file hash.
+
+        Lets re-ingestion of an unchanged media file reuse the transcript
+        instead of re-running the (expensive) remote Nextext job.
+
+        Args:
+            collection (str): Logical Qdrant collection name.
+            file_hash (str): SHA-256 of the media file.
+            jsonl (str): The transcript NDJSON text to cache.
+        """
+        if not collection or not file_hash:
+            return
+        now = time.time()
+
+        def _do() -> None:
+            self._conn.execute(
+                """
+                INSERT INTO ingest_manifest
+                    (collection, file_hash, status, started_at, updated_at, nextext_jsonl)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(collection, file_hash) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    nextext_jsonl = excluded.nextext_jsonl
+                """,
+                (collection, file_hash, STATUS_CACHED, now, now, jsonl),
+            )
+            self._conn.commit()
+
+        self._execute("cache_nextext_transcript", _do)
+
+    def get_nextext_transcript(self, collection: str, file_hash: str) -> str | None:
+        """Return a cached Nextext transcript, or ``None`` when absent.
+
+        Args:
+            collection (str): Logical Qdrant collection name.
+            file_hash (str): SHA-256 of the media file.
+
+        Returns:
+            str | None: The cached NDJSON text, or ``None``.
+        """
+        if not collection or not file_hash:
+            return None
+
+        def _do() -> str | None:
+            row = self._conn.execute(
+                "SELECT nextext_jsonl FROM ingest_manifest WHERE collection = ? AND file_hash = ?",
+                (collection, file_hash),
+            ).fetchone()
+            return row[0] if row and row[0] is not None else None
+
+        return self._execute("get_nextext_transcript", _do)
+
     def pending_files(self, collection: str) -> dict[str, float]:
         """Return ``{file_hash: started_at}`` for files in flight.
 
@@ -399,6 +458,15 @@ class NullIngestManifest:
     ) -> None:
         """No-op."""
         _ = (collection, file_hash, error_message)
+
+    def cache_nextext_transcript(self, collection: str, file_hash: str, jsonl: str) -> None:
+        """No-op cache write (manifest disabled)."""
+        _ = (collection, file_hash, jsonl)
+
+    def get_nextext_transcript(self, collection: str, file_hash: str) -> str | None:
+        """Return ``None`` — caching disabled."""
+        _ = (collection, file_hash)
+        return None
 
     def pending_files(self, collection: str) -> dict[str, float]:
         """Return an empty dict."""

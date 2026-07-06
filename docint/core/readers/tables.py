@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import csv
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, cast
@@ -52,6 +52,31 @@ def _normalize_column_name(value: Any) -> str:
         str: The normalized column name.
     """
     return str(value or "").strip().casefold()
+
+
+MEDIA_MANIFEST_REQUIRED_COLUMNS: frozenset[str] = frozenset(
+    {
+        _normalize_column_name("Media ID"),
+        _normalize_column_name("Exported media filename"),
+    }
+)
+
+
+def is_media_manifest(columns: Iterable[Any]) -> bool:
+    """Return whether a table's columns identify it as a social media manifest.
+
+    Detection is fuzzy by design: only the two join columns must be present
+    (``Media ID`` + ``Exported media filename``), not an exact header set, so
+    the manifest is recognized regardless of platform-specific extra columns.
+
+    Args:
+        columns (Iterable[Any]): The table's column names.
+
+    Returns:
+        bool: True when both join columns are present (case-insensitively).
+    """
+    normalized = {_normalize_column_name(column) for column in columns}
+    return MEDIA_MANIFEST_REQUIRED_COLUMNS.issubset(normalized)
 
 
 @dataclass(slots=True)

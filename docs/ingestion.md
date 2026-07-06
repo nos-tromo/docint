@@ -27,10 +27,17 @@ The default list lives in `load_ingestion_env()` in
   Nextext transcripts)
 - **Images** — `.png`, `.jpg`, `.jpeg`, `.gif`
 
-Only the file types listed above are ingested; all others are silently
-skipped. For audio and video, transcribe them in
-[Nextext](https://github.com/nos-tromo/nextext) first and upload the
-resulting `.jsonl` transcript.
+Only the file types listed above are ingested when uploaded standalone; all
+others are silently skipped. Audio and video are instead handled through the
+**social-multimodal** path: drop the raw media files into the **same
+directory** as `postings.csv` / `media.csv` and reference them by filename from
+the manifest, and docint forwards
+each clip to a remote [Nextext](https://github.com/nos-tromo/nextext) service
+that transcribes it and extracts keyframes — the transcript is ingested as
+text and the keyframes as CLIP image points (requires `NEXTEXT_API_BASE`; see
+"Social Multimodal Media" in `README.md`). A pre-made Nextext `.jsonl`
+transcript still ingests directly as a structured file if you prefer to
+transcribe out of band.
 
 Each extension is dispatched to the reader that knows how to parse it
 (see the next section).

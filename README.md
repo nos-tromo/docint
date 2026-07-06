@@ -287,6 +287,61 @@ and Noto fonts for multi-script text. It needs WeasyPrint's native libraries,
 which the backend image installs; if they are absent the `.pdf` route returns
 503 while every other format keeps working.
 
+## Social Multimodal Media
+
+Docint can ingest social-media exports that pair text **postings** with linked
+**media files** (images, video, audio). The ingestion pipeline reads a
+`media.csv` manifest, joins each media file to its parent posting (by `Network
+ID`, else `Media ID`, matched against the postings' `Posting ID`), and routes
+each artifact to the right backend — images go through
+CLIP, video/audio are transcribed by Nextext and keyframe-extracted.
+
+**One flat directory.** Put `postings.csv`, `media.csv`, and every referenced
+media file in a **single directory**, and ingest that directory. Media are
+resolved by filename *within that one directory* — no subfolders, and no
+relative or absolute paths in the manifest (only the basename is used) — so a
+file is linked only when it sits directly beside the manifest. Upload it with
+the SPA's folder picker, or point `DATA_PATH` at that directory.
+
+**Linker.** During ingestion, `posting_uuid` is written into every artifact
+node (image embedding, keyframe, Nextext transcript segment). At retrieval
+time, `_attach_posting_group` reads that UUID from `reference_metadata.uuid`
+or the top-level `posting_uuid` field and tags each source dict with a
+`posting_group` key so the UI can render a post alongside all its media as a
+single entity.
+
+**Nextext transcription.** Video/audio transcription is delegated to an
+external Nextext service. Set:
+
+```bash
+NEXTEXT_API_BASE=https://<nextext-host>/api/v1   # required to enable social-media ingestion
+NEXTEXT_API_KEY=<token>                          # if the endpoint requires auth
+NEXTEXT_TIMEOUT=120                              # per-request HTTP timeout (seconds)
+NEXTEXT_POLL_INTERVAL=5                          # polling interval while waiting for job (seconds)
+NEXTEXT_POLL_MAX_SECONDS=600                     # hard deadline per transcription job (seconds)
+```
+
+The `/api/v1` suffix is required: docint's client calls `{NEXTEXT_API_BASE}/jobs`,
+and Nextext mounts its jobs router under `/api/v1` — a base URL without that
+suffix will 404 on every request.
+
+When `NEXTEXT_API_BASE` is unset, the Nextext client is disabled and
+video/audio files are skipped gracefully — non-social collections are
+unaffected.
+
+**Keyframe sampling.** Keyframes are extracted at a configurable rate, pruned
+by cosine similarity before captioning, and ingested alongside the transcript:
+
+```bash
+KEYFRAMES_PER_MINUTE=4      # target frame sampling rate (default 4)
+KEYFRAMES_MAX=20            # hard ceiling on candidate frames (default 20)
+KEYFRAME_DEDUP_COSINE=0.95  # drop frames whose CLIP embedding cosine similarity
+                            # to an already-accepted frame exceeds this threshold
+```
+
+Transcripts are cached in the per-collection `IngestManifest` by media-file
+hash so re-ingestion of unchanged files skips the Nextext round-trip entirely.
+
 ## Translation
 
 Chat source citations, entity findings, and hate-speech findings each show a

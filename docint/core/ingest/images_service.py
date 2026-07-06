@@ -34,6 +34,23 @@ from docint.utils.openai_cfg import OpenAIPipeline
 
 T = TypeVar("T")
 
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    """Return the dot product of two equal-length L2-normalized vectors.
+
+    CLIP embeddings are already L2-normalized, so the dot product equals the
+    cosine similarity without re-normalizing.
+
+    Args:
+        a (list[float]): First vector.
+        b (list[float]): Second vector.
+
+    Returns:
+        float: Cosine similarity in ``[-1, 1]``.
+    """
+    return sum(x * y for x, y in zip(a, b, strict=False))
+
+
 __all__ = [
     "ImageAsset",
     "ImageIngestionConfig",
@@ -683,6 +700,14 @@ class ImageIngestionService:
                 )
             except Exception as idx_exc:
                 logger.debug("Payload index creation on image_id skipped: {}", idx_exc)
+            try:
+                self.qdrant_client.create_payload_index(
+                    collection_name=collection_name,
+                    field_name="posting_uuid",
+                    field_schema=models.PayloadSchemaType.KEYWORD,
+                )
+            except Exception as idx_exc:
+                logger.debug("Payload index creation on posting_uuid skipped: {}", idx_exc)
             logger.info(
                 "Created image collection '{}' with vector '{}'",
                 collection_name,
@@ -924,6 +949,118 @@ class ImageIngestionService:
             llm_tags=tags,
             error=tag_error,
         )
+
+    def ingest_keyframe_set(
+        self,
+        frames: list[bytes],
+        *,
+        context: IngestContext,
+        source_doc_id: str | None,
+        extra_metadata: dict[str, Any] | None = None,
+        dedup_cosine: float = 0.95,
+    ) -> list[StoredImageRecord]:
+        """Embed candidate keyframes, prune near-duplicates, caption survivors.
+
+        Each frame is CLIP-embedded once. A greedy pass keeps a frame only when
+        its maximum cosine similarity (== dot product, since CLIP vectors are
+        L2-normalized) to an already-kept frame is below ``dedup_cosine``. Only
+        survivors are sent to the (expensive) vision tagger and stored, each
+        stamped with ``source_doc_id``/``extra_metadata`` so it links to its
+        posting. Fail-soft: a frame that fails to embed is skipped, not raised.
+
+        Args:
+            frames (list[bytes]): Candidate keyframe image bytes, in time order.
+            context (IngestContext): Collection-resolution context.
+            source_doc_id (str | None): The posting UUID stamped on each point.
+            extra_metadata (dict[str, Any] | None): Extra payload fields
+                (e.g. ``posting_id``/``media_id``) merged onto each point.
+            dedup_cosine (float): Drop a frame whose cosine similarity to a kept
+                frame is >= this value.
+
+        Returns:
+            list[StoredImageRecord]: One record per survivor (status ``stored``).
+        """
+        if not self.img_ingestion_config.enabled or not frames:
+            return []
+        embedding_backend = self._get_embedding_backend()
+        if embedding_backend is None:
+            logger.warning("Keyframe ingestion skipped: no embedding backend.")
+            return []
+        try:
+            target_collection = self._resolve_collection_name(context.source_collection)
+        except Exception as exc:
+            logger.warning("Keyframe ingestion skipped: {}", exc)
+            return []
+
+        kept_embeddings: list[list[float]] = []
+        records: list[StoredImageRecord] = []
+        tagger = self._get_tagging_backend()
+        for frame_bytes in frames:
+            try:
+                embedding = self._run_with_retries(lambda fb=frame_bytes: embedding_backend.embed(fb))
+            except Exception as exc:
+                logger.warning("Keyframe embed failed (skipping frame): {}", exc)
+                continue
+            if any(_cosine(embedding, kept) >= dedup_cosine for kept in kept_embeddings):
+                continue
+            kept_embeddings.append(embedding)
+
+            description: str = ""
+            tags: list[str] = []
+            if self.img_ingestion_config.tagging_enabled and tagger is not None:
+                try:
+                    description, tags = self._run_with_retries(
+                        lambda fb=frame_bytes, t=tagger: t.describe_and_tag(fb, "image/jpeg")
+                    )
+                except Exception as exc:
+                    logger.warning("Keyframe tagging failed: {}", exc)
+
+            image_id = self._hash_image_bytes(frame_bytes)
+            point_id = self._point_id_from_image_id(image_id)
+            text_parts = [description.strip()]
+            if tags:
+                text_parts.append("Tags: " + ", ".join(tags))
+            node_text = "\n\n".join(part for part in text_parts if part).strip()
+            payload: dict[str, Any] = {
+                "image_id": image_id,
+                "source_type": "social_media_keyframe",
+                "source_collection": context.source_collection,
+                "source_doc_id": source_doc_id,
+                "posting_uuid": source_doc_id,
+                "mime_type": "image/jpeg",
+                "mimetype": "image/jpeg",
+                "file_type": "image/jpeg",
+                "llm_description": description,
+                "llm_tags": tags,
+                "vector_name": self.img_ingestion_config.vector_name,
+                "image_collection": target_collection,
+            }
+            if extra_metadata:
+                payload.update(extra_metadata)
+            node = ImageNode(
+                id_=point_id,
+                text=node_text,
+                metadata=payload,
+                image_mimetype="image/jpeg",
+                embedding=embedding,
+            )
+            try:
+                self._ensure_collection(collection_name=target_collection, vector_dim=len(embedding))
+                self._get_vector_store(target_collection).add([node])
+            except Exception as exc:
+                logger.warning("Keyframe store failed: {}", exc)
+                continue
+            records.append(
+                StoredImageRecord(
+                    point_id=point_id,
+                    image_id=image_id,
+                    status="stored",
+                    payload=payload,
+                    llm_description=description,
+                    llm_tags=tags,
+                )
+            )
+        return records
 
     def query_similar_images(
         self,
