@@ -50,6 +50,47 @@ SECTION_ANCHOR: dict[str, str] = {
     ARTIFACT_HATE: "sec-hate",
 }
 
+COLLECTION_OVERVIEW_ANCHOR = "sec-collection-overview"
+COLLECTION_OVERVIEW_HEADING = "report_section_collection_overview"
+_HASH_DISPLAY_CHARS = 12
+
+
+def _overview_snapshot(report: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the overview snapshot iff the trailing section should render.
+
+    Renders only when the report opts in (``show_collection_overview``) AND the
+    snapshot has at least one document — an empty manifest reads as a bug, so it
+    is omitted like an empty item-section.
+    """
+    if not report.get("show_collection_overview"):
+        return None
+    overview = report.get("collection_overview") or None
+    if not overview or not (overview.get("documents") or []):
+        return None
+    return overview
+
+
+def _overview_units(doc: dict[str, Any]) -> str:
+    """Pages-or-rows cell for a manifest row ("—" when neither applies)."""
+    pages = int(doc.get("page_count") or 0)
+    if pages > 0:
+        return str(pages)
+    rows = int(doc.get("row_count") or 0)
+    if rows > 0:
+        return str(rows)
+    return "—"
+
+
+def _short_hash(value: Any) -> str:
+    text = str(value or "")
+    return text[:_HASH_DISPLAY_CHARS] if text else "—"
+
+
+def _overview_file_types(overview: dict[str, Any]) -> str:
+    parts = [f"{ft.get('count')} {ft.get('label')}" for ft in (overview.get("file_types") or [])]
+    return ", ".join(parts) if parts else "—"
+
+
 _CHUNK_MAX_CHARS = 1500
 
 # CSV bundle column schemas for the chat/summary artifacts (entity & hate-speech
@@ -278,6 +319,36 @@ def _md_summary(snap: dict[str, Any], note: str | None) -> list[str]:
     return lines
 
 
+def _md_collection_overview(overview: dict[str, Any]) -> list[str]:
+    """Markdown for the trailing document-overview section (strip + manifest table)."""
+    strip = "  ·  ".join(
+        [
+            f"{ui_string('report_overview_documents')}: {overview.get('document_count', 0)}",
+            f"{ui_string('report_overview_nodes')}: {overview.get('node_count', 0)}",
+            f"{ui_string('report_overview_file_types')}: {_overview_file_types(overview)}",
+            f"{ui_string('report_overview_entity_types')}: {len(overview.get('entity_types') or [])}",
+        ]
+    )
+    lines = [f"## {ui_string(COLLECTION_OVERVIEW_HEADING)}", "", strip, ""]
+    lines += [
+        (
+            f"| {ui_string('report_overview_col_document')} "
+            f"| {ui_string('report_overview_col_type')} "
+            f"| {ui_string('report_overview_col_units')} "
+            f"| {ui_string('report_overview_col_hash')} |"
+        ),
+        "| --- | --- | ---: | --- |",
+    ]
+    for doc in overview.get("documents") or []:
+        filename = str(doc.get("filename") or "").replace("|", "\\|")
+        type_label = doc.get("type_label") or "—"
+        units = _overview_units(doc)
+        file_hash = _short_hash(doc.get("file_hash"))
+        lines.append(f"| {filename} | {type_label} | {units} | {file_hash} |")
+    lines.append("")
+    return lines
+
+
 _MD_DISPATCH = {
     ARTIFACT_CHAT: _md_chat,
     ARTIFACT_ENTITY: _md_entity,
@@ -286,11 +357,13 @@ _MD_DISPATCH = {
 }
 
 
-def _md_toc(grouped: OrderedDict[str, list[dict[str, Any]]]) -> list[str]:
+def _md_toc(grouped: OrderedDict[str, list[dict[str, Any]]], overview_present: bool) -> list[str]:
     """Render a Markdown contents list — section names only (Markdown has no pages)."""
     entries = [
         f"- {ui_string(heading_key)}" for artifact_type, heading_key in SECTION_ORDER if grouped.get(artifact_type)
     ]
+    if overview_present:
+        entries.append(f"- {ui_string(COLLECTION_OVERVIEW_HEADING)}")
     if not entries:
         return []
     return [f"## {ui_string('report_section_toc')}", "", *entries, ""]
@@ -318,12 +391,13 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines += ["  ·  ".join(meta_bits), ""]
 
     grouped = _group_items(report.get("items") or [])
-    if not any(grouped.values()):
+    overview = _overview_snapshot(report)
+    if not any(grouped.values()) and overview is None:
         lines += [ui_string("report_empty"), ""]
         return "\n".join(lines)
 
     if report.get("show_toc"):
-        lines += _md_toc(grouped)
+        lines += _md_toc(grouped, overview is not None)
 
     for artifact_type, heading_key in SECTION_ORDER:
         items = grouped.get(artifact_type) or []
@@ -333,6 +407,9 @@ def render_markdown(report: dict[str, Any]) -> str:
         renderer = _MD_DISPATCH[artifact_type]
         for item in items:
             lines += renderer(item.get("snapshot") or {}, item.get("note"))
+
+    if overview is not None:
+        lines += _md_collection_overview(overview)
 
     # Footer note: AI-generation caveat, after the content.
     lines += ["---", "", f"*{ui_string('report_disclaimer')}*", ""]
@@ -427,6 +504,15 @@ ul.sources { margin: 4pt 0 0; padding-left: 16pt; font-size: 9pt; }
 .refmeta .rm-row { break-inside: avoid; margin: 0 0 1pt; }
 .refmeta .rm-key { font-weight: 600; color: #555; }
 .empty { color: #888; font-style: italic; }
+.overview-strip { color: #555; font-size: 9pt; margin: 4pt 0 8pt; }
+table.manifest { width: 100%; border-collapse: collapse; font-size: 8.5pt; }
+table.manifest th, table.manifest td {
+  text-align: left; padding: 3pt 6pt; border-bottom: 1px solid #eee; vertical-align: top;
+}
+table.manifest th { font-weight: 600; color: #444; border-bottom: 1px solid #ccc; }
+table.manifest td.num, table.manifest th.num { text-align: right; }
+table.manifest td.hash { font-family: 'DejaVu Sans Mono', 'Liberation Mono', monospace; color: #666; }
+table.manifest tr { break-inside: avoid; }
 """
 
 
@@ -568,6 +654,35 @@ def _html_summary(snap: dict[str, Any], note: str | None) -> str:
     return "".join(parts)
 
 
+def _html_collection_overview(overview: dict[str, Any]) -> str:
+    """HTML for the trailing document-overview section (strip + manifest table)."""
+    strip_items = [
+        (ui_string("report_overview_documents"), overview.get("document_count", 0)),
+        (ui_string("report_overview_nodes"), overview.get("node_count", 0)),
+        (ui_string("report_overview_file_types"), _overview_file_types(overview)),
+        (ui_string("report_overview_entity_types"), len(overview.get("entity_types") or [])),
+    ]
+    strip = "  ·  ".join(f"{_esc(label)}: {_esc(value)}" for label, value in strip_items)
+    rows = "".join(
+        "<tr>"
+        f"<td>{_esc(doc.get('filename'))}</td>"
+        f"<td>{_esc(doc.get('type_label') or '—')}</td>"
+        f'<td class="num">{_esc(_overview_units(doc))}</td>'
+        f'<td class="hash">{_esc(_short_hash(doc.get("file_hash")))}</td>'
+        "</tr>"
+        for doc in overview.get("documents") or []
+    )
+    return (
+        f'<div class="overview-strip">{strip}</div>'
+        '<table class="manifest"><thead><tr>'
+        f"<th>{_esc(ui_string('report_overview_col_document'))}</th>"
+        f"<th>{_esc(ui_string('report_overview_col_type'))}</th>"
+        f'<th class="num">{_esc(ui_string("report_overview_col_units"))}</th>'
+        f"<th>{_esc(ui_string('report_overview_col_hash'))}</th>"
+        f"</tr></thead><tbody>{rows}</tbody></table>"
+    )
+
+
 _HTML_DISPATCH = {
     ARTIFACT_CHAT: _html_chat,
     ARTIFACT_ENTITY: _html_entity,
@@ -581,7 +696,7 @@ _HTML_DISPATCH = {
 _CARD_ARTIFACTS = frozenset({ARTIFACT_ENTITY, ARTIFACT_HATE})
 
 
-def _html_toc(grouped: OrderedDict[str, list[dict[str, Any]]]) -> str:
+def _html_toc(grouped: OrderedDict[str, list[dict[str, Any]]], overview_present: bool) -> str:
     """Render the contents block (Inhaltsverzeichnis) linking each present section.
 
     Lists only sections that have content, section-level only. Page numbers come
@@ -593,6 +708,10 @@ def _html_toc(grouped: OrderedDict[str, list[dict[str, Any]]]) -> str:
         for artifact_type, heading_key in SECTION_ORDER
         if grouped.get(artifact_type)
     ]
+    if overview_present:
+        entries.append(
+            f'<li><a href="#{COLLECTION_OVERVIEW_ANCHOR}">{_esc(ui_string(COLLECTION_OVERVIEW_HEADING))}</a></li>'
+        )
     if not entries:
         return ""
     return (
@@ -643,11 +762,12 @@ def render_html(report: dict[str, Any]) -> str:
     body_parts.append(f'<div class="running-disclaimer">{_esc(ui_string("report_disclaimer"))}</div>')
 
     grouped = _group_items(report.get("items") or [])
-    if not any(grouped.values()):
+    overview = _overview_snapshot(report)
+    if not any(grouped.values()) and overview is None:
         body_parts.append(f'<p class="empty">{_esc(ui_string("report_empty"))}</p>')
     else:
         if report.get("show_toc"):
-            body_parts.append(_html_toc(grouped))
+            body_parts.append(_html_toc(grouped, overview is not None))
         for artifact_type, heading_key in SECTION_ORDER:
             items = grouped.get(artifact_type) or []
             if not items:
@@ -660,6 +780,12 @@ def render_html(report: dict[str, Any]) -> str:
                 body_parts.append(
                     f'<div class="{item_class}">{renderer(item.get("snapshot") or {}, item.get("note"))}</div>'
                 )
+        if overview is not None:
+            body_parts.append(
+                f'<h2 class="section" id="{COLLECTION_OVERVIEW_ANCHOR}">'
+                f"{_esc(ui_string(COLLECTION_OVERVIEW_HEADING))}</h2>"
+            )
+            body_parts.append(f'<div class="item">{_html_collection_overview(overview)}</div>')
 
     return (
         f'<!DOCTYPE html>\n<html lang="{_esc(locale)}">\n<head>\n'

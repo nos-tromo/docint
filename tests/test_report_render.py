@@ -467,3 +467,86 @@ def test_markdown_toc_absent_when_disabled(monkeypatch: pytest.MonkeyPatch) -> N
     """No contents list in Markdown when the toggle is off."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
     assert ui_string("report_section_toc") not in R.render_markdown(_toc_report(show_toc=False))
+
+
+_OVERVIEW: dict[str, Any] = {
+    "collection": "c1",
+    "captured_at": "2026-07-06T10:00:00+00:00",
+    "document_count": 2,
+    "node_count": 9,
+    "file_types": [{"label": "PDF", "count": 1}, {"label": "CSV", "count": 1}],
+    "entity_types": ["ORG", "PER"],
+    "documents": [
+        {
+            "filename": "a.pdf",
+            "type_label": "PDF",
+            "page_count": 4,
+            "row_count": None,
+            "node_count": 6,
+            "file_hash": "0123456789abcdefff",
+        },
+        {
+            "filename": "b.csv",
+            "type_label": "CSV",
+            "page_count": 0,
+            "row_count": 30,
+            "node_count": 3,
+            "file_hash": "deadbeefcafebabe00",
+        },
+    ],
+}
+
+
+def _overview_report(**over: Any) -> dict[str, Any]:
+    """A minimal report dict with the document-overview toggled on by default.
+
+    Named distinctly from the module's ``_report()`` (the "Case Alpha" fixture
+    used throughout this file) — reusing that name would shadow it, since
+    Python resolves a bare-name call against whatever the module global is
+    *at call time*, silently rebinding every existing ``_report()`` call to
+    this smaller dict.
+    """
+    base: dict[str, Any] = {
+        "title": "R",
+        "items": [],
+        "show_toc": True,
+        "show_collection_overview": True,
+        "collection_overview": _OVERVIEW,
+    }
+    base.update(over)
+    return base
+
+
+def test_overview_renders_last_in_markdown_when_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The trailing overview section renders with its manifest table when enabled."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    md = R.render_markdown(_overview_report())
+    assert "Document overview" in md
+    assert "a.pdf" in md and "b.csv" in md
+    assert "0123456789ab" in md and "0123456789abcdefff" not in md  # hash truncated to 12
+
+
+def test_overview_omitted_when_toggled_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Toggling show_collection_overview off omits the section entirely."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    md = R.render_markdown(_overview_report(show_collection_overview=False))
+    assert "Document overview" not in md
+
+
+def test_overview_omitted_when_empty_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An overview snapshot with no documents is omitted like an empty item section."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    empty: dict[str, Any] = {**_OVERVIEW, "documents": []}
+    md = R.render_markdown(_overview_report(collection_overview=empty))
+    assert "Document overview" not in md
+    # items empty AND no overview -> the "empty report" copy shows
+    assert R.render_markdown(_overview_report(collection_overview=empty)).strip()
+
+
+def test_overview_only_report_is_not_empty_and_appears_in_html_toc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A report with only an overview (no items) is not treated as empty, and gets a TOC entry."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    htm = R.render_html(_overview_report(show_toc=True))
+    assert 'id="sec-collection-overview"' in htm
+    assert "This report has no items yet" not in htm  # overview counts as content
+    assert "#sec-collection-overview" in htm  # TOC entry present
