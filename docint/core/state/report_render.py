@@ -853,12 +853,20 @@ def _summary_csv_row(snap: dict[str, Any]) -> dict[str, Any]:
 
 
 def _overview_csv_row(doc: dict[str, Any]) -> dict[str, Any]:
-    """CSV row for one document-overview manifest entry (full, untruncated hash)."""
+    """CSV row for one document-overview manifest entry (full, untruncated hash).
+
+    Numeric count cells (``pages``/``rows``/``nodes``) render a real ``0`` when
+    the count is zero and blank only when the count is absent (``None``) — the
+    snapshot deliberately distinguishes ``row_count: 0`` (an empty table) from
+    ``row_count: None`` (no table), and this CSV is the evidentiary artifact
+    where that distinction must survive (never collapse "counted zero" into
+    "not applicable").
+    """
     return {
         "filename": doc.get("filename") or "",
         "type": doc.get("type_label") or "",
-        "pages": doc.get("page_count") or "",
-        "rows": doc.get("row_count") or "",
+        "pages": doc.get("page_count") if doc.get("page_count") is not None else "",
+        "rows": doc.get("row_count") if doc.get("row_count") is not None else "",
         "nodes": doc.get("node_count") if doc.get("node_count") is not None else "",
         "hash": doc.get("file_hash") or "",  # full hash — evidentiary integrity
     }

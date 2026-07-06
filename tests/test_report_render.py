@@ -582,3 +582,31 @@ def test_csv_bundle_omits_overview_when_off() -> None:
     """No collection-overview.csv when the overview toggle is off."""
     zf = zipfile.ZipFile(io.BytesIO(R.report_csv_bundle(_overview_report(show_collection_overview=False))))
     assert "collection-overview.csv" not in zf.namelist()
+
+
+def test_overview_csv_preserves_zero_counts() -> None:
+    """A counted zero (0 pages/rows/nodes) renders as ``0``, never a blank cell.
+
+    The snapshot distinguishes ``row_count: 0`` (an empty table) from
+    ``row_count: None`` (no table); the CSV is the evidentiary artifact where
+    that distinction must survive, so a real zero must not collapse to blank.
+    """
+    ov: dict[str, Any] = {
+        **_OVERVIEW,
+        "documents": [
+            {
+                "filename": "z.csv",
+                "type_label": "CSV",
+                "page_count": 0,
+                "row_count": 0,
+                "node_count": 0,
+                "file_hash": "h0",
+            }
+        ],
+    }
+    zf = zipfile.ZipFile(io.BytesIO(R.report_csv_bundle(_overview_report(collection_overview=ov))))
+    body = zf.read("collection-overview.csv").decode()
+    # Columns: filename,type,pages,rows,nodes,hash -> the data row's counts are all "0".
+    data_row = body.strip().splitlines()[-1].split(",")
+    assert data_row[2:5] == ["0", "0", "0"]  # pages,rows,nodes are 0, not blank
+    assert ",0,0,0," in body
