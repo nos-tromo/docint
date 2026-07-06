@@ -108,3 +108,15 @@ The 8 files in `media/` belong to postings whose ids (`3748824911910182974_77503
 ### Net
 - **Robustness to large drop-ins: now covered** — aggregated logging, batch-confined resolution, only-present-files linked.
 - **Useful linking on your data still needs:** (2) the correct join key confirmed, and (3) consistent postings/media subsets.
+
+---
+
+## Update — resolution simplified to one flat directory (commit `268fe50`)
+
+Per request, media resolution is now **flat and single-directory**: `postings.csv`, `media.csv`, and every media file live in one directory, and each media row is resolved by *basename within the manifest's own directory*.
+
+- **Removed** the recursive `build_file_index` (`rglob`) and the relative/absolute-path branch of `_resolve_path` — and with them the batch-containment guard (fix B), now unnecessary: only a basename is ever used, looked up only in that one directory, so resolution provably cannot leave it. A new test asserts a basename that exists only in a *different* directory is not ingested.
+- **Kept** the delimiter/BOM sniffing (fix A) and the aggregated skip summary (large drop-ins stay quiet — a full manifest with a handful of present files links only those and logs one line).
+- Net −116 / +70 lines; full suite **963 passing**.
+
+This does not change the two open items above: the media→posting **join key** (2) and **consistent subsets** (3) still determine whether anything actually links on your data.

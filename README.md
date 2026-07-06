@@ -287,10 +287,12 @@ Docint can ingest social-media exports that pair text **postings** with linked
 `Media ID`, and routes each artifact to the right backend — images go through
 CLIP, video/audio are transcribed by Nextext and keyframe-extracted.
 
-**Folder upload.** Use the SPA's folder-upload (directory drag-and-drop). The
-SPA preserves the subdirectory structure, which the backend needs to resolve
-relative media paths from the manifest. Uploading a flat archive of files
-breaks the join.
+**One flat directory.** Put `postings.csv`, `media.csv`, and every referenced
+media file in a **single directory**, and ingest that directory. Media are
+resolved by filename *within that one directory* — no subfolders, and no
+relative or absolute paths in the manifest (only the basename is used) — so a
+file is linked only when it sits directly beside the manifest. Upload it with
+the SPA's folder picker, or point `DATA_PATH` at that directory.
 
 **Linker.** During ingestion, `posting_uuid` is written into every artifact
 node (image embedding, keyframe, Nextext transcript segment). At retrieval

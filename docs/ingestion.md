@@ -29,8 +29,9 @@ The default list lives in `load_ingestion_env()` in
 
 Only the file types listed above are ingested when uploaded standalone; all
 others are silently skipped. Audio and video are instead handled through the
-**social-multimodal** path: drop the raw media files into a social-export
-batch and reference them from the `media.csv` manifest, and docint forwards
+**social-multimodal** path: drop the raw media files into the **same
+directory** as `postings.csv` / `media.csv` and reference them by filename from
+the manifest, and docint forwards
 each clip to a remote [Nextext](https://github.com/nos-tromo/nextext) service
 that transcribes it and extracts keyframes — the transcript is ingested as
 text and the keyframes as CLIP image points (requires `NEXTEXT_API_BASE`; see
