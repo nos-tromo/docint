@@ -157,6 +157,25 @@ describe('Report view — document overview', () => {
     expect(await screen.findByText(/this report is empty/i)).toBeInTheDocument()
   })
 
+  it('shows the empty message (not a blank area) when items are empty and the overview is toggled off', async () => {
+    mockFetch({ ...reportDetail, items: [], item_count: 0, show_collection_overview: false })
+    renderReport()
+    expect(await screen.findByText(/this report is empty/i)).toBeInTheDocument()
+    expect(screen.queryByText('c.pdf')).not.toBeInTheDocument()
+  })
+
+  it('shows the empty message when items are empty and the overview snapshot has no documents', async () => {
+    mockFetch({
+      ...reportDetail,
+      items: [],
+      item_count: 0,
+      collection_overview: { ...overview, documents: [], document_count: 0 }
+    })
+    renderReport()
+    expect(await screen.findByText(/this report is empty/i)).toBeInTheDocument()
+    expect(screen.queryByText('c.pdf')).not.toBeInTheDocument()
+  })
+
   it('reflects show_collection_overview and toggles it via PATCH', async () => {
     renderReport()
     const toggle = await screen.findByRole('checkbox', { name: 'Document overview' })

@@ -100,6 +100,16 @@ export function Report() {
   const report = active.data
   const items = report?.items ?? []
 
+  // Single source of truth for the overview preview: the snapshot to render, or
+  // null. Both the empty-state guard and the render below key off this, so the
+  // guard and the render can never diverge — an overview that is toggled off or
+  // has no documents falls through to the "empty" message, never a blank area.
+  const overviewSnapshot = report?.collection_overview ?? null
+  const overviewToShow =
+    (report?.show_collection_overview ?? true) && overviewSnapshot && overviewSnapshot.documents.length > 0
+      ? overviewSnapshot
+      : null
+
   const onCreate = async () => {
     try {
       const created = await createReport.mutateAsync({
@@ -315,7 +325,7 @@ export function Report() {
               </div>
             </div>
 
-            {items.length === 0 && !report.collection_overview ? (
+            {items.length === 0 && overviewToShow === null ? (
               <p className="text-sm text-muted-foreground">
                 This report is empty. Use the “+ Report” control on a chat answer, entity finding, or
                 hate-speech finding to add it here.
@@ -390,11 +400,7 @@ export function Report() {
                     </div>
                   )
                 })}
-                {(report.show_collection_overview ?? true) &&
-                  report.collection_overview &&
-                  report.collection_overview.documents.length > 0 && (
-                    <CollectionOverviewPreview overview={report.collection_overview} />
-                  )}
+                {overviewToShow && <CollectionOverviewPreview overview={overviewToShow} />}
               </div>
             )}
           </>
