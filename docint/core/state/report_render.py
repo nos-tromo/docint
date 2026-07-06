@@ -82,11 +82,13 @@ def _overview_units(doc: dict[str, Any]) -> str:
 
 
 def _short_hash(value: Any) -> str:
+    """Truncate a file hash to its display prefix ("—" when absent)."""
     text = str(value or "")
     return text[:_HASH_DISPLAY_CHARS] if text else "—"
 
 
 def _overview_file_types(overview: dict[str, Any]) -> str:
+    """Summarize the snapshot's file-type counts as "N Label, …" ("—" when none)."""
     parts = [f"{ft.get('count')} {ft.get('label')}" for ft in (overview.get("file_types") or [])]
     return ", ".join(parts) if parts else "—"
 

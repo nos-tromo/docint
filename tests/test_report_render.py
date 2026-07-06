@@ -539,8 +539,8 @@ def test_overview_omitted_when_empty_snapshot(monkeypatch: pytest.MonkeyPatch) -
     empty: dict[str, Any] = {**_OVERVIEW, "documents": []}
     md = R.render_markdown(_overview_report(collection_overview=empty))
     assert "Document overview" not in md
-    # items empty AND no overview -> the "empty report" copy shows
-    assert R.render_markdown(_overview_report(collection_overview=empty)).strip()
+    # items empty AND no overview -> the "empty report" copy actually renders.
+    assert "This report has no items yet" in md
 
 
 def test_overview_only_report_is_not_empty_and_appears_in_html_toc(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -550,3 +550,21 @@ def test_overview_only_report_is_not_empty_and_appears_in_html_toc(monkeypatch: 
     assert 'id="sec-collection-overview"' in htm
     assert "This report has no items yet" not in htm  # overview counts as content
     assert "#sec-collection-overview" in htm  # TOC entry present
+    assert "0123456789ab" in htm and "0123456789abcdefff" not in htm  # hash truncated to 12
+
+
+def test_overview_renders_after_items_in_markdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The trailing overview section appears after the item sections in output order."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    item = {
+        "id": 1,
+        "artifact_type": "summary",
+        "note": None,
+        "snapshot": {"collection": "c1", "text": "UNIQUE_ITEM_BODY_MARKER"},
+    }
+    md = R.render_markdown(_overview_report(items=[item]))
+    assert "Document overview" in md
+    assert "UNIQUE_ITEM_BODY_MARKER" in md  # the item body rendered …
+    # Match the "## " section heading, not the "- " TOC entry (which precedes the
+    # item body): the guarantee under test is that the overview *section* trails.
+    assert md.index("## Document overview") > md.index("UNIQUE_ITEM_BODY_MARKER")
