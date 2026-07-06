@@ -1,7 +1,7 @@
 """Join a social export's postings table to its media manifest + files.
 
 Pure join logic lives here (counter stripping, set-membership matching,
-recursive file resolution). Routing of resolved media into the modality
+flat basename file resolution). Routing of resolved media into the modality
 pipelines (CLIP / Nextext) lives in :class:`SocialLinker` (Task 10).
 """
 
@@ -86,86 +86,29 @@ def build_posting_index(postings_df: pd.DataFrame) -> dict[str, str]:
     return index
 
 
-def build_file_index(root: Path) -> dict[str, list[Path]]:
-    """Index every file under ``root`` (recursively) by lowercase basename.
-
-    Args:
-        root (Path): The batch tree root.
-
-    Returns:
-        dict[str, list[Path]]: ``{basename_lower: [paths]}`` (sorted per key).
-    """
-    index: dict[str, list[Path]] = {}
-    for path in sorted(root.rglob("*")):
-        if path.is_file():
-            index.setdefault(path.name.lower(), []).append(path)
-    return index
-
-
-def _resolve_path(
-    exported_filename: str,
-    file_index: dict[str, list[Path]],
-    tables_dir: Path,
-    root: Path,
-) -> Path | None:
-    """Resolve an ``Exported media filename`` to a file in the batch tree.
-
-    Prefers a path relative to the tables folder when the value carries one;
-    otherwise matches by basename across the tree, logging on collision.
-    Resolution is confined to the batch tree: a path-branch candidate that
-    resolves outside ``root`` (an absolute path, or a ``../`` escape) is
-    refused rather than returned, falling through to the basename index —
-    which is itself already scoped to ``root`` via :func:`build_file_index`.
-
-    Args:
-        exported_filename (str): The manifest's filename (basename or rel path).
-        file_index (dict[str, list[Path]]): Recursive basename index.
-        tables_dir (Path): Directory holding the manifest (relative-path anchor).
-        root (Path): The batch tree root; path-branch resolution outside this
-            tree is refused.
-
-    Returns:
-        Path | None: The resolved file, or ``None`` when missing.
-    """
-    name = str(exported_filename or "").strip().replace("\\", "/")
-    if not name:
-        return None
-    if "/" in name:
-        candidate = (tables_dir / name).resolve()
-        if candidate.is_file():
-            if candidate.is_relative_to(root.resolve()):
-                return candidate
-            logger.warning("Media reference {!r} resolves outside the batch tree; refusing.", name)
-    matches = file_index.get(Path(name).name.lower(), [])
-    if not matches:
-        return None
-    if len(matches) > 1:
-        logger.warning("Media filename {!r} matched {} files; using {}", name, len(matches), matches[0])
-    return matches[0]
-
-
 def resolve_media_rows(
     media_df: pd.DataFrame,
     posting_uuids: dict[str, str],
-    file_index: dict[str, list[Path]],
-    *,
-    tables_dir: Path,
-    root: Path | None = None,
+    media_dir: Path,
 ) -> list[MediaLink]:
-    """Resolve manifest rows to ``MediaLink``s, skipping orphans and missing files.
+    """Resolve manifest rows to MediaLinks by basename within a single directory.
+
+    Media files must live directly in ``media_dir`` (the manifest's own folder).
+    Only the basename of ``Exported media filename`` is used, matched
+    case-insensitively against the files in ``media_dir`` — no recursion and no
+    relative/absolute path handling, so resolution can never leave ``media_dir``.
+    Orphan rows (no matching posting) and rows with no local file are counted and
+    reported once, not logged per row (a full manifest may have tens of thousands).
 
     Args:
         media_df (pd.DataFrame): Manifest with ``Media ID`` + ``Exported media filename``.
         posting_uuids (dict[str, str]): ``Posting ID → UUID`` from the postings table.
-        file_index (dict[str, list[Path]]): Recursive basename index.
-        tables_dir (Path): Manifest directory (relative-path anchor).
-        root (Path | None): Batch tree root that resolution must stay within;
-            defaults to ``tables_dir`` when omitted.
+        media_dir (Path): The single flat directory holding the media files.
 
     Returns:
         list[MediaLink]: One per row whose posting is known and file exists.
     """
-    effective_root = root if root is not None else tables_dir
+    present = {p.name.lower(): p for p in media_dir.iterdir() if p.is_file()}
     links: list[MediaLink] = []
     orphan_skips = 0
     missing_skips = 0
@@ -178,7 +121,8 @@ def resolve_media_rows(
         if uuid is None:
             orphan_skips += 1
             continue
-        path = _resolve_path(str(row.get("Exported media filename") or ""), file_index, tables_dir, root=effective_root)
+        name = Path(str(row.get("Exported media filename") or "").strip().replace("\\", "/")).name
+        path = present.get(name.lower()) if name else None
         if path is None:
             missing_skips += 1
             continue
@@ -283,8 +227,7 @@ class SocialLinker:
             pd.read_csv(postings_csv, sep=_sniff_delimiter(postings_csv), dtype=str, encoding="utf-8-sig")
         )
         media_df = pd.read_csv(media_csv, sep=_sniff_delimiter(media_csv), dtype=str, encoding="utf-8-sig")
-        file_index = build_file_index(data_dir)
-        links = resolve_media_rows(media_df, posting_uuids, file_index, tables_dir=media_csv.parent, root=data_dir)
+        links = resolve_media_rows(media_df, posting_uuids, media_csv.parent)
 
         result.consumed_paths.add(media_csv)
         context = IngestContext(source_collection=self.target_collection)

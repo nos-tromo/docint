@@ -78,6 +78,10 @@ class _FakeNextext:
 def _write_export(root: Path) -> None:
     """Write a minimal social export tree under *root* for testing.
 
+    Under the flat single-directory contract, ``postings.csv``, ``media.csv``,
+    and every referenced media file live directly in *root* — there is no
+    ``tables/``/``media/`` split.
+
     The fixture includes a ``comments.csv`` that contains both ``UUID`` and
     ``Posting ID`` columns to guard against subset-collision with the postings
     profile detection — it must NOT be misdetected as the postings table.
@@ -85,8 +89,6 @@ def _write_export(root: Path) -> None:
     Args:
         root: Temporary directory in which to create the export.
     """
-    (root / "tables").mkdir(parents=True)
-    (root / "media").mkdir()
     # Full 25-column postings profile — exact-match required by _find_tables.
     postings_cols = [
         "UUID",
@@ -119,17 +121,17 @@ def _write_export(root: Path) -> None:
     postings_data["UUID"] = ["u1", "u2"]
     postings_data["Posting ID"] = ["P_1", "P_2"]
     postings_data["Text Content"] = ["a", "b"]
-    pd.DataFrame(postings_data).to_csv(root / "tables" / "postings.csv", index=False)
+    pd.DataFrame(postings_data).to_csv(root / "postings.csv", index=False)
     pd.DataFrame({"Media ID": ["P_1_0", "P_2_0"], "Exported media filename": ["pic.jpg", "clip.mp4"]}).to_csv(
-        root / "tables" / "media.csv", index=False
+        root / "media.csv", index=False
     )
     # comments.csv contains UUID + Posting ID but is NOT the full postings header set;
     # it must NOT be misdetected as the postings table (guards subset-collision regression).
     pd.DataFrame({"UUID": ["c1"], "Posting ID": ["P_1"], "Text Content": ["comment text"]}).to_csv(
-        root / "tables" / "comments.csv", index=False
+        root / "comments.csv", index=False
     )
-    (root / "media" / "pic.jpg").write_bytes(b"\xff\xd8\xff")
-    (root / "media" / "clip.mp4").write_bytes(b"video")
+    (root / "pic.jpg").write_bytes(b"\xff\xd8\xff")
+    (root / "clip.mp4").write_bytes(b"video")
 
 
 def test_run_routes_image_and_video_and_links(tmp_path: Path) -> None:
@@ -296,26 +298,26 @@ def _write_semicolon_postings(root: Path, media_rows: dict[str, str]) -> None:
     ``u1``/``P_1`` and ``u2``/``P_2``) but serializes both tables with ``;``
     as the delimiter and a UTF-8 BOM, matching real social-platform exports,
     so tests can exercise delimiter sniffing end to end. Each test supplies
-    its own media manifest rows.
+    its own media manifest rows. Both CSVs are written directly in *root*,
+    matching the flat single-directory contract; callers are responsible for
+    placing any referenced media files directly in *root* as well.
 
     Args:
         root: Temporary directory in which to create the export.
         media_rows: Mapping of ``Media ID`` to ``Exported media filename``
             for the media manifest.
     """
-    (root / "tables").mkdir(parents=True)
-    (root / "media").mkdir()
     postings_data = {col: ["", ""] for col in _SEMICOLON_POSTINGS_COLUMNS}
     postings_data["UUID"] = ["u1", "u2"]
     postings_data["Posting ID"] = ["P_1", "P_2"]
     postings_data["Text Content"] = ["a", "b"]
-    pd.DataFrame(postings_data).to_csv(root / "tables" / "postings.csv", index=False, sep=";", encoding="utf-8-sig")
+    pd.DataFrame(postings_data).to_csv(root / "postings.csv", index=False, sep=";", encoding="utf-8-sig")
     pd.DataFrame(
         {
             "Media ID": list(media_rows.keys()),
             "Exported media filename": list(media_rows.values()),
         }
-    ).to_csv(root / "tables" / "media.csv", index=False, sep=";", encoding="utf-8-sig")
+    ).to_csv(root / "media.csv", index=False, sep=";", encoding="utf-8-sig")
 
 
 def test_run_detects_semicolon_delimited_export(tmp_path: Path) -> None:
@@ -328,7 +330,7 @@ def test_run_detects_semicolon_delimited_export(tmp_path: Path) -> None:
     (which are semicolon-delimited with a UTF-8 BOM).
     """
     _write_semicolon_postings(tmp_path, {"P_1_0": "pic.jpg"})
-    (tmp_path / "media" / "pic.jpg").write_bytes(b"\xff\xd8\xff")
+    (tmp_path / "pic.jpg").write_bytes(b"\xff\xd8\xff")
     img = _FakeImageService()
     result = SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c").run(tmp_path)
 
@@ -350,8 +352,8 @@ def test_run_links_only_present_media(tmp_path: Path) -> None:
         tmp_path,
         {"P_1_0": "pic.jpg", "P_2_0": "clip.mp4", "P_1_1": "missing.jpg"},
     )
-    (tmp_path / "media" / "pic.jpg").write_bytes(b"\xff\xd8\xff")
-    (tmp_path / "media" / "clip.mp4").write_bytes(b"video")
+    (tmp_path / "pic.jpg").write_bytes(b"\xff\xd8\xff")
+    (tmp_path / "clip.mp4").write_bytes(b"video")
     img = _FakeImageService()
     result = SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c").run(tmp_path)
 
@@ -363,15 +365,16 @@ def test_run_links_only_present_media(tmp_path: Path) -> None:
     assert "missing.jpg" not in consumed_names
 
 
-def test_resolve_refuses_out_of_batch_reference(tmp_path: Path) -> None:
-    """An absolute or ``../`` manifest path outside the batch tree is refused.
+def test_run_skips_absolute_or_traversal_media_reference(tmp_path: Path) -> None:
+    """An absolute or ``../`` manifest filename collapses to its basename and is not found.
 
-    Security regression guard: ``_resolve_path``'s path branch had no
-    containment check, so a manifest row's ``Exported media filename`` could
-    point anywhere on the filesystem — an absolute path, or a ``../`` escape
-    — and the linker would happily ingest it. Both shapes must now be
-    refused and fall through to (and fail) the basename lookup, which is
-    itself scoped to the batch tree.
+    Regression guard, updated for the flat single-directory model: resolution
+    now only ever looks up ``Path(filename).name`` inside the manifest's own
+    directory — there is no path-branch handling and thus nothing that needs
+    a containment check. An absolute path and a ``../`` traversal both
+    collapse to the same basename (``secret.jpg``); since the real file lives
+    outside the batch directory and no ``secret.jpg`` exists directly inside
+    it, both rows are skipped rather than ingested.
     """
     outside_dir = tmp_path / "outside"
     outside_dir.mkdir(parents=True)
@@ -386,7 +389,7 @@ def test_resolve_refuses_out_of_batch_reference(tmp_path: Path) -> None:
     postings_data["Text Content"] = ["a", "b"]
     pd.DataFrame(postings_data).to_csv(batch / "postings.csv", index=False, sep=";", encoding="utf-8-sig")
     # One row escapes via an absolute path, the other via a "../" traversal;
-    # both point at the same real file living outside the batch tree.
+    # both point at the same real file living outside the batch directory.
     pd.DataFrame(
         {
             "Media ID": ["P_1_0", "P_2_0"],
