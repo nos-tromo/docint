@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 from docint.core.ingest.social_linker import (
+    _derive_posting_id,
     build_posting_index,
     resolve_media_rows,
     strip_counter,
@@ -97,3 +98,38 @@ def test_resolve_media_rows_aggregates_skips_for_large_manifest(tmp_path: Path) 
     assert len(lines) == 1
     assert lines[0].startswith("INFO|")
     assert "media linked" in lines[0]
+
+
+def test_derive_posting_id_prefers_network_id() -> None:
+    """The Network ID column is the join key when it names a known posting."""
+    posting_uuids = {"POST_1": "uuid-1"}
+    # strip_counter(Media ID) would yield the wrong id here; Network ID is correct.
+    assert _derive_posting_id("POST_1", "ALBUM_9_POST_1_ACCT", posting_uuids) == "POST_1"
+
+
+def test_derive_posting_id_falls_back_to_media_id_then_strip_counter() -> None:
+    """Falls back to the raw Media ID, then strip_counter(Media ID); None if neither."""
+    posting_uuids = {"POST_1": "uuid-1"}
+    assert _derive_posting_id("", "POST_1", posting_uuids) == "POST_1"  # raw Media ID == Posting ID
+    assert _derive_posting_id("", "POST_1_0", posting_uuids) == "POST_1"  # <Posting ID>_<counter>
+    assert _derive_posting_id("NOPE", "ALSO_NOPE", posting_uuids) is None
+
+
+def test_resolve_media_rows_links_via_network_id(tmp_path: Path) -> None:
+    """A row whose Network ID (not strip_counter) matches a posting links correctly."""
+    (tmp_path / "clip.jpg").write_bytes(b"\xff\xd8\xff")
+    postings = pd.DataFrame({"Posting ID": ["3745_779"], "UUID": ["uuid-1"]})
+    # Media ID is <album>_<posting>_<account>: strip_counter -> "18525_3745" (wrong);
+    # the true parent Posting ID is carried in Network ID.
+    media = pd.DataFrame(
+        {
+            "Media ID": ["18525_3745_779"],
+            "Network ID": ["3745_779"],
+            "Exported media filename": ["clip.jpg"],
+        }
+    )
+    links = resolve_media_rows(media, build_posting_index(postings), tmp_path)
+    assert len(links) == 1
+    assert links[0].posting_uuid == "uuid-1"
+    assert links[0].posting_id == "3745_779"
+    assert links[0].media_id == "18525_3745_779"

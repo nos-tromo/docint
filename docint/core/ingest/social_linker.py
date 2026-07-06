@@ -86,6 +86,32 @@ def build_posting_index(postings_df: pd.DataFrame) -> dict[str, str]:
     return index
 
 
+def _derive_posting_id(network_id: str, media_id: str, posting_uuids: dict[str, str]) -> str | None:
+    """Return the parent posting id for a media row, or ``None`` when unknown.
+
+    Social exports encode the media→posting link differently, so try the known
+    candidates in order and return the first that names a posting present in
+    ``posting_uuids``:
+
+    1. ``Network ID`` — a dedicated column that holds the parent ``Posting ID``
+       (the common case; e.g. the AfD/Meta-style exports).
+    2. the raw ``Media ID`` — some exports set it equal to the ``Posting ID``.
+    3. ``strip_counter(Media ID)`` — for ``<Posting ID>_<counter>`` media ids.
+
+    Args:
+        network_id (str): The row's ``Network ID`` value (may be empty).
+        media_id (str): The row's ``Media ID`` value.
+        posting_uuids (dict[str, str]): Known ``Posting ID → UUID`` mapping.
+
+    Returns:
+        str | None: The matched posting id, or ``None`` if no candidate is known.
+    """
+    for candidate in (network_id, media_id, strip_counter(media_id)):
+        if candidate and candidate in posting_uuids:
+            return candidate
+    return None
+
+
 def resolve_media_rows(
     media_df: pd.DataFrame,
     posting_uuids: dict[str, str],
@@ -116,11 +142,12 @@ def resolve_media_rows(
         media_id = str(row.get("Media ID") or "").strip()
         if not media_id:
             continue
-        posting_id = strip_counter(media_id)
-        uuid = posting_uuids.get(posting_id)
-        if uuid is None:
+        network_id = str(row.get("Network ID") or "").strip()
+        posting_id = _derive_posting_id(network_id, media_id, posting_uuids)
+        if posting_id is None:
             orphan_skips += 1
             continue
+        uuid = posting_uuids[posting_id]
         name = Path(str(row.get("Exported media filename") or "").strip().replace("\\", "/")).name
         path = present.get(name.lower()) if name else None
         if path is None:
