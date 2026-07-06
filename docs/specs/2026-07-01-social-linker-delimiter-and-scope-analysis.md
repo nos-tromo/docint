@@ -85,3 +85,26 @@ Implemented in commit **`d68c2ff`** — `fix(social): sniff CSV delimiter (;/BOM
 - `tests/test_social_linker_routing.py` + `tests/test_social_linker_join.py`: 9 passed.
 - Full suite: **961 passed** (958 baseline + 3), one pre-existing unrelated deprecation warning.
 - `ruff check .`, `ruff format --check .`, `pyrefly check` (project-wide), and `pre-commit run --all-files`: all clean.
+
+---
+
+## Addendum — "robust to large `media.csv` drop-ins with only a few referenced files"
+
+Ran the fixed linker against the real batch (73,969-row manifest, 8 files present). Three findings.
+
+### 1. Log-volume robustness — FIXED (commit `41b7b27`)
+`resolve_media_rows` logged one line per skipped row → **73,969 log lines** on the real data (~4.2s, all "orphan" here). Now aggregated into a single `INFO` summary: *"Social linker: N media linked, M skipped (… no matching posting, … no local file) across R rows."* New test `test_resolve_media_rows_aggregates_skips_for_large_manifest` asserts one summary, not per-row. Combined with the batch-containment guard (fix B) and basename index (scoped to the batch), the large-drop-in shape is now handled: only files physically in the batch can ever be ingested, and skips don't flood the logs.
+
+### 2. The join key is wrong for this export → **0 links** on your data
+The linker derives the posting id as `strip_counter(Media ID)` (strip a trailing `_<digits>`) and matches it against `Posting ID`. In this export:
+- `Posting ID` = `<postingId>_<accountId>` (e.g. `3847537156143369215_77503905789`).
+- `Media ID` = `[<albumId>_]<postingId>_<accountId>` — so `strip_counter` strips the **account** (the wrong end) and never matches.
+- Measured: raw `Media ID` equals a `Posting ID` in **138** rows, and **`Network ID` equals a `Posting ID` in 138 rows** — i.e. the true media→posting key here is `Network ID` (or the raw `Media ID`), **not** `strip_counter(Media ID)`. Over the full manifest, `strip_counter` yields **0** links.
+- **Recommendation (needs confirmation — this is a join-semantics/export-format decision):** key media→posting on `Network ID` (fallback: raw `Media ID`), or make the key column part of a per-export profile. Deliberately **not** changed unilaterally: it alters the documented join contract and could affect other export formats.
+
+### 3. The reduced subsets are inconsistent → the 8 copied files can't link regardless
+The 8 files in `media/` belong to postings whose ids (`3748824911910182974_77503905789`, …) are **not** among the 138 rows in `postings.csv`. Even with the correct join key, they have no parent posting in the batch. **Data-side fix:** reduce `postings.csv` and `media.csv` to the *same* postings — keep the postings that own the copied media (or copy media belonging to the kept postings).
+
+### Net
+- **Robustness to large drop-ins: now covered** — aggregated logging, batch-confined resolution, only-present-files linked.
+- **Useful linking on your data still needs:** (2) the correct join key confirmed, and (3) consistent postings/media subsets.
