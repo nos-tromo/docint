@@ -1,9 +1,11 @@
 import { Button } from '@infra/ui'
 import { reportExportHref } from '@/api/reports'
 import type { ArtifactType, ReportExportFormat, ReportItem } from '@/api/types'
+import { CollectionOverviewPreview } from '@/components/report/CollectionOverviewPreview'
 import {
   useCreateReport,
   useDeleteReport,
+  useRefreshCollectionOverview,
   useRemoveReportItem,
   useReorderReportItems,
   useReport,
@@ -93,6 +95,7 @@ export function Report() {
   const removeItem = useRemoveReportItem()
   const reorderItems = useReorderReportItems()
   const updateItem = useUpdateReportItem()
+  const refreshOverview = useRefreshCollectionOverview()
 
   const report = active.data
   const items = report?.items ?? []
@@ -256,6 +259,32 @@ export function Report() {
                     />
                     <span className="uppercase tracking-wide">Table of contents</span>
                   </label>
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={report.show_collection_overview ?? true}
+                      onChange={(e) =>
+                        updateReport.mutate({ id: report.id, show_collection_overview: e.target.checked })
+                      }
+                      className="accent-primary"
+                      aria-label="Document overview"
+                    />
+                    <span className="uppercase tracking-wide">Document overview</span>
+                  </label>
+                  {(report.show_collection_overview ?? true) && (
+                    <button
+                      type="button"
+                      onClick={() => refreshOverview.mutate(report.id)}
+                      disabled={refreshOverview.isPending}
+                      className="text-xs text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground disabled:opacity-50"
+                    >
+                      {refreshOverview.isPending
+                        ? 'Refreshing…'
+                        : report.collection_overview?.captured_at
+                          ? `Refresh overview (captured ${report.collection_overview.captured_at.slice(0, 10)})`
+                          : 'Capture overview'}
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -286,7 +315,7 @@ export function Report() {
               </div>
             </div>
 
-            {items.length === 0 ? (
+            {items.length === 0 && !report.collection_overview ? (
               <p className="text-sm text-muted-foreground">
                 This report is empty. Use the “+ Report” control on a chat answer, entity finding, or
                 hate-speech finding to add it here.
@@ -361,6 +390,11 @@ export function Report() {
                     </div>
                   )
                 })}
+                {(report.show_collection_overview ?? true) &&
+                  report.collection_overview &&
+                  report.collection_overview.documents.length > 0 && (
+                    <CollectionOverviewPreview overview={report.collection_overview} />
+                  )}
               </div>
             )}
           </>
