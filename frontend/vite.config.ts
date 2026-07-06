@@ -17,6 +17,7 @@ export default defineConfig({
     proxy: {
       '/collections': 'http://localhost:8000',
       '/config': 'http://localhost:8000',
+      '/version': 'http://localhost:8000',
       '/sessions': 'http://localhost:8000',
       '/reports': 'http://localhost:8000',
       '/sources': 'http://localhost:8000',
@@ -24,7 +25,8 @@ export default defineConfig({
       '/stream_query': 'http://localhost:8000',
       '/summarize': 'http://localhost:8000',
       '/ingest': 'http://localhost:8000',
-      '/agent': 'http://localhost:8000'
+      '/agent': 'http://localhost:8000',
+      '/translate': 'http://localhost:8000'
     }
   },
   test: {

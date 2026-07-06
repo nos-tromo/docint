@@ -11,7 +11,11 @@ export function useDocumentsPages() {
   return useInfiniteQuery({
     queryKey: ['documents-pages', collection],
     queryFn: ({ pageParam }) =>
-      getDocumentsPage({ cursor: pageParam as string | null, limit: 50 }),
+      getDocumentsPage({
+        cursor: pageParam as string | null,
+        limit: 50,
+        collection: collection ?? undefined
+      }),
     initialPageParam: null as string | null,
     getNextPageParam: (last) => last.next_cursor,
     enabled: !!collection
@@ -27,7 +31,7 @@ export function useDocumentsCount() {
   const collection = useUiStore((s) => s.selectedCollection)
   return useQuery({
     queryKey: ['documents-count', collection],
-    queryFn: getDocumentsCount,
+    queryFn: () => getDocumentsCount(collection ?? undefined),
     enabled: !!collection
   })
 }

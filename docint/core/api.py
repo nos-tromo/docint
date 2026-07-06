@@ -6,6 +6,7 @@ import io
 import json
 import zipfile
 from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -26,6 +27,7 @@ from pydantic import BaseModel, Field
 from qdrant_client import models
 from starlette.middleware.cors import CORSMiddleware
 
+from docint import __version__
 from docint.agents import (
     AgentOrchestrator,
     ClarificationConfig,
@@ -43,6 +45,7 @@ from docint.cli import ingest as ingest_module
 from docint.core.auth.principal import resolve_principal
 from docint.core.rag import RAG, EmptyIngestionError
 from docint.core.retrieval_filters import build_metadata_filters, build_qdrant_filter
+from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.env_cfg import (
     load_frontend_env,
@@ -52,6 +55,7 @@ from docint.utils.env_cfg import (
 )
 from docint.utils.hashing import compute_file_hash
 from docint.utils.logger_cfg import init_logger
+from docint.utils.translate_client import translate
 
 # Names re-exported for test monkey-patching. pyrefly treats these as
 # private re-exports without an explicit ``__all__``.
@@ -187,6 +191,87 @@ def _require_active_collection() -> str:
             detail=(f"Collection '{name}' no longer exists. Please select another collection."),
         )
     return name
+
+
+def _require_owned_collection(logical_name: str, principal: str) -> str:
+    """Resolve a caller-owned logical collection to its physical Qdrant name.
+
+    The single ownership gate for collection-scoped endpoints. It mirrors
+    :func:`_get_owned_report`: a collection the caller does not own (or that
+    does not exist) is indistinguishable from "not found" (HTTP 404), so one
+    user's collection names never leak to another.
+
+    Args:
+        logical_name (str): The user-visible collection name from the request.
+        principal (str): The resolved calling principal.
+
+    Returns:
+        str: The physical (owner-namespaced) Qdrant collection name to use.
+
+    Raises:
+        HTTPException: 400 if the name is blank; 404 if the caller does not own it.
+    """
+    name = (logical_name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Collection name required")
+    physical = rag.ensure_collection_owner_manager().resolve(principal, name)
+    if physical is None:
+        raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
+    return physical
+
+
+def _resolve_request_collection(collection: str | None, principal: str) -> str:
+    """Resolve a collection-scoped request to its physical Qdrant name.
+
+    The single resolver for the read/query and analysis/export endpoints. When
+    the caller supplies an explicit logical ``collection`` it is owner-gated via
+    :func:`_require_owned_collection` (404 when not owned or missing) and its
+    physical name returned. When omitted, it falls back to the process-default
+    active collection (validated by :func:`_require_active_collection`).
+
+    Clients should pass ``collection`` explicitly — it is the only owner-gated,
+    concurrency-safe path. The fallback exists for single-collection CLI-style
+    use and pre-multi-tenant clients; it reads the process default and is not
+    owner-scoped, so it returns nothing useful once ``/collections/select`` no
+    longer mutates global state (real multi-user deployments always pass it).
+
+    Args:
+        collection (str | None): The caller's logical collection name, if any.
+        principal (str): The resolved calling principal.
+
+    Returns:
+        str: The physical (owner-namespaced) Qdrant collection name.
+
+    Raises:
+        HTTPException: 400 when neither a collection nor a default is available;
+            404 when the caller does not own the named collection.
+    """
+    if collection:
+        return _require_owned_collection(collection, principal)
+    return _require_active_collection()
+
+
+@contextmanager
+def _scoped_collection(collection: str | None, principal: str) -> Iterator[str]:
+    """Resolve + owner-gate a request collection and bind it for the engine.
+
+    Combines :func:`_resolve_request_collection` with
+    :meth:`docint.core.rag.RAG.collection_scope` so every ``rag`` call inside
+    the block (and any anyio worker thread it spawns) reads the request's own
+    physical collection rather than a shared global. Use this for synchronous,
+    non-streaming endpoints; streaming endpoints must open the scope *inside*
+    their event generator so it stays active while the body is consumed.
+
+    Args:
+        collection (str | None): The caller's logical collection name, if any.
+        principal (str): The resolved calling principal.
+
+    Yields:
+        str: The resolved physical collection name.
+    """
+    physical = _resolve_request_collection(collection, principal)
+    with rag.collection_scope(physical):
+        yield physical
 
 
 def _resolve_qdrant_src_dir() -> Path:
@@ -514,6 +599,11 @@ class QueryIn(BaseModel):
 
     question: str
     session_id: str | None = None
+    # Caller's *logical* collection name. When provided it is owner-gated and
+    # resolved to the per-request physical collection, so concurrent queries on
+    # different collections never interfere. When omitted, the server falls back
+    # to its process-default active collection (legacy single-collection use).
+    collection: str | None = None
     metadata_filters: list[MetadataFilterIn] = Field(default_factory=list)
     retrieval_mode: Literal["session", "stateless"] = "session"
     query_mode: Literal["answer", "entity_occurrence", "entity_occurrence_multi"] = "answer"
@@ -622,11 +712,21 @@ class FrontendConfigOut(BaseModel):
     collection_timeout: int
 
 
+class VersionOut(BaseModel):
+    """App release version."""
+
+    version: str
+
+
 class AgentChatIn(BaseModel):
     """Request payload for a single agent chat turn."""
 
     message: str
     session_id: str | None = None
+    # Caller's *logical* collection name; owner-gated and resolved to the
+    # per-request physical collection. Falls back to the process default when
+    # omitted (legacy single-collection use).
+    collection: str | None = None
 
 
 class AgentChatOut(BaseModel):
@@ -675,6 +775,12 @@ class ReportItemIn(BaseModel):
     note: str | None = None
 
 
+class TranslateIn(BaseModel):
+    """Request payload for on-demand snippet translation."""
+
+    text: str
+
+
 class ReportItemNoteIn(BaseModel):
     """Request payload setting or clearing an item note."""
 
@@ -716,70 +822,92 @@ def get_frontend_config() -> dict[str, int]:
     }
 
 
+@app.get("/version", response_model=VersionOut, tags=["Meta"])
+def get_version() -> VersionOut:
+    """Return the running app version (unauthenticated, no principal)."""
+    return VersionOut(version=__version__)
+
+
 @app.get("/collections/list", response_model=list[str], tags=["Collections"])
-def collections_list() -> list[str]:
-    """List existing collections.
+def collections_list(principal: str = Depends(resolve_principal)) -> list[str]:
+    """List the calling principal's collections (logical names).
+
+    Collections are owner-scoped: a caller only sees the collections they
+    ingested themselves. Names are the user-visible logical names, not the
+    owner-namespaced physical Qdrant names.
+
+    Args:
+        principal (str): The resolved request principal.
 
     Returns:
-        list[str]: A list of collection names.
+        list[str]: The caller's collection names, sorted.
 
     Raises:
         HTTPException: If an error occurs while listing collections.
     """
     try:
-        return rag.list_collections()
+        return rag.ensure_collection_owner_manager().list_for(principal)
     except Exception as e:
         logger.error("HTTPException: Error listing collections: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/collections/select", response_model=SelectCollectionOut, tags=["Collections"])
-def collections_select(payload: SelectCollectionIn) -> dict[str, bool | str]:
-    """Select a collection to use for queries.
+def collections_select(
+    payload: SelectCollectionIn, principal: str = Depends(resolve_principal)
+) -> dict[str, bool | str]:
+    """Validate that the caller owns a collection (non-mutating).
+
+    This endpoint no longer changes any server-side state: selection is purely a
+    client concern (the SPA keeps the chosen collection locally and sends it on
+    each request via the ``collection`` field). It exists only as an ownership
+    check — 200 with the name when the caller owns it, 404 otherwise — so a UI
+    can confirm a selection without leaking another user's collections. Making
+    it stateless is what allows concurrent users on different collections to
+    stop clobbering each other (the WS2 fix).
 
     Args:
         payload (SelectCollectionIn): The payload containing the collection name.
+        principal (str): The resolved request principal.
 
     Returns:
-        dict[str, bool | str]: A dictionary indicating success and the selected collection name.
+        dict[str, bool | str]: ``{"ok": True, "name": <logical>}`` when owned.
 
     Raises:
-        HTTPException: 400 if the collection name is missing, 404 if the
-            collection does not exist, 500 for any other backend failure.
+        HTTPException: 400 if the collection name is missing, 404 if the caller
+            does not own it.
     """
     name = payload.name.strip()
-    if not name:
-        logger.error("HTTPException: Collection name required")
-        raise HTTPException(status_code=400, detail="Collection name required")
-    try:
-        rag.select_collection(name)
-    except HTTPException:
-        raise
-    except ValueError as e:
-        logger.error("Collection '{}' could not be selected: {}", name, e)
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except Exception as e:
-        logger.error("Unexpected error selecting collection '{}': {}", name, e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    _require_owned_collection(name, principal)
     return {"ok": True, "name": name}
 
 
 @app.delete("/collections/{name}", tags=["Collections"])
-def collections_delete(name: str) -> dict[str, bool]:
-    """Delete a collection.
+def collections_delete(name: str, principal: str = Depends(resolve_principal)) -> dict[str, bool]:
+    """Delete a collection the caller owns.
+
+    Deleting a collection the caller does not own (or one that does not exist)
+    is a 404, so a user can never delete another user's data. The Qdrant
+    collection is dropped first; only then is the ownership mapping removed, so
+    a failed Qdrant delete leaves ownership intact for retry.
 
     Args:
-        name (str): The name of the collection to delete.
+        name (str): The user-visible collection name to delete.
+        principal (str): The resolved request principal.
 
     Returns:
         dict[str, bool]: A dictionary indicating success.
 
     Raises:
-        HTTPException: If an error occurs while deleting the collection.
+        HTTPException: 404 if the caller does not own it; 500 on backend failure.
     """
+    physical = _require_owned_collection(name, principal)
     try:
-        rag.delete_collection(name)
+        rag.delete_collection(physical)
+        rag.ensure_collection_owner_manager().delete(principal, name)
         return {"ok": True}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("HTTPException: Error deleting collection: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -801,7 +929,8 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
         HTTPException: If an error occurs while processing the query.
     """
     try:
-        _require_active_collection()
+        principal = resolve_principal(request)
+        physical = _resolve_request_collection(payload.collection, principal)
 
         metadata_filters = build_metadata_filters(payload.metadata_filters)
         vector_store_kwargs = {}
@@ -809,61 +938,64 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
         if qdrant_filter is not None:
             vector_store_kwargs["qdrant_filters"] = qdrant_filter
 
-        if payload.query_mode in {"entity_occurrence", "entity_occurrence_multi"}:
-            if payload.query_mode == "entity_occurrence_multi":
-                data = rag.run_multi_entity_occurrence_query(
-                    payload.question,
-                    qdrant_filter=qdrant_filter,
-                )
-            else:
-                data = rag.run_entity_occurrence_query(
-                    payload.question,
-                    qdrant_filter=qdrant_filter,
-                )
-            session_id = payload.session_id or "stateless"
-        else:
-            if getattr(rag, "query_engine", None) is None:
-                if getattr(rag, "index", None) is None:
-                    rag.create_index()
-                rag.create_query_engine()
-
-            if payload.retrieval_mode == "stateless":
-                retrieval_query = payload.question
-                graph_debug: dict[str, Any] | None = None
-                expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
-                if callable(expand_with_debug):
-                    try:
-                        expanded, debug_payload = cast("tuple[Any, Any]", expand_with_debug(retrieval_query))
-                        retrieval_query = str(expanded)
-                        if isinstance(debug_payload, dict):
-                            graph_debug = debug_payload
-                    except Exception as exc:
-                        logger.warning(
-                            "Graph debug expansion failed for stateless query: {}",
-                            exc,
-                        )
-
-                data = rag.run_query(
-                    retrieval_query,
-                    metadata_filters=metadata_filters,
-                    metadata_filter_rules=payload.metadata_filters,
-                    vector_store_kwargs=vector_store_kwargs or None,
-                )
-                if graph_debug is not None:
-                    data["graph_debug"] = graph_debug
+        with rag.collection_scope(physical):
+            if payload.query_mode in {"entity_occurrence", "entity_occurrence_multi"}:
+                if payload.query_mode == "entity_occurrence_multi":
+                    data = rag.run_multi_entity_occurrence_query(
+                        payload.question,
+                        qdrant_filter=qdrant_filter,
+                    )
+                else:
+                    data = rag.run_entity_occurrence_query(
+                        payload.question,
+                        qdrant_filter=qdrant_filter,
+                    )
                 session_id = payload.session_id or "stateless"
             else:
-                session_id = rag.start_session(
-                    payload.session_id,
-                    owner=resolve_principal(request),
-                )
-                data = rag.chat(
-                    payload.question,
-                    metadata_filters=metadata_filters,
-                    metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
-                    metadata_filter_rules=payload.metadata_filters,
-                    vector_store_kwargs=vector_store_kwargs or None,
-                )
+                if getattr(rag, "query_engine", None) is None:
+                    if getattr(rag, "index", None) is None:
+                        rag.create_index()
+                    rag.create_query_engine()
+
+                if payload.retrieval_mode == "stateless":
+                    retrieval_query = payload.question
+                    graph_debug: dict[str, Any] | None = None
+                    expand_with_debug = getattr(rag, "expand_query_with_graph_with_debug", None)
+                    if callable(expand_with_debug):
+                        try:
+                            expanded, debug_payload = cast("tuple[Any, Any]", expand_with_debug(retrieval_query))
+                            retrieval_query = str(expanded)
+                            if isinstance(debug_payload, dict):
+                                graph_debug = debug_payload
+                        except Exception as exc:
+                            logger.warning(
+                                "Graph debug expansion failed for stateless query: {}",
+                                exc,
+                            )
+
+                    data = rag.run_query(
+                        retrieval_query,
+                        metadata_filters=metadata_filters,
+                        metadata_filter_rules=payload.metadata_filters,
+                        vector_store_kwargs=vector_store_kwargs or None,
+                    )
+                    if graph_debug is not None:
+                        data["graph_debug"] = graph_debug
+                    session_id = payload.session_id or "stateless"
+                else:
+                    session_id = rag.start_session(
+                        payload.session_id,
+                        owner=principal,
+                    )
+                    data = rag.chat(
+                        payload.question,
+                        session_id=session_id,
+                        owner=principal,
+                        metadata_filters=metadata_filters,
+                        metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
+                        metadata_filter_rules=payload.metadata_filters,
+                        vector_store_kwargs=vector_store_kwargs or None,
+                    )
 
         answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
         sources: list[dict[str, Any]] = data.get("sources", []) if isinstance(data, dict) else []
@@ -926,6 +1058,8 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
         }
     except HTTPException:
         raise
+    except SessionCollectionMismatchError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("Unexpected error processing query: {}", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -946,7 +1080,8 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
     Raises:
         HTTPException: If an error occurs while processing the streaming query.
     """
-    _require_active_collection()
+    principal = resolve_principal(request)
+    physical = _resolve_request_collection(payload.collection, principal)
 
     metadata_filters = build_metadata_filters(payload.metadata_filters)
     vector_store_kwargs = {}
@@ -954,21 +1089,29 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
     if qdrant_filter is not None:
         vector_store_kwargs["qdrant_filters"] = qdrant_filter
 
-    if (
-        payload.query_mode not in {"entity_occurrence", "entity_occurrence_multi"}
-        and getattr(rag, "index", None) is None
-    ):
-        await to_thread.run_sync(rag.create_index)
-
     session_owner: str | None = None
     if (
         payload.query_mode not in {"entity_occurrence", "entity_occurrence_multi"}
         and payload.retrieval_mode != "stateless"
     ):
-        session_owner = resolve_principal(request)
+        session_owner = principal
+        # Up-front collection-pin check so a mismatch is a clean 409 rather than
+        # an in-stream SSE error: resuming an owned session against a different
+        # collection must be refused before any retrieval runs.
+        if payload.session_id:
+            pinned = rag.ensure_session_manager().get_session_collection(payload.session_id, session_owner)
+            if pinned is not None and pinned != physical:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Session '{payload.session_id}' is pinned to a different collection.",
+                )
 
-    async def event_generator() -> AsyncIterator[str]:
+    async def _stream_body() -> AsyncIterator[str]:
         """Generate SSE events for the streaming query.
+
+        Runs inside the request's :meth:`RAG.collection_scope` (opened by the
+        ``event_generator`` wrapper) so every retrieval/generation call resolves
+        the caller's own physical collection.
 
         Returns:
             AsyncIterator[str]: An asynchronous iterator yielding SSE events.
@@ -1083,6 +1226,8 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
                         "Iterator[Any]",
                         rag.stream_chat(
                             payload.question,
+                            session_id=session_id,
+                            owner=session_owner,
                             metadata_filters=metadata_filters,
                             metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
                             metadata_filter_rules=payload.metadata_filters,
@@ -1166,6 +1311,26 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
             logger.exception("Stream error during SSE generation")
             yield f"data: {json.dumps({'error': 'Internal server error'})}\n\n"
 
+    async def event_generator() -> AsyncIterator[str]:
+        """Bind the request's physical collection, then stream the body.
+
+        The collection scope is opened here rather than in the handler so it
+        stays active while Starlette consumes the generator and copies into the
+        anyio worker threads spawned for retrieval/generation. Warming the index
+        also happens inside the scope so the correct collection is materialized.
+
+        Yields:
+            str: SSE event lines from the scoped stream body.
+        """
+        with rag.collection_scope(physical):
+            if (
+                payload.query_mode not in {"entity_occurrence", "entity_occurrence_multi"}
+                and getattr(rag, "index", None) is None
+            ):
+                await to_thread.run_sync(rag.create_index)
+            async for chunk in _stream_body():
+                yield chunk
+
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
@@ -1178,65 +1343,76 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
 
 
 @app.post("/summarize", response_model=SummarizeOut, tags=["Query"])
-def summarize(refresh: bool = Query(False)) -> dict[str, Any]:
-    """Generate a summary for the currently selected collection.
+def summarize(
+    refresh: bool = Query(False),
+    collection: str | None = None,
+    principal: str = Depends(resolve_principal),
+) -> dict[str, Any]:
+    """Generate a summary for the caller's collection.
 
     Args:
         refresh (bool): If ``True``, bypass cached collection summaries.
+        collection (str | None): Caller's logical collection; owner-gated and
+            scoped per request, falling back to the process default when omitted.
+        principal (str): The resolved request principal.
 
     Returns:
         dict[str, list[dict] | str]: A dictionary containing the summary and sources.
 
     Raises:
-        HTTPException: If an error occurs while generating the summary.
+        HTTPException: 400/404 from collection resolution; 500 on generation error.
     """
-    try:
-        if not rag.qdrant_collection:
-            logger.error("HTTPException: No collection selected")
-            raise HTTPException(status_code=400, detail="No collection selected")
+    with _scoped_collection(collection, principal):
+        try:
+            data = rag.summarize_collection(refresh=refresh)
+            summary = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
+            sources: list[dict[str, Any]] = data.get("sources", []) if isinstance(data, dict) else []
+            summary_diagnostics = data.get("summary_diagnostics") if isinstance(data, dict) else None
 
-        data = rag.summarize_collection(refresh=refresh)
-        summary = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""
-        sources: list[dict[str, Any]] = data.get("sources", []) if isinstance(data, dict) else []
-        summary_diagnostics = data.get("summary_diagnostics") if isinstance(data, dict) else None
-
-        validation = _validation_payload(
-            question=rag.summarize_prompt,
-            answer=summary,
-            sources=sources,
-            summary_diagnostics=summary_diagnostics,
-        )
-        return {
-            "summary": summary,
-            "sources": sources,
-            "summary_diagnostics": summary_diagnostics,
-            **validation,
-        }
-    except HTTPException as e:
-        logger.error("HTTPException: Error generating summary: {}", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+            validation = _validation_payload(
+                question=rag.summarize_prompt,
+                answer=summary,
+                sources=sources,
+                summary_diagnostics=summary_diagnostics,
+            )
+            return {
+                "summary": summary,
+                "sources": sources,
+                "summary_diagnostics": summary_diagnostics,
+                **validation,
+            }
+        except HTTPException as e:
+            logger.error("HTTPException: Error generating summary: {}", e)
+            raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/summarize/stream", tags=["Query"])
-async def summarize_stream(request: Request, refresh: bool = Query(False)) -> StreamingResponse:
-    """Generate a streaming summary for the currently selected collection.
+async def summarize_stream(
+    request: Request,
+    refresh: bool = Query(False),
+    collection: str | None = None,
+    principal: str = Depends(resolve_principal),
+) -> StreamingResponse:
+    """Generate a streaming summary for the caller's collection.
 
     Args:
         request (Request): The incoming request, used to detect client
             disconnects while the blocking summary stream is drained.
         refresh (bool): If ``True``, bypass cached collection summaries.
+        collection (str | None): Caller's logical collection; owner-gated and
+            scoped per request, falling back to the process default when omitted.
+        principal (str): The resolved request principal.
 
     Returns:
         StreamingResponse: A streaming response that yields SSE events during summarization.
 
     Raises:
-        HTTPException: If an error occurs while generating the summary.
+        HTTPException: 400/404 from collection resolution.
     """
-    if not rag.qdrant_collection:
-        raise HTTPException(status_code=400, detail="No collection selected")
+    physical = _resolve_request_collection(collection, principal)
 
-    async def event_generator() -> AsyncIterator[str]:
-        """Generate SSE events for the streaming summary.
+    async def _summary_body() -> AsyncIterator[str]:
+        """Generate SSE events for the streaming summary (inside the scope).
 
         Yields:
             AsyncIterator[str]: An asynchronous iterator yielding SSE events.
@@ -1274,12 +1450,26 @@ async def summarize_stream(request: Request, refresh: bool = Query(False)) -> St
             logger.error("Stream error: {}", e)
             yield f"data: {json.dumps({'error': 'An internal error occurred during streaming.'})}\n\n"
 
+    async def event_generator() -> AsyncIterator[str]:
+        """Bind the request's physical collection, then stream the summary body.
+
+        Yields:
+            str: SSE event lines from the scoped summary body.
+        """
+        with rag.collection_scope(physical):
+            async for chunk in _summary_body():
+                yield chunk
+
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.get("/collections/ner", tags=["Query"], deprecated=True)
-def get_collection_ner(refresh: bool = False) -> dict[str, list[dict[str, Any]]]:
-    """Get all NER data (entities and relations) for the currently selected collection.
+def get_collection_ner(
+    refresh: bool = False,
+    collection: str | None = None,
+    principal: str = Depends(resolve_principal),
+) -> dict[str, list[dict[str, Any]]]:
+    """Get all NER data (entities and relations) for the caller's collection.
 
     Deprecated: scrolls the entire collection in one response and is the
     pre-pagination path. Prefer ``GET /collections/ner/sources`` (paginated,
@@ -1289,18 +1479,22 @@ def get_collection_ner(refresh: bool = False) -> dict[str, list[dict[str, Any]]]
 
     Args:
         refresh (bool): If ``True``, bypass in-memory cache and re-fetch from storage.
+        collection (str | None): Caller's logical collection; owner-gated and
+            scoped per request, falling back to the process default when omitted.
+        principal (str): The resolved request principal.
 
     Returns:
         dict[str, list[dict]]: A dictionary containing the list of NER sources.
 
     Raises:
-        HTTPException: If no collection is selected or an error occurs.
+        HTTPException: 400/404 from collection resolution; 500 on error.
     """
-    if not rag.qdrant_collection:
-        raise HTTPException(status_code=400, detail="No collection selected")
     try:
-        sources = rag.get_collection_ner(refresh=refresh)
-        return {"sources": sources}
+        with _scoped_collection(collection, principal):
+            sources = rag.get_collection_ner(refresh=refresh)
+            return {"sources": sources}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error fetching collection NER: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -1312,8 +1506,10 @@ def get_collection_hate_speech(
     limit: int = Query(default=0, ge=0, le=500),
     category: str | None = None,
     min_confidence: str | None = None,
+    collection: str | None = None,
+    principal: str = Depends(resolve_principal),
 ) -> dict[str, Any]:
-    """Return flagged hate-speech chunks for the selected collection.
+    """Return flagged hate-speech chunks for the caller's collection.
 
     The endpoint operates in two modes:
 
@@ -1329,25 +1525,28 @@ def get_collection_hate_speech(
         category (str | None): Optional case-insensitive category filter.
         min_confidence (str | None): Optional confidence floor (``low`` <
             ``medium`` < ``high``).
+        collection (str | None): Caller's logical collection; owner-gated and
+            scoped per request, falling back to the process default when omitted.
+        principal (str): The resolved request principal.
 
     Returns:
         dict[str, Any]: Either the legacy ``{"results": ...}`` payload or a
         paginated ``{"items": ..., "next_cursor": ...}`` envelope.
     """
-    if not rag.qdrant_collection:
-        raise HTTPException(status_code=400, detail="No collection selected")
-
     paginated = cursor is not None or limit > 0 or category is not None or min_confidence is not None
     try:
-        if not paginated:
-            return {"results": rag.get_collection_hate_speech()}
-        items, next_cursor = rag.iter_hate_speech(
-            cursor=cursor,
-            limit=limit or 50,
-            category=category,
-            min_confidence=min_confidence,
-        )
-        return {"items": items, "next_cursor": next_cursor}
+        with _scoped_collection(collection, principal):
+            if not paginated:
+                return {"results": rag.get_collection_hate_speech()}
+            items, next_cursor = rag.iter_hate_speech(
+                cursor=cursor,
+                limit=limit or 50,
+                category=category,
+                min_confidence=min_confidence,
+            )
+            return {"items": items, "next_cursor": next_cursor}
+    except HTTPException:
+        raise
     except InvalidCursorError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
@@ -1363,8 +1562,10 @@ def get_collection_ner_sources(
     entity_text: str | None = None,
     entity_type: str | None = None,
     entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
+    collection: str | None = None,
+    principal: str = Depends(resolve_principal),
 ) -> dict[str, Any]:
-    """Return one page of NER-bearing source rows for the selected collection.
+    """Return one page of NER-bearing source rows for the caller's collection.
 
     Always paginated — there is no full-list mode. When an entity filter is
     supplied the matcher mirrors the SPA's ``sourceContainsEntity`` (same
@@ -1382,22 +1583,26 @@ def get_collection_ner_sources(
         entity_type (str | None): Explicit entity type/label.
         entity_merge_mode (Literal): Clustering mode; ``"resolved"`` includes
             sibling aliases of the canonical entity.
+        collection (str | None): Caller's logical collection; owner-gated and
+            scoped per request, falling back to the process default when omitted.
+        principal (str): The resolved request principal.
 
     Returns:
         dict[str, Any]: ``{"items": [...], "next_cursor": ...}``.
     """
-    if not rag.qdrant_collection:
-        raise HTTPException(status_code=400, detail="No collection selected")
     try:
-        items, next_cursor = rag.iter_collection_ner_sources(
-            cursor=cursor,
-            limit=limit,
-            entity_key=entity_key,
-            entity_text=entity_text,
-            entity_type=entity_type,
-            entity_merge_mode=entity_merge_mode,
-        )
-        return {"items": items, "next_cursor": next_cursor}
+        with _scoped_collection(collection, principal):
+            items, next_cursor = rag.iter_collection_ner_sources(
+                cursor=cursor,
+                limit=limit,
+                entity_key=entity_key,
+                entity_text=entity_text,
+                entity_type=entity_type,
+                entity_merge_mode=entity_merge_mode,
+            )
+            return {"items": items, "next_cursor": next_cursor}
+    except HTTPException:
+        raise
     except InvalidCursorError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
@@ -1406,23 +1611,33 @@ def get_collection_ner_sources(
 
 
 @app.post("/collections/ner/warm", tags=["Query"])
-async def warm_collection_ner() -> dict[str, Any]:
-    """Pre-warm the NER aggregate cache for the selected collection.
+async def warm_collection_ner(
+    collection: str | None = None,
+    principal: str = Depends(resolve_principal),
+) -> dict[str, Any]:
+    """Pre-warm the NER aggregate cache for the caller's collection.
 
     Runs :meth:`docint.core.rag.RAG._get_collection_ner_aggregate` on a
     worker thread so the first ``/collections/ner/stats`` call after a
     collection switch doesn't pay the full Qdrant scroll cost on a user
     interaction. Safe to call concurrently — the underlying cache uses
-    a per-collection key and tolerates repeat-loads.
+    a per-collection key and tolerates repeat-loads. The collection scope is
+    open across the ``to_thread`` hop, so the worker warms the correct cache.
+
+    Args:
+        collection (str | None): Caller's logical collection; owner-gated and
+            scoped per request, falling back to the process default when omitted.
+        principal (str): The resolved request principal.
 
     Returns:
         dict[str, Any]: ``{"ok": True}`` once warming completes.
     """
-    if not rag.qdrant_collection:
-        raise HTTPException(status_code=400, detail="No collection selected")
     try:
-        await to_thread.run_sync(rag._get_collection_ner_aggregate)  # pyrefly: ignore[bad-argument-type]  # anyio run_sync over-strict on bound method with keyword-only args
+        with _scoped_collection(collection, principal):
+            await to_thread.run_sync(rag._get_collection_ner_aggregate)  # pyrefly: ignore[bad-argument-type]  # anyio run_sync over-strict on bound method with keyword-only args
         return {"ok": True}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error warming collection NER aggregate: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -1435,8 +1650,10 @@ def get_collection_ner_stats(
     entity_type: str | None = None,
     include_relations: bool = True,
     entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
+    collection: str | None = None,
+    principal: str = Depends(resolve_principal),
 ) -> dict[str, Any]:
-    """Get collection-wide NER statistics.
+    """Get collection-wide NER statistics for the caller's collection.
 
     Args:
         top_k (int): Maximum number of top entities/relations to include.
@@ -1445,23 +1662,27 @@ def get_collection_ner_stats(
         include_relations (bool): Whether relation aggregates are included.
         entity_merge_mode (Literal["orthographic", "exact", "resolved"]): Entity clustering mode used for
             derived views ("resolved" groups by durable canonical entity id).
+        collection (str | None): Caller's logical collection; owner-gated and
+            scoped per request, falling back to the process default when omitted.
+        principal (str): The resolved request principal.
 
     Returns:
         dict[str, Any]: A dashboard-friendly NER stats payload.
 
     Raises:
-        HTTPException: If no collection is selected or an internal error occurs.
+        HTTPException: 400/404 from collection resolution; 500 on error.
     """
-    if not rag.qdrant_collection:
-        raise HTTPException(status_code=400, detail="No collection selected")
     try:
-        return rag.get_collection_ner_stats(
-            top_k=top_k,
-            min_mentions=min_mentions,
-            entity_type=entity_type,
-            include_relations=include_relations,
-            entity_merge_mode=entity_merge_mode,
-        )
+        with _scoped_collection(collection, principal):
+            return rag.get_collection_ner_stats(
+                top_k=top_k,
+                min_mentions=min_mentions,
+                entity_type=entity_type,
+                include_relations=include_relations,
+                entity_merge_mode=entity_merge_mode,
+            )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error fetching collection NER stats: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -1473,8 +1694,10 @@ def search_collection_ner_entities(
     entity_type: str | None = None,
     limit: int = 100,
     entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
+    collection: str | None = None,
+    principal: str = Depends(resolve_principal),
 ) -> dict[str, list[dict[str, Any]]]:
-    """Search entities across the selected collection.
+    """Search entities across the caller's collection.
 
     Args:
         q (str): Substring query applied to entity text.
@@ -1482,24 +1705,28 @@ def search_collection_ner_entities(
         limit (int): Maximum number of rows to return.
         entity_merge_mode (Literal["orthographic", "exact", "resolved"]): Entity clustering mode used for
             derived views ("resolved" groups by durable canonical entity id).
+        collection (str | None): Caller's logical collection; owner-gated and
+            scoped per request, falling back to the process default when omitted.
+        principal (str): The resolved request principal.
 
     Returns:
         dict[str, list[dict]]: Dictionary containing matched entities.
 
     Raises:
-        HTTPException: If no collection is selected or an internal error occurs.
+        HTTPException: 400/404 from collection resolution; 500 on error.
     """
-    if not rag.qdrant_collection:
-        raise HTTPException(status_code=400, detail="No collection selected")
     try:
-        return {
-            "results": rag.search_collection_ner_entities(
-                q=q,
-                entity_type=entity_type,
-                limit=limit,
-                entity_merge_mode=entity_merge_mode,
-            )
-        }
+        with _scoped_collection(collection, principal):
+            return {
+                "results": rag.search_collection_ner_entities(
+                    q=q,
+                    entity_type=entity_type,
+                    limit=limit,
+                    entity_merge_mode=entity_merge_mode,
+                )
+            }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error searching collection entities: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -1510,8 +1737,10 @@ def get_collection_ner_graph(
     top_k_nodes: int | None = Query(default=None, ge=1),
     min_edge_weight: int = Query(default=1, ge=1),
     entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
+    collection: str | None = None,
+    principal: str = Depends(resolve_principal),
 ) -> dict[str, Any]:
-    """Return a derived entity graph for the selected collection.
+    """Return a derived entity graph for the caller's collection.
 
     Wraps :meth:`docint.core.rag.RAG.get_collection_ner_graph`, exposing the
     same node/edge payload the GraphRAG expansion uses so the SPA can render an
@@ -1528,32 +1757,39 @@ def get_collection_ner_graph(
         entity_merge_mode (Literal["orthographic", "exact", "resolved"]): Entity
             clustering mode used for derived views ("resolved" groups by durable
             canonical entity id).
+        collection (str | None): Caller's logical collection; owner-gated and
+            scoped per request, falling back to the process default when omitted.
+        principal (str): The resolved request principal.
 
     Returns:
         dict[str, Any]: Graph payload containing ``nodes``, ``edges`` and ``meta``.
 
     Raises:
-        HTTPException: If no collection is selected or an internal error occurs.
+        HTTPException: 400/404 from collection resolution; 500 on error.
     """
-    if not rag.qdrant_collection:
-        raise HTTPException(status_code=400, detail="No collection selected")
     cfg = load_frontend_env()
     requested = cfg.graph_top_k if top_k_nodes is None else top_k_nodes
     effective_top_k = min(max(1, requested), cfg.graph_max_top_k)
     try:
-        return rag.get_collection_ner_graph(
-            top_k_nodes=effective_top_k,
-            min_edge_weight=min_edge_weight,
-            entity_merge_mode=entity_merge_mode,
-        )
+        with _scoped_collection(collection, principal):
+            return rag.get_collection_ner_graph(
+                top_k_nodes=effective_top_k,
+                min_edge_weight=min_edge_weight,
+                entity_merge_mode=entity_merge_mode,
+            )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error building collection NER graph: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/collections/entities/resolve", tags=["Query"])
-def resolve_collection_entities() -> dict[str, int]:
-    """Resolve the selected collection's entities into durable canonicals.
+def resolve_collection_entities(
+    collection: str | None = None,
+    principal: str = Depends(resolve_principal),
+) -> dict[str, int]:
+    """Resolve the caller's collection's entities into durable canonicals.
 
     Runs the batch resolution pipeline (name embeddings + conservative LLM
     tie-break) that merges semantically-equivalent named entities into the
@@ -1561,24 +1797,30 @@ def resolve_collection_entities() -> dict[str, int]:
     "resolved"`` views group them. Idempotent — already-resolved surfaces are
     skipped.
 
+    Args:
+        collection (str | None): Caller's logical collection; owner-gated and
+            scoped per request, falling back to the process default when omitted.
+        principal (str): The resolved request principal.
+
     Returns:
         dict[str, int]: Resolution summary counts (``processed``, ``minted``,
         ``attached``, ``skipped``, ``entities_touched``).
 
     Raises:
-        HTTPException: If no collection is selected or an internal error occurs.
+        HTTPException: 400/404 from collection resolution; 500 on error.
     """
-    if not rag.qdrant_collection:
-        raise HTTPException(status_code=400, detail="No collection selected")
     try:
-        summary = rag.resolve_entities()
-        return {
-            "processed": summary.processed,
-            "minted": summary.minted,
-            "attached": summary.attached,
-            "skipped": summary.skipped,
-            "entities_touched": summary.entities_touched,
-        }
+        with _scoped_collection(collection, principal):
+            summary = rag.resolve_entities()
+            return {
+                "processed": summary.processed,
+                "minted": summary.minted,
+                "attached": summary.attached,
+                "skipped": summary.skipped,
+                "entities_touched": summary.entities_touched,
+            }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error resolving collection entities: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -1588,8 +1830,10 @@ def resolve_collection_entities() -> dict[str, int]:
 def get_collection_documents(
     cursor: str | None = None,
     limit: int = Query(default=0, ge=0, le=500),
+    collection: str | None = None,
+    principal: str = Depends(resolve_principal),
 ) -> dict[str, Any]:
-    """Return documents in the currently selected collection.
+    """Return documents in the caller's collection.
 
     The endpoint operates in two modes for backward compatibility:
 
@@ -1602,20 +1846,23 @@ def get_collection_documents(
     Args:
         cursor (str | None): Opaque cursor token from a previous paginated call.
         limit (int): Page size (1-500). ``0`` selects legacy mode.
+        collection (str | None): Caller's logical collection; owner-gated and
+            scoped per request, falling back to the process default when omitted.
+        principal (str): The resolved request principal.
 
     Returns:
         dict[str, Any]: Either the legacy ``{"documents": ...}`` payload or a
         paginated ``{"items": ..., "next_cursor": ...}`` envelope.
     """
-    if not rag.qdrant_collection:
-        raise HTTPException(status_code=400, detail="No collection selected")
-
     paginated = cursor is not None or limit > 0
     try:
-        if not paginated:
-            return {"documents": rag.list_documents()}
-        items, next_cursor = rag.iter_documents(cursor=cursor, limit=limit or 50)
-        return {"items": items, "next_cursor": next_cursor}
+        with _scoped_collection(collection, principal):
+            if not paginated:
+                return {"documents": rag.list_documents()}
+            items, next_cursor = rag.iter_documents(cursor=cursor, limit=limit or 50)
+            return {"items": items, "next_cursor": next_cursor}
+    except HTTPException:
+        raise
     except InvalidCursorError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
@@ -1624,49 +1871,29 @@ def get_collection_documents(
 
 
 @app.get("/collections/documents/count", tags=["Query"])
-def get_collection_documents_count() -> dict[str, int]:
-    """Return the number of unique documents in the active collection.
+def get_collection_documents_count(
+    collection: str | None = None,
+    principal: str = Depends(resolve_principal),
+) -> dict[str, int]:
+    """Return the number of unique documents in the caller's collection.
 
     Backed by the same per-collection cache as ``/collections/documents``
     pagination, so the first call after a collection switch pays the
     Qdrant scroll once and the dashboard KPI then reads from cache.
+
+    Args:
+        collection (str | None): Caller's logical collection; owner-gated and
+            scoped per request, falling back to the process default when omitted.
+        principal (str): The resolved request principal.
     """
-    if not rag.qdrant_collection:
-        raise HTTPException(status_code=400, detail="No collection selected")
     try:
-        return {"count": rag.get_document_count()}
+        with _scoped_collection(collection, principal):
+            return {"count": rag.get_document_count()}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error fetching collection document count: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
-
-
-def _validate_export_collection(name: str) -> None:
-    """Validate that ``name`` matches the active collection and is visible.
-
-    Args:
-        name (str): Collection name from the export URL path.
-
-    Raises:
-        HTTPException: 400 if no collection is selected, 404 if the requested
-            collection is hidden or unknown, 409 if a different collection is
-            currently active (the SPA must call ``/collections/select`` first).
-    """
-    if not rag.qdrant_collection:
-        raise HTTPException(status_code=400, detail="No collection selected")
-    if name != rag.qdrant_collection:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Active collection is '{rag.qdrant_collection}'; "
-                f"call /collections/select for '{name}' before exporting."
-            ),
-        )
-    try:
-        visible = rag.list_collections()
-    except Exception:
-        visible = [rag.qdrant_collection]
-    if name not in visible:
-        raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
 
 
 def _csv_attachment_headers(stem: str) -> dict[str, str]:
@@ -1735,17 +1962,21 @@ def _get_owned_report(report_id: int, principal: str) -> dict[str, Any]:
 
 
 @app.get("/collections/{name}/export/documents.csv", tags=["Query"])
-def export_documents_csv(name: str) -> StreamingResponse:
+def export_documents_csv(name: str, principal: str = Depends(resolve_principal)) -> StreamingResponse:
     """Stream the documents table as CSV.
 
     The endpoint reads from :meth:`docint.core.rag.RAG.list_documents` (cached
     after the first call) and emits one row per document. Output matches the
-    CLI's ``query --documents`` schema column-for-column.
+    CLI's ``query --documents`` schema column-for-column. The path ``name`` is
+    the caller's logical collection: it is owner-gated (404 if not owned) and
+    resolved to its physical collection for the duration of the read, so exports
+    are stateless and isolated per user. Rows are materialized within the scope;
+    the response then streams the in-memory list.
     """
     from docint.utils.csv_stream import DOCUMENT_COLUMNS, document_row, stream_csv
 
-    _validate_export_collection(name)
-    docs = rag.list_documents()
+    with _scoped_collection(name, principal):
+        docs = rag.list_documents()
 
     def row_iter() -> Iterator[dict[str, Any]]:
         for doc in docs:
@@ -1765,6 +1996,7 @@ def export_entities_csv(
     min_mentions: int = Query(default=1, ge=1),
     entity_type: str | None = None,
     entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
+    principal: str = Depends(resolve_principal),
 ) -> StreamingResponse:
     """Stream the top entities by mention frequency as CSV.
 
@@ -1773,18 +2005,19 @@ def export_entities_csv(
     identical output for the same collection. ``entity_merge_mode="resolved"``
     streams the durable canonical entities (same as the Analysis/Dashboard
     resolved view); it falls back to orthographic on collections that have not
-    been resolved.
+    been resolved. The path ``name`` is owner-gated and resolved to its physical
+    collection for the read.
     """
     from docint.utils.csv_stream import ENTITY_STATS_COLUMNS, entity_stats_row, stream_csv
 
-    _validate_export_collection(name)
-    stats = rag.get_collection_ner_stats(
-        top_k=top_k,
-        min_mentions=min_mentions,
-        entity_type=entity_type,
-        include_relations=False,
-        entity_merge_mode=entity_merge_mode,
-    )
+    with _scoped_collection(name, principal):
+        stats = rag.get_collection_ner_stats(
+            top_k=top_k,
+            min_mentions=min_mentions,
+            entity_type=entity_type,
+            include_relations=False,
+            entity_merge_mode=entity_merge_mode,
+        )
     entities = list(stats.get("top_entities") or [])
 
     def row_iter() -> Iterator[dict[str, Any]]:
@@ -1805,6 +2038,7 @@ def export_ner_sources_csv(
     entity_text: str | None = None,
     entity_type: str | None = None,
     entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
+    principal: str = Depends(resolve_principal),
 ) -> StreamingResponse:
     """Stream entity findings (per-source rows) as CSV.
 
@@ -1812,11 +2046,12 @@ def export_ner_sources_csv(
     ``frontend/src/lib/exports.ts``. Filtering uses the same matcher as the
     paginated ``/collections/ner/sources`` endpoint, so the export reflects
     exactly what the SPA's entity inspector shows. ``entity_merge_mode=
-    "resolved"`` includes the canonical entity's sibling aliases.
+    "resolved"`` includes the canonical entity's sibling aliases. The path
+    ``name`` is owner-gated and resolved to its physical collection; all pages
+    are materialized within that scope before the response streams them (the
+    request scope cannot remain bound across the post-return streaming hops).
     """
     from docint.utils.csv_stream import NER_SOURCE_COLUMNS, ner_source_row, stream_csv
-
-    _validate_export_collection(name)
 
     if entity_key and not (entity_text or entity_type):
         if "::" in entity_key:
@@ -1827,7 +2062,8 @@ def export_ner_sources_csv(
     label_type = entity_type or "Unlabeled"
     entity_label = f"{entity_text} [{label_type}]" if entity_text else ""
 
-    def row_iter() -> Iterator[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with _scoped_collection(name, principal):
         cursor: str | None = None
         while True:
             page, cursor = rag.iter_collection_ner_sources(
@@ -1838,12 +2074,12 @@ def export_ner_sources_csv(
                 entity_merge_mode=entity_merge_mode,
             )
             for source in page:
-                yield ner_source_row(source, entity_label=entity_label)
+                rows.append(ner_source_row(source, entity_label=entity_label))
             if cursor is None:
                 break
 
     return StreamingResponse(
-        stream_csv(row_iter(), NER_SOURCE_COLUMNS),
+        stream_csv(iter(rows), NER_SOURCE_COLUMNS),
         media_type="text/csv; charset=utf-8",
         headers=_csv_attachment_headers(f"{name}-ner-sources"),
     )
@@ -1854,22 +2090,24 @@ def export_hate_speech_csv(
     name: str,
     category: str | None = None,
     min_confidence: str | None = None,
+    principal: str = Depends(resolve_principal),
 ) -> StreamingResponse:
     """Stream the hate-speech findings table as CSV.
 
     Output schema matches ``hateSpeechToCsv`` in
     ``frontend/src/lib/exports.ts``. Filtering uses the same logic as the
-    paginated ``/collections/hate-speech`` endpoint.
+    paginated ``/collections/hate-speech`` endpoint. The path ``name`` is
+    owner-gated and resolved to its physical collection for the read.
     """
     from docint.core.rag import _filter_hate_speech
     from docint.utils.csv_stream import HATE_SPEECH_COLUMNS, hate_speech_row, stream_csv
 
-    _validate_export_collection(name)
-    findings = _filter_hate_speech(
-        rag.get_collection_hate_speech(),
-        category=category,
-        min_confidence=min_confidence,
-    )
+    with _scoped_collection(name, principal):
+        findings = _filter_hate_speech(
+            rag.get_collection_hate_speech(),
+            category=category,
+            min_confidence=min_confidence,
+        )
 
     def row_iter() -> Iterator[dict[str, Any]]:
         for finding in findings:
@@ -1949,8 +2187,9 @@ def _collect_session_source_files(session_id: str, principal: str) -> list[tuple
     Each entry is ``(filename_in_zip, path_on_disk)``. Files that can't be
     resolved on disk are skipped — the ZIP is best-effort and surfaces only
     files the backend can still serve. Collection is resolved from each
-    source's ``collection`` field when present and falls back to the
-    currently active collection so behaviour matches ``/sources/preview``.
+    source's ``collection`` field when present and falls back to the session's
+    own *pinned* collection (owner-scoped), not any process-global active
+    collection, so the bundle stays correct under concurrent multi-tenant use.
 
     Args:
         session_id (str): The session whose citations should be packaged.
@@ -1960,8 +2199,9 @@ def _collect_session_source_files(session_id: str, principal: str) -> list[tuple
     Returns:
         list[tuple[str, Path]]: Pairs ready for :meth:`zipfile.ZipFile.write`.
     """
-    messages = rag.ensure_session_manager().get_session_history(session_id, principal)
-    active_collection = rag.qdrant_collection
+    sm = rag.ensure_session_manager()
+    messages = sm.get_session_history(session_id, principal)
+    session_collection = sm.get_session_collection(session_id, principal)
     selected: dict[str, tuple[str, Path]] = {}
     used_arcnames: set[str] = set()
     for message in messages:
@@ -1971,7 +2211,7 @@ def _collect_session_source_files(session_id: str, principal: str) -> list[tuple
             file_hash = source.get("file_hash")
             if not file_hash or file_hash in selected:
                 continue
-            collection = str(source.get("collection") or active_collection or "")
+            collection = str(source.get("collection") or session_collection or "")
             if not collection:
                 continue
             filename = str(source.get("filename") or "")
@@ -2368,27 +2608,35 @@ def agent_chat(payload: AgentChatIn, request: Request) -> AgentChatOut:
     """Agentic chat endpoint: understand → maybe clarify → retrieve/respond.
 
     Args:
-        payload (AgentChatIn): Message and optional session id.
+        payload (AgentChatIn): Message, optional session id, and optional
+            logical collection (owner-gated; falls back to the process default).
         request (Request): The incoming request used to resolve the calling principal.
 
     Returns:
         AgentChatOut: Clarification prompt or answer with sources.
+
+    Raises:
+        HTTPException: 400/404 from collection resolution; 409 when the session
+            is pinned to a different collection.
     """
-    if not rag.qdrant_collection:
-        raise HTTPException(status_code=400, detail="No collection selected")
-
-    # Ensure a session is active and get per-session agent context
     owner = resolve_principal(request)
-    session_id = rag.start_session(payload.session_id, owner=owner)
-    ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
+    physical = _resolve_request_collection(payload.collection, owner)
 
-    if ctx and rag.sessions:
-        ctx.history = rag.sessions.get_session_history(session_id, owner=owner)
+    # Scope every retrieval/generation call inside the turn to the resolved
+    # physical collection (per-request ContextVar), and thread the session id
+    # explicitly so the turn persists under the right conversation.
+    try:
+        with rag.collection_scope(physical):
+            session_id = rag.start_session(payload.session_id, owner=owner)
+            ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
+            if ctx and rag.sessions:
+                ctx.history = rag.sessions.get_session_history(session_id, owner=owner)
 
-    turn = Turn(user_input=payload.message, session_id=session_id)
-    orchestrator = _build_orchestrator()
-
-    result = orchestrator.handle_turn(turn, context=ctx)
+            turn = Turn(user_input=payload.message, session_id=session_id)
+            orchestrator = _build_orchestrator()
+            result = orchestrator.handle_turn(turn, context=ctx)
+    except SessionCollectionMismatchError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     if result.clarification is not None and result.clarification.needed:
         if ctx:
@@ -2422,11 +2670,17 @@ def agent_chat(payload: AgentChatIn, request: Request) -> AgentChatOut:
 
 
 @app.post("/ingest", response_model=IngestOut, tags=["Ingestion"])
-def ingest(payload: IngestIn) -> dict[str, bool | str]:
-    """Trigger ingestion for the requested collection using the configured data directory.
+def ingest(payload: IngestIn, request: Request) -> dict[str, bool | str]:
+    """Trigger ingestion for the caller's collection using the configured data directory.
+
+    The ``collection`` in the payload is the caller's *logical* name. Ingestion
+    registers ownership (the first ingester owns it) and resolves it to an
+    owner-namespaced physical Qdrant collection, so two users can ingest the
+    same logical name without colliding.
 
     Args:
         payload (IngestIn): The ingestion payload containing the collection name and hybrid flag.
+        request (Request): The incoming request used to resolve the calling principal.
 
     Returns:
         dict[str, bool | str]: A dictionary with keys ``ok``, ``collection``, ``data_dir``,
@@ -2443,6 +2697,9 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
         logger.error("HTTPException: Collection name required")
         raise HTTPException(status_code=400, detail="Collection name required")
 
+    principal = resolve_principal(request)
+    physical = rag.ensure_collection_owner_manager().register(principal, name)
+
     data_dir = _resolve_data_dir()
     if not data_dir.is_dir():
         logger.error("HTTPException: Data directory does not exist: {}", data_dir)
@@ -2453,7 +2710,7 @@ def ingest(payload: IngestIn) -> dict[str, bool | str]:
 
     try:
         ingest_module.ingest_docs(
-            name,
+            physical,
             data_dir,
             hybrid=payload.hybrid if payload.hybrid is not None else True,
         )
@@ -2486,87 +2743,108 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
     """Streaming variant of agent chat with token events and final metadata.
 
     Args:
-        payload (AgentChatIn): Message and optional session id.
+        payload (AgentChatIn): Message, optional session id, and optional logical
+            collection (owner-gated; falls back to the process default).
         request (Request): The incoming request used to resolve the calling principal.
 
     Returns:
         StreamingResponse: SSE stream with clarification or answer tokens and metadata.
+
+    Raises:
+        HTTPException: 400/404 from collection resolution; 409 when the session
+            is pinned to a different collection.
     """
     owner = resolve_principal(request)
+    physical = _resolve_request_collection(payload.collection, owner)
+    # Up-front collection-pin check so a mismatch is a clean 409 rather than an
+    # in-stream error event.
+    if payload.session_id:
+        pinned = rag.ensure_session_manager().get_session_collection(payload.session_id, owner)
+        if pinned is not None and pinned != physical:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Session '{payload.session_id}' is pinned to a different collection.",
+            )
 
     async def event_generator() -> AsyncIterator[str]:
         """Generate SSE events for the agent chat stream.
 
+        The request's physical collection is bound for the whole generator (so
+        it propagates into the anyio worker threads spawned for analysis and
+        generation), and the resolved session id is threaded explicitly into
+        ``stream_chat`` so the turn persists under the right conversation.
+
         Yields:
             AsyncIterator[str]: An asynchronous iterator yielding SSE events.
         """
-        if not rag.qdrant_collection:
-            yield _format_sse("error", {"detail": "No collection selected"})
-            return
+        with rag.collection_scope(physical):
 
-        def _prepare() -> tuple[str, Any, Any, Any]:
-            """Run the blocking session/understanding pre-amble off the loop.
+            def _prepare() -> tuple[str, Any, Any, Any]:
+                """Run the blocking session/understanding pre-amble off the loop.
 
-            Session start, history load, and intent analysis are synchronous
-            (and may issue LLM calls), so they run on a worker thread.
+                Session start, history load, and intent analysis are synchronous
+                (and may issue LLM calls), so they run on a worker thread.
 
-            Returns:
-                tuple[str, Any, Any, Any]: ``(session_id, ctx, analysis,
-                clarification_decision)``.
-            """
-            session_id = rag.start_session(payload.session_id, owner=owner)
-            ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
-            if ctx and rag.sessions:
-                ctx.history = rag.sessions.get_session_history(session_id, owner=owner)
-            turn = Turn(user_input=payload.message, session_id=session_id)
-            analysis = _select_understanding_agent().analyze(turn, context=ctx)
-            clarification_decision = _clarification_policy.evaluate(
-                analysis, clarifications_so_far=ctx.clarifications if ctx else 0
-            )
-            return session_id, ctx, analysis, clarification_decision
+                Returns:
+                    tuple[str, Any, Any, Any]: ``(session_id, ctx, analysis,
+                    clarification_decision)``.
+                """
+                session_id = rag.start_session(payload.session_id, owner=owner)
+                ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
+                if ctx and rag.sessions:
+                    ctx.history = rag.sessions.get_session_history(session_id, owner=owner)
+                turn = Turn(user_input=payload.message, session_id=session_id)
+                analysis = _select_understanding_agent().analyze(turn, context=ctx)
+                clarification_decision = _clarification_policy.evaluate(
+                    analysis, clarifications_so_far=ctx.clarifications if ctx else 0
+                )
+                return session_id, ctx, analysis, clarification_decision
 
-        session_id, ctx, analysis, clarification_decision = await to_thread.run_sync(_prepare)
+            session_id, ctx, analysis, clarification_decision = await to_thread.run_sync(_prepare)
 
-        if clarification_decision.needed:
-            if ctx:
-                ctx.clarifications += 1
-            payload_out = {
-                "status": "clarification",
-                "message": clarification_decision.message,
-                "reason": clarification_decision.reason,
-                "intent": analysis.intent,
-                "confidence": analysis.confidence,
-                "session_id": session_id,
-            }
-            yield _format_sse("clarification", payload_out)
-            return
-
-        # Stream via RAG chat (history-aware: rewritten query + prior turn)
-        query_text = analysis.rewritten_query or payload.message
-
-        def _make_agent_stream() -> Iterator[Any]:
-            """Build the blocking agent chat stream off the event loop.
-
-            Returns:
-                Iterator[Any]: The sync chat-chunk generator.
-            """
-            prior_turn = build_prior_turn(ctx.history) if ctx else None
-            return cast("Iterator[Any]", rag.stream_chat(query_text, prior_turn=prior_turn))
-
-        # Tokens
-        async for chunk in _aiter_sync_gen(_make_agent_stream, request):
-            if isinstance(chunk, str):
-                yield _format_sse("token", {"token": chunk})
-            elif isinstance(chunk, dict):
-                meta = {
-                    "status": "answer",
-                    "sources": chunk.get("sources", []),
-                    "session_id": chunk.get("session_id", session_id),
+            if clarification_decision.needed:
+                if ctx:
+                    ctx.clarifications += 1
+                payload_out = {
+                    "status": "clarification",
+                    "message": clarification_decision.message,
+                    "reason": clarification_decision.reason,
                     "intent": analysis.intent,
                     "confidence": analysis.confidence,
-                    "tool_used": "rag_chat",
+                    "session_id": session_id,
                 }
-                yield _format_sse("done", meta)
+                yield _format_sse("clarification", payload_out)
+                return
+
+            # Stream via RAG chat (history-aware: rewritten query + prior turn)
+            query_text = analysis.rewritten_query or payload.message
+
+            def _make_agent_stream() -> Iterator[Any]:
+                """Build the blocking agent chat stream off the event loop.
+
+                Returns:
+                    Iterator[Any]: The sync chat-chunk generator.
+                """
+                prior_turn = build_prior_turn(ctx.history) if ctx else None
+                return cast(
+                    "Iterator[Any]",
+                    rag.stream_chat(query_text, session_id=session_id, owner=owner, prior_turn=prior_turn),
+                )
+
+            # Tokens
+            async for chunk in _aiter_sync_gen(_make_agent_stream, request):
+                if isinstance(chunk, str):
+                    yield _format_sse("token", {"token": chunk})
+                elif isinstance(chunk, dict):
+                    meta = {
+                        "status": "answer",
+                        "sources": chunk.get("sources", []),
+                        "session_id": chunk.get("session_id", session_id),
+                        "intent": analysis.intent,
+                        "confidence": analysis.confidence,
+                        "tool_used": "rag_chat",
+                    }
+                    yield _format_sse("done", meta)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -2602,6 +2880,12 @@ async def ingest_upload(
         logger.error("HTTPException: At least one file is required for upload")
         raise HTTPException(status_code=400, detail="At least one file is required")
 
+    # Ownership: the first uploader owns the logical name; resolve it to an
+    # owner-namespaced physical collection so two users uploading the same
+    # logical name keep separate Qdrant collections and source-file stores.
+    principal = resolve_principal(request)
+    physical = rag.ensure_collection_owner_manager().register(principal, name)
+
     # We use a persistent directory for uploads to support previewing files later.
     # The files are ingested into Qdrant and kept in the collection directory.
 
@@ -2616,7 +2900,7 @@ async def ingest_upload(
         """
         # Use the dedicated sources directory (sibling to Qdrant collections) to store uploaded files
         qdrant_src_dir = _resolve_qdrant_src_dir()
-        batch_dir = qdrant_src_dir / name
+        batch_dir = qdrant_src_dir / physical
         batch_dir.mkdir(parents=True, exist_ok=True)
 
         yield _format_sse(
@@ -2717,7 +3001,7 @@ async def ingest_upload(
                 try:
                     await to_thread.run_sync(
                         ingest_module.ingest_docs,
-                        name,
+                        physical,
                         batch_dir,
                         hybrid if hybrid is not None else True,
                         progress_callback,
@@ -2805,20 +3089,54 @@ async def ingest_upload(
 
 
 @app.get("/sources/preview", tags=["Sources"])
-def preview_source(collection: str, file_hash: str) -> FileResponse:
-    """Serve a previously ingested source file for preview purposes.
+def preview_source(collection: str, file_hash: str, principal: str = Depends(resolve_principal)) -> FileResponse:
+    """Serve a previously ingested source file the caller owns.
+
+    ``collection`` is the caller's *logical* name; it is owner-gated and
+    resolved to its owner-namespaced physical collection before the source
+    store is touched (404 when the caller does not own it). This both prevents
+    one user from previewing another's files and makes previews resolve under
+    the correct physical path for namespaced users.
 
     Args:
-        collection (str): The name of the collection.
+        collection (str): The caller's logical collection name.
         file_hash (str): The hash of the file to preview.
+        principal (str): The resolved request principal.
 
     Returns:
         FileResponse: A response containing the requested file.
 
     Raises:
-        HTTPException: If an error occurs while retrieving the source preview.
+        HTTPException: 404 when the caller does not own the collection or the
+            file cannot be found.
     """
-    path = _resolve_source_file_path(collection, file_hash)
+    physical = _require_owned_collection(collection, principal)
+    path = _resolve_source_file_path(physical, file_hash)
     if path is None:
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(path)
+
+
+@app.post("/translate", tags=["Translate"])
+def translate_text(payload: TranslateIn, principal: str = Depends(resolve_principal)) -> dict[str, Any]:
+    """Translate a client-supplied snippet into the operator's locale.
+
+    Authenticated for consistency, but not collection-scoped: it translates text
+    the caller already holds, so there is nothing to leak and no store re-fetch.
+    Fail-soft — a transport error returns ``ok: false`` with the original shape.
+
+    Args:
+        payload (TranslateIn): The snippet to translate.
+        principal (str): The resolved request principal.
+
+    Returns:
+        dict[str, Any]: ``{ok, translation, model, target_lang, error}``.
+    """
+    result = translate(payload.text)
+    return {
+        "ok": result.ok,
+        "translation": result.translation,
+        "model": result.model,
+        "target_lang": result.target_lang,
+        "error": result.error,
+    }

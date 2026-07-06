@@ -4,6 +4,7 @@ import { sourcePreviewUrl } from '@/api/ingest'
 import { useUiStore } from '@/stores/ui'
 import { formatScore, sourceLabel } from '@/lib/sourceLabel'
 import { referenceMetadataItems } from '@/lib/referenceMetadata'
+import { TranslateControl } from '@/components/common/TranslateControl'
 
 export function Citation({ source }: { source: Source }) {
   const [open, setOpen] = useState(false)
@@ -31,11 +32,7 @@ export function Citation({ source }: { source: Source }) {
               ))}
             </dl>
           )}
-          {source.text && (
-            <div className="whitespace-pre-wrap text-xs bg-zinc-950 p-2 rounded">
-              {source.text}
-            </div>
-          )}
+          {source.text && <TranslateControl rawText={source.text} />}
           {collection && source.file_hash && (
             <a
               href={sourcePreviewUrl(collection, source.file_hash)}

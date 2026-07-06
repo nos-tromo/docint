@@ -390,12 +390,13 @@ class OpenAIPipeline:
             logger.info("Loaded prompt from '{}'", prompt_path)
             return f.read()
 
-    def call_chat(self, prompt: str, system_prompt: str | None = None) -> str:
+    def call_chat(self, prompt: str, system_prompt: str | None = None, model: str | None = None) -> str:
         """Call OpenAI Chat completion.
 
         Args:
             prompt (str): The user prompt.
             system_prompt (str | None): Optional system prompt.
+            model (str | None): Optional model override; defaults to the configured chat model.
 
         Returns:
             str: The response text.
@@ -414,7 +415,7 @@ class OpenAIPipeline:
                 request_kwargs["reasoning_effort"] = self.reasoning_effort
 
             response = self.client.chat.completions.create(
-                model=self.text_model_id,
+                model=model or self.text_model_id,
                 messages=messages,
                 seed=self.seed,
                 temperature=self.temperature,

@@ -1,8 +1,17 @@
 import { describe, expect, it, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { EntityFindingsTable } from './EntityFindingsTable'
 import { useUiStore } from '@/stores/ui'
 import type { NerEntityRow, NerSourceRow } from '@/api/types'
+
+// Rows render a TranslateControl (mounted whenever a row has chunk text),
+// which calls useTranslate()/useMutation() — it needs a QueryClientProvider
+// ancestor even though these tests never trigger a translation.
+function renderWithClient(ui: React.ReactNode) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>)
+}
 
 const selected: NerEntityRow = {
   text: 'Berlin',
@@ -34,7 +43,7 @@ beforeEach(() => {
 
 describe('EntityFindingsTable', () => {
   it('shows the findings count and a table header for the selected entity', () => {
-    render(<EntityFindingsTable selected={selected} findings={findings} collection="alpha" />)
+    renderWithClient(<EntityFindingsTable selected={selected} findings={findings} collection="alpha" />)
     const heading = screen.getByText(/findings for/i).parentElement!
     expect(heading).toHaveTextContent('Berlin')
     expect(heading).toHaveTextContent(/2 chunks/i)
@@ -44,14 +53,14 @@ describe('EntityFindingsTable', () => {
   })
 
   it('renders one row per finding with its chunk text inline', () => {
-    render(<EntityFindingsTable selected={selected} findings={findings} collection="alpha" />)
+    renderWithClient(<EntityFindingsTable selected={selected} findings={findings} collection="alpha" />)
     expect(screen.getAllByTestId('entity-finding-row')).toHaveLength(2)
     // "Berlin" is highlighted (a <mark>), so assert on the trailing segment.
     expect(screen.getByText(/is the capital/)).toBeInTheDocument()
   })
 
   it('renders the CSV download link with the selected entity in the query string', () => {
-    render(<EntityFindingsTable selected={selected} findings={findings} collection="alpha" />)
+    renderWithClient(<EntityFindingsTable selected={selected} findings={findings} collection="alpha" />)
     const link = screen.getByRole('link', { name: 'CSV' })
     const href = link.getAttribute('href') ?? ''
     expect(href).toContain('/collections/alpha/export/ner-sources.csv')

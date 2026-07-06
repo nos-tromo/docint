@@ -78,7 +78,9 @@ class RAGRetrievalAgent(RetrievalAgent):
 
         query_text = analysis.rewritten_query or turn.user_input
         prior_turn = build_prior_turn(request.history)
-        data = self.rag.chat(query_text, prior_turn=prior_turn)
+        # Thread the resolved session id explicitly so the turn persists under
+        # this conversation (never a process-global / shared field).
+        data = self.rag.chat(query_text, session_id=session_id, prior_turn=prior_turn)
         latency = (time.monotonic() - start) * 1000
 
         answer = str(data.get("response") or data.get("answer") or "") if isinstance(data, dict) else ""

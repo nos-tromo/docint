@@ -10,8 +10,20 @@ from docint.utils.env_cfg import load_nextext_env
 def test_nextext_disabled_when_base_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Nextext client is disabled when NEXTEXT_API_BASE is unset."""
-    monkeypatch.delenv("NEXTEXT_API_BASE", raising=False)
+    """Nextext client is disabled and config falls back to built-in defaults.
+
+    Clears every env var whose default is asserted below so an ambient value
+    (e.g. a developer ``.env`` loaded by ``load_dotenv`` at import) cannot make
+    the test flap.
+    """
+    for var in (
+        "NEXTEXT_API_BASE",
+        "NEXTEXT_MAX_CONCURRENCY",
+        "KEYFRAMES_PER_MINUTE",
+        "KEYFRAMES_MAX",
+        "KEYFRAME_DEDUP_COSINE",
+    ):
+        monkeypatch.delenv(var, raising=False)
     cfg = load_nextext_env()
     assert cfg.enabled is False
     assert cfg.keyframes_per_minute == 4

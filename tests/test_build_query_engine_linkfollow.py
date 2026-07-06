@@ -1,5 +1,7 @@
 """Tests for LinkFollowingPostprocessor wiring in build_query_engine."""
 
+import threading
+from collections import OrderedDict
 from typing import Any
 
 import pytest
@@ -40,9 +42,15 @@ def test_link_following_added_for_social_collections(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(rag_module.RAG, "post_retrieval_text_model", property(lambda self: None))
 
     rag = rag_module.RAG.__new__(rag_module.RAG)
-    # index and social_summary_diversity_limit are declared slots — set directly.
-    rag.index = object()  # type: ignore[assignment]
+    # index is a property backed by the _index_cache slot (guarded by _retrieval_cache_lock)
+    # keyed by qdrant_collection; social_summary_diversity_limit is a plain slot. RAG.__new__
+    # skips __init__, so seed the backing slots before assigning through the index setter.
+    rag.qdrant_collection = "c"
+    rag._retrieval_cache_lock = threading.Lock()
+    rag._index_cache = OrderedDict()
+    rag._resolved_index_cache = {}
     rag.social_summary_diversity_limit = 2
+    rag.index = object()  # type: ignore[assignment]
 
     rag.build_query_engine()
     kinds = [type(p).__name__ for p in captured["node_postprocessors"]]

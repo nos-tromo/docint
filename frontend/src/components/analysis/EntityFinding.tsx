@@ -5,12 +5,10 @@ import { sourcePreviewUrl } from '@/api/ingest'
 import { referenceMetadataItems } from '@/lib/referenceMetadata'
 import { highlightSegments } from '@/lib/highlight'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
+import { useTranslatable, type TranslationPayload } from '@/hooks/useTranslatable'
+import { TranslateToggle } from '@/components/common/TranslateToggle'
+import { ClampedText } from '@/components/common/ClampedText'
 import { entityFindingSnapshot } from '@/lib/reportSnapshots'
-import { cn } from '@/lib/cn'
-
-// Length past which the chunk text is clamped behind a "Show more" toggle so
-// rows stay scannable without hiding short findings.
-const TEXT_CLAMP_CHARS = 240
 
 interface Props {
   index: number
@@ -70,13 +68,15 @@ export function EntityFinding({
   reportDedupeKeys,
   gridTemplate
 }: Props) {
-  const [expanded, setExpanded] = useState(false)
-  const reportItem = entityLabel != null ? entityFindingSnapshot(source, entityLabel) : null
+  const [translation, setTranslation] = useState<TranslationPayload | null>(null)
+  const reportItem =
+    entityLabel != null ? entityFindingSnapshot(source, entityLabel, translation ?? undefined) : null
   const inReport = reportItem != null && (reportDedupeKeys?.has(reportItem.dedupe_key) ?? false)
   const collection = useUiStore((s) => s.selectedCollection)
   const refMeta = referenceMetadataItems(source.reference_metadata)
   const chunkText = (source.chunk_text ?? source.text ?? '').trim()
   const segments = highlightSegments(chunkText, highlightTerms)
+  const t = useTranslatable(chunkText, setTranslation)
   const mentions = matchedMentions(source, highlightTerms, selectedTypeLower)
   const previewHref =
     collection && source.file_hash ? sourcePreviewUrl(collection, source.file_hash) : null
@@ -96,11 +96,9 @@ export function EntityFinding({
   if (source.file_hash) metadata.push({ label: 'File hash', value: shortHash(source.file_hash) })
   for (const item of refMeta) metadata.push(item)
 
-  const canClamp = chunkText.length > TEXT_CLAMP_CHARS
-
   return (
     <div
-      className="grid items-start gap-3 border-b border-border px-3 py-2.5 text-sm hover:bg-zinc-900/40"
+      className="group grid items-start gap-3 border-b border-border px-3 py-2.5 text-sm hover:bg-zinc-900/40"
       style={{ gridTemplateColumns: gridTemplate }}
       data-testid="entity-finding-row"
     >
@@ -157,30 +155,25 @@ export function EntityFinding({
       <div className="min-w-0">
         {chunkText ? (
           <>
-            <p
-              className={cn(
-                'whitespace-pre-wrap leading-6 break-words',
-                canClamp && !expanded && 'line-clamp-4'
-              )}
-            >
-              {segments.map((seg, i) =>
-                seg.highlight ? (
-                  <mark key={i} className="bg-yellow-300 text-zinc-950 rounded px-0.5">
-                    {seg.text}
-                  </mark>
-                ) : (
-                  <span key={i}>{seg.text}</span>
-                )
-              )}
-            </p>
-            {canClamp && (
-              <button
-                type="button"
-                onClick={() => setExpanded((v) => !v)}
-                className="mt-1 text-xs text-blue-400 hover:text-blue-300"
-              >
-                {expanded ? 'Show less' : 'Show more'}
-              </button>
+            {t.shown && (
+              <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                Translation
+              </div>
+            )}
+            <ClampedText length={(t.translation ?? chunkText).length}>
+              {t.translation ??
+                segments.map((seg, i) =>
+                  seg.highlight ? (
+                    <mark key={i} className="bg-yellow-300 text-zinc-950 rounded px-0.5">
+                      {seg.text}
+                    </mark>
+                  ) : (
+                    <span key={i}>{seg.text}</span>
+                  )
+                )}
+            </ClampedText>
+            {t.failed && (
+              <div className="mt-1 text-[11px] text-muted-foreground">Translation unavailable — showing original.</div>
             )}
           </>
         ) : (
@@ -188,7 +181,8 @@ export function EntityFinding({
         )}
       </div>
 
-      <div className="flex justify-end">
+      <div className="flex items-center justify-end gap-1">
+        {chunkText && <TranslateToggle shown={t.shown} busy={t.busy} onClick={t.toggle} />}
         {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
       </div>
     </div>
