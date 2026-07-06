@@ -1,18 +1,20 @@
 import { useMemo } from 'react'
-import { useDocumentsPages } from '@/hooks/useDocuments'
+import { useDocumentsCount, useDocumentsPages } from '@/hooks/useDocuments'
 import { useUiStore } from '@/stores/ui'
 import { DocumentTable } from '@/components/inspector/DocumentTable'
+import { DocumentSummary } from '@/components/inspector/DocumentSummary'
 import { SessionZipButton } from '@/components/inspector/SessionZipButton'
 
 export function Inspector() {
   const collection = useUiStore((s) => s.selectedCollection)
   const query = useDocumentsPages()
+  const { data: count } = useDocumentsCount()
   const docs = useMemo(
     () => (query.data?.pages ?? []).flatMap((p) => p.items),
     [query.data]
   )
   return (
-    <div className="p-8 space-y-4">
+    <div className="p-8 space-y-6">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-semibold">Inspector</h1>
         <SessionZipButton />
@@ -22,13 +24,20 @@ export function Inspector() {
       ) : query.isLoading ? (
         <div className="text-sm text-muted-foreground">Loading…</div>
       ) : (
-        <DocumentTable
-          docs={docs}
-          isFetching={query.isFetching}
-          hasNextPage={!!query.hasNextPage}
-          onLoadMore={() => query.fetchNextPage()}
-          collection={collection}
-        />
+        <>
+          <DocumentSummary
+            docs={docs}
+            totalCount={count?.count}
+            partial={!!query.hasNextPage}
+          />
+          <DocumentTable
+            docs={docs}
+            isFetching={query.isFetching}
+            hasNextPage={!!query.hasNextPage}
+            onLoadMore={() => query.fetchNextPage()}
+            collection={collection}
+          />
+        </>
       )}
     </div>
   )
