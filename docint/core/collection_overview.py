@@ -90,7 +90,7 @@ def build_collection_overview(
             if et:
                 entity_types.add(str(et))
         raw_rows = doc.get("max_rows")
-        row_count = int(raw_rows) if isinstance(raw_rows, (int, float)) and raw_rows else None
+        row_count = int(raw_rows) if isinstance(raw_rows, (int, float)) else None
         rows.append(
             {
                 "filename": str(doc.get("filename") or ""),
