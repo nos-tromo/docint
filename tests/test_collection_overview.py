@@ -1,6 +1,7 @@
 """Tests for collection_overview aggregation."""
 
 from datetime import UTC, datetime
+from typing import Any
 
 from docint.core.collection_overview import build_collection_overview, mime_label
 
@@ -18,7 +19,7 @@ def test_mime_label_known_and_fallback_and_missing() -> None:
 
 def test_build_overview_aggregates_counts_types_and_normalizes_rows() -> None:
     """Test build_collection_overview aggregation, sorting, and max_rows normalization."""
-    docs = [
+    docs: list[dict[str, Any]] = [
         {
             "filename": "b.pdf",
             "mimetype": "application/pdf",
