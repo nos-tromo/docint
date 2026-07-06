@@ -35,3 +35,21 @@ def test_ui_string_missing_key_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(KeyError):
         ui_string("not_a_real_key")
+
+
+def test_collection_overview_keys_present_both_locales() -> None:
+    """All report collection-overview keys must be present in both en and de."""
+    keys = {
+        "report_section_collection_overview",
+        "report_overview_documents",
+        "report_overview_nodes",
+        "report_overview_file_types",
+        "report_overview_entity_types",
+        "report_overview_col_document",
+        "report_overview_col_type",
+        "report_overview_col_units",
+        "report_overview_col_hash",
+    }
+    assert keys <= set(UI_STRINGS["en"])
+    assert keys <= set(UI_STRINGS["de"])
+    assert UI_STRINGS["de"]["report_section_collection_overview"] == "Dokumentenübersicht"
