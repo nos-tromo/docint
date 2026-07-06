@@ -120,3 +120,11 @@ Per request, media resolution is now **flat and single-directory**: `postings.cs
 - Net −116 / +70 lines; full suite **963 passing**.
 
 This does not change the two open items above: the media→posting **join key** (2) and **consistent subsets** (3) still determine whether anything actually links on your data.
+
+---
+
+## Update — `Network ID` join key implemented (commit `45c7868`)
+
+Open item (2) is resolved. `_derive_posting_id` now keys media→posting on **`Network ID`** first, then the raw **`Media ID`**, then `strip_counter(Media ID)`, using the first that names a known posting (backward compatible with the `<Posting ID>_<counter>` format). On the real 73,969-row manifest this derives a posting for **138 rows** (was **0** with `strip_counter` alone).
+
+**Only (3) — data consistency — remains for your test to link.** Measured: **0 of your 8 present files** have a parent posting in the 138-row `postings.csv`. To get links, make the subsets consistent — copy the media files that belong to the 138 kept postings, or keep the postings that own the 8 files you copied.

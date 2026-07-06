@@ -283,8 +283,9 @@ which the backend image installs; if they are absent the `.pdf` route returns
 
 Docint can ingest social-media exports that pair text **postings** with linked
 **media files** (images, video, audio). The ingestion pipeline reads a
-`media.csv` manifest, joins media to their parent posting by `Posting ID` /
-`Media ID`, and routes each artifact to the right backend — images go through
+`media.csv` manifest, joins each media file to its parent posting (by `Network
+ID`, else `Media ID`, matched against the postings' `Posting ID`), and routes
+each artifact to the right backend — images go through
 CLIP, video/audio are transcribed by Nextext and keyframe-extracted.
 
 **One flat directory.** Put `postings.csv`, `media.csv`, and every referenced
