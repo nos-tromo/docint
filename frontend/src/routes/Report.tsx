@@ -106,7 +106,7 @@ export function Report() {
   // has no documents falls through to the "empty" message, never a blank area.
   const overviewSnapshot = report?.collection_overview ?? null
   const overviewToShow =
-    (report?.show_collection_overview ?? true) && overviewSnapshot && overviewSnapshot.documents.length > 0
+    (report?.show_collection_overview ?? true) && overviewSnapshot && (overviewSnapshot.documents?.length ?? 0) > 0
       ? overviewSnapshot
       : null
 

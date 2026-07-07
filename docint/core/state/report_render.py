@@ -856,11 +856,12 @@ def _overview_csv_row(doc: dict[str, Any]) -> dict[str, Any]:
     """CSV row for one document-overview manifest entry (full, untruncated hash).
 
     Numeric count cells (``pages``/``rows``/``nodes``) render a real ``0`` when
-    the count is zero and blank only when the count is absent (``None``) — the
-    snapshot deliberately distinguishes ``row_count: 0`` (an empty table) from
-    ``row_count: None`` (no table), and this CSV is the evidentiary artifact
-    where that distinction must survive (never collapse "counted zero" into
-    "not applicable").
+    the count is zero and blank only when the count is absent (``None``). The
+    ``row_count: 0`` vs. ``row_count: None`` distinction is defensive only —
+    ``rag.list_documents`` deletes ``max_rows`` whenever it is 0, so a real
+    snapshot never actually carries ``row_count: 0``; this just keeps the cell
+    correct (rather than collapsing to blank) if that upstream behavior ever
+    changes.
     """
     return {
         "filename": doc.get("filename") or "",

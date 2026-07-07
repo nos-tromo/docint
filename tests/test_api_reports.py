@@ -312,6 +312,18 @@ def test_refresh_build_failure_is_502(client: TestClient, monkeypatch: pytest.Mo
     assert resp.status_code == 502
 
 
+def test_refresh_unowned_collection_is_404_not_502(client: TestClient) -> None:
+    """A report's collection that no longer resolves to an owned collection surfaces 404.
+
+    Covers a ``collection_name`` that was never registered (or was deleted after
+    the report was created): the ownership resolver's 404 must pass through
+    refresh verbatim, not get masked as a generic 502 by the catch-all handler.
+    """
+    rid = _create(client, collection="ghost-collection")["id"]
+    resp = client.post(f"/reports/{rid}/collection-overview/refresh")
+    assert resp.status_code == 404
+
+
 def test_create_captures_overview_when_collection_registered(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

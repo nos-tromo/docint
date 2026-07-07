@@ -2436,8 +2436,19 @@ def refresh_report_collection_overview(report_id: int, principal: str = Depends(
     """Recapture a report's document-overview snapshot from its collection.
 
     Point-in-time refresh: rebuilds the frozen manifest from the collection's
-    *current* documents. Owner-gated (404 cross-owner); 400 when the report has
-    no collection; 502 when the manifest cannot be built.
+    *current* documents.
+
+    Args:
+        report_id (int): The report id.
+        principal (str): The resolved request principal (owner).
+
+    Returns:
+        dict[str, Any]: The report with its refreshed ``collection_overview`` snapshot.
+
+    Raises:
+        HTTPException: 404 when the report is missing or owned by another
+            principal (or its collection is no longer owned); 400 when the report
+            has no collection; 502 when the manifest build fails.
     """
     report = _get_owned_report(report_id, principal)
     collection = report.get("collection_name")
@@ -2445,6 +2456,8 @@ def refresh_report_collection_overview(report_id: int, principal: str = Depends(
         raise HTTPException(status_code=400, detail="Report has no collection to summarize.")
     try:
         updated = _capture_collection_overview(report_id, collection, principal)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Collection-overview refresh failed for report {}: {}", report_id, e)
         raise HTTPException(status_code=502, detail="Failed to build the document overview.") from e
