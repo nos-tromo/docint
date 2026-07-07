@@ -270,6 +270,7 @@ export interface ReportSummary {
   operator: string | null
   reference_number: string | null
   show_toc: boolean
+  show_collection_overview: boolean
   session_id: string | null
   created_at: string | null
   updated_at: string | null
@@ -278,6 +279,27 @@ export interface ReportSummary {
 
 export interface Report extends ReportSummary {
   items: ReportItem[]
+  collection_overview: CollectionOverviewSnapshot | null
+}
+
+export interface CollectionOverviewDocument {
+  filename: string
+  mimetype?: string | null
+  type_label: string
+  page_count: number
+  row_count: number | null
+  node_count: number
+  file_hash: string
+}
+
+export interface CollectionOverviewSnapshot {
+  collection: string
+  captured_at: string
+  document_count: number
+  node_count: number
+  file_types: { label: string; count: number }[]
+  entity_types: string[]
+  documents: CollectionOverviewDocument[]
 }
 
 export interface IngestEvent {

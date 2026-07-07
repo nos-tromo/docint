@@ -467,3 +467,146 @@ def test_markdown_toc_absent_when_disabled(monkeypatch: pytest.MonkeyPatch) -> N
     """No contents list in Markdown when the toggle is off."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
     assert ui_string("report_section_toc") not in R.render_markdown(_toc_report(show_toc=False))
+
+
+_OVERVIEW: dict[str, Any] = {
+    "collection": "c1",
+    "captured_at": "2026-07-06T10:00:00+00:00",
+    "document_count": 2,
+    "node_count": 9,
+    "file_types": [{"label": "PDF", "count": 1}, {"label": "CSV", "count": 1}],
+    "entity_types": ["ORG", "PER"],
+    "documents": [
+        {
+            "filename": "a.pdf",
+            "type_label": "PDF",
+            "page_count": 4,
+            "row_count": None,
+            "node_count": 6,
+            "file_hash": "0123456789abcdefff",
+        },
+        {
+            "filename": "b.csv",
+            "type_label": "CSV",
+            "page_count": 0,
+            "row_count": 30,
+            "node_count": 3,
+            "file_hash": "deadbeefcafebabe00",
+        },
+    ],
+}
+
+
+def _overview_report(**over: Any) -> dict[str, Any]:
+    """A minimal report dict with the document-overview toggled on by default.
+
+    Named distinctly from the module's ``_report()`` (the "Case Alpha" fixture
+    used throughout this file) — reusing that name would shadow it, since
+    Python resolves a bare-name call against whatever the module global is
+    *at call time*, silently rebinding every existing ``_report()`` call to
+    this smaller dict.
+    """
+    base: dict[str, Any] = {
+        "title": "R",
+        "items": [],
+        "show_toc": True,
+        "show_collection_overview": True,
+        "collection_overview": _OVERVIEW,
+    }
+    base.update(over)
+    return base
+
+
+def test_overview_renders_last_in_markdown_when_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The trailing overview section renders with its manifest table when enabled."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    md = R.render_markdown(_overview_report())
+    assert "Document overview" in md
+    assert "a.pdf" in md and "b.csv" in md
+    assert "0123456789ab" in md and "0123456789abcdefff" not in md  # hash truncated to 12
+
+
+def test_overview_omitted_when_toggled_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Toggling show_collection_overview off omits the section entirely."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    md = R.render_markdown(_overview_report(show_collection_overview=False))
+    assert "Document overview" not in md
+
+
+def test_overview_omitted_when_empty_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An overview snapshot with no documents is omitted like an empty item section."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    empty: dict[str, Any] = {**_OVERVIEW, "documents": []}
+    md = R.render_markdown(_overview_report(collection_overview=empty))
+    assert "Document overview" not in md
+    # items empty AND no overview -> the "empty report" copy actually renders.
+    assert "This report has no items yet" in md
+
+
+def test_overview_only_report_is_not_empty_and_appears_in_html_toc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A report with only an overview (no items) is not treated as empty, and gets a TOC entry."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    htm = R.render_html(_overview_report(show_toc=True))
+    assert 'id="sec-collection-overview"' in htm
+    assert "This report has no items yet" not in htm  # overview counts as content
+    assert "#sec-collection-overview" in htm  # TOC entry present
+    assert "0123456789ab" in htm and "0123456789abcdefff" not in htm  # hash truncated to 12
+
+
+def test_overview_renders_after_items_in_markdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The trailing overview section appears after the item sections in output order."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    item = {
+        "id": 1,
+        "artifact_type": "summary",
+        "note": None,
+        "snapshot": {"collection": "c1", "text": "UNIQUE_ITEM_BODY_MARKER"},
+    }
+    md = R.render_markdown(_overview_report(items=[item]))
+    assert "Document overview" in md
+    assert "UNIQUE_ITEM_BODY_MARKER" in md  # the item body rendered …
+    # Match the "## " section heading, not the "- " TOC entry (which precedes the
+    # item body): the guarantee under test is that the overview *section* trails.
+    assert md.index("## Document overview") > md.index("UNIQUE_ITEM_BODY_MARKER")
+
+
+def test_csv_bundle_includes_overview_with_full_hash() -> None:
+    """The CSV bundle carries collection-overview.csv with the untruncated hash."""
+    zf = zipfile.ZipFile(io.BytesIO(R.report_csv_bundle(_overview_report())))
+    assert "collection-overview.csv" in zf.namelist()
+    body = zf.read("collection-overview.csv").decode()
+    assert "a.pdf" in body and "0123456789abcdefff" in body  # full hash in CSV, unlike the display truncation
+
+
+def test_csv_bundle_omits_overview_when_off() -> None:
+    """No collection-overview.csv when the overview toggle is off."""
+    zf = zipfile.ZipFile(io.BytesIO(R.report_csv_bundle(_overview_report(show_collection_overview=False))))
+    assert "collection-overview.csv" not in zf.namelist()
+
+
+def test_overview_csv_preserves_zero_counts() -> None:
+    """A counted zero (0 pages/rows/nodes) renders as ``0``, never a blank cell.
+
+    The snapshot distinguishes ``row_count: 0`` (an empty table) from
+    ``row_count: None`` (no table); the CSV is the evidentiary artifact where
+    that distinction must survive, so a real zero must not collapse to blank.
+    """
+    ov: dict[str, Any] = {
+        **_OVERVIEW,
+        "documents": [
+            {
+                "filename": "z.csv",
+                "type_label": "CSV",
+                "page_count": 0,
+                "row_count": 0,
+                "node_count": 0,
+                "file_hash": "h0",
+            }
+        ],
+    }
+    zf = zipfile.ZipFile(io.BytesIO(R.report_csv_bundle(_overview_report(collection_overview=ov))))
+    body = zf.read("collection-overview.csv").decode()
+    # Columns: filename,type,pages,rows,nodes,hash -> the data row's counts are all "0".
+    data_row = body.strip().splitlines()[-1].split(",")
+    assert data_row[2:5] == ["0", "0", "0"]  # pages,rows,nodes are 0, not blank
+    assert ",0,0,0," in body

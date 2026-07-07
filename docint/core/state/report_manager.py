@@ -107,6 +107,7 @@ class ReportManager:
         """
         created = cast(datetime | None, report.created_at)
         updated = cast(datetime | None, report.updated_at)
+        overview_raw = cast(str | None, report.collection_overview_snapshot)
         data: dict[str, Any] = {
             "id": report.id,
             "title": report.title,
@@ -114,6 +115,10 @@ class ReportManager:
             "operator": report.operator,
             "reference_number": report.reference_number,
             "show_toc": True if report.show_toc is None else bool(report.show_toc),
+            "show_collection_overview": (
+                True if report.show_collection_overview is None else bool(report.show_collection_overview)
+            ),
+            "collection_overview": json.loads(overview_raw) if overview_raw else None,
             "session_id": report.session_id,
             "created_at": created.isoformat() if created else None,
             "updated_at": updated.isoformat() if updated else None,
@@ -209,6 +214,7 @@ class ReportManager:
         operator: str | None = None,
         reference_number: str | None = None,
         show_toc: bool | None = None,
+        show_collection_overview: bool | None = None,
     ) -> dict[str, Any] | None:
         """Update a report the caller owns.
 
@@ -223,6 +229,8 @@ class ReportManager:
             reference_number (str | None): New file reference, when provided.
             show_toc (bool | None): Whether the exports render a contents
                 section, when provided.
+            show_collection_overview (bool | None): Whether the exports render
+                the collection's document overview section, when provided.
 
         Returns:
             dict[str, Any] | None: The updated report, or ``None`` when missing
@@ -240,6 +248,33 @@ class ReportManager:
                 report.reference_number = cast(Any, reference_number)
             if show_toc is not None:
                 report.show_toc = cast(Any, show_toc)
+            if show_collection_overview is not None:
+                report.show_collection_overview = cast(Any, show_collection_overview)
+            s.commit()
+            s.refresh(report)
+            return self._serialize_report(s, report)
+
+    def set_collection_overview_snapshot(
+        self, report_id: int, owner: str | None, snapshot: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        """Store (or clear) a report's frozen collection-overview snapshot.
+
+        Args:
+            report_id (int): The report id.
+            owner (str | None): The principal requesting the write.
+            snapshot (dict | None): The overview snapshot to freeze, or ``None``
+                to clear it.
+
+        Returns:
+            dict | None: The updated report, or ``None`` when missing or not owned.
+        """
+        with self._session_scope() as s:
+            report = s.get(Report, report_id)
+            if report is None or report.owner != owner:
+                return None
+            report.collection_overview_snapshot = cast(
+                Any, json.dumps(snapshot, ensure_ascii=False) if snapshot is not None else None
+            )
             s.commit()
             s.refresh(report)
             return self._serialize_report(s, report)
