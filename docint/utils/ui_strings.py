@@ -62,7 +62,7 @@ UI_STRINGS: Final[dict[str, dict[str, str]]] = {
         "report_section_chat": "Chat-Antworten",
         "report_section_entities": "Entitäten",
         "report_section_hate_speech": "Gruppenbezogene Menschenfeindlichkeit (GMF)",
-        "report_section_summaries": "Zusammenfassungen",
+        "report_section_summaries": "Zusammenfassung",
         "report_section_toc": "Inhaltsverzeichnis",
         "report_section_collection_overview": "Dokumentenübersicht",
         "report_overview_documents": "Dokumente",
