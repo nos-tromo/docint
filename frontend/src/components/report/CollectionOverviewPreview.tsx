@@ -7,6 +7,11 @@ function units(doc: { page_count: number; row_count: number | null }): string {
   return '—'
 }
 
+/** "N noun" with a plural "s" unless N is exactly 1 (all strip nouns pluralize with a bare "s"). */
+function count(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? '' : 's'}`
+}
+
 /**
  * In-app preview of a report's frozen document-overview section: the count
  * strip plus the per-document manifest. The authoritative render is server-side
@@ -17,8 +22,8 @@ export function CollectionOverviewPreview({ overview }: { overview: CollectionOv
     <div className="space-y-2">
       <h2 className="text-sm font-medium uppercase tracking-wide text-muted-foreground">Document overview</h2>
       <div className="text-xs text-muted-foreground">
-        {overview.document_count} documents · {overview.node_count} nodes · {overview.file_types.length} file types ·{' '}
-        {overview.entity_types.length} entity types
+        {count(overview.document_count, 'document')} · {count(overview.node_count, 'node')} ·{' '}
+        {count(overview.file_types.length, 'file type')} · {count(overview.entity_types.length, 'entity type')}
       </div>
       <div className="overflow-auto rounded-md border border-border">
         <table className="w-full text-xs">

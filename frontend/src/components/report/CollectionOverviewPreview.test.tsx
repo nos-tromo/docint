@@ -22,4 +22,17 @@ describe('CollectionOverviewPreview', () => {
     expect(screen.getByText('0123456789ab')).toBeInTheDocument()
     expect(screen.queryByText('0123456789abcdef')).not.toBeInTheDocument()
   })
+
+  it('pluralizes the count strip (singular at 1, plural otherwise)', () => {
+    // fixture: document_count=1, file_types=1, entity_types=1 → singular; node_count=6 → plural
+    const { container } = render(<CollectionOverviewPreview overview={overview} />)
+    const text = container.textContent ?? ''
+    expect(text).toContain('1 document ·')
+    expect(text).toContain('6 nodes ·')
+    expect(text).toContain('1 file type ·')
+    expect(text).toContain('1 entity type')
+    expect(text).not.toContain('1 documents')
+    expect(text).not.toContain('1 file types')
+    expect(text).not.toContain('1 entity types')
+  })
 })
