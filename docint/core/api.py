@@ -712,6 +712,22 @@ class FrontendConfigOut(BaseModel):
     collection_timeout: int
 
 
+class FileTypeCount(BaseModel):
+    """One file-type tally in a collection's document summary."""
+
+    label: str
+    count: int
+
+
+class DocumentsSummaryOut(BaseModel):
+    """Collection-wide document aggregates for the Inspector KPI strip."""
+
+    document_count: int
+    node_count: int
+    file_types: list[FileTypeCount]
+    entity_types: list[str]
+
+
 class VersionOut(BaseModel):
     """App release version."""
 
@@ -1894,6 +1910,35 @@ def get_collection_documents_count(
         raise
     except Exception as e:
         logger.error("Error fetching collection document count: {}", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/collections/documents/summary", response_model=DocumentsSummaryOut, tags=["Query"])
+def get_collection_documents_summary(
+    collection: str | None = None,
+    principal: str = Depends(resolve_principal),
+) -> dict[str, Any]:
+    """Return collection-wide document aggregates for the Inspector's KPI strip.
+
+    Unlike the paginated ``/collections/documents`` list, this reports the
+    document/node totals and the file-type / entity-type breakdown over the
+    *entire* collection, so the Inspector's summary cards stay accurate no matter
+    how many pages the user has scrolled in (the paginated rows previously
+    undercounted file types on large collections). Backed by the same
+    per-collection cache as the count/list endpoints.
+
+    Args:
+        collection (str | None): Caller's logical collection; owner-gated and
+            scoped per request, falling back to the process default when omitted.
+        principal (str): The resolved request principal.
+    """
+    try:
+        with _scoped_collection(collection, principal):
+            return rag.get_document_summary()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error fetching collection document summary: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 

@@ -1,6 +1,7 @@
 import { apiDelete, apiGet, apiPost, url } from './client'
 import type {
   DocumentRecord,
+  DocumentsSummary,
   EntityMergeMode,
   HateSpeechRow,
   NerGraph,
@@ -46,6 +47,15 @@ export const getDocumentsPage = (params: {
 export const getDocumentsCount = (collection?: string) =>
   apiGet<{ count: number }>(
     '/collections/documents/count',
+    collection ? { collection } : undefined
+  )
+
+// Collection-wide aggregates (document/node totals + file-type / entity-type
+// breakdown) for the Inspector KPI strip. Computed server-side over the whole
+// collection so the counts don't undercount with the paginated document table.
+export const getDocumentsSummary = (collection?: string) =>
+  apiGet<DocumentsSummary>(
+    '/collections/documents/summary',
     collection ? { collection } : undefined
   )
 

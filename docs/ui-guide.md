@@ -102,7 +102,11 @@ finding table shape.
 
 A paginated document table (`src/components/inspector/DocumentTable.tsx`)
 over the active collection, plus a per-session ZIP export
-(`SessionZipButton`).
+(`SessionZipButton`). The summary strip above the table
+(`DocumentSummary`) reads collection-wide aggregates from
+`GET /collections/documents/summary` — so the document/node totals and the
+file-type / entity-type breakdown stay accurate regardless of how many pages
+the table has lazily loaded (the counts are not derived from the loaded rows).
 
 ## State
 

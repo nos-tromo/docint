@@ -119,6 +119,7 @@ __all__ = [
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from qdrant_client.qdrant_fastembed import IDF_EMBEDDING_MODELS  # type: ignore[attr-defined]
 
+from docint.core.collection_overview import summarize_document_types
 from docint.core.entities.resolution import (
     ResolutionSummary,
     SurfaceMention,
@@ -7521,6 +7522,30 @@ class RAG:
             cached = self.list_documents()
             self._documents_cache[self.qdrant_collection] = cached
         return len(cached)
+
+    def get_document_summary(self) -> dict[str, Any]:
+        """Return collection-wide document aggregates for the Inspector KPI strip.
+
+        Aggregates the *whole* document list (document/node totals, file-type and
+        entity-type breakdown) so the Inspector's summary cards reflect the
+        entire collection rather than only the pages the user has scrolled in —
+        the fix for the file-type counts undercounting a large, lazily-paginated
+        collection. Shares :attr:`_documents_cache` with :meth:`get_document_count`
+        and the paginated inspector, so it is O(1) after the first scroll and is
+        refreshed by the same ingest/collection-switch cache invalidation.
+
+        Returns:
+            dict[str, Any]: ``document_count``, ``node_count``, ``file_types``
+            (``[{label, count}]``) and ``entity_types`` (sorted). Zeroed/empty
+            when no collection is selected.
+        """
+        if not self.qdrant_collection:
+            return {"document_count": 0, "node_count": 0, "file_types": [], "entity_types": []}
+        cached = self._documents_cache.get(self.qdrant_collection)
+        if cached is None:
+            cached = self.list_documents()
+            self._documents_cache[self.qdrant_collection] = cached
+        return summarize_document_types(cached)
 
     def get_collection_ner(self, refresh: bool = False) -> list[dict[str, Any]]:
         """Fetch all nodes from the current collection and return their NER metadata.
