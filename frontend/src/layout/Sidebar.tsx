@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { NavLink, useNavigate } from 'react-router-dom'
+import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { Button } from '@infra/ui'
 import { ApiError } from '@/api/client'
@@ -27,6 +27,7 @@ function getSessionsStatusMessage(error: unknown) {
 
 export function Sidebar() {
   const navigate = useNavigate()
+  const location = useLocation()
   const { data: collections } = useCollections()
   const selectMutation = useSelectCollection()
   const deleteCollectionMutation = useDeleteCollection()
@@ -59,7 +60,14 @@ export function Sidebar() {
     // collections resets any open chat so the next message can't resume it
     // against the wrong collection (which the backend refuses with a 409).
     setCurrentSessionId(null)
-    navigate('/chat')
+    // Stay in whatever section the user is currently viewing — switching the
+    // active collection must not yank them to chat. The one exception is a
+    // pinned chat session sub-route (`/chat/:sessionId`): that session belongs
+    // to the old collection, so drop to a fresh chat (still the chat section)
+    // rather than leave a stale transcript/URL behind.
+    if (location.pathname.startsWith('/chat/')) {
+      navigate('/chat')
+    }
   }
 
   const onDeleteCollection = (name: string) => {

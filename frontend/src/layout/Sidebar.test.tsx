@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Sidebar } from './Sidebar'
 import { useUiStore } from '@/stores/ui'
@@ -29,6 +29,23 @@ function renderSidebar() {
     <QueryClientProvider client={qc}>
       <MemoryRouter>
         <Sidebar />
+      </MemoryRouter>
+    </QueryClientProvider>
+  )
+}
+
+function LocationProbe() {
+  const location = useLocation()
+  return <div data-testid="location-probe">{location.pathname}</div>
+}
+
+function renderSidebarAt(initialPath: string) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={[initialPath]}>
+        <Sidebar />
+        <LocationProbe />
       </MemoryRouter>
     </QueryClientProvider>
   )
@@ -205,5 +222,51 @@ describe('Sidebar collection selection', () => {
       expect(useUiStore.getState().selectedCollection).toBeNull()
     })
     expect(useUiStore.getState().currentSessionId).toBeNull()
+  })
+})
+
+describe('Sidebar keeps the current section when switching collections', () => {
+  it('stays on the current section instead of jumping to chat', async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': ['alpha', 'beta'],
+      '/sessions/list': { sessions: [] },
+      '/collections/select': { ok: true, name: 'beta' }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'alpha' })
+
+    renderSidebarAt('/analysis')
+
+    const select = await screen.findByLabelText(/select collection/i)
+    await screen.findByRole('option', { name: 'beta' })
+    await userEvent.selectOptions(select, 'beta')
+
+    await waitFor(() => {
+      expect(useUiStore.getState().selectedCollection).toBe('beta')
+    })
+    expect(screen.getByTestId('location-probe').textContent).toBe('/analysis')
+  })
+
+  it('drops to a fresh chat when switching collections while viewing a pinned session', async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': ['alpha', 'beta'],
+      '/sessions/list': { sessions: [] },
+      '/collections/select': { ok: true, name: 'beta' }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'alpha', currentSessionId: 'sess-old' })
+
+    renderSidebarAt('/chat/sess-old')
+
+    const select = await screen.findByLabelText(/select collection/i)
+    await screen.findByRole('option', { name: 'beta' })
+    await userEvent.selectOptions(select, 'beta')
+
+    await waitFor(() => {
+      expect(useUiStore.getState().selectedCollection).toBe('beta')
+    })
+    // A session is pinned to the collection it was created under, so the stale
+    // session sub-route is dropped — but the user stays within the chat section.
+    expect(screen.getByTestId('location-probe').textContent).toBe('/chat')
   })
 })
