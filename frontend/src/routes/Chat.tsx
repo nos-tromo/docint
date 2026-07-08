@@ -2,6 +2,7 @@ import { useEffect, useReducer, useRef } from 'react'
 import { useParams } from 'react-router-dom'
 import { Button } from '@infra/ui'
 import { streamQuery } from '@/api/chat'
+import { ApiError } from '@/api/client'
 import type { ChatFinalEvent } from '@/api/types'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSessionHistory } from '@/hooks/useSessions'
@@ -161,18 +162,26 @@ export function Chat() {
         qc.invalidateQueries({ queryKey: sessionsKey })
       }
     } catch (e) {
-      // A backend OOM mid-stream surfaces as a generic "Failed to fetch"
-      // / "network error" TypeError from the underlying reader. The
-      // transport-level message isn't actionable on its own; flag the
-      // most likely cause and keep the raw detail for forensics.
-      const detail = e instanceof Error ? e.message : String(e)
-      dispatch({
-        type: 'fail',
-        error:
+      // A pinned session resumed against the wrong collection (409) or a send
+      // with no active collection (400) reaches here as a typed ApiError. Give
+      // each an actionable message. Anything else is a transport failure — a
+      // backend OOM mid-stream surfaces as a generic "network error" TypeError
+      // from the reader; flag the likely cause and keep the raw detail.
+      let error: string
+      if (e instanceof ApiError && e.status === 409) {
+        error =
+          'This chat belongs to a different collection — switch to that ' +
+          'collection to continue it, or start a new chat.'
+      } else if (e instanceof ApiError && e.status === 400) {
+        error = 'Select a collection before chatting.'
+      } else {
+        const detail = e instanceof Error ? e.message : String(e)
+        error =
           'Chat stream ended unexpectedly — the backend may have crashed ' +
           '(out of memory while loading NER/LLM models is the usual cause). ' +
           `Check backend logs and try again. (transport: ${detail})`
-      })
+      }
+      dispatch({ type: 'fail', error })
     } finally {
       abortRef.current = null
     }
