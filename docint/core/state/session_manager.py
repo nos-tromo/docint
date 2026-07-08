@@ -973,6 +973,37 @@ class SessionManager:
                 return True
             return False
 
+    def delete_sessions_for_collection(self, collection: str) -> int:
+        """Delete every conversation pinned to a physical collection.
+
+        Called when a collection is deleted so its chat sessions do not outlive
+        it. Deletes the ``Conversation`` ORM objects (not a bulk ``DELETE``
+        query) so the ``Conversation.turns`` -> ``Turn.citations`` cascades
+        fire, removing the turns and citations too. Matched by physical
+        ``collection_name`` alone: the API delete path has already proven the
+        caller owns the collection, and physical names are owner-namespaced, so
+        this also reaps any legacy ``NULL``-owner session pinned to it.
+        Idempotent — a re-run deletes nothing and returns 0.
+
+        Args:
+            collection (str): The physical Qdrant collection name whose sessions
+                should be deleted.
+
+        Returns:
+            int: The number of conversations deleted.
+        """
+        if not collection:
+            return 0
+        with self._session_scope() as s:
+            convs = s.query(Conversation).filter(Conversation.collection_name == collection).all()
+            count = 0
+            for conv in convs:
+                s.delete(conv)
+                count += 1
+            if count:
+                s.commit()
+            return count
+
     def _export_transcript(self, out_dir: Path, conv: Conversation, rolling_summary: str) -> None:
         """Export the conversation transcript to a Markdown file.
 
