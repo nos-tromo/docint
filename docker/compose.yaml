@@ -43,6 +43,10 @@ services:
       QDRANT_HOST: http://qdrant:6333
       QDRANT_SRC_DIR: /var/lib/docint/sources
       SESSIONS_DB_PATH: /var/lib/docint/sessions/sessions.sqlite3
+      # Same value nginx enforces (frontend service, below). The backend only
+      # advertises it via GET /config so the SPA sizes upload batches to stay
+      # under nginx's client_max_body_size; it does not enforce it here.
+      DOCINT_CLIENT_MAX_BODY_SIZE: ${DOCINT_CLIENT_MAX_BODY_SIZE:-1g}
     env_file: *env-file
     volumes:
       - docling-cache:/root/.cache/docling

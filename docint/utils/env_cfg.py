@@ -285,6 +285,43 @@ def _embed_envelope_defaults(inference_provider: str) -> tuple[float, int, int]:
     return 1800.0, 16, 1
 
 
+def parse_nginx_size(value: str | None, default_bytes: int) -> int:
+    """Parse an nginx ``size`` string (e.g. ``"1g"``, ``"512m"``) into bytes.
+
+    nginx size suffixes are binary: ``k`` = 1024, ``m`` = 1024**2, ``g`` =
+    1024**3; a bare number is a byte count. Case and surrounding whitespace are
+    tolerated. Any unparseable value falls back to ``default_bytes`` so a
+    malformed operator override of ``DOCINT_CLIENT_MAX_BODY_SIZE`` can never
+    crash the SPA's ``/config`` fetch (it just reports the default budget).
+
+    This mirrors the ``client_max_body_size`` directive the frontend nginx
+    enforces so the backend can advertise the *same* per-request ceiling to the
+    SPA, which sizes its upload batches from it.
+
+    Args:
+        value (str | None): The raw size string (typically the value of the
+            ``DOCINT_CLIENT_MAX_BODY_SIZE`` env var).
+        default_bytes (int): Fallback byte count for missing/invalid input.
+
+    Returns:
+        int: The parsed size in bytes (never negative).
+    """
+    if value is None:
+        return default_bytes
+    text = str(value).strip().lower()
+    if not text:
+        return default_bytes
+    units = {"k": 1024, "m": 1024**2, "g": 1024**3}
+    suffix = text[-1]
+    try:
+        if suffix in units:
+            magnitude = float(text[:-1].strip())
+            return max(0, int(magnitude * units[suffix]))
+        return max(0, int(text))
+    except (ValueError, TypeError):
+        return default_bytes
+
+
 @dataclass(frozen=True)
 class FrontendConfig:
     """Dataclass for frontend configuration."""
@@ -292,12 +329,14 @@ class FrontendConfig:
     collection_timeout: int
     graph_top_k: int
     graph_max_top_k: int
+    max_upload_bytes: int
 
 
 def load_frontend_env(
     default_collection_timeout: int = 120,
     default_graph_top_k: int = 80,
     default_graph_max_top_k: int = 500,
+    default_max_upload_size: str = "1g",
 ) -> FrontendConfig:
     """Loads frontend configuration from environment variables or defaults.
 
@@ -308,19 +347,32 @@ def load_frontend_env(
             Analysis graph view requests.
         default_graph_max_top_k (int): Ceiling for the graph node count, used
             for both the API clamp and the UI control's upper bound.
+        default_max_upload_size (str): Default per-request upload ceiling in
+            nginx ``size`` notation. Must mirror the frontend image's
+            ``DOCINT_CLIENT_MAX_BODY_SIZE`` default so the value the SPA reads
+            matches what nginx actually enforces.
 
     Returns:
         FrontendConfig: Parsed frontend configuration.
         - collection_timeout (int): Collection-fetch timeout in seconds.
         - graph_top_k (int): Default graph node count (clamped to >= 1).
         - graph_max_top_k (int): Graph node ceiling (clamped to >= graph_top_k).
+        - max_upload_bytes (int): Per-request upload ceiling in bytes, parsed
+          from ``DOCINT_CLIENT_MAX_BODY_SIZE`` (the same var nginx reads). The
+          SPA splits large selections into batches that each stay under this.
     """
     graph_top_k = max(1, int(os.getenv("NER_GRAPH_TOP_K", default_graph_top_k)))
     graph_max_top_k = max(graph_top_k, int(os.getenv("NER_GRAPH_MAX_TOP_K", default_graph_max_top_k)))
+    default_upload_bytes = parse_nginx_size(default_max_upload_size, 1024**3)
+    max_upload_bytes = parse_nginx_size(
+        os.getenv("DOCINT_CLIENT_MAX_BODY_SIZE", default_max_upload_size),
+        default_upload_bytes,
+    )
     return FrontendConfig(
         collection_timeout=int(os.getenv("FRONTEND_COLLECTION_TIMEOUT", default_collection_timeout)),
         graph_top_k=graph_top_k,
         graph_max_top_k=graph_max_top_k,
+        max_upload_bytes=max_upload_bytes,
     )
 
 

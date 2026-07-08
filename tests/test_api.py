@@ -2449,6 +2449,154 @@ def test_ingest_upload_empty_emits_warning_and_completes(
     assert cast(Any, api_module.rag).selected == []
 
 
+def test_ingest_upload_defer_saves_without_ingesting(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """``defer_ingest=true`` stages the file(s) but runs no ingestion pass.
+
+    The SPA uploads a large selection as several deferred batches, then triggers
+    a single ingestion via ``/ingest/finalize``; a staged batch must emit
+    ``upload_complete`` and never call ``ingest_docs``.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture.
+    """
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+    calls: list[Path] = []
+
+    def spy_ingest(collection: str, path: Path, hybrid: bool = True, progress_callback: Any = None) -> None:
+        """Record that ingestion was invoked (it must not be, when deferring)."""
+        _ = (collection, hybrid, progress_callback)
+        calls.append(path)
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", spy_ingest)
+
+    response = client.post(
+        "/ingest/upload",
+        data={"collection": "stage-1", "defer_ingest": "true"},
+        files={"files": ("a.txt", b"hello", "text/plain")},
+    )
+
+    assert response.status_code == 200
+    body = response.text
+    assert "event: upload_complete" in body
+    assert "event: ingestion_started" not in body
+    assert "event: ingestion_complete" not in body
+    # No ingestion ran, but the file was staged to disk for a later finalize.
+    assert calls == []
+    assert (tmp_path / "stage-1" / "a.txt").read_bytes() == b"hello"
+
+
+def test_ingest_finalize_ingests_staged_files(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """``/ingest/finalize`` runs one ingestion pass over the staged directory.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture.
+    """
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+    calls: list[Path] = []
+
+    def spy_ingest(collection: str, path: Path, hybrid: bool = True, progress_callback: Any = None) -> None:
+        """Record the directory ingestion ran over."""
+        _ = (collection, hybrid, progress_callback)
+        calls.append(path)
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", spy_ingest)
+
+    staged = client.post(
+        "/ingest/upload",
+        data={"collection": "final-1", "defer_ingest": "true"},
+        files={"files": ("a.txt", b"hello", "text/plain")},
+    )
+    assert staged.status_code == 200
+    assert calls == []  # staged, not yet ingested
+
+    response = client.post("/ingest/finalize", json={"collection": "final-1"})
+
+    assert response.status_code == 200
+    body = response.text
+    assert "event: ingestion_started" in body
+    assert "event: ingestion_complete" in body
+    assert "Ingestion failed" not in body
+    # Exactly one ingestion pass, over the whole staged directory.
+    assert calls == [tmp_path / "final-1"]
+
+
+def test_ingest_finalize_missing_dir_completes_empty(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """Finalizing a collection with nothing staged completes empty, not error.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture.
+    """
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+    called = False
+
+    def spy_ingest(*args: Any, **kwargs: Any) -> None:
+        """Fail the test if ingestion is attempted on a missing directory."""
+        nonlocal called
+        _ = (args, kwargs)
+        called = True
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", spy_ingest)
+
+    response = client.post("/ingest/finalize", json={"collection": "never-staged"})
+
+    assert response.status_code == 200
+    body = response.text
+    assert "event: warning" in body
+    assert '"empty": true' in body
+    assert "Ingestion failed" not in body
+    assert called is False
+
+
+def test_ingest_soft_completes_when_reader_finds_no_supported_files(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """A "No files found" reader error becomes a soft-empty completion.
+
+    A batch (or finalize) whose directory holds only reader-unsupported files
+    (e.g. audio/video, which the ``required_exts`` whitelist filters out) makes
+    ``SimpleDirectoryReader`` raise ``ValueError("No files found ...")``. That
+    must surface as a warning + empty completion, not a hard ``error`` event.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture.
+    """
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+
+    def raise_no_files(collection: str, path: Path, hybrid: bool = True, progress_callback: Any = None) -> None:
+        """Simulate the reader finding no ingestable files in ``path``."""
+        _ = (collection, hybrid, progress_callback)
+        raise ValueError(f"No files found in {path}.")
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", raise_no_files)
+
+    response = client.post(
+        "/ingest/upload",
+        data={"collection": "media-only"},
+        files={"files": ("clip.mp4", b"\x00" * 16, "video/mp4")},
+    )
+
+    assert response.status_code == 200
+    body = response.text
+    assert "event: warning" in body
+    assert '"empty": true' in body
+    assert "No ingestable files" in body
+    assert "Ingestion failed" not in body
+
+
 def test_ingest_upload_success_does_not_warm_query_engine(
     monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
 ) -> None:
@@ -3684,6 +3832,24 @@ def test_get_config_returns_graph_settings(client: TestClient, monkeypatch: pyte
     assert body["graph_top_k"] == 120
     assert body["graph_max_top_k"] == 900
     assert "collection_timeout" in body
+
+
+def test_get_config_reports_upload_ceiling(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`GET /config` advertises the per-request upload ceiling in bytes.
+
+    The SPA sizes its upload batches from this so a large selection is split
+    into sub-ceiling requests instead of one body nginx would 413.
+
+    Args:
+        client (TestClient): The TestClient instance.
+        monkeypatch (pytest.MonkeyPatch): Fixture to override env vars.
+    """
+    monkeypatch.setenv("DOCINT_CLIENT_MAX_BODY_SIZE", "4g")
+
+    response = client.get("/config")
+
+    assert response.status_code == 200
+    assert response.json()["max_upload_bytes"] == 4 * 1024**3
 
 
 def test_ner_graph_uses_env_default_when_top_k_omitted(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

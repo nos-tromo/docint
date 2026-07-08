@@ -1,6 +1,22 @@
 import { url } from './client'
 import type { SseEvent } from './sse'
 
+/**
+ * Error thrown when an upload POST returns a non-OK HTTP status. Carries the
+ * numeric `status` so callers can branch on it — notably 413 (Request Entity
+ * Too Large, from nginx's `client_max_body_size`) which needs a size-specific
+ * message rather than the generic "backend may have crashed" fallback.
+ */
+export class UploadHttpError extends Error {
+  readonly status: number
+
+  constructor(status: number) {
+    super(`Upload failed: ${status}`)
+    this.name = 'UploadHttpError'
+    this.status = status
+  }
+}
+
 export async function* streamUpload(
   path: string,
   formData: FormData,
@@ -12,7 +28,7 @@ export async function* streamUpload(
     signal
   })
   if (!res.ok || !res.body) {
-    throw new Error(`Upload failed: ${res.status}`)
+    throw new UploadHttpError(res.status)
   }
   const reader = res.body.getReader()
   const decoder = new TextDecoder('utf-8')

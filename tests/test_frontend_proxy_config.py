@@ -38,6 +38,21 @@ def test_frontend_compose_exposes_upload_limit_override() -> None:
     assert "DOCINT_CLIENT_MAX_BODY_SIZE: ${DOCINT_CLIENT_MAX_BODY_SIZE:-1g}" in compose
 
 
+def test_backend_and_frontend_share_upload_limit_env() -> None:
+    """Both services must read the same DOCINT_CLIENT_MAX_BODY_SIZE.
+
+    nginx (frontend) *enforces* the ceiling; the backend only *advertises* it
+    via GET /config so the SPA can size upload batches to stay under it. If the
+    backend didn't get the var, /config would report the 1g default while nginx
+    enforced a raised limit (or vice-versa) and batches would be mis-sized.
+    """
+    compose = (REPO_ROOT / "docker" / "compose.yaml").read_text(encoding="utf-8")
+
+    # The env line must appear twice: once under backend, once under frontend.
+    occurrences = compose.count("DOCINT_CLIENT_MAX_BODY_SIZE: ${DOCINT_CLIENT_MAX_BODY_SIZE:-1g}")
+    assert occurrences == 2, f"expected the shared upload-limit env in both services, found {occurrences}"
+
+
 def test_ingest_proxy_uses_configurable_request_limit() -> None:
     """The ingest nginx location should use the configurable multipart limit."""
     nginx_conf = (REPO_ROOT / "frontend" / "nginx" / "default.conf").read_text(encoding="utf-8")

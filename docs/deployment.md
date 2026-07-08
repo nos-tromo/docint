@@ -90,7 +90,10 @@ the frontend port is published for local development.
   `compose.override.yaml` maps `${DOCINT_HOST_PORT:-8080}:80`, so
   `make up-dev` serves the UI at `http://localhost:8080`.
 - Environment: `DOCINT_CLIENT_MAX_BODY_SIZE` (default `1g`) — the nginx
-  upload-size cap.
+  per-request upload-size cap. The backend service reads the same value only to
+  advertise it via `GET /config` (`max_upload_bytes`); the SPA uses it to split
+  large selections into sub-cap batches, so the total upload is not bounded by
+  this cap — only an individual file bigger than it would still be rejected.
 - Attaches to `docint-net` only, and `depends_on` the `backend` so Compose
   starts the backend container first.
 
@@ -199,7 +202,7 @@ of network, proxy, and runtime overrides are Compose-specific:
 | `INFERENCE_NET` | Name of the shared external inference network (default `inference-net`). |
 | `DATA_NET` | Name of the shared external data network (default `data-net`). |
 | `DOCINT_HOST_PORT` | Host port for the React SPA under `make up-dev` (default `8080`). |
-| `DOCINT_CLIENT_MAX_BODY_SIZE` | nginx upload-size cap on the frontend (default `1g`). |
+| `DOCINT_CLIENT_MAX_BODY_SIZE` | Per-request upload cap nginx enforces on the frontend (default `1g`); the backend reads the same value to advertise it to the SPA (which batches large uploads under it). Raise only for single files larger than the default. |
 | `PRELOAD_MODELS` | When `true`, the backend runs `load-models` at startup before `uvicorn`. |
 
 ## Session persistence

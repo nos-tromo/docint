@@ -710,6 +710,7 @@ class FrontendConfigOut(BaseModel):
     graph_top_k: int
     graph_max_top_k: int
     collection_timeout: int
+    max_upload_bytes: int
 
 
 class VersionOut(BaseModel):
@@ -812,14 +813,16 @@ def get_frontend_config() -> dict[str, int]:
     variables on each call (see :func:`docint.utils.env_cfg.load_frontend_env`).
 
     Returns:
-        dict[str, int]: ``graph_top_k``, ``graph_max_top_k`` and
-        ``collection_timeout``.
+        dict[str, int]: ``graph_top_k``, ``graph_max_top_k``,
+        ``collection_timeout`` and ``max_upload_bytes`` (the per-request upload
+        ceiling nginx enforces, which the SPA uses to size its upload batches).
     """
     cfg = load_frontend_env()
     return {
         "graph_top_k": cfg.graph_top_k,
         "graph_max_top_k": cfg.graph_max_top_k,
         "collection_timeout": cfg.collection_timeout,
+        "max_upload_bytes": cfg.max_upload_bytes,
     }
 
 
@@ -2921,12 +2924,189 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+async def _stream_collection_ingestion(
+    name: str,
+    physical: str,
+    batch_dir: Path,
+    hybrid: bool | None,
+    request: Request,
+) -> AsyncIterator[str]:
+    """Run ingestion over ``batch_dir`` and yield SSE event frames.
+
+    Shared by ``/ingest/upload`` (after it saves a batch of files) and
+    ``/ingest/finalize`` (which ingests files staged by earlier ``defer_ingest``
+    uploads without receiving any new file). Yields ``ingestion_started`` first,
+    then ``ingestion_progress`` / ``warning`` frames, and terminates with exactly
+    one of ``ingestion_complete`` (including the soft ``empty`` outcomes) or
+    ``error``. Polls ``request.is_disconnected()`` so a client hangup cancels the
+    awaiter; the worker thread runs to completion and its output is discarded.
+
+    A directory that holds no reader-supported files (e.g. only audio/video,
+    which the ingestion ``required_exts`` whitelist filters out) surfaces as a
+    soft ``empty`` completion rather than a hard error, so a mixed upload never
+    fails just because one slice of it had nothing ingestable.
+
+    Args:
+        name (str): The caller's logical collection name (used in messages).
+        physical (str): The owner-namespaced physical Qdrant collection.
+        batch_dir (Path): Directory of staged source files to ingest.
+        hybrid (bool | None): Whether to enable hybrid search (defaults to True).
+        request (Request): The incoming request, for disconnect detection.
+
+    Yields:
+        str: SSE-formatted event frames.
+    """
+    yield _format_sse("ingestion_started", {"collection": name})
+    try:
+        queue: asyncio.Queue[str | None | Exception] = asyncio.Queue()
+        loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
+
+        def _safe_put(item: str | None | Exception) -> None:
+            """Enqueue a message, tolerating a closed loop after disconnect.
+
+            If the event loop has already been torn down (e.g., the coroutine
+            was cancelled and the loop is gone by the time the worker thread
+            finishes), we log rather than silently dropping the message.
+
+            Args:
+                item (str | None | Exception): The message or sentinel to
+                    enqueue. ``None`` signals normal completion; ``Exception``
+                    signals failure.
+            """
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, item)
+            except Exception as exc:
+                # CPython raises RuntimeError("Event loop is closed"); uvloop or
+                # an OS-level SIGPIPE/EBADF during teardown can surface OSError /
+                # BrokenPipeError. Catch broadly so an exception from the worker
+                # thread still lands in the log rather than vanishing.
+                logger.warning(
+                    "Could not enqueue ingest message for collection '{}' (loop unavailable after disconnect): {}",
+                    name,
+                    exc,
+                )
+
+        def progress_callback(msg: str) -> None:
+            """Report a progress message from the worker thread.
+
+            Args:
+                msg (str): Progress message to be reported.
+            """
+            _safe_put(msg)
+
+        async def run_ingestion() -> None:
+            """Run the ingestion process in a separate thread.
+
+            Logs cancellation and worker-thread exceptions explicitly so a
+            disconnected client does not cause silent data loss. The underlying
+            worker thread cannot be killed (Python has no safe thread-kill
+            primitive), so on cancellation we only release the awaiting
+            coroutine; the thread runs to completion and its output is discarded.
+            """
+            try:
+                await to_thread.run_sync(
+                    ingest_module.ingest_docs,
+                    physical,
+                    batch_dir,
+                    hybrid if hybrid is not None else True,
+                    progress_callback,
+                )
+                _safe_put(None)
+            except asyncio.CancelledError:
+                logger.warning(
+                    "Ingestion task for collection '{}' cancelled; the worker "
+                    "thread will continue until ingest_docs returns and its "
+                    "output will be discarded.",
+                    name,
+                )
+                raise
+            except Exception as e:
+                logger.error("Ingestion of collection '{}' failed: {}", name, e)
+                _safe_put(e)
+
+        ingestion_task = asyncio.create_task(run_ingestion())
+
+        # Poll periodically so client disconnects are noticed even when the
+        # worker is quiet (embedding batches, etc.). The interval is a
+        # module-level constant so tests can override it.
+        while True:
+            try:
+                msg = await asyncio.wait_for(
+                    queue.get(),
+                    timeout=INGEST_DISCONNECT_POLL_INTERVAL_S,
+                )
+            except TimeoutError:
+                if await request.is_disconnected():
+                    ingestion_task.cancel()
+                    logger.warning(
+                        "Client disconnected during ingestion for collection "
+                        "'{}'; cancelled the awaiter. Worker thread continues "
+                        "to completion.",
+                        name,
+                    )
+                    return
+                continue
+            if msg is None:
+                break
+            if isinstance(msg, EmptyIngestionError):
+                yield _format_sse(
+                    "warning",
+                    {"message": str(msg), "collection": msg.collection_name},
+                )
+                yield _format_sse(
+                    "ingestion_complete",
+                    {"collection": name, "data_dir": str(batch_dir), "empty": True},
+                )
+                return
+            if isinstance(msg, Exception):
+                raise msg
+            event_name = (
+                "warning"
+                if isinstance(msg, str) and msg.strip().lower().startswith("warning:")
+                else "ingestion_progress"
+            )
+            yield _format_sse(event_name, {"message": msg})
+
+        yield _format_sse(
+            "ingestion_complete",
+            {"collection": name, "data_dir": str(batch_dir)},
+        )
+    except Exception as exc:  # pragma: no cover - streamed errors are logged
+        if isinstance(exc, ValueError) and "No files found" in str(exc):
+            # The staged directory held no reader-supported files (e.g. only
+            # audio/video, which required_exts filters out). Treat as a soft
+            # empty ingest, not a hard failure, so a mixed upload whose media
+            # files are not directly ingestable still completes cleanly.
+            logger.warning(
+                "No ingestable files for collection '{}'; completing as empty.",
+                name,
+            )
+            yield _format_sse(
+                "warning",
+                {"message": f"No ingestable files found for '{name}'.", "collection": name},
+            )
+            yield _format_sse(
+                "ingestion_complete",
+                {"collection": name, "data_dir": str(batch_dir), "empty": True},
+            )
+            return
+        logger.error("Error during streamed ingestion: {}", exc)
+        # Include the exception class + message so the user can tell at a glance
+        # whether the failure was, e.g., an embedding-endpoint outage versus a
+        # Qdrant connectivity issue versus a parse error.
+        yield _format_sse(
+            "error",
+            {"message": f"Ingestion failed: {type(exc).__name__}: {exc}"},
+        )
+
+
 @app.post("/ingest/upload", tags=["Ingestion"])
 async def ingest_upload(
     request: Request,
     collection: str = Form(...),
     files: list[UploadFile] = File(...),  # noqa: B008 — FastAPI dependency marker
     hybrid: bool | None = Form(True),
+    defer_ingest: bool = Form(False),
 ) -> StreamingResponse:
     """Upload files for ingestion and stream progress as SSE events.
 
@@ -2936,6 +3116,12 @@ async def ingest_upload(
         collection (str): The name of the collection to ingest into.
         files (list[UploadFile]): The list of files to upload.
         hybrid (bool | None): Whether to enable hybrid search (default: True).
+        defer_ingest (bool): When ``True``, save the file(s) but do NOT ingest —
+            the caller runs one ingestion pass afterwards via
+            ``/ingest/finalize``. The SPA sets this on every batch of a large,
+            client-split upload so ingestion happens once over the whole staged
+            directory instead of once per batch. Defaults to ``False`` (save +
+            ingest, the single-request behaviour).
 
     Returns:
         StreamingResponse: A streaming response that yields SSE events during ingestion.
@@ -3020,142 +3206,81 @@ async def ingest_upload(
                 )
                 return
 
-        yield _format_sse("ingestion_started", {"collection": name})
-        try:
-            queue: asyncio.Queue[str | None | Exception] = asyncio.Queue()
-            loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
+        if defer_ingest:
+            # Staged-only mode: the file(s) are saved but NOT ingested here. The
+            # SPA uploads a large selection as several deferred batches (each
+            # under the nginx request cap), then calls /ingest/finalize once to
+            # run a single ingestion pass over the whole directory. Ingesting
+            # per batch instead would re-init the models for every batch and
+            # hard-fail on any batch that happened to hold only reader-
+            # unsupported files (e.g. audio/video → SimpleDirectoryReader's
+            # "No files found").
+            yield _format_sse(
+                "upload_complete",
+                {"collection": name, "files_saved": len(files)},
+            )
+            return
 
-            def _safe_put(item: str | None | Exception) -> None:
-                """Enqueue a message, tolerating a closed loop after disconnect.
+        async for frame in _stream_collection_ingestion(name, physical, batch_dir, hybrid, request):
+            yield frame
 
-                If the event loop has already been torn down (e.g., the
-                coroutine was cancelled and the loop is gone by the time
-                the worker thread finishes), we log rather than silently
-                dropping the message.
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
-                Args:
-                    item (str | None | Exception): The message or sentinel
-                        to enqueue. ``None`` signals normal completion;
-                        ``Exception`` signals failure.
-                """
-                try:
-                    loop.call_soon_threadsafe(queue.put_nowait, item)
-                except Exception as exc:
-                    # CPython raises RuntimeError("Event loop is closed");
-                    # uvloop or an OS-level SIGPIPE/EBADF during teardown
-                    # can surface OSError / BrokenPipeError. Catch broadly
-                    # so an exception from the worker thread still lands
-                    # in the log rather than vanishing after disconnect.
-                    logger.warning(
-                        "Could not enqueue ingest message for collection '{}' (loop unavailable after disconnect): {}",
-                        name,
-                        exc,
-                    )
 
-            def progress_callback(msg: str) -> None:
-                """Callback function to report progress during ingestion.
+@app.post("/ingest/finalize", tags=["Ingestion"])
+async def ingest_finalize(payload: IngestIn, request: Request) -> StreamingResponse:
+    """Ingest a collection's already-staged upload batches (receives no files).
 
-                Args:
-                    msg (str): Progress message to be reported.
-                """
-                _safe_put(msg)
+    The SPA uploads a large selection as several ``defer_ingest`` batches to
+    ``/ingest/upload`` (each saved but not ingested), then calls this once to run
+    a single ingestion pass over the whole staged directory, streaming the same
+    SSE ingestion events as ``/ingest/upload``. Being fileless, this request
+    cannot trip the nginx request-size cap, so ingestion still runs even if an
+    individual upload batch failed.
 
-            async def run_ingestion() -> None:
-                """Run the ingestion process in a separate thread.
+    Args:
+        payload (IngestIn): The collection (logical name) and hybrid flag.
+        request (Request): The incoming request, used to resolve the principal
+            and detect client disconnect.
 
-                Logs cancellation and worker-thread exceptions explicitly
-                so a disconnected client does not cause silent data loss.
-                The underlying worker thread cannot be killed (Python has
-                no safe thread-kill primitive), so on cancellation we
-                only release the awaiting coroutine; the thread runs to
-                completion and its output is discarded.
-                """
-                try:
-                    await to_thread.run_sync(
-                        ingest_module.ingest_docs,
-                        physical,
-                        batch_dir,
-                        hybrid if hybrid is not None else True,
-                        progress_callback,
-                    )
-                    _safe_put(None)
-                except asyncio.CancelledError:
-                    logger.warning(
-                        "Ingestion task for collection '{}' cancelled; the "
-                        "worker thread will continue until ingest_docs "
-                        "returns and its output will be discarded.",
-                        name,
-                    )
-                    raise
-                except Exception as e:
-                    logger.error("Ingestion of collection '{}' failed: {}", name, e)
-                    _safe_put(e)
+    Returns:
+        StreamingResponse: SSE stream of ingestion events (``ingestion_started``
+        … ``ingestion_complete`` / ``error``).
 
-            ingestion_task = asyncio.create_task(run_ingestion())
+    Raises:
+        HTTPException: 400 if the collection name is missing.
+    """
+    name = payload.collection.strip()
+    if not name:
+        logger.error("HTTPException: Collection name required for finalize")
+        raise HTTPException(status_code=400, detail="Collection name required")
 
-            # Poll periodically so client disconnects are noticed even when
-            # the worker is quiet (embedding batches, etc.). The interval is
-            # a module-level constant so tests can override it.
-            while True:
-                try:
-                    msg = await asyncio.wait_for(
-                        queue.get(),
-                        timeout=INGEST_DISCONNECT_POLL_INTERVAL_S,
-                    )
-                except TimeoutError:
-                    if await request.is_disconnected():
-                        ingestion_task.cancel()
-                        logger.warning(
-                            "Client disconnected during /ingest/upload for "
-                            "collection '{}'; cancelled the awaiter. Worker "
-                            "thread continues to completion.",
-                            name,
-                        )
-                        return
-                    continue
-                if msg is None:
-                    break
-                if isinstance(msg, EmptyIngestionError):
-                    yield _format_sse(
-                        "warning",
-                        {
-                            "message": str(msg),
-                            "collection": msg.collection_name,
-                        },
-                    )
-                    yield _format_sse(
-                        "ingestion_complete",
-                        {
-                            "collection": name,
-                            "data_dir": str(batch_dir),
-                            "empty": True,
-                        },
-                    )
-                    return
-                if isinstance(msg, Exception):
-                    raise msg
-                event_name = (
-                    "warning"
-                    if isinstance(msg, str) and msg.strip().lower().startswith("warning:")
-                    else "ingestion_progress"
-                )
-                yield _format_sse(event_name, {"message": msg})
+    principal = resolve_principal(request)
+    physical = rag.ensure_collection_owner_manager().register(principal, name)
+    batch_dir = _resolve_qdrant_src_dir() / physical
+    hybrid = payload.hybrid
 
+    async def event_stream() -> AsyncIterator[str]:
+        """Yield the shared ingestion SSE stream for the staged directory.
+
+        Yields:
+            str: SSE-formatted event frames.
+        """
+        if not batch_dir.is_dir():
+            # Nothing was staged (e.g. every upload batch failed). Report a soft
+            # empty completion instead of erroring on a missing directory.
+            yield _format_sse("ingestion_started", {"collection": name})
+            yield _format_sse(
+                "warning",
+                {"message": f"No staged files found for '{name}'.", "collection": name},
+            )
             yield _format_sse(
                 "ingestion_complete",
-                {"collection": name, "data_dir": str(batch_dir)},
+                {"collection": name, "data_dir": str(batch_dir), "empty": True},
             )
-        except Exception as exc:  # pragma: no cover - streamed errors are logged
-            logger.error("Error during streamed ingestion: {}", exc)
-            # Include the exception class + message so the user can tell at a
-            # glance whether the failure was, e.g., an embedding-endpoint
-            # outage versus a Qdrant connectivity issue versus a parse error.
-            yield _format_sse(
-                "error",
-                {
-                    "message": f"Ingestion failed: {type(exc).__name__}: {exc}",
-                },
-            )
+            return
+        async for frame in _stream_collection_ingestion(name, physical, batch_dir, hybrid, request):
+            yield frame
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

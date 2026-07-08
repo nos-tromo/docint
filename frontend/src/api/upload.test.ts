@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { streamUpload } from './upload'
+import { streamUpload, UploadHttpError } from './upload'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -35,5 +35,20 @@ describe('streamUpload', () => {
     const call = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(call[1].method).toBe('POST')
     expect(call[1].body).toBe(fd)
+  })
+
+  it('throws a typed UploadHttpError carrying the status on a non-OK response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 413, body: null }))
+
+    // 413 (nginx client_max_body_size) must be distinguishable from a generic
+    // failure so callers can show a size-specific message.
+    let caught: unknown
+    try {
+      await streamUpload('/ingest/upload', new FormData()).next()
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeInstanceOf(UploadHttpError)
+    expect((caught as UploadHttpError).status).toBe(413)
   })
 })
