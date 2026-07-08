@@ -34,6 +34,7 @@ this doc are declared at the top of `docint/core/api.py:208` and onward.
 | `GET`  | `/collections/ner/graph` | `Query` | Derived entity graph (nodes + edges) for the active collection. |
 | `GET`  | `/collections/hate-speech` | `Query` | Hate-speech findings for the active collection. |
 | `GET`  | `/collections/documents` | `Query` | List documents in a collection. |
+| `GET`  | `/collections/documents/summary` | `Query` | Collection-wide document aggregates (document/node totals + file-type / entity-type breakdown) for the Inspector KPI strip. |
 | `GET`  | `/sessions/list` | `Sessions` | List stored sessions. |
 | `GET`  | `/sessions/{session_id}` | `Sessions` | Return conversation history for a session. |
 | `DELETE` | `/sessions/{session_id}` | `Sessions` | Delete a session. |

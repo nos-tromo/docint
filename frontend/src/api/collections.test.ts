@@ -3,6 +3,7 @@ import {
   csvExportHref,
   getDocumentsCount,
   getDocumentsPage,
+  getDocumentsSummary,
   getHateSpeech,
   getHateSpeechPage,
   getNerGraph,
@@ -54,6 +55,13 @@ describe('collections api carries the selected collection', () => {
     mockFetch({ count: 0 })
     await getDocumentsCount('docs')
     expect(lastUrl()).toContain('/collections/documents/count')
+    expect(lastUrl()).toContain('collection=docs')
+  })
+
+  it('getDocumentsSummary sends collection as a query param', async () => {
+    mockFetch({ document_count: 0, node_count: 0, file_types: [], entity_types: [] })
+    await getDocumentsSummary('docs')
+    expect(lastUrl()).toContain('/collections/documents/summary')
     expect(lastUrl()).toContain('collection=docs')
   })
 

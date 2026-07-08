@@ -3,7 +3,11 @@
 from datetime import UTC, datetime
 from typing import Any
 
-from docint.core.collection_overview import build_collection_overview, mime_label
+from docint.core.collection_overview import (
+    build_collection_overview,
+    mime_label,
+    summarize_document_types,
+)
 
 
 def test_mime_label_known_and_fallback_and_missing() -> None:
@@ -77,6 +81,52 @@ def test_build_overview_empty() -> None:
     """Test build_collection_overview with an empty document list."""
     ov = build_collection_overview([], "empty", datetime(2026, 7, 6, tzinfo=UTC))
     assert ov["document_count"] == 0 and ov["documents"] == [] and ov["node_count"] == 0
+
+
+def test_summarize_document_types_aggregates_over_whole_list() -> None:
+    """summarize_document_types tallies counts/types/entities across every doc.
+
+    This is the collection-wide aggregate the Inspector KPI strip reads, so an
+    image-heavy collection reports the true file-type counts regardless of how
+    many document pages the paginated table has loaded.
+    """
+    docs: list[dict[str, Any]] = [
+        {"mimetype": "image/jpeg", "node_count": 1, "entity_types": ["PER"]},
+        {"mimetype": "image/jpeg", "node_count": 1, "entity_types": ["ORG", "PER"]},
+        {"mimetype": "image/png", "node_count": 2, "entity_types": []},
+    ]
+    summary = summarize_document_types(docs)
+    assert summary["document_count"] == 3
+    assert summary["node_count"] == 4
+    # Most-common-first (JPEG=2), then alphabetical on ties.
+    assert summary["file_types"] == [{"label": "JPEG", "count": 2}, {"label": "PNG", "count": 1}]
+    assert summary["entity_types"] == ["ORG", "PER"]
+
+
+def test_summarize_document_types_empty() -> None:
+    """summarize_document_types on an empty list returns zeroed aggregates."""
+    assert summarize_document_types([]) == {
+        "document_count": 0,
+        "node_count": 0,
+        "file_types": [],
+        "entity_types": [],
+    }
+
+
+def test_overview_reuses_summarize_document_types() -> None:
+    """The snapshot's aggregate fields equal summarize_document_types (shared logic).
+
+    Guards against the live Inspector summary and the frozen report overview
+    ever drifting apart, since they must show identical numbers.
+    """
+    docs: list[dict[str, Any]] = [
+        {"filename": "a.jpg", "mimetype": "image/jpeg", "node_count": 1, "entity_types": ["PER"]},
+        {"filename": "b.png", "mimetype": "image/png", "node_count": 3, "entity_types": ["ORG"]},
+    ]
+    ov = build_collection_overview(docs, "c", datetime(2026, 7, 8, tzinfo=UTC))
+    agg = summarize_document_types(docs)
+    for key in ("document_count", "node_count", "file_types", "entity_types"):
+        assert ov[key] == agg[key]
 
 
 def test_row_count_zero_preserved_distinct_from_absent() -> None:

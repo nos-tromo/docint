@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
-import { getDocumentsCount, getDocumentsPage } from '@/api/collections'
+import { getDocumentsCount, getDocumentsPage, getDocumentsSummary } from '@/api/collections'
 import { useUiStore } from '@/stores/ui'
 
 /**
@@ -32,6 +32,21 @@ export function useDocumentsCount() {
   return useQuery({
     queryKey: ['documents-count', collection],
     queryFn: () => getDocumentsCount(collection ?? undefined),
+    enabled: !!collection
+  })
+}
+
+/**
+ * Collection-wide document aggregates (document/node totals + file-type and
+ * entity-type breakdown) for the inspector's KPI strip. Computed server-side
+ * over the whole collection, so the summary cards stay accurate regardless of
+ * how many pages {@link useDocumentsPages} has loaded.
+ */
+export function useDocumentsSummary() {
+  const collection = useUiStore((s) => s.selectedCollection)
+  return useQuery({
+    queryKey: ['documents-summary', collection],
+    queryFn: () => getDocumentsSummary(collection ?? undefined),
     enabled: !!collection
   })
 }

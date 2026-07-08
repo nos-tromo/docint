@@ -57,6 +57,47 @@ def mime_label(mimetype: str | None) -> str:
     return cleaned[:12].upper()
 
 
+def summarize_document_types(documents: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate collection-wide type/entity/node totals from a document list.
+
+    Shared by the live Inspector summary endpoint
+    (:meth:`RAG.get_document_summary`) and :func:`build_collection_overview` so
+    the at-a-glance KPI strip and the frozen report overview report identical
+    numbers. Pure and dependency-free — the whole document list is aggregated,
+    so the counts are collection-wide regardless of any UI pagination.
+
+    Args:
+        documents: Raw document dicts from :meth:`RAG.list_documents`.
+
+    Returns:
+        A dict with English keys (protocol): ``document_count``, ``node_count``,
+        ``file_types`` (``[{label, count}]``, most-common-first then
+        alphabetical on ties) and ``entity_types`` (sorted distinct union).
+    """
+    type_counts: dict[str, int] = {}
+    entity_types: set[str] = set()
+    node_total = 0
+
+    for doc in documents:
+        label = mime_label(doc.get("mimetype"))
+        type_counts[label] = type_counts.get(label, 0) + 1
+        node_total += int(doc.get("node_count") or 0)
+        for et in doc.get("entity_types") or []:
+            if et:
+                entity_types.add(str(et))
+
+    file_types = [
+        {"label": label, "count": count} for label, count in sorted(type_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+
+    return {
+        "document_count": len(documents),
+        "node_count": node_total,
+        "file_types": file_types,
+        "entity_types": sorted(entity_types),
+    }
+
+
 def build_collection_overview(
     documents: list[dict[str, Any]],
     collection: str,
@@ -73,47 +114,33 @@ def build_collection_overview(
         The snapshot dict. Keys are English (protocol); ``documents`` is sorted
         by filename and ``file_types`` is ordered most-common-first then
         alphabetically. ``max_rows`` is normalized to ``row_count`` (``None``
-        when absent).
+        when absent). The count/type aggregates come from
+        :func:`summarize_document_types` so the snapshot and the live Inspector
+        summary stay identical.
     """
-    type_counts: dict[str, int] = {}
-    entity_types: set[str] = set()
-    node_total = 0
     rows: list[dict[str, Any]] = []
 
     for doc in documents:
         mimetype = doc.get("mimetype")
-        label = mime_label(mimetype)
-        type_counts[label] = type_counts.get(label, 0) + 1
-        node_count = int(doc.get("node_count") or 0)
-        node_total += node_count
-        for et in doc.get("entity_types") or []:
-            if et:
-                entity_types.add(str(et))
         raw_rows = doc.get("max_rows")
         row_count = int(raw_rows) if isinstance(raw_rows, (int, float)) else None
         rows.append(
             {
                 "filename": str(doc.get("filename") or ""),
                 "mimetype": mimetype,
-                "type_label": label,
+                "type_label": mime_label(mimetype),
                 "page_count": int(doc.get("page_count") or 0),
                 "row_count": row_count,
-                "node_count": node_count,
+                "node_count": int(doc.get("node_count") or 0),
                 "file_hash": str(doc.get("file_hash") or ""),
             }
         )
 
-    file_types = [
-        {"label": label, "count": count} for label, count in sorted(type_counts.items(), key=lambda kv: (-kv[1], kv[0]))
-    ]
     rows.sort(key=lambda r: r["filename"])
 
     return {
         "collection": collection,
         "captured_at": captured_at.isoformat(),
-        "document_count": len(documents),
-        "node_count": node_total,
-        "file_types": file_types,
-        "entity_types": sorted(entity_types),
+        **summarize_document_types(documents),
         "documents": rows,
     }

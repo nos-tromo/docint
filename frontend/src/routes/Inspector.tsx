@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { useDocumentsCount, useDocumentsPages } from '@/hooks/useDocuments'
+import { useDocumentsPages, useDocumentsSummary } from '@/hooks/useDocuments'
 import { useUiStore } from '@/stores/ui'
 import { DocumentTable } from '@/components/inspector/DocumentTable'
 import { DocumentSummary } from '@/components/inspector/DocumentSummary'
@@ -8,7 +8,7 @@ import { SessionZipButton } from '@/components/inspector/SessionZipButton'
 export function Inspector() {
   const collection = useUiStore((s) => s.selectedCollection)
   const query = useDocumentsPages()
-  const { data: count } = useDocumentsCount()
+  const { data: summary } = useDocumentsSummary()
   const docs = useMemo(
     () => (query.data?.pages ?? []).flatMap((p) => p.items),
     [query.data]
@@ -25,11 +25,7 @@ export function Inspector() {
         <div className="text-sm text-muted-foreground">Loading…</div>
       ) : (
         <>
-          <DocumentSummary
-            docs={docs}
-            totalCount={count?.count}
-            partial={!!query.hasNextPage}
-          />
+          <DocumentSummary summary={summary} />
           <DocumentTable
             docs={docs}
             isFetching={query.isFetching}

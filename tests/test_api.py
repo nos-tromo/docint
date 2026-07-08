@@ -3405,6 +3405,43 @@ def test_documents_count_requires_active_collection(client: TestClient) -> None:
     assert response.status_code == 400
 
 
+def test_documents_summary_returns_collection_wide_aggregate(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The summary endpoint returns collection-wide document aggregates.
+
+    This is the fix for the Inspector undercounting file types on a large,
+    lazily-paginated collection: the breakdown is computed server-side over the
+    whole collection, not just the loaded rows.
+
+    Args:
+        client (TestClient): The TestClient instance.
+        monkeypatch (pytest.MonkeyPatch): Fixture to override the RAG method.
+    """
+    _select_alpha(client)
+    rag = cast(DummyRAG, api_module.rag)
+    aggregate = {
+        "document_count": 305,
+        "node_count": 305,
+        "file_types": [{"label": "JPEG", "count": 304}, {"label": "PNG", "count": 1}],
+        "entity_types": ["loc", "org"],
+    }
+    # DummyRAG has no get_document_summary; wire a thin lambda for this test.
+    monkeypatch.setattr(rag, "get_document_summary", lambda: aggregate, raising=False)
+
+    response = client.get("/collections/documents/summary")
+
+    assert response.status_code == 200
+    assert response.json() == aggregate
+
+
+def test_documents_summary_requires_active_collection(client: TestClient) -> None:
+    """Summary endpoint must reject calls with no active collection."""
+    api_module.rag.qdrant_collection = ""
+    response = client.get("/collections/documents/summary")
+    assert response.status_code == 400
+
+
 # ---------------------------------------------------------------------------
 # /sessions/{session_id}/sources.zip
 # ---------------------------------------------------------------------------

@@ -103,6 +103,24 @@ export interface DocumentRecord {
   entity_types?: string[]
 }
 
+export interface FileTypeCount {
+  label: string
+  count: number
+}
+
+/**
+ * Collection-wide document aggregates for the Inspector KPI strip, served by
+ * `GET /collections/documents/summary`. Computed over the whole collection, so
+ * the file-type / entity-type breakdown is accurate regardless of how many
+ * document pages the paginated table has loaded.
+ */
+export interface DocumentsSummary {
+  document_count: number
+  node_count: number
+  file_types: FileTypeCount[]
+  entity_types: string[]
+}
+
 export interface NerVariant {
   text: string
   type?: string
