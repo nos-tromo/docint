@@ -46,7 +46,7 @@ The same RAG engine is used for both ingestion (write path) and retrieval
 |---|---|
 | `docint/core/api.py` | FastAPI app, request/response models, streaming handlers |
 | `docint/core/rag.py` | RAG engine: ingest, retrieve, rerank, chat/stream |
-| `docint/core/ingest/` | Ingestion pipeline and shared image service |
+| `docint/core/ingest/` | Ingestion pipeline, shared image service, and media transcription (social + standalone) |
 | `docint/core/readers/` | File-type-specific readers (PDF, images, tables, JSON / Nextext transcripts) |
 | `docint/core/storage/` | Qdrant-backed docstore, hierarchical node storage, source staging |
 | `docint/core/state/` | Conversation sessions and citation tracking (SQLAlchemy) |
@@ -111,7 +111,17 @@ The diagram below expands what happens when the UI calls `POST /query` or
      (`docint/core/storage/sources.py`).
    - Builds the `DocumentIngestionPipeline`
      (`docint/core/ingest/ingestion_pipeline.py`).
-3. **Ingestion pipeline** — iterates files, dispatching to the matching
+3. **Ingestion pipeline** — before the per-file reader dispatch below, two
+   pre-passes sweep the whole batch tree for audio/video:
+   `docint/core/ingest/social_linker.py` (media linked via a social export's
+   `postings.csv` / `media.csv` manifest) runs first, then
+   `docint/core/ingest/standalone_media.py` picks up any other audio/video
+   file the linker did not already claim. Both route through the shared
+   `docint/core/ingest/media_transcribe.py` engine (`MediaTranscriber`) — a
+   remote Nextext call producing transcript segments (text nodes) and, for
+   video, keyframes (CLIP image points) — the social linker now delegates
+   its per-file Nextext routing to this shared engine rather than calling
+   Nextext directly. Every remaining file then dispatches to the matching
    reader in `docint/core/readers/`:
    - PDFs go through the page-level pipeline
      (`docint/core/readers/documents/`) — triage → layout → OCR →

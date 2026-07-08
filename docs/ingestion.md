@@ -26,20 +26,38 @@ The default list lives in `load_ingestion_env()` in
 - **Structured** — `.json`, `.jsonl`, `.ndjson` (generic payloads and
   Nextext transcripts)
 - **Images** — `.png`, `.jpg`, `.jpeg`, `.gif`
+- **Media** — `.mp4`, `.mov`, `.mkv`, `.webm`, `.avi`, `.m4v`, `.mpg`,
+  `.mpeg`, `.mp3`, `.m4a`, `.wav`, `.flac`, `.aac`, `.ogg`, `.opus`, `.wma`
+  (`DEFAULT_MEDIA_FILETYPES`, overridable via `MEDIA_FILETYPES`) — not part
+  of `supported_filetypes` and never handed to the generic reader dispatch
+  below; a dedicated pre-pass discovers them by extension and routes them
+  straight to Nextext (see below).
 
 Only the file types listed above are ingested when uploaded standalone; all
-others are silently skipped. Audio and video are instead handled through the
-**social-multimodal** path: drop the raw media files into the **same
-directory** as `postings.csv` / `media.csv` and reference them by filename from
-the manifest, and docint forwards
-each clip to a remote [Nextext](https://github.com/nos-tromo/nextext) service
-that transcribes it and extracts keyframes — the transcript is ingested as
-text and the keyframes as CLIP image points (requires `NEXTEXT_API_BASE`; see
-"Social Multimodal Media" in `README.md`). A pre-made Nextext `.jsonl`
+other extensions are silently skipped.
+
+Audio and video need no `postings.csv` / `media.csv` at all: drop loose
+media files anywhere in the ingest batch (SPA folder upload or `DATA_PATH`)
+and docint forwards each one to a remote
+[Nextext](https://github.com/nos-tromo/nextext) service that transcribes it
+and, for video, extracts keyframes — the transcript is ingested as text
+(one segment per node) and the keyframes as CLIP image points. Every
+artifact anchors to the media file's own content hash and filename; there
+is no posting to link it to, so transcript segments and keyframes retrieve
+and cite as independent, normally-ranked sources naming the source clip.
+
+A social export's `postings.csv` / `media.csv` manifest changes *linking*,
+not *whether* transcription happens: media resolved from the manifest is
+**additionally** stamped with its parent posting's `posting_uuid` so it
+groups with that posting at citation time (see "Social Multimodal Media" in
+`README.md`), while any other loose audio/video elsewhere in the batch still
+goes through the standalone path above. Both require `NEXTEXT_API_BASE`;
+when it is unset, audio/video files are skipped with a one-line warning and
+the rest of the batch still ingests normally. A pre-made Nextext `.jsonl`
 transcript still ingests directly as a structured file if you prefer to
 transcribe out of band.
 
-Each extension is dispatched to the reader that knows how to parse it
+Every other extension is dispatched to the reader that knows how to parse it
 (see the next section).
 
 ## Readers
