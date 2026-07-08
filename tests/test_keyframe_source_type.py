@@ -40,6 +40,7 @@ def _service(monkeypatch: pytest.MonkeyPatch) -> tuple[ImageIngestionService, li
 
 
 def test_defaults_preserve_social_keyframe_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default args preserve the social keyframe payload byte-for-byte."""
     svc, stored = _service(monkeypatch)
     svc.ingest_keyframe_set(
         [b"f0"],
@@ -54,6 +55,7 @@ def test_defaults_preserve_social_keyframe_payload(monkeypatch: pytest.MonkeyPat
 
 
 def test_standalone_video_keyframe_has_no_posting_uuid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A standalone video keyframe carries source_type video_keyframe and no posting_uuid."""
     svc, stored = _service(monkeypatch)
     svc.ingest_keyframe_set(
         [b"f0"],
