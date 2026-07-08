@@ -6,7 +6,6 @@ import pandas as pd
 
 from docint.core.ingest.social_linker import (
     _derive_posting_id,
-    _warn_unreferenced_media,
     build_posting_index,
     resolve_media_rows,
     strip_counter,
@@ -134,39 +133,3 @@ def test_resolve_media_rows_links_via_network_id(tmp_path: Path) -> None:
     assert links[0].posting_uuid == "uuid-1"
     assert links[0].posting_id == "3745_779"
     assert links[0].media_id == "18525_3745_779"
-
-
-def test_warn_unreferenced_media_flags_only_unlinked_audio_video(tmp_path: Path) -> None:
-    """Unlinked audio/video is warned about; linked A/V and any image are not."""
-    from loguru import logger
-
-    (tmp_path / "orphan.mp4").write_bytes(b"x")  # A/V, not linked -> warned (dropped)
-    (tmp_path / "linked.mov").write_bytes(b"x")  # A/V, linked -> not warned
-    (tmp_path / "pic.jpg").write_bytes(b"x")  # image, not linked -> not warned (standalone fallback)
-
-    lines: list[str] = []
-    sink_id = logger.add(lambda message: lines.append(str(message)), level="WARNING", format="{message}")
-    try:
-        _warn_unreferenced_media(tmp_path, {tmp_path / "linked.mov"})
-    finally:
-        logger.remove(sink_id)
-
-    assert len(lines) == 1
-    assert "orphan.mp4" in lines[0]
-    assert "linked.mov" not in lines[0]
-    assert "pic.jpg" not in lines[0]
-    assert "NOT ingested" in lines[0]
-
-
-def test_warn_unreferenced_media_silent_when_all_linked(tmp_path: Path) -> None:
-    """No warning when every present A/V file is linked."""
-    from loguru import logger
-
-    (tmp_path / "clip.mp4").write_bytes(b"x")
-    lines: list[str] = []
-    sink_id = logger.add(lambda message: lines.append(str(message)), level="WARNING", format="{message}")
-    try:
-        _warn_unreferenced_media(tmp_path, {tmp_path / "clip.mp4"})
-    finally:
-        logger.remove(sink_id)
-    assert lines == []

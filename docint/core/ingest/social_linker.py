@@ -17,24 +17,6 @@ from loguru import logger
 
 _COUNTER_SUFFIX = re.compile(r"_\d+$")
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
-_AV_EXTS = {
-    ".mp4",
-    ".mov",
-    ".mkv",
-    ".webm",
-    ".avi",
-    ".m4v",
-    ".mpg",
-    ".mpeg",
-    ".mp3",
-    ".m4a",
-    ".wav",
-    ".flac",
-    ".aac",
-    ".ogg",
-    ".opus",
-    ".wma",
-}
 
 
 @dataclass(frozen=True)
@@ -193,32 +175,6 @@ def is_image(path: Path) -> bool:
     return path.suffix.lower() in _IMAGE_EXTS
 
 
-def _warn_unreferenced_media(media_dir: Path, linked_paths: set[Path]) -> None:
-    """Warn about audio/video files in ``media_dir`` the manifest did not link.
-
-    Audio/video reach docint only via a manifest link (→ Nextext); a clip that
-    is present but unreferenced — not in ``media.csv``, or whose posting/file
-    did not resolve — is otherwise dropped silently by the generic reader's
-    extension whitelist. Surface it so it isn't lost without a trace. Images are
-    excluded: they have a standalone-ingestion fallback and are not dropped.
-
-    Args:
-        media_dir (Path): The flat directory holding the media files.
-        linked_paths (set[Path]): Paths the linker resolved and routed.
-    """
-    orphaned = sorted(
-        p.name for p in media_dir.iterdir() if p.is_file() and p.suffix.lower() in _AV_EXTS and p not in linked_paths
-    )
-    if orphaned:
-        shown = ", ".join(orphaned[:10]) + (" ..." if len(orphaned) > 10 else "")
-        logger.warning(
-            "{} audio/video file(s) present but not linked by the manifest were NOT ingested "
-            "(audio/video reach docint only via a manifest link to Nextext): {}",
-            len(orphaned),
-            shown,
-        )
-
-
 # ---------------------------------------------------------------------------
 # Routing layer (SocialLinker + SocialLinkResult) — Task 10
 # ---------------------------------------------------------------------------
@@ -299,7 +255,6 @@ class SocialLinker:
         )
         media_df = pd.read_csv(media_csv, sep=_sniff_delimiter(media_csv), dtype=str, encoding="utf-8-sig")
         links = resolve_media_rows(media_df, posting_uuids, media_csv.parent)
-        _warn_unreferenced_media(media_csv.parent, {link.path for link in links})
 
         result.consumed_paths.add(media_csv)
         context = IngestContext(source_collection=self.target_collection)
