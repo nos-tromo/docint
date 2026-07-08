@@ -1,5 +1,5 @@
 import { useMemo, useReducer, useState } from 'react'
-import { Button } from '@infra/ui'
+import { Button, FileList, mergeFiles } from '@infra/ui'
 import { streamIngestUploadBatched } from '@/api/ingest'
 import { useSelectCollection, useCollections, collectionsKey } from '@/hooks/useCollections'
 import { useConfig } from '@/hooks/useConfig'
@@ -17,7 +17,7 @@ import { deriveIngestStatus } from '@/lib/ingestStatus'
  */
 const FALLBACK_UPLOAD_LIMIT_BYTES = 512 * 1024 * 1024
 
-interface State {
+export interface State {
   collection: string
   files: File[]
   events: IngestEvent[]
@@ -32,6 +32,7 @@ interface State {
 type Action =
   | { type: 'set_collection'; v: string }
   | { type: 'add_files'; v: File[] }
+  | { type: 'remove_file'; i: number }
   | { type: 'reset_files' }
   | { type: 'start'; sizes: Record<string, number> }
   | { type: 'event'; v: IngestEvent }
@@ -49,12 +50,14 @@ function progressKind(ev: IngestEvent): string | null {
   return message.replace(/\d+/g, '#').trim()
 }
 
-function reducer(s: State, a: Action): State {
+export function reducer(s: State, a: Action): State {
   switch (a.type) {
     case 'set_collection':
       return { ...s, collection: a.v }
     case 'add_files':
-      return { ...s, files: [...s.files, ...a.v] }
+      return { ...s, files: mergeFiles(s.files, a.v) }
+    case 'remove_file':
+      return { ...s, files: s.files.filter((_, i) => i !== a.i) }
     case 'reset_files':
       return { ...s, files: [] }
     case 'start':
@@ -191,34 +194,19 @@ export function Ingest() {
 
       <Dropzone disabled={state.busy} onFiles={(v) => dispatch({ type: 'add_files', v })} />
 
-      {state.files.length > 0 && (
-        <ul className="text-sm space-y-1">
-          {state.files.map((f) => (
-            <li key={f.name}>
-              {f.name} <span className="text-muted-foreground">({f.size} bytes)</span>
-            </li>
-          ))}
-        </ul>
-      )}
+      <FileList
+        files={state.files}
+        onRemove={(i) => dispatch({ type: 'remove_file', i })}
+        onClear={() => dispatch({ type: 'reset_files' })}
+      />
 
-      <div className="flex gap-2">
-        <Button
-          variant="primary"
-          onClick={submit}
-          disabled={state.busy || !state.collection || state.files.length === 0}
-        >
-          {state.busy ? 'Ingesting…' : 'Ingest'}
-        </Button>
-        {state.files.length > 0 && (
-          <button
-            type="button"
-            onClick={() => dispatch({ type: 'reset_files' })}
-            className="px-4 py-2 rounded-md border border-border"
-          >
-            Clear files
-          </button>
-        )}
-      </div>
+      <Button
+        variant="primary"
+        onClick={submit}
+        disabled={state.busy || !state.collection || state.files.length === 0}
+      >
+        {state.busy ? 'Ingesting…' : 'Ingest'}
+      </Button>
 
       {error && <div className="text-red-400 text-sm">{error}</div>}
       {warnings.length > 0 && (
