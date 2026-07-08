@@ -3642,6 +3642,32 @@ def test_sessions_list_uses_default_identity_when_no_header(
     assert seen["list"] == "operator"
 
 
+def test_sessions_list_scopes_to_collection(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """`?collection=` resolves to physical and scopes; unowned -> empty, not 404."""
+    seen: dict[str, Any] = {}
+
+    class ScopedSessions:
+        def list_sessions(self, owner: str, collection: str | None = None) -> list[dict[str, Any]]:
+            seen["args"] = (owner, collection)
+            return [{"id": "s1", "created_at": "2026-01-01", "title": "t", "collection": collection}]
+
+    class Owners:
+        def resolve(self, owner: str, logical: str) -> str | None:
+            return f"u123__{logical}" if logical == "alpha" else None
+
+    monkeypatch.setattr(api_module.rag, "ensure_session_manager", lambda: ScopedSessions())
+    monkeypatch.setattr(api_module.rag, "ensure_collection_owner_manager", lambda: Owners())
+
+    resp = client.get("/sessions/list?collection=alpha", headers={"X-Auth-User": "alice"})
+    assert resp.status_code == 200
+    assert seen["args"] == ("alice", "u123__alpha")
+    assert resp.json()["sessions"][0]["id"] == "s1"
+
+    resp = client.get("/sessions/list?collection=ghost", headers={"X-Auth-User": "alice"})
+    assert resp.status_code == 200
+    assert resp.json()["sessions"] == []
+
+
 @pytest.mark.anyio
 async def test_stream_query_does_not_block_event_loop(
     monkeypatch: pytest.MonkeyPatch,
