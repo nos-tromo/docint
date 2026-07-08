@@ -24,3 +24,14 @@ def test_media_filetypes_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MEDIA_FILETYPES", ".mp4, .mov")
     cfg = load_ingestion_env()
     assert cfg.media_filetypes == [".mp4", ".mov"]
+
+
+def test_media_filetypes_override_normalizes_case_dot_and_empties(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Override entries are lowercased, empty segments dropped, and a leading dot ensured.
+
+    A dotless entry like ``mp4`` would otherwise never match ``Path.suffix`` (which
+    always carries the dot), silently skipping the operator's media — so normalize it.
+    """
+    monkeypatch.setenv("MEDIA_FILETYPES", "MP4, .mov, ,mkv")
+    cfg = load_ingestion_env()
+    assert cfg.media_filetypes == [".mp4", ".mov", ".mkv"]

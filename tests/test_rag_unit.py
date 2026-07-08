@@ -1116,6 +1116,67 @@ def test_retrieve_image_sources_skips_when_image_collection_missing() -> None:
     assert image_service.called is False
 
 
+def test_retrieve_image_sources_shapes_standalone_video_keyframe() -> None:
+    """A standalone video keyframe surfaces as a citable, un-grouped image source.
+
+    Standalone keyframes carry ``source_type="video_keyframe"`` and
+    ``source_doc_id=<media hash>`` with no ``posting_uuid``. They must normalize to a
+    normal image source: a filename derived from the clip path, a preview_url keyed on
+    the media hash, and no posting linkage (so no cross-modal grouping downstream).
+    """
+
+    class DummyImageService:
+        """Image service stub returning one standalone video-keyframe payload."""
+
+        def _resolve_collection_name(self, source_collection: str | None = None) -> str:
+            """Return the image companion collection name.
+
+            Args:
+                source_collection: The source collection name, or None for default.
+            """
+            return f"{source_collection}_images"
+
+        def query_similar_images_by_text(
+            self,
+            query_text: str,
+            top_k: int = 3,
+            *,
+            source_collection: str | None = None,
+        ) -> list[dict[str, Any]]:
+            """Return a single standalone video-keyframe payload.
+
+            Args:
+                query_text: The text query (ignored by the stub).
+                top_k: Maximum matches to return (ignored by the stub).
+                source_collection: The source collection name (ignored by the stub).
+            """
+            return [
+                {
+                    "image_id": "img-1",
+                    "source_type": "video_keyframe",
+                    "source_doc_id": "mediahash-1",
+                    "source_path": "/sources/coll/clip.mp4",
+                    "llm_description": "a title slide",
+                    "mime_type": "image/jpeg",
+                }
+            ]
+
+    rag = RAG(qdrant_collection="coll")
+    rag._image_ingestion_service = cast(Any, DummyImageService())
+    rag._qdrant_client = cast(Any, types.SimpleNamespace(collection_exists=lambda collection_name: True))
+
+    sources = rag._retrieve_image_sources("what was on the slide?", top_k=3)
+
+    assert len(sources) == 1
+    src = sources[0]
+    assert src["source"] == "video_keyframe"
+    assert src["filename"] == "clip.mp4"
+    assert src["file_hash"] == "mediahash-1"
+    assert "preview_url" in src
+    assert "file_hash=mediahash-1" in src["preview_url"]
+    assert "posting_uuid" not in src
+
+
 def test_directory_ingestion_attaches_file_hash(tmp_path: Path) -> None:
     """Test that directory ingestion attaches file hashes to documents.
 
