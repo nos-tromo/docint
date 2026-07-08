@@ -182,7 +182,9 @@ export function Sidebar() {
             </li>
           )}
           {!sessionsLoading && !sessionsError && sessions.length === 0 && (
-            <li className="px-2 py-1 text-sm text-muted-foreground">No chats yet.</li>
+            <li className="px-2 py-1 text-sm text-muted-foreground">
+              {selected ? 'No chats in this collection yet.' : 'Select a collection to see its chats.'}
+            </li>
           )}
           {!sessionsLoading && !sessionsError && sessions.map((s) => {
             const active = currentSessionId === s.id

@@ -125,11 +125,44 @@ describe('Sidebar collection selection', () => {
         return { ok: true, status: 200, json: async () => null, text: async () => 'null' }
       })
     )
+    useUiStore.setState({ selectedCollection: 'alpha' })
 
     renderSidebar()
 
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent(/DOCINT_DEFAULT_IDENTITY/i)
     expect(alert).toHaveTextContent(/authenticated user/i)
+  })
+
+  it("lists the active collection's sessions and scopes the request", async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': ['alpha'],
+      '/sessions/list': {
+        sessions: [{ id: 's1', created_at: '2026-01-01', title: 'First chat', collection: 'alpha' }]
+      }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'alpha' })
+
+    renderSidebar()
+
+    expect(await screen.findByText('First chat')).toBeInTheDocument()
+    await waitFor(() => {
+      const call = fetchMock.mock.calls
+        .map((c) => String(c[0]))
+        .find((u) => u.includes('/sessions/list'))
+      expect(call).toContain('collection=alpha')
+    })
+  })
+
+  it('prompts to select a collection when none is active and skips the sessions fetch', async () => {
+    const fetchMock = mockFetch({ '/collections/list': ['alpha'] })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderSidebar()
+
+    expect(await screen.findByText(/select a collection to see its chats/i)).toBeInTheDocument()
+    const calls = fetchMock.mock.calls.map((c) => String(c[0]))
+    expect(calls.some((u) => u.includes('/sessions/list'))).toBe(false)
   })
 })
