@@ -3686,6 +3686,24 @@ def test_get_config_returns_graph_settings(client: TestClient, monkeypatch: pyte
     assert "collection_timeout" in body
 
 
+def test_get_config_reports_upload_ceiling(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`GET /config` advertises the per-request upload ceiling in bytes.
+
+    The SPA sizes its upload batches from this so a large selection is split
+    into sub-ceiling requests instead of one body nginx would 413.
+
+    Args:
+        client (TestClient): The TestClient instance.
+        monkeypatch (pytest.MonkeyPatch): Fixture to override env vars.
+    """
+    monkeypatch.setenv("DOCINT_CLIENT_MAX_BODY_SIZE", "4g")
+
+    response = client.get("/config")
+
+    assert response.status_code == 200
+    assert response.json()["max_upload_bytes"] == 4 * 1024**3
+
+
 def test_ner_graph_uses_env_default_when_top_k_omitted(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Omitting `top_k_nodes` falls back to `NER_GRAPH_TOP_K`.
 

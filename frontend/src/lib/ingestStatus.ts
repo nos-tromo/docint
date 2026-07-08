@@ -169,7 +169,12 @@ export function deriveIngestStatus(
         status.phase = 'uploading'
         status.collection = strOf(d.collection) ?? status.collection
         const files = Array.isArray(d.files) ? (d.files as unknown[]) : []
-        status.totalFiles = files.length
+        // Accumulate rather than assign so totalFiles spans every `start` in the
+        // stream. A batched upload emits one synthetic `start` listing all files
+        // (so this runs once), but should the stream ever carry a `start` per
+        // batch, the count must sum, not reset to the last batch. Single-request
+        // ingests emit exactly one `start`, so this matches the old behaviour.
+        status.totalFiles += files.length
         // Anchor the elapsed timer to the *arrival* time of the start event,
         // stamped once on the event itself (IngestEvent.receivedAt). Reading
         // Date.now() here instead would reset startedAt on every re-derivation

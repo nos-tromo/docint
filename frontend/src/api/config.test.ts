@@ -19,10 +19,16 @@ function mockFetch(body: unknown) {
 
 describe('config api', () => {
   it('getConfig GETs /config and returns the parsed body', async () => {
-    mockFetch({ graph_top_k: 80, graph_max_top_k: 500, collection_timeout: 120 })
+    const body = {
+      graph_top_k: 80,
+      graph_max_top_k: 500,
+      collection_timeout: 120,
+      max_upload_bytes: 1024 * 1024 * 1024
+    }
+    mockFetch(body)
     const cfg = await getConfig()
     const call = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(String(call[0])).toContain('/config')
-    expect(cfg).toEqual({ graph_top_k: 80, graph_max_top_k: 500, collection_timeout: 120 })
+    expect(cfg).toEqual(body)
   })
 })

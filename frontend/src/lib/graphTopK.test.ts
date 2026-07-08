@@ -1,7 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import { resolveGraphTopK } from './graphTopK'
 
-const cfg = { graph_top_k: 80, graph_max_top_k: 500, collection_timeout: 120 }
+const cfg = {
+  graph_top_k: 80,
+  graph_max_top_k: 500,
+  collection_timeout: 120,
+  max_upload_bytes: 1024 * 1024 * 1024
+}
 
 describe('resolveGraphTopK', () => {
   it('uses the server default when nothing is stored', () => {

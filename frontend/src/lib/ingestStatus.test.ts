@@ -122,6 +122,16 @@ describe('deriveIngestStatus', () => {
     })
   })
 
+  it('accumulates totalFiles across multiple start events (batched upload)', () => {
+    // A batched upload may carry more than one `start`; totalFiles must sum
+    // every batch rather than reset to the last one's count.
+    const events: IngestEvent[] = [
+      { event: 'start', data: { collection: 'c', files: ['a.pdf', 'b.pdf'] } },
+      { event: 'start', data: { collection: 'c', files: ['c.pdf'] } }
+    ]
+    expect(deriveIngestStatus(events).totalFiles).toBe(3)
+  })
+
   it('transitions to uploading on start and records totals + collection', () => {
     const events: IngestEvent[] = [
       {

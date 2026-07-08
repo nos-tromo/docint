@@ -24,6 +24,7 @@ from docint.utils.env_cfg import (
     load_model_env,
     load_resolution_env,
     load_retrieval_env,
+    parse_nginx_size,
 )
 
 
@@ -594,8 +595,76 @@ def _clear_frontend_env(monkeypatch: pytest.MonkeyPatch) -> None:
     Args:
         monkeypatch: Fixture to override environment variables.
     """
-    for var in ("FRONTEND_COLLECTION_TIMEOUT", "NER_GRAPH_TOP_K", "NER_GRAPH_MAX_TOP_K"):
+    for var in (
+        "FRONTEND_COLLECTION_TIMEOUT",
+        "NER_GRAPH_TOP_K",
+        "NER_GRAPH_MAX_TOP_K",
+        "DOCINT_CLIENT_MAX_BODY_SIZE",
+    ):
         monkeypatch.delenv(var, raising=False)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("1g", 1024**3),
+        ("8g", 8 * 1024**3),
+        ("512m", 512 * 1024**2),
+        ("1024k", 1024 * 1024),
+        ("1048576", 1_048_576),  # bare bytes
+        ("2G", 2 * 1024**3),  # case-insensitive
+        ("  4g  ", 4 * 1024**3),  # whitespace tolerated
+    ],
+)
+def test_parse_nginx_size_valid(value: str, expected: int) -> None:
+    """Nginx size notation parses to binary byte counts.
+
+    Args:
+        value (str): The nginx-style size string.
+        expected (int): The expected byte count.
+    """
+    assert parse_nginx_size(value, default_bytes=123) == expected
+
+
+@pytest.mark.parametrize("value", ["", None, "notasize", "1gb", "g", "-5"])
+def test_parse_nginx_size_invalid_falls_back(value: str | None) -> None:
+    """Malformed sizes fall back to the default so /config never crashes.
+
+    Args:
+        value (str | None): An unparseable size string (or None).
+    """
+    # ``-5`` is a special case: ``int("-5")`` succeeds but is clamped to 0, not
+    # the fallback — a negative ceiling would be nonsensical either way.
+    if value == "-5":
+        assert parse_nginx_size(value, default_bytes=999) == 0
+    else:
+        assert parse_nginx_size(value, default_bytes=999) == 999
+
+
+def test_frontend_config_upload_bytes_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without an override the upload ceiling defaults to 1 GiB (matches nginx).
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    _clear_frontend_env(monkeypatch)
+
+    cfg = load_frontend_env()
+
+    assert cfg.max_upload_bytes == 1024**3
+
+
+def test_frontend_config_upload_bytes_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DOCINT_CLIENT_MAX_BODY_SIZE drives the advertised upload ceiling.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.setenv("DOCINT_CLIENT_MAX_BODY_SIZE", "8g")
+
+    cfg = load_frontend_env()
+
+    assert cfg.max_upload_bytes == 8 * 1024**3
 
 
 def test_frontend_config_graph_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

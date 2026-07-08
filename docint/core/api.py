@@ -710,6 +710,7 @@ class FrontendConfigOut(BaseModel):
     graph_top_k: int
     graph_max_top_k: int
     collection_timeout: int
+    max_upload_bytes: int
 
 
 class VersionOut(BaseModel):
@@ -812,14 +813,16 @@ def get_frontend_config() -> dict[str, int]:
     variables on each call (see :func:`docint.utils.env_cfg.load_frontend_env`).
 
     Returns:
-        dict[str, int]: ``graph_top_k``, ``graph_max_top_k`` and
-        ``collection_timeout``.
+        dict[str, int]: ``graph_top_k``, ``graph_max_top_k``,
+        ``collection_timeout`` and ``max_upload_bytes`` (the per-request upload
+        ceiling nginx enforces, which the SPA uses to size its upload batches).
     """
     cfg = load_frontend_env()
     return {
         "graph_top_k": cfg.graph_top_k,
         "graph_max_top_k": cfg.graph_max_top_k,
         "collection_timeout": cfg.collection_timeout,
+        "max_upload_bytes": cfg.max_upload_bytes,
     }
 
 

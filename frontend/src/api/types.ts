@@ -310,11 +310,12 @@ export interface IngestEvent {
     | 'ingestion_started'
     | 'ingestion_progress'
     | 'ingestion_complete'
+    | 'warning'
     | 'error'
   data: Record<string, unknown>
   /**
    * Client-side wall-clock time (ms since epoch) at which this event was
-   * received from the SSE stream, stamped once by `streamIngestUpload`.
+   * received from the SSE stream, stamped once by `streamIngestUploadBatched`.
    *
    * The ingest elapsed timer is derived from this rather than read from the
    * wall clock inside `deriveIngestStatus`, so that derivation stays a pure
@@ -345,4 +346,11 @@ export interface AppConfig {
   graph_top_k: number
   graph_max_top_k: number
   collection_timeout: number
+  /**
+   * Per-request upload ceiling in bytes, mirroring the nginx
+   * `client_max_body_size` the frontend enforces. The Ingest view splits a
+   * large file selection into batches that each stay under this (times a
+   * safety margin) so no single POST is rejected with 413.
+   */
+  max_upload_bytes: number
 }
