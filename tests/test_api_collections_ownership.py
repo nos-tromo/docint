@@ -40,6 +40,17 @@ class _FakeIngest:
         self.dummy.existing.add(collection)
 
 
+class _SpySessions:
+    """Records the physical collections whose sessions were cascade-deleted."""
+
+    def __init__(self) -> None:
+        self.deleted_for: list[str] = []
+
+    def delete_sessions_for_collection(self, collection: str) -> int:
+        self.deleted_for.append(collection)
+        return 0
+
+
 class _OwnRAG:
     """Minimal RAG stand-in for collection-ownership endpoint tests."""
 
@@ -52,6 +63,7 @@ class _OwnRAG:
         self.existing: set[str] = set()
         self.active: str = ""
         self.deleted: list[str] = []
+        self._sessions = _SpySessions()
         self._backfilled = False
 
     def list_collections(self) -> list[str]:
@@ -62,6 +74,9 @@ class _OwnRAG:
             self._com.backfill_legacy(self.list_collections(), "test-operator")
             self._backfilled = True
         return self._com
+
+    def ensure_session_manager(self) -> _SpySessions:
+        return self._sessions
 
     def select_collection(self, name: str) -> None:
         if name not in self.existing:
@@ -139,6 +154,16 @@ def test_delete_is_owner_gated(client: TestClient, _patch_rag: _OwnRAG) -> None:
     assert client.delete("/collections/alpha", headers={"X-Auth-User": "alice"}).status_code == 200
     assert len(_patch_rag.deleted) == 1  # the physical name was deleted from Qdrant
     assert _list(client, "alice") == []
+
+
+def test_delete_collection_cascades_sessions(client: TestClient, _patch_rag: _OwnRAG) -> None:
+    """Deleting a collection cascade-deletes its chat sessions (by physical name)."""
+    assert _ingest(client, "alice", "alpha").status_code == 200
+    physical = _patch_rag.ensure_collection_owner_manager().resolve("alice", "alpha")
+    assert physical is not None
+
+    assert client.delete("/collections/alpha", headers={"X-Auth-User": "alice"}).status_code == 200
+    assert _patch_rag._sessions.deleted_for == [physical]
 
 
 def test_legacy_collections_backfilled_to_default_identity(client: TestClient, _patch_rag: _OwnRAG) -> None:

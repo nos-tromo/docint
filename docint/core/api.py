@@ -909,7 +909,9 @@ def collections_delete(name: str, principal: str = Depends(resolve_principal)) -
     Deleting a collection the caller does not own (or one that does not exist)
     is a 404, so a user can never delete another user's data. The Qdrant
     collection is dropped first; only then is the ownership mapping removed, so
-    a failed Qdrant delete leaves ownership intact for retry.
+    a failed Qdrant delete leaves ownership intact for retry. The collection's
+    chat sessions are cascade-deleted after the Qdrant collection is dropped and
+    before the ownership mapping is removed.
 
     Args:
         name (str): The user-visible collection name to delete.
@@ -924,6 +926,9 @@ def collections_delete(name: str, principal: str = Depends(resolve_principal)) -
     physical = _require_owned_collection(name, principal)
     try:
         rag.delete_collection(physical)
+        deleted_sessions = rag.ensure_session_manager().delete_sessions_for_collection(physical)
+        if deleted_sessions:
+            logger.info("Deleted {} chat session(s) pinned to collection '{}'.", deleted_sessions, name)
         rag.ensure_collection_owner_manager().delete(principal, name)
         return {"ok": True}
     except HTTPException:
