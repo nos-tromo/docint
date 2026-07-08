@@ -1,8 +1,10 @@
+import { useEffect } from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { Button } from '@infra/ui'
 import { ApiError } from '@/api/client'
 import { useCollections, useDeleteCollection, useSelectCollection } from '@/hooks/useCollections'
-import { useDeleteSession, useSessions } from '@/hooks/useSessions'
+import { useDeleteSession, useSessions, sessionsKey } from '@/hooks/useSessions'
 import { useUiStore } from '@/stores/ui'
 import { cn } from '@/lib/cn'
 import { VersionBadge } from '@/components/VersionBadge'
@@ -30,23 +32,47 @@ export function Sidebar() {
   const deleteCollectionMutation = useDeleteCollection()
   const { data: sessionsData, isLoading: sessionsLoading, error: sessionsError } = useSessions()
   const deleteSessionMutation = useDeleteSession()
+  const qc = useQueryClient()
   const selected = useUiStore((s) => s.selectedCollection)
   const setSelected = useUiStore((s) => s.setSelectedCollection)
   const currentSessionId = useUiStore((s) => s.currentSessionId)
   const setCurrentSessionId = useUiStore((s) => s.setCurrentSessionId)
   const sessions = sessionsData?.sessions ?? []
 
+  // A persisted collection can point at one this user no longer owns (deleted
+  // since last visit). Once the owned list has loaded, clear a stale selection
+  // so the UI returns to the no-collection state instead of firing requests
+  // that 404.
+  useEffect(() => {
+    if (!collections || !selected) return
+    if (!collections.includes(selected)) {
+      setSelected(null)
+      setCurrentSessionId(null)
+    }
+  }, [collections, selected, setSelected, setCurrentSessionId])
+
   const onSelectCollection = async (name: string) => {
-    if (!name) return
+    if (!name || name === selected) return
     await selectMutation.mutateAsync(name)
     setSelected(name)
+    // A session is pinned to the collection it was created under. Switching
+    // collections resets any open chat so the next message can't resume it
+    // against the wrong collection (which the backend refuses with a 409).
+    setCurrentSessionId(null)
+    navigate('/chat')
   }
 
   const onDeleteCollection = (name: string) => {
     if (!confirm(`Delete collection "${name}"? This cannot be undone.`)) return
     deleteCollectionMutation.mutate(name, {
       onSuccess: () => {
-        if (selected === name) setSelected(null)
+        if (selected === name) {
+          setSelected(null)
+          // The backend cascade-deleted this collection's chat sessions; drop
+          // any open one and clear the now-stale session list.
+          setCurrentSessionId(null)
+          qc.invalidateQueries({ queryKey: sessionsKey })
+        }
       }
     })
   }

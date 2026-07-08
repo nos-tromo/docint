@@ -165,4 +165,45 @@ describe('Sidebar collection selection', () => {
     const calls = fetchMock.mock.calls.map((c) => String(c[0]))
     expect(calls.some((u) => u.includes('/sessions/list'))).toBe(false)
   })
+
+  it('clears the open chat when switching collections', async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': ['alpha', 'beta'],
+      '/sessions/list': { sessions: [] },
+      '/collections/select': { ok: true, name: 'beta' }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'alpha', currentSessionId: 'sess-old' })
+
+    renderSidebar()
+
+    const select = await screen.findByLabelText(/select collection/i)
+    await screen.findByRole('option', { name: 'beta' })
+    await userEvent.selectOptions(select, 'beta')
+
+    await waitFor(() => {
+      expect(useUiStore.getState().selectedCollection).toBe('beta')
+    })
+    expect(useUiStore.getState().currentSessionId).toBeNull()
+  })
+
+  it('clears selection and the open chat after deleting the active collection', async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': ['alpha'],
+      '/sessions/list': { sessions: [] }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('confirm', () => true)
+    useUiStore.setState({ selectedCollection: 'alpha', currentSessionId: 'sess-old' })
+
+    renderSidebar()
+
+    const del = await screen.findByLabelText(/delete collection alpha/i)
+    await userEvent.click(del)
+
+    await waitFor(() => {
+      expect(useUiStore.getState().selectedCollection).toBeNull()
+    })
+    expect(useUiStore.getState().currentSessionId).toBeNull()
+  })
 })
