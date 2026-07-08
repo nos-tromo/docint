@@ -337,8 +337,7 @@ and Nextext mounts its jobs router under `/api/v1` — a base URL without that
 suffix will 404 on every request.
 
 When `NEXTEXT_API_BASE` is unset, the Nextext client is disabled and
-video/audio files are skipped gracefully — non-social collections are
-unaffected.
+video/audio files are skipped gracefully — collections with no audio/video are unaffected (loose audio/video in any batch is transcribed when `NEXTEXT_API_BASE` is set — see **Standalone media (audio/video)** below).
 
 **Keyframe sampling.** Keyframes are extracted at a configurable rate, pruned
 by cosine similarity before captioning, and ingested alongside the transcript:
