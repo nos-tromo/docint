@@ -833,20 +833,27 @@ class SessionManager:
                 e,
             )
 
-    def list_sessions(self, owner: str | None) -> list[dict[str, Any]]:
+    def list_sessions(self, owner: str | None, collection: str | None = None) -> list[dict[str, Any]]:
         """List the caller's sessions ordered by creation date (descending).
 
         Args:
-            owner (str | None): The principal whose sessions to list; ``None`` matches legacy un-owned (NULL) rows.
+            owner (str | None): The principal whose sessions to list; ``None``
+                matches legacy un-owned (NULL) rows.
+            collection (str | None): When provided, restrict the listing to
+                conversations pinned to this **physical** collection name. When
+                ``None`` (default), every session the owner has is returned. A
+                session whose ``collection_name`` is ``NULL`` never matches a
+                non-``None`` filter.
 
         Returns:
             list[dict[str, Any]]: A list of session dictionaries owned by
-                ``owner``.
+                ``owner`` (optionally scoped to ``collection``).
         """
         with self._session_scope() as s:
-            convs = (
-                s.query(Conversation).filter(Conversation.owner == owner).order_by(Conversation.created_at.desc()).all()
-            )
+            query = s.query(Conversation).filter(Conversation.owner == owner)
+            if collection is not None:
+                query = query.filter(Conversation.collection_name == collection)
+            convs = query.order_by(Conversation.created_at.desc()).all()
             results = []
             for c in convs:
                 title = "New Chat"
