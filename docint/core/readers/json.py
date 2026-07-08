@@ -512,7 +512,11 @@ class CustomJSONReader(BaseReader):
             metadata["speaker"] = speaker
             speaker_str = speaker
 
-        source_file = segment.get("source_file")
+        # Fall back to the caller-provided base (extra_info) so a standalone
+        # media ingest can cite the original clip (e.g. clip.mp4) even when the
+        # Nextext segment carries no source_file of its own. Social/other callers
+        # set no base source_file, so their behavior is unchanged.
+        source_file = segment.get("source_file") or base.get("source_file")
         source_file_str: str | None = None
         if isinstance(source_file, str) and source_file:
             metadata["source_file"] = source_file
