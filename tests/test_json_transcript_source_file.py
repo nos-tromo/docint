@@ -58,3 +58,27 @@ def test_no_source_file_anywhere_omits_it(tmp_path: Path) -> None:
     """
     docs = list(CustomJSONReader(is_jsonl=True).iter_documents(_write(tmp_path)))
     assert "source_file" not in docs[0].metadata["reference_metadata"]
+
+
+def test_segment_source_file_wins_over_extra_info(tmp_path: Path) -> None:
+    """A segment's own source_file takes precedence over the extra_info fallback.
+
+    Guards the ``segment.get(...) or base.get(...)`` operand order: an accidental
+    swap would let the caller's fallback clobber the transcript's real value.
+
+    Args:
+        tmp_path: Temporary directory provided by pytest.
+    """
+    jsonl = tmp_path / "clip.mp4.nextext.jsonl"
+    jsonl.write_text(
+        '{"text":"hi","start_seconds":0,"end_seconds":1,"source_file":"original.mp4"}\n',
+        encoding="utf-8",
+    )
+    docs = list(
+        CustomJSONReader(is_jsonl=True).iter_documents(
+            jsonl,
+            extra_info={"source_file": "fallback.mp4"},
+        )
+    )
+    assert docs[0].metadata["source_file"] == "original.mp4"
+    assert docs[0].metadata["reference_metadata"]["source_file"] == "original.mp4"

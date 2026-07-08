@@ -81,3 +81,39 @@ def test_standalone_pass_excludes_socially_consumed_paths(tmp_path: Path, monkey
     monkeypatch.setattr(pipe_mod, "StandaloneMediaIngestor", lambda *a, **k: _FakeIngestor())
     pipeline._run_standalone_media()
     assert claimed in seen["already_consumed"]  # the linker's claim is passed through so it is skipped
+
+
+def test_pipeline_coexistence_merges_social_and_standalone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mixed batch merges the social linker's and the standalone pass's contributions.
+
+    Simulates the social linker having already claimed one clip and produced a
+    transcript, then runs the standalone pass: the social-claimed path is excluded
+    from the standalone walk (no double-ingest), and both passes' consumed paths and
+    transcript Documents end up merged (social first, standalone appended).
+    """
+    social_clip = tmp_path / "linked.mp4"
+    social_clip.write_bytes(b"s")
+    loose_clip = tmp_path / "loose.mp4"
+    loose_clip.write_bytes(b"l")
+    pipeline = _pipeline(tmp_path, monkeypatch)
+
+    # Simulate the social linker's output (it runs first in _load_doc_readers).
+    social_doc = Document(text="social transcript", metadata={"docint_doc_kind": "transcript_segment"})
+    pipeline.social_link_consumed = {social_clip}
+    pipeline.social_link_documents = [social_doc]
+
+    standalone_doc = Document(text="loose transcript", metadata={"docint_doc_kind": "transcript_segment"})
+    seen: dict[str, Any] = {}
+
+    class _FakeIngestor:
+        def run(self, data_dir: Path, already_consumed: set[Path]) -> MediaTranscribeResult:
+            seen["already_consumed"] = set(already_consumed)
+            return MediaTranscribeResult(consumed_paths={loose_clip}, transcript_documents=[standalone_doc])
+
+    monkeypatch.setattr(pipe_mod, "StandaloneMediaIngestor", lambda *a, **k: _FakeIngestor())
+
+    pipeline._run_standalone_media()
+
+    assert social_clip in seen["already_consumed"]  # social's claim excluded from the standalone walk
+    assert pipeline.social_link_consumed == {social_clip, loose_clip}  # both merged
+    assert pipeline.social_link_documents == [social_doc, standalone_doc]  # social first, standalone appended
