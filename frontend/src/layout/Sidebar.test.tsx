@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Sidebar } from './Sidebar'
 import { useUiStore } from '@/stores/ui'
@@ -29,6 +29,23 @@ function renderSidebar() {
     <QueryClientProvider client={qc}>
       <MemoryRouter>
         <Sidebar />
+      </MemoryRouter>
+    </QueryClientProvider>
+  )
+}
+
+function LocationProbe() {
+  const location = useLocation()
+  return <div data-testid="location-probe">{location.pathname}</div>
+}
+
+function renderSidebarAt(initialPath: string) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={[initialPath]}>
+        <Sidebar />
+        <LocationProbe />
       </MemoryRouter>
     </QueryClientProvider>
   )
@@ -125,11 +142,131 @@ describe('Sidebar collection selection', () => {
         return { ok: true, status: 200, json: async () => null, text: async () => 'null' }
       })
     )
+    useUiStore.setState({ selectedCollection: 'alpha' })
 
     renderSidebar()
 
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent(/DOCINT_DEFAULT_IDENTITY/i)
     expect(alert).toHaveTextContent(/authenticated user/i)
+  })
+
+  it("lists the active collection's sessions and scopes the request", async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': ['alpha'],
+      '/sessions/list': {
+        sessions: [{ id: 's1', created_at: '2026-01-01', title: 'First chat', collection: 'alpha' }]
+      }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'alpha' })
+
+    renderSidebar()
+
+    expect(await screen.findByText('First chat')).toBeInTheDocument()
+    await waitFor(() => {
+      const call = fetchMock.mock.calls
+        .map((c) => String(c[0]))
+        .find((u) => u.includes('/sessions/list'))
+      expect(call).toContain('collection=alpha')
+    })
+  })
+
+  it('prompts to select a collection when none is active and skips the sessions fetch', async () => {
+    const fetchMock = mockFetch({ '/collections/list': ['alpha'] })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderSidebar()
+
+    expect(await screen.findByText(/select a collection to see its chats/i)).toBeInTheDocument()
+    const calls = fetchMock.mock.calls.map((c) => String(c[0]))
+    expect(calls.some((u) => u.includes('/sessions/list'))).toBe(false)
+  })
+
+  it('clears the open chat when switching collections', async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': ['alpha', 'beta'],
+      '/sessions/list': { sessions: [] },
+      '/collections/select': { ok: true, name: 'beta' }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'alpha', currentSessionId: 'sess-old' })
+
+    renderSidebar()
+
+    const select = await screen.findByLabelText(/select collection/i)
+    await screen.findByRole('option', { name: 'beta' })
+    await userEvent.selectOptions(select, 'beta')
+
+    await waitFor(() => {
+      expect(useUiStore.getState().selectedCollection).toBe('beta')
+    })
+    expect(useUiStore.getState().currentSessionId).toBeNull()
+  })
+
+  it('clears selection and the open chat after deleting the active collection', async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': ['alpha'],
+      '/sessions/list': { sessions: [] }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('confirm', () => true)
+    useUiStore.setState({ selectedCollection: 'alpha', currentSessionId: 'sess-old' })
+
+    renderSidebar()
+
+    const del = await screen.findByLabelText(/delete collection alpha/i)
+    await userEvent.click(del)
+
+    await waitFor(() => {
+      expect(useUiStore.getState().selectedCollection).toBeNull()
+    })
+    expect(useUiStore.getState().currentSessionId).toBeNull()
+  })
+})
+
+describe('Sidebar keeps the current section when switching collections', () => {
+  it('stays on the current section instead of jumping to chat', async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': ['alpha', 'beta'],
+      '/sessions/list': { sessions: [] },
+      '/collections/select': { ok: true, name: 'beta' }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'alpha' })
+
+    renderSidebarAt('/analysis')
+
+    const select = await screen.findByLabelText(/select collection/i)
+    await screen.findByRole('option', { name: 'beta' })
+    await userEvent.selectOptions(select, 'beta')
+
+    await waitFor(() => {
+      expect(useUiStore.getState().selectedCollection).toBe('beta')
+    })
+    expect(screen.getByTestId('location-probe').textContent).toBe('/analysis')
+  })
+
+  it('drops to a fresh chat when switching collections while viewing a pinned session', async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': ['alpha', 'beta'],
+      '/sessions/list': { sessions: [] },
+      '/collections/select': { ok: true, name: 'beta' }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'alpha', currentSessionId: 'sess-old' })
+
+    renderSidebarAt('/chat/sess-old')
+
+    const select = await screen.findByLabelText(/select collection/i)
+    await screen.findByRole('option', { name: 'beta' })
+    await userEvent.selectOptions(select, 'beta')
+
+    await waitFor(() => {
+      expect(useUiStore.getState().selectedCollection).toBe('beta')
+    })
+    // A session is pinned to the collection it was created under, so the stale
+    // session sub-route is dropped — but the user stays within the chat section.
+    expect(screen.getByTestId('location-probe').textContent).toBe('/chat')
   })
 })

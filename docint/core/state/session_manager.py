@@ -833,20 +833,27 @@ class SessionManager:
                 e,
             )
 
-    def list_sessions(self, owner: str | None) -> list[dict[str, Any]]:
+    def list_sessions(self, owner: str | None, collection: str | None = None) -> list[dict[str, Any]]:
         """List the caller's sessions ordered by creation date (descending).
 
         Args:
-            owner (str | None): The principal whose sessions to list; ``None`` matches legacy un-owned (NULL) rows.
+            owner (str | None): The principal whose sessions to list; ``None``
+                matches legacy un-owned (NULL) rows.
+            collection (str | None): When provided, restrict the listing to
+                conversations pinned to this **physical** collection name. When
+                ``None`` (default), every session the owner has is returned. A
+                session whose ``collection_name`` is ``NULL`` never matches a
+                non-``None`` filter.
 
         Returns:
             list[dict[str, Any]]: A list of session dictionaries owned by
-                ``owner``.
+                ``owner`` (optionally scoped to ``collection``).
         """
         with self._session_scope() as s:
-            convs = (
-                s.query(Conversation).filter(Conversation.owner == owner).order_by(Conversation.created_at.desc()).all()
-            )
+            query = s.query(Conversation).filter(Conversation.owner == owner)
+            if collection is not None:
+                query = query.filter(Conversation.collection_name == collection)
+            convs = query.order_by(Conversation.created_at.desc()).all()
             results = []
             for c in convs:
                 title = "New Chat"
@@ -965,6 +972,37 @@ class SessionManager:
                 s.commit()
                 return True
             return False
+
+    def delete_sessions_for_collection(self, collection: str) -> int:
+        """Delete every conversation pinned to a physical collection.
+
+        Called when a collection is deleted so its chat sessions do not outlive
+        it. Deletes the ``Conversation`` ORM objects (not a bulk ``DELETE``
+        query) so the ``Conversation.turns`` -> ``Turn.citations`` cascades
+        fire, removing the turns and citations too. Matched by physical
+        ``collection_name`` alone: the API delete path has already proven the
+        caller owns the collection, and physical names are owner-namespaced, so
+        this also reaps any legacy ``NULL``-owner session pinned to it.
+        Idempotent — a re-run deletes nothing and returns 0.
+
+        Args:
+            collection (str): The physical Qdrant collection name whose sessions
+                should be deleted.
+
+        Returns:
+            int: The number of conversations deleted.
+        """
+        if not collection:
+            return 0
+        with self._session_scope() as s:
+            convs = s.query(Conversation).filter(Conversation.collection_name == collection).all()
+            count = 0
+            for conv in convs:
+                s.delete(conv)
+                count += 1
+            if count:
+                s.commit()
+            return count
 
     def _export_transcript(self, out_dir: Path, conv: Conversation, rolling_summary: str) -> None:
         """Export the conversation transcript to a Markdown file.

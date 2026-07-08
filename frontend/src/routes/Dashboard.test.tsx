@@ -59,3 +59,48 @@ describe('Dashboard backend status indicator', () => {
     expect(screen.getByText('offline')).toBeInTheDocument()
   })
 })
+
+describe('Dashboard sessions panel scoping', () => {
+  it('prompts to select a collection in the recent-sessions panel when none is active', async () => {
+    vi.stubGlobal('fetch', mockFetch(true))
+    renderDashboard()
+
+    expect(
+      await screen.findByText(/select a collection to see its chats/i)
+    ).toBeInTheDocument()
+  })
+
+  it("lists the active collection's recent sessions without the physical-name label", async () => {
+    useUiStore.setState({ selectedCollection: 'alpha' })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path = typeof input === 'string' ? input : input.toString()
+        if (path.includes('/collections/list')) {
+          return { ok: true, status: 200, json: async () => ['alpha'] }
+        }
+        if (path.includes('/sessions/list')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              sessions: [
+                { id: 'sess-1', title: 'First chat', created_at: '2026-01-01', collection: 'u123__alpha' }
+              ]
+            })
+          }
+        }
+        return { ok: true, status: 200, json: async () => ({ documents: [], top_entities: [] }) }
+      })
+    )
+    renderDashboard()
+
+    expect(await screen.findByText('First chat')).toBeInTheDocument()
+    // The panel is scoped to the active collection, so no per-row collection
+    // label — and never the owner-namespaced physical name.
+    expect(screen.queryByText('u123__alpha')).not.toBeInTheDocument()
+    expect(
+      screen.queryByText(/select a collection to see its chats/i)
+    ).not.toBeInTheDocument()
+  })
+})

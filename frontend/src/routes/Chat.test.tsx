@@ -275,6 +275,33 @@ describe('Chat SSE handling', () => {
       expect(screen.getAllByText('transcript.txt')).toHaveLength(2)
     })
   })
+
+  it('surfaces a collection-mismatch message on a 409', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 409, body: null }))
+    useUiStore.setState({ selectedCollection: 'alpha', currentSessionId: 'sess-x' })
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/belongs to a different collection/i)).toBeInTheDocument()
+    })
+  })
+
+  it('prompts to select a collection on a 400', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 400, body: null }))
+
+    renderChat()
+
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/select a collection before chatting/i)).toBeInTheDocument()
+    })
+  })
 })
 
 function renderChatWithSession(sessionId: string) {

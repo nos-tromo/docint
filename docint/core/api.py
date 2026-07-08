@@ -909,7 +909,9 @@ def collections_delete(name: str, principal: str = Depends(resolve_principal)) -
     Deleting a collection the caller does not own (or one that does not exist)
     is a 404, so a user can never delete another user's data. The Qdrant
     collection is dropped first; only then is the ownership mapping removed, so
-    a failed Qdrant delete leaves ownership intact for retry.
+    a failed Qdrant delete leaves ownership intact for retry. The collection's
+    chat sessions are cascade-deleted after the Qdrant collection is dropped and
+    before the ownership mapping is removed.
 
     Args:
         name (str): The user-visible collection name to delete.
@@ -924,6 +926,9 @@ def collections_delete(name: str, principal: str = Depends(resolve_principal)) -
     physical = _require_owned_collection(name, principal)
     try:
         rag.delete_collection(physical)
+        deleted_sessions = rag.ensure_session_manager().delete_sessions_for_collection(physical)
+        if deleted_sessions:
+            logger.info("Deleted {} chat session(s) pinned to collection '{}'.", deleted_sessions, name)
         rag.ensure_collection_owner_manager().delete(principal, name)
         return {"ok": True}
     except HTTPException:
@@ -2196,21 +2201,37 @@ def export_hate_speech_csv(
 
 @app.get("/sessions/list", response_model=SessionListOut, tags=["Sessions"])
 def list_sessions(
+    collection: str | None = None,
     principal: str = Depends(resolve_principal),
 ) -> dict[str, list[dict[str, Any]]]:
-    """List the calling principal's chat sessions.
+    """List the calling principal's chat sessions, optionally scoped to a collection.
+
+    When ``collection`` (a *logical* name) is supplied it is resolved to the
+    caller's physical Qdrant name and the listing is restricted to sessions
+    pinned to it. A collection the caller does not own (or that no longer
+    exists) yields an empty list rather than a 404 — a stale client selection
+    must not break the sidebar. When ``collection`` is omitted, every session
+    the caller owns is returned (backward compatible).
 
     Args:
+        collection (str | None): Optional logical collection name to scope to.
         principal (str): The resolved request principal.
 
     Returns:
         dict[str, list[dict[str, Any]]]: A dictionary containing the list of sessions.
 
     Raises:
-        HTTPException: If an error occurs while listing sessions.
+        HTTPException: 500 if an error occurs while listing sessions.
     """
     try:
-        sessions = rag.ensure_session_manager().list_sessions(principal)
+        sm = rag.ensure_session_manager()
+        if collection is not None:
+            physical = rag.ensure_collection_owner_manager().resolve(principal, collection)
+            if physical is None:
+                return {"sessions": []}
+            sessions = sm.list_sessions(principal, collection=physical)
+        else:
+            sessions = sm.list_sessions(principal)
         return {"sessions": sessions}
     except Exception as e:
         logger.error("Error listing sessions: {}", e)

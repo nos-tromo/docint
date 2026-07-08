@@ -53,7 +53,11 @@ export function Dashboard() {
           value={collection ? documentsCount?.count ?? null : '—'}
           hint={collection ? `in ${collection}` : 'select a collection'}
         />
-        <KpiCard label="Sessions" value={sessionsData?.sessions.length ?? null} />
+        <KpiCard
+          label="Sessions"
+          value={collection ? sessionsData?.sessions.length ?? null : '—'}
+          hint={collection ? `in ${collection}` : 'select a collection'}
+        />
       </div>
 
       <section className="rounded-lg border border-border bg-zinc-900 p-4">
@@ -93,16 +97,15 @@ export function Dashboard() {
 
       <section className="rounded-lg border border-border bg-zinc-900 p-4">
         <h2 className="text-lg font-medium mb-3">Recent sessions</h2>
-        <ul className="space-y-1 text-sm">
-          {sessionsData?.sessions.slice(0, 10).map((s) => (
-            <li key={s.id} className="flex justify-between">
-              <span>{s.title?.trim() || s.id.slice(0, 8)}</span>
-              {s.collection && (
-                <span className="text-muted-foreground">{s.collection}</span>
-              )}
-            </li>
-          ))}
-        </ul>
+        {!collection ? (
+          <div className="text-sm text-muted-foreground">Select a collection to see its chats.</div>
+        ) : (
+          <ul className="space-y-1 text-sm">
+            {sessionsData?.sessions.slice(0, 10).map((s) => (
+              <li key={s.id}>{s.title?.trim() || s.id.slice(0, 8)}</li>
+            ))}
+          </ul>
+        )}
       </section>
     </div>
   )

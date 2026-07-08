@@ -99,6 +99,10 @@ and chat. It ships with:
    collection-scoped request carries its collection explicitly and is owner-gated
    (cross-owner access is a 404), and the active collection is resolved
    per-request, so concurrent users on different collections never interfere.
+   Chat sessions are further scoped to the collection they were created in: the
+   sidebar lists only the active collection's chats, resuming a chat requires its
+   collection to be active, and **deleting a collection also deletes its chat
+   sessions** (along with the collection's documents and companion data).
 - **Identity.** The React SPA does not add an authenticated-user header itself.
    For single-user Docker or local setups, set `DOCINT_DEFAULT_IDENTITY` in
    `.env` so every request shares one owner. To run multi-user, put docint behind

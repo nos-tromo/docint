@@ -18,10 +18,10 @@ describe('useUiStore', () => {
     expect(useUiStore.getState().selectedCollection).toBe('c1')
   })
 
-  it('does not persist the active collection across reloads', () => {
+  it('persists the active collection across reloads', () => {
     useUiStore.getState().setSelectedCollection('c1')
     const persisted = JSON.parse(localStorage.getItem('docint-ui')!).state
-    expect(persisted.selectedCollection).toBeUndefined()
+    expect(persisted.selectedCollection).toBe('c1')
   })
 
   it('clears current session', () => {
@@ -58,5 +58,24 @@ describe('useUiStore', () => {
     useUiStore.getState().setGraphTopK(150)
     const persisted = JSON.parse(localStorage.getItem('docint-ui')!).state
     expect(persisted.graphTopK).toBe(150)
+  })
+
+  it('clears the current session when the selected collection changes', () => {
+    useUiStore.setState({ selectedCollection: 'alpha', currentSessionId: 's1' })
+    useUiStore.getState().setSelectedCollection('beta')
+    expect(useUiStore.getState().selectedCollection).toBe('beta')
+    expect(useUiStore.getState().currentSessionId).toBeNull()
+  })
+
+  it('clears the current session when the collection is cleared to null', () => {
+    useUiStore.setState({ selectedCollection: 'alpha', currentSessionId: 's1' })
+    useUiStore.getState().setSelectedCollection(null)
+    expect(useUiStore.getState().currentSessionId).toBeNull()
+  })
+
+  it('keeps the current session when re-selecting the same collection', () => {
+    useUiStore.setState({ selectedCollection: 'alpha', currentSessionId: 's1' })
+    useUiStore.getState().setSelectedCollection('alpha')
+    expect(useUiStore.getState().currentSessionId).toBe('s1')
   })
 })

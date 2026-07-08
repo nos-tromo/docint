@@ -1,4 +1,4 @@
-import { url } from './client'
+import { url, ApiError } from './client'
 
 export interface SseEvent {
   event: string
@@ -17,7 +17,7 @@ export async function* streamSse(
     signal
   })
   if (!res.ok || !res.body) {
-    throw new Error(`SSE request failed: ${res.status}`)
+    throw new ApiError(res.status, `SSE request failed: ${res.status}`)
   }
   const reader = res.body.getReader()
   const decoder = new TextDecoder('utf-8')
