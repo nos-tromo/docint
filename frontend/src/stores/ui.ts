@@ -30,7 +30,18 @@ export const useUiStore = create<UiState>()(
       previewModal: null,
       entityMergeMode: 'resolved',
       graphTopK: null,
-      setSelectedCollection: (name) => set({ selectedCollection: name }),
+      setSelectedCollection: (name) =>
+        set((s) =>
+          // Invariant: the open chat always belongs to the active collection,
+          // or is null. Enforced here at the single source of truth, so every
+          // caller (Sidebar switch/delete/reconcile, Ingest's post-ingest
+          // collection flip, any future one) drops the current session whenever
+          // the active collection actually changes. Re-selecting the same
+          // collection is a no-op and keeps the open chat.
+          name === s.selectedCollection
+            ? { selectedCollection: name }
+            : { selectedCollection: name, currentSessionId: null }
+        ),
       setCurrentSessionId: (id) => set({ currentSessionId: id }),
       setEntityMergeMode: (mode) => set({ entityMergeMode: mode }),
       setGraphTopK: (n) => set({ graphTopK: n }),
