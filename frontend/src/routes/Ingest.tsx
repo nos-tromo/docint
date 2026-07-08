@@ -98,10 +98,11 @@ export function Ingest() {
     if (!state.collection || state.files.length === 0) return
     setError(null)
     setWarnings([])
-    // The upload is split into batches that each stay under the server's
-    // per-request ceiling (`/config` max_upload_bytes); the batched stream
-    // applies the safety margin. This is what lets a multi-GB selection ingest
-    // instead of being rejected as one oversized body (nginx 413).
+    // The selection is uploaded as staged batches that each stay under the
+    // server's per-request ceiling (`/config` max_upload_bytes; the batched
+    // stream applies the safety margin), then ingested in one finalize pass.
+    // This lets a multi-GB selection ingest instead of being rejected as one
+    // oversized body (nginx 413), and ingestion sees the whole selection at once.
     const limitBytes = config?.max_upload_bytes ?? FALLBACK_UPLOAD_LIMIT_BYTES
     const sizes: Record<string, number> = {}
     for (const f of state.files) sizes[f.name] = f.size

@@ -1,4 +1,5 @@
 import { streamUpload, UploadHttpError } from './upload'
+import { streamSse } from './sse'
 import { planUploadBatches } from '@/lib/uploadBatches'
 import { formatBytes } from '@/lib/ingestStatus'
 import type { IngestEvent } from './types'
@@ -11,9 +12,17 @@ import type { IngestEvent } from './types'
  */
 export const UPLOAD_SAFETY_MARGIN = 0.9
 
-export function buildIngestFormData(collection: string, files: File[]): FormData {
+export function buildIngestFormData(
+  collection: string,
+  files: File[],
+  deferIngest = false
+): FormData {
   const fd = new FormData()
   fd.append('collection', collection)
+  // Staged-only upload: save the files but defer ingestion to a single
+  // /ingest/finalize pass (see streamIngestUploadBatched). Omitted when false so
+  // the single-request default keeps its existing save+ingest behaviour.
+  if (deferIngest) fd.append('defer_ingest', 'true')
   for (const f of files) fd.append('files', f, f.webkitRelativePath || f.name)
   return fd
 }
@@ -55,37 +64,44 @@ export function describeBatchFailure(f: BatchFailure, limitBytes: number): strin
 const fileLabel = (f: File): string => f.webkitRelativePath || f.name
 
 /**
- * Upload a file selection to `/ingest/upload` as one or more size-bounded
- * batches and yield a *single* normalised ingest event stream.
+ * Upload a file selection in size-bounded batches, then run a single ingestion
+ * pass — yielding one normalised ingest event stream.
  *
  * Why batch: nginx caps each request body at `client_max_body_size`, so one
  * multipart POST carrying every file is rejected with 413 once the selection
  * exceeds the ceiling (the original crash). Splitting into batches that each
- * stay under the ceiling makes the total upload size unbounded by that
- * per-request cap. The backend ingestion is idempotent by file hash, so
- * uploading batches sequentially to the same collection never double-ingests.
+ * stay under the ceiling makes the total upload size unbounded by that cap.
  *
- * The per-batch SSE streams are normalised so downstream consumers
- * (`deriveIngestStatus`, the Ingest view) still see one logical ingest:
- * - exactly one synthetic `start` up front listing every file;
- * - every batch's `upload_progress` / `file_saved` / `ingestion_*progress` /
- *   `warning` events, forwarded verbatim (progress accumulates across batches);
- * - per-batch `start` and `ingestion_complete` are swallowed;
- * - exactly one synthetic terminal: `ingestion_complete` if any batch
- *   committed, or `error` if every batch failed.
+ * Why decouple upload from ingestion: the batches are uploaded **staged-only**
+ * (`defer_ingest`), then one `/ingest/finalize` call ingests the whole staged
+ * directory at once. Ingesting per batch instead would (a) re-init the models
+ * for every batch, and (b) hard-fail any batch that happened to hold only
+ * reader-unsupported files — e.g. a batch of just audio/video, which the backend
+ * `required_exts` whitelist filters out, yields "No files found". A single
+ * finalize pass sees the whole selection, so the images/docs are always found.
+ * Being fileless, finalize can't 413, so ingestion still runs even if some
+ * upload batch failed.
  *
- * Failures are non-fatal: a batch that errors (e.g. a lone oversize file → 413,
- * or a transient network drop) is recorded and reported as a `warning`, and the
- * remaining batches still upload. The terminal `ingestion_complete` carries
- * `failed_files` / `failed_message` so the UI can flag partial failures without
- * discarding the batches that did succeed.
+ * The streams are normalised so downstream consumers (`deriveIngestStatus`, the
+ * Ingest view) still see one logical ingest:
+ * - one synthetic `start` up front listing every file;
+ * - each batch's `upload_progress` / `file_saved` forwarded (progress
+ *   accumulates); per-batch `start` and `upload_complete` swallowed;
+ * - finalize's `ingestion_started` / `ingestion_progress` / `warning` forwarded;
+ * - one synthetic terminal: `ingestion_complete`, or `error` if every upload
+ *   batch failed or finalize itself failed.
+ *
+ * Upload failures are non-fatal: a batch that errors (a lone oversize file →
+ * 413, or a transient drop) is reported as a `warning` and the rest still
+ * upload; the terminal `ingestion_complete` carries `failed_files` /
+ * `failed_message` so the UI can flag partial failures.
  *
  * @param collection - Target logical collection name.
  * @param files - The full selection to upload, in user order.
  * @param limitBytes - The server's per-request upload ceiling in bytes (from
  *   `/config` `max_upload_bytes`); the packing budget is this times
  *   `UPLOAD_SAFETY_MARGIN`.
- * @param signal - Optional abort signal cancelling the in-flight batch.
+ * @param signal - Optional abort signal cancelling the in-flight request.
  * @yields Normalised `IngestEvent`s, each stamped with `receivedAt`.
  */
 export async function* streamIngestUploadBatched(
@@ -109,26 +125,26 @@ export async function* streamIngestUploadBatched(
   // covers every batch instead of resetting to the last batch's file count.
   yield stamp('start', { collection, files: files.map(fileLabel) })
 
+  // Stage 1 — upload every batch staged-only (no ingestion yet).
   const failures: BatchFailure[] = []
-  let anySucceeded = false
-  let anyContent = false
+  let anySaved = false
 
   for (let i = 0; i < batches.length; i++) {
     const batch = batches[i]
     const batchNames = batch.map(fileLabel)
     try {
-      let batchEmpty = false
-      for await (const ev of streamUpload('/ingest/upload', buildIngestFormData(collection, batch), signal)) {
+      for await (const ev of streamUpload(
+        '/ingest/upload',
+        buildIngestFormData(collection, batch, true),
+        signal
+      )) {
         const data = (ev.data ?? {}) as Record<string, unknown>
-        if (ev.event === 'start') continue // already emitted one synthetic start
-        if (ev.event === 'ingestion_complete') {
-          if (data.empty === true) batchEmpty = true
-          continue // swallow; one synthetic terminal is emitted after all batches
-        }
+        // Swallow the per-batch `start` (one synthetic start already emitted)
+        // and `upload_complete` (staged-only terminal); forward save progress.
+        if (ev.event === 'start' || ev.event === 'upload_complete') continue
         yield stamp(ev.event as IngestEvent['event'], data)
       }
-      anySucceeded = true
-      if (!batchEmpty) anyContent = true
+      anySaved = true
     } catch (err) {
       const status = err instanceof UploadHttpError ? err.status : undefined
       const failure: BatchFailure = { batch: i + 1, total: batches.length, files: batchNames, status }
@@ -139,7 +155,7 @@ export async function* streamIngestUploadBatched(
     }
   }
 
-  if (!anySucceeded) {
+  if (!anySaved) {
     const anyTooLarge = failures.some((f) => f.status === 413)
     const message = anyTooLarge
       ? `Upload failed: every batch exceeded the ${formatBytes(limitBytes)} per-upload limit. ` +
@@ -150,10 +166,35 @@ export async function* streamIngestUploadBatched(
     return
   }
 
+  // Stage 2 — one ingestion pass over everything staged above.
   const failedFiles = failures.flatMap((f) => f.files)
+  let empty = false
+  let finalizeError: string | null = null
+  try {
+    for await (const ev of streamSse('/ingest/finalize', { collection, hybrid: true }, signal)) {
+      const data = (ev.data ?? {}) as Record<string, unknown>
+      if (ev.event === 'ingestion_complete') {
+        if (data.empty === true) empty = true
+        continue // fold into the single synthetic terminal below
+      }
+      if (ev.event === 'error') {
+        finalizeError = typeof data.message === 'string' ? data.message : 'Ingestion failed'
+        continue
+      }
+      yield stamp(ev.event as IngestEvent['event'], data)
+    }
+  } catch (err) {
+    finalizeError = err instanceof Error ? err.message : String(err)
+  }
+
+  if (finalizeError) {
+    yield stamp('error', { message: finalizeError })
+    return
+  }
+
   yield stamp('ingestion_complete', {
     collection,
-    empty: !anyContent,
+    empty,
     ...(failedFiles.length > 0
       ? {
           failed_files: failedFiles,

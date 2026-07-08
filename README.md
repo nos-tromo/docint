@@ -74,13 +74,18 @@ and chat. It ships with:
   shared cache volumes.
 - If you use an outbound proxy, put the proxy variables in `.env` so Compose,
   image builds, and containers use the same values.
-- Large uploads are handled by client-side batching: the Ingest view splits a
-   file selection into sequential `/ingest/upload` requests that each stay under
-   the frontend nginx proxy's per-request cap (`DOCINT_CLIENT_MAX_BODY_SIZE`,
-   default `1g`, advertised to the SPA via `GET /config` as `max_upload_bytes`).
-   So the total upload size is no longer bounded by that cap, and a failed batch
-   is reported without sinking the rest — already-ingested files are skipped on
-   retry (ingestion is idempotent by file hash). Raise
+- Large uploads are handled by client-side batching plus a single deferred
+   ingestion pass. The Ingest view uploads a file selection as several *staged*
+   `/ingest/upload` batches (`defer_ingest`, saved but not ingested) that each
+   stay under the frontend nginx proxy's per-request cap
+   (`DOCINT_CLIENT_MAX_BODY_SIZE`, default `1g`, advertised to the SPA via
+   `GET /config` as `max_upload_bytes`), then calls `/ingest/finalize` once to
+   ingest the whole staged directory. So the total upload size is no longer
+   bounded by that cap; ingestion sees the complete selection at once (a batch
+   that happens to hold only media never trips a "No files found" error, and the
+   models load once instead of per batch); and a failed upload batch is reported
+   without blocking the rest — finalize still runs, and already-saved files are
+   skipped on retry (ingestion is idempotent by file hash). Raise
    `DOCINT_CLIENT_MAX_BODY_SIZE` in `.env` only if a *single* file exceeds the
    default `1g` (both the frontend and backend services read the same value).
 - Session persistence uses one SQLite file path. Set `SESSIONS_DB_PATH` for
