@@ -967,13 +967,17 @@ class ImageIngestionService:
         its maximum cosine similarity (== dot product, since CLIP vectors are
         L2-normalized) to an already-kept frame is below ``dedup_cosine``. Only
         survivors are sent to the (expensive) vision tagger and stored, each
-        stamped with ``source_doc_id``/``extra_metadata`` so it links to its
-        posting. Fail-soft: a frame that fails to embed is skipped, not raised.
+        stamped with ``source_doc_id``/``extra_metadata`` so it links back to its
+        source — a posting for the social-media path, or the media file itself for
+        standalone video. Fail-soft: a frame that fails to embed is skipped, not raised.
 
         Args:
             frames (list[bytes]): Candidate keyframe image bytes, in time order.
             context (IngestContext): Collection-resolution context.
-            source_doc_id (str | None): The posting UUID stamped on each point.
+            source_doc_id (str | None): Identifier stamped on each point's
+                ``source_doc_id`` (and mirrored under ``link_field`` when set) —
+                the posting UUID for the social-media path, or the media file's
+                content hash for standalone video keyframes.
             extra_metadata (dict[str, Any] | None): Extra payload fields
                 (e.g. ``posting_id``/``media_id``) merged onto each point.
             dedup_cosine (float): Drop a frame whose cosine similarity to a kept
