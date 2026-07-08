@@ -23,6 +23,7 @@ from llama_index.node_parser.docling import DoclingNodeParser
 from loguru import logger
 
 from docint.core.ingest.images_service import ImageIngestionService
+from docint.core.ingest.standalone_media import StandaloneMediaIngestor
 from docint.core.readers.docx import DocxReader
 from docint.core.readers.images import ImageReader
 from docint.core.readers.json import CustomJSONReader
@@ -849,6 +850,28 @@ class DocumentIngestionPipeline:
             },
         )
         self._run_social_linker()
+        self._run_standalone_media()
+
+    def _open_ingest_manifest(self) -> Any:
+        """Open the ingest manifest for this collection, or a no-op stub.
+
+        Returns:
+            IngestManifest | NullIngestManifest: A manifest keyed by
+            ``(collection, file_hash)`` when enabled and a sources root + target
+            collection are configured; otherwise a no-op stub. Callers must
+            ``close()`` the returned object.
+        """
+        from docint.core.storage.ingest_manifest import IngestManifest, NullIngestManifest
+        from docint.utils.env_cfg import load_ingestion_env, load_path_env
+
+        try:
+            sources_root = load_path_env().qdrant_sources
+            if load_ingestion_env().ingest_manifest_enabled and sources_root and self.target_collection:
+                target = self.target_collection
+                return IngestManifest(sources_root / target / f"{target}_ingest_manifest.db")
+        except Exception as exc:  # pragma: no cover - fail-soft guard
+            logger.debug("Manifest unavailable: {}", exc)
+        return NullIngestManifest()
 
     def _run_social_linker(self) -> None:
         """Run the social linker; record consumed paths + transcript Documents.
@@ -857,19 +880,10 @@ class DocumentIngestionPipeline:
         postings table and a media manifest.
         """
         from docint.core.ingest.social_linker import SocialLinker
-        from docint.core.storage.ingest_manifest import IngestManifest, NullIngestManifest
-        from docint.utils.env_cfg import load_ingestion_env, load_nextext_env, load_path_env
+        from docint.utils.env_cfg import load_nextext_env
         from docint.utils.nextext_client import NextextClient
 
-        manifest: IngestManifest | NullIngestManifest = NullIngestManifest()
-        try:
-            sources_root = load_path_env().qdrant_sources
-            if load_ingestion_env().ingest_manifest_enabled and sources_root and self.target_collection:
-                target = self.target_collection
-                manifest = IngestManifest(sources_root / target / f"{target}_ingest_manifest.db")
-        except Exception as exc:  # pragma: no cover - fail-soft guard
-            logger.debug("Manifest unavailable for social linker cache: {}", exc)
-
+        manifest = self._open_ingest_manifest()
         try:
             nextext_cfg = load_nextext_env()
             result = SocialLinker(
@@ -887,6 +901,43 @@ class DocumentIngestionPipeline:
             manifest.close()
         self.social_link_consumed = result.consumed_paths
         self.social_link_documents = result.transcript_documents
+
+    def _run_standalone_media(self) -> None:
+        """Transcribe loose audio/video files the social linker did not claim.
+
+        Runs after :meth:`_run_social_linker`; merges its consumed paths +
+        transcript Documents into the shared pre-pass accumulators
+        (``social_link_consumed`` / ``social_link_documents``) that the generic
+        sweep skips / yields. Fail-soft: any error logs a warning and is swallowed
+        so ingestion of the rest of the batch proceeds.
+        """
+        from docint.core.ingest.media_transcribe import MediaTranscriber
+        from docint.utils.env_cfg import load_ingestion_env, load_nextext_env
+        from docint.utils.nextext_client import NextextClient
+
+        manifest = self._open_ingest_manifest()
+        try:
+            nextext_cfg = load_nextext_env()
+            transcriber = MediaTranscriber(
+                image_service=self.image_ingestion_service or ImageIngestionService(),
+                nextext_client=NextextClient(nextext_cfg),
+                target_collection=self.target_collection,
+                manifest=manifest,
+                keyframe_dedup_cosine=nextext_cfg.keyframe_dedup_cosine,
+                nextext_max_concurrency=nextext_cfg.nextext_max_concurrency,
+            )
+            result = StandaloneMediaIngestor(
+                transcriber,
+                media_filetypes=set(load_ingestion_env().media_filetypes),
+                nextext_enabled=nextext_cfg.enabled,
+            ).run(self.data_dir, self.social_link_consumed)
+        except Exception as exc:  # pragma: no cover - fail-soft guard
+            logger.warning("Standalone media ingestion skipped due to error: {}", exc)
+            return
+        finally:
+            manifest.close()
+        self.social_link_consumed = self.social_link_consumed | result.consumed_paths
+        self.social_link_documents = [*self.social_link_documents, *result.transcript_documents]
 
     def _load_node_parsers(self) -> None:
         """Load document parsers for various file types."""

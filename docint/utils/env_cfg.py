@@ -710,6 +710,27 @@ class IngestionConfig:
     sentence_splitter_chunk_overlap: int
     sentence_splitter_chunk_size: int
     supported_filetypes: list[str]
+    media_filetypes: list[str]
+
+
+DEFAULT_MEDIA_FILETYPES: list[str] = [
+    ".mp4",
+    ".mov",
+    ".mkv",
+    ".webm",
+    ".avi",
+    ".m4v",
+    ".mpg",
+    ".mpeg",
+    ".mp3",
+    ".m4a",
+    ".wav",
+    ".flac",
+    ".aac",
+    ".ogg",
+    ".opus",
+    ".wma",
+]
 
 
 def load_ingestion_env(
@@ -779,6 +800,8 @@ def load_ingestion_env(
         - sentence_splitter_chunk_overlap (int): The chunk overlap size for sentence splitting.
         - sentence_splitter_chunk_size (int): The chunk size for sentence splitting.
         - supported_filetypes (list[str]): List of supported file extensions for ingestion.
+        - media_filetypes (list[str]): List of audio/video file extensions discovered by the
+            standalone media ingestion pass (not parsed by the generic document readers).
     """
     if default_supported_filetypes is None:
         default_supported_filetypes = [
@@ -800,6 +823,11 @@ def load_ingestion_env(
             ".xls",
             ".xlsx",
         ]
+    media_override = os.getenv("MEDIA_FILETYPES")
+    if media_override:
+        media_filetypes = [ext.strip().lower() for ext in media_override.split(",") if ext.strip()]
+    else:
+        media_filetypes = list(DEFAULT_MEDIA_FILETYPES)
     return IngestionConfig(
         coarse_chunk_size=int(os.getenv("COARSE_CHUNK_SIZE", default_coarse_chunk_size)),
         docling_accelerator_num_threads=int(
@@ -864,6 +892,7 @@ def load_ingestion_env(
             os.getenv("SENTENCE_SPLITTER_CHUNK_SIZE", default_sentence_splitter_chunk_size)
         ),
         supported_filetypes=default_supported_filetypes,
+        media_filetypes=media_filetypes,
     )
 
 

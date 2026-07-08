@@ -958,6 +958,8 @@ class ImageIngestionService:
         source_doc_id: str | None,
         extra_metadata: dict[str, Any] | None = None,
         dedup_cosine: float = 0.95,
+        keyframe_source_type: str = "social_media_keyframe",
+        link_field: str | None = "posting_uuid",
     ) -> list[StoredImageRecord]:
         """Embed candidate keyframes, prune near-duplicates, caption survivors.
 
@@ -976,6 +978,13 @@ class ImageIngestionService:
                 (e.g. ``posting_id``/``media_id``) merged onto each point.
             dedup_cosine (float): Drop a frame whose cosine similarity to a kept
                 frame is >= this value.
+            keyframe_source_type (str): Value stamped onto each point's
+                ``source_type`` field. Defaults to the social-media keyframe
+                path's historical hard-coded value.
+            link_field (str | None): Payload key that gets ``source_doc_id`` as
+                its value (e.g. ``posting_uuid`` for the social-media path).
+                Pass ``None`` to omit this link field entirely (e.g. standalone
+                video keyframes, which have no posting to link to).
 
         Returns:
             list[StoredImageRecord]: One record per survivor (status ``stored``).
@@ -1023,10 +1032,9 @@ class ImageIngestionService:
             node_text = "\n\n".join(part for part in text_parts if part).strip()
             payload: dict[str, Any] = {
                 "image_id": image_id,
-                "source_type": "social_media_keyframe",
+                "source_type": keyframe_source_type,
                 "source_collection": context.source_collection,
                 "source_doc_id": source_doc_id,
-                "posting_uuid": source_doc_id,
                 "mime_type": "image/jpeg",
                 "mimetype": "image/jpeg",
                 "file_type": "image/jpeg",
@@ -1035,6 +1043,8 @@ class ImageIngestionService:
                 "vector_name": self.img_ingestion_config.vector_name,
                 "image_collection": target_collection,
             }
+            if link_field:
+                payload[link_field] = source_doc_id
             if extra_metadata:
                 payload.update(extra_metadata)
             node = ImageNode(

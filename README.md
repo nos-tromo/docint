@@ -341,8 +341,7 @@ and Nextext mounts its jobs router under `/api/v1` — a base URL without that
 suffix will 404 on every request.
 
 When `NEXTEXT_API_BASE` is unset, the Nextext client is disabled and
-video/audio files are skipped gracefully — non-social collections are
-unaffected.
+video/audio files are skipped gracefully — collections with no audio/video are unaffected (loose audio/video in any batch is transcribed when `NEXTEXT_API_BASE` is set — see **Standalone media (audio/video)** below).
 
 **Keyframe sampling.** Keyframes are extracted at a configurable rate, pruned
 by cosine similarity before captioning, and ingested alongside the transcript:
@@ -356,6 +355,41 @@ KEYFRAME_DEDUP_COSINE=0.95  # drop frames whose CLIP embedding cosine similarity
 
 Transcripts are cached in the per-collection `IngestManifest` by media-file
 hash so re-ingestion of unchanged files skips the Nextext round-trip entirely.
+
+## Standalone Media (Audio/Video)
+
+Audio and video do not need a social export at all. Drop loose media files
+anywhere in an ingest batch — the SPA's folder upload or `DATA_PATH` — and,
+with `NEXTEXT_API_BASE` set, docint transcribes each one automatically and,
+for video, extracts keyframes, exactly like the social path above but with
+no `postings.csv` / `media.csv` manifest required. This runs as a pipeline
+pre-pass right after the social linker, so manifest-linked media is claimed
+first and this pass only picks up whatever is left over — a social export
+still ingests exactly as documented above, and a batch mixing one with
+extra, unreferenced media handles both in the same run. When
+`NEXTEXT_API_BASE` is unset, loose audio/video files are skipped with a
+one-line warning and the rest of the batch still ingests normally.
+
+The key difference from the social path: there is no posting to stamp, so
+every artifact — transcript segments and keyframes — anchors to the media
+file's own content hash and filename instead of a `posting_uuid`. Each
+retrieves and cites as an independent, normally-ranked source naming the
+source clip; unlike social media, there is no `posting_group` cross-modal
+clustering.
+
+It reuses the Nextext client and keyframe sampling described above —
+`NEXTEXT_API_BASE`, `KEYFRAMES_PER_MINUTE`, `KEYFRAMES_MAX`,
+`KEYFRAME_DEDUP_COSINE`, and `NEXTEXT_MAX_CONCURRENCY` (default `4`, caps how
+many clips run through Nextext in parallel per batch) all apply unchanged.
+One new knob controls which extensions count as media for this pass:
+
+```bash
+MEDIA_FILETYPES=.mp4,.mov,.mkv,.webm,.avi,.m4v,.mpg,.mpeg,.mp3,.m4a,.wav,.flac,.aac,.ogg,.opus,.wma
+# ^ comma-separated override; defaults to the 16 extensions above
+# (DEFAULT_MEDIA_FILETYPES in env_cfg.py). Only the standalone discovery
+# pass consults this list — the social linker routes any manifest-resolved,
+# non-image file to Nextext regardless of extension.
+```
 
 ## Translation
 
