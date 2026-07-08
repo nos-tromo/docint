@@ -448,8 +448,13 @@ def test_nextext_reference_metadata_populated(tmp_path: Path) -> None:
     assert ref["author"] == "SPEAKER_01"
 
 
-def test_nextext_detected_language_differs_for_translate(tmp_path: Path) -> None:
-    """A translate segment keeps whisper_language=target, detected=source.
+def test_nextext_language_matches_detected_language_for_translate_task(tmp_path: Path) -> None:
+    """A translate-task segment still carries language == detected_language.
+
+    Nextext always emits the original (untranslated) transcript text
+    regardless of task, so ``language`` and ``detected_language`` are always
+    equal — the resolved source language. ``task`` is provenance/audit only
+    and no longer implies ``language`` is a translation target.
 
     Args:
         tmp_path: Temporary directory provided by pytest.
@@ -457,16 +462,17 @@ def test_nextext_detected_language_differs_for_translate(tmp_path: Path) -> None
     jsonl = tmp_path / "translate.jsonl"
     _write_jsonl(
         jsonl,
-        [_nextext_segment(language="en", detected_language="de", task="translate")],
+        [_nextext_segment(language="de", detected_language="de", task="translate")],
     )
 
     reader = CustomJSONReader(is_jsonl=True)
     meta = reader.load_data(jsonl)[0].metadata
 
-    assert meta["whisper_language"] == "en"
+    assert meta["whisper_task"] == "translate"
+    assert meta["whisper_language"] == "de"
     assert meta["whisper_detected_language"] == "de"
     ref = meta["reference_metadata"]
-    assert ref["language"] == "en"
+    assert ref["language"] == "de"
     assert ref["detected_language"] == "de"
 
 
@@ -484,6 +490,56 @@ def test_nextext_detected_language_absent_when_null(tmp_path: Path) -> None:
 
     assert "whisper_detected_language" not in meta
     assert "detected_language" not in meta["reference_metadata"]
+
+
+def test_nextext_detected_language_key_omitted_is_tolerated(tmp_path: Path) -> None:
+    """A segment that omits ``detected_language`` entirely is read cleanly.
+
+    This is the shape current Nextext emits — the key is dropped, not sent as
+    ``null`` (see ``test_nextext_detected_language_absent_when_null`` for the
+    explicit-null variant). The reader must surface neither
+    ``whisper_detected_language`` nor ``reference_metadata["detected_language"]``,
+    while the still-present ``language`` / ``task`` keys are unaffected.
+
+    Args:
+        tmp_path: Temporary directory provided by pytest.
+    """
+    seg = _nextext_segment()
+    del seg["detected_language"]
+    jsonl = tmp_path / "omitted_detected.jsonl"
+    _write_jsonl(jsonl, [seg])
+
+    reader = CustomJSONReader(is_jsonl=True)
+    meta = reader.load_data(jsonl)[0].metadata
+
+    assert "whisper_detected_language" not in meta
+    assert "detected_language" not in meta["reference_metadata"]
+    assert meta["whisper_language"] == "de"
+    assert meta["whisper_task"] == "transcribe"
+
+
+def test_nextext_task_key_omitted_is_tolerated(tmp_path: Path) -> None:
+    """A segment that omits ``task`` entirely is read cleanly.
+
+    Current Nextext no longer emits ``task`` (the JSONL always carries the
+    original transcript, so a task label is redundant or misleading). The
+    reader must not surface ``whisper_task`` when the key is absent, while the
+    still-present ``language`` key is unaffected. The key stays read for
+    backward compatibility with transcripts cached before the schema change.
+
+    Args:
+        tmp_path: Temporary directory provided by pytest.
+    """
+    seg = _nextext_segment()
+    del seg["task"]
+    jsonl = tmp_path / "omitted_task.jsonl"
+    _write_jsonl(jsonl, [seg])
+
+    reader = CustomJSONReader(is_jsonl=True)
+    meta = reader.load_data(jsonl)[0].metadata
+
+    assert "whisper_task" not in meta
+    assert meta["whisper_language"] == "de"
 
 
 def test_nextext_segment_without_speaker_omits_key(tmp_path: Path) -> None:

@@ -422,10 +422,25 @@ class CustomJSONReader(BaseReader):
         ``text_id``, plus ``timestamp`` (segment start, mirrors the generic
         anchor used by social-table content), ``language``,
         ``detected_language``, ``source_file``, and ``speaker`` when present.
-        ``whisper_language`` / ``language`` carry the transcript-text
-        language; ``whisper_detected_language`` / ``detected_language`` carry
-        the Whisper-detected source language (equal for transcribe tasks,
-        distinct for translate). ``start_ts`` / ``end_ts`` are intentionally
+        ``whisper_language`` / ``language`` carries the resolved source
+        language of the audio — Nextext always emits the original
+        (untranslated) transcript text regardless of ``task``, so there is
+        only ever one language per segment. ``whisper_detected_language`` /
+        ``detected_language`` is no longer sent by current Nextext output
+        (it was a redundant duplicate of ``language``); the key is still
+        read and surfaced here, absent-tolerant, purely for backward
+        compatibility with transcripts cached before this schema change (see
+        ``manifest.cache_nextext_transcript``) — new ingests simply omit it.
+        ``whisper_task`` / ``task`` is no longer sent by current Nextext
+        output (the JSONL always carries the original transcript, so a task
+        label was redundant or misleading); like ``detected_language`` the
+        key is still read and surfaced here, absent-tolerant, purely for
+        backward compatibility with transcripts cached before this schema
+        change. It records provenance only and never indicates which language
+        ``text`` is in — docint applies its own on-demand translation at
+        display time (see :mod:`docint.utils.translate_client`) when an
+        operator needs it.
+        ``start_ts`` / ``end_ts`` are intentionally
         absent from ``reference_metadata`` — surfacing them duplicated the
         ``timestamp`` row in the citation view; the flat-metadata copies
         feed ``LLM_VISIBLE_METADATA_KEYS`` for prompt-side citation context.
