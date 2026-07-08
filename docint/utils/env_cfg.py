@@ -825,7 +825,14 @@ def load_ingestion_env(
         ]
     media_override = os.getenv("MEDIA_FILETYPES")
     if media_override:
-        media_filetypes = [ext.strip().lower() for ext in media_override.split(",") if ext.strip()]
+        # Normalize each entry: strip + lowercase, drop empty segments, and ensure a
+        # leading dot so a dotless operator entry (``mp4``) still matches ``Path.suffix``
+        # (which always carries the dot) instead of silently skipping that media type.
+        media_filetypes = [
+            ext if ext.startswith(".") else f".{ext}"
+            for ext in (raw.strip().lower() for raw in media_override.split(","))
+            if ext
+        ]
     else:
         media_filetypes = list(DEFAULT_MEDIA_FILETYPES)
     return IngestionConfig(
