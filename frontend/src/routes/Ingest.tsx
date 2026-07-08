@@ -140,8 +140,13 @@ export function Ingest() {
         if (ev.event === 'ingestion_complete') {
           sawTerminal = true
           await selectMutation.mutateAsync(state.collection)
-          setSelected(state.collection)
+          // Refresh the owned-collections list BEFORE selecting: the Sidebar's
+          // reconcile effect clears any active collection not present in that
+          // cached list, so selecting a brand-new collection while the list is
+          // stale would immediately snap the selection back to null. Awaiting the
+          // refetch first ensures the new name is in the list before we select it.
           await qc.invalidateQueries({ queryKey: collectionsKey })
+          setSelected(state.collection)
           // Partial success: some batches committed, others were skipped. Keep
           // the collection selected (its ingested files are usable) but flag the
           // skipped files so the outcome isn't silently reported as a clean run.
