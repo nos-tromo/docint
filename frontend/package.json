@@ -45,7 +45,7 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "globals": "^17.6.0",
     "happy-dom": "^20.10.6",
-    "postcss": "^8.5.15",
+    "postcss": "^8.5.17",
     "tailwindcss": "^4.3.1",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8",
