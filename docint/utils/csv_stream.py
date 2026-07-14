@@ -39,6 +39,17 @@ NER_SOURCE_COLUMNS: tuple[str, ...] = (
     "text_id",
     "anchor_text",
     "parent_text",
+    "url",
+    "posting_uuid",
+    "posting_id",
+    "media_id",
+    "posting_network",
+    "posting_author",
+    "posting_author_id",
+    "posting_vanity",
+    "posting_timestamp",
+    "posting_url",
+    "posting_text",
     "translation",
 )
 
@@ -61,6 +72,17 @@ HATE_SPEECH_COLUMNS: tuple[str, ...] = (
     "text_id",
     "anchor_text",
     "parent_text",
+    "url",
+    "posting_uuid",
+    "posting_id",
+    "media_id",
+    "posting_network",
+    "posting_author",
+    "posting_author_id",
+    "posting_vanity",
+    "posting_timestamp",
+    "posting_url",
+    "posting_text",
     "translation",
 )
 
@@ -168,6 +190,26 @@ def entity_stats_row(entity: dict[str, Any], *, rank: int) -> dict[str, Any]:
     }
 
 
+_POSTING_REFERENCE_COLUMNS: tuple[str, ...] = (
+    "url",
+    "posting_uuid",
+    "posting_id",
+    "media_id",
+    "posting_network",
+    "posting_author",
+    "posting_author_id",
+    "posting_vanity",
+    "posting_timestamp",
+    "posting_url",
+    "posting_text",
+)
+
+
+def _posting_reference_cells(ref: Any) -> dict[str, Any]:
+    """Build the posting-reference CSV cells shared by the findings exports."""
+    return {key: _reference_field(ref, key) for key in _POSTING_REFERENCE_COLUMNS}
+
+
 def _source_label(chunk: dict[str, Any]) -> str:
     """Pick the canonical 'source' field for a chunk row."""
     return str(chunk.get("filename") or chunk.get("source_ref") or "")
@@ -196,6 +238,7 @@ def ner_source_row(chunk: dict[str, Any], *, entity_label: str) -> dict[str, Any
         "text_id": _reference_field(ref, "text_id"),
         "anchor_text": _reference_field(ref, "anchor_text"),
         "parent_text": _reference_field(ref, "parent_text"),
+        **_posting_reference_cells(ref),
         "translation": (chunk.get("translation") or {}).get("text") or "",
     }
 
@@ -225,6 +268,7 @@ def hate_speech_row(chunk: dict[str, Any]) -> dict[str, Any]:
         "text_id": _reference_field(ref, "text_id"),
         "anchor_text": _reference_field(ref, "anchor_text"),
         "parent_text": _reference_field(ref, "parent_text"),
+        **_posting_reference_cells(ref),
         "translation": (chunk.get("translation") or {}).get("text") or "",
     }
 

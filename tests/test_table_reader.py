@@ -183,6 +183,7 @@ def test_table_reader_detects_social_media_postings_schema_out_of_order(
     assert docs[0].metadata["reference_metadata"]["type"] == "posting"
     assert docs[0].metadata["reference_metadata"]["network"] == "Facebook"
     assert docs[0].metadata["reference_metadata"]["uuid"] == "u1"
+    assert docs[0].metadata["reference_metadata"]["url"] == "https://example.com"
     assert docs[0].metadata["reference_metadata"]["parent_text"] is None
     assert docs[0].metadata["reference_metadata"]["anchor_text"] is None
 

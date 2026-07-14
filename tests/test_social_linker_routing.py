@@ -66,6 +66,7 @@ class _FakeImageService:
             {
                 "frames": frames,
                 "source_doc_id": source_doc_id,
+                "extra_metadata": extra_metadata,
                 "dedup_cosine": dedup_cosine,
                 "keyframe_source_type": keyframe_source_type,
                 "link_field": link_field,
@@ -139,6 +140,10 @@ def _write_export(root: Path) -> None:
     postings_data["UUID"] = ["u1", "u2"]
     postings_data["Posting ID"] = ["P_1", "P_2"]
     postings_data["Text Content"] = ["a", "b"]
+    postings_data["Network"] = ["Facebook", "Facebook"]
+    postings_data["Author"] = ["Jane Poster", "Jane Poster"]
+    postings_data["URL"] = ["https://fb.example/p1", "https://fb.example/p2"]
+    postings_data["Timestamp"] = ["2023-01-01 10:00", "2023-02-02 11:00"]
     pd.DataFrame(postings_data).to_csv(root / "postings.csv", index=False)
     pd.DataFrame({"Media ID": ["P_1_0", "P_2_0"], "Exported media filename": ["pic.jpg", "clip.mp4"]}).to_csv(
         root / "media.csv", index=False
@@ -171,6 +176,55 @@ def test_run_routes_image_and_video_and_links(tmp_path: Path) -> None:
     assert {"media.csv", "pic.jpg", "clip.mp4"}.issubset(consumed_names)
     # postings.csv is NOT consumed (the sweep ingests it as text nodes).
     assert "postings.csv" not in consumed_names
+
+
+def test_run_stamps_posting_reference_metadata(tmp_path: Path) -> None:
+    """Derived media artifacts carry the parent posting's reference fields, additively.
+
+    The image asset and the keyframe call must carry the ``posting_*`` fields
+    plus a ready-made nested ``reference_metadata`` block; the transcript
+    segment must merge them into its own ``reference_metadata`` WITHOUT
+    dropping the Nextext identity (``network: nextext`` /
+    ``type: transcript_segment``).
+    """
+    _write_export(tmp_path)
+    img = _FakeImageService()
+    linker = SocialLinker(image_service=img, nextext_client=_FakeNextext(), target_collection="c")
+    result = linker.run(tmp_path)
+
+    image_extra = img.images[0].extra_metadata
+    assert image_extra["posting_network"] == "Facebook"
+    assert image_extra["posting_author"] == "Jane Poster"
+    assert image_extra["posting_url"] == "https://fb.example/p1"
+    assert image_extra["posting_timestamp"] == "2023-01-01 10:00"
+    assert image_extra["posting_text"] == "a"
+    assert image_extra["reference_metadata"]["type"] == "image"
+    assert image_extra["reference_metadata"]["posting_uuid"] == "u1"
+    assert image_extra["reference_metadata"]["posting_network"] == "Facebook"
+
+    keyframe_extra = img.keyframe_calls[0]["extra_metadata"]
+    assert keyframe_extra["posting_network"] == "Facebook"
+    assert keyframe_extra["posting_url"] == "https://fb.example/p2"
+    assert keyframe_extra["reference_metadata"]["type"] == "keyframe"
+    assert keyframe_extra["reference_metadata"]["posting_uuid"] == "u2"
+
+    segment_ref = result.transcript_documents[0].metadata["reference_metadata"]
+    # Nextext identity preserved (additive merge, nothing dropped).
+    assert segment_ref["network"] == "nextext"
+    assert segment_ref["type"] == "transcript_segment"
+    assert segment_ref["posting_uuid"] == "u2"
+    assert segment_ref["posting_network"] == "Facebook"
+    assert segment_ref["posting_author"] == "Jane Poster"
+    assert segment_ref["posting_url"] == "https://fb.example/p2"
+    assert segment_ref["posting_text"] == "b"
+
+
+def test_build_posting_reference_index_requires_postings_profile() -> None:
+    """Header drift away from the postings profile degrades to link-ids-only."""
+    from docint.core.ingest.social_linker import build_posting_reference_index
+
+    df = pd.DataFrame({"UUID": ["u1"], "Posting ID": ["P_1"], "Something Else": ["x"]})
+    assert build_posting_reference_index(df) == {}
 
 
 class _CountingNextext:

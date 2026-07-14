@@ -142,6 +142,17 @@ export type ReferenceMetadata = Record<string, unknown> & {
   network?: string | null
   type?: string | null
   uuid?: string | null
+  posting_uuid?: string | null
+  posting_id?: string | null
+  media_id?: string | null
+  url?: string | null
+  posting_network?: string | null
+  posting_author?: string | null
+  posting_author_id?: string | null
+  posting_vanity?: string | null
+  posting_timestamp?: string | null
+  posting_url?: string | null
+  posting_text?: string | null
   timestamp?: string | null
   author?: string | null
   author_id?: string | null

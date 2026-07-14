@@ -66,7 +66,15 @@ def _report() -> dict[str, Any]:
                     "reason": "contains slur",
                     "chunk_text": "bad text",
                     "filename": "b.json",
-                    "reference_metadata": {"network": "X", "author": "bob", "timestamp": "2026-03-04"},
+                    "reference_metadata": {
+                        "network": "X",
+                        "author": "bob",
+                        "timestamp": "2026-03-04",
+                        "posting_network": "Facebook",
+                        "posting_author": "Jane Poster",
+                        "posting_url": "https://fb.example/p1",
+                        "posting_text": "Original post body",
+                    },
                 },
             },
         ],
@@ -207,6 +215,11 @@ def test_findings_carry_reference_metadata(monkeypatch: pytest.MonkeyPatch) -> N
         assert blob.count(label) >= 2  # one block for the entity finding, one for the hate finding
         assert "Telegram" in blob and "alice" in blob  # entity finding provenance
         assert "bob" in blob  # hate-speech finding provenance
+        # Posting reference fields carried by media-derived findings render additively.
+        assert "Posting Network" in blob and "Facebook" in blob
+        assert "Posting Author" in blob and "Jane Poster" in blob
+        assert "Posting URL" in blob and "https://fb.example/p1" in blob
+        assert "Posting Text" in blob and "Original post body" in blob
 
 
 def test_case_file_only_in_running_header(monkeypatch: pytest.MonkeyPatch) -> None:

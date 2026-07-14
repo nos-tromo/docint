@@ -627,9 +627,13 @@ class ImageIngestionService:
 
         Returns:
             dict[str, Any]: A dictionary representing the occurrence metadata to append to existing points
-            when an image is deduplicated.
+            when an image is deduplicated. Social-link ids (``posting_uuid`` /
+            ``posting_id`` / ``media_id``) are recorded per occurrence so a second
+            posting referencing the same image bytes is at least traceable — the
+            point's top-level metadata (including ``reference_metadata``) stays
+            first-wins.
         """
-        return {
+        occurrence: dict[str, Any] = {
             "source_type": asset.source_type,
             "source_collection": context.source_collection,
             "source_doc_id": asset.source_doc_id,
@@ -637,6 +641,11 @@ class ImageIngestionService:
             "page_number": asset.page_number,
             "bbox": asset.bbox,
         }
+        for link_field in ("posting_uuid", "posting_id", "media_id"):
+            link_value = (asset.extra_metadata or {}).get(link_field)
+            if link_value:
+                occurrence[link_field] = link_value
+        return occurrence
 
     def _append_occurrence(
         self,

@@ -523,6 +523,55 @@ def test_document_and_standalone_follow_same_shared_schema(tmp_path: Path) -> No
     assert len(stored_payload["occurrences"]) == 2
 
 
+def test_deduped_social_image_occurrence_records_posting_link(tmp_path: Path) -> None:
+    """A second posting referencing the same image bytes stays traceable via occurrences.
+
+    The point's top-level payload (incl. ``reference_metadata``) is first-wins,
+    so the dedup occurrence must carry the second posting's link ids.
+
+    Args:
+        tmp_path: pytest fixture providing a temporary directory for test files.
+    """
+    service, client, _vector_store = _build_service()
+    image_bytes = _make_png_bytes(color=(4, 5, 6))
+
+    first_path = tmp_path / "first.png"
+    first_path.write_bytes(image_bytes)
+    second_path = tmp_path / "second.png"
+    second_path.write_bytes(image_bytes)
+
+    def _social_asset(path: Path, posting_uuid: str, posting_id: str, media_id: str) -> ImageAsset:
+        return ImageAsset.from_path(
+            path=path,
+            source_type="social_media",
+            source_doc_id=posting_uuid,
+            extra_metadata={
+                "posting_uuid": posting_uuid,
+                "posting_id": posting_id,
+                "media_id": media_id,
+                "source_type": "social_media",
+            },
+        )
+
+    first = service.ingest_image(
+        _social_asset(first_path, "u1", "P_1", "P_1_0"),
+        context=IngestContext(source_collection="att-3"),
+    )
+    second = service.ingest_image(
+        _social_asset(second_path, "u2", "P_2", "P_2_0"),
+        context=IngestContext(source_collection="att-3"),
+    )
+
+    assert first.status == "stored"
+    assert second.status == "cached"
+    stored_payload = client.records[first.point_id or ""]
+    # First-wins on the top-level link ids ...
+    assert stored_payload["posting_uuid"] == "u1"
+    # ... but the deduped occurrence records the second posting's link.
+    occurrences = stored_payload["occurrences"]
+    assert any(occ.get("posting_uuid") == "u2" and occ.get("media_id") == "P_2_0" for occ in occurrences)
+
+
 def test_ingest_image_degrades_when_embedding_backend_init_fails() -> None:
     """When the remote CLIP backend raises on init, ingestion should fail gracefully with an error message."""
     cfg = ImageIngestionConfig(

@@ -193,6 +193,62 @@ _POSTINGS_HEADERS: set[str] = next(
     set(),
 )
 
+# Posting reference fields carried onto derived media artifacts, prefixed so they
+# merge additively into an artifact's ``reference_metadata`` without clobbering
+# the artifact's own fields (e.g. a transcript segment's ``network: nextext``).
+_POSTING_REFERENCE_KEYS: dict[str, str] = {
+    "network": "posting_network",
+    "author": "posting_author",
+    "author_id": "posting_author_id",
+    "vanity": "posting_vanity",
+    "timestamp": "posting_timestamp",
+    "url": "posting_url",
+    "text": "posting_text",
+}
+
+
+def build_posting_reference_index(postings_df: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    """Return ``{Posting ID: prefixed posting reference fields}`` from a postings table.
+
+    Reuses the :class:`TableReader` postings schema profile so the column
+    mapping stays declared in exactly one place. Keys are prefixed via
+    :data:`_POSTING_REFERENCE_KEYS` (``network`` → ``posting_network``, ...);
+    empty / missing values are omitted.
+
+    Args:
+        postings_df (pd.DataFrame): Table carrying the postings export schema.
+
+    Returns:
+        dict[str, dict[str, Any]]: Mapping from posting id to the prefixed
+        posting reference fields. Empty when the headers do not match the
+        postings profile — derived artifacts then carry link ids only,
+        matching the pre-enrichment behavior.
+    """
+    profile, normalized_map = TableReader._detect_schema_profile(postings_df.columns)
+    if profile is None or profile.style != "postings":
+        logger.warning(
+            "Social linker: postings table does not match the postings profile; media artifacts keep link ids only."
+        )
+        return {}
+    index: dict[str, dict[str, Any]] = {}
+    for _, row in postings_df.iterrows():
+        posting_id = str(row.get("Posting ID") or "").strip()
+        if not posting_id:
+            continue
+        reference = TableReader._build_reference_metadata(
+            profile=profile, row_dict=row.to_dict(), normalized_map=normalized_map
+        )
+        stamp: dict[str, Any] = {}
+        for key, prefixed in _POSTING_REFERENCE_KEYS.items():
+            value = reference.get(key)
+            if value is None or (isinstance(value, float) and pd.isna(value)):
+                continue
+            text = str(value).strip()
+            if text:
+                stamp[prefixed] = text
+        index[posting_id] = stamp
+    return index
+
 
 @dataclass
 class SocialLinkResult:
@@ -250,9 +306,9 @@ class SocialLinker:
         if postings_csv is None or media_csv is None:
             return result
 
-        posting_uuids = build_posting_index(
-            pd.read_csv(postings_csv, sep=_sniff_delimiter(postings_csv), dtype=str, encoding="utf-8-sig")
-        )
+        postings_df = pd.read_csv(postings_csv, sep=_sniff_delimiter(postings_csv), dtype=str, encoding="utf-8-sig")
+        posting_uuids = build_posting_index(postings_df)
+        posting_references = build_posting_reference_index(postings_df)
         media_df = pd.read_csv(media_csv, sep=_sniff_delimiter(media_csv), dtype=str, encoding="utf-8-sig")
         links = resolve_media_rows(media_df, posting_uuids, media_csv.parent)
 
@@ -260,15 +316,25 @@ class SocialLinker:
         context = IngestContext(source_collection=self.target_collection)
         clips: list[MediaClip] = []
         for link in links:
+            posting_ref = posting_references.get(link.posting_id, {})
+            link_ids = {
+                "posting_uuid": link.posting_uuid,
+                "posting_id": link.posting_id,
+                "media_id": link.media_id,
+            }
             if is_image(link.path):
                 result.consumed_paths.add(link.path)
-                extra = {"posting_id": link.posting_id, "media_id": link.media_id, "source_type": "social_media"}
                 self.image_service.ingest_image(
                     ImageAsset.from_path(
                         path=link.path,
                         source_type="social_media",
                         source_doc_id=link.posting_uuid,
-                        extra_metadata={**extra, "posting_uuid": link.posting_uuid},
+                        extra_metadata={
+                            **link_ids,
+                            "source_type": "social_media",
+                            **posting_ref,
+                            "reference_metadata": {"type": "image", **link_ids, **posting_ref},
+                        },
                     ),
                     context=context,
                 )
@@ -278,16 +344,14 @@ class SocialLinker:
                         path=link.path,
                         source_doc_id=link.posting_uuid,
                         keyframe_extra_metadata={
-                            "posting_id": link.posting_id,
-                            "media_id": link.media_id,
+                            **link_ids,
                             "source_type": "social_media",
-                            "posting_uuid": link.posting_uuid,
+                            **posting_ref,
+                            "reference_metadata": {"type": "keyframe", **link_ids, **posting_ref},
                         },
-                        transcript_extra_info={
-                            "posting_uuid": link.posting_uuid,
-                            "posting_id": link.posting_id,
-                            "media_id": link.media_id,
-                        },
+                        # Flat keys only: the transcript reader owns the segment's
+                        # reference_metadata and merges these in additively.
+                        transcript_extra_info={**link_ids, **posting_ref},
                     )
                 )
         sub = MediaTranscriber(

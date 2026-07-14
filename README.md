@@ -325,6 +325,18 @@ or the top-level `posting_uuid` field and tags each source dict with a
 `posting_group` key so the UI can render a post alongside all its media as a
 single entity.
 
+**Posting reference metadata.** Every linked artifact also carries the parent
+posting's reference fields — `posting_network`, `posting_author`,
+`posting_author_id`, `posting_vanity`, `posting_timestamp`, `posting_url`, and
+the full `posting_text` — merged *additively* into its `reference_metadata`
+(a transcript segment keeps its `network: nextext` / `type: transcript_segment`
+identity). These fields are stored in the Qdrant payload at ingest time and
+surface everywhere reference metadata renders: chat citations, entity and
+hate-speech findings, report exports (MD/HTML/PDF), and the findings CSVs.
+Collections ingested before this feature must be **re-ingested** to pick the
+fields up — there is no payload migration (cached Nextext transcripts make
+this cheap: only embedding is redone, not transcription).
+
 **Nextext transcription.** Video/audio transcription is delegated to an
 external Nextext service. Set:
 
