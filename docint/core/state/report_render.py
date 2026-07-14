@@ -479,12 +479,11 @@ h2.section {
 /* Flat layout: no boxed cards. Findings sit in open space, separated from one
    another by a single hairline rule between consecutive items. */
 .item { margin: 0; padding: 0; }
-/* Keep a compact finding (entity / hate-speech card) intact across a page break.
-   Prose items (summaries, chat answers) deliberately OMIT this: they are often
-   taller than a page, and `break-inside: avoid` would push the whole block onto a
-   fresh page — stranding its section heading on an almost-empty page (orphaned
-   heading) and leaving a large gap. Prose flows; only cards avoid in-page breaks. */
-.item--card { break-inside: avoid; }
+/* Every item flows across page breaks — findings included. A finding table
+   (full chunk text + entity badges) is routinely taller than a page, and any
+   `break-inside: avoid` on it makes WeasyPrint push the whole block onto a
+   fresh page: the section heading strands alone on an almost-empty page and
+   a page-sized gap opens before the content. */
 .item + .item { border-top: 1px solid #e6e6e6; margin-top: 12pt; padding-top: 12pt; }
 .item-title { font-weight: 600; font-size: 11pt; margin: 0 0 2pt; }
 /* One table per finding: shaded top row gives the tag + verbatim chunk text
@@ -492,7 +491,10 @@ h2.section {
    below. Verbatim evidence text keeps `pre-wrap` — never reflowed. */
 table.finding { width: 100%; border-collapse: collapse; margin: 4pt 0; }
 table.finding td { border: 1px solid #e6e6e6; padding: 3pt 6pt; vertical-align: top; }
-table.finding tr { break-inside: avoid; }
+/* No `break-inside: avoid` on finding rows: the chunk row and the entity-badge
+   row can each approach a page in height, and an unbreakable row jumps whole to
+   the next page, leaving the previous one half empty. Rows split mid-cell like
+   ordinary table content instead. */
 table.finding tr.f-top td { background: #f7f7f7; }
 table.finding td.f-tag { width: 24%; font-weight: 600; font-size: 9.5pt; }
 table.finding td.f-text { white-space: pre-wrap; font-size: 9.5pt; color: #222; }
@@ -702,11 +704,6 @@ _HTML_DISPATCH = {
     ARTIFACT_SUMMARY: _html_summary,
 }
 
-# Compact "card" findings (entity / hate-speech) get `break-inside: avoid` so a
-# single finding is never split across pages; the prose artifacts (summary, chat
-# answer) flow instead — see the `.item--card` CSS note on orphaned headings.
-_CARD_ARTIFACTS = frozenset({ARTIFACT_ENTITY, ARTIFACT_HATE})
-
 
 def _html_toc(grouped: OrderedDict[str, list[dict[str, Any]]], overview_present: bool) -> str:
     """Render the contents block (Inhaltsverzeichnis) linking each present section.
@@ -737,7 +734,7 @@ def render_html(report: dict[str, Any]) -> str:
 
     The same document is served as the ``.html`` export and fed to WeasyPrint
     for the PDF, so paged-media rules (``@page`` page numbers, the running
-    title header, ``break-inside: avoid`` on cards) live here once.
+    title header, section-heading break control) live here once.
     """
     title = report.get("title") or "Report"
     locale = "en"
@@ -787,11 +784,8 @@ def render_html(report: dict[str, Any]) -> str:
             anchor = SECTION_ANCHOR.get(artifact_type, "")
             body_parts.append(f'<h2 class="section" id="{anchor}">{_esc(ui_string(heading_key))}</h2>')
             renderer = _HTML_DISPATCH[artifact_type]
-            item_class = "item item--card" if artifact_type in _CARD_ARTIFACTS else "item"
             for item in items:
-                body_parts.append(
-                    f'<div class="{item_class}">{renderer(item.get("snapshot") or {}, item.get("note"))}</div>'
-                )
+                body_parts.append(f'<div class="item">{renderer(item.get("snapshot") or {}, item.get("note"))}</div>')
         if overview is not None:
             body_parts.append(
                 f'<h2 class="section" id="{COLLECTION_OVERVIEW_ANCHOR}">'

@@ -140,33 +140,30 @@ def test_render_html_escapes_user_content_and_has_paged_media() -> None:
     assert 'class="item"' in htm
 
 
-def test_prose_items_flow_while_findings_stay_intact() -> None:
-    """Page-break contract: prose items flow; only findings avoid in-page breaks.
+def test_all_items_flow_across_page_breaks() -> None:
+    """Page-break contract: every item — findings included — flows across pages.
 
-    A summary or chat answer is often taller than a page. If it carries
-    ``break-inside: avoid`` WeasyPrint pushes the whole block onto a fresh page,
-    stranding the section heading on an almost-empty page (an orphaned heading)
-    and leaving a large gap. So the prose artifacts (summary, chat answer) must
-    flow, and the ``break-inside: avoid`` guard belongs only to the compact
-    entity / hate-speech finding cards (``.item--card``).
+    A finding table (full chunk text + entity badges) is routinely taller than
+    a page. Any ``break-inside: avoid`` on the item or its rows makes WeasyPrint
+    push the whole block (or a giant row) onto a fresh page, stranding the
+    section heading on an almost-empty page and leaving page-sized gaps. So
+    neither the item wrapper nor ``table.finding`` rows may carry a break-avoid
+    guard; only the short manifest rows keep one. The section heading stays
+    attached to its first item via ``break-after: avoid`` instead.
     """
-    htm = R.render_html(_report())  # chat (prose) + entity + hate (cards)
-    # The break-avoid guard lives on the card modifier, not the base item rule.
-    assert ".item--card" in htm
-    assert "break-inside: avoid" in htm
+    htm = R.render_html(_report())  # chat (prose) + entity + hate findings
+    assert ".item--card" not in htm  # the unbreakable-card modifier is gone
     base_item_rule = re.search(r"\.item\s*\{([^}]*)\}", htm)
     assert base_item_rule is not None
-    assert "break-inside" not in base_item_rule.group(1)  # the base item flows
-    # Findings opt into staying intact; prose does not.
-    card_report = _single_item_report(
-        "entity_finding",
-        {"entity_label": "E", "chunk_text": "x", "filename": "f", "row": 0, "entities": []},
-    )
-    assert 'class="item item--card"' in R.render_html(card_report)
-    prose_report = _single_item_report("summary", {"collection": "c", "text": "long prose body"})
-    prose_html = R.render_html(prose_report)
-    assert 'class="item"' in prose_html  # prose keeps the plain item class …
-    assert 'class="item item--card"' not in prose_html  # … never the break-avoid card modifier
+    assert "break-inside" not in base_item_rule.group(1)  # items flow
+    finding_rules = re.findall(r"table\.finding[^{]*\{([^}]*)\}", htm)
+    assert finding_rules and all("break-inside" not in rule for rule in finding_rules)
+    # Headings keep their content: no orphaned section title at a page bottom.
+    heading_rule = re.search(r"h2\.section\s*\{([^}]*)\}", htm)
+    assert heading_rule is not None and "break-after: avoid" in heading_rule.group(1)
+    # The manifest keeps its per-row guard (rows are single-line).
+    manifest_rule = re.search(r"table\.manifest tr\s*\{([^}]*)\}", htm)
+    assert manifest_rule is not None and "break-inside: avoid" in manifest_rule.group(1)
 
 
 def test_render_includes_case_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
