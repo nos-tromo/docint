@@ -220,17 +220,20 @@ def test_findings_carry_reference_metadata(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_findings_render_as_single_table_each(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each finding is one two-column table: tag + chunk text prominent on top, the rest below."""
+    """Each finding is one table: full-width tag header band, full-width chunk row, the rest below."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
     report = _report()
 
     htm = R.render_html(report)
-    # One table per finding (entity + hate), tag and text in the shaded top row.
+    # One table per finding (entity + hate); the tag rides a full-width shaded
+    # header band, the chunk text a full-width row right under it.
     assert htm.count('<table class="finding">') == 2
-    assert htm.count('class="f-top"') == 2
-    assert '<td class="f-tag">Acme [ORG]</td>' in htm
-    assert re.search(r'class="f-tag"><span class="badge">slur</span><span class="badge">high</span>', htm)
-    assert re.search(r'<td class="f-text">bad text</td>', htm)
+    assert htm.count('class="f-head"') == 2
+    assert '<tr class="f-head"><td colspan="2">Acme [ORG]</td></tr>' in htm
+    assert re.search(
+        r'class="f-head"><td colspan="2"><span class="badge">slur</span><span class="badge">high</span>', htm
+    )
+    assert re.search(r'<td colspan="2" class="f-text">bad text</td>', htm)
     # The rest sits below as label/value rows inside the same table.
     assert re.search(r'<td class="f-key">Network</td><td class="f-val">X</td>', htm)
     assert re.search(r'<td class="f-key">Posting Network</td><td class="f-val">Facebook</td>', htm)

@@ -486,19 +486,20 @@ h2.section {
    a page-sized gap opens before the content. */
 .item + .item { border-top: 1px solid #e6e6e6; margin-top: 12pt; padding-top: 12pt; }
 .item-title { font-weight: 600; font-size: 11pt; margin: 0 0 2pt; }
-/* One table per finding: shaded top row gives the tag + verbatim chunk text
-   their prominent placement; every remaining field is a muted label/value row
-   below. Verbatim evidence text keeps `pre-wrap` — never reflowed. */
+/* One table per finding, ordered top-to-bottom: a full-width shaded header
+   band carries the tag (the finding's title bar), the verbatim chunk text
+   follows at full width (fewer wrapped lines than a squeezed column), and
+   every remaining field is a muted label/value row with a slim label column.
+   Verbatim evidence text keeps `pre-wrap` — never reflowed. */
 table.finding { width: 100%; border-collapse: collapse; margin: 4pt 0; }
 table.finding td { border: 1px solid #e6e6e6; padding: 3pt 6pt; vertical-align: top; }
 /* No `break-inside: avoid` on finding rows: the chunk row and the entity-badge
    row can each approach a page in height, and an unbreakable row jumps whole to
    the next page, leaving the previous one half empty. Rows split mid-cell like
    ordinary table content instead. */
-table.finding tr.f-top td { background: #f7f7f7; }
-table.finding td.f-tag { width: 24%; font-weight: 600; font-size: 9.5pt; }
+table.finding tr.f-head td { background: #f7f7f7; font-weight: 600; font-size: 9.5pt; }
 table.finding td.f-text { white-space: pre-wrap; font-size: 9.5pt; color: #222; }
-table.finding td.f-key { width: 24%; font-weight: 600; color: #555; font-size: 8pt; }
+table.finding td.f-key { width: 16%; font-weight: 600; color: #555; font-size: 8pt; }
 table.finding td.f-val { white-space: pre-wrap; font-size: 8pt; color: #444; }
 table.finding tr.f-subhead td {
   font-weight: 600; color: #444; font-size: 8pt; background: #fafafa; padding: 2pt 6pt;
@@ -515,8 +516,8 @@ table.finding tr.f-subhead td {
 .note { font-style: italic; color: #444; margin-top: 5pt; }
 .label { font-weight: 600; color: #333; }
 .badge {
-  display: inline-block; padding: 1pt 6pt; border-radius: 3px;
-  background: #f0f0f0; font-size: 8.5pt; margin: 0 4pt 2pt 0;
+  display: inline-block; padding: 1pt 5pt; border-radius: 3px;
+  background: #f0f0f0; font-size: 8.5pt; margin: 0 3pt 2pt 0;
 }
 .badge .etype { color: #999; font-size: 7.5pt; }
 ul.sources { margin: 4pt 0 0; padding-left: 16pt; font-size: 9pt; }
@@ -601,14 +602,17 @@ def _html_reference_metadata_rows(snap: dict[str, Any]) -> str:
 
 
 def _html_finding_table(snap: dict[str, Any], note: str | None, *, tag_html: str, body_rows: str) -> str:
-    """Render one finding as a single two-column table.
+    """Render one finding as a single table.
 
-    The shaded top row gives the tag and the verbatim chunk text their
-    prominent placement; everything else (reason, source, translation,
-    reference metadata, note) sits below as label/value rows.
+    A full-width shaded header band carries the tag (the finding's title bar),
+    the verbatim chunk text follows at full width, and everything else
+    (reason, source, translation, reference metadata, note) sits below as
+    slim label/value rows. The chunk row is omitted when there is no chunk.
     """
     chunk = _truncate(snap.get("chunk_text") or "")
-    rows = [f'<tr class="f-top"><td class="f-tag">{tag_html}</td><td class="f-text">{_esc(chunk)}</td></tr>']
+    rows = [f'<tr class="f-head"><td colspan="2">{tag_html}</td></tr>']
+    if chunk:
+        rows.append(f'<tr><td colspan="2" class="f-text">{_esc(chunk)}</td></tr>')
     rows.append(body_rows)
     meta = " — ".join(p for p in [str(snap.get("filename") or ""), _location(snap)] if p)
     if meta:
