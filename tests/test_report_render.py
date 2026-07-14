@@ -222,6 +222,49 @@ def test_findings_carry_reference_metadata(monkeypatch: pytest.MonkeyPatch) -> N
         assert "Posting Text" in blob and "Original post body" in blob
 
 
+def test_findings_render_as_single_table_each(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each finding is one two-column table: tag + chunk text prominent on top, the rest below."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _report()
+
+    htm = R.render_html(report)
+    # One table per finding (entity + hate), tag and text in the shaded top row.
+    assert htm.count('<table class="finding">') == 2
+    assert htm.count('class="f-top"') == 2
+    assert '<td class="f-tag">Acme [ORG]</td>' in htm
+    assert re.search(r'class="f-tag"><span class="badge">slur</span><span class="badge">high</span>', htm)
+    assert re.search(r'<td class="f-text">bad text</td>', htm)
+    # The rest sits below as label/value rows inside the same table.
+    assert re.search(r'<td class="f-key">Network</td><td class="f-val">X</td>', htm)
+    assert re.search(r'<td class="f-key">Posting Network</td><td class="f-val">Facebook</td>', htm)
+
+    md = R.render_markdown(report)
+    # GFM table: tag + chunk text form the (prominent) header row.
+    assert "| slur (high) | bad text |" in md
+    assert "| Acme [ORG] | Acme met Bob <script>alert(1)</script> |" in md
+    assert "| --- | --- |" in md
+    assert "| Posting Network | Facebook |" in md
+    # The old bullet-list metadata format is gone.
+    assert "- Posting Network:" not in md
+
+
+def test_md_finding_table_cells_escape_pipes_and_newlines() -> None:
+    """Verbatim evidence text cannot break the Markdown table grid."""
+    report = _single_item_report(
+        "hate_speech_finding",
+        {
+            "category": "x",
+            "confidence": "high",
+            "reason": "line one\nline two",
+            "chunk_text": "a|b\nc",
+            "filename": "f",
+        },
+    )
+    md = R.render_markdown(report)
+    assert "| x (high) | a\\|b<br>c |" in md
+    assert "line one<br>line two" in md
+
+
 def test_case_file_only_in_running_header(monkeypatch: pytest.MonkeyPatch) -> None:
     """The case file rides the running header — not the subheader — and the date is date-only."""
     monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
