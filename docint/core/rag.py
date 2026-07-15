@@ -1784,7 +1784,11 @@ class RAG:
 
     # --- Named entity recognition ---
     ner_enabled: bool = field(default=False, init=False)
-    ner_sources: list[dict[str, Any]] = field(default_factory=list, init=False)
+    # Keyed by physical collection name, like the pagination caches below.
+    # A single un-keyed list here served whichever collection populated it
+    # first to every later request (and every tenant) — see the regression
+    # tests in tests/test_ner_sources_collection_scoping.py.
+    _ner_sources_cache: dict[str, list[dict[str, Any]]] = field(default_factory=dict, init=False, repr=False)
     ner_aggregate_cache: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     ner_graph_cache: dict[tuple[str, str, int, int], dict[str, Any]] = field(
         default_factory=dict, init=False, repr=False
@@ -6110,7 +6114,7 @@ class RAG:
                 all per-collection caches across the instance.
         """
         if collection is None:
-            self.ner_sources = []
+            self._ner_sources_cache.clear()
             self.ner_aggregate_cache.clear()
             self.ner_graph_cache.clear()
             self._parent_context_support_cache.clear()
@@ -6133,8 +6137,7 @@ class RAG:
         for graph_key in stale_graph_keys:
             self.ner_graph_cache.pop(graph_key, None)
 
-        if collection == self.qdrant_collection:
-            self.ner_sources = []
+        self._ner_sources_cache.pop(collection, None)
         self._parent_context_support_cache.pop(collection, None)
         self._documents_cache.pop(collection, None)
         self._hate_speech_cache.pop(collection, None)
@@ -7559,17 +7562,20 @@ class RAG:
         Returns:
             list[dict[str, Any]]: A list of source metadata dictionaries containing NER data.
         """
-        if not self.qdrant_collection:
+        collection = self.qdrant_collection
+        if not collection:
             return []
 
         if refresh:
-            self._invalidate_ner_cache(self.qdrant_collection)
+            self._invalidate_ner_cache(collection)
 
-        if self.ner_sources and not refresh:
-            return self.ner_sources
+        cached = self._ner_sources_cache.get(collection)
+        if cached is not None:
+            return cached
 
-        self.ner_sources = self._load_collection_ner_sources()
-        return self.ner_sources
+        sources = self._load_collection_ner_sources()
+        self._ner_sources_cache[collection] = sources
+        return sources
 
     def iter_collection_ner_sources(
         self,
@@ -7584,7 +7590,7 @@ class RAG:
         """Return one paginated slice of NER-bearing sources.
 
         Sources come from :meth:`get_collection_ner` (cached on
-        ``self.ner_sources``), so the first call after a cache miss pays the
+        ``self._ner_sources_cache`` per collection), so the first call after a cache miss pays the
         Qdrant scroll cost and subsequent calls only filter and slice.
 
         Entity filtering mirrors the SPA's ``sourceContainsEntity``: the same

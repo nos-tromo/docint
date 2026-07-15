@@ -1337,7 +1337,7 @@ def test_select_collection_invalidates_ner_cache(
         monkeypatch: The monkeypatch fixture.
     """
     rag = RAG(qdrant_collection="alpha")
-    rag.ner_sources = [{"filename": "a.pdf", "entities": [{"text": "Acme"}]}]
+    rag._ner_sources_cache[rag.qdrant_collection] = [{"filename": "a.pdf", "entities": [{"text": "Acme"}]}]
     rag.ner_aggregate_cache[("alpha", "orthographic")] = {"entities": []}
     rag.ner_graph_cache[("alpha", "orthographic", 100, 1)] = {
         "nodes": [],
@@ -1352,7 +1352,7 @@ def test_select_collection_invalidates_ner_cache(
 
     rag.select_collection("beta")
 
-    assert rag.ner_sources == []
+    assert "alpha" not in rag._ner_sources_cache
     assert rag.ner_aggregate_cache.get(("alpha", "orthographic")) is None
     assert ("alpha", "orthographic", 100, 1) not in rag.ner_graph_cache
 
@@ -1552,7 +1552,7 @@ def test_collection_ner_stats_and_search() -> None:
             "relations": [{"head": "Acme", "label": "located_in", "tail": "Rivertown"}],
         },
     ]
-    rag.ner_sources = sources
+    rag._ner_sources_cache[rag.qdrant_collection] = sources
 
     stats = rag.get_collection_ner_stats(top_k=10, min_mentions=2)
     assert stats["totals"]["unique_entities"] == 2
@@ -1574,7 +1574,7 @@ def test_collection_ner_stats_and_search() -> None:
 def test_collection_ner_stats_condense_orthographic_variants() -> None:
     """Orthographic variants should condense into one canonical entity by default."""
     rag = RAG(qdrant_collection="test")
-    rag.ner_sources = [
+    rag._ner_sources_cache[rag.qdrant_collection] = [
         {
             "filename": "a.pdf",
             "entities": [{"text": "Parteitag", "type": "EVENT", "score": 0.7}],
@@ -1610,7 +1610,7 @@ def test_collection_ner_stats_condense_orthographic_variants() -> None:
 def test_collection_ner_stats_exact_mode_preserves_orthographic_variants() -> None:
     """Exact mode should keep orthographic variants split."""
     rag = RAG(qdrant_collection="test")
-    rag.ner_sources = [
+    rag._ner_sources_cache[rag.qdrant_collection] = [
         {"filename": "a.pdf", "entities": [{"text": "Parteitag", "type": "EVENT"}]},
         {"filename": "b.pdf", "entities": [{"text": "Partei Tag", "type": "EVENT"}]},
     ]
@@ -1631,7 +1631,7 @@ def test_collection_ner_stats_exact_mode_preserves_orthographic_variants() -> No
 def test_collection_ner_search_matches_entity_acronyms() -> None:
     """Entity search should match acronym queries against multi-word entities."""
     rag = RAG(qdrant_collection="test")
-    rag.ner_sources = [
+    rag._ner_sources_cache[rag.qdrant_collection] = [
         {
             "filename": "a.pdf",
             "entities": [{"text": "European Union", "type": "ORG"}],
@@ -1653,7 +1653,7 @@ def test_collection_ner_search_matches_entity_acronyms() -> None:
 def test_run_entity_occurrence_query_returns_matching_sources() -> None:
     """Entity occurrence mode should return mention-level source rows."""
     rag = RAG(qdrant_collection="test")
-    rag.ner_sources = [
+    rag._ner_sources_cache[rag.qdrant_collection] = [
         {
             "filename": "a.pdf",
             "file_hash": "hash-a",
@@ -1696,7 +1696,7 @@ def test_run_entity_occurrence_query_returns_matching_sources() -> None:
 def test_run_entity_occurrence_query_includes_orthographic_variants() -> None:
     """Occurrence mode should include all mentions from condensed variants."""
     rag = RAG(qdrant_collection="test")
-    rag.ner_sources = [
+    rag._ner_sources_cache[rag.qdrant_collection] = [
         {
             "filename": "a.pdf",
             "chunk_id": "chunk-1",
@@ -1728,7 +1728,7 @@ def test_run_entity_occurrence_query_includes_orthographic_variants() -> None:
 def test_run_entity_occurrence_query_reports_no_match() -> None:
     """Entity occurrence mode should return a clear no-match response."""
     rag = RAG(qdrant_collection="test")
-    rag.ner_sources = [
+    rag._ner_sources_cache[rag.qdrant_collection] = [
         {
             "filename": "a.pdf",
             "chunk_id": "chunk-1",
@@ -1747,7 +1747,7 @@ def test_run_entity_occurrence_query_reports_no_match() -> None:
 def test_run_entity_occurrence_query_reports_ambiguity() -> None:
     """Single-entity occurrence mode should stop when top-rank matches tie."""
     rag = RAG(qdrant_collection="test")
-    rag.ner_sources = [
+    rag._ner_sources_cache[rag.qdrant_collection] = [
         {
             "filename": "a.pdf",
             "chunk_id": "chunk-1",
@@ -1775,7 +1775,7 @@ def test_run_entity_occurrence_query_reports_ambiguity() -> None:
 def test_run_multi_entity_occurrence_query_groups_strong_matches() -> None:
     """Multi-entity occurrence mode should group all equally strong matches."""
     rag = RAG(qdrant_collection="test")
-    rag.ner_sources = [
+    rag._ner_sources_cache[rag.qdrant_collection] = [
         {
             "filename": "a.pdf",
             "file_hash": "hash-a",
@@ -1827,7 +1827,7 @@ def test_collection_ner_graph_and_neighbors() -> None:
             ],
         },
     ]
-    rag.ner_sources = sources
+    rag._ner_sources_cache[rag.qdrant_collection] = sources
 
     graph = rag.get_collection_ner_graph(top_k_nodes=10, min_edge_weight=1)
     assert graph["meta"]["node_count"] >= 3
@@ -1842,7 +1842,7 @@ def test_collection_ner_graph_and_neighbors() -> None:
 def test_collection_ner_graph_merges_orthographic_relation_nodes() -> None:
     """Graph construction should merge orthographic variants before building edges."""
     rag = RAG(qdrant_collection="test")
-    rag.ner_sources = [
+    rag._ner_sources_cache[rag.qdrant_collection] = [
         {
             "filename": "a.pdf",
             "entities": [

@@ -922,10 +922,11 @@ def test_collections_ner_success(client: TestClient) -> None:
     Args:
         client (TestClient): The TestClient instance.
     """
-    api_module.rag.ner_sources = [{"filename": "doc1.pdf", "page": 1, "row": 2, "entities": [], "relations": []}]
+    dummy_rag = cast(DummyRAG, api_module.rag)
+    dummy_rag.ner_sources = [{"filename": "doc1.pdf", "page": 1, "row": 2, "entities": [], "relations": []}]
     response = client.get("/collections/ner")
     assert response.status_code == 200
-    assert response.json() == {"sources": api_module.rag.ner_sources}
+    assert response.json() == {"sources": dummy_rag.ner_sources}
     assert cast(DummyRAG, api_module.rag).ner_refresh_calls[-1] is False
 
 

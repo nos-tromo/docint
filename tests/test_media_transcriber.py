@@ -138,6 +138,69 @@ def test_cache_hit_skips_nextext(tmp_path: Path) -> None:
     assert len(result.transcript_documents) == 1
 
 
+def test_transient_transcript_removed_from_disk(tmp_path: Path) -> None:
+    """The ``.nextext.jsonl`` transient must not survive the run on disk.
+
+    A leftover transient in a shared source directory (``DATA_PATH`` /
+    ``ingest`` CLI) gets swept into other collections by the generic JSON
+    reader on a later ingest, where ``consumed_paths`` no longer shields it.
+    """
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"x")
+    nextext = _FakeNextext(
+        NextextResult(
+            status="completed",
+            transcript_jsonl=b'{"text":"hello","start_seconds":0,"end_seconds":1}\n',
+            keyframes=[],
+        )
+    )
+    result = MediaTranscriber(_FakeImages(), nextext, target_collection="c", manifest=None).run([_clip(clip)])
+
+    transient = tmp_path / "clip.mp4.nextext.jsonl"
+    assert not transient.exists()
+    # Still marked consumed so this run's generic sweep skips it even if a
+    # failed unlink left it behind.
+    assert transient in result.consumed_paths
+    assert len(result.transcript_documents) == 1
+
+
+def test_transient_transcript_removed_on_cache_hit(tmp_path: Path) -> None:
+    """The cache-hit ingest path also removes its ``.nextext.jsonl`` transient."""
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"x")
+
+    class _Manifest:
+        """Manifest stub with a pre-seeded cache hit."""
+
+        def get_nextext_transcript(self, collection: str, file_hash: str) -> str | None:
+            """Return a fixed cached transcript regardless of collection/hash.
+
+            Args:
+                collection: Collection name (ignored in stub).
+                file_hash: Media file hash (ignored in stub).
+
+            Returns:
+                A fixed cached transcript JSONL string.
+            """
+            return '{"text":"cached","start_seconds":0,"end_seconds":1}\n'
+
+        def cache_nextext_transcript(self, *a: Any) -> None:  # pragma: no cover
+            """Fail the test if invoked; a cache hit must never write back.
+
+            Args:
+                *a: Ignored positional arguments.
+
+            Raises:
+                AssertionError: Always — this must not be called on a cache hit.
+            """
+            raise AssertionError("must not write on a cache hit")
+
+    MediaTranscriber(
+        _FakeImages(), _FakeNextext(NextextResult(status="error")), target_collection="c", manifest=_Manifest()
+    ).run([_clip(clip)])
+    assert not (tmp_path / "clip.mp4.nextext.jsonl").exists()
+
+
 def test_empty_clip_list_is_noop(tmp_path: Path) -> None:
     """Running with no clips returns an empty result and touches nothing."""
     result = MediaTranscriber(_FakeImages(), _FakeNextext(NextextResult(status="error")), target_collection="c").run([])

@@ -156,9 +156,14 @@ class MediaTranscriber:
         """Parse transcript JSONL into segment Documents stamped with the clip identity.
 
         Writes a transient ``.nextext.jsonl`` next to the media file purely so
-        ``CustomJSONReader`` (which reads from a path) can parse it; that
-        transient is marked consumed so the generic sweep ignores it. The durable
-        cache of record is the ingest manifest, not this file.
+        ``CustomJSONReader`` (which reads from a path) can parse it; the file is
+        unlinked as soon as parsing finishes (and marked consumed as a fallback
+        for this run's sweep should the unlink fail). Leaving it on disk let a
+        later ingest of the same source directory — where ``consumed_paths`` no
+        longer covers it, e.g. a shared ``DATA_PATH`` or CLI ingest into another
+        collection — sweep it up via the generic JSON reader as an orphaned,
+        posting-less transcript. The durable cache of record is the ingest
+        manifest, not this file.
 
         Args:
             clip (MediaClip): The clip whose ``transcript_extra_info`` is stamped.
@@ -168,5 +173,13 @@ class MediaTranscriber:
         transient = clip.path.parent / (clip.path.name + ".nextext.jsonl")
         transient.write_bytes(transcript)
         result.consumed_paths.add(transient)
-        docs = CustomJSONReader(is_jsonl=True).iter_documents(transient, extra_info=dict(clip.transcript_extra_info))
-        result.transcript_documents.extend(docs)
+        try:
+            docs = CustomJSONReader(is_jsonl=True).iter_documents(
+                transient, extra_info=dict(clip.transcript_extra_info)
+            )
+            result.transcript_documents.extend(docs)
+        finally:
+            try:
+                transient.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Could not remove transient transcript {!r}: {}", str(transient), exc)
