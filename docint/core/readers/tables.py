@@ -243,6 +243,7 @@ class TableReader(BaseReader):
                 "network": "Network",
                 "type": None,
                 "uuid": "UUID",
+                "url": "URL",
                 "timestamp": "Timestamp",
                 "author": "Author",
                 "author_id": "Author ID",

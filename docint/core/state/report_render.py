@@ -23,7 +23,6 @@ from datetime import datetime
 from typing import Any
 
 from docint.utils.env_cfg import language_endonym
-from docint.utils.reference_metadata import BODY_TEXT_FIELDS, reference_metadata_items
 from docint.utils.ui_strings import ui_string
 
 # Artifact types (English protocol values, mirrored in the frontend).
@@ -127,8 +126,8 @@ def _truncate(text: str, limit: int = _CHUNK_MAX_CHARS) -> str:
 def _translation_label(lang: str) -> str:
     """Build the machine-translation heading, suffixed with the target language's endonym.
 
-    Shared by the Markdown (:func:`_translation_lines`) and HTML
-    (:func:`_html_translation`) renderers so the label stays identical
+    Shared by the Markdown (:func:`_md_translation_row`) and HTML
+    (:func:`_html_translation_row`) renderers so the label stays identical
     across export formats.
 
     Args:
@@ -143,15 +142,24 @@ def _translation_label(lang: str) -> str:
     return f"{heading} (→ {language_endonym(lang)})" if lang else heading
 
 
-def _translation_lines(snap: dict[str, Any]) -> list[str]:
-    """Markdown lines for an optional machine-translation block, or []."""
+def _md_cell(value: Any) -> str:
+    """Escape a value for use inside a single Markdown table cell.
+
+    Pipes are escaped and newlines become ``<br>`` so verbatim evidence text
+    (multi-line chunks, posting texts) cannot break the table grid.
+    """
+    text = str(value if value is not None else "").strip()
+    return "<br>".join(text.replace("|", "\\|").splitlines())
+
+
+def _md_translation_row(snap: dict[str, Any]) -> list[str]:
+    """Markdown finding-table row for an optional machine-translation, or []."""
     tr = snap.get("translation") or {}
     text = _truncate(tr.get("text") or "")
     if not text:
         return []
-    lang = str(tr.get("target_lang") or "").strip()
-    label = _translation_label(lang)
-    return ["", f"*{label}:*", "> " + "\n> ".join(text.splitlines())]
+    label = _translation_label(str(tr.get("target_lang") or "").strip())
+    return [f"| {_md_cell(label)} | {_md_cell(text)} |"]
 
 
 def _date_only(value: Any) -> str:
@@ -230,6 +238,158 @@ def _dedupe_entities(entities: list[dict[str, Any]]) -> list[tuple[str, str]]:
     return out
 
 
+# Pipeline-internal "network" values: wiring, not provenance. A transcript
+# segment's real network is its parent posting's `posting_network`; the bare
+# `network: nextext` stamp never reaches an investigator-facing report.
+_INTERNAL_NETWORKS: frozenset[str] = frozenset({"nextext"})
+
+# Posting fields coalesced across the two snapshot shapes (see _posting_view).
+_POSTING_KEYS: tuple[str, ...] = ("network", "author", "author_id", "vanity", "timestamp", "url", "text", "id")
+
+
+def _ref_meta(snap: dict[str, Any]) -> dict[str, Any]:
+    """Return the snapshot's ``reference_metadata`` dict (``{}`` when absent)."""
+    raw = snap.get("reference_metadata")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _posting_view(rm: dict[str, Any]) -> tuple[dict[str, str], bool]:
+    """Coalesce the two posting shapes into one view of the (parent) posting.
+
+    A social-table row carries its posting fields bare (``network``/``author``/
+    ``timestamp``/…); a media-derived artifact (transcript segment, keyframe)
+    carries them prefixed (``posting_network``/…) while its bare ``network`` is
+    the internal pipeline stamp and its bare ``timestamp`` is the in-media
+    offset. ``posting_*`` wins; bare fields are used only when the artifact
+    itself *is* the posting (i.e. its network is not pipeline-internal).
+
+    Args:
+        rm (dict[str, Any]): The snapshot's ``reference_metadata``.
+
+    Returns:
+        tuple[dict[str, str], bool]: The coalesced posting fields (empty-string
+        for absent values) and whether the artifact's bare network is internal.
+    """
+    internal = str(rm.get("network") or "").strip().lower() in _INTERNAL_NETWORKS
+
+    def pick(key: str) -> str:
+        value = rm.get(f"posting_{key}")
+        if value is None and not internal:
+            value = rm.get(key)
+        return str(value).strip() if value is not None else ""
+
+    return {key: pick(key) for key in _POSTING_KEYS}, internal
+
+
+def _posting_text(snap: dict[str, Any]) -> str:
+    """The (parent) posting's own text, shown next to the referenced chunk."""
+    post, _ = _posting_view(_ref_meta(snap))
+    return _truncate(post["text"])
+
+
+def _provenance_rows(snap: dict[str, Any]) -> list[tuple[str, str]]:
+    """Build the finding's metadata block as grouped ``(label, value)`` rows.
+
+    Three rows at most, one per logical key, in fixed order — file reference,
+    then posting, then account — each answering one investigator question and
+    never repeating a value another row already carries:
+
+    * **Source** — which file, and where in it (page/row, or the in-media
+      timestamp for transcript segments; the original media file is preferred
+      over the derived transcript artifact). Language/speaker ride along.
+    * **Posting** — network, posting timestamp, posting ID, URL. The media ID
+      appears only when it differs from the posting ID.
+    * **Account** — author display name with handle and account ID inline.
+
+    Pipeline-internal fields (``network: nextext``, ``type``, UUIDs,
+    ``text_id``) are deliberately dropped: the full snapshot stays available in
+    the JSON/CSV data exports; the report is informative, not exhaustive.
+    """
+    rm = _ref_meta(snap)
+    post, internal = _posting_view(rm)
+    rows: list[tuple[str, str]] = []
+
+    # Source: file + position (+ language/speaker).
+    file_ref = str(rm.get("source_file") or snap.get("filename") or "").strip()
+    bits = [file_ref] if file_ref else []
+    media_ts = str(rm.get("timestamp") or "").strip() if internal else ""
+    location = media_ts or _location(snap)
+    if location:
+        bits.append(location)
+    language = str(rm.get("language") or rm.get("detected_language") or "").strip()
+    if language:
+        bits.append(f"{ui_string('report_label_language')}: {language}")
+    speaker = str(rm.get("speaker") or "").strip()
+    if speaker:
+        bits.append(f"{ui_string('report_label_speaker')}: {speaker}")
+    if bits:
+        rows.append((ui_string("report_label_source"), " · ".join(bits)))
+
+    # Posting: network · timestamp · ID, with the URL on its own line.
+    bits = [b for b in (post["network"], post["timestamp"]) if b]
+    if post["id"]:
+        bits.append(f"ID {post['id']}")
+    media_id = str(rm.get("media_id") or "").strip()
+    if media_id and media_id != post["id"]:
+        bits.append(f"{ui_string('report_label_media_id')} {media_id}")
+    posting = " · ".join(bits)
+    if post["url"]:
+        posting = f"{posting}\n{post['url']}" if posting else post["url"]
+    if posting:
+        rows.append((ui_string("report_label_posting"), posting))
+
+    # Account: display name (handle · ID).
+    details = []
+    if post["vanity"]:
+        details.append("@" + post["vanity"].lstrip("@"))
+    if post["author_id"]:
+        details.append(f"ID {post['author_id']}")
+    account = post["author"]
+    if details:
+        joined = " · ".join(details)
+        account = f"{account} ({joined})" if account else joined
+    if account:
+        rows.append((ui_string("report_label_account"), account))
+
+    return rows
+
+
+def _collapse_entity_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge entity findings that reference the same chunk into one block.
+
+    An operator adding one chunk several times (once per entity of interest)
+    should get a single reference block whose header names every entity label;
+    the mention lists and notes are merged. Keyed by ``chunk_id`` (falling back
+    to the file/locator/text tuple for old snapshots without one); original
+    item dicts and snapshots are never mutated.
+    """
+    merged: OrderedDict[Any, dict[str, Any]] = OrderedDict()
+    labels: dict[Any, list[str]] = {}
+    notes: dict[Any, list[str]] = {}
+    for item in items:
+        snap = dict(item.get("snapshot") or {})
+        key = snap.get("chunk_id") or (snap.get("filename"), snap.get("page"), snap.get("row"), snap.get("chunk_text"))
+        label = str(snap.get("entity_label") or "").strip()
+        note = str(item.get("note") or "").strip()
+        if key not in merged:
+            merged[key] = {**item, "snapshot": snap}
+            labels[key] = [label] if label else []
+            notes[key] = [note] if note else []
+            continue
+        target = merged[key]["snapshot"]
+        if label and label not in labels[key]:
+            labels[key].append(label)
+        if note and note not in notes[key]:
+            notes[key].append(note)
+        target["entities"] = list(target.get("entities") or []) + list(snap.get("entities") or [])
+        if not target.get("translation") and snap.get("translation"):
+            target["translation"] = snap["translation"]
+    for key, item in merged.items():
+        item["snapshot"]["entity_label"] = " · ".join(labels[key])
+        item["note"] = " · ".join(notes[key]) or None
+    return list(merged.values())
+
+
 # --------------------------------------------------------------------------- #
 # JSON
 # --------------------------------------------------------------------------- #
@@ -241,21 +401,6 @@ def render_json(report: dict[str, Any]) -> str:
 # --------------------------------------------------------------------------- #
 # Markdown
 # --------------------------------------------------------------------------- #
-def _md_reference_metadata(snap: dict[str, Any]) -> list[str]:
-    """Render the source's reference metadata (provenance) rows, if any.
-
-    Surfaces the stable citation fields (network, author, timestamp, …) captured
-    at ingestion; the body-text fields are skipped because the chunk text is
-    already shown above.
-    """
-    items = reference_metadata_items(snap, skip_keys=BODY_TEXT_FIELDS)
-    if not items:
-        return []
-    lines = ["", f"**{ui_string('report_label_reference_metadata')}:**"]
-    lines += [f"- {label}: {value}" for label, value in items]
-    return lines
-
-
 def _md_chat(snap: dict[str, Any], note: str | None) -> list[str]:
     lines = [
         f"### {ui_string('report_label_question')}: {snap.get('user_text', '').strip()}",
@@ -272,46 +417,49 @@ def _md_chat(snap: dict[str, Any], note: str | None) -> list[str]:
     return lines
 
 
-def _md_entity(snap: dict[str, Any], note: str | None) -> list[str]:
-    label = snap.get("entity_label") or ""
-    meta = " — ".join(p for p in [snap.get("filename") or "", _location(snap)] if p)
-    lines = [f"### {label}".rstrip()]
-    if meta:
-        lines.append(f"*{ui_string('report_label_source')}: {meta}*")
+def _md_finding_table(snap: dict[str, Any], note: str | None, *, tag: str, body_rows: list[str]) -> list[str]:
+    """Render one finding as a single two-column Markdown table.
+
+    The GFM header row gives the tag and the verbatim chunk text their
+    prominent top placement. Content stays together below it — translation,
+    then the parent posting's text — followed by the type-specific rows
+    (entities / reason) and the grouped provenance block (source → posting →
+    account, see :func:`_provenance_rows`).
+    """
     chunk = _truncate(snap.get("chunk_text") or "")
-    if chunk:
-        lines += ["", "> " + "\n> ".join(chunk.splitlines())]
-    lines += _translation_lines(snap)
+    lines = [
+        f"| {_md_cell(tag)} | {_md_cell(chunk)} |",
+        "| --- | --- |",
+    ]
+    lines += _md_translation_row(snap)
+    posting_text = _posting_text(snap)
+    if posting_text:
+        lines.append(f"| {_md_cell(ui_string('report_label_posting_text'))} | {_md_cell(posting_text)} |")
+    lines += body_rows
+    lines += [f"| {_md_cell(label)} | {_md_cell(value)} |" for label, value in _provenance_rows(snap)]
+    if note:
+        lines.append(f"| {ui_string('report_label_note')} | {_md_cell(note)} |")
+    lines.append("")
+    return lines
+
+
+def _md_entity(snap: dict[str, Any], note: str | None) -> list[str]:
+    body_rows: list[str] = []
     entities = _dedupe_entities(snap.get("entities") or [])
     if entities:
         rendered = ", ".join(f"{text} [{etype}]" if etype else text for text, etype in entities)
-        lines += ["", f"**{ui_string('report_label_entities')}:** {rendered}"]
-    lines += _md_reference_metadata(snap)
-    if note:
-        lines += ["", f"*{ui_string('report_label_note')}: {note.strip()}*"]
-    lines.append("")
-    return lines
+        body_rows.append(f"| {ui_string('report_label_entities')} | {_md_cell(rendered)} |")
+    return _md_finding_table(snap, note, tag=str(snap.get("entity_label") or ""), body_rows=body_rows)
 
 
 def _md_hate(snap: dict[str, Any], note: str | None) -> list[str]:
     category = snap.get("category") or ""
     confidence = snap.get("confidence") or ""
-    lines = [f"### {category} ({confidence})".strip()]
+    body_rows: list[str] = []
     reason = snap.get("reason")
     if reason:
-        lines.append(f"**{ui_string('report_label_reason')}:** {reason.strip()}")
-    meta = " — ".join(p for p in [snap.get("filename") or "", _location(snap)] if p)
-    if meta:
-        lines.append(f"*{ui_string('report_label_source')}: {meta}*")
-    chunk = _truncate(snap.get("chunk_text") or "")
-    if chunk:
-        lines += ["", "> " + "\n> ".join(chunk.splitlines())]
-    lines += _translation_lines(snap)
-    lines += _md_reference_metadata(snap)
-    if note:
-        lines += ["", f"*{ui_string('report_label_note')}: {note.strip()}*"]
-    lines.append("")
-    return lines
+        body_rows.append(f"| {ui_string('report_label_reason')} | {_md_cell(reason)} |")
+    return _md_finding_table(snap, note, tag=f"{category} ({confidence})".strip(), body_rows=body_rows)
 
 
 def _md_summary(snap: dict[str, Any], note: str | None) -> list[str]:
@@ -407,6 +555,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         if not items:
             continue
         lines += [f"## {ui_string(heading_key)}", ""]
+        if artifact_type == ARTIFACT_ENTITY:
+            items = _collapse_entity_items(items)
         renderer = _MD_DISPATCH[artifact_type]
         for item in items:
             lines += renderer(item.get("snapshot") or {}, item.get("note"))
@@ -469,20 +619,28 @@ h2.section {
 /* Flat layout: no boxed cards. Findings sit in open space, separated from one
    another by a single hairline rule between consecutive items. */
 .item { margin: 0; padding: 0; }
-/* Keep a compact finding (entity / hate-speech card) intact across a page break.
-   Prose items (summaries, chat answers) deliberately OMIT this: they are often
-   taller than a page, and `break-inside: avoid` would push the whole block onto a
-   fresh page — stranding its section heading on an almost-empty page (orphaned
-   heading) and leaving a large gap. Prose flows; only cards avoid in-page breaks. */
-.item--card { break-inside: avoid; }
+/* Every item flows across page breaks — findings included. A finding table
+   (full chunk text + entity badges) is routinely taller than a page, and any
+   `break-inside: avoid` on it makes WeasyPrint push the whole block onto a
+   fresh page: the section heading strands alone on an almost-empty page and
+   a page-sized gap opens before the content. */
 .item + .item { border-top: 1px solid #e6e6e6; margin-top: 12pt; padding-top: 12pt; }
 .item-title { font-weight: 600; font-size: 11pt; margin: 0 0 2pt; }
-.item-meta { color: #777; font-size: 8.5pt; margin: 0 0 5pt; }
-/* Verbatim evidence text (social-media posts, document chunks) — kept exact. */
-.chunk {
-  white-space: pre-wrap; background: #fafafa; border-left: 2px solid #ddd;
-  padding: 5pt 8pt; font-size: 9pt; color: #333; margin: 5pt 0;
-}
+/* One table per finding, ordered top-to-bottom: a full-width shaded header
+   band carries the tag (the finding's title bar), the verbatim chunk text
+   follows at full width (fewer wrapped lines than a squeezed column), and
+   every remaining field is a muted label/value row with a slim label column.
+   Verbatim evidence text keeps `pre-wrap` — never reflowed. */
+table.finding { width: 100%; border-collapse: collapse; margin: 4pt 0; }
+table.finding td { border: 1px solid #e6e6e6; padding: 3pt 6pt; vertical-align: top; }
+/* No `break-inside: avoid` on finding rows: the chunk row and the entity-badge
+   row can each approach a page in height, and an unbreakable row jumps whole to
+   the next page, leaving the previous one half empty. Rows split mid-cell like
+   ordinary table content instead. */
+table.finding tr.f-head td { background: #f7f7f7; font-weight: 600; font-size: 9.5pt; }
+table.finding td.f-text { white-space: pre-wrap; font-size: 9.5pt; color: #222; }
+table.finding td.f-key { width: 16%; font-weight: 600; color: #555; font-size: 8pt; }
+table.finding td.f-val { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 8pt; color: #444; }
 /* Rendered Markdown prose (summaries, chat answers). */
 .prose { margin: 2pt 0 4pt; }
 .prose > :first-child { margin-top: 0; }
@@ -495,17 +653,11 @@ h2.section {
 .note { font-style: italic; color: #444; margin-top: 5pt; }
 .label { font-weight: 600; color: #333; }
 .badge {
-  display: inline-block; padding: 1pt 6pt; border-radius: 3px;
-  background: #f0f0f0; font-size: 8.5pt; margin: 0 4pt 2pt 0;
+  display: inline-block; padding: 1pt 5pt; border-radius: 3px;
+  background: #f0f0f0; font-size: 8.5pt; margin: 0 3pt 2pt 0;
 }
 .badge .etype { color: #999; font-size: 7.5pt; }
 ul.sources { margin: 4pt 0 0; padding-left: 16pt; font-size: 9pt; }
-/* Provenance: every field kept, but laid out as a compact, muted two-column
-   key/value grid so the identifiers do not dominate the page. */
-.rm-head { font-weight: 600; color: #444; font-size: 8.5pt; margin-top: 6pt; }
-.refmeta { columns: 2; column-gap: 18pt; margin: 2pt 0 0; font-size: 8pt; color: #666; }
-.refmeta .rm-row { break-inside: avoid; margin: 0 0 1pt; }
-.refmeta .rm-key { font-weight: 600; color: #555; }
 .empty { color: #888; font-style: italic; }
 .overview-strip { color: #555; font-size: 9pt; margin: 4pt 0 8pt; }
 table.manifest { width: 100%; border-collapse: collapse; font-size: 8.5pt; }
@@ -558,40 +710,44 @@ def _html_note(note: str | None) -> str:
     return f'<div class="note">{ui_string("report_label_note")}: {_esc(note)}</div>'
 
 
-def _html_chunk(snap: dict[str, Any]) -> str:
-    chunk = _truncate(snap.get("chunk_text") or "")
-    return f'<div class="chunk">{_esc(chunk)}</div>' if chunk else ""
+def _html_finding_row(label: str, value_html: str) -> str:
+    """One label/value row of a finding table (value passed as ready HTML)."""
+    return f'<tr><td class="f-key">{_esc(label)}</td><td class="f-val">{value_html}</td></tr>'
 
 
-def _html_translation(snap: dict[str, Any]) -> str:
-    """HTML for an optional machine-translation block, or ''."""
+def _html_translation_row(snap: dict[str, Any]) -> str:
+    """Finding-table row for an optional machine-translation, or ''."""
     tr = snap.get("translation") or {}
     text = _truncate(tr.get("text") or "")
     if not text:
         return ""
-    lang = str(tr.get("target_lang") or "").strip()
-    label = _translation_label(lang)
-    return (
-        f'<div class="translation"><span class="label">{_esc(label)}:</span> '
-        f'<div class="chunk">{_esc(text)}</div></div>'
-    )
+    label = _translation_label(str(tr.get("target_lang") or "").strip())
+    return _html_finding_row(label, _esc(text))
 
 
-def _html_reference_metadata(snap: dict[str, Any]) -> str:
-    """Render the source's reference metadata (provenance) as a compact block.
+def _html_finding_table(snap: dict[str, Any], note: str | None, *, tag_html: str, body_rows: str) -> str:
+    """Render one finding as a single table.
 
-    Every captured field is kept (chain-of-custody), laid out as a tight, muted
-    two-column key/value grid so the identifiers no longer dominate the page.
+    A full-width shaded header band carries the tag (the finding's title bar),
+    the verbatim chunk text follows at full width, and content stays together:
+    the translation and the parent posting's text sit directly under the chunk.
+    The type-specific rows (entities / reason) follow, then the grouped
+    provenance block (source → posting → account, see
+    :func:`_provenance_rows`). The chunk row is omitted when there is no chunk.
     """
-    items = reference_metadata_items(snap, skip_keys=BODY_TEXT_FIELDS)
-    if not items:
-        return ""
-    rows = "".join(
-        f'<div class="rm-row"><span class="rm-key">{_esc(label)}:</span> {_esc(value)}</div>' for label, value in items
-    )
-    return (
-        f'<div class="rm-head">{ui_string("report_label_reference_metadata")}:</div><div class="refmeta">{rows}</div>'
-    )
+    chunk = _truncate(snap.get("chunk_text") or "")
+    rows = [f'<tr class="f-head"><td colspan="2">{tag_html}</td></tr>']
+    if chunk:
+        rows.append(f'<tr><td colspan="2" class="f-text">{_esc(chunk)}</td></tr>')
+    rows.append(_html_translation_row(snap))
+    posting_text = _posting_text(snap)
+    if posting_text:
+        rows.append(_html_finding_row(ui_string("report_label_posting_text"), _esc(posting_text)))
+    rows.append(body_rows)
+    rows.extend(_html_finding_row(label, _esc(value)) for label, value in _provenance_rows(snap))
+    if note:
+        rows.append(_html_finding_row(ui_string("report_label_note"), _esc(note)))
+    return f'<table class="finding">{"".join(rows)}</table>'
 
 
 def _html_chat(snap: dict[str, Any], note: str | None) -> str:
@@ -609,12 +765,7 @@ def _html_chat(snap: dict[str, Any], note: str | None) -> str:
 
 
 def _html_entity(snap: dict[str, Any], note: str | None) -> str:
-    meta = " — ".join(p for p in [str(snap.get("filename") or ""), _location(snap)] if p)
-    parts = [f'<div class="item-title">{_esc(snap.get("entity_label"))}</div>']
-    if meta:
-        parts.append(f'<div class="item-meta">{ui_string("report_label_source")}: {_esc(meta)}</div>')
-    parts.append(_html_chunk(snap))
-    parts.append(_html_translation(snap))
+    body_rows = ""
     entities = _dedupe_entities(snap.get("entities") or [])
     if entities:
         badges = "".join(
@@ -623,29 +774,19 @@ def _html_entity(snap: dict[str, Any], note: str | None) -> str:
             + "</span>"
             for text, etype in entities
         )
-        parts.append(f'<div><span class="label">{ui_string("report_label_entities")}:</span> {badges}</div>')
-    parts.append(_html_reference_metadata(snap))
-    parts.append(_html_note(note))
-    return "".join(parts)
+        body_rows = _html_finding_row(ui_string("report_label_entities"), badges)
+    return _html_finding_table(snap, note, tag_html=_esc(snap.get("entity_label")), body_rows=body_rows)
 
 
 def _html_hate(snap: dict[str, Any], note: str | None) -> str:
-    parts = [
-        f'<div class="item-title"><span class="badge">{_esc(snap.get("category"))}</span>'
-        f'<span class="badge">{_esc(snap.get("confidence"))}</span></div>'
-    ]
+    tag_html = (
+        f'<span class="badge">{_esc(snap.get("category"))}</span>'
+        f'<span class="badge">{_esc(snap.get("confidence"))}</span>'
+    )
+    body_rows = ""
     if snap.get("reason"):
-        parts.append(
-            f'<div><span class="label">{ui_string("report_label_reason")}:</span> {_esc(snap.get("reason"))}</div>'
-        )
-    meta = " — ".join(p for p in [str(snap.get("filename") or ""), _location(snap)] if p)
-    if meta:
-        parts.append(f'<div class="item-meta">{ui_string("report_label_source")}: {_esc(meta)}</div>')
-    parts.append(_html_chunk(snap))
-    parts.append(_html_translation(snap))
-    parts.append(_html_reference_metadata(snap))
-    parts.append(_html_note(note))
-    return "".join(parts)
+        body_rows = _html_finding_row(ui_string("report_label_reason"), _esc(snap.get("reason")))
+    return _html_finding_table(snap, note, tag_html=tag_html, body_rows=body_rows)
 
 
 def _html_summary(snap: dict[str, Any], note: str | None) -> str:
@@ -693,11 +834,6 @@ _HTML_DISPATCH = {
     ARTIFACT_SUMMARY: _html_summary,
 }
 
-# Compact "card" findings (entity / hate-speech) get `break-inside: avoid` so a
-# single finding is never split across pages; the prose artifacts (summary, chat
-# answer) flow instead — see the `.item--card` CSS note on orphaned headings.
-_CARD_ARTIFACTS = frozenset({ARTIFACT_ENTITY, ARTIFACT_HATE})
-
 
 def _html_toc(grouped: OrderedDict[str, list[dict[str, Any]]], overview_present: bool) -> str:
     """Render the contents block (Inhaltsverzeichnis) linking each present section.
@@ -728,7 +864,7 @@ def render_html(report: dict[str, Any]) -> str:
 
     The same document is served as the ``.html`` export and fed to WeasyPrint
     for the PDF, so paged-media rules (``@page`` page numbers, the running
-    title header, ``break-inside: avoid`` on cards) live here once.
+    title header, section-heading break control) live here once.
     """
     title = report.get("title") or "Report"
     locale = "en"
@@ -777,12 +913,11 @@ def render_html(report: dict[str, Any]) -> str:
                 continue
             anchor = SECTION_ANCHOR.get(artifact_type, "")
             body_parts.append(f'<h2 class="section" id="{anchor}">{_esc(ui_string(heading_key))}</h2>')
+            if artifact_type == ARTIFACT_ENTITY:
+                items = _collapse_entity_items(items)
             renderer = _HTML_DISPATCH[artifact_type]
-            item_class = "item item--card" if artifact_type in _CARD_ARTIFACTS else "item"
             for item in items:
-                body_parts.append(
-                    f'<div class="{item_class}">{renderer(item.get("snapshot") or {}, item.get("note"))}</div>'
-                )
+                body_parts.append(f'<div class="item">{renderer(item.get("snapshot") or {}, item.get("note"))}</div>')
         if overview is not None:
             body_parts.append(
                 f'<h2 class="section" id="{COLLECTION_OVERVIEW_ANCHOR}">'

@@ -2853,6 +2853,9 @@ class RAG:
                 src["bbox"] = bbox
             if payload.get("posting_uuid"):
                 src["posting_uuid"] = payload["posting_uuid"]
+            reference_metadata = RAG._extract_reference_metadata(payload)
+            if reference_metadata:
+                src["reference_metadata"] = reference_metadata
             results.append(src)
 
         return results

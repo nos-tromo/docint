@@ -566,7 +566,21 @@ class CustomJSONReader(BaseReader):
         if speaker_str is not None:
             reference_metadata["speaker"] = speaker_str
 
-        for link_field in ("posting_uuid", "posting_id", "media_id"):
+        # Link ids plus the parent posting's own reference fields (stamped by the
+        # social linker, already ``posting_``-prefixed) — merged additively so the
+        # segment's ``network: nextext`` / ``type: transcript_segment`` survive.
+        for link_field in (
+            "posting_uuid",
+            "posting_id",
+            "media_id",
+            "posting_network",
+            "posting_author",
+            "posting_author_id",
+            "posting_vanity",
+            "posting_timestamp",
+            "posting_url",
+            "posting_text",
+        ):
             link_value = base.get(link_field)
             if link_value:
                 reference_metadata[link_field] = link_value
@@ -623,7 +637,14 @@ class CustomJSONReader(BaseReader):
                 segment_text=cleaned_text,
             )
             ensure_file_hash(metadata, file_hash=file_hash, path=file_path)
-            yield Document(text=cleaned_text, metadata=metadata)
+            # reference_metadata duplicates the segment text and may carry the
+            # full parent posting text — keep it out of the embedding input
+            # (llama-index copies the exclusion onto split nodes).
+            yield Document(
+                text=cleaned_text,
+                metadata=metadata,
+                excluded_embed_metadata_keys=["reference_metadata"],
+            )
             seen_segments += 1
 
         if truncated:

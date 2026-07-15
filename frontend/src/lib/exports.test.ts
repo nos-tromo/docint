@@ -79,6 +79,34 @@ describe('chatTranscriptToText', () => {
     expect(text).not.toContain('Anchor Text:')
     expect(text).toContain('Author: alice')
   })
+
+  it('renders posting reference fields in the source metadata block', () => {
+    const meta: ChatFinalEvent = {
+      sources: [
+        {
+          filename: 'clip.mp4',
+          score: 0.5,
+          preview_text: 'spoken words',
+          reference_metadata: {
+            network: 'nextext',
+            type: 'transcript_segment',
+            posting_network: 'Facebook',
+            posting_author: 'Jane Poster',
+            posting_url: 'https://fb.example/p1',
+            posting_text: 'Original post body'
+          }
+        }
+      ],
+      session_id: 's'
+    }
+    const text = chatTranscriptToText([{ user: 'q', assistant: 'a', done: true, meta }])
+    // The artifact identity stays, the posting reference rides along.
+    expect(text).toContain('- Network: nextext')
+    expect(text).toContain('- Posting Network: Facebook')
+    expect(text).toContain('- Posting Author: Jane Poster')
+    expect(text).toContain('- Posting URL: https://fb.example/p1')
+    expect(text).toContain('- Posting Text: Original post body')
+  })
 })
 
 describe('summaryToMarkdown', () => {

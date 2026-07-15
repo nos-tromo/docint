@@ -65,8 +65,28 @@ def _report() -> dict[str, Any]:
                     "confidence": "high",
                     "reason": "contains slur",
                     "chunk_text": "bad text",
-                    "filename": "b.json",
-                    "reference_metadata": {"network": "X", "author": "bob", "timestamp": "2026-03-04"},
+                    "filename": "clip.mp4.nextext.jsonl",
+                    "row": 2,
+                    # A media-derived transcript segment: internal pipeline stamps
+                    # plus the parent posting's reference fields (additive carry).
+                    "reference_metadata": {
+                        "network": "nextext",
+                        "type": "transcript_segment",
+                        "posting_uuid": "pu-1",
+                        "posting_id": "P1",
+                        "media_id": "P1",
+                        "posting_network": "Facebook",
+                        "posting_author": "Jane Poster",
+                        "posting_author_id": "42",
+                        "posting_vanity": "jane.poster",
+                        "posting_timestamp": "2026-03-04 09:00:00+00",
+                        "posting_url": "https://fb.example/p1",
+                        "posting_text": "Original post body",
+                        "timestamp": "00:00:08",
+                        "text_id": "clip.mp4:2",
+                        "language": "en",
+                        "source_file": "clip.mp4",
+                    },
                 },
             },
         ],
@@ -132,33 +152,30 @@ def test_render_html_escapes_user_content_and_has_paged_media() -> None:
     assert 'class="item"' in htm
 
 
-def test_prose_items_flow_while_findings_stay_intact() -> None:
-    """Page-break contract: prose items flow; only findings avoid in-page breaks.
+def test_all_items_flow_across_page_breaks() -> None:
+    """Page-break contract: every item — findings included — flows across pages.
 
-    A summary or chat answer is often taller than a page. If it carries
-    ``break-inside: avoid`` WeasyPrint pushes the whole block onto a fresh page,
-    stranding the section heading on an almost-empty page (an orphaned heading)
-    and leaving a large gap. So the prose artifacts (summary, chat answer) must
-    flow, and the ``break-inside: avoid`` guard belongs only to the compact
-    entity / hate-speech finding cards (``.item--card``).
+    A finding table (full chunk text + entity badges) is routinely taller than
+    a page. Any ``break-inside: avoid`` on the item or its rows makes WeasyPrint
+    push the whole block (or a giant row) onto a fresh page, stranding the
+    section heading on an almost-empty page and leaving page-sized gaps. So
+    neither the item wrapper nor ``table.finding`` rows may carry a break-avoid
+    guard; only the short manifest rows keep one. The section heading stays
+    attached to its first item via ``break-after: avoid`` instead.
     """
-    htm = R.render_html(_report())  # chat (prose) + entity + hate (cards)
-    # The break-avoid guard lives on the card modifier, not the base item rule.
-    assert ".item--card" in htm
-    assert "break-inside: avoid" in htm
+    htm = R.render_html(_report())  # chat (prose) + entity + hate findings
+    assert ".item--card" not in htm  # the unbreakable-card modifier is gone
     base_item_rule = re.search(r"\.item\s*\{([^}]*)\}", htm)
     assert base_item_rule is not None
-    assert "break-inside" not in base_item_rule.group(1)  # the base item flows
-    # Findings opt into staying intact; prose does not.
-    card_report = _single_item_report(
-        "entity_finding",
-        {"entity_label": "E", "chunk_text": "x", "filename": "f", "row": 0, "entities": []},
-    )
-    assert 'class="item item--card"' in R.render_html(card_report)
-    prose_report = _single_item_report("summary", {"collection": "c", "text": "long prose body"})
-    prose_html = R.render_html(prose_report)
-    assert 'class="item"' in prose_html  # prose keeps the plain item class …
-    assert 'class="item item--card"' not in prose_html  # … never the break-avoid card modifier
+    assert "break-inside" not in base_item_rule.group(1)  # items flow
+    finding_rules = re.findall(r"table\.finding[^{]*\{([^}]*)\}", htm)
+    assert finding_rules and all("break-inside" not in rule for rule in finding_rules)
+    # Headings keep their content: no orphaned section title at a page bottom.
+    heading_rule = re.search(r"h2\.section\s*\{([^}]*)\}", htm)
+    assert heading_rule is not None and "break-after: avoid" in heading_rule.group(1)
+    # The manifest keeps its per-row guard (rows are single-line).
+    manifest_rule = re.search(r"table\.manifest tr\s*\{([^}]*)\}", htm)
+    assert manifest_rule is not None and "break-inside: avoid" in manifest_rule.group(1)
 
 
 def test_render_includes_case_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -199,14 +216,160 @@ def test_summaries_render_first(monkeypatch: pytest.MonkeyPatch) -> None:
     assert htm.index(ui_string("report_section_summaries")) < htm.index(ui_string("report_section_chat"))
 
 
-def test_findings_carry_reference_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Entity and hate-speech findings surface their reference metadata (provenance)."""
+def test_findings_carry_grouped_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Findings surface a grouped provenance block: source → posting → account.
+
+    The report view is informative, not exhaustive: pipeline-internal fields
+    (``network: nextext``, ``type``, UUIDs, ``text_id``) and duplicates
+    (media ID equal to posting ID, the derived transcript filename shadowed by
+    ``source_file``) never render; the full snapshot stays in the JSON export.
+    """
     monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
-    label = ui_string("report_label_reference_metadata")
     for blob in (R.render_markdown(_report()), R.render_html(_report())):
-        assert blob.count(label) >= 2  # one block for the entity finding, one for the hate finding
-        assert "Telegram" in blob and "alice" in blob  # entity finding provenance
-        assert "bob" in blob  # hate-speech finding provenance
+        # Entity finding (a direct social row): bare fields feed posting/account.
+        assert "Telegram" in blob and "alice" in blob
+        # Hate finding (transcript segment): the parent posting's fields render …
+        assert "Facebook" in blob
+        assert "Jane Poster (@jane.poster · ID 42)" in blob  # account merged into one row
+        assert "https://fb.example/p1" in blob
+        assert "Original post body" in blob
+        assert "ID P1" in blob  # the posting ID (the exact reference)
+        # … while internal/duplicate fields are dropped from the report view.
+        assert "nextext" not in blob
+        assert "transcript_segment" not in blob
+        assert "pu-1" not in blob and "u-1" not in blob  # docint-minted UUIDs
+        assert "clip.mp4:2" not in blob  # text_id duplicates source file + position
+        assert ui_string("report_label_media_id") not in blob  # media ID == posting ID
+        assert "clip.mp4.nextext.jsonl" not in blob  # derived artifact; source_file wins
+        assert "clip.mp4 · 00:00:08" in blob  # original media + in-media position
+
+
+def test_media_id_renders_only_when_distinct(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A media ID differing from the posting ID still renders (it adds information)."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _report()
+    report["items"][2]["snapshot"]["reference_metadata"]["media_id"] = "M9"
+    htm = R.render_html(report)
+    assert f"{ui_string('report_label_media_id')} M9" in htm
+
+
+def test_posting_text_renders_adjacent_to_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The parent posting's text sits directly under the chunk, before analysis/provenance rows."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    htm = R.render_html(_report())
+    i_chunk = htm.index("bad text")
+    i_posting_text = htm.index("Original post body")
+    i_reason = htm.index("contains slur")
+    i_source_row = htm.index("clip.mp4 · 00:00:08")
+    assert i_chunk < i_posting_text < i_reason < i_source_row
+
+
+def test_entity_findings_same_chunk_collapse(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Entity findings added per-entity for the same chunk merge into one block.
+
+    The header names every entity label, the mention badges are merged, and the
+    notes are joined; a finding on a different chunk stays its own block.
+    """
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    snap = {
+        "chunk_id": "c1",
+        "chunk_text": "Acme met Bob",
+        "filename": "a.pdf",
+        "page": 2,
+    }
+    report: dict[str, Any] = {
+        "id": 1,
+        "title": "T",
+        "collection_name": "c",
+        "created_at": "2026-06-20T10:00:00+00:00",
+        "items": [
+            {
+                "id": 1,
+                "artifact_type": "entity_finding",
+                "note": "first",
+                "snapshot": {**snap, "entity_label": "Acme [ORG]", "entities": [{"text": "Acme", "type": "ORG"}]},
+            },
+            {
+                "id": 2,
+                "artifact_type": "entity_finding",
+                "note": "second",
+                "snapshot": {**snap, "entity_label": "Bob [PERSON]", "entities": [{"text": "Bob", "type": "PERSON"}]},
+            },
+            {
+                "id": 3,
+                "artifact_type": "entity_finding",
+                "note": None,
+                "snapshot": {
+                    "chunk_id": "c2",
+                    "entity_label": "Eve [PERSON]",
+                    "chunk_text": "Eve elsewhere",
+                    "filename": "a.pdf",
+                    "page": 3,
+                    "entities": [{"text": "Eve", "type": "PERSON"}],
+                },
+            },
+        ],
+    }
+    htm = R.render_html(report)
+    assert htm.count('<table class="finding">') == 2  # c1 collapsed + c2
+    assert htm.count("Acme met Bob") == 1  # the shared chunk renders once
+    assert "Acme [ORG] · Bob [PERSON]" in htm  # header names all entities
+    assert "first · second" in htm  # notes merged
+    md = R.render_markdown(report)
+    assert md.count("Acme met Bob") == 1
+    assert "Acme [ORG] · Bob [PERSON]" in md
+
+
+def test_findings_render_as_single_table_each(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each finding is one table: full-width tag header band, full-width chunk row, the rest below."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _report()
+
+    htm = R.render_html(report)
+    # One table per finding (entity + hate); the tag rides a full-width shaded
+    # header band, the chunk text a full-width row right under it.
+    assert htm.count('<table class="finding">') == 2
+    assert htm.count('class="f-head"') == 2
+    assert '<tr class="f-head"><td colspan="2">Acme [ORG]</td></tr>' in htm
+    assert re.search(
+        r'class="f-head"><td colspan="2"><span class="badge">slur</span><span class="badge">high</span>', htm
+    )
+    assert re.search(r'<td colspan="2" class="f-text">bad text</td>', htm)
+    # The rest sits below as grouped label/value rows inside the same table.
+    assert '<td class="f-key">Source</td><td class="f-val">a.pdf · Page 2</td>' in htm
+    assert (
+        '<td class="f-key">Posting</td>'
+        '<td class="f-val">Facebook · 2026-03-04 09:00:00+00 · ID P1\nhttps://fb.example/p1</td>'
+    ) in htm
+
+    md = R.render_markdown(report)
+    # GFM table: tag + chunk text form the (prominent) header row.
+    assert "| slur (high) | bad text |" in md
+    assert "| Acme [ORG] | Acme met Bob <script>alert(1)</script> |" in md
+    assert "| --- | --- |" in md
+    # Grouped provenance rows; the multi-line posting value keeps the grid intact.
+    assert "| Posting | Facebook · 2026-03-04 09:00:00+00 · ID P1<br>https://fb.example/p1 |" in md
+    assert "| Posting text | Original post body |" in md
+    # The old exhaustive per-field metadata block is gone.
+    assert "Posting Network" not in md
+    assert "Posting UUID" not in md
+
+
+def test_md_finding_table_cells_escape_pipes_and_newlines() -> None:
+    """Verbatim evidence text cannot break the Markdown table grid."""
+    report = _single_item_report(
+        "hate_speech_finding",
+        {
+            "category": "x",
+            "confidence": "high",
+            "reason": "line one\nline two",
+            "chunk_text": "a|b\nc",
+            "filename": "f",
+        },
+    )
+    md = R.render_markdown(report)
+    assert "| x (high) | a\\|b<br>c |" in md
+    assert "line one<br>line two" in md
 
 
 def test_case_file_only_in_running_header(monkeypatch: pytest.MonkeyPatch) -> None:

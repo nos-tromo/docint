@@ -181,6 +181,48 @@ def test_hate_speech_row_full_payload() -> None:
     assert row["ref_type"] == "post"
 
 
+def test_findings_rows_carry_posting_reference_columns() -> None:
+    """Posting reference fields flow into both findings exports as dedicated columns."""
+    reference_metadata = {
+        "network": "nextext",
+        "type": "transcript_segment",
+        "posting_uuid": "u1",
+        "posting_id": "P_1",
+        "media_id": "P_1_0",
+        "posting_network": "Facebook",
+        "posting_author": "Jane Poster",
+        "posting_timestamp": "2023-01-01 10:00",
+        "posting_url": "https://fb.example/p1",
+        "posting_text": "Original post body",
+    }
+    chunk = {"filename": "clip.mp4", "chunk_text": "bad", "reference_metadata": reference_metadata}
+    for row in (hate_speech_row(chunk), ner_source_row(chunk, entity_label="X")):
+        assert row["network"] == "nextext"
+        assert row["posting_uuid"] == "u1"
+        assert row["posting_id"] == "P_1"
+        assert row["media_id"] == "P_1_0"
+        assert row["posting_network"] == "Facebook"
+        assert row["posting_author"] == "Jane Poster"
+        assert row["posting_timestamp"] == "2023-01-01 10:00"
+        assert row["posting_url"] == "https://fb.example/p1"
+        assert row["posting_text"] == "Original post body"
+    posting_columns = {
+        "url",
+        "posting_uuid",
+        "posting_id",
+        "media_id",
+        "posting_network",
+        "posting_author",
+        "posting_author_id",
+        "posting_vanity",
+        "posting_timestamp",
+        "posting_url",
+        "posting_text",
+    }
+    assert posting_columns.issubset(NER_SOURCE_COLUMNS)
+    assert posting_columns.issubset(HATE_SPEECH_COLUMNS)
+
+
 def test_document_row_preserves_entity_types_list() -> None:
     """Document row preserves entity types list."""
     doc = {
