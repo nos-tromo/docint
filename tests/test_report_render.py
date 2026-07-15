@@ -65,15 +65,27 @@ def _report() -> dict[str, Any]:
                     "confidence": "high",
                     "reason": "contains slur",
                     "chunk_text": "bad text",
-                    "filename": "b.json",
+                    "filename": "clip.mp4.nextext.jsonl",
+                    "row": 2,
+                    # A media-derived transcript segment: internal pipeline stamps
+                    # plus the parent posting's reference fields (additive carry).
                     "reference_metadata": {
-                        "network": "X",
-                        "author": "bob",
-                        "timestamp": "2026-03-04",
+                        "network": "nextext",
+                        "type": "transcript_segment",
+                        "posting_uuid": "pu-1",
+                        "posting_id": "P1",
+                        "media_id": "P1",
                         "posting_network": "Facebook",
                         "posting_author": "Jane Poster",
+                        "posting_author_id": "42",
+                        "posting_vanity": "jane.poster",
+                        "posting_timestamp": "2026-03-04 09:00:00+00",
                         "posting_url": "https://fb.example/p1",
                         "posting_text": "Original post body",
+                        "timestamp": "00:00:08",
+                        "text_id": "clip.mp4:2",
+                        "language": "en",
+                        "source_file": "clip.mp4",
                     },
                 },
             },
@@ -204,19 +216,108 @@ def test_summaries_render_first(monkeypatch: pytest.MonkeyPatch) -> None:
     assert htm.index(ui_string("report_section_summaries")) < htm.index(ui_string("report_section_chat"))
 
 
-def test_findings_carry_reference_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Entity and hate-speech findings surface their reference metadata (provenance)."""
+def test_findings_carry_grouped_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Findings surface a grouped provenance block: source → posting → account.
+
+    The report view is informative, not exhaustive: pipeline-internal fields
+    (``network: nextext``, ``type``, UUIDs, ``text_id``) and duplicates
+    (media ID equal to posting ID, the derived transcript filename shadowed by
+    ``source_file``) never render; the full snapshot stays in the JSON export.
+    """
     monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
-    label = ui_string("report_label_reference_metadata")
     for blob in (R.render_markdown(_report()), R.render_html(_report())):
-        assert blob.count(label) >= 2  # one block for the entity finding, one for the hate finding
-        assert "Telegram" in blob and "alice" in blob  # entity finding provenance
-        assert "bob" in blob  # hate-speech finding provenance
-        # Posting reference fields carried by media-derived findings render additively.
-        assert "Posting Network" in blob and "Facebook" in blob
-        assert "Posting Author" in blob and "Jane Poster" in blob
-        assert "Posting URL" in blob and "https://fb.example/p1" in blob
-        assert "Posting Text" in blob and "Original post body" in blob
+        # Entity finding (a direct social row): bare fields feed posting/account.
+        assert "Telegram" in blob and "alice" in blob
+        # Hate finding (transcript segment): the parent posting's fields render …
+        assert "Facebook" in blob
+        assert "Jane Poster (@jane.poster · ID 42)" in blob  # account merged into one row
+        assert "https://fb.example/p1" in blob
+        assert "Original post body" in blob
+        assert "ID P1" in blob  # the posting ID (the exact reference)
+        # … while internal/duplicate fields are dropped from the report view.
+        assert "nextext" not in blob
+        assert "transcript_segment" not in blob
+        assert "pu-1" not in blob and "u-1" not in blob  # docint-minted UUIDs
+        assert "clip.mp4:2" not in blob  # text_id duplicates source file + position
+        assert ui_string("report_label_media_id") not in blob  # media ID == posting ID
+        assert "clip.mp4.nextext.jsonl" not in blob  # derived artifact; source_file wins
+        assert "clip.mp4 · 00:00:08" in blob  # original media + in-media position
+
+
+def test_media_id_renders_only_when_distinct(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A media ID differing from the posting ID still renders (it adds information)."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    report = _report()
+    report["items"][2]["snapshot"]["reference_metadata"]["media_id"] = "M9"
+    htm = R.render_html(report)
+    assert f"{ui_string('report_label_media_id')} M9" in htm
+
+
+def test_posting_text_renders_adjacent_to_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The parent posting's text sits directly under the chunk, before analysis/provenance rows."""
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    htm = R.render_html(_report())
+    i_chunk = htm.index("bad text")
+    i_posting_text = htm.index("Original post body")
+    i_reason = htm.index("contains slur")
+    i_source_row = htm.index("clip.mp4 · 00:00:08")
+    assert i_chunk < i_posting_text < i_reason < i_source_row
+
+
+def test_entity_findings_same_chunk_collapse(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Entity findings added per-entity for the same chunk merge into one block.
+
+    The header names every entity label, the mention badges are merged, and the
+    notes are joined; a finding on a different chunk stays its own block.
+    """
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "en")
+    snap = {
+        "chunk_id": "c1",
+        "chunk_text": "Acme met Bob",
+        "filename": "a.pdf",
+        "page": 2,
+    }
+    report: dict[str, Any] = {
+        "id": 1,
+        "title": "T",
+        "collection_name": "c",
+        "created_at": "2026-06-20T10:00:00+00:00",
+        "items": [
+            {
+                "id": 1,
+                "artifact_type": "entity_finding",
+                "note": "first",
+                "snapshot": {**snap, "entity_label": "Acme [ORG]", "entities": [{"text": "Acme", "type": "ORG"}]},
+            },
+            {
+                "id": 2,
+                "artifact_type": "entity_finding",
+                "note": "second",
+                "snapshot": {**snap, "entity_label": "Bob [PERSON]", "entities": [{"text": "Bob", "type": "PERSON"}]},
+            },
+            {
+                "id": 3,
+                "artifact_type": "entity_finding",
+                "note": None,
+                "snapshot": {
+                    "chunk_id": "c2",
+                    "entity_label": "Eve [PERSON]",
+                    "chunk_text": "Eve elsewhere",
+                    "filename": "a.pdf",
+                    "page": 3,
+                    "entities": [{"text": "Eve", "type": "PERSON"}],
+                },
+            },
+        ],
+    }
+    htm = R.render_html(report)
+    assert htm.count('<table class="finding">') == 2  # c1 collapsed + c2
+    assert htm.count("Acme met Bob") == 1  # the shared chunk renders once
+    assert "Acme [ORG] · Bob [PERSON]" in htm  # header names all entities
+    assert "first · second" in htm  # notes merged
+    md = R.render_markdown(report)
+    assert md.count("Acme met Bob") == 1
+    assert "Acme [ORG] · Bob [PERSON]" in md
 
 
 def test_findings_render_as_single_table_each(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -234,18 +335,24 @@ def test_findings_render_as_single_table_each(monkeypatch: pytest.MonkeyPatch) -
         r'class="f-head"><td colspan="2"><span class="badge">slur</span><span class="badge">high</span>', htm
     )
     assert re.search(r'<td colspan="2" class="f-text">bad text</td>', htm)
-    # The rest sits below as label/value rows inside the same table.
-    assert re.search(r'<td class="f-key">Network</td><td class="f-val">X</td>', htm)
-    assert re.search(r'<td class="f-key">Posting Network</td><td class="f-val">Facebook</td>', htm)
+    # The rest sits below as grouped label/value rows inside the same table.
+    assert '<td class="f-key">Source</td><td class="f-val">a.pdf · Page 2</td>' in htm
+    assert (
+        '<td class="f-key">Posting</td>'
+        '<td class="f-val">Facebook · 2026-03-04 09:00:00+00 · ID P1\nhttps://fb.example/p1</td>'
+    ) in htm
 
     md = R.render_markdown(report)
     # GFM table: tag + chunk text form the (prominent) header row.
     assert "| slur (high) | bad text |" in md
     assert "| Acme [ORG] | Acme met Bob <script>alert(1)</script> |" in md
     assert "| --- | --- |" in md
-    assert "| Posting Network | Facebook |" in md
-    # The old bullet-list metadata format is gone.
-    assert "- Posting Network:" not in md
+    # Grouped provenance rows; the multi-line posting value keeps the grid intact.
+    assert "| Posting | Facebook · 2026-03-04 09:00:00+00 · ID P1<br>https://fb.example/p1 |" in md
+    assert "| Posting text | Original post body |" in md
+    # The old exhaustive per-field metadata block is gone.
+    assert "Posting Network" not in md
+    assert "Posting UUID" not in md
 
 
 def test_md_finding_table_cells_escape_pipes_and_newlines() -> None:
