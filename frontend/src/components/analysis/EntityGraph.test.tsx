@@ -1,9 +1,36 @@
+import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { EntityGraph } from './EntityGraph'
 import { colorForType } from '@/lib/entityGraphElements'
 import type { NerGraphEdge, NerGraphNode } from '@/api/types'
+
+async function selectAcme() {
+  await userEvent.click(screen.getByRole('button', { name: /Acme \(ORG\)/ }))
+}
+
+/** A minimal controlled wrapper, mirroring how a real parent owns `selectedKey`. */
+function ControlledEntityGraph(props: {
+  nodes: NerGraphNode[]
+  edges: NerGraphEdge[]
+  initialSelectedKey?: string | null
+  onSelectEntity?: (key: string | null) => void
+}) {
+  const [selectedKey, setSelectedKey] = useState<string | null>(props.initialSelectedKey ?? null)
+  return (
+    <EntityGraph
+      nodes={props.nodes}
+      edges={props.edges}
+      selectedKey={selectedKey}
+      onSelectEntity={(key) => {
+        setSelectedKey(key)
+        props.onSelectEntity?.(key)
+      }}
+      keyForNode={keyForNode}
+    />
+  )
+}
 
 const nodes: NerGraphNode[] = [
   { id: 'acme::org', text: 'Acme', type: 'ORG', mentions: 9 },
@@ -220,6 +247,82 @@ describe('EntityGraph', () => {
     )
     await userEvent.click(screen.getByRole('button', { name: /reset node count/i }))
     expect(onResetNodeCount).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('EntityGraph node removal (view-only)', () => {
+  it('removes a selected node and its edges on "Remove node", keeping other nodes', async () => {
+    const { container } = render(<ControlledEntityGraph nodes={nodes} edges={edges} />)
+    await selectAcme()
+    await userEvent.click(screen.getByRole('button', { name: /remove node/i }))
+
+    expect(screen.queryByText('Acme')).not.toBeInTheDocument()
+    expect(screen.getByText('Rivertown')).toBeInTheDocument()
+    expect(screen.getByText('Widget')).toBeInTheDocument()
+    // Both edges touched Acme, so both should be gone.
+    expect(container.querySelectorAll('line')).toHaveLength(0)
+  })
+
+  it('deselects via onSelectEntity(null) when the removed node was the selected entity', async () => {
+    const onSelectEntity = vi.fn()
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey="Acme::ORG"
+        onSelectEntity={onSelectEntity}
+        keyForNode={keyForNode}
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: /remove node/i }))
+    expect(onSelectEntity).toHaveBeenCalledWith(null)
+  })
+
+  it('removes the selected node on Backspace', async () => {
+    render(<ControlledEntityGraph nodes={nodes} edges={edges} />)
+    await selectAcme()
+    fireEvent.keyDown(document, { key: 'Backspace' })
+
+    expect(screen.queryByText('Acme')).not.toBeInTheDocument()
+    expect(screen.getByText('Rivertown')).toBeInTheDocument()
+  })
+
+  it('restores removed nodes when the nodes prop identity changes (fresh fetch)', async () => {
+    const { rerender, container } = render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey="Acme::ORG"
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: /remove node/i }))
+    expect(screen.queryByText('Acme')).not.toBeInTheDocument()
+
+    const freshNodes = nodes.map((n) => ({ ...n }))
+    const freshEdges = edges.map((e) => ({ ...e }))
+    rerender(
+      <EntityGraph
+        nodes={freshNodes}
+        edges={freshEdges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+
+    expect(screen.getByText('Acme')).toBeInTheDocument()
+    expect(container.querySelectorAll('line')).toHaveLength(edges.length)
+  })
+
+  it('reflects the filtered node/edge set in the type legend after removal', async () => {
+    render(<ControlledEntityGraph nodes={nodes} edges={edges} />)
+    await selectAcme()
+    await userEvent.click(screen.getByRole('button', { name: /remove node/i }))
+    expect(screen.queryByText('ORG')).not.toBeInTheDocument()
+    expect(screen.getByText('LOC')).toBeInTheDocument()
+    expect(screen.getByText('PRODUCT')).toBeInTheDocument()
   })
 })
 

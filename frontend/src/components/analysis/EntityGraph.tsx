@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ForceGraph } from '@infra/ui'
 import type { NerGraphEdge, NerGraphNode } from '@/api/types'
 import { ENTITY_EDGE_STYLES, legendForNodes, nodeStylesForTypes, toEntityForceGraph } from '@/lib/entityGraphElements'
@@ -49,14 +49,33 @@ export function EntityGraph({
   onNodeCountChange,
   onResetNodeCount
 }: Props) {
-  const fg = useMemo(() => toEntityForceGraph(nodes, edges), [nodes, edges])
+  // View-only node removal (mirrors chorus's expand-on-click graphs): removed
+  // ids are local component state, never sent upstream. A fresh `nodes` array
+  // (new fetch, top-K change, merge-mode switch) resets it, so removal never
+  // outlives the payload it was applied to.
+  const [removedIds, setRemovedIds] = useState<ReadonlySet<string>>(new Set())
+  useEffect(() => setRemovedIds(new Set()), [nodes])
+
+  const visibleNodes = useMemo(
+    () => (removedIds.size === 0 ? nodes : nodes.filter((n) => !removedIds.has(n.id))),
+    [nodes, removedIds]
+  )
+  const visibleEdges = useMemo(
+    () =>
+      removedIds.size === 0
+        ? edges
+        : edges.filter((e) => !removedIds.has(e.source) && !removedIds.has(e.target)),
+    [edges, removedIds]
+  )
+
+  const fg = useMemo(() => toEntityForceGraph(visibleNodes, visibleEdges), [visibleNodes, visibleEdges])
 
   const nodeStyles = useMemo(() => {
-    const types = new Set(nodes.map((n) => n.type || 'Unlabeled'))
+    const types = new Set(visibleNodes.map((n) => n.type || 'Unlabeled'))
     return nodeStylesForTypes(types)
-  }, [nodes])
+  }, [visibleNodes])
 
-  const legend = useMemo(() => legendForNodes(nodes), [nodes])
+  const legend = useMemo(() => legendForNodes(visibleNodes), [visibleNodes])
 
   // Node id -> docint selection key (`${text}::${type}`), used both to derive
   // `selectedIds` from `selectedKey` and to translate a ForceGraph selection
@@ -89,6 +108,25 @@ export function EntityGraph({
       if (key) onSelectEntity(key)
     },
     [keyById, onSelectEntity]
+  )
+
+  // View-only removal: hide the given nodes (and their edges) from the
+  // canvas. If the currently-selected entity was among them, deselect it so
+  // the findings panel doesn't keep showing a vanished node. The underlying
+  // NER data and any exports of it are untouched — removed nodes return on
+  // the next fetch (see the `nodes`-identity effect above).
+  const handleDeleteNodes = useCallback(
+    (ids: string[]) => {
+      setRemovedIds((prev) => {
+        const next = new Set(prev)
+        for (const id of ids) next.add(id)
+        return next
+      })
+      if (selectedKey && ids.some((id) => keyById.get(id) === selectedKey)) {
+        onSelectEntity(null)
+      }
+    },
+    [keyById, selectedKey, onSelectEntity]
   )
 
   if (!isLoading && nodes.length === 0) {
@@ -129,6 +167,7 @@ export function EntityGraph({
         edgeStyles={ENTITY_EDGE_STYLES}
         selectedIds={selectedIds}
         onSelectionChange={handleSelectionChange}
+        onDeleteNodes={handleDeleteNodes}
         statusText={
           isLoading
             ? 'Building entity graph…'
