@@ -99,7 +99,11 @@ at a time) and a merge-mode toggle:
   or more nodes shows a **Remove node**/**Remove {n} nodes** button
   (Backspace/Delete also works); removal is view-only local state in
   `EntityGraph` — the underlying NER data is untouched, and removed nodes
-  reappear on the next fetch, top-K change, or merge-mode switch.
+  reappear on the next fetch, top-K change, or merge-mode switch. **Export
+  JSON**/**Export GraphML**/**Export HTML** buttons (shown once the graph is
+  non-empty) serialize the current view state — respecting node removals —
+  via `@infra/ui`'s `toGraphJson`/`toGraphML`/`toGraphHtml` + `downloadText`;
+  this is client-side only, with no backend round-trip.
 
 The type legend is computed from the full node set, while the min-edges filter only affects what is drawn—so legend entries can name types whose nodes are currently filtered out; this is a deliberate divergence from the previous local renderer, accepted because filter state is component-internal.
 

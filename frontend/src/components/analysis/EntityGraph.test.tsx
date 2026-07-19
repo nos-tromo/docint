@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { EntityGraph } from './EntityGraph'
@@ -418,6 +418,78 @@ describe('EntityGraph multi-select (marquee/shift)', () => {
     // Both incident edges touched Acme or Rivertown, so both should be gone.
     expect(container.querySelectorAll('line')).toHaveLength(0)
     expect(onSelectEntity).toHaveBeenCalledWith(null)
+  })
+})
+
+describe('EntityGraph export (JSON/GraphML/HTML)', () => {
+  let capturedBlob: Blob | null = null
+
+  beforeEach(() => {
+    capturedBlob = null
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((blob) => {
+      capturedBlob = blob as Blob
+      return 'blob:mock-url'
+    })
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+  })
+
+  it('hides the export buttons when there is no graph to export', () => {
+    render(
+      <EntityGraph
+        nodes={[]}
+        edges={[]}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    expect(screen.queryByRole('button', { name: 'Export JSON' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Export GraphML' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Export HTML' })).not.toBeInTheDocument()
+  })
+
+  it('shows the export buttons once there is graph data', () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    expect(screen.getByRole('button', { name: 'Export JSON' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Export GraphML' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Export HTML' })).toBeInTheDocument()
+  })
+
+  it('triggers a JSON download via the Blob/createObjectURL mock on click', async () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Export JSON' }))
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1)
+    expect(capturedBlob).toBeTruthy()
+    const text = await capturedBlob!.text()
+    expect(JSON.parse(text).nodes).toHaveLength(nodes.length)
+  })
+
+  it('exports only the post-removal (visible) node/edge set', async () => {
+    render(<ControlledEntityGraph nodes={nodes} edges={edges} />)
+    await selectAcme()
+    await userEvent.click(screen.getByRole('button', { name: /remove node/i }))
+
+    await userEvent.click(screen.getByRole('button', { name: 'Export JSON' }))
+    const text = await capturedBlob!.text()
+    const parsed = JSON.parse(text)
+    expect(parsed.nodes.map((n: { id: string }) => n.id)).not.toContain('acme::org')
+    expect(parsed.nodes).toHaveLength(nodes.length - 1)
   })
 })
 

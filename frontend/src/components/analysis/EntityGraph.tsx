@@ -1,5 +1,13 @@
-import { useCallback, useMemo, useState } from 'react'
-import { ForceGraph } from '@infra/ui'
+import { useCallback, useMemo, useRef, useState } from 'react'
+import {
+  Button,
+  ForceGraph,
+  downloadText,
+  toGraphHtml,
+  toGraphJson,
+  toGraphML,
+  type ForceGraphHandle
+} from '@infra/ui'
 import type { NerGraphEdge, NerGraphNode } from '@/api/types'
 import { ENTITY_EDGE_STYLES, legendForNodes, nodeStylesForTypes, toEntityForceGraph } from '@/lib/entityGraphElements'
 import { GraphTopKControl } from './GraphTopKControl'
@@ -80,6 +88,10 @@ export function EntityGraph({
   }, [visibleNodes])
 
   const legend = useMemo(() => legendForNodes(visibleNodes), [visibleNodes])
+
+  // Imperative access to the canvas's live layout, for baking positions into
+  // the HTML export.
+  const apiRef = useRef<ForceGraphHandle | null>(null)
 
   // Node id -> docint selection key (`${text}::${type}`), used both to derive
   // `selectedIds` from `selectedKey` and to translate a ForceGraph selection
@@ -176,28 +188,84 @@ export function EntityGraph({
 
   return (
     <div className="space-y-2">
-      {nodeCount != null && onNodeCountChange && (
+      {(nodeCount != null && onNodeCountChange) || fg.nodes.length > 0 ? (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-border pt-2">
-          <GraphTopKControl
-            value={nodeCount}
-            max={nodeCountMax ?? nodeCount}
-            onChange={onNodeCountChange}
-          />
-          {onResetNodeCount && (
-            <button
-              type="button"
-              onClick={onResetNodeCount}
-              aria-label="Reset node count"
-              title="Reset the node count to the deploy default"
-              className="h-7 px-2 rounded-md border border-border text-xs"
-            >
-              Reset count
-            </button>
+          {nodeCount != null && onNodeCountChange && (
+            <>
+              <GraphTopKControl
+                value={nodeCount}
+                max={nodeCountMax ?? nodeCount}
+                onChange={onNodeCountChange}
+              />
+              {onResetNodeCount && (
+                <button
+                  type="button"
+                  onClick={onResetNodeCount}
+                  aria-label="Reset node count"
+                  title="Reset the node count to the deploy default"
+                  className="h-7 px-2 rounded-md border border-border text-xs"
+                >
+                  Reset count
+                </button>
+              )}
+            </>
+          )}
+          {fg.nodes.length > 0 && (
+            <>
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() =>
+                  downloadText(
+                    'docint-entity-graph.json',
+                    toGraphJson(fg.nodes, fg.edges),
+                    'application/json'
+                  )
+                }
+              >
+                Export JSON
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() =>
+                  downloadText(
+                    'docint-entity-graph.graphml',
+                    toGraphML(fg.nodes, fg.edges),
+                    'application/xml'
+                  )
+                }
+              >
+                Export GraphML
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() =>
+                  downloadText(
+                    'docint-entity-graph.html',
+                    toGraphHtml({
+                      title: 'Entity graph',
+                      nodes: fg.nodes,
+                      edges: fg.edges,
+                      positions: apiRef.current?.getPositions() ?? {},
+                      nodeStyles,
+                      edgeStyles: ENTITY_EDGE_STYLES,
+                      legend
+                    }),
+                    'text/html'
+                  )
+                }
+              >
+                Export HTML
+              </Button>
+            </>
           )}
         </div>
-      )}
+      ) : null}
 
       <ForceGraph
+        apiRef={apiRef}
         nodes={fg.nodes}
         edges={fg.edges}
         nodeStyles={nodeStyles}
