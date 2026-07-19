@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { EntityGraph } from './EntityGraph'
+import { colorForType } from '@/lib/entityGraphElements'
 import type { NerGraphEdge, NerGraphNode } from '@/api/types'
 
 const nodes: NerGraphNode[] = [
@@ -33,6 +34,19 @@ describe('EntityGraph', () => {
     expect(screen.getByText('Widget')).toBeInTheDocument()
   })
 
+  it('renders an edge (svg line) per graph edge', () => {
+    const { container } = render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    expect(container.querySelectorAll('line')).toHaveLength(edges.length)
+  })
+
   it('selects an entity (by text::type key) when its node is clicked', async () => {
     const onSelectEntity = vi.fn()
     render(
@@ -44,8 +58,24 @@ describe('EntityGraph', () => {
         keyForNode={keyForNode}
       />
     )
-    await userEvent.click(screen.getByRole('button', { name: /Acme \(ORG, 9 mentions\)/ }))
+    await userEvent.click(screen.getByRole('button', { name: /Acme \(ORG\)/ }))
     expect(onSelectEntity).toHaveBeenCalledWith('Acme::ORG')
+  })
+
+  it('does nothing when the selection is cleared (background click)', async () => {
+    const onSelectEntity = vi.fn()
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey="Acme::ORG"
+        onSelectEntity={onSelectEntity}
+        keyForNode={keyForNode}
+      />
+    )
+    const app = screen.getByRole('application')
+    await userEvent.click(app)
+    expect(onSelectEntity).not.toHaveBeenCalled()
   })
 
   it('marks the selected node pressed for assistive tech', () => {
@@ -58,11 +88,11 @@ describe('EntityGraph', () => {
         keyForNode={keyForNode}
       />
     )
-    const selected = screen.getByRole('button', { name: /Acme \(ORG/ })
+    const selected = screen.getByRole('button', { name: /Acme \(ORG\)/ })
     expect(selected).toHaveAttribute('aria-pressed', 'true')
   })
 
-  it('renders a type legend', () => {
+  it('renders a type legend for the top entity types', () => {
     render(
       <EntityGraph
         nodes={nodes}
@@ -72,108 +102,36 @@ describe('EntityGraph', () => {
         keyForNode={keyForNode}
       />
     )
-    expect(screen.getByText('Types')).toBeInTheDocument()
     expect(screen.getByText('ORG')).toBeInTheDocument()
+    expect(screen.getByText('LOC')).toBeInTheDocument()
     expect(screen.getByText('PRODUCT')).toBeInTheDocument()
   })
 
-  it('filters out low-degree nodes via the min-edges stepper (default 0 shows all)', async () => {
+  it('shows an empty state when there are no nodes', () => {
     render(
       <EntityGraph
-        nodes={nodes}
-        edges={edges}
+        nodes={[]}
+        edges={[]}
         selectedKey={null}
         onSelectEntity={() => {}}
         keyForNode={keyForNode}
       />
     )
-    // Default threshold is 0: every node visible, and decrement is disabled.
-    expect(screen.getByText('Rivertown')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /decrease minimum edges/i })).toBeDisabled()
-
-    const inc = screen.getByRole('button', { name: /increase minimum edges/i })
-    await userEvent.click(inc) // min edges = 1 — every node still has ≥1 edge.
-    expect(screen.getByText('Widget')).toBeInTheDocument()
-
-    await userEvent.click(inc) // min edges = 2 — only Acme (degree 2) survives.
-    expect(screen.getByText('Acme')).toBeInTheDocument()
-    expect(screen.queryByText('Rivertown')).not.toBeInTheDocument()
-    expect(screen.queryByText('Widget')).not.toBeInTheDocument()
-    // Acme is the most-connected node, so the threshold cannot climb further.
-    expect(inc).toBeDisabled()
+    expect(screen.getByText(/no entity relationships to graph/i)).toBeInTheDocument()
   })
 
-  it('renders an edge-length slider defaulting to 1x density', () => {
+  it('does not show the empty state while loading, even with zero nodes', () => {
     render(
       <EntityGraph
-        nodes={nodes}
-        edges={edges}
+        nodes={[]}
+        edges={[]}
         selectedKey={null}
         onSelectEntity={() => {}}
         keyForNode={keyForNode}
+        isLoading
       />
     )
-    const slider = screen.getByRole('slider', { name: /edge length/i }) as HTMLInputElement
-    expect(slider).toBeInTheDocument()
-    // Default keeps today's density (1x); users widen toward 8x or compact to 0.5x.
-    expect(slider.value).toBe('1')
-    // The upper bound is generous so even dense graphs can be pulled fully apart.
-    expect(slider.max).toBe('8')
-  })
-
-  it('updates the edge-length value when the slider is dragged', () => {
-    render(
-      <EntityGraph
-        nodes={nodes}
-        edges={edges}
-        selectedKey={null}
-        onSelectEntity={() => {}}
-        keyForNode={keyForNode}
-      />
-    )
-    const slider = screen.getByRole('slider', { name: /edge length/i }) as HTMLInputElement
-    fireEvent.change(slider, { target: { value: '2.5' } })
-    expect(slider.value).toBe('2.5')
-  })
-
-  it('labels the zoom controls as their own group (distinct from min-edges)', () => {
-    render(
-      <EntityGraph
-        nodes={nodes}
-        edges={edges}
-        selectedKey={null}
-        onSelectEntity={() => {}}
-        keyForNode={keyForNode}
-      />
-    )
-    expect(screen.getByRole('group', { name: /zoom/i })).toBeInTheDocument()
-  })
-
-  it('reset restores min-edges, edge-length, and zoom to their defaults', async () => {
-    render(
-      <EntityGraph
-        nodes={nodes}
-        edges={edges}
-        selectedKey={null}
-        onSelectEntity={() => {}}
-        keyForNode={keyForNode}
-      />
-    )
-    // Move both filter controls off their defaults.
-    await userEvent.click(screen.getByRole('button', { name: /increase minimum edges/i }))
-    const slider = screen.getByRole('slider', { name: /edge length/i }) as HTMLInputElement
-    fireEvent.change(slider, { target: { value: '2.5' } })
-    // Sanity: they are now off-default (decrement enabled, slider at 2.5x).
-    expect(screen.getByRole('button', { name: /decrease minimum edges/i })).not.toBeDisabled()
-    expect(slider.value).toBe('2.5')
-
-    await userEvent.click(screen.getByRole('button', { name: /^reset$/i }))
-
-    // Reset returns min-edges to 0 (decrement disabled) and edge length to 1x.
-    expect(screen.getByRole('button', { name: /decrease minimum edges/i })).toBeDisabled()
-    expect((screen.getByRole('slider', { name: /edge length/i }) as HTMLInputElement).value).toBe(
-      '1'
-    )
+    expect(screen.queryByText(/no entity relationships to graph/i)).not.toBeInTheDocument()
   })
 
   it('renders the node-count control inline with the other graph controls', () => {
@@ -190,7 +148,6 @@ describe('EntityGraph', () => {
         onResetNodeCount={() => {}}
       />
     )
-    // The Nodes selector now sits in the controls row alongside Min edges.
     expect(screen.getByLabelText('Graph node count')).toHaveValue(80)
   })
 
@@ -207,7 +164,29 @@ describe('EntityGraph', () => {
     expect(screen.queryByLabelText('Graph node count')).not.toBeInTheDocument()
   })
 
-  it('reset delegates the node count back to its deploy default', async () => {
+  it('fires onNodeCountChange when the node-count control commits a new value', async () => {
+    const onNodeCountChange = vi.fn()
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+        nodeCount={80}
+        nodeCountMax={500}
+        onNodeCountChange={onNodeCountChange}
+        onResetNodeCount={() => {}}
+      />
+    )
+    const input = screen.getByLabelText('Graph node count')
+    await userEvent.clear(input)
+    await userEvent.type(input, '120')
+    await userEvent.tab()
+    expect(onNodeCountChange).toHaveBeenCalledWith(120)
+  })
+
+  it('resets the node count to the deploy default via its own reset control', async () => {
     const onResetNodeCount = vi.fn()
     render(
       <EntityGraph
@@ -222,117 +201,19 @@ describe('EntityGraph', () => {
         onResetNodeCount={onResetNodeCount}
       />
     )
-    await userEvent.click(screen.getByRole('button', { name: /^reset$/i }))
+    await userEvent.click(screen.getByRole('button', { name: /reset node count/i }))
     expect(onResetNodeCount).toHaveBeenCalledTimes(1)
   })
+})
 
-  it('attaches a non-passive wheel listener so wheel-zoom cannot scroll the page', () => {
-    // React registers wheel listeners as passive (and, failing jsdom's
-    // passive-support probe, with a boolean capture flag), where the handler's
-    // preventDefault() is a no-op and the page scrolls behind the graph. The
-    // component must attach its own { passive: false } listener instead — assert
-    // that exact registration happened. (jsdom gives DOM nodes their own
-    // EventTarget prototype, distinct from the global `EventTarget`, so we probe
-    // a real SVG element to find the prototype that actually owns
-    // addEventListener before spying on it.)
-    const probe = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
-    let proto: object | null = Object.getPrototypeOf(probe)
-    while (proto && !Object.prototype.hasOwnProperty.call(proto, 'addEventListener')) {
-      proto = Object.getPrototypeOf(proto)
-    }
-    const addSpy = vi.spyOn(proto as EventTarget, 'addEventListener')
-    try {
-      render(
-        <EntityGraph
-          nodes={nodes}
-          edges={edges}
-          selectedKey={null}
-          onSelectEntity={() => {}}
-          keyForNode={keyForNode}
-        />
-      )
-      const nonPassiveWheel = addSpy.mock.calls.some(
-        ([type, , opts]) =>
-          type === 'wheel' &&
-          typeof opts === 'object' &&
-          opts !== null &&
-          (opts as AddEventListenerOptions).passive === false
-      )
-      expect(nonPassiveWheel).toBe(true)
-    } finally {
-      addSpy.mockRestore()
-    }
+describe('colorForType', () => {
+  it('is stable: the same type always resolves to the same color', () => {
+    expect(colorForType('ORG')).toBe(colorForType('ORG'))
+    expect(colorForType('PERSON')).toBe(colorForType('PERSON'))
   })
 
-  it('shows an empty state when there are no nodes', () => {
-    render(
-      <EntityGraph
-        nodes={[]}
-        edges={[]}
-        selectedKey={null}
-        onSelectEntity={() => {}}
-        keyForNode={keyForNode}
-      />
-    )
-    expect(screen.getByText(/no entity relationships to graph/i)).toBeInTheDocument()
-  })
-
-  it('toggles maximize via the expand/collapse button', async () => {
-    render(
-      <EntityGraph
-        nodes={nodes}
-        edges={edges}
-        selectedKey={null}
-        onSelectEntity={() => {}}
-        keyForNode={keyForNode}
-      />
-    )
-    const expandBtn = screen.getByRole('button', { name: 'Expand graph' })
-    expect(expandBtn).toHaveAttribute('aria-pressed', 'false')
-
-    await userEvent.click(expandBtn)
-
-    const collapseBtn = screen.getByRole('button', { name: 'Collapse graph' })
-    expect(collapseBtn).toHaveAttribute('aria-pressed', 'true')
-    expect(document.querySelector('[data-maximized="true"]')).not.toBeNull()
-
-    await userEvent.click(collapseBtn)
-    expect(screen.getByRole('button', { name: 'Expand graph' })).toHaveAttribute(
-      'aria-pressed',
-      'false'
-    )
-    expect(document.querySelector('[data-maximized="true"]')).toBeNull()
-  })
-
-  it('exits maximize when Escape is pressed', async () => {
-    render(
-      <EntityGraph
-        nodes={nodes}
-        edges={edges}
-        selectedKey={null}
-        onSelectEntity={() => {}}
-        keyForNode={keyForNode}
-      />
-    )
-    await userEvent.click(screen.getByRole('button', { name: 'Expand graph' }))
-    expect(screen.getByRole('button', { name: 'Collapse graph' })).toBeInTheDocument()
-
-    fireEvent.keyDown(window, { key: 'Escape' })
-
-    expect(screen.getByRole('button', { name: 'Expand graph' })).toBeInTheDocument()
-  })
-
-  it('still renders nodes while maximized', async () => {
-    render(
-      <EntityGraph
-        nodes={nodes}
-        edges={edges}
-        selectedKey={null}
-        onSelectEntity={() => {}}
-        keyForNode={keyForNode}
-      />
-    )
-    await userEvent.click(screen.getByRole('button', { name: 'Expand graph' }))
-    expect(screen.getByText('Acme')).toBeInTheDocument()
+  it('differentiates at least some distinct types', () => {
+    const colors = new Set(['ORG', 'PERSON', 'LOC', 'PRODUCT', 'EVENT'].map(colorForType))
+    expect(colors.size).toBeGreaterThan(1)
   })
 })
