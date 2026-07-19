@@ -423,14 +423,20 @@ describe('EntityGraph multi-select (marquee/shift)', () => {
 
 describe('EntityGraph export (JSON/GraphML/HTML)', () => {
   let capturedBlob: Blob | null = null
+  let capturedFilename: string | null = null
 
   beforeEach(() => {
     capturedBlob = null
+    capturedFilename = null
     vi.spyOn(URL, 'createObjectURL').mockImplementation((blob) => {
       capturedBlob = blob as Blob
       return 'blob:mock-url'
     })
     vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    // Mock HTMLAnchorElement.click to capture the download attribute
+    HTMLAnchorElement.prototype.click = vi.fn(function (this: HTMLAnchorElement) {
+      capturedFilename = this.download
+    })
   })
 
   it('hides the export buttons when there is no graph to export', () => {
@@ -490,6 +496,171 @@ describe('EntityGraph export (JSON/GraphML/HTML)', () => {
     const parsed = JSON.parse(text)
     expect(parsed.nodes.map((n: { id: string }) => n.id)).not.toContain('acme::org')
     expect(parsed.nodes).toHaveLength(nodes.length - 1)
+  })
+
+  it('exports with default filename when no exportName is provided', async () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Export JSON' }))
+    expect(capturedFilename).toBe('docint_entity_graph.json')
+  })
+
+  it('exports with collection-named filename when exportName is provided', async () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+        exportName="My Reports"
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Export JSON' }))
+    expect(capturedFilename).toBe('my-reports_entity_graph.json')
+  })
+
+  it('sanitizes exportName: converts spaces to dashes', async () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+        exportName="My Reports 2026"
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Export JSON' }))
+    expect(capturedFilename).toBe('my-reports-2026_entity_graph.json')
+  })
+
+  it('sanitizes exportName: converts slashes and special chars to dashes', async () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+        exportName="My Reports/2026"
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Export JSON' }))
+    expect(capturedFilename).toBe('my-reports-2026_entity_graph.json')
+  })
+
+  it('sanitizes exportName: collapses consecutive dashes', async () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+        exportName="My--Reports//2026"
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Export JSON' }))
+    expect(capturedFilename).toBe('my-reports-2026_entity_graph.json')
+  })
+
+  it('sanitizes exportName: trims leading/trailing dashes', async () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+        exportName="-My Reports-"
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Export JSON' }))
+    expect(capturedFilename).toBe('my-reports_entity_graph.json')
+  })
+
+  it('sanitizes exportName: falls back to "docint" when exportName becomes empty after sanitization', async () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+        exportName="---"
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Export JSON' }))
+    expect(capturedFilename).toBe('docint_entity_graph.json')
+  })
+
+  it('uses sanitized exportName in HTML export title', async () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+        exportName="My Reports 2026"
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Export HTML' }))
+    const text = await capturedBlob!.text()
+    expect(text).toContain('<title>My Reports 2026 — entity graph</title>')
+  })
+
+  it('uses "Entity graph" title in HTML export when no exportName provided', async () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Export HTML' }))
+    const text = await capturedBlob!.text()
+    expect(text).toContain('<title>Entity graph</title>')
+  })
+
+  it('exports GraphML with collection-named filename', async () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+        exportName="My Reports"
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Export GraphML' }))
+    expect(capturedFilename).toBe('my-reports_entity_graph.graphml')
+  })
+
+  it('exports HTML with collection-named filename', async () => {
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+        exportName="My Reports"
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Export HTML' }))
+    expect(capturedFilename).toBe('my-reports_entity_graph.html')
   })
 })
 

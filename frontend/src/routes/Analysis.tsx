@@ -202,6 +202,7 @@ export function Analysis() {
                   nodeCountMax={graphMax}
                   onNodeCountChange={setGraphTopK}
                   onResetNodeCount={resetGraphTopK}
+                  exportName={collection ?? undefined}
                 />
               )}
               <EntityFindingsTable

@@ -10,6 +10,7 @@ import {
 } from '@infra/ui'
 import type { NerGraphEdge, NerGraphNode } from '@/api/types'
 import { ENTITY_EDGE_STYLES, legendForNodes, nodeStylesForTypes, toEntityForceGraph } from '@/lib/entityGraphElements'
+import { sanitizeExportFilename } from '@/lib/sanitizeFilename'
 import { GraphTopKControl } from './GraphTopKControl'
 
 interface Props {
@@ -31,6 +32,12 @@ interface Props {
   onNodeCountChange?: (n: number) => void
   /** Reset the node count to the deploy default (env `NER_GRAPH_TOP_K`). */
   onResetNodeCount?: () => void
+  /**
+   * Optional basename for export files. When provided, export filenames become
+   * `${sanitize(exportName)}_entity_graph.{json,graphml,html}` instead of
+   * `docint_entity_graph.*`. The HTML export title uses the raw exportName.
+   */
+  exportName?: string
 }
 
 /**
@@ -55,7 +62,8 @@ export function EntityGraph({
   nodeCount,
   nodeCountMax,
   onNodeCountChange,
-  onResetNodeCount
+  onResetNodeCount,
+  exportName
 }: Props) {
   // View-only node removal (mirrors chorus's expand-on-click graphs): removed
   // ids are local component state, never sent upstream. A fresh `nodes` array
@@ -215,37 +223,41 @@ export function EntityGraph({
               <Button
                 type="button"
                 variant="secondary"
-                onClick={() =>
+                onClick={() => {
+                  const sanitized = sanitizeExportFilename(exportName ?? 'docint')
                   downloadText(
-                    'docint-entity-graph.json',
+                    `${sanitized}_entity_graph.json`,
                     toGraphJson(fg.nodes, fg.edges),
                     'application/json'
                   )
-                }
+                }}
               >
                 Export JSON
               </Button>
               <Button
                 type="button"
                 variant="secondary"
-                onClick={() =>
+                onClick={() => {
+                  const sanitized = sanitizeExportFilename(exportName ?? 'docint')
                   downloadText(
-                    'docint-entity-graph.graphml',
+                    `${sanitized}_entity_graph.graphml`,
                     toGraphML(fg.nodes, fg.edges),
                     'application/xml'
                   )
-                }
+                }}
               >
                 Export GraphML
               </Button>
               <Button
                 type="button"
                 variant="secondary"
-                onClick={() =>
+                onClick={() => {
+                  const sanitized = sanitizeExportFilename(exportName ?? 'docint')
+                  const title = exportName ? `${exportName} — entity graph` : 'Entity graph'
                   downloadText(
-                    'docint-entity-graph.html',
+                    `${sanitized}_entity_graph.html`,
                     toGraphHtml({
-                      title: 'Entity graph',
+                      title,
                       nodes: fg.nodes,
                       edges: fg.edges,
                       positions: apiRef.current?.getPositions() ?? {},
@@ -255,7 +267,7 @@ export function EntityGraph({
                     }),
                     'text/html'
                   )
-                }
+                }}
               >
                 Export HTML
               </Button>
