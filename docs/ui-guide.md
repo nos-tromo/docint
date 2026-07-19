@@ -81,16 +81,31 @@ at a time) and a merge-mode toggle:
 
 - **Table** — an `EntitySelect` category + entity picker. The category filter
   re-filters the entity dropdown and pre-selects that category's top entity.
-- **Graph** — an interactive, force-directed entity graph (`EntityGraph`, over
-  the dependency-free `src/lib/forceGraph.ts` layout, fed by
-  `GET /collections/ner/graph`). Nodes are draggable (with collision), the
-  canvas zooms (wheel) and pans (background drag), and clicking a node selects
-  that entity. Below the graph, a dedicated controls row carries three labeled
-  groups: a **Min edges** +/− stepper (default 0) that hides nodes with fewer
-  than that many incident edges to thin out weakly-connected clutter; an **Edge
-  length** slider (default 1×, range 0.5×–3×) that scales the layout's link
-  rest-length and repulsion on the live simulation to spread a dense graph apart
-  without reseeding it; and a labeled **Zoom** group (+/− and Reset).
+- **Graph** — an interactive, force-directed entity graph rendered by the
+  shared `@infra/ui` `ForceGraph` primitive (the same component chorus's
+  reactive graph exploration uses; see chorus ADR 0016), fed by
+  `GET /collections/ner/graph`. `EntityGraph` (`src/components/analysis/
+  EntityGraph.tsx`) is a thin adapter: `src/lib/entityGraphElements.ts` maps
+  the NER graph payload onto `ForceGraph`'s `{nodes, edges}` shape and bridges
+  docint's single-entity `${text}::${type}` selection key onto the
+  primitive's node-id selection API. Nodes are draggable (with collision),
+  the canvas zooms (wheel) and pans (background drag), and clicking a node
+  selects that entity. `ForceGraph` itself renders the controls row (**Min
+  edges** stepper, **Edge length** slider, **Zoom**, **Fit**, **Reset**) and
+  the maximize overlay, and adds native `<title>` tooltips, fit-to-view, and
+  marquee/shift-click multi-select (docint's single-entity findings panel
+  just follows the most recently selected node). A small node-count control
+  (`GraphTopKControl`, parent-owned state) sits above the graph. Selecting one
+  or more nodes shows a **Remove node**/**Remove {n} nodes** button
+  (Backspace/Delete also works); removal is view-only local state in
+  `EntityGraph` — the underlying NER data is untouched, and removed nodes
+  reappear on the next fetch, top-K change, or merge-mode switch. **Export
+  JSON**/**Export GraphML**/**Export HTML** buttons (shown once the graph is
+  non-empty) serialize the current view state — respecting node removals —
+  via `@infra/ui`'s `toGraphJson`/`toGraphML`/`toGraphHtml` + `downloadText`;
+  this is client-side only, with no backend round-trip.
+
+The type legend is computed from the full node set, while the min-edges filter only affects what is drawn—so legend entries can name types whose nodes are currently filtered out; this is a deliberate divergence from the previous local renderer, accepted because filter state is component-internal.
 
 Either selection surface drives the shared **findings table**
 (`EntityFindingsTable` → `EntityFinding` rows): one chunk per row, with all
