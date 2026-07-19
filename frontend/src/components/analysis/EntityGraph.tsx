@@ -8,7 +8,8 @@ interface Props {
   nodes: NerGraphNode[]
   edges: NerGraphEdge[]
   selectedKey: string | null
-  onSelectEntity: (key: string) => void
+  /** `key === null` means the selection was cleared (e.g. background click). */
+  onSelectEntity: (key: string | null) => void
   /** Map a graph node to the `${text}::${type}` selection key used elsewhere. */
   keyForNode: (n: NerGraphNode) => string
   isLoading?: boolean
@@ -75,12 +76,15 @@ export function EntityGraph({
   }, [keyById, selectedKey])
 
   // Docint's findings panel is single-entity: a marquee/shift-click multi
-  // selection has no representation there, so an empty selection (background
-  // click) is a no-op — the panel keeps showing whatever was last selected —
-  // and any non-empty selection resolves to its most-recently-added id.
+  // selection has no representation there, so a non-empty selection resolves
+  // to its most-recently-added id. An empty selection (background click)
+  // clears it, same as chorus.
   const handleSelectionChange = useCallback(
     (ids: string[]) => {
-      if (ids.length === 0) return
+      if (ids.length === 0) {
+        onSelectEntity(null)
+        return
+      }
       const key = keyById.get(ids[ids.length - 1])
       if (key) onSelectEntity(key)
     },

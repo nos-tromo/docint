@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { EntityGraph } from './EntityGraph'
 import { colorForType } from '@/lib/entityGraphElements'
@@ -62,9 +62,9 @@ describe('EntityGraph', () => {
     expect(onSelectEntity).toHaveBeenCalledWith('Acme::ORG')
   })
 
-  it('does nothing when the selection is cleared (background click)', async () => {
+  it('clears the selection when the background is clicked', () => {
     const onSelectEntity = vi.fn()
-    render(
+    const { container } = render(
       <EntityGraph
         nodes={nodes}
         edges={edges}
@@ -73,9 +73,26 @@ describe('EntityGraph', () => {
         keyForNode={keyForNode}
       />
     )
-    const app = screen.getByRole('application')
-    await userEvent.click(app)
-    expect(onSelectEntity).not.toHaveBeenCalled()
+    const backgroundRect = container.querySelector('svg > rect')
+    expect(backgroundRect).toBeTruthy()
+    fireEvent.pointerDown(backgroundRect!, { clientX: 10, clientY: 10 })
+    fireEvent.pointerUp(backgroundRect!, { clientX: 10, clientY: 10 })
+    expect(onSelectEntity).toHaveBeenCalledWith(null)
+  })
+
+  it('still selects an entity by key when a node is clicked (regression)', async () => {
+    const onSelectEntity = vi.fn()
+    render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={null}
+        onSelectEntity={onSelectEntity}
+        keyForNode={keyForNode}
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: /Acme \(ORG\)/ }))
+    expect(onSelectEntity).toHaveBeenCalledWith('Acme::ORG')
   })
 
   it('marks the selected node pressed for assistive tech', () => {
