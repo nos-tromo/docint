@@ -97,6 +97,8 @@ at a time) and a merge-mode toggle:
   just follows the most recently selected node). A small node-count control
   (`GraphTopKControl`, parent-owned state) sits above the graph.
 
+The type legend is computed from the full node set, while the min-edges filter only affects what is drawn—so legend entries can name types whose nodes are currently filtered out; this is a deliberate divergence from the previous local renderer, accepted because filter state is component-internal.
+
 Either selection surface drives the shared **findings table**
 (`EntityFindingsTable` → `EntityFinding` rows): one chunk per row, with all
 locator/reference metadata flattened into a single Metadata column and an
