@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { ForceGraph } from '@infra/ui'
 import type { NerGraphEdge, NerGraphNode } from '@/api/types'
 import { ENTITY_EDGE_STYLES, legendForNodes, nodeStylesForTypes, toEntityForceGraph } from '@/lib/entityGraphElements'
@@ -54,7 +54,11 @@ export function EntityGraph({
   // (new fetch, top-K change, merge-mode switch) resets it, so removal never
   // outlives the payload it was applied to.
   const [removedIds, setRemovedIds] = useState<ReadonlySet<string>>(new Set())
-  useEffect(() => setRemovedIds(new Set()), [nodes])
+  const [prevNodes, setPrevNodes] = useState(nodes)
+  if (nodes !== prevNodes) {
+    setPrevNodes(nodes)
+    setRemovedIds(new Set())
+  }
 
   const visibleNodes = useMemo(
     () => (removedIds.size === 0 ? nodes : nodes.filter((n) => !removedIds.has(n.id))),

@@ -251,14 +251,21 @@ describe('EntityGraph', () => {
 })
 
 describe('EntityGraph node removal (view-only)', () => {
-  it('removes a selected node and its edges on "Remove node", keeping other nodes', async () => {
-    const { container } = render(<ControlledEntityGraph nodes={nodes} edges={edges} />)
+  it('removes a selected node on "Remove node", keeping other nodes', async () => {
+    render(<ControlledEntityGraph nodes={nodes} edges={edges} />)
     await selectAcme()
     await userEvent.click(screen.getByRole('button', { name: /remove node/i }))
 
     expect(screen.queryByText('Acme')).not.toBeInTheDocument()
     expect(screen.getByText('Rivertown')).toBeInTheDocument()
     expect(screen.getByText('Widget')).toBeInTheDocument()
+  })
+
+  it('removing a node also removes its incident edges', async () => {
+    const { container } = render(<ControlledEntityGraph nodes={nodes} edges={edges} />)
+    await selectAcme()
+    await userEvent.click(screen.getByRole('button', { name: /remove node/i }))
+
     // Both edges touched Acme, so both should be gone.
     expect(container.querySelectorAll('line')).toHaveLength(0)
   })
