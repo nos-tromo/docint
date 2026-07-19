@@ -72,12 +72,18 @@ export function Analysis() {
   }, [collection])
 
   // Seed a sensible default selection (the top entity) once the list loads, so
-  // the findings panel and dropdown aren't empty on arrival.
+  // the findings panel and dropdown aren't empty on arrival. Scoped to the
+  // table view: the graph view dims every non-neighbor of the active
+  // selection, so auto-selecting there would leave the graph permanently
+  // washed-out on first arrival instead of starting bright. (The
+  // `EntityGraph` adapter separately avoids adopting a selection that was
+  // already set before it mounted, so switching table -> graph after this
+  // effect ran in table view doesn't retroactively dim it either.)
   useEffect(() => {
-    if (selectedEntityKey || entities.length === 0) return
+    if (nerView !== 'table' || selectedEntityKey || entities.length === 0) return
     const top = entities.find((e) => (e.text ?? '').trim().length > 0)
     if (top) setSelectedEntityKey(keyOf(top.text, top.type))
-  }, [entities, selectedEntityKey])
+  }, [entities, selectedEntityKey, nerView])
 
   // The selected entity row (for highlight terms / labels / CSV). Falls back to
   // a minimal row parsed from the key so graph clicks on entities outside the

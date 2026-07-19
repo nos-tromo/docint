@@ -122,16 +122,12 @@ describe('EntityGraph', () => {
     expect(onSelectEntity).toHaveBeenCalledWith('Acme::ORG')
   })
 
-  it('marks the selected node pressed for assistive tech', () => {
-    render(
-      <EntityGraph
-        nodes={nodes}
-        edges={edges}
-        selectedKey="Acme::ORG"
-        onSelectEntity={() => {}}
-        keyForNode={keyForNode}
-      />
-    )
+  it('marks the selected node pressed for assistive tech', async () => {
+    // Mounting with a pre-existing `selectedKey` no longer marks it pressed
+    // (see the "no dimmed nodes on mount" tests below) — selecting via an
+    // in-graph click still does.
+    render(<ControlledEntityGraph nodes={nodes} edges={edges} />)
+    await selectAcme()
     const selected = screen.getByRole('button', { name: /Acme \(ORG\)/ })
     expect(selected).toHaveAttribute('aria-pressed', 'true')
   })
@@ -272,15 +268,8 @@ describe('EntityGraph node removal (view-only)', () => {
 
   it('deselects via onSelectEntity(null) when the removed node was the selected entity', async () => {
     const onSelectEntity = vi.fn()
-    render(
-      <EntityGraph
-        nodes={nodes}
-        edges={edges}
-        selectedKey="Acme::ORG"
-        onSelectEntity={onSelectEntity}
-        keyForNode={keyForNode}
-      />
-    )
+    render(<ControlledEntityGraph nodes={nodes} edges={edges} onSelectEntity={onSelectEntity} />)
+    await selectAcme()
     await userEvent.click(screen.getByRole('button', { name: /remove node/i }))
     expect(onSelectEntity).toHaveBeenCalledWith(null)
   })
@@ -295,12 +284,26 @@ describe('EntityGraph node removal (view-only)', () => {
   })
 
   it('restores removed nodes when the nodes prop identity changes (fresh fetch)', async () => {
+    let selectedKey: string | null = null
+    const onSelectEntity = (key: string | null) => {
+      selectedKey = key
+    }
     const { rerender, container } = render(
       <EntityGraph
         nodes={nodes}
         edges={edges}
-        selectedKey="Acme::ORG"
-        onSelectEntity={() => {}}
+        selectedKey={selectedKey}
+        onSelectEntity={onSelectEntity}
+        keyForNode={keyForNode}
+      />
+    )
+    await selectAcme()
+    rerender(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey={selectedKey}
+        onSelectEntity={onSelectEntity}
         keyForNode={keyForNode}
       />
     )
@@ -330,6 +333,91 @@ describe('EntityGraph node removal (view-only)', () => {
     expect(screen.queryByText('ORG')).not.toBeInTheDocument()
     expect(screen.getByText('LOC')).toBeInTheDocument()
     expect(screen.getByText('PRODUCT')).toBeInTheDocument()
+  })
+})
+
+describe('EntityGraph multi-select (marquee/shift)', () => {
+  it('keeps all shift-selected nodes on the canvas and reports the last one to the panel', async () => {
+    const onSelectEntity = vi.fn()
+    render(<ControlledEntityGraph nodes={nodes} edges={edges} onSelectEntity={onSelectEntity} />)
+
+    await userEvent.click(screen.getByRole('button', { name: /Acme \(ORG\)/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Rivertown \(LOC\)/ }), { shiftKey: true })
+    fireEvent.click(screen.getByRole('button', { name: /Widget \(PRODUCT\)/ }), { shiftKey: true })
+
+    const pressed = screen.getAllByRole('button', { pressed: true })
+    expect(pressed).toHaveLength(3)
+    expect(onSelectEntity).toHaveBeenLastCalledWith('Widget::PRODUCT')
+  })
+
+  it('mounting with a pre-existing selectedKey renders no dimmed nodes', () => {
+    const { container } = render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey="Acme::ORG"
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    expect(screen.queryAllByRole('button', { pressed: true })).toHaveLength(0)
+    const nodeGroups = container.querySelectorAll('svg g[role="button"]')
+    expect(nodeGroups).toHaveLength(3)
+    for (const g of nodeGroups) {
+      expect(g.getAttribute('opacity')).toBe('1')
+    }
+  })
+
+  it('a selectedKey change after mount selects exactly that node', () => {
+    const { rerender, container } = render(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey="Acme::ORG"
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    // No selection yet (mount doesn't adopt the pre-existing key).
+    expect(container.querySelectorAll('svg g[aria-pressed="true"]')).toHaveLength(0)
+
+    rerender(
+      <EntityGraph
+        nodes={nodes}
+        edges={edges}
+        selectedKey="Rivertown::LOC"
+        onSelectEntity={() => {}}
+        keyForNode={keyForNode}
+      />
+    )
+    const selected = screen.getByRole('button', { name: /Rivertown \(LOC\)/ })
+    expect(selected).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryAllByRole('button', { pressed: true })).toHaveLength(1)
+  })
+
+  it('removing a shift-selected set of two removes both and their edges, clearing the panel if it pointed at one', async () => {
+    const onSelectEntity = vi.fn()
+    const { container } = render(
+      <ControlledEntityGraph
+        nodes={nodes}
+        edges={edges}
+        initialSelectedKey="Acme::ORG"
+        onSelectEntity={onSelectEntity}
+      />
+    )
+    // Select Acme (already the panel's entity) + Rivertown, leave Widget alone.
+    await userEvent.click(screen.getByRole('button', { name: /Acme \(ORG\)/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Rivertown \(LOC\)/ }), { shiftKey: true })
+    expect(screen.getAllByRole('button', { pressed: true })).toHaveLength(2)
+
+    await userEvent.click(screen.getByRole('button', { name: /remove 2 nodes/i }))
+
+    expect(screen.queryByText('Acme')).not.toBeInTheDocument()
+    expect(screen.queryByText('Rivertown')).not.toBeInTheDocument()
+    expect(screen.getByText('Widget')).toBeInTheDocument()
+    // Both incident edges touched Acme or Rivertown, so both should be gone.
+    expect(container.querySelectorAll('line')).toHaveLength(0)
+    expect(onSelectEntity).toHaveBeenCalledWith(null)
   })
 })
 

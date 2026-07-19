@@ -90,35 +90,67 @@ export function EntityGraph({
     return m
   }, [nodes, keyForNode])
 
-  const selectedIds = useMemo(() => {
-    if (!selectedKey) return []
-    for (const [id, key] of keyById) {
-      if (key === selectedKey) return [id]
+  // The graph's own multi-select state — this, not `selectedKey`, drives
+  // `<ForceGraph selectedIds>`. Docint's findings panel is single-entity, so
+  // it can't represent a marquee/shift-click set; the graph canvas can, and
+  // this state is what lets it keep all of them highlighted instead of
+  // snapping back to one.
+  const [graphSelection, setGraphSelection] = useState<string[]>([])
+
+  // The key corresponding to the last id in `graphSelection` (or null when
+  // empty) — used to tell an external `selectedKey` change (EntitySelect
+  // dropdown, a findings-table pick) apart from one the graph itself just
+  // caused via `onSelectEntity`.
+  const graphSelectionKey = useMemo(() => {
+    if (graphSelection.length === 0) return null
+    return keyById.get(graphSelection[graphSelection.length - 1]) ?? null
+  }, [graphSelection, keyById])
+
+  // The last `selectedKey` value this adapter has already reconciled
+  // `graphSelection` against. Initialized to the mount-time `selectedKey` so
+  // a pre-existing selection (e.g. carried over from the table view) is
+  // *not* adopted on mount — the graph starts undimmed; only a subsequent
+  // change to `selectedKey` triggers a highlight.
+  const [syncedKey, setSyncedKey] = useState<string | null>(selectedKey)
+
+  // Render-time state adjustment (same pattern as the `prevNodes` reset
+  // above): when `selectedKey` changes to something the graph didn't just
+  // report itself, replace `graphSelection` with the matching node (or
+  // clear it). When it changed *because* the graph reported it, just record
+  // it as synced without touching the selection that's already correct.
+  if (selectedKey !== syncedKey) {
+    setSyncedKey(selectedKey)
+    if (selectedKey !== graphSelectionKey) {
+      let matchId: string | null = null
+      for (const [id, key] of keyById) {
+        if (key === selectedKey) {
+          matchId = id
+          break
+        }
+      }
+      setGraphSelection(matchId ? [matchId] : [])
     }
-    return []
-  }, [keyById, selectedKey])
+  }
 
   // Docint's findings panel is single-entity: a marquee/shift-click multi
-  // selection has no representation there, so a non-empty selection resolves
-  // to its most-recently-added id. An empty selection (background click)
-  // clears it, same as chorus.
+  // selection has no representation there, so the panel follows whichever
+  // node was most recently added to the selection. The canvas itself keeps
+  // the full set via `graphSelection`. An empty selection (background click)
+  // clears both, same as chorus.
   const handleSelectionChange = useCallback(
     (ids: string[]) => {
-      if (ids.length === 0) {
-        onSelectEntity(null)
-        return
-      }
-      const key = keyById.get(ids[ids.length - 1])
-      if (key) onSelectEntity(key)
+      setGraphSelection(ids)
+      onSelectEntity(ids.length ? (keyById.get(ids[ids.length - 1]) ?? null) : null)
     },
     [keyById, onSelectEntity]
   )
 
   // View-only removal: hide the given nodes (and their edges) from the
   // canvas. If the currently-selected entity was among them, deselect it so
-  // the findings panel doesn't keep showing a vanished node. The underlying
-  // NER data and any exports of it are untouched — removed nodes return on
-  // the next fetch (see the `nodes`-identity effect above).
+  // the findings panel doesn't keep showing a vanished node, and drop them
+  // from the graph's own multi-selection too. The underlying NER data and
+  // any exports of it are untouched — removed nodes return on the next fetch
+  // (see the `nodes`-identity effect above).
   const handleDeleteNodes = useCallback(
     (ids: string[]) => {
       setRemovedIds((prev) => {
@@ -126,6 +158,7 @@ export function EntityGraph({
         for (const id of ids) next.add(id)
         return next
       })
+      setGraphSelection((prev) => prev.filter((id) => !ids.includes(id)))
       if (selectedKey && ids.some((id) => keyById.get(id) === selectedKey)) {
         onSelectEntity(null)
       }
@@ -169,7 +202,7 @@ export function EntityGraph({
         edges={fg.edges}
         nodeStyles={nodeStyles}
         edgeStyles={ENTITY_EDGE_STYLES}
-        selectedIds={selectedIds}
+        selectedIds={graphSelection}
         onSelectionChange={handleSelectionChange}
         onDeleteNodes={handleDeleteNodes}
         statusText={
