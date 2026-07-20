@@ -1,13 +1,13 @@
 # Social multimodal ingestion — "images from the larger dataset appear" — analysis & fix
 
 **Date:** 2026-07-01
-**Reporter symptom:** ingesting a reduced multimodal test set (`/home/user/Desktop/videoingest_test`: `..._postings.csv`, `afd_20260701_media.csv`, 5 images + 3 videos), but images belonging to the *full* dataset (`/home/user/data/projects/afd/lukreta`, an unrelated filesystem location) appear in Qdrant. Question raised: *"Does the current algo search my filesystem?"*
+**Reporter symptom:** ingesting a reduced multimodal test set (`<test-batch-dir>`, a local test-batch directory: `..._postings.csv`, `<prefix>_media.csv`, 5 images + 3 videos), but images belonging to the *full* dataset (`<full-dataset-dir>`, an unrelated filesystem location outside the ingestion source) appear in Qdrant. Question raised: *"Does the current algo search my filesystem?"*
 
 ## TL;DR
 
-1. **Your current test collection is actually clean.** `videoingest-test-1_images` holds exactly the **5 physical test images**, ingested as plain `standalone` images (no posting linkage). No full-dataset images are in it, and **no collection anywhere** contains social-media images or any path under `/home/user/data/projects/afd/lukreta`.
+1. **Your current test collection is actually clean.** `videoingest-test-1_images` holds exactly the **5 physical test images**, ingested as plain `standalone` images (no posting linkage). No full-dataset images are in it, and **no collection anywhere** contains social-media images or any path under `<full-dataset-dir>`.
 2. **The social multimodal linker never ran on your data.** Your CSVs are **semicolon-delimited with a UTF-8 BOM** (typical German export). `social_linker` reads them with the default *comma* delimiter, which collapses the whole header into one column, so it fails to recognise the postings/media tables and **silently no-ops**. Your 5 images were picked up only by the generic image sweep; the videos, keyframes, transcripts, and posting links were all skipped.
-3. **The real danger is latent, and your instinct is right.** `afd_20260701_media.csv` is the **full manifest — 73,969 rows** (you copied in only 8 files). The linker resolves each row's `Exported media filename` and, in one branch, **does not confine the result to the batch** — an absolute or `../` path would resolve to a file *anywhere on disk*. Combined with a full manifest, any scan root that reaches the full dataset would pull in the whole corpus. That is almost certainly what you saw in an earlier run.
+3. **The real danger is latent, and your instinct is right.** `<prefix>_media.csv` is the **full manifest — 73,969 rows** (you copied in only 8 files). The linker resolves each row's `Exported media filename` and, in one branch, **does not confine the result to the batch** — an absolute or `../` path would resolve to a file *anywhere on disk*. Combined with a full manifest, any scan root that reaches the full dataset would pull in the whole corpus. That is almost certainly what you saw in an earlier run.
 
 ## Evidence
 
@@ -20,7 +20,7 @@
 | `media.csv` row count | **73,969** (full dataset manifest, not reduced). |
 | Physical media in test set | 8 files in `.../media/` (5 `.jpg`, 3 `.mp4`); all 8 basenames present in `media.csv`'s `Exported media filename`. |
 | `videoingest-test-1_images` (Qdrant) | **5 points**, `source_type=standalone`, `source_path=/var/lib/docint/sources/videoingest-test-1/.../media/*.jpg`, `source_doc_id=null` (no linkage). |
-| Any social-media / full-dataset images in Qdrant? | **None.** afd `showcase`/`test-long-table` collections have no `_images` companion; `voc-37*_images` are PDF-page images. |
+| Any social-media / full-dataset images in Qdrant? | **None.** `<dataset>` `showcase`/`test-long-table` collections have no `_images` companion; `voc-37*_images` are PDF-page images. |
 
 ## Root cause 1 — semicolon exports silently no-op the linker
 
@@ -45,7 +45,7 @@ if "/" in name:
 matches = file_index.get(Path(name).name.lower(), [])   # basename index, scoped to the batch root
 ```
 
-`(tables_dir / name)` follows an **absolute** path straight out of the batch (`Path("/batch") / "/full/x.jpg" == "/full/x.jpg"`), and `.resolve()` follows `../`. So a manifest whose filenames are absolute/parent paths into `/home/user/data/projects/afd/lukreta` would ingest those files directly — an arbitrary-file-read / cross-dataset leak. (Your current `media.csv` uses bare basenames, so this specific branch isn't firing today — but with the full 73,969-row manifest it is exactly the mechanism that pulls in the larger dataset once resolution reaches it.)
+`(tables_dir / name)` follows an **absolute** path straight out of the batch (`Path("/batch") / "/full/x.jpg" == "/full/x.jpg"`), and `.resolve()` follows `../`. So a manifest whose filenames are absolute/parent paths into `<full-dataset-dir>` would ingest those files directly — an arbitrary-file-read / cross-dataset leak. (Your current `media.csv` uses bare basenames, so this specific branch isn't firing today — but with the full 73,969-row manifest it is exactly the mechanism that pulls in the larger dataset once resolution reaches it.)
 
 The basename branch is scoped to `build_file_index(data_dir)`, so it is safe **as long as `data_dir` is only the batch**. If ingestion is pointed at (or the batch lives inside) a directory that also contains the full dataset, even bare basenames match the full corpus.
 
@@ -53,7 +53,7 @@ The basename branch is scoped to `build_file_index(data_dir)`, so it is safe **a
 
 Given the current collection is clean and the linker no-ops on `;`, the full-dataset images you observed were **not** produced by the current, upload-scoped run. Most likely one of:
 
-- An **earlier run** with the ingestion source (`DATA_PATH` / the ingested folder) pointing at — or containing — `/home/user/data/projects/afd/lukreta`, so either the generic image sweep or a then-working linker matched the 73,969-row manifest against the full corpus; or
+- An **earlier run** with the ingestion source (`DATA_PATH` / the ingested folder) pointing at — or containing — `<full-dataset-dir>`, so either the generic image sweep or a then-working linker matched the 73,969-row manifest against the full corpus; or
 - A **non-fresh collection** carried over from prior full-dataset work.
 
 Either way it reduces to the same code weakness: **a full manifest + basename/path resolution that isn't hard-confined to the batch.** The fix closes that; the operational note below closes the rest.
@@ -68,7 +68,7 @@ New tests: `;`+BOM export is detected and linked; a full manifest links only the
 ## What to check / do on your side
 
 1. **Use a fresh collection** for the test (or delete `videoingest-test-1` + `videoingest-test-1_images` first) so nothing carries over.
-2. **Scope the ingestion source to the test batch only.** Prefer the SPA folder-upload of `/home/user/Desktop/videoingest_test`, or ensure `DATA_PATH` points *only* at it — never at a parent of `/home/user/data/projects/afd/lukreta`.
+2. **Scope the ingestion source to the test batch only.** Prefer the SPA folder-upload of `<test-batch-dir>`, or ensure `DATA_PATH` points *only* at it — never at a parent of `<full-dataset-dir>`.
 3. Re-ingest after the fix and confirm: the linker now links the 8 present media to their postings (images via CLIP, videos via Nextext keyframes+transcript), and the other 73,961 manifest rows are skipped as "file not found" rather than pulled from disk.
 4. (Optional) If you want the reduced test to be self-contained, trim `media.csv` to just the rows for the copied files — but with fix B this is no longer required for safety.
 
