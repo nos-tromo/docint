@@ -1,6 +1,6 @@
 # Nextext `keyframes.zip` Artifact — Implementation Plan
 
-> **Repo:** this plan operates on the **Nextext** repo (`/home/user/dev/infra/Nextext`), not docint. It is the prerequisite for docint's social-multimodal video *visuals* (docint Phase 2 consumes `keyframes.zip`). docint degrades gracefully without it — video transcripts still flow; keyframes stay empty until this ships.
+> **Repo:** this plan operates on the **Nextext** repo (`../Nextext`, relative to this workspace), not docint. It is the prerequisite for docint's social-multimodal video *visuals* (docint Phase 2 consumes `keyframes.zip`). docint degrades gracefully without it — video transcripts still flow; keyframes stay empty until this ships.
 >
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax.
 
@@ -97,7 +97,7 @@ git commit -m "feat(jobs): add keyframe sampling options" -m "Co-Authored-By: Cl
 
 - [ ] **Step 1: Confirm Pillow is available**
 
-Run: `cd /home/user/dev/infra/Nextext && uv run python -c "import PIL; print(PIL.__version__)"`
+Run: `cd ../Nextext && uv run python -c "import PIL; print(PIL.__version__)"`
 Expected: prints a version. If it errors, run `uv add pillow` and commit the lock change as part of Step 5.
 
 - [ ] **Step 2: Write the failing test**
