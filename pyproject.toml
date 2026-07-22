@@ -31,6 +31,7 @@ dependencies = [
   "opencv-python-headless>=5.0.0.93",
   "pandas>=3.0.3",
   "pillow>=12.3.0",
+  "prometheus-fastapi-instrumentator>=8.0.2",
   "pyarrow>=25.0.0",
   "pydantic>=2.13.4",
   "pypdf>=6.14.2",

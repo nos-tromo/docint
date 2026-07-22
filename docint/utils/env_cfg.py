@@ -537,6 +537,30 @@ def load_host_env(
 
 
 @dataclass(frozen=True)
+class MetricsConfig:
+    """Dataclass for Prometheus metrics configuration."""
+
+    enabled: bool
+
+
+def load_metrics_env(default_enabled: bool = True) -> MetricsConfig:
+    """Loads Prometheus metrics configuration from environment variables or defaults.
+
+    Args:
+        default_enabled (bool): Default value to enable the ``/metrics``
+            endpoint. Set to True to enable by default.
+
+    Returns:
+        MetricsConfig: Dataclass containing metrics configuration.
+        - enabled (bool): Whether to instrument the app and expose
+            ``GET /metrics`` for scraping by the obs-plane member.
+    """
+    return MetricsConfig(
+        enabled=str(os.getenv("METRICS_ENABLED", default_enabled)).lower() in {"true", "1", "yes"},
+    )
+
+
+@dataclass(frozen=True)
 class PrincipalConfig:
     """Dataclass for request-principal resolution configuration."""
 
