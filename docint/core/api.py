@@ -23,6 +23,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from loguru import logger
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 from qdrant_client import models
 from starlette.middleware.cors import CORSMiddleware
@@ -50,6 +51,7 @@ from docint.utils.cursor import InvalidCursorError
 from docint.utils.env_cfg import (
     load_frontend_env,
     load_host_env,
+    load_metrics_env,
     load_path_env,
     load_response_validation_env,
 )
@@ -81,6 +83,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Prometheus metrics for the obs-plane scrape target. Aggregate request
+# counters/histograms only (method, path template, status code, latency) —
+# no document content, collection names, or user identifiers are recorded.
+# Served without a principal dependency, like /version and /config, so
+# obs-plane can scrape it unauthenticated.
+if load_metrics_env().enabled:
+    Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
 rag = RAG(qdrant_collection="")
 SIMULATED_STREAM_TOKEN_DELAY_SECONDS = 0.03
