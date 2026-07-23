@@ -12,7 +12,7 @@
 .DEFAULT_GOAL := help
 
 REPO     := docint
-NETWORKS := inference-net data-net
+NETWORKS := inference-net data-net edge-net
 VOLUMES  := docling-cache huggingface-cache ollama-cache sessions-storage source-preview-cache
 include make/common.mk
 

@@ -1,8 +1,20 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { apiGet, apiPost, apiDelete, ApiError } from './client'
+import { apiGet, apiPost, apiDelete, ApiError, apiBase } from './client'
 
 afterEach(() => {
   vi.restoreAllMocks()
+})
+
+describe('apiBase', () => {
+  it('uses an explicit VITE_API_BASE_URL override verbatim (trailing slash trimmed)', () => {
+    expect(apiBase('http://elsewhere/', '/docint/')).toBe('http://elsewhere')
+  })
+  it('derives from BASE_URL when no override is set', () => {
+    expect(apiBase(undefined, '/docint/')).toBe('/docint')
+  })
+  it('is empty (same-origin root) at root BASE_URL with no override', () => {
+    expect(apiBase(undefined, '/')).toBe('')
+  })
 })
 
 function mockFetch(body: unknown, init: { status?: number; ok?: boolean } = {}) {

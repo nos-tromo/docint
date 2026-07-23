@@ -112,3 +112,21 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
 - **Multi-tenant / per-user isolation (load-bearing)**: Collections, chat sessions, and reports are owner-scoped by the resolved principal (`docint/core/auth/principal.py` reads `DOCINT_AUTH_HEADER`, default `X-Auth-User`, then falls back to `DOCINT_DEFAULT_IDENTITY`, else 401). Collection names are *logical*; the physical Qdrant name is namespaced per owner (`CollectionOwnerManager`), so two users can own the same name. Every collection-scoped endpoint resolves + gates the caller's logical name via `_require_owned_collection` / `_scoped_collection` (404 cross-owner) and binds the active collection **per-request** through `RAG.collection_scope` (a `ContextVar`). `/collections/select` is a non-mutating validation only — clients must send `collection` on every collection-scoped request (the SPA reads `useUiStore.selectedCollection`). The `SessionManager` chat runtime is threaded per request too (`start_session`/`chat`/`stream_chat` take `(session_id, owner)`; no shared `session_id`/`_owner`/`chat_engine`/`chat_memory`). **Never reintroduce process-global active-collection or session state** — it silently breaks (or cross-contaminates) concurrent users. Multi-tenant invariants are guarded by `tests/test_{collection_owner_manager,api_collections_ownership,rag_stateless_concurrency,session_concurrency,multiuser_isolation}.py`.
 - **Hidden collection suffixes**: `docint/core/rag.py` defines `HIDDEN_COLLECTION_SUFFIXES` (currently `("_images", "_dockv", "_entities")`). `RAG.list_collections()` filters these out, which transitively hides them from `/collections/list` and makes `select_collection()` reject them. Extend the tuple rather than adding filters at the UI layer. The companions share the base collection's lifecycle — `delete_collection` and the empty-ingestion cleanup remove `{name}_images`/`{name}_entities` alongside it.
 - **Locale-aware prompts**: every LLM prompt template lives under `docint/utils/prompts/{en,de}/<name>.txt`. The active locale is `load_language_env().code` (env var `RESPONSE_LANGUAGE`, default `en`). Adding a new prompt = add the file in both `en/` and `de/`. Adding a new locale = create the subdir and translate all 16 files. Non-prompt user-facing strings live in `docint/utils/ui_strings.py` and follow the same env var. JSON output schemas, intent labels, and hate-speech `category` enum stay English in every locale — they are protocol, not prose.
+
+### Deployment: edge-plane gateway sub-path
+
+The docint SPA is served in production under the canonical `/docint/`
+sub-path behind the `edge-plane` gateway, not at its own vhost root. The
+`frontend` service joins the external `edge-net` network (alongside its
+existing `docint-net` membership) as alias `docint-frontend`, which is how
+the gateway reaches it. Vite is built with `base: '/docint/'`, the API base
+derives from `BASE_URL` (`VITE_API_BASE_URL` still overrides it verbatim
+when set — e.g. for standalone/dev use outside the gateway), the SPA router
+uses a matching `basename`, and the frontend's nginx template strips the
+`/docint` prefix internally before falling through to the existing
+root-anchored locations (SSE endpoints included), redirecting bare `/` to
+`/docint/`. The gateway is the sole production entry point and is what
+injects `X-Auth-User` for the backend's trusted-header principal seam
+(`docint/core/auth/principal.py`) — production leaves `DOCINT_DEFAULT_IDENTITY`
+unset so requests without that header are rejected as unauthenticated. The
+dev override's `DOCINT_DEFAULT_IDENTITY` fallback stays dev-only.
