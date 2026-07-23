@@ -6,7 +6,12 @@ import { dirname, resolve } from 'node:path'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
+const BACKEND = 'http://localhost:8000'
+
+const API_PREFIXES = ['collections', 'config', 'version', 'sessions', 'reports', 'sources', 'query', 'stream_query', 'summarize', 'ingest', 'agent', 'translate']
+
 export default defineConfig({
+  base: '/docint/',
   plugins: [react()],
   resolve: {
     alias: { '@': resolve(__dirname, './src') }
@@ -14,20 +19,12 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
-    proxy: {
-      '/collections': 'http://localhost:8000',
-      '/config': 'http://localhost:8000',
-      '/version': 'http://localhost:8000',
-      '/sessions': 'http://localhost:8000',
-      '/reports': 'http://localhost:8000',
-      '/sources': 'http://localhost:8000',
-      '/query': 'http://localhost:8000',
-      '/stream_query': 'http://localhost:8000',
-      '/summarize': 'http://localhost:8000',
-      '/ingest': 'http://localhost:8000',
-      '/agent': 'http://localhost:8000',
-      '/translate': 'http://localhost:8000'
-    }
+    proxy: Object.fromEntries(
+      API_PREFIXES.map((p) => [
+        `/docint/${p}`,
+        { target: BACKEND, changeOrigin: true, rewrite: (path: string) => path.replace(/^\/docint/, '') },
+      ]),
+    )
   },
   test: {
     globals: true,

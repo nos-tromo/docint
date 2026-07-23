@@ -1,4 +1,14 @@
-const BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
+/** API base: explicit VITE_API_BASE_URL wins; otherwise derive from
+ *  Vite's base path so the SPA works under /docint/ and at root alike. */
+export function apiBase(
+  override: string | undefined = import.meta.env.VITE_API_BASE_URL,
+  base: string = import.meta.env.BASE_URL,
+): string {
+  const raw = override ?? (base === '/' ? '' : base)
+  return raw.replace(/\/+$/, '')
+}
+
+const BASE = apiBase()
 
 export class ApiError extends Error {
   constructor(public status: number, public detail: unknown) {

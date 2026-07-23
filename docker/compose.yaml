@@ -92,6 +92,9 @@ services:
       docint-net:
         aliases:
           - frontend
+      edge-net:
+        aliases:
+          - docint-frontend
     depends_on:
       backend:
         condition: service_healthy
@@ -123,3 +126,6 @@ networks:
   inference-net:
     external: true
     name: ${INFERENCE_NET:-inference-net}
+  edge-net:
+    external: true
+    name: ${EDGE_NET:-edge-net}

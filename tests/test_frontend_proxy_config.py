@@ -86,13 +86,28 @@ def test_frontend_nginx_proxies_translate_endpoint() -> None:
     assert "translate" in _nginx_api_route_tokens()
 
 
+def _vite_api_prefixes() -> list[str]:
+    """Return the Vite dev server's ``API_PREFIXES`` allowlist entries.
+
+    Order-independent: parses the ``API_PREFIXES = [...]`` array literal in
+    ``vite.config.ts`` (each entry is proxied under the ``/docint/`` base) so
+    membership checks don't depend on where an entry sits in the list.
+
+    Returns:
+        list[str]: The API path segments proxied to the backend.
+    """
+    vite_conf = (REPO_ROOT / "frontend" / "vite.config.ts").read_text(encoding="utf-8")
+    match = re.search(r"API_PREFIXES\s*=\s*\[([^\]]*)\]", vite_conf)
+    assert match is not None, "API_PREFIXES array not found in vite.config.ts"
+    return [tok.strip().strip("'\"") for tok in match.group(1).split(",") if tok.strip()]
+
+
 def test_frontend_vite_proxies_translate_endpoint() -> None:
     """The Vite dev server must proxy /translate to the backend, not 404.
 
-    The dev-side half of the dual-proxy allowlist: a missing ``/translate`` key
-    in the Vite proxy map makes the dev server serve the SPA fallback instead of
-    reaching FastAPI. Asserts on the key's presence (order-independent).
+    The dev-side half of the dual-proxy allowlist: a missing ``translate`` entry
+    in the Vite ``API_PREFIXES`` allowlist makes the dev server serve the SPA
+    fallback instead of reaching FastAPI. Asserts on the entry's presence
+    (order-independent).
     """
-    vite_conf = (REPO_ROOT / "frontend" / "vite.config.ts").read_text(encoding="utf-8")
-
-    assert "'/translate'" in vite_conf
+    assert "translate" in _vite_api_prefixes()

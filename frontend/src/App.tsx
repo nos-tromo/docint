@@ -6,7 +6,7 @@ import { Router } from './routes/Router'
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
+      <BrowserRouter basename={import.meta.env.BASE_URL.replace(/\/+$/, '')}>
         <Router />
       </BrowserRouter>
     </QueryClientProvider>
