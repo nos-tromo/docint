@@ -24,7 +24,8 @@ help:
 	@echo "  make network    create the external inference-net + data-net"
 	@echo "  make volumes    create the external Docker volumes"
 	@echo "  make build      build images"
-	@echo "  make bundle     ship the built images as a versioned .tar.gz"
+	@echo "  make bundle     ship the built images as a versioned .tar.gz (latest annotated release tag)"
+	@echo "  make bundle-dev like 'bundle', but from the current working tree (dev/soak)"
 	@echo "  make up         run docint detached, no build (production shape, no host ports)"
 	@echo "  make up-dev     like 'up', but publishes the frontend port on the host (no build)"
 	@echo "  make dev        build, then up-dev"
@@ -32,6 +33,7 @@ help:
 	@echo "  make down       stop + remove containers (never touches data-plane state)"
 	@echo "  make resolve    merge duplicate/similar entities (COLLECTION=<name> optional)"
 	@echo "  make pre-commit run pre-commit hooks (ruff + pyrefly)"
+	@echo "  make verify     pre-push gate: pre-commit + frontend lint/build; mirrors CI's lint gate"
 	@echo "  make test       run the test suite"
 
 # Resolve duplicate / semantically-similar entities for a collection into
