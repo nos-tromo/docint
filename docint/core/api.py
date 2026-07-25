@@ -584,6 +584,20 @@ class SelectCollectionOut(BaseModel):
     name: str
 
 
+class AdminOwnerCollections(BaseModel):
+    """One foreign owner's logical collection names (admin listing)."""
+
+    owner: str
+    collections: list[str]
+
+
+class AdminCollectionsOut(BaseModel):
+    """Admin-shaped /collections/list response: own plus per-owner groups."""
+
+    mine: list[str]
+    others: list[AdminOwnerCollections]
+
+
 class MetadataFilterIn(BaseModel):
     """Single metadata filter applied to retrieval queries."""
 
@@ -861,25 +875,51 @@ def get_version() -> VersionOut:
     return VersionOut(version=__version__)
 
 
-@app.get("/collections/list", response_model=list[str], tags=["Collections"])
-def collections_list(principal: Principal = Depends(resolve_principal)) -> list[str]:  # noqa: B008 — FastAPI dependency marker
-    """List the calling principal's collections (logical names).
+@app.get("/collections/list", response_model=list[str] | AdminCollectionsOut, tags=["Collections"])
+def collections_list(
+    all: bool = False,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> list[str] | AdminCollectionsOut:
+    """List collections: the caller's own, or (admins, with ``?all=true``) everyone's.
 
     Collections are owner-scoped: a caller only sees the collections they
     ingested themselves. Names are the user-visible logical names, not the
-    owner-namespaced physical Qdrant names.
+    owner-namespaced physical Qdrant names. Without ``all`` the response is
+    the caller's logical names exactly as before. With ``all=true`` an admin
+    additionally receives every other owner's collections grouped per owner;
+    for non-admins the flag is silently ignored (plain list) so collection
+    existence never leaks.
 
     Args:
+        all (bool): When true and the caller is an admin, also return every
+            other owner's collections grouped by owner. Ignored otherwise.
         principal (Principal): The resolved request principal.
 
     Returns:
-        list[str]: The caller's collection names, sorted.
+        list[str] | AdminCollectionsOut: The caller's collection names,
+            sorted; or, for an admin with ``all=true``, ``mine`` (the
+            caller's own names) plus ``others`` (every other owner's names,
+            grouped and sorted by owner).
 
     Raises:
         HTTPException: If an error occurs while listing collections.
     """
     try:
-        return rag.ensure_collection_owner_manager().list_for(principal.name)
+        mgr = rag.ensure_collection_owner_manager()
+        mine = mgr.list_for(principal.name)
+        if not (all and principal.is_admin):
+            return mine
+        others: dict[str, list[str]] = {}
+        for owner, logical in mgr.list_all():
+            if owner is None or owner == principal.name:
+                # None-owner legacy rows are unreachable in production
+                # (no default identity => 401 before any resolve).
+                continue
+            others.setdefault(owner, []).append(logical)
+        return AdminCollectionsOut(
+            mine=mine,
+            others=[AdminOwnerCollections(owner=o, collections=c) for o, c in others.items()],
+        )
     except Exception as e:
         logger.error("HTTPException: Error listing collections: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e

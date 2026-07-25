@@ -292,3 +292,35 @@ def test_admin_lists_own_sessions_scoped_to_cross_owner_collection(client: TestC
     owner_arg, collection_arg = _patch_rag._sessions.listed[-1]
     assert owner_arg == "root"  # session ownership stays on principal.name, not effective_owner
     assert collection_arg is not None  # but the collection resolved under alice's namespace
+
+
+def test_collections_list_all_admin_shape(client: TestClient) -> None:
+    """?all=true for an admin returns mine + per-owner groups, mine excluded from others."""
+    _ingest(client, "alice", "alpha")
+    _ingest(client, "bob", "beta")
+    _ingest(client, "root", "own")
+
+    body = client.get("/collections/list?all=true", headers=ADMIN).json()
+
+    assert body == {
+        "mine": ["own"],
+        "others": [
+            {"owner": "alice", "collections": ["alpha"]},
+            {"owner": "bob", "collections": ["beta"]},
+        ],
+    }
+
+
+def test_collections_list_all_ignored_for_non_admin(client: TestClient) -> None:
+    """?all=true for a non-admin is silently ignored: plain string[] as always."""
+    _ingest(client, "alice", "alpha")
+    _ingest(client, "bob", "beta")
+
+    assert client.get("/collections/list?all=true", headers={"X-Auth-User": "alice"}).json() == ["alpha"]
+
+
+def test_collections_list_no_params_unchanged_for_admin(client: TestClient) -> None:
+    """Without ?all the admin gets the plain owner-scoped string[] like anyone else."""
+    _ingest(client, "root", "own")
+
+    assert client.get("/collections/list", headers=ADMIN).json() == ["own"]
