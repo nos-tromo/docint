@@ -1,4 +1,4 @@
-import { apiDelete, apiGet, apiPost, url } from './client'
+import { apiDelete, apiGet, apiPost, getOwnerParam, url } from './client'
 import type {
   DocumentRecord,
   DocumentsSummary,
@@ -14,7 +14,27 @@ export interface Page<T> {
   next_cursor: string | null
 }
 
-export const listCollections = () => apiGet<string[]>('/collections/list')
+export interface OwnerCollections {
+  owner: string
+  collections: string[]
+}
+
+/** Normalized /collections/list view. The backend returns a bare string[]
+ *  for non-admins (even with all=true) and {mine, others} for admins — the
+ *  array/object branch doubles as admin detection (one round trip). */
+export interface CollectionsView {
+  mine: string[]
+  others: OwnerCollections[]
+  isAdmin: boolean
+}
+
+export const listCollections = async (): Promise<CollectionsView> => {
+  const resp = await apiGet<string[] | { mine: string[]; others: OwnerCollections[] }>(
+    '/collections/list',
+    { all: true }
+  )
+  return Array.isArray(resp) ? { mine: resp, others: [], isAdmin: false } : { ...resp, isAdmin: true }
+}
 
 export const selectCollection = (name: string) =>
   apiPost<{ ok: boolean; name: string }>('/collections/select', { name })
@@ -153,7 +173,8 @@ export function csvExportHref(
   kind: CsvExportKind,
   params: CsvExportParams = {}
 ): string {
-  const qs = Object.entries(params)
+  const owner = getOwnerParam()
+  const qs = Object.entries({ ...params, owner: owner ?? undefined })
     .filter(([, v]) => v !== undefined && v !== null && v !== '')
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
     .join('&')

@@ -71,7 +71,7 @@ describe('Sidebar collection selection', () => {
 
     await waitFor(() => {
       const calls = fetchMock.mock.calls.map((c) => String(c[0]))
-      expect(calls.some((u) => u.endsWith('/collections/list'))).toBe(true)
+      expect(calls.some((u) => u.includes('/collections/list'))).toBe(true)
     })
     const calls = fetchMock.mock.calls.map((c) => String(c[0]))
     expect(calls.some((u) => u.endsWith('/collections/select'))).toBe(false)

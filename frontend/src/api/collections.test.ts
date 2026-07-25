@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
+import { setOwnerParam } from './client'
 import {
   csvExportHref,
   getDocumentsCount,
@@ -114,5 +115,12 @@ describe('collections api carries the selected collection', () => {
     expect(csvExportHref('docs', 'hate-speech')).toContain(
       '/collections/docs/export/hate-speech.csv'
     )
+  })
+
+  it('csvExportHref includes the owner param when an owner context is set', () => {
+    setOwnerParam('jane.doe')
+    expect(csvExportHref('docs', 'documents')).toContain('owner=jane.doe')
+    setOwnerParam(null)
+    expect(csvExportHref('docs', 'documents')).not.toContain('owner=')
   })
 })
