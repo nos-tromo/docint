@@ -100,3 +100,18 @@ def test_backfill_legacy_is_idempotent_and_preserves_existing(mgr: CollectionOwn
     mgr.backfill_legacy([physical, "legacyA"], default_owner="operator")
     assert mgr.resolve("alice", "mydocs") == physical
     assert mgr.list_for("operator") == ["legacyA"]
+
+
+def test_list_all_returns_every_owner_sorted(mgr: CollectionOwnerManager) -> None:
+    """list_all exposes the whole table as (owner, logical), owner-then-name sorted."""
+    mgr.register("bob", "zeta")
+    mgr.register("alice", "beta")
+    mgr.register("alice", "alpha")
+    mgr.backfill_legacy(["legacy-docs"], "operator")
+
+    assert mgr.list_all() == [
+        ("alice", "alpha"),
+        ("alice", "beta"),
+        ("bob", "zeta"),
+        ("operator", "legacy-docs"),
+    ]
