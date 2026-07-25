@@ -1,4 +1,4 @@
-import { url } from './client'
+import { url, withOwner } from './client'
 import type { SseEvent } from './sse'
 
 /**
@@ -22,7 +22,7 @@ export async function* streamUpload(
   formData: FormData,
   signal?: AbortSignal
 ): AsyncGenerator<SseEvent, void, unknown> {
-  const res = await fetch(url(path), {
+  const res = await fetch(url(withOwner(path)), {
     method: 'POST',
     body: formData,
     signal

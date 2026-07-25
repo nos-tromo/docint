@@ -61,12 +61,26 @@ export function Sidebar() {
 
   const onSelectCollection = async (entry: CollectionEntry) => {
     if (entryMatches(entry, selected, selectedOwner)) return
+    const prevSelected = selected
+    const prevOwner = selectedOwner
+    const prevSessionId = currentSessionId
     setSelected(entry.name, entry.owner)
     // A session is pinned to the collection it was created under. Switching
     // collections resets any open chat so the next message can't resume it
     // against the wrong collection (which the backend refuses with a 409).
     setCurrentSessionId(null)
-    await selectMutation.mutateAsync(entry.name)
+    try {
+      await selectMutation.mutateAsync(entry.name)
+    } catch {
+      // A failing select must not leave a dead selection committed — restore
+      // exactly what was active before this attempt (both the (name, owner)
+      // pair and the open session). The file has no toast mechanism; the
+      // mutation's own error state (selectMutation.error) is the surfaced
+      // signal, matching how the other mutations here report failure.
+      setSelected(prevSelected, prevOwner)
+      setCurrentSessionId(prevSessionId)
+      return
+    }
     // Stay in whatever section the user is currently viewing — switching the
     // active collection must not yank them to chat. The one exception is a
     // pinned chat session sub-route (`/chat/:sessionId`): that session belongs
@@ -77,8 +91,9 @@ export function Sidebar() {
     }
   }
 
-  const onDeleteCollection = (name: string) => {
-    if (!confirm(`Delete collection "${name}"? This cannot be undone.`)) return
+  const onDeleteCollection = (name: string, owner: string | null) => {
+    const label = owner ? `"${name}" (owner: ${owner})` : `"${name}"`
+    if (!confirm(`Delete collection ${label}? This cannot be undone.`)) return
     deleteCollectionMutation.mutate(name, {
       onSuccess: () => {
         if (selected === name) {
@@ -191,7 +206,7 @@ export function Sidebar() {
           {selected && (
             <button
               type="button"
-              onClick={() => onDeleteCollection(selected)}
+              onClick={() => onDeleteCollection(selected, selectedOwner)}
               aria-label={`Delete collection ${selected}`}
               title="Delete this collection"
               className="shrink-0 text-zinc-500 transition-colors hover:text-red-400"

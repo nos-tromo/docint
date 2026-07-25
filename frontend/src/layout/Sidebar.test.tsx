@@ -204,6 +204,39 @@ describe('Sidebar collection selection', () => {
     expect(useUiStore.getState().currentSessionId).toBeNull()
   })
 
+  it('rolls back to the previous selection and session when /collections/select fails', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const path = typeof input === 'string' ? input : input.toString()
+      if (path.includes('/collections/select')) {
+        return { ok: false, status: 404, json: async () => ({ detail: 'not found' }), text: async () => '{}' }
+      }
+      if (path.includes('/collections/list')) {
+        return { ok: true, status: 200, json: async () => ['alpha', 'beta'], text: async () => '["alpha","beta"]' }
+      }
+      if (path.includes('/sessions/list')) {
+        return { ok: true, status: 200, json: async () => ({ sessions: [] }), text: async () => '{"sessions":[]}' }
+      }
+      return { ok: true, status: 200, json: async () => null, text: async () => 'null' }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ selectedCollection: 'alpha', selectedOwner: null, currentSessionId: 'sess-old' })
+
+    renderSidebar()
+
+    const select = await screen.findByLabelText(/select collection/i)
+    await screen.findByRole('option', { name: 'beta' })
+    await userEvent.selectOptions(select, 'beta')
+
+    await waitFor(() => {
+      const selectCall = fetchMock.mock.calls.find((c) => String(c[0]).includes('/collections/select'))
+      expect(selectCall).toBeDefined()
+    })
+    await waitFor(() => {
+      expect(useUiStore.getState().selectedCollection).toBe('alpha')
+    })
+    expect(useUiStore.getState().currentSessionId).toBe('sess-old')
+  })
+
   it('clears selection and the open chat after deleting the active collection', async () => {
     const fetchMock = mockFetch({
       '/collections/list': ['alpha'],

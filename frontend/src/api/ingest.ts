@@ -1,5 +1,6 @@
 import { streamUpload, UploadHttpError } from './upload'
 import { streamSse } from './sse'
+import { withOwner } from './client'
 import { planUploadBatches } from '@/lib/uploadBatches'
 import { formatBytes } from '@/lib/ingestStatus'
 import type { IngestEvent } from './types'
@@ -207,4 +208,6 @@ export async function* streamIngestUploadBatched(
 }
 
 export const sourcePreviewUrl = (collection: string, file_hash: string) =>
-  `/sources/preview?collection=${encodeURIComponent(collection)}&file_hash=${encodeURIComponent(file_hash)}`
+  withOwner(
+    `/sources/preview?collection=${encodeURIComponent(collection)}&file_hash=${encodeURIComponent(file_hash)}`
+  )

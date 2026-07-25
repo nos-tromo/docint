@@ -46,7 +46,7 @@ export function getOwnerParam(): string | null {
   return ownerParam
 }
 
-function withOwner(pathAndQuery: string): string {
+export function withOwner(pathAndQuery: string): string {
   if (!ownerParam) return pathAndQuery
   const sep = pathAndQuery.includes('?') ? '&' : '?'
   return `${pathAndQuery}${sep}owner=${encodeURIComponent(ownerParam)}`

@@ -958,10 +958,12 @@ def collections_select(
 
 @app.delete("/collections/{name}", tags=["Collections"])
 def collections_delete(name: str, principal: Principal = Depends(resolve_principal)) -> dict[str, bool]:  # noqa: B008 — FastAPI dependency marker
-    """Delete a collection the caller owns.
+    """Delete a collection resolved under the caller's effective owner.
 
-    Deleting a collection the caller does not own (or one that does not exist)
-    is a 404, so a user can never delete another user's data. The Qdrant
+    Deleting a collection the caller's effective owner does not own (or one
+    that does not exist) is a 404, so a user can never delete another user's
+    data outside their effective-owner scope — including an admin's own
+    namespace when a foreign ``owner`` is not explicitly requested. The Qdrant
     collection is dropped first; only then is the ownership mapping removed, so
     a failed Qdrant delete leaves ownership intact for retry. The collection's
     chat sessions are cascade-deleted after the Qdrant collection is dropped and
@@ -2101,10 +2103,12 @@ def export_documents_csv(name: str, principal: Principal = Depends(resolve_princ
     The endpoint reads from :meth:`docint.core.rag.RAG.list_documents` (cached
     after the first call) and emits one row per document. Output matches the
     CLI's ``query --documents`` schema column-for-column. The path ``name`` is
-    the caller's logical collection: it is owner-gated (404 if not owned) and
-    resolved to its physical collection for the duration of the read, so exports
-    are stateless and isolated per user. Rows are materialized within the scope;
-    the response then streams the in-memory list.
+    the caller's logical collection: it is resolved to its physical collection
+    under the caller's effective owner (404 if not owned there), so exports
+    are stateless and isolated per effective owner — including an admin
+    exporting a foreign owner's collection via the ``owner`` query param.
+    Rows are materialized within the scope; the response then streams the
+    in-memory list.
     """
     from docint.utils.csv_stream import DOCUMENT_COLUMNS, document_row, stream_csv
 
@@ -2138,8 +2142,8 @@ def export_entities_csv(
     identical output for the same collection. ``entity_merge_mode="resolved"``
     streams the durable canonical entities (same as the Analysis/Dashboard
     resolved view); it falls back to orthographic on collections that have not
-    been resolved. The path ``name`` is owner-gated and resolved to its physical
-    collection for the read.
+    been resolved. The path ``name`` is resolved to its physical collection
+    under the caller's effective owner for the read.
     """
     from docint.utils.csv_stream import ENTITY_STATS_COLUMNS, entity_stats_row, stream_csv
 
@@ -2180,9 +2184,10 @@ def export_ner_sources_csv(
     paginated ``/collections/ner/sources`` endpoint, so the export reflects
     exactly what the SPA's entity inspector shows. ``entity_merge_mode=
     "resolved"`` includes the canonical entity's sibling aliases. The path
-    ``name`` is owner-gated and resolved to its physical collection; all pages
-    are materialized within that scope before the response streams them (the
-    request scope cannot remain bound across the post-return streaming hops).
+    ``name`` is resolved to its physical collection under the caller's
+    effective owner; all pages are materialized within that scope before the
+    response streams them (the request scope cannot remain bound across the
+    post-return streaming hops).
     """
     from docint.utils.csv_stream import NER_SOURCE_COLUMNS, ner_source_row, stream_csv
 
@@ -2230,7 +2235,8 @@ def export_hate_speech_csv(
     Output schema matches ``hateSpeechToCsv`` in
     ``frontend/src/lib/exports.ts``. Filtering uses the same logic as the
     paginated ``/collections/hate-speech`` endpoint. The path ``name`` is
-    owner-gated and resolved to its physical collection for the read.
+    resolved to its physical collection under the caller's effective owner
+    for the read.
     """
     from docint.core.rag import _filter_hate_speech
     from docint.utils.csv_stream import HATE_SPEECH_COLUMNS, hate_speech_row, stream_csv
@@ -3429,13 +3435,15 @@ async def ingest_finalize(payload: IngestIn, request: Request) -> StreamingRespo
 
 @app.get("/sources/preview", tags=["Sources"])
 def preview_source(collection: str, file_hash: str, principal: Principal = Depends(resolve_principal)) -> FileResponse:  # noqa: B008 — FastAPI dependency marker
-    """Serve a previously ingested source file the caller owns.
+    """Serve a previously ingested source file resolved under the caller's effective owner.
 
-    ``collection`` is the caller's *logical* name; it is owner-gated and
-    resolved to its owner-namespaced physical collection before the source
-    store is touched (404 when the caller does not own it). This both prevents
-    one user from previewing another's files and makes previews resolve under
-    the correct physical path for namespaced users.
+    ``collection`` is the caller's *logical* name; it is resolved to its
+    owner-namespaced physical collection under ``principal.effective_owner``
+    before the source store is touched (404 when that owner does not own it).
+    This both prevents previewing a file outside the caller's effective-owner
+    scope and makes previews resolve under the correct physical path for
+    namespaced users — including an admin previewing a foreign owner's file
+    via the ``owner`` query param.
 
     Args:
         collection (str): The caller's logical collection name.
