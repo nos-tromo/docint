@@ -137,3 +137,52 @@ def test_resolve_principal_honours_custom_header_name(
     request = _make_request({"X-Remote-User": "bob"})
 
     assert resolve_principal(request) == "bob"
+
+
+def test_load_principal_env_groups_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no env vars set, groups config uses the contract defaults.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.delenv("DOCINT_GROUPS_HEADER", raising=False)
+    monkeypatch.delenv("DOCINT_ADMIN_GROUP", raising=False)
+    monkeypatch.delenv("DOCINT_DEFAULT_GROUPS", raising=False)
+
+    cfg = load_principal_env()
+
+    assert cfg.groups_header == "X-Auth-Groups"
+    assert cfg.admin_group == "admins"
+    assert cfg.default_groups is None
+
+
+def test_load_principal_env_groups_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicit env values override the groups header, admin group, and dev groups.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("DOCINT_GROUPS_HEADER", "X-Remote-Groups")
+    monkeypatch.setenv("DOCINT_ADMIN_GROUP", "operators")
+    monkeypatch.setenv("DOCINT_DEFAULT_GROUPS", "operators,users")
+
+    cfg = load_principal_env()
+
+    assert cfg.groups_header == "X-Remote-Groups"
+    assert cfg.admin_group == "operators"
+    assert cfg.default_groups == "operators,users"
+
+
+def test_load_principal_env_blank_default_groups_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blank/whitespace ``DOCINT_DEFAULT_GROUPS`` normalises to ``None``.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("DOCINT_DEFAULT_GROUPS", "   ")
+
+    cfg = load_principal_env()
+
+    assert cfg.default_groups is None
