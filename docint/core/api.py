@@ -2220,12 +2220,16 @@ def list_sessions(
 ) -> dict[str, list[dict[str, Any]]]:
     """List the calling principal's chat sessions, optionally scoped to a collection.
 
-    When ``collection`` (a *logical* name) is supplied it is resolved to the
-    caller's physical Qdrant name and the listing is restricted to sessions
-    pinned to it. A collection the caller does not own (or that no longer
-    exists) yields an empty list rather than a 404 — a stale client selection
-    must not break the sidebar. When ``collection`` is omitted, every session
-    the caller owns is returned (backward compatible).
+    When ``collection`` (a *logical* name) is supplied it is resolved to its
+    physical Qdrant name under the caller's effective owner (an admin's
+    ``owner`` query param, or the caller themself) and the listing is
+    restricted to sessions pinned to it and owned by the calling principal —
+    an admin browsing a foreign collection sees only their own sessions
+    pinned to it, never the owner's. A collection that does not resolve
+    (not owned by the effective owner, or no longer exists) yields an empty
+    list rather than a 404 — a stale client selection must not break the
+    sidebar. When ``collection`` is omitted, every session the caller owns
+    is returned (backward compatible).
 
     Args:
         collection (str | None): Optional logical collection name to scope to.
@@ -2240,7 +2244,7 @@ def list_sessions(
     try:
         sm = rag.ensure_session_manager()
         if collection is not None:
-            physical = rag.ensure_collection_owner_manager().resolve(principal.name, collection)
+            physical = rag.ensure_collection_owner_manager().resolve(principal.effective_owner, collection)
             if physical is None:
                 return {"sessions": []}
             sessions = sm.list_sessions(principal.name, collection=physical)

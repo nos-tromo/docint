@@ -41,14 +41,22 @@ class _FakeIngest:
 
 
 class _SpySessions:
-    """Records the physical collections whose sessions were cascade-deleted."""
+    """Records the physical collections whose sessions were cascade-deleted.
+
+    Also records the (owner, collection) pairs any session listing was scoped to.
+    """
 
     def __init__(self) -> None:
         self.deleted_for: list[str] = []
+        self.listed: list[tuple[str | None, str | None]] = []
 
     def delete_sessions_for_collection(self, collection: str) -> int:
         self.deleted_for.append(collection)
         return 0
+
+    def list_sessions(self, owner: str | None, collection: str | None = None) -> list[dict[str, Any]]:
+        self.listed.append((owner, collection))
+        return [{"id": "s1", "owner": owner, "collection": collection}]
 
 
 class _OwnRAG:
@@ -264,3 +272,23 @@ def test_admin_ingests_into_cross_owner_collection(client: TestClient) -> None:
     # Still exactly alice's collection — not duplicated into the admin's namespace.
     assert client.get("/collections/list", headers={"X-Auth-User": "alice"}).json() == ["alpha"]
     assert client.get("/collections/list", headers=ADMIN).json() == []
+
+
+def test_admin_lists_own_sessions_scoped_to_cross_owner_collection(client: TestClient, _patch_rag: _OwnRAG) -> None:
+    """Admin's /sessions/list?owner=alice resolves alice's collection, not the admin's empty namespace.
+
+    The collection lookup must use the effective owner (alice) so it resolves
+    at all; the session listing itself stays scoped to the admin's own
+    identity, never alice's — an admin never sees another owner's sessions.
+    """
+    _ingest(client, "alice", "alpha")
+
+    resp = client.get("/sessions/list", params={"collection": "alpha", "owner": "alice"}, headers=ADMIN)
+    assert resp.status_code == 200
+    # A resolved collection reaches the session manager (non-empty fake payload);
+    # the old bug's fallback for an unresolvable collection was a hard {"sessions": []}.
+    assert resp.json()["sessions"] != []
+
+    owner_arg, collection_arg = _patch_rag._sessions.listed[-1]
+    assert owner_arg == "root"  # session ownership stays on principal.name, not effective_owner
+    assert collection_arg is not None  # but the collection resolved under alice's namespace
