@@ -69,6 +69,7 @@ def _make_request(headers: dict[str, str] | None = None) -> Request:
         "method": "GET",
         "path": "/",
         "headers": raw_headers,
+        "query_string": b"",
     }
     return Request(scope)
 
@@ -86,7 +87,7 @@ def test_resolve_principal_returns_header_value(
 
     request = _make_request({"X-Auth-User": "alice"})
 
-    assert resolve_principal(request) == "alice"
+    assert resolve_principal(request).name == "alice"
 
 
 def test_resolve_principal_falls_back_to_default_identity(
@@ -102,7 +103,7 @@ def test_resolve_principal_falls_back_to_default_identity(
 
     request = _make_request({})
 
-    assert resolve_principal(request) == "operator"
+    assert resolve_principal(request).name == "operator"
 
 
 def test_resolve_principal_fails_closed_without_header_or_default(
@@ -136,7 +137,7 @@ def test_resolve_principal_honours_custom_header_name(
 
     request = _make_request({"X-Remote-User": "bob"})
 
-    assert resolve_principal(request) == "bob"
+    assert resolve_principal(request).name == "bob"
 
 
 def test_load_principal_env_groups_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -186,3 +187,76 @@ def test_load_principal_env_blank_default_groups_is_none(
     cfg = load_principal_env()
 
     assert cfg.default_groups is None
+
+
+def test_resolve_principal_parses_groups_and_admin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Groups parse from the comma-separated header; admin flag derives from them.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.delenv("DOCINT_GROUPS_HEADER", raising=False)
+    monkeypatch.delenv("DOCINT_ADMIN_GROUP", raising=False)
+
+    principal = resolve_principal(_make_request({"X-Auth-User": "root", "X-Auth-Groups": "admins, users"}))
+
+    assert principal.groups == frozenset({"admins", "users"})
+    assert principal.is_admin is True
+
+
+def test_resolve_principal_fails_closed_on_missing_or_blank_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing or whitespace-only groups header means no groups and not admin.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.delenv("DOCINT_DEFAULT_GROUPS", raising=False)
+
+    for headers in ({"X-Auth-User": "alice"}, {"X-Auth-User": "alice", "X-Auth-Groups": " , ,"}):
+        principal = resolve_principal(_make_request(headers))
+        assert principal.groups == frozenset()
+        assert principal.is_admin is False
+
+
+def test_resolve_principal_dev_default_groups(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DOCINT_DEFAULT_GROUPS applies only when the groups header is absent.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    monkeypatch.setenv("DOCINT_DEFAULT_IDENTITY", "operator")
+    monkeypatch.setenv("DOCINT_DEFAULT_GROUPS", "admins")
+
+    assert resolve_principal(_make_request({})).is_admin is True
+    assert resolve_principal(_make_request({"X-Auth-User": "alice", "X-Auth-Groups": "users"})).is_admin is False
+
+
+def test_effective_owner_rules() -> None:
+    """Only admins may act as another owner; everyone else acts as themselves."""
+    from docint.core.auth.principal import Principal
+
+    admin = Principal(name="root", groups=frozenset({"admins"}), is_admin=True, requested_owner="alice")
+    assert admin.effective_owner == "alice"
+    assert (
+        Principal(name="root", groups=frozenset({"admins"}), is_admin=True, requested_owner=None).effective_owner
+        == "root"
+    )
+    non_admin = Principal(name="bob", groups=frozenset(), is_admin=False, requested_owner="alice")
+    assert non_admin.effective_owner == "bob"
+
+
+def test_resolve_principal_reads_owner_query_param(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``owner`` query param lands in ``requested_owner`` (blank -> None).
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    """
+    request = _make_request({"X-Auth-User": "root"})
+    request.scope["query_string"] = b"owner=alice"
+    assert resolve_principal(request).requested_owner == "alice"
