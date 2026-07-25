@@ -223,3 +223,44 @@ def test_upload_registers_ownership(
     assert resp.status_code == 200, resp.text
     assert _list(client, "alice") == ["uploaded"]
     assert _list(client, "bob") == []
+
+
+ADMIN = {"X-Auth-User": "root", "X-Auth-Groups": "admins"}
+
+
+def test_admin_accesses_cross_owner_with_owner_param(client: TestClient) -> None:
+    """An admin with ?owner=<user> operates in that user's namespace."""
+    _ingest(client, "alice", "alpha")
+
+    resp = client.post("/collections/select?owner=alice", json={"name": "alpha"}, headers=ADMIN)
+    assert resp.status_code == 200
+
+    # Without the owner param the admin is in their own (empty) namespace.
+    assert client.post("/collections/select", json={"name": "alpha"}, headers=ADMIN).status_code == 404
+
+
+def test_non_admin_owner_param_still_404s(client: TestClient) -> None:
+    """A non-admin passing ?owner= resolves in their own namespace: 404, not 403."""
+    _ingest(client, "alice", "alpha")
+
+    resp = client.post("/collections/select?owner=alice", json={"name": "alpha"}, headers={"X-Auth-User": "bob"})
+    assert resp.status_code == 404
+
+
+def test_admin_deletes_cross_owner_collection(client: TestClient) -> None:
+    """Admin delete with ?owner= removes the user's mapping (full owner powers)."""
+    _ingest(client, "alice", "alpha")
+
+    assert client.delete("/collections/alpha?owner=alice", headers=ADMIN).status_code == 200
+    assert client.get("/collections/list", headers={"X-Auth-User": "alice"}).json() == []
+
+
+def test_admin_ingests_into_cross_owner_collection(client: TestClient) -> None:
+    """Admin ingest with ?owner= registers under that owner, not the admin."""
+    _ingest(client, "alice", "alpha")
+    resp = client.post("/ingest?owner=alice", json={"collection": "alpha"}, headers=ADMIN)
+    assert resp.status_code == 200
+
+    # Still exactly alice's collection — not duplicated into the admin's namespace.
+    assert client.get("/collections/list", headers={"X-Auth-User": "alice"}).json() == ["alpha"]
+    assert client.get("/collections/list", headers=ADMIN).json() == []

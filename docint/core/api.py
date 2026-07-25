@@ -209,7 +209,10 @@ def _require_owned_collection(logical_name: str, principal: Principal) -> str:
     The single ownership gate for collection-scoped endpoints. It mirrors
     :func:`_get_owned_report`: a collection the caller does not own (or that
     does not exist) is indistinguishable from "not found" (HTTP 404), so one
-    user's collection names never leak to another.
+    user's collection names never leak to another. Admins may resolve
+    another owner's collection via the request's ``owner`` query param
+    (carried on ``Principal.requested_owner``); for everyone else
+    ``effective_owner == name`` and behavior is exactly as before.
 
     Args:
         logical_name (str): The user-visible collection name from the request.
@@ -224,7 +227,7 @@ def _require_owned_collection(logical_name: str, principal: Principal) -> str:
     name = (logical_name or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Collection name required")
-    physical = rag.ensure_collection_owner_manager().resolve(principal.name, name)
+    physical = rag.ensure_collection_owner_manager().resolve(principal.effective_owner, name)
     if physical is None:
         raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
     return physical
@@ -940,7 +943,7 @@ def collections_delete(name: str, principal: Principal = Depends(resolve_princip
         deleted_sessions = rag.ensure_session_manager().delete_sessions_for_collection(physical)
         if deleted_sessions:
             logger.info("Deleted {} chat session(s) pinned to collection '{}'.", deleted_sessions, name)
-        rag.ensure_collection_owner_manager().delete(principal.name, name)
+        rag.ensure_collection_owner_manager().delete(principal.effective_owner, name)
         return {"ok": True}
     except HTTPException:
         raise
@@ -2868,7 +2871,7 @@ def ingest(payload: IngestIn, request: Request) -> dict[str, bool | str]:
         raise HTTPException(status_code=400, detail="Collection name required")
 
     principal = resolve_principal(request)
-    physical = rag.ensure_collection_owner_manager().register(principal.name, name)
+    physical = rag.ensure_collection_owner_manager().register(principal.effective_owner, name)
 
     data_dir = _resolve_data_dir()
     if not data_dir.is_dir():
@@ -3237,7 +3240,7 @@ async def ingest_upload(
     # owner-namespaced physical collection so two users uploading the same
     # logical name keep separate Qdrant collections and source-file stores.
     principal = resolve_principal(request)
-    physical = rag.ensure_collection_owner_manager().register(principal.name, name)
+    physical = rag.ensure_collection_owner_manager().register(principal.effective_owner, name)
 
     # We use a persistent directory for uploads to support previewing files later.
     # The files are ingested into Qdrant and kept in the collection directory.
@@ -3351,7 +3354,7 @@ async def ingest_finalize(payload: IngestIn, request: Request) -> StreamingRespo
         raise HTTPException(status_code=400, detail="Collection name required")
 
     principal = resolve_principal(request)
-    physical = rag.ensure_collection_owner_manager().register(principal.name, name)
+    physical = rag.ensure_collection_owner_manager().register(principal.effective_owner, name)
     batch_dir = _resolve_qdrant_src_dir() / physical
     hybrid = payload.hybrid
 
