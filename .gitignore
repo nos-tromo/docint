@@ -82,6 +82,8 @@ package-lock.json
 *.sock
 docker-compose.override.yml
 wheels/*.whl
+# Built image tag stamp written by `make build`; never committed.
+.docint-version
 
 # ==================================
 # Hidden files
