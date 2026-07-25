@@ -96,6 +96,18 @@ Loaded by `load_host_env()` (`env_cfg.py:220`).
 | `QDRANT_HOST` | `http://localhost:6333` | Qdrant REST URL. |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Comma-separated CORS origins (the Vite dev server). |
 
+## Identity and authentication — `PrincipalConfig`
+
+Loaded by `load_principal_env()` (`env_cfg.py:574`). Configures request-principal resolution via trusted headers from the gateway or dev fallbacks.
+
+| Variable | Default | Description |
+|---|---|---|
+| `DOCINT_AUTH_HEADER` | `X-Auth-User` | Trusted header carrying the authenticated principal's username. Set by the gateway (`edge-plane`); in dev, falls back to `DOCINT_DEFAULT_IDENTITY`. |
+| `DOCINT_DEFAULT_IDENTITY` | *unset* | Dev-only fallback identity when the trusted header is absent. Production must leave this unset so requests without `X-Auth-User` are rejected (401). Also backfills the owner for pre-existing collection and session rows (legacy migration). |
+| `DOCINT_GROUPS_HEADER` | `X-Auth-Groups` | Trusted header carrying the principal's group memberships (comma-separated). Set by the gateway; in dev, falls back to `DOCINT_DEFAULT_GROUPS`. |
+| `DOCINT_ADMIN_GROUP` | `admins` | Group name that grants admin-level access. Members of this group (from `X-Auth-Groups`) can access collections owned by other principals via the `owner` query parameter; non-admin principals are unaffected and cross-owner access remains 404. |
+| `DOCINT_DEFAULT_GROUPS` | *unset* | Dev-only fallback group memberships (comma-separated) when the trusted header is absent. E.g. `DOCINT_DEFAULT_GROUPS=admins,devs` makes the dev principal an admin and member of devs. |
+
 ## Retrieval — `RetrievalConfig`
 
 Loaded by `load_retrieval_env()` (`env_cfg.py:967`).
