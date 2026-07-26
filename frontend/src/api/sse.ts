@@ -1,4 +1,4 @@
-import { url, ApiError } from './client'
+import { url, withOwner, ApiError } from './client'
 
 export interface SseEvent {
   event: string
@@ -10,7 +10,7 @@ export async function* streamSse(
   body?: unknown,
   signal?: AbortSignal
 ): AsyncGenerator<SseEvent, void, unknown> {
-  const res = await fetch(url(path), {
+  const res = await fetch(url(withOwner(path)), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
     body: body === undefined ? undefined : JSON.stringify(body),

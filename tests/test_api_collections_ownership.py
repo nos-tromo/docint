@@ -41,14 +41,22 @@ class _FakeIngest:
 
 
 class _SpySessions:
-    """Records the physical collections whose sessions were cascade-deleted."""
+    """Records the physical collections whose sessions were cascade-deleted.
+
+    Also records the (owner, collection) pairs any session listing was scoped to.
+    """
 
     def __init__(self) -> None:
         self.deleted_for: list[str] = []
+        self.listed: list[tuple[str | None, str | None]] = []
 
     def delete_sessions_for_collection(self, collection: str) -> int:
         self.deleted_for.append(collection)
         return 0
+
+    def list_sessions(self, owner: str | None, collection: str | None = None) -> list[dict[str, Any]]:
+        self.listed.append((owner, collection))
+        return [{"id": "s1", "owner": owner, "collection": collection}]
 
 
 class _OwnRAG:
@@ -223,3 +231,105 @@ def test_upload_registers_ownership(
     assert resp.status_code == 200, resp.text
     assert _list(client, "alice") == ["uploaded"]
     assert _list(client, "bob") == []
+
+
+ADMIN = {"X-Auth-User": "root", "X-Auth-Groups": "admins"}
+
+
+def test_admin_accesses_cross_owner_with_owner_param(client: TestClient) -> None:
+    """An admin with ?owner=<user> operates in that user's namespace."""
+    _ingest(client, "alice", "alpha")
+
+    resp = client.post("/collections/select?owner=alice", json={"name": "alpha"}, headers=ADMIN)
+    assert resp.status_code == 200
+
+    # Without the owner param the admin is in their own (empty) namespace.
+    assert client.post("/collections/select", json={"name": "alpha"}, headers=ADMIN).status_code == 404
+
+
+def test_non_admin_owner_param_still_404s(client: TestClient) -> None:
+    """A non-admin passing ?owner= resolves in their own namespace: 404, not 403."""
+    _ingest(client, "alice", "alpha")
+
+    resp = client.post("/collections/select?owner=alice", json={"name": "alpha"}, headers={"X-Auth-User": "bob"})
+    assert resp.status_code == 404
+
+
+def test_admin_deletes_cross_owner_collection(client: TestClient) -> None:
+    """Admin delete with ?owner= removes the user's mapping (full owner powers)."""
+    _ingest(client, "alice", "alpha")
+
+    assert client.delete("/collections/alpha?owner=alice", headers=ADMIN).status_code == 200
+    assert client.get("/collections/list", headers={"X-Auth-User": "alice"}).json() == []
+
+
+def test_admin_ingests_into_cross_owner_collection(client: TestClient) -> None:
+    """Admin ingest with ?owner= registers under that owner, not the admin."""
+    _ingest(client, "alice", "alpha")
+    resp = client.post("/ingest?owner=alice", json={"collection": "alpha"}, headers=ADMIN)
+    assert resp.status_code == 200
+
+    # Still exactly alice's collection — not duplicated into the admin's namespace.
+    assert client.get("/collections/list", headers={"X-Auth-User": "alice"}).json() == ["alpha"]
+    assert client.get("/collections/list", headers=ADMIN).json() == []
+
+
+def test_admin_lists_cross_owner_sessions_with_owner_param(client: TestClient, _patch_rag: _OwnRAG) -> None:
+    """Admin's /sessions/list?owner=alice lists *alice's* sessions in alice's collection.
+
+    Both the collection lookup and the session-owner scope use the effective
+    owner (alice): an admin browsing a foreign namespace must see that owner's
+    chats there, not their own empty list.
+    """
+    _ingest(client, "alice", "alpha")
+
+    resp = client.get("/sessions/list", params={"collection": "alpha", "owner": "alice"}, headers=ADMIN)
+    assert resp.status_code == 200
+    # A resolved collection reaches the session manager (non-empty fake payload);
+    # the old bug's fallback for an unresolvable collection was a hard {"sessions": []}.
+    assert resp.json()["sessions"] != []
+
+    owner_arg, collection_arg = _patch_rag._sessions.listed[-1]
+    assert owner_arg == "alice"  # session scope follows effective_owner, not the admin's name
+    assert collection_arg is not None  # and the collection resolved under alice's namespace
+
+
+def test_non_admin_owner_param_does_not_rescope_sessions(client: TestClient, _patch_rag: _OwnRAG) -> None:
+    """A non-admin passing ?owner= keeps their own session scope."""
+    resp = client.get("/sessions/list", params={"owner": "alice"}, headers={"X-Auth-User": "bob"})
+    assert resp.status_code == 200
+
+    owner_arg, _ = _patch_rag._sessions.listed[-1]
+    assert owner_arg == "bob"
+
+
+def test_collections_list_all_admin_shape(client: TestClient) -> None:
+    """?all=true for an admin returns mine + per-owner groups, mine excluded from others."""
+    _ingest(client, "alice", "alpha")
+    _ingest(client, "bob", "beta")
+    _ingest(client, "root", "own")
+
+    body = client.get("/collections/list?all=true", headers=ADMIN).json()
+
+    assert body == {
+        "mine": ["own"],
+        "others": [
+            {"owner": "alice", "collections": ["alpha"]},
+            {"owner": "bob", "collections": ["beta"]},
+        ],
+    }
+
+
+def test_collections_list_all_ignored_for_non_admin(client: TestClient) -> None:
+    """?all=true for a non-admin is silently ignored: plain string[] as always."""
+    _ingest(client, "alice", "alpha")
+    _ingest(client, "bob", "beta")
+
+    assert client.get("/collections/list?all=true", headers={"X-Auth-User": "alice"}).json() == ["alpha"]
+
+
+def test_collections_list_no_params_unchanged_for_admin(client: TestClient) -> None:
+    """Without ?all the admin gets the plain owner-scoped string[] like anyone else."""
+    _ingest(client, "root", "own")
+
+    assert client.get("/collections/list", headers=ADMIN).json() == ["own"]

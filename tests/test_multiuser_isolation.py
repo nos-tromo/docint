@@ -137,3 +137,50 @@ def test_concurrent_documents_isolated_per_owner(monkeypatch: pytest.MonkeyPatch
     assert not errors, errors
     assert results["alice"].json()["documents"] == [{"collection": physical_alice}]
     assert results["bob"].json()["documents"] == [{"collection": physical_bob}]
+
+
+def test_admin_capability_boundary_on_analysis_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Pins the admin cross-owner boundary on the analysis path too (WS6).
+
+    Complements ``test_api_collections_ownership.py``'s admin-select/-delete/
+    -ingest coverage with the same guarantee on ``/collections/documents``:
+    - a non-admin passing ``?owner=`` still resolves in their own namespace
+      (404 here, since carol owns nothing named 'docs') — the query param is
+      not a privilege escalation by itself;
+    - an admin with no ``?owner=`` is scoped to their own (empty) namespace,
+      not silently granted every owner's data.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture.
+        tmp_path (Path): Per-test temp dir for the SQLite store.
+    """
+    rag = _make_rag(monkeypatch, tmp_path)
+    monkeypatch.setattr(RAG, "list_documents", lambda self: [{"collection": self.qdrant_collection}])
+    api_module = _wire(monkeypatch, rag)
+    client = TestClient(api_module.app)
+
+    # Non-admin: the owner param is inert without admin rights.
+    denied = client.get(
+        "/collections/documents",
+        params={"collection": "docs", "owner": "alice"},
+        headers={"X-Auth-User": "carol"},
+    )
+    assert denied.status_code == 404
+
+    # Admin, no owner param: scoped to their own (unregistered) namespace.
+    admin_own = client.get(
+        "/collections/documents",
+        params={"collection": "docs"},
+        headers={"X-Auth-User": "root", "X-Auth-Groups": "admins"},
+    )
+    assert admin_own.status_code == 404
+
+    # Admin with an explicit owner param: resolves alice's physical collection.
+    physical_alice = rag.ensure_collection_owner_manager().resolve("alice", "docs")
+    admin_cross = client.get(
+        "/collections/documents",
+        params={"collection": "docs", "owner": "alice"},
+        headers={"X-Auth-User": "root", "X-Auth-Groups": "admins"},
+    )
+    assert admin_cross.status_code == 200, admin_cross.text
+    assert admin_cross.json()["documents"] == [{"collection": physical_alice}]

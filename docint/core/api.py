@@ -43,7 +43,7 @@ from docint.agents import (
 )
 from docint.agents.history import build_prior_turn
 from docint.cli import ingest as ingest_module
-from docint.core.auth.principal import resolve_principal
+from docint.core.auth.principal import Principal, resolve_principal
 from docint.core.rag import RAG, EmptyIngestionError
 from docint.core.retrieval_filters import build_metadata_filters, build_qdrant_filter
 from docint.core.state.session_manager import SessionCollectionMismatchError
@@ -203,17 +203,20 @@ def _require_active_collection() -> str:
     return name
 
 
-def _require_owned_collection(logical_name: str, principal: str) -> str:
+def _require_owned_collection(logical_name: str, principal: Principal) -> str:
     """Resolve a caller-owned logical collection to its physical Qdrant name.
 
     The single ownership gate for collection-scoped endpoints. It mirrors
     :func:`_get_owned_report`: a collection the caller does not own (or that
     does not exist) is indistinguishable from "not found" (HTTP 404), so one
-    user's collection names never leak to another.
+    user's collection names never leak to another. Admins may resolve
+    another owner's collection via the request's ``owner`` query param
+    (carried on ``Principal.requested_owner``); for everyone else
+    ``effective_owner == name`` and behavior is exactly as before.
 
     Args:
         logical_name (str): The user-visible collection name from the request.
-        principal (str): The resolved calling principal.
+        principal (Principal): The resolved calling principal.
 
     Returns:
         str: The physical (owner-namespaced) Qdrant collection name to use.
@@ -224,13 +227,13 @@ def _require_owned_collection(logical_name: str, principal: str) -> str:
     name = (logical_name or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Collection name required")
-    physical = rag.ensure_collection_owner_manager().resolve(principal, name)
+    physical = rag.ensure_collection_owner_manager().resolve(principal.effective_owner, name)
     if physical is None:
         raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
     return physical
 
 
-def _resolve_request_collection(collection: str | None, principal: str) -> str:
+def _resolve_request_collection(collection: str | None, principal: Principal) -> str:
     """Resolve a collection-scoped request to its physical Qdrant name.
 
     The single resolver for the read/query and analysis/export endpoints. When
@@ -247,7 +250,7 @@ def _resolve_request_collection(collection: str | None, principal: str) -> str:
 
     Args:
         collection (str | None): The caller's logical collection name, if any.
-        principal (str): The resolved calling principal.
+        principal (Principal): The resolved calling principal.
 
     Returns:
         str: The physical (owner-namespaced) Qdrant collection name.
@@ -262,7 +265,7 @@ def _resolve_request_collection(collection: str | None, principal: str) -> str:
 
 
 @contextmanager
-def _scoped_collection(collection: str | None, principal: str) -> Iterator[str]:
+def _scoped_collection(collection: str | None, principal: Principal) -> Iterator[str]:
     """Resolve + owner-gate a request collection and bind it for the engine.
 
     Combines :func:`_resolve_request_collection` with
@@ -274,7 +277,7 @@ def _scoped_collection(collection: str | None, principal: str) -> Iterator[str]:
 
     Args:
         collection (str | None): The caller's logical collection name, if any.
-        principal (str): The resolved calling principal.
+        principal (Principal): The resolved calling principal.
 
     Yields:
         str: The resolved physical collection name.
@@ -581,6 +584,20 @@ class SelectCollectionOut(BaseModel):
     name: str
 
 
+class AdminOwnerCollections(BaseModel):
+    """One foreign owner's logical collection names (admin listing)."""
+
+    owner: str
+    collections: list[str]
+
+
+class AdminCollectionsOut(BaseModel):
+    """Admin-shaped /collections/list response: own plus per-owner groups."""
+
+    mine: list[str]
+    others: list[AdminOwnerCollections]
+
+
 class MetadataFilterIn(BaseModel):
     """Single metadata filter applied to retrieval queries."""
 
@@ -858,25 +875,51 @@ def get_version() -> VersionOut:
     return VersionOut(version=__version__)
 
 
-@app.get("/collections/list", response_model=list[str], tags=["Collections"])
-def collections_list(principal: str = Depends(resolve_principal)) -> list[str]:
-    """List the calling principal's collections (logical names).
+@app.get("/collections/list", response_model=list[str] | AdminCollectionsOut, tags=["Collections"])
+def collections_list(
+    all: bool = False,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> list[str] | AdminCollectionsOut:
+    """List collections: the caller's own, or (admins, with ``?all=true``) everyone's.
 
     Collections are owner-scoped: a caller only sees the collections they
     ingested themselves. Names are the user-visible logical names, not the
-    owner-namespaced physical Qdrant names.
+    owner-namespaced physical Qdrant names. Without ``all`` the response is
+    the caller's logical names exactly as before. With ``all=true`` an admin
+    additionally receives every other owner's collections grouped per owner;
+    for non-admins the flag is silently ignored (plain list) so collection
+    existence never leaks.
 
     Args:
-        principal (str): The resolved request principal.
+        all (bool): When true and the caller is an admin, also return every
+            other owner's collections grouped by owner. Ignored otherwise.
+        principal (Principal): The resolved request principal.
 
     Returns:
-        list[str]: The caller's collection names, sorted.
+        list[str] | AdminCollectionsOut: The caller's collection names,
+            sorted; or, for an admin with ``all=true``, ``mine`` (the
+            caller's own names) plus ``others`` (every other owner's names,
+            grouped and sorted by owner).
 
     Raises:
         HTTPException: If an error occurs while listing collections.
     """
     try:
-        return rag.ensure_collection_owner_manager().list_for(principal)
+        mgr = rag.ensure_collection_owner_manager()
+        mine = mgr.list_for(principal.name)
+        if not (all and principal.is_admin):
+            return mine
+        others: dict[str, list[str]] = {}
+        for owner, logical in mgr.list_all():
+            if owner is None or owner == principal.name:
+                # None-owner legacy rows are unreachable in production
+                # (no default identity => 401 before any resolve).
+                continue
+            others.setdefault(owner, []).append(logical)
+        return AdminCollectionsOut(
+            mine=mine,
+            others=[AdminOwnerCollections(owner=o, collections=c) for o, c in others.items()],
+        )
     except Exception as e:
         logger.error("HTTPException: Error listing collections: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -884,7 +927,8 @@ def collections_list(principal: str = Depends(resolve_principal)) -> list[str]:
 
 @app.post("/collections/select", response_model=SelectCollectionOut, tags=["Collections"])
 def collections_select(
-    payload: SelectCollectionIn, principal: str = Depends(resolve_principal)
+    payload: SelectCollectionIn,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, bool | str]:
     """Validate that the caller owns a collection (non-mutating).
 
@@ -898,7 +942,7 @@ def collections_select(
 
     Args:
         payload (SelectCollectionIn): The payload containing the collection name.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, bool | str]: ``{"ok": True, "name": <logical>}`` when owned.
@@ -913,11 +957,13 @@ def collections_select(
 
 
 @app.delete("/collections/{name}", tags=["Collections"])
-def collections_delete(name: str, principal: str = Depends(resolve_principal)) -> dict[str, bool]:
-    """Delete a collection the caller owns.
+def collections_delete(name: str, principal: Principal = Depends(resolve_principal)) -> dict[str, bool]:  # noqa: B008 — FastAPI dependency marker
+    """Delete a collection resolved under the caller's effective owner.
 
-    Deleting a collection the caller does not own (or one that does not exist)
-    is a 404, so a user can never delete another user's data. The Qdrant
+    Deleting a collection the caller's effective owner does not own (or one
+    that does not exist) is a 404, so a user can never delete another user's
+    data outside their effective-owner scope — including an admin's own
+    namespace when a foreign ``owner`` is not explicitly requested. The Qdrant
     collection is dropped first; only then is the ownership mapping removed, so
     a failed Qdrant delete leaves ownership intact for retry. The collection's
     chat sessions are cascade-deleted after the Qdrant collection is dropped and
@@ -925,7 +971,7 @@ def collections_delete(name: str, principal: str = Depends(resolve_principal)) -
 
     Args:
         name (str): The user-visible collection name to delete.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, bool]: A dictionary indicating success.
@@ -939,7 +985,7 @@ def collections_delete(name: str, principal: str = Depends(resolve_principal)) -
         deleted_sessions = rag.ensure_session_manager().delete_sessions_for_collection(physical)
         if deleted_sessions:
             logger.info("Deleted {} chat session(s) pinned to collection '{}'.", deleted_sessions, name)
-        rag.ensure_collection_owner_manager().delete(principal, name)
+        rag.ensure_collection_owner_manager().delete(principal.effective_owner, name)
         return {"ok": True}
     except HTTPException:
         raise
@@ -1020,12 +1066,12 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                 else:
                     session_id = rag.start_session(
                         payload.session_id,
-                        owner=principal,
+                        owner=principal.effective_owner,
                     )
                     data = rag.chat(
                         payload.question,
                         session_id=session_id,
-                        owner=principal,
+                        owner=principal.effective_owner,
                         metadata_filters=metadata_filters,
                         metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
                         metadata_filter_rules=payload.metadata_filters,
@@ -1129,7 +1175,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
         payload.query_mode not in {"entity_occurrence", "entity_occurrence_multi"}
         and payload.retrieval_mode != "stateless"
     ):
-        session_owner = principal
+        session_owner = principal.effective_owner
         # Up-front collection-pin check so a mismatch is a clean 409 rather than
         # an in-stream SSE error: resuming an owned session against a different
         # collection must be refused before any retrieval runs.
@@ -1381,7 +1427,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
 def summarize(
     refresh: bool = Query(False),
     collection: str | None = None,
-    principal: str = Depends(resolve_principal),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Generate a summary for the caller's collection.
 
@@ -1389,7 +1435,7 @@ def summarize(
         refresh (bool): If ``True``, bypass cached collection summaries.
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, list[dict] | str]: A dictionary containing the summary and sources.
@@ -1426,7 +1472,7 @@ async def summarize_stream(
     request: Request,
     refresh: bool = Query(False),
     collection: str | None = None,
-    principal: str = Depends(resolve_principal),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> StreamingResponse:
     """Generate a streaming summary for the caller's collection.
 
@@ -1436,7 +1482,7 @@ async def summarize_stream(
         refresh (bool): If ``True``, bypass cached collection summaries.
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         StreamingResponse: A streaming response that yields SSE events during summarization.
@@ -1502,7 +1548,7 @@ async def summarize_stream(
 def get_collection_ner(
     refresh: bool = False,
     collection: str | None = None,
-    principal: str = Depends(resolve_principal),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, list[dict[str, Any]]]:
     """Get all NER data (entities and relations) for the caller's collection.
 
@@ -1516,7 +1562,7 @@ def get_collection_ner(
         refresh (bool): If ``True``, bypass in-memory cache and re-fetch from storage.
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, list[dict]]: A dictionary containing the list of NER sources.
@@ -1542,7 +1588,7 @@ def get_collection_hate_speech(
     category: str | None = None,
     min_confidence: str | None = None,
     collection: str | None = None,
-    principal: str = Depends(resolve_principal),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Return flagged hate-speech chunks for the caller's collection.
 
@@ -1562,7 +1608,7 @@ def get_collection_hate_speech(
             ``medium`` < ``high``).
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, Any]: Either the legacy ``{"results": ...}`` payload or a
@@ -1598,7 +1644,7 @@ def get_collection_ner_sources(
     entity_type: str | None = None,
     entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
     collection: str | None = None,
-    principal: str = Depends(resolve_principal),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Return one page of NER-bearing source rows for the caller's collection.
 
@@ -1620,7 +1666,7 @@ def get_collection_ner_sources(
             sibling aliases of the canonical entity.
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, Any]: ``{"items": [...], "next_cursor": ...}``.
@@ -1648,7 +1694,7 @@ def get_collection_ner_sources(
 @app.post("/collections/ner/warm", tags=["Query"])
 async def warm_collection_ner(
     collection: str | None = None,
-    principal: str = Depends(resolve_principal),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Pre-warm the NER aggregate cache for the caller's collection.
 
@@ -1662,7 +1708,7 @@ async def warm_collection_ner(
     Args:
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, Any]: ``{"ok": True}`` once warming completes.
@@ -1686,7 +1732,7 @@ def get_collection_ner_stats(
     include_relations: bool = True,
     entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
     collection: str | None = None,
-    principal: str = Depends(resolve_principal),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Get collection-wide NER statistics for the caller's collection.
 
@@ -1699,7 +1745,7 @@ def get_collection_ner_stats(
             derived views ("resolved" groups by durable canonical entity id).
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, Any]: A dashboard-friendly NER stats payload.
@@ -1730,7 +1776,7 @@ def search_collection_ner_entities(
     limit: int = 100,
     entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
     collection: str | None = None,
-    principal: str = Depends(resolve_principal),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, list[dict[str, Any]]]:
     """Search entities across the caller's collection.
 
@@ -1742,7 +1788,7 @@ def search_collection_ner_entities(
             derived views ("resolved" groups by durable canonical entity id).
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, list[dict]]: Dictionary containing matched entities.
@@ -1773,7 +1819,7 @@ def get_collection_ner_graph(
     min_edge_weight: int = Query(default=1, ge=1),
     entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
     collection: str | None = None,
-    principal: str = Depends(resolve_principal),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Return a derived entity graph for the caller's collection.
 
@@ -1794,7 +1840,7 @@ def get_collection_ner_graph(
             canonical entity id).
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, Any]: Graph payload containing ``nodes``, ``edges`` and ``meta``.
@@ -1822,7 +1868,7 @@ def get_collection_ner_graph(
 @app.post("/collections/entities/resolve", tags=["Query"])
 def resolve_collection_entities(
     collection: str | None = None,
-    principal: str = Depends(resolve_principal),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, int]:
     """Resolve the caller's collection's entities into durable canonicals.
 
@@ -1835,7 +1881,7 @@ def resolve_collection_entities(
     Args:
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, int]: Resolution summary counts (``processed``, ``minted``,
@@ -1866,7 +1912,7 @@ def get_collection_documents(
     cursor: str | None = None,
     limit: int = Query(default=0, ge=0, le=500),
     collection: str | None = None,
-    principal: str = Depends(resolve_principal),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Return documents in the caller's collection.
 
@@ -1883,7 +1929,7 @@ def get_collection_documents(
         limit (int): Page size (1-500). ``0`` selects legacy mode.
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, Any]: Either the legacy ``{"documents": ...}`` payload or a
@@ -1908,7 +1954,7 @@ def get_collection_documents(
 @app.get("/collections/documents/count", tags=["Query"])
 def get_collection_documents_count(
     collection: str | None = None,
-    principal: str = Depends(resolve_principal),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, int]:
     """Return the number of unique documents in the caller's collection.
 
@@ -1919,7 +1965,7 @@ def get_collection_documents_count(
     Args:
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
     """
     try:
         with _scoped_collection(collection, principal):
@@ -1934,7 +1980,7 @@ def get_collection_documents_count(
 @app.get("/collections/documents/summary", response_model=DocumentsSummaryOut, tags=["Query"])
 def get_collection_documents_summary(
     collection: str | None = None,
-    principal: str = Depends(resolve_principal),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Return collection-wide document aggregates for the Inspector's KPI strip.
 
@@ -1948,7 +1994,7 @@ def get_collection_documents_summary(
     Args:
         collection (str | None): Caller's logical collection; owner-gated and
             scoped per request, falling back to the process default when omitted.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
     """
     try:
         with _scoped_collection(collection, principal):
@@ -2011,7 +2057,7 @@ def _get_owned_report(report_id: int, principal: str) -> dict[str, Any]:
 
     Args:
         report_id (int): The report id.
-        principal (str): The resolved request principal.
+        principal (str): The resolved request principal name.
 
     Returns:
         dict[str, Any]: The report, including its ordered items.
@@ -2025,7 +2071,7 @@ def _get_owned_report(report_id: int, principal: str) -> dict[str, Any]:
     return report
 
 
-def _capture_collection_overview(report_id: int, collection: str, principal: str) -> dict[str, Any] | None:
+def _capture_collection_overview(report_id: int, collection: str, principal: Principal) -> dict[str, Any] | None:
     """Build and persist a report's frozen document-overview snapshot.
 
     Reads the full document list under the caller's scoped collection and stores
@@ -2035,7 +2081,7 @@ def _capture_collection_overview(report_id: int, collection: str, principal: str
     Args:
         report_id (int): The report id.
         collection (str): The report's logical collection.
-        principal (str): The resolved request principal (owner).
+        principal (Principal): The resolved request principal (owner).
 
     Returns:
         dict | None: The updated report, or ``None`` when the report is not owned.
@@ -2047,20 +2093,22 @@ def _capture_collection_overview(report_id: int, collection: str, principal: str
     with _scoped_collection(collection, principal):
         documents = rag.list_documents()
     overview = build_collection_overview(documents, collection, datetime.now(UTC))
-    return rag.ensure_report_manager().set_collection_overview_snapshot(report_id, principal, overview)
+    return rag.ensure_report_manager().set_collection_overview_snapshot(report_id, principal.effective_owner, overview)
 
 
 @app.get("/collections/{name}/export/documents.csv", tags=["Query"])
-def export_documents_csv(name: str, principal: str = Depends(resolve_principal)) -> StreamingResponse:
+def export_documents_csv(name: str, principal: Principal = Depends(resolve_principal)) -> StreamingResponse:  # noqa: B008 — FastAPI dependency marker
     """Stream the documents table as CSV.
 
     The endpoint reads from :meth:`docint.core.rag.RAG.list_documents` (cached
     after the first call) and emits one row per document. Output matches the
     CLI's ``query --documents`` schema column-for-column. The path ``name`` is
-    the caller's logical collection: it is owner-gated (404 if not owned) and
-    resolved to its physical collection for the duration of the read, so exports
-    are stateless and isolated per user. Rows are materialized within the scope;
-    the response then streams the in-memory list.
+    the caller's logical collection: it is resolved to its physical collection
+    under the caller's effective owner (404 if not owned there), so exports
+    are stateless and isolated per effective owner — including an admin
+    exporting a foreign owner's collection via the ``owner`` query param.
+    Rows are materialized within the scope; the response then streams the
+    in-memory list.
     """
     from docint.utils.csv_stream import DOCUMENT_COLUMNS, document_row, stream_csv
 
@@ -2085,7 +2133,7 @@ def export_entities_csv(
     min_mentions: int = Query(default=1, ge=1),
     entity_type: str | None = None,
     entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
-    principal: str = Depends(resolve_principal),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> StreamingResponse:
     """Stream the top entities by mention frequency as CSV.
 
@@ -2094,8 +2142,8 @@ def export_entities_csv(
     identical output for the same collection. ``entity_merge_mode="resolved"``
     streams the durable canonical entities (same as the Analysis/Dashboard
     resolved view); it falls back to orthographic on collections that have not
-    been resolved. The path ``name`` is owner-gated and resolved to its physical
-    collection for the read.
+    been resolved. The path ``name`` is resolved to its physical collection
+    under the caller's effective owner for the read.
     """
     from docint.utils.csv_stream import ENTITY_STATS_COLUMNS, entity_stats_row, stream_csv
 
@@ -2127,7 +2175,7 @@ def export_ner_sources_csv(
     entity_text: str | None = None,
     entity_type: str | None = None,
     entity_merge_mode: Literal["orthographic", "exact", "resolved"] = Query(default="orthographic"),
-    principal: str = Depends(resolve_principal),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> StreamingResponse:
     """Stream entity findings (per-source rows) as CSV.
 
@@ -2136,9 +2184,10 @@ def export_ner_sources_csv(
     paginated ``/collections/ner/sources`` endpoint, so the export reflects
     exactly what the SPA's entity inspector shows. ``entity_merge_mode=
     "resolved"`` includes the canonical entity's sibling aliases. The path
-    ``name`` is owner-gated and resolved to its physical collection; all pages
-    are materialized within that scope before the response streams them (the
-    request scope cannot remain bound across the post-return streaming hops).
+    ``name`` is resolved to its physical collection under the caller's
+    effective owner; all pages are materialized within that scope before the
+    response streams them (the request scope cannot remain bound across the
+    post-return streaming hops).
     """
     from docint.utils.csv_stream import NER_SOURCE_COLUMNS, ner_source_row, stream_csv
 
@@ -2179,14 +2228,15 @@ def export_hate_speech_csv(
     name: str,
     category: str | None = None,
     min_confidence: str | None = None,
-    principal: str = Depends(resolve_principal),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> StreamingResponse:
     """Stream the hate-speech findings table as CSV.
 
     Output schema matches ``hateSpeechToCsv`` in
     ``frontend/src/lib/exports.ts``. Filtering uses the same logic as the
     paginated ``/collections/hate-speech`` endpoint. The path ``name`` is
-    owner-gated and resolved to its physical collection for the read.
+    resolved to its physical collection under the caller's effective owner
+    for the read.
     """
     from docint.core.rag import _filter_hate_speech
     from docint.utils.csv_stream import HATE_SPEECH_COLUMNS, hate_speech_row, stream_csv
@@ -2212,20 +2262,24 @@ def export_hate_speech_csv(
 @app.get("/sessions/list", response_model=SessionListOut, tags=["Sessions"])
 def list_sessions(
     collection: str | None = None,
-    principal: str = Depends(resolve_principal),
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, list[dict[str, Any]]]:
     """List the calling principal's chat sessions, optionally scoped to a collection.
 
-    When ``collection`` (a *logical* name) is supplied it is resolved to the
-    caller's physical Qdrant name and the listing is restricted to sessions
-    pinned to it. A collection the caller does not own (or that no longer
-    exists) yields an empty list rather than a 404 — a stale client selection
-    must not break the sidebar. When ``collection`` is omitted, every session
-    the caller owns is returned (backward compatible).
+    When ``collection`` (a *logical* name) is supplied it is resolved to its
+    physical Qdrant name under the caller's effective owner (an admin's
+    ``owner`` query param, or the caller themself) and the listing is
+    restricted to sessions pinned to it and owned by that same effective
+    owner — an admin browsing a foreign collection sees the owner's
+    sessions there, exactly as the owner would. A collection that does not resolve
+    (not owned by the effective owner, or no longer exists) yields an empty
+    list rather than a 404 — a stale client selection must not break the
+    sidebar. When ``collection`` is omitted, every session the caller owns
+    is returned (backward compatible).
 
     Args:
         collection (str | None): Optional logical collection name to scope to.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, list[dict[str, Any]]]: A dictionary containing the list of sessions.
@@ -2236,12 +2290,12 @@ def list_sessions(
     try:
         sm = rag.ensure_session_manager()
         if collection is not None:
-            physical = rag.ensure_collection_owner_manager().resolve(principal, collection)
+            physical = rag.ensure_collection_owner_manager().resolve(principal.effective_owner, collection)
             if physical is None:
                 return {"sessions": []}
-            sessions = sm.list_sessions(principal, collection=physical)
+            sessions = sm.list_sessions(principal.effective_owner, collection=physical)
         else:
-            sessions = sm.list_sessions(principal)
+            sessions = sm.list_sessions(principal.effective_owner)
         return {"sessions": sessions}
     except Exception as e:
         logger.error("Error listing sessions: {}", e)
@@ -2254,7 +2308,8 @@ def list_sessions(
     tags=["Sessions"],
 )
 def get_session_history(
-    session_id: str, principal: str = Depends(resolve_principal)
+    session_id: str,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, list[dict[str, Any]]]:
     """Get history for a session owned by the calling principal.
 
@@ -2263,7 +2318,7 @@ def get_session_history(
 
     Args:
         session_id (str): The ID of the session.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, list[dict[str, Any]]]: A dictionary containing the session messages.
@@ -2273,7 +2328,7 @@ def get_session_history(
             principal; 500 on unexpected errors.
     """
     try:
-        messages = rag.ensure_session_manager().get_session_history(session_id, principal)
+        messages = rag.ensure_session_manager().get_session_history(session_id, principal.effective_owner)
     except HTTPException:
         raise
     except Exception as e:
@@ -2341,7 +2396,7 @@ def _collect_session_source_files(session_id: str, principal: str) -> list[tuple
 
 
 @app.get("/sessions/{session_id}/sources.zip", tags=["Sessions"])
-def export_session_sources_zip(session_id: str, principal: str = Depends(resolve_principal)) -> StreamingResponse:
+def export_session_sources_zip(session_id: str, principal: Principal = Depends(resolve_principal)) -> StreamingResponse:  # noqa: B008 — FastAPI dependency marker
     """Stream a ZIP bundle of every source file cited in a session.
 
     Resolves each citation's ``file_hash`` to an on-disk file using the same
@@ -2353,7 +2408,7 @@ def export_session_sources_zip(session_id: str, principal: str = Depends(resolve
 
     Args:
         session_id (str): The session ID to package.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         StreamingResponse: ``application/zip`` payload with an
@@ -2364,7 +2419,7 @@ def export_session_sources_zip(session_id: str, principal: str = Depends(resolve
             owned by another principal.
     """
     try:
-        files = _collect_session_source_files(session_id, principal)
+        files = _collect_session_source_files(session_id, principal.effective_owner)
     except Exception as e:
         logger.error("Error assembling session sources for {}: {}", session_id, e)
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -2397,7 +2452,7 @@ def export_session_sources_zip(session_id: str, principal: str = Depends(resolve
 
 
 @app.delete("/sessions/{session_id}", tags=["Sessions"])
-def delete_session(session_id: str, principal: str = Depends(resolve_principal)) -> dict[str, bool]:
+def delete_session(session_id: str, principal: Principal = Depends(resolve_principal)) -> dict[str, bool]:  # noqa: B008 — FastAPI dependency marker
     """Delete a session owned by the calling principal.
 
     A session that does not exist or is owned by another principal is
@@ -2405,7 +2460,7 @@ def delete_session(session_id: str, principal: str = Depends(resolve_principal))
 
     Args:
         session_id (str): The ID of the session to delete.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, bool]: A dictionary indicating whether the deletion
@@ -2416,7 +2471,7 @@ def delete_session(session_id: str, principal: str = Depends(resolve_principal))
             principal; 500 on unexpected errors.
     """
     try:
-        success = rag.ensure_session_manager().delete_session(session_id, principal)
+        success = rag.ensure_session_manager().delete_session(session_id, principal.effective_owner)
     except HTTPException:
         raise
     except Exception as e:
@@ -2428,12 +2483,12 @@ def delete_session(session_id: str, principal: str = Depends(resolve_principal))
 
 
 @app.post("/reports", tags=["Reports"])
-def create_report(payload: ReportCreateIn, principal: str = Depends(resolve_principal)) -> dict[str, Any]:
+def create_report(payload: ReportCreateIn, principal: Principal = Depends(resolve_principal)) -> dict[str, Any]:  # noqa: B008 — FastAPI dependency marker
     """Create a new, empty report owned by the calling principal.
 
     Args:
         payload (ReportCreateIn): Title and optional collection/session scope.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, Any]: The created report.
@@ -2441,7 +2496,7 @@ def create_report(payload: ReportCreateIn, principal: str = Depends(resolve_prin
     try:
         report = rag.ensure_report_manager().create_report(
             title=payload.title,
-            owner=principal,
+            owner=principal.effective_owner,
             collection_name=payload.collection_name,
             operator=payload.operator,
             reference_number=payload.reference_number,
@@ -2466,31 +2521,32 @@ def create_report(payload: ReportCreateIn, principal: str = Depends(resolve_prin
 
 @app.get("/reports", response_model=ReportListOut, tags=["Reports"])
 def list_reports(
-    collection: str | None = None, principal: str = Depends(resolve_principal)
+    collection: str | None = None,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, list[dict[str, Any]]]:
     """List the caller's reports, optionally filtered by collection.
 
     Args:
         collection (str | None): Optional collection filter.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, list[dict[str, Any]]]: The caller's report summaries.
     """
     try:
-        return {"reports": rag.ensure_report_manager().list_reports(principal, collection)}
+        return {"reports": rag.ensure_report_manager().list_reports(principal.effective_owner, collection)}
     except Exception as e:
         logger.error("Error listing reports: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/reports/{report_id}", tags=["Reports"])
-def get_report(report_id: int, principal: str = Depends(resolve_principal)) -> dict[str, Any]:
+def get_report(report_id: int, principal: Principal = Depends(resolve_principal)) -> dict[str, Any]:  # noqa: B008 — FastAPI dependency marker
     """Return a report (with items) owned by the calling principal.
 
     Args:
         report_id (int): The report id.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, Any]: The report and its ordered items.
@@ -2498,19 +2554,21 @@ def get_report(report_id: int, principal: str = Depends(resolve_principal)) -> d
     Raises:
         HTTPException: 404 when the report is missing or not owned.
     """
-    return _get_owned_report(report_id, principal)
+    return _get_owned_report(report_id, principal.effective_owner)
 
 
 @app.patch("/reports/{report_id}", tags=["Reports"])
 def update_report(
-    report_id: int, payload: ReportUpdateIn, principal: str = Depends(resolve_principal)
+    report_id: int,
+    payload: ReportUpdateIn,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Update a report (title, case metadata, or contents toggle) owned by the caller.
 
     Args:
         report_id (int): The report id.
         payload (ReportUpdateIn): Fields to update; only non-null fields apply.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, Any]: The updated report.
@@ -2520,7 +2578,7 @@ def update_report(
     """
     report = rag.ensure_report_manager().update_report(
         report_id,
-        principal,
+        principal.effective_owner,
         title=payload.title,
         operator=payload.operator,
         reference_number=payload.reference_number,
@@ -2533,7 +2591,10 @@ def update_report(
 
 
 @app.post("/reports/{report_id}/collection-overview/refresh", tags=["Reports"])
-def refresh_report_collection_overview(report_id: int, principal: str = Depends(resolve_principal)) -> dict[str, Any]:
+def refresh_report_collection_overview(
+    report_id: int,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, Any]:
     """Recapture a report's document-overview snapshot from its collection.
 
     Point-in-time refresh: rebuilds the frozen manifest from the collection's
@@ -2541,7 +2602,7 @@ def refresh_report_collection_overview(report_id: int, principal: str = Depends(
 
     Args:
         report_id (int): The report id.
-        principal (str): The resolved request principal (owner).
+        principal (Principal): The resolved request principal (owner).
 
     Returns:
         dict[str, Any]: The report with its refreshed ``collection_overview`` snapshot.
@@ -2551,7 +2612,7 @@ def refresh_report_collection_overview(report_id: int, principal: str = Depends(
             principal (or its collection is no longer owned); 400 when the report
             has no collection; 502 when the manifest build fails.
     """
-    report = _get_owned_report(report_id, principal)
+    report = _get_owned_report(report_id, principal.effective_owner)
     collection = report.get("collection_name")
     if not collection:
         raise HTTPException(status_code=400, detail="Report has no collection to summarize.")
@@ -2566,12 +2627,12 @@ def refresh_report_collection_overview(report_id: int, principal: str = Depends(
 
 
 @app.delete("/reports/{report_id}", tags=["Reports"])
-def delete_report(report_id: int, principal: str = Depends(resolve_principal)) -> dict[str, bool]:
+def delete_report(report_id: int, principal: Principal = Depends(resolve_principal)) -> dict[str, bool]:  # noqa: B008 — FastAPI dependency marker
     """Delete a report (and its items) owned by the calling principal.
 
     Args:
         report_id (int): The report id.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, bool]: ``{"ok": True}`` on success.
@@ -2579,21 +2640,23 @@ def delete_report(report_id: int, principal: str = Depends(resolve_principal)) -
     Raises:
         HTTPException: 404 when the report is missing or not owned.
     """
-    if not rag.ensure_report_manager().delete_report(report_id, principal):
+    if not rag.ensure_report_manager().delete_report(report_id, principal.effective_owner):
         raise HTTPException(status_code=404, detail="Report not found.")
     return {"ok": True}
 
 
 @app.post("/reports/{report_id}/items", tags=["Reports"])
 def add_report_item(
-    report_id: int, payload: ReportItemIn, principal: str = Depends(resolve_principal)
+    report_id: int,
+    payload: ReportItemIn,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Add a snapshotted artifact to a report (idempotent by dedupe key).
 
     Args:
         report_id (int): The report id.
         payload (ReportItemIn): Artifact type, dedupe key, snapshot, optional note.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, Any]: The added (or pre-existing) item.
@@ -2603,7 +2666,7 @@ def add_report_item(
     """
     item = rag.ensure_report_manager().add_item(
         report_id,
-        principal,
+        principal.effective_owner,
         artifact_type=payload.artifact_type,
         dedupe_key=payload.dedupe_key,
         snapshot=payload.snapshot,
@@ -2616,7 +2679,10 @@ def add_report_item(
 
 @app.patch("/reports/{report_id}/items/{item_id}", tags=["Reports"])
 def annotate_report_item(
-    report_id: int, item_id: int, payload: ReportItemNoteIn, principal: str = Depends(resolve_principal)
+    report_id: int,
+    item_id: int,
+    payload: ReportItemNoteIn,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Set or clear the note on a report item.
 
@@ -2624,7 +2690,7 @@ def annotate_report_item(
         report_id (int): The report id.
         item_id (int): The item id.
         payload (ReportItemNoteIn): The new note (``None`` clears it).
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, Any]: The updated item.
@@ -2632,20 +2698,24 @@ def annotate_report_item(
     Raises:
         HTTPException: 404 when the report/item is missing or not owned.
     """
-    item = rag.ensure_report_manager().annotate_item(report_id, principal, item_id, note=payload.note)
+    item = rag.ensure_report_manager().annotate_item(report_id, principal.effective_owner, item_id, note=payload.note)
     if item is None:
         raise HTTPException(status_code=404, detail="Report or item not found.")
     return item
 
 
 @app.delete("/reports/{report_id}/items/{item_id}", tags=["Reports"])
-def remove_report_item(report_id: int, item_id: int, principal: str = Depends(resolve_principal)) -> dict[str, bool]:
+def remove_report_item(
+    report_id: int,
+    item_id: int,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, bool]:
     """Remove a single item from a report owned by the calling principal.
 
     Args:
         report_id (int): The report id.
         item_id (int): The item id.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, bool]: ``{"ok": True}`` on success.
@@ -2653,21 +2723,23 @@ def remove_report_item(report_id: int, item_id: int, principal: str = Depends(re
     Raises:
         HTTPException: 404 when the report/item is missing or not owned.
     """
-    if not rag.ensure_report_manager().remove_item(report_id, principal, item_id):
+    if not rag.ensure_report_manager().remove_item(report_id, principal.effective_owner, item_id):
         raise HTTPException(status_code=404, detail="Report or item not found.")
     return {"ok": True}
 
 
 @app.post("/reports/{report_id}/items/reorder", tags=["Reports"])
 def reorder_report_items(
-    report_id: int, payload: ReportReorderIn, principal: str = Depends(resolve_principal)
+    report_id: int,
+    payload: ReportReorderIn,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
 ) -> dict[str, Any]:
     """Reorder a report's items to match the supplied id order.
 
     Args:
         report_id (int): The report id.
         payload (ReportReorderIn): Desired item id order.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, Any]: The reordered report.
@@ -2675,18 +2747,18 @@ def reorder_report_items(
     Raises:
         HTTPException: 404 when the report is missing or not owned.
     """
-    report = rag.ensure_report_manager().reorder_items(report_id, principal, payload.item_ids)
+    report = rag.ensure_report_manager().reorder_items(report_id, principal.effective_owner, payload.item_ids)
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found.")
     return report
 
 
 @app.get("/reports/{report_id}/export.md", tags=["Reports"])
-def export_report_markdown(report_id: int, principal: str = Depends(resolve_principal)) -> Response:
+def export_report_markdown(report_id: int, principal: Principal = Depends(resolve_principal)) -> Response:  # noqa: B008 — FastAPI dependency marker
     """Export a report as a single Markdown document (attachment download)."""
     from docint.core.state.report_render import render_markdown
 
-    report = _get_owned_report(report_id, principal)
+    report = _get_owned_report(report_id, principal.effective_owner)
     return Response(
         content=render_markdown(report),
         media_type="text/markdown; charset=utf-8",
@@ -2695,11 +2767,11 @@ def export_report_markdown(report_id: int, principal: str = Depends(resolve_prin
 
 
 @app.get("/reports/{report_id}/export.html", tags=["Reports"])
-def export_report_html(report_id: int, principal: str = Depends(resolve_principal)) -> Response:
+def export_report_html(report_id: int, principal: Principal = Depends(resolve_principal)) -> Response:  # noqa: B008 — FastAPI dependency marker
     """Export a report as a self-contained HTML document (served inline)."""
     from docint.core.state.report_render import render_html
 
-    report = _get_owned_report(report_id, principal)
+    report = _get_owned_report(report_id, principal.effective_owner)
     return Response(
         content=render_html(report),
         media_type="text/html; charset=utf-8",
@@ -2708,11 +2780,11 @@ def export_report_html(report_id: int, principal: str = Depends(resolve_principa
 
 
 @app.get("/reports/{report_id}/export.json", tags=["Reports"])
-def export_report_json(report_id: int, principal: str = Depends(resolve_principal)) -> Response:
+def export_report_json(report_id: int, principal: Principal = Depends(resolve_principal)) -> Response:  # noqa: B008 — FastAPI dependency marker
     """Export the full report (with snapshots) as JSON (attachment download)."""
     from docint.core.state.report_render import render_json
 
-    report = _get_owned_report(report_id, principal)
+    report = _get_owned_report(report_id, principal.effective_owner)
     return Response(
         content=render_json(report),
         media_type="application/json",
@@ -2721,11 +2793,11 @@ def export_report_json(report_id: int, principal: str = Depends(resolve_principa
 
 
 @app.get("/reports/{report_id}/export.zip", tags=["Reports"])
-def export_report_zip(report_id: int, principal: str = Depends(resolve_principal)) -> Response:
+def export_report_zip(report_id: int, principal: Principal = Depends(resolve_principal)) -> Response:  # noqa: B008 — FastAPI dependency marker
     """Export a report as a ZIP bundle of per-type CSVs (attachment download)."""
     from docint.core.state.report_render import report_csv_bundle
 
-    report = _get_owned_report(report_id, principal)
+    report = _get_owned_report(report_id, principal.effective_owner)
     return Response(
         content=report_csv_bundle(report),
         media_type="application/zip",
@@ -2734,7 +2806,7 @@ def export_report_zip(report_id: int, principal: str = Depends(resolve_principal
 
 
 @app.get("/reports/{report_id}/export.pdf", tags=["Reports"])
-def export_report_pdf(report_id: int, principal: str = Depends(resolve_principal)) -> Response:
+def export_report_pdf(report_id: int, principal: Principal = Depends(resolve_principal)) -> Response:  # noqa: B008 — FastAPI dependency marker
     """Export a report as a real paginated PDF rendered by WeasyPrint.
 
     Returns 503 if the PDF engine (WeasyPrint + native libs) is unavailable,
@@ -2742,7 +2814,7 @@ def export_report_pdf(report_id: int, principal: str = Depends(resolve_principal
     """
     from docint.core.state.report_render import PdfEngineUnavailableError, render_pdf
 
-    report = _get_owned_report(report_id, principal)
+    report = _get_owned_report(report_id, principal.effective_owner)
     try:
         pdf_bytes = render_pdf(report)
     except PdfEngineUnavailableError as e:
@@ -2778,10 +2850,10 @@ def agent_chat(payload: AgentChatIn, request: Request) -> AgentChatOut:
     # explicitly so the turn persists under the right conversation.
     try:
         with rag.collection_scope(physical):
-            session_id = rag.start_session(payload.session_id, owner=owner)
+            session_id = rag.start_session(payload.session_id, owner=owner.name)
             ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
             if ctx and rag.sessions:
-                ctx.history = rag.sessions.get_session_history(session_id, owner=owner)
+                ctx.history = rag.sessions.get_session_history(session_id, owner=owner.name)
 
             turn = Turn(user_input=payload.message, session_id=session_id)
             orchestrator = _build_orchestrator()
@@ -2849,7 +2921,7 @@ def ingest(payload: IngestIn, request: Request) -> dict[str, bool | str]:
         raise HTTPException(status_code=400, detail="Collection name required")
 
     principal = resolve_principal(request)
-    physical = rag.ensure_collection_owner_manager().register(principal, name)
+    physical = rag.ensure_collection_owner_manager().register(principal.effective_owner, name)
 
     data_dir = _resolve_data_dir()
     if not data_dir.is_dir():
@@ -2910,7 +2982,7 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
     # Up-front collection-pin check so a mismatch is a clean 409 rather than an
     # in-stream error event.
     if payload.session_id:
-        pinned = rag.ensure_session_manager().get_session_collection(payload.session_id, owner)
+        pinned = rag.ensure_session_manager().get_session_collection(payload.session_id, owner.name)
         if pinned is not None and pinned != physical:
             raise HTTPException(
                 status_code=409,
@@ -2940,10 +3012,10 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
                     tuple[str, Any, Any, Any]: ``(session_id, ctx, analysis,
                     clarification_decision)``.
                 """
-                session_id = rag.start_session(payload.session_id, owner=owner)
+                session_id = rag.start_session(payload.session_id, owner=owner.name)
                 ctx = rag.sessions.get_agent_context(session_id) if rag.sessions else None
                 if ctx and rag.sessions:
-                    ctx.history = rag.sessions.get_session_history(session_id, owner=owner)
+                    ctx.history = rag.sessions.get_session_history(session_id, owner=owner.name)
                 turn = Turn(user_input=payload.message, session_id=session_id)
                 analysis = _select_understanding_agent().analyze(turn, context=ctx)
                 clarification_decision = _clarification_policy.evaluate(
@@ -2979,7 +3051,7 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
                 prior_turn = build_prior_turn(ctx.history) if ctx else None
                 return cast(
                     "Iterator[Any]",
-                    rag.stream_chat(query_text, session_id=session_id, owner=owner, prior_turn=prior_turn),
+                    rag.stream_chat(query_text, session_id=session_id, owner=owner.name, prior_turn=prior_turn),
                 )
 
             # Tokens
@@ -3218,7 +3290,7 @@ async def ingest_upload(
     # owner-namespaced physical collection so two users uploading the same
     # logical name keep separate Qdrant collections and source-file stores.
     principal = resolve_principal(request)
-    physical = rag.ensure_collection_owner_manager().register(principal, name)
+    physical = rag.ensure_collection_owner_manager().register(principal.effective_owner, name)
 
     # We use a persistent directory for uploads to support previewing files later.
     # The files are ingested into Qdrant and kept in the collection directory.
@@ -3332,7 +3404,7 @@ async def ingest_finalize(payload: IngestIn, request: Request) -> StreamingRespo
         raise HTTPException(status_code=400, detail="Collection name required")
 
     principal = resolve_principal(request)
-    physical = rag.ensure_collection_owner_manager().register(principal, name)
+    physical = rag.ensure_collection_owner_manager().register(principal.effective_owner, name)
     batch_dir = _resolve_qdrant_src_dir() / physical
     hybrid = payload.hybrid
 
@@ -3362,19 +3434,21 @@ async def ingest_finalize(payload: IngestIn, request: Request) -> StreamingRespo
 
 
 @app.get("/sources/preview", tags=["Sources"])
-def preview_source(collection: str, file_hash: str, principal: str = Depends(resolve_principal)) -> FileResponse:
-    """Serve a previously ingested source file the caller owns.
+def preview_source(collection: str, file_hash: str, principal: Principal = Depends(resolve_principal)) -> FileResponse:  # noqa: B008 — FastAPI dependency marker
+    """Serve a previously ingested source file resolved under the caller's effective owner.
 
-    ``collection`` is the caller's *logical* name; it is owner-gated and
-    resolved to its owner-namespaced physical collection before the source
-    store is touched (404 when the caller does not own it). This both prevents
-    one user from previewing another's files and makes previews resolve under
-    the correct physical path for namespaced users.
+    ``collection`` is the caller's *logical* name; it is resolved to its
+    owner-namespaced physical collection under ``principal.effective_owner``
+    before the source store is touched (404 when that owner does not own it).
+    This both prevents previewing a file outside the caller's effective-owner
+    scope and makes previews resolve under the correct physical path for
+    namespaced users — including an admin previewing a foreign owner's file
+    via the ``owner`` query param.
 
     Args:
         collection (str): The caller's logical collection name.
         file_hash (str): The hash of the file to preview.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         FileResponse: A response containing the requested file.
@@ -3391,7 +3465,7 @@ def preview_source(collection: str, file_hash: str, principal: str = Depends(res
 
 
 @app.post("/translate", tags=["Translate"])
-def translate_text(payload: TranslateIn, principal: str = Depends(resolve_principal)) -> dict[str, Any]:
+def translate_text(payload: TranslateIn, principal: Principal = Depends(resolve_principal)) -> dict[str, Any]:  # noqa: B008 — FastAPI dependency marker
     """Translate a client-supplied snippet into the operator's locale.
 
     Authenticated for consistency, but not collection-scoped: it translates text
@@ -3400,7 +3474,7 @@ def translate_text(payload: TranslateIn, principal: str = Depends(resolve_princi
 
     Args:
         payload (TranslateIn): The snippet to translate.
-        principal (str): The resolved request principal.
+        principal (Principal): The resolved request principal.
 
     Returns:
         dict[str, Any]: ``{ok, translation, model, target_lang, error}``.

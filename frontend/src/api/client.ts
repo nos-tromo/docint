@@ -33,6 +33,25 @@ export function url(path: string) {
   return `${BASE}${path}`
 }
 
+// Admin owner context: when an admin has a foreign collection selected, every
+// request carries `owner=<that user>` so the backend resolves in their
+// namespace (Principal.requested_owner). Null for non-admins/own collections.
+let ownerParam: string | null = null
+
+export function setOwnerParam(owner: string | null) {
+  ownerParam = owner
+}
+
+export function getOwnerParam(): string | null {
+  return ownerParam
+}
+
+export function withOwner(pathAndQuery: string): string {
+  if (!ownerParam) return pathAndQuery
+  const sep = pathAndQuery.includes('?') ? '&' : '?'
+  return `${pathAndQuery}${sep}owner=${encodeURIComponent(ownerParam)}`
+}
+
 export async function apiGet<T>(path: string, params?: Record<string, string | number | boolean | undefined>): Promise<T> {
   const qs = params
     ? '?' +
@@ -41,12 +60,12 @@ export async function apiGet<T>(path: string, params?: Record<string, string | n
         .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
         .join('&')
     : ''
-  return handle<T>(await fetch(url(path) + qs))
+  return handle<T>(await fetch(url(withOwner(path + qs))))
 }
 
 export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   return handle<T>(
-    await fetch(url(path), {
+    await fetch(url(withOwner(path)), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body)
@@ -56,7 +75,7 @@ export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
 
 export async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
   return handle<T>(
-    await fetch(url(path), {
+    await fetch(url(withOwner(path)), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body)
@@ -65,5 +84,5 @@ export async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
 }
 
 export async function apiDelete<T>(path: string): Promise<T> {
-  return handle<T>(await fetch(url(path), { method: 'DELETE' }))
+  return handle<T>(await fetch(url(withOwner(path)), { method: 'DELETE' }))
 }

@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { EntityMergeMode } from '@/api/types'
+import { setOwnerParam } from '@/api/client'
 
 export interface PreviewModal {
   collection: string
@@ -10,11 +11,12 @@ export interface PreviewModal {
 
 interface UiState {
   selectedCollection: string | null
+  selectedOwner: string | null
   currentSessionId: string | null
   previewModal: PreviewModal | null
   entityMergeMode: EntityMergeMode
   graphTopK: number | null
-  setSelectedCollection: (name: string | null) => void
+  setSelectedCollection: (name: string | null, owner?: string | null) => void
   setCurrentSessionId: (id: string | null) => void
   setEntityMergeMode: (mode: EntityMergeMode) => void
   setGraphTopK: (n: number | null) => void
@@ -26,21 +28,24 @@ export const useUiStore = create<UiState>()(
   persist(
     (set) => ({
       selectedCollection: null,
+      selectedOwner: null,
       currentSessionId: null,
       previewModal: null,
       entityMergeMode: 'resolved',
       graphTopK: null,
-      setSelectedCollection: (name) =>
+      setSelectedCollection: (name, owner = null) =>
         set((s) =>
           // Invariant: the open chat always belongs to the active collection,
           // or is null. Enforced here at the single source of truth, so every
           // caller (Sidebar switch/delete/reconcile, Ingest's post-ingest
           // collection flip, any future one) drops the current session whenever
           // the active collection actually changes. Re-selecting the same
-          // collection is a no-op and keeps the open chat.
-          name === s.selectedCollection
-            ? { selectedCollection: name }
-            : { selectedCollection: name, currentSessionId: null }
+          // collection is a no-op and keeps the open chat. A foreign collection
+          // with the same name is a different collection — the (name, owner)
+          // pair is compared as a whole.
+          name === s.selectedCollection && owner === s.selectedOwner
+            ? { selectedCollection: name, selectedOwner: owner }
+            : { selectedCollection: name, selectedOwner: owner, currentSessionId: null }
         ),
       setCurrentSessionId: (id) => set({ currentSessionId: id }),
       setEntityMergeMode: (mode) => set({ entityMergeMode: mode }),
@@ -58,20 +63,23 @@ export const useUiStore = create<UiState>()(
       // list and clears it if the collection no longer exists.
       partialize: (s) => ({
         selectedCollection: s.selectedCollection,
+        selectedOwner: s.selectedOwner,
         currentSessionId: s.currentSessionId,
         entityMergeMode: s.entityMergeMode,
         graphTopK: s.graphTopK
       }),
-      version: 2,
+      version: 3,
       migrate: (persisted) => {
         const prior = (persisted ?? {}) as {
           selectedCollection?: string | null
+          selectedOwner?: string | null
           currentSessionId?: string | null
           entityMergeMode?: EntityMergeMode
           graphTopK?: number | null
         }
         return {
           selectedCollection: prior.selectedCollection ?? null,
+          selectedOwner: prior.selectedOwner ?? null,
           currentSessionId: prior.currentSessionId ?? null,
           entityMergeMode: prior.entityMergeMode ?? 'resolved',
           graphTopK: prior.graphTopK ?? null
@@ -80,3 +88,6 @@ export const useUiStore = create<UiState>()(
     }
   )
 )
+
+setOwnerParam(useUiStore.getState().selectedOwner)
+useUiStore.subscribe((s) => setOwnerParam(s.selectedOwner))

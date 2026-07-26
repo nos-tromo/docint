@@ -566,11 +566,17 @@ class PrincipalConfig:
 
     header_name: str
     default_identity: str | None
+    groups_header: str
+    admin_group: str
+    default_groups: str | None
 
 
 def load_principal_env(
     default_header_name: str = "X-Auth-User",
     default_identity: str | None = None,
+    default_groups_header: str = "X-Auth-Groups",
+    default_admin_group: str = "admins",
+    default_groups: str | None = None,
 ) -> PrincipalConfig:
     """Loads request-principal configuration from environment variables.
 
@@ -584,12 +590,20 @@ def load_principal_env(
             authenticated principal.
         default_identity (str | None): Default fallback identity when no
             ``DOCINT_DEFAULT_IDENTITY`` is configured.
+        default_groups_header (str): Default header carrying the
+            authenticated principal's groups.
+        default_admin_group (str): Default group name for admin-level access.
+        default_groups (str | None): Default fallback groups when no
+            ``DOCINT_DEFAULT_GROUPS`` is configured.
 
     Returns:
         PrincipalConfig: Dataclass containing principal configuration.
         - header_name (str): The trusted header carrying the principal.
         - default_identity (str | None): Fallback / backfill identity, or
           ``None`` when unset (resolver then fails closed with 401).
+        - groups_header (str): The trusted header carrying the principal's groups.
+        - admin_group (str): The group name for admin-level access.
+        - default_groups (str | None): Fallback groups, or ``None`` when unset.
     """
     raw_identity = os.getenv("DOCINT_DEFAULT_IDENTITY")
     if raw_identity is not None and raw_identity.strip():
@@ -597,9 +611,18 @@ def load_principal_env(
     else:
         resolved_identity = default_identity
 
+    raw_groups = os.getenv("DOCINT_DEFAULT_GROUPS")
+    if raw_groups is not None and raw_groups.strip():
+        resolved_groups: str | None = raw_groups.strip()
+    else:
+        resolved_groups = default_groups
+
     return PrincipalConfig(
         header_name=os.getenv("DOCINT_AUTH_HEADER", default_header_name),
         default_identity=resolved_identity,
+        groups_header=os.getenv("DOCINT_GROUPS_HEADER", default_groups_header),
+        admin_group=os.getenv("DOCINT_ADMIN_GROUP", default_admin_group),
+        default_groups=resolved_groups,
     )
 
 

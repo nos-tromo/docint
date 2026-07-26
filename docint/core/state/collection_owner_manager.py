@@ -157,6 +157,24 @@ class CollectionOwnerManager:
             )
             return [str(r[0]) for r in rows]
 
+    def list_all(self) -> list[tuple[str | None, str]]:
+        """Return every ``(owner, logical_name)`` mapping, sorted by owner then name.
+
+        Admin-only listing surface: callers are responsible for gating on the
+        requesting principal's admin flag before exposing the result.
+
+        Returns:
+            list[tuple[str | None, str]]: All ownership rows, including legacy
+                backfilled ones (whose logical name equals the physical name).
+        """
+        with self._session_scope() as s:
+            rows = (
+                s.query(CollectionOwnership.owner, CollectionOwnership.logical_name)
+                .order_by(CollectionOwnership.owner, CollectionOwnership.logical_name)
+                .all()
+            )
+            return [(r[0], str(r[1])) for r in rows]
+
     def delete(self, owner: str | None, logical: str) -> str | None:
         """Delete the mapping the caller owns; return its physical name, or ``None``.
 

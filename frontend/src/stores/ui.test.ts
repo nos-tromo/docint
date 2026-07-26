@@ -5,6 +5,7 @@ beforeEach(() => {
   localStorage.clear()
   useUiStore.setState({
     selectedCollection: null,
+    selectedOwner: null,
     currentSessionId: null,
     previewModal: null,
     entityMergeMode: 'resolved',
@@ -77,5 +78,19 @@ describe('useUiStore', () => {
     useUiStore.setState({ selectedCollection: 'alpha', currentSessionId: 's1' })
     useUiStore.getState().setSelectedCollection('alpha')
     expect(useUiStore.getState().currentSessionId).toBe('s1')
+  })
+
+  it('tracks the selected owner and clears it on own-collection selection', () => {
+    useUiStore.getState().setSelectedCollection('theirs', 'jane.doe')
+    expect(useUiStore.getState().selectedOwner).toBe('jane.doe')
+
+    useUiStore.getState().setSelectedCollection('mine')
+    expect(useUiStore.getState().selectedOwner).toBeNull()
+  })
+
+  it('changing owner of the same-named collection drops the open session', () => {
+    useUiStore.setState({ selectedCollection: 'alpha', selectedOwner: null, currentSessionId: 's1' })
+    useUiStore.getState().setSelectedCollection('alpha', 'jane.doe')
+    expect(useUiStore.getState().currentSessionId).toBeNull()
   })
 })

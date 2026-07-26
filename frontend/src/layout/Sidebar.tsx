@@ -8,6 +8,7 @@ import { useDeleteSession, useSessions, sessionsKey } from '@/hooks/useSessions'
 import { useUiStore } from '@/stores/ui'
 import { cn } from '@/lib/cn'
 import { VersionBadge } from '@/components/VersionBadge'
+import { buildCollectionEntries, entryMatches, type CollectionEntry } from '@/lib/collectionEntries'
 
 const NAV = [
   { to: '/', label: 'Dashboard' },
@@ -35,31 +36,51 @@ export function Sidebar() {
   const deleteSessionMutation = useDeleteSession()
   const qc = useQueryClient()
   const selected = useUiStore((s) => s.selectedCollection)
+  const selectedOwner = useUiStore((s) => s.selectedOwner)
   const setSelected = useUiStore((s) => s.setSelectedCollection)
   const currentSessionId = useUiStore((s) => s.currentSessionId)
   const setCurrentSessionId = useUiStore((s) => s.setCurrentSessionId)
   const sessions = sessionsData?.sessions ?? []
+  const entries = collections ? buildCollectionEntries(collections) : []
+  const selectedIndex = entries.findIndex((e) => entryMatches(e, selected, selectedOwner))
 
-  // A persisted collection can point at one this user no longer owns (deleted
-  // since last visit). Once the owned list has loaded, clear a stale selection
-  // so the UI returns to the no-collection state instead of firing requests
-  // that 404.
+  // A persisted collection can point at one this user no longer has access to
+  // (deleted, or a foreign one no longer shared, since last visit). Once the
+  // listing has loaded, clear a stale selection so the UI returns to the
+  // no-collection state instead of firing requests that 404.
   useEffect(() => {
     if (!collections || !selected) return
-    if (!collections.includes(selected)) {
+    const stillExists = buildCollectionEntries(collections).some((e) =>
+      entryMatches(e, selected, useUiStore.getState().selectedOwner)
+    )
+    if (!stillExists) {
       setSelected(null)
       setCurrentSessionId(null)
     }
   }, [collections, selected, setSelected, setCurrentSessionId])
 
-  const onSelectCollection = async (name: string) => {
-    if (!name || name === selected) return
-    await selectMutation.mutateAsync(name)
-    setSelected(name)
+  const onSelectCollection = async (entry: CollectionEntry) => {
+    if (entryMatches(entry, selected, selectedOwner)) return
+    const prevSelected = selected
+    const prevOwner = selectedOwner
+    const prevSessionId = currentSessionId
+    setSelected(entry.name, entry.owner)
     // A session is pinned to the collection it was created under. Switching
     // collections resets any open chat so the next message can't resume it
     // against the wrong collection (which the backend refuses with a 409).
     setCurrentSessionId(null)
+    try {
+      await selectMutation.mutateAsync(entry.name)
+    } catch {
+      // A failing select must not leave a dead selection committed — restore
+      // exactly what was active before this attempt (both the (name, owner)
+      // pair and the open session). The file has no toast mechanism; the
+      // mutation's own error state (selectMutation.error) is the surfaced
+      // signal, matching how the other mutations here report failure.
+      setSelected(prevSelected, prevOwner)
+      setCurrentSessionId(prevSessionId)
+      return
+    }
     // Stay in whatever section the user is currently viewing — switching the
     // active collection must not yank them to chat. The one exception is a
     // pinned chat session sub-route (`/chat/:sessionId`): that session belongs
@@ -70,8 +91,9 @@ export function Sidebar() {
     }
   }
 
-  const onDeleteCollection = (name: string) => {
-    if (!confirm(`Delete collection "${name}"? This cannot be undone.`)) return
+  const onDeleteCollection = (name: string, owner: string | null) => {
+    const label = owner ? `"${name}" (owner: ${owner})` : `"${name}"`
+    if (!confirm(`Delete collection ${label}? This cannot be undone.`)) return
     deleteCollectionMutation.mutate(name, {
       onSuccess: () => {
         if (selected === name) {
@@ -149,25 +171,42 @@ export function Sidebar() {
               Active
             </span>
           )}
+          {selected && selectedOwner && (
+            <span className="text-[10px] text-muted-foreground shrink-0 truncate">
+              {selectedOwner}
+            </span>
+          )}
           <select
             aria-label="Select collection"
             className="min-w-0 flex-1 cursor-pointer bg-zinc-950 text-sm text-foreground outline-hidden"
-            value={selected ?? ''}
-            onChange={(e) => onSelectCollection(e.target.value)}
+            value={selectedIndex >= 0 ? String(selectedIndex) : ''}
+            onChange={(e) => onSelectCollection(entries[Number(e.target.value)])}
           >
             <option value="" disabled>
-              {collections?.length ? 'Choose a collection…' : 'No collections yet'}
+              {entries.length ? 'Choose a collection…' : 'No collections yet'}
             </option>
-            {collections?.map((c) => (
-              <option key={c} value={c}>
+            {collections?.mine.map((c) => (
+              <option key={`own:${c}`} value={String(entries.findIndex((e) => entryMatches(e, c, null)))}>
                 {c}
               </option>
+            ))}
+            {collections?.others.map((g) => (
+              <optgroup key={g.owner} label={g.owner}>
+                {g.collections.map((c) => (
+                  <option
+                    key={`${g.owner}:${c}`}
+                    value={String(entries.findIndex((e) => entryMatches(e, c, g.owner)))}
+                  >
+                    {c}
+                  </option>
+                ))}
+              </optgroup>
             ))}
           </select>
           {selected && (
             <button
               type="button"
-              onClick={() => onDeleteCollection(selected)}
+              onClick={() => onDeleteCollection(selected, selectedOwner)}
               aria-label={`Delete collection ${selected}`}
               title="Delete this collection"
               className="shrink-0 text-zinc-500 transition-colors hover:text-red-400"

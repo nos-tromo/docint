@@ -47,7 +47,7 @@ export function Dashboard() {
             </span>
           }
         />
-        <KpiCard label="Collections" value={collections?.length ?? null} />
+        <KpiCard label="Collections" value={collections?.mine.length ?? null} />
         <KpiCard
           label="Documents"
           value={collection ? documentsCount?.count ?? null : '—'}

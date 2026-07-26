@@ -191,7 +191,7 @@ export function Ingest() {
           className="bg-zinc-900 border border-border rounded-md px-2 py-1 text-sm"
         />
         <datalist id="existing-collections">
-          {collections?.map((c) => (
+          {collections?.mine.map((c) => (
             <option key={c} value={c} />
           ))}
         </datalist>
