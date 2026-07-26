@@ -68,6 +68,7 @@ export const de: Strings = {
 
   // shared transport-error suffix
   'common.transport_suffix': ' (Transport: {detail})',
+  'common.owned_by_suffix': ' (Eigentümer/-in: {owner})',
 
   // chat
   'chat.title': 'Chat',
@@ -287,4 +288,94 @@ export const de: Strings = {
   'report.count_filetype_other': '{count} Dateitypen',
   'report.count_entitytype_one': '{count} Entitätstyp',
   'report.count_entitytype_other': '{count} Entitätstypen',
+
+  // dashboard
+  'dashboard.title': 'Dashboard',
+  'dashboard.kpi_backend': 'Backend',
+  'dashboard.kpi_collections': 'Sammlungen',
+  'dashboard.status_online': 'online',
+  'dashboard.status_offline': 'offline',
+  'dashboard.kpi_hint_in': 'in {collection}',
+  'dashboard.kpi_hint_select': 'Sammlung auswählen',
+  'dashboard.top_entities': 'Top-Entitäten',
+  'dashboard.top_k_label': 'top-k',
+  'dashboard.min_mentions_label': 'Min. Erwähnungen',
+  'dashboard.select_collection_entities': 'Wählen Sie eine Sammlung aus, um Entitäten zu sehen.',
+  'dashboard.recent_sessions': 'Letzte Sitzungen',
+  'dashboard.chart_empty': 'Noch keine Entitäten.',
+  'dashboard.chart_mentions': 'Erwähnungen',
+
+  // inspector route wrapper
+  'inspector.title': 'Inspektion',
+  'inspector.select_collection': 'Wählen Sie eine Sammlung aus.',
+
+  // reference-metadata field labels (shared by chat citations, entity
+  // findings, hate-speech rows, and the .txt/.md download exports)
+  'common.refmeta_network': 'Netzwerk',
+  'common.refmeta_type': 'Typ',
+  'common.refmeta_uuid': 'UUID',
+  'common.refmeta_posting_uuid': 'Beitrags-UUID',
+  'common.refmeta_posting_id': 'Beitrags-ID',
+  'common.refmeta_media_id': 'Medien-ID',
+  'common.refmeta_url': 'URL',
+  'common.refmeta_posting_network': 'Beitragsnetzwerk',
+  'common.refmeta_posting_author': 'Beitragsautor/-in',
+  'common.refmeta_posting_author_id': 'Beitragsautor-ID',
+  'common.refmeta_posting_vanity': 'Beitrags-Vanity',
+  'common.refmeta_posting_timestamp': 'Beitragszeitstempel',
+  'common.refmeta_posting_url': 'Beitrags-URL',
+  'common.refmeta_posting_text': 'Beitragstext',
+  'common.refmeta_timestamp': 'Zeitstempel',
+  'common.refmeta_author': 'Autor/-in',
+  'common.refmeta_author_id': 'Autor-ID',
+  'common.refmeta_vanity': 'Vanity-Name',
+  'common.refmeta_text': 'Text',
+  'common.refmeta_text_id': 'Text-ID',
+  'common.refmeta_parent_text': 'Übergeordneter Text',
+  'common.refmeta_anchor_text': 'Ankertext',
+  'common.refmeta_speaker': 'Sprecher/-in',
+  'common.refmeta_language': 'Sprache',
+  'common.refmeta_detected_language': 'Erkannte Sprache',
+  'common.refmeta_source_file': 'Quelldatei',
+
+  // bare Page/Row labels (mirrors backend ui_strings.py report_label_page/row)
+  'common.meta_page': 'Seite',
+  'common.meta_row': 'Zeile',
+
+  // client-generated .txt/.md download content (chat transcript, summary)
+  'export.unknown_source': 'Unbekannt',
+  'export.user_prefix': 'BENUTZER: ',
+  'export.assistant_prefix': 'ASSISTENT: ',
+  'export.validation_prefix': 'VALIDIERUNG: ',
+  'export.sources_heading': 'QUELLEN:',
+  'export.empty_placeholder': '(leer)',
+
+  // bare "not applicable" fallback (download content)
+  'common.not_applicable': 'k. A.',
+
+  // ingest stage/task label mapping (LABEL_KEY-style, mirrors hate.category_*)
+  'ingest.stage_processing_pdfs': 'PDFs werden verarbeitet',
+  'ingest.task_hate_detection': 'Hassrede-Erkennung',
+  'ingest.stage_progress': '{current} von {total}',
+
+  // document-format unit words (documentFormat.ts)
+  'documentFormat.unit_pg': 'S.',
+  'documentFormat.unit_row_one': 'Zeile',
+  'documentFormat.unit_row_other': 'Zeilen',
+
+  // api/ingest.ts — batched-upload guidance messages (surfaced as SSE
+  // warning/error events, rendered raw by Ingest.tsx)
+  'ingest.batch_files_count': '{count} Dateien',
+  'ingest.batch_too_large':
+    'Batch {batch}/{total} ({label}) ist größer als das Limit von {limit} pro Upload und wurde übersprungen. Erhöhen Sie DOCINT_CLIENT_MAX_BODY_SIZE und starten Sie neu, oder entfernen Sie die zu große Datei und nehmen Sie erneut auf — bereits aufgenommene Dateien werden automatisch übersprungen.',
+  'ingest.batch_failed_http':
+    'Batch {batch}/{total} ({label}) ist fehlgeschlagen (HTTP {status}) und wurde übersprungen; die übrigen Batches wurden fortgesetzt.',
+  'ingest.batch_failed_network':
+    'Batch {batch}/{total} ({label}) ist fehlgeschlagen (Netzwerkfehler) und wurde übersprungen; die übrigen Batches wurden fortgesetzt.',
+  'ingest.upload_failed_too_large':
+    'Upload fehlgeschlagen: Jeder Batch überschritt das Limit von {limit} pro Upload. Erhöhen Sie DOCINT_CLIENT_MAX_BODY_SIZE und starten Sie neu, oder laden Sie kleinere Dateien hoch.',
+  'ingest.upload_failed_rejected':
+    'Upload fehlgeschlagen: Keiner der {count} Batches wurde akzeptiert. Prüfen Sie, ob das Backend läuft und erreichbar ist, und versuchen Sie es erneut.',
+  'ingest.partial_failure_message':
+    'Abgeschlossen, aber {count} Datei(en) wurden übersprungen: {files}. Details siehe Warnungen oben.',
 }

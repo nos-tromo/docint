@@ -75,7 +75,7 @@ export function EntityFinding({
     entityLabel != null ? entityFindingSnapshot(source, entityLabel, translation ?? undefined) : null
   const inReport = reportItem != null && (reportDedupeKeys?.has(reportItem.dedupe_key) ?? false)
   const collection = useUiStore((s) => s.selectedCollection)
-  const refMeta = referenceMetadataItems(source.reference_metadata)
+  const refMeta = referenceMetadataItems(source.reference_metadata, {}, t)
   const chunkText = (source.chunk_text ?? source.text ?? '').trim()
   const segments = highlightSegments(chunkText, highlightTerms)
   const translationState = useTranslatable(chunkText, setTranslation)

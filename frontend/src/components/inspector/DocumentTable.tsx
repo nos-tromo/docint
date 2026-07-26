@@ -53,11 +53,11 @@ function buildColumns(t: ReturnType<typeof useT>): ColumnDef<DocumentRecord>[] {
     },
     {
       id: 'units',
-      accessorFn: (r) => unitsLabel(r).sort,
+      accessorFn: (r) => unitsLabel(r, t).sort,
       header: t('table.col_units'),
       meta: { align: 'right' },
       cell: (c) => {
-        const units = unitsLabel(c.row.original)
+        const units = unitsLabel(c.row.original, t)
         return (
           <span className={cn('tabular-nums', units.text === '—' && 'text-muted-foreground')}>
             {units.text}

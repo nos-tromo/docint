@@ -53,7 +53,7 @@ function HateSpeechTableRow({
   const [translation, setTranslation] = useState<TranslationPayload | null>(null)
   const reportItem = hateSpeechSnapshot(row, translation ?? undefined)
   const inReport = reportDedupeKeys?.has(reportItem.dedupe_key) ?? false
-  const refMeta = referenceMetadataItems(row.reference_metadata)
+  const refMeta = referenceMetadataItems(row.reference_metadata, {}, i18n)
   const chunkText = (row.chunk_text ?? row.text ?? '').trim()
   const translationState = useTranslatable(chunkText, setTranslation)
   const source = row.source_ref ?? row.filename ?? i18n('common.unknown_source')

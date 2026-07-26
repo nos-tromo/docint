@@ -97,7 +97,7 @@ export function Sidebar() {
   }
 
   const onDeleteCollection = (name: string, owner: string | null) => {
-    const label = owner ? `"${name}" (owner: ${owner})` : `"${name}"`
+    const label = owner ? `"${name}"${t('common.owned_by_suffix', { owner })}` : `"${name}"`
     if (!confirm(t('common.delete_collection_confirm', { label }))) return
     deleteCollectionMutation.mutate(name, {
       onSuccess: () => {

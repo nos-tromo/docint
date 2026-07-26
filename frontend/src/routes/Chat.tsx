@@ -196,7 +196,7 @@ export function Chat() {
               onClick={() =>
                 downloadText(
                   `chat_${currentSessionId ?? 'session'}.txt`,
-                  chatTranscriptToText(state.turns)
+                  chatTranscriptToText(state.turns, t)
                 )
               }
               className="px-3 py-1 rounded-md border border-border text-sm"

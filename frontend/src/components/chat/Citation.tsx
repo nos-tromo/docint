@@ -11,7 +11,7 @@ export function Citation({ source }: { source: Source }) {
   const t = useT()
   const [open, setOpen] = useState(false)
   const collection = useUiStore((s) => s.selectedCollection)
-  const refMeta = referenceMetadataItems(source.reference_metadata)
+  const refMeta = referenceMetadataItems(source.reference_metadata, {}, t)
   return (
     <div className="rounded-md border border-border bg-zinc-900 px-3 py-2 text-sm">
       <button
@@ -19,7 +19,7 @@ export function Citation({ source }: { source: Source }) {
         className="flex items-center justify-between w-full gap-2"
         onClick={() => setOpen((v) => !v)}
       >
-        <span className="truncate">{sourceLabel(source)}</span>
+        <span className="truncate">{sourceLabel(source, t)}</span>
         <span className="text-xs text-muted-foreground">{formatScore(source.score)}</span>
       </button>
       {open && (

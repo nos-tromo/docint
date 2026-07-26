@@ -102,7 +102,7 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
               onClick={() =>
                 downloadText(
                   'summary.md',
-                  summaryToMarkdown(state.meta, state.text),
+                  summaryToMarkdown(state.meta, state.text, t),
                   'text/markdown;charset=utf-8'
                 )
               }

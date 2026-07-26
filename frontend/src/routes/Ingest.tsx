@@ -122,7 +122,13 @@ export function Ingest() {
     const truncationMessage = t('ingest.error_truncated')
     let sawTerminal = false
     try {
-      for await (const ev of streamIngestUploadBatched(state.collection, state.files, limitBytes)) {
+      for await (const ev of streamIngestUploadBatched(
+        state.collection,
+        state.files,
+        limitBytes,
+        undefined,
+        t
+      )) {
         dispatch({ type: 'event', v: ev })
         if (ev.event === 'warning') {
           // A batch was skipped (e.g. a lone oversize file → 413, or a transient
@@ -134,7 +140,7 @@ export function Ingest() {
         }
         if (ev.event === 'error') {
           const data = ev.data as Record<string, unknown>
-          setError(String(data.message ?? 'Ingestion failed'))
+          setError(String(data.message ?? t('ingest.failed_default')))
           sawTerminal = true
           continue
         }

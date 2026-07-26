@@ -1,4 +1,6 @@
 import type { DocumentRecord } from '@/api/types'
+import type { Strings } from '@/i18n'
+import { defaultT } from '@/i18n/defaultT'
 
 /**
  * Human-friendly short labels for the MIME types docint actually ingests.
@@ -61,13 +63,22 @@ export interface UnitsLabel {
  * Images and anything with neither return `—` instead of a misleading `0`.
  *
  * @param doc Document record (only `page_count` / `row_count` are read).
+ * @param t Translate function; defaults to the English catalog for pure/test callers.
  * @returns The display text and a numeric `sort` key (`0` when there are no units).
  */
-export function unitsLabel(doc: Pick<DocumentRecord, 'page_count' | 'row_count'>): UnitsLabel {
+export function unitsLabel(
+  doc: Pick<DocumentRecord, 'page_count' | 'row_count'>,
+  t: (key: keyof Strings, vars?: Record<string, string | number>) => string = defaultT
+): UnitsLabel {
   const pages = doc.page_count ?? 0
-  if (pages > 0) return { text: `${pages} pg`, sort: pages }
+  if (pages > 0) return { text: `${pages} ${t('documentFormat.unit_pg')}`, sort: pages }
   const rows = doc.row_count ?? 0
-  if (rows > 0) return { text: `${rows} ${rows === 1 ? 'row' : 'rows'}`, sort: rows }
+  if (rows > 0) {
+    return {
+      text: `${rows} ${t(rows === 1 ? 'documentFormat.unit_row_one' : 'documentFormat.unit_row_other')}`,
+      sort: rows
+    }
+  }
   return { text: '—', sort: 0 }
 }
 

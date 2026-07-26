@@ -65,6 +65,7 @@ export const en = {
 
   // shared transport-error suffix
   'common.transport_suffix': ' (transport: {detail})',
+  'common.owned_by_suffix': ' (owner: {owner})',
 
   // chat
   'chat.title': 'Chat',
@@ -281,4 +282,94 @@ export const en = {
   'report.count_filetype_other': '{count} file types',
   'report.count_entitytype_one': '{count} entity type',
   'report.count_entitytype_other': '{count} entity types',
+
+  // dashboard
+  'dashboard.title': 'Dashboard',
+  'dashboard.kpi_backend': 'Backend',
+  'dashboard.kpi_collections': 'Collections',
+  'dashboard.status_online': 'online',
+  'dashboard.status_offline': 'offline',
+  'dashboard.kpi_hint_in': 'in {collection}',
+  'dashboard.kpi_hint_select': 'select a collection',
+  'dashboard.top_entities': 'Top entities',
+  'dashboard.top_k_label': 'top-k',
+  'dashboard.min_mentions_label': 'min mentions',
+  'dashboard.select_collection_entities': 'Select a collection to see entities.',
+  'dashboard.recent_sessions': 'Recent sessions',
+  'dashboard.chart_empty': 'No entities yet.',
+  'dashboard.chart_mentions': 'Mentions',
+
+  // inspector route wrapper
+  'inspector.title': 'Inspector',
+  'inspector.select_collection': 'Select a collection.',
+
+  // reference-metadata field labels (shared by chat citations, entity
+  // findings, hate-speech rows, and the .txt/.md download exports)
+  'common.refmeta_network': 'Network',
+  'common.refmeta_type': 'Type',
+  'common.refmeta_uuid': 'UUID',
+  'common.refmeta_posting_uuid': 'Posting UUID',
+  'common.refmeta_posting_id': 'Posting ID',
+  'common.refmeta_media_id': 'Media ID',
+  'common.refmeta_url': 'URL',
+  'common.refmeta_posting_network': 'Posting Network',
+  'common.refmeta_posting_author': 'Posting Author',
+  'common.refmeta_posting_author_id': 'Posting Author ID',
+  'common.refmeta_posting_vanity': 'Posting Vanity',
+  'common.refmeta_posting_timestamp': 'Posting Timestamp',
+  'common.refmeta_posting_url': 'Posting URL',
+  'common.refmeta_posting_text': 'Posting Text',
+  'common.refmeta_timestamp': 'Timestamp',
+  'common.refmeta_author': 'Author',
+  'common.refmeta_author_id': 'Author ID',
+  'common.refmeta_vanity': 'Vanity',
+  'common.refmeta_text': 'Text',
+  'common.refmeta_text_id': 'Text ID',
+  'common.refmeta_parent_text': 'Parent Text',
+  'common.refmeta_anchor_text': 'Anchor Text',
+  'common.refmeta_speaker': 'Speaker',
+  'common.refmeta_language': 'Language',
+  'common.refmeta_detected_language': 'Detected Language',
+  'common.refmeta_source_file': 'Source File',
+
+  // bare Page/Row labels (mirrors backend ui_strings.py report_label_page/row)
+  'common.meta_page': 'Page',
+  'common.meta_row': 'Row',
+
+  // client-generated .txt/.md download content (chat transcript, summary)
+  'export.unknown_source': 'Unknown',
+  'export.user_prefix': 'USER: ',
+  'export.assistant_prefix': 'ASSISTANT: ',
+  'export.validation_prefix': 'VALIDATION: ',
+  'export.sources_heading': 'SOURCES:',
+  'export.empty_placeholder': '(empty)',
+
+  // bare "not applicable" fallback (download content)
+  'common.not_applicable': 'n/a',
+
+  // ingest stage/task label mapping (LABEL_KEY-style, mirrors hate.category_*)
+  'ingest.stage_processing_pdfs': 'Processing PDFs',
+  'ingest.task_hate_detection': 'Hate detection',
+  'ingest.stage_progress': '{current} of {total}',
+
+  // document-format unit words (documentFormat.ts)
+  'documentFormat.unit_pg': 'pg',
+  'documentFormat.unit_row_one': 'row',
+  'documentFormat.unit_row_other': 'rows',
+
+  // api/ingest.ts — batched-upload guidance messages (surfaced as SSE
+  // warning/error events, rendered raw by Ingest.tsx)
+  'ingest.batch_files_count': '{count} files',
+  'ingest.batch_too_large':
+    'Batch {batch}/{total} ({label}) is larger than the {limit} per-upload limit and was skipped. Raise DOCINT_CLIENT_MAX_BODY_SIZE and restart, or remove the oversized file, then re-ingest — already-ingested files are skipped automatically.',
+  'ingest.batch_failed_http':
+    'Batch {batch}/{total} ({label}) failed (HTTP {status}) and was skipped; other batches continued.',
+  'ingest.batch_failed_network':
+    'Batch {batch}/{total} ({label}) failed (network error) and was skipped; other batches continued.',
+  'ingest.upload_failed_too_large':
+    'Upload failed: every batch exceeded the {limit} per-upload limit. Raise DOCINT_CLIENT_MAX_BODY_SIZE and restart, or upload smaller files.',
+  'ingest.upload_failed_rejected':
+    'Upload failed: none of the {count} batch(es) were accepted. Check that the backend is running and reachable, then retry.',
+  'ingest.partial_failure_message':
+    'Completed, but {count} file(s) were skipped: {files}. See the warnings above for details.',
 }

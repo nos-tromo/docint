@@ -20,6 +20,30 @@ interface PhaseTheme {
   tone: Tone
 }
 
+// `status.stage.label` / `task.label` are the literal strings ingestStatus.ts's
+// parseProgressMessage() derived from the backend's free-form progress
+// messages — not translated there (a pure parsing module with no `useT()`).
+// LABEL_KEY-style mapping here, mirroring hateCategoryLabel.ts: an
+// unrecognized label (e.g. a future backend stage) falls back to the raw
+// string as-is rather than throwing or rendering blank.
+const STAGE_LABEL_KEY: Partial<Record<string, keyof Strings>> = {
+  'Processing PDFs': 'ingest.stage_processing_pdfs'
+}
+const TASK_LABEL_KEY: Partial<Record<string, keyof Strings>> = {
+  Entities: 'table.col_entities',
+  'Hate detection': 'ingest.task_hate_detection'
+}
+
+function stageLabel(raw: string, t: (key: keyof Strings) => string): string {
+  const key = STAGE_LABEL_KEY[raw]
+  return key ? t(key) : raw
+}
+
+function taskLabel(raw: string, t: (key: keyof Strings) => string): string {
+  const key = TASK_LABEL_KEY[raw]
+  return key ? t(key) : raw
+}
+
 const PHASE_THEME: Record<IngestPhase, PhaseTheme> = {
   idle: {
     border: 'border-zinc-800',
@@ -251,9 +275,9 @@ function ProcessingBody({ status }: { status: IngestStatus }) {
       {hasStage && status.stage && (
         <div className="space-y-1.5">
           <div className="flex items-baseline justify-between gap-2">
-            <span className="text-sm text-foreground">{status.stage.label}</span>
+            <span className="text-sm text-foreground">{stageLabel(status.stage.label, t)}</span>
             <span className="tabular-nums text-xs text-muted-foreground">
-              {status.stage.current} of {status.stage.total}
+              {t('ingest.stage_progress', { current: status.stage.current, total: status.stage.total })}
             </span>
           </div>
           <Bar
@@ -274,7 +298,7 @@ function ProcessingBody({ status }: { status: IngestStatus }) {
           {status.tasks.map((task) => (
             <div key={task.key} className="space-y-1">
               <div className="flex items-baseline justify-between gap-2">
-                <span className="text-sm text-foreground">{task.label}</span>
+                <span className="text-sm text-foreground">{taskLabel(task.label, t)}</span>
                 <span className="tabular-nums text-xs text-muted-foreground">
                   {task.current}/{task.total}
                 </span>
