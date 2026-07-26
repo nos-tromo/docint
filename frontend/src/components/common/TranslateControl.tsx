@@ -1,5 +1,6 @@
 import { cn } from '@/lib/cn'
 import { useTranslatable, type TranslationPayload } from '@/hooks/useTranslatable'
+import { useT } from '@/i18n/LanguageContext'
 import { TranslateToggle } from './TranslateToggle'
 import { ClampedText } from './ClampedText'
 
@@ -19,17 +20,25 @@ interface Props {
  * `useTranslatable` + `TranslateToggle` + `ClampedText` directly.
  */
 export function TranslateControl({ rawText, onTranslated, className }: Props) {
-  const t = useTranslatable(rawText, onTranslated)
-  const body = t.translation ?? rawText
+  const translatable = useTranslatable(rawText, onTranslated)
+  const t = useT()
+  const body = translatable.translation ?? rawText
   return (
     <div className={cn('group relative rounded bg-zinc-950/70 p-2.5 pr-9 text-xs', className)}>
-      <TranslateToggle shown={t.shown} busy={t.busy} onClick={t.toggle} className="absolute right-1 top-1" />
-      {t.shown && (
-        <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Translation</div>
+      <TranslateToggle
+        shown={translatable.shown}
+        busy={translatable.busy}
+        onClick={translatable.toggle}
+        className="absolute right-1 top-1"
+      />
+      {translatable.shown && (
+        <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+          {t('common.translation')}
+        </div>
       )}
       <ClampedText length={body.length}>{body}</ClampedText>
-      {t.failed && (
-        <div className="mt-1 text-[11px] text-muted-foreground">Translation unavailable — showing original.</div>
+      {translatable.failed && (
+        <div className="mt-1 text-[11px] text-muted-foreground">{t('common.translation_unavailable')}</div>
       )}
     </div>
   )

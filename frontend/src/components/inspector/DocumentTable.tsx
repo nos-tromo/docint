@@ -16,6 +16,7 @@ import type { DocumentRecord } from '@/api/types'
 import { csvExportHref } from '@/api/collections'
 import { mimeLabel, shortHash, unitsLabel } from '@/lib/documentFormat'
 import { cn } from '@/lib/cn'
+import { useT } from '@/i18n/LanguageContext'
 
 // Per-column layout hints consumed by the shared grid renderer below.
 declare module '@tanstack/react-table' {
@@ -32,64 +33,72 @@ declare module '@tanstack/react-table' {
  */
 const GRID_COLUMNS = 'minmax(0,2.4fr) 72px 92px 72px minmax(0,1.8fr) 96px'
 
-const COLUMNS: ColumnDef<DocumentRecord>[] = [
-  {
-    accessorKey: 'filename',
-    header: 'Filename',
-    cell: (c) => (
-      <span className="block truncate font-mono text-[13px]" title={c.getValue<string>()}>
-        {c.getValue<string>()}
-      </span>
-    )
-  },
-  {
-    id: 'type',
-    accessorFn: (r) => mimeLabel(r.mimetype),
-    header: 'Type',
-    cell: (c) => <span className="text-muted-foreground">{c.getValue<string>()}</span>
-  },
-  {
-    id: 'units',
-    accessorFn: (r) => unitsLabel(r).sort,
-    header: 'Units',
-    meta: { align: 'right' },
-    cell: (c) => {
-      const units = unitsLabel(c.row.original)
-      return (
-        <span className={cn('tabular-nums', units.text === '—' && 'text-muted-foreground')}>
-          {units.text}
+/** Column defs depend on the active locale (header labels, copy-button label), so they're built per-render rather than module-level. */
+function buildColumns(t: ReturnType<typeof useT>): ColumnDef<DocumentRecord>[] {
+  return [
+    {
+      accessorKey: 'filename',
+      header: t('table.col_filename'),
+      cell: (c) => (
+        <span className="block truncate font-mono text-[13px]" title={c.getValue<string>()}>
+          {c.getValue<string>()}
         </span>
       )
+    },
+    {
+      id: 'type',
+      accessorFn: (r) => mimeLabel(r.mimetype),
+      header: t('table.col_type'),
+      cell: (c) => <span className="text-muted-foreground">{c.getValue<string>()}</span>
+    },
+    {
+      id: 'units',
+      accessorFn: (r) => unitsLabel(r).sort,
+      header: t('table.col_units'),
+      meta: { align: 'right' },
+      cell: (c) => {
+        const units = unitsLabel(c.row.original)
+        return (
+          <span className={cn('tabular-nums', units.text === '—' && 'text-muted-foreground')}>
+            {units.text}
+          </span>
+        )
+      }
+    },
+    {
+      accessorKey: 'node_count',
+      header: t('table.col_nodes'),
+      meta: { align: 'right' },
+      cell: (c) => <span className="tabular-nums">{c.getValue<number | undefined>() ?? 0}</span>
+    },
+    {
+      id: 'entity_types',
+      accessorFn: (r) => (r.entity_types ?? []).join(', '),
+      header: t('table.col_entities'),
+      enableSorting: false,
+      cell: (c) => <EntityBadges types={c.row.original.entity_types ?? []} />
+    },
+    {
+      accessorKey: 'file_hash',
+      header: t('table.col_hash'),
+      enableSorting: false,
+      cell: (c) => {
+        const hash = c.getValue<string>()
+        return (
+          <span className="flex items-center gap-1">
+            <span className="font-mono text-xs text-muted-foreground">{shortHash(hash)}</span>
+            <CopyButton
+              text={hash}
+              label={t('table.copy_hash', { filename: c.row.original.filename })}
+              copiedLabel={t('common.copied')}
+              className="h-6 w-6"
+            />
+          </span>
+        )
+      }
     }
-  },
-  {
-    accessorKey: 'node_count',
-    header: 'Nodes',
-    meta: { align: 'right' },
-    cell: (c) => <span className="tabular-nums">{c.getValue<number | undefined>() ?? 0}</span>
-  },
-  {
-    id: 'entity_types',
-    accessorFn: (r) => (r.entity_types ?? []).join(', '),
-    header: 'Entities',
-    enableSorting: false,
-    cell: (c) => <EntityBadges types={c.row.original.entity_types ?? []} />
-  },
-  {
-    accessorKey: 'file_hash',
-    header: 'Hash',
-    enableSorting: false,
-    cell: (c) => {
-      const hash = c.getValue<string>()
-      return (
-        <span className="flex items-center gap-1">
-          <span className="font-mono text-xs text-muted-foreground">{shortHash(hash)}</span>
-          <CopyButton text={hash} label={`Copy hash for ${c.row.original.filename}`} className="h-6 w-6" />
-        </span>
-      )
-    }
-  }
-]
+  ]
+}
 
 interface Props {
   docs: DocumentRecord[]
@@ -152,11 +161,13 @@ function HeaderCell({ column, children }: { column: Column<DocumentRecord>; chil
 
 /** Read-only overview of a collection's documents, one aligned row each. */
 export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, collection }: Props) {
+  const t = useT()
   const [sorting, setSorting] = useState<SortingState>([])
   const data = useMemo(() => docs, [docs])
+  const columns = useMemo(() => buildColumns(t), [t])
   const table = useReactTable({
     data,
-    columns: COLUMNS,
+    columns,
     state: { sorting },
     onSortingChange: setSorting,
     getCoreRowModel: getCoreRowModel(),
@@ -176,9 +187,9 @@ export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, colle
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
-          {docs.length} document{docs.length === 1 ? '' : 's'}
+          {t(docs.length === 1 ? 'table.documents_one' : 'table.documents_other', { count: docs.length })}
           {hasNextPage ? '+' : ''}
-          {isFetching ? ' · loading…' : ''}
+          {isFetching ? ` ${t('table.loading_suffix')}` : ''}
         </p>
         {collection && (
           <a
@@ -186,15 +197,15 @@ export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, colle
             download
             className="rounded-md border border-border px-3 py-1 text-sm hover:bg-white/5"
           >
-            Export CSV
+            {t('table.export_csv')}
           </a>
         )}
       </div>
 
       {docs.length === 0 && !isFetching ? (
         <div className="rounded-lg border border-dashed border-border bg-zinc-900/50 p-10 text-center">
-          <p className="text-sm text-muted-foreground">No documents in this collection yet.</p>
-          <p className="mt-1 text-xs text-muted-foreground">Ingest files to see them here.</p>
+          <p className="text-sm text-muted-foreground">{t('table.empty_title')}</p>
+          <p className="mt-1 text-xs text-muted-foreground">{t('table.empty_hint')}</p>
         </div>
       ) : (
         <div className="overflow-hidden rounded-lg border border-border bg-zinc-900">
@@ -203,7 +214,7 @@ export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, colle
             className="max-h-[70vh] overflow-auto"
             data-testid="documents-scroll"
             role="table"
-            aria-label="Documents"
+            aria-label={t('table.aria_documents')}
           >
             <div role="rowgroup">
               {table.getHeaderGroups().map((hg) => (
@@ -264,7 +275,7 @@ export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, colle
                 disabled={isFetching}
                 className="rounded-md border border-border px-3 py-1 text-sm hover:bg-white/5 disabled:opacity-50"
               >
-                {isFetching ? 'Loading…' : 'Load more'}
+                {isFetching ? t('common.loading_ellipsis') : t('table.load_more')}
               </button>
             </div>
           )}

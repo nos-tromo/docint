@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { cn } from '@/lib/cn'
+import { useT } from '@/i18n/LanguageContext'
 
 /** Chars past which the body clamps to 4 lines behind a "Show more" toggle. */
 const CLAMP_CHARS = 240
@@ -18,6 +19,7 @@ export function ClampedText({
   length: number
   className?: string
 }) {
+  const t = useT()
   const [expanded, setExpanded] = useState(false)
   const canClamp = length > CLAMP_CHARS
   return (
@@ -37,7 +39,7 @@ export function ClampedText({
           onClick={() => setExpanded((v) => !v)}
           className="mt-1 text-xs text-blue-400 hover:text-blue-300"
         >
-          {expanded ? 'Show less' : 'Show more'}
+          {expanded ? t('common.show_less') : t('common.show_more')}
         </button>
       )}
     </div>

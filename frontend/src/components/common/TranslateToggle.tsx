@@ -1,4 +1,5 @@
 import { HoverIconAction, Spinner } from '@infra/ui'
+import { useT } from '@/i18n/LanguageContext'
 
 const TranslateGlyph = () => (
   <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
@@ -19,10 +20,11 @@ export function TranslateToggle({
   onClick: () => void
   className?: string
 }) {
+  const t = useT()
   return (
     <HoverIconAction
       icon={busy ? <Spinner /> : <TranslateGlyph />}
-      label={shown ? 'Show original' : 'Translate'}
+      label={shown ? t('common.show_original') : t('common.translate')}
       aria-pressed={shown}
       disabled={busy}
       onClick={onClick}
