@@ -382,4 +382,6 @@ export interface AppConfig {
    * safety margin) so no single POST is rejected with 413.
    */
   max_upload_bytes: number
+  /** Active UI/response locale, driven by `RESPONSE_LANGUAGE` on the backend. */
+  language: 'en' | 'de'
 }

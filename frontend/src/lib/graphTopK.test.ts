@@ -5,7 +5,8 @@ const cfg = {
   graph_top_k: 80,
   graph_max_top_k: 500,
   collection_timeout: 120,
-  max_upload_bytes: 1024 * 1024 * 1024
+  max_upload_bytes: 1024 * 1024 * 1024,
+  language: 'en' as const
 }
 
 describe('resolveGraphTopK', () => {

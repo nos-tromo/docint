@@ -3916,6 +3916,21 @@ def test_get_config_reports_upload_ceiling(client: TestClient, monkeypatch: pyte
     assert response.json()["max_upload_bytes"] == 4 * 1024**3
 
 
+def test_get_config_includes_language(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`GET /config` reports the active `RESPONSE_LANGUAGE` locale.
+
+    Args:
+        client (TestClient): The TestClient instance.
+        monkeypatch (pytest.MonkeyPatch): Fixture to override env vars.
+    """
+    monkeypatch.setenv("RESPONSE_LANGUAGE", "de")
+
+    response = client.get("/config")
+
+    assert response.status_code == 200
+    assert response.json()["language"] == "de"
+
+
 def test_ner_graph_uses_env_default_when_top_k_omitted(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Omitting `top_k_nodes` falls back to `NER_GRAPH_TOP_K`.
 
