@@ -9,8 +9,8 @@ requires-python = ">=3.11,<3.12"
 license = "Apache-2.0"
 dependencies = [
   "cryptography>=49.0.0",
-  "docling>=2.113.0",
-  "fastapi>=0.139.2",
+  "docling>=2.115.0",
+  "fastapi>=0.140.0",
   "fastembed>=0.8.0",
   "fastparquet>=2026.5.0",
   "httpx>=0.28.1",
@@ -18,7 +18,7 @@ dependencies = [
   "llama-index>=0.14.23",
   "llama-index-embeddings-huggingface>=0.7.0",
   "llama-index-embeddings-openai>=0.6.0",
-  "llama-index-llms-openai>=0.7.9",
+  "llama-index-llms-openai>=0.7.10",
   "llama-index-node-parser-docling>=0.4.2",
   "llama-index-readers-docling>=0.4.2",
   "llama-index-vector-stores-qdrant>=0.10.2",
@@ -27,11 +27,11 @@ dependencies = [
   "numba>=0.66.0",
   "numpy>=2.3.5",
   "ollama>=0.6.2",
-  "openai>=2.46.0",
+  "openai>=2.48.0",
   "opencv-python-headless>=5.0.0.93",
-  "pandas>=3.0.3",
+  "pandas>=3.0.5",
   "pillow>=12.3.0",
-  "prometheus-fastapi-instrumentator>=8.0.2",
+  "prometheus-fastapi-instrumentator>=8.1.0",
   "pyarrow>=25.0.0",
   "pydantic>=2.13.4",
   "pypdf>=6.14.2",
@@ -61,7 +61,7 @@ load-models = "docint.utils.model_cfg:main"
 
 [dependency-groups]
 dev = [
-    "pre-commit>=4.6.0",
+    "pre-commit>=4.6.1",
     "pyrefly==1.1.1",
     "pytest>=9.1.1",
     "ruff==0.15.14",
