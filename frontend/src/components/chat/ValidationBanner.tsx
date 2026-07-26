@@ -1,5 +1,6 @@
 import type { ValidationFields } from '@/api/types'
 import { cn } from '@/lib/cn'
+import { useT } from '@/i18n/LanguageContext'
 
 interface BannerSpec {
   tone: string
@@ -8,7 +9,7 @@ interface BannerSpec {
   detail?: string
 }
 
-function resolveSpec(v: ValidationFields): BannerSpec {
+function resolveSpec(v: ValidationFields, t: ReturnType<typeof useT>): BannerSpec {
   // Mirrors Streamlit's response_validation_summary: always show *some*
   // signal under each chat turn so the validation status never silently
   // disappears.
@@ -17,15 +18,15 @@ function resolveSpec(v: ValidationFields): BannerSpec {
     return {
       tone: 'border-amber-700 bg-amber-950 text-amber-200',
       icon: '⚠',
-      title: 'Response validation flagged a potential mismatch',
-      detail: reason ?? 'Potential mismatch between answer and retrieved sources.'
+      title: t('chat.validation_mismatch_title'),
+      detail: reason ?? t('chat.validation_mismatch_default_detail')
     }
   }
   if (v.validation_checked === true) {
     return {
       tone: 'border-emerald-700 bg-emerald-950 text-emerald-200',
       icon: '✓',
-      title: 'Response validation passed',
+      title: t('chat.validation_passed_title'),
       detail: reason ?? undefined
     }
   }
@@ -38,14 +39,15 @@ function resolveSpec(v: ValidationFields): BannerSpec {
     icon: 'ⓘ',
     title:
       v.validation_checked === false
-        ? 'Response validation unavailable'
-        : 'Response not validated',
-    detail: reason ?? 'Validation was skipped or unavailable for this response.'
+        ? t('chat.validation_unavailable_title')
+        : t('chat.validation_not_validated_title'),
+    detail: reason ?? t('chat.validation_default_detail')
   }
 }
 
 export function ValidationBanner({ v }: { v: ValidationFields }) {
-  const spec = resolveSpec(v)
+  const t = useT()
+  const spec = resolveSpec(v, t)
   return (
     <div className={cn('mt-3 rounded-md border px-3 py-2 text-xs', spec.tone)}>
       <div className="font-medium flex items-center gap-2">

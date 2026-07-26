@@ -1,4 +1,5 @@
 import type { ChatFinalEvent } from '@/api/types'
+import { useT } from '@/i18n/LanguageContext'
 
 function readField(obj: unknown, ...keys: string[]): string | null {
   if (!obj || typeof obj !== 'object') return null
@@ -12,17 +13,18 @@ function readField(obj: unknown, ...keys: string[]): string | null {
 }
 
 export function EntityCandidatesPanel({ meta }: { meta: ChatFinalEvent }) {
+  const t = useT()
   const candidates = meta.entity_match_candidates ?? []
   const groups = meta.entity_match_groups ?? []
   if (candidates.length === 0 && groups.length === 0) return null
 
   return (
     <div className="rounded-md border border-border bg-zinc-900 p-3 space-y-3 text-sm">
-      <div className="text-xs uppercase text-muted-foreground">Entity disambiguation</div>
+      <div className="text-xs uppercase text-muted-foreground">{t('chat.entity_disambiguation')}</div>
 
       {candidates.length > 0 && (
         <div>
-          <div className="text-xs text-muted-foreground mb-1">Candidates</div>
+          <div className="text-xs text-muted-foreground mb-1">{t('chat.candidates')}</div>
           <ul className="flex flex-wrap gap-1">
             {candidates.map((c, i) => {
               const label = readField(c, 'text', 'name', 'label') ?? `#${i}`
@@ -44,10 +46,10 @@ export function EntityCandidatesPanel({ meta }: { meta: ChatFinalEvent }) {
 
       {groups.length > 0 && (
         <div>
-          <div className="text-xs text-muted-foreground mb-1">Groups</div>
+          <div className="text-xs text-muted-foreground mb-1">{t('chat.groups')}</div>
           <ul className="space-y-1">
             {groups.map((g, i) => {
-              const label = readField(g, 'label', 'name', 'text') ?? `Group ${i + 1}`
+              const label = readField(g, 'label', 'name', 'text') ?? t('chat.group_fallback', { n: i + 1 })
               const members = ((g as Record<string, unknown>).members ?? (g as Record<string, unknown>).candidates ?? []) as unknown[]
               return (
                 <li key={i} className="rounded-md bg-zinc-950 px-2 py-1">

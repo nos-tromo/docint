@@ -1,5 +1,6 @@
 import type { DocumentsSummary } from '@/api/types'
 import { KpiCard } from '@/components/common/KpiCard'
+import { useT } from '@/i18n/LanguageContext'
 
 interface Props {
   /**
@@ -24,24 +25,35 @@ function joinCapped(items: string[], max: number, sep: string): string {
  * as the paginated document table lazily loads rows.
  */
 export function DocumentSummary({ summary }: Props) {
+  const t = useT()
   const fileTypes = summary?.file_types ?? []
   const entityTypes = summary?.entity_types ?? []
 
   const fileTypesHint = fileTypes.length
     ? joinCapped(
-        fileTypes.map((t) => `${t.count} ${t.label}`),
+        fileTypes.map((ft) => `${ft.count} ${ft.label}`),
         4,
         ' · '
       )
     : undefined
-  const entityHint = entityTypes.length ? joinCapped(entityTypes, 8, ', ') : 'none extracted'
+  const entityHint = entityTypes.length
+    ? joinCapped(entityTypes, 8, ', ')
+    : t('inspector.none_extracted')
 
   return (
     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-      <KpiCard label="Documents" value={summary?.document_count ?? '—'} />
-      <KpiCard label="Nodes" value={summary?.node_count ?? '—'} />
-      <KpiCard label="File types" value={fileTypes.length || '—'} hint={fileTypesHint} />
-      <KpiCard label="Entity types" value={entityTypes.length || '—'} hint={entityHint} />
+      <KpiCard label={t('table.aria_documents')} value={summary?.document_count ?? '—'} />
+      <KpiCard label={t('table.col_nodes')} value={summary?.node_count ?? '—'} />
+      <KpiCard
+        label={t('inspector.file_types')}
+        value={fileTypes.length || '—'}
+        hint={fileTypesHint}
+      />
+      <KpiCard
+        label={t('inspector.entity_types')}
+        value={entityTypes.length || '—'}
+        hint={entityHint}
+      />
     </div>
   )
 }

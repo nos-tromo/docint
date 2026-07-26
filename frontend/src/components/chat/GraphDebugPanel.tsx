@@ -1,6 +1,8 @@
 import { useState } from 'react'
+import { useT } from '@/i18n/LanguageContext'
 
 export function GraphDebugPanel({ data }: { data: unknown }) {
+  const t = useT()
   const [open, setOpen] = useState(false)
   if (!data) return null
   return (
@@ -10,7 +12,7 @@ export function GraphDebugPanel({ data }: { data: unknown }) {
         className="w-full text-left px-3 py-2 text-xs uppercase text-muted-foreground"
         onClick={() => setOpen((v) => !v)}
       >
-        Graph debug {open ? '▾' : '▸'}
+        {t('chat.graph_debug')} {open ? '▾' : '▸'}
       </button>
       {open && (
         <pre className="text-xs p-3 overflow-auto max-h-80 bg-zinc-950">

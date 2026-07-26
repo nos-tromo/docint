@@ -6,6 +6,8 @@ import {
   type IngestPhase,
   type IngestStatus
 } from '@/lib/ingestStatus'
+import { useT } from '@/i18n/LanguageContext'
+import type { Strings } from '@/i18n'
 
 type Tone = 'sky' | 'amber' | 'emerald' | 'red'
 
@@ -13,7 +15,7 @@ interface PhaseTheme {
   border: string
   pill: string
   label: string
-  text: string
+  textKey: keyof Strings
   pulse: boolean
   tone: Tone
 }
@@ -23,7 +25,7 @@ const PHASE_THEME: Record<IngestPhase, PhaseTheme> = {
     border: 'border-zinc-800',
     pill: 'bg-zinc-500',
     label: 'text-zinc-300',
-    text: 'Idle',
+    textKey: 'ingest.status_idle',
     pulse: false,
     tone: 'sky'
   },
@@ -31,7 +33,7 @@ const PHASE_THEME: Record<IngestPhase, PhaseTheme> = {
     border: 'border-sky-700',
     pill: 'bg-sky-400',
     label: 'text-sky-200',
-    text: 'Uploading',
+    textKey: 'ingest.status_uploading',
     pulse: true,
     tone: 'sky'
   },
@@ -39,7 +41,7 @@ const PHASE_THEME: Record<IngestPhase, PhaseTheme> = {
     border: 'border-amber-700',
     pill: 'bg-amber-400',
     label: 'text-amber-200',
-    text: 'Processing',
+    textKey: 'ingest.status_processing',
     pulse: true,
     tone: 'amber'
   },
@@ -47,7 +49,7 @@ const PHASE_THEME: Record<IngestPhase, PhaseTheme> = {
     border: 'border-emerald-700',
     pill: 'bg-emerald-400',
     label: 'text-emerald-200',
-    text: 'Complete',
+    textKey: 'ingest.status_complete',
     pulse: false,
     tone: 'emerald'
   },
@@ -55,7 +57,7 @@ const PHASE_THEME: Record<IngestPhase, PhaseTheme> = {
     border: 'border-red-700',
     pill: 'bg-red-400',
     label: 'text-red-200',
-    text: 'Failed',
+    textKey: 'ingest.status_failed',
     pulse: false,
     tone: 'red'
   }
@@ -138,6 +140,7 @@ function Header({
   theme: PhaseTheme
   elapsedMs: number
 }) {
+  const t = useT()
   const showTimer = status.startedAt !== undefined && status.phase !== 'error'
   const icon =
     status.phase === 'complete' ? '✓' : status.phase === 'error' ? '✗' : null
@@ -170,7 +173,7 @@ function Header({
             theme.label
           )}
         >
-          {theme.text}
+          {t(theme.textKey)}
         </span>
         {status.collection && (
           <>
@@ -192,6 +195,7 @@ function Header({
 }
 
 function UploadingBody({ status }: { status: IngestStatus }) {
+  const t = useT()
   const { uploadingFile, uploadingBytes, uploadingTotalBytes } = status
   const fileIndex = Math.min(status.filesSaved + 1, Math.max(1, status.totalFiles))
   const bytesText =
@@ -213,8 +217,8 @@ function UploadingBody({ status }: { status: IngestStatus }) {
       <div className="flex items-baseline justify-between gap-2">
         <span className="text-sm text-foreground">
           {status.totalFiles > 0
-            ? `Saving file ${fileIndex} of ${status.totalFiles}`
-            : 'Uploading files'}
+            ? t('ingest.saving_file', { current: fileIndex, total: status.totalFiles })
+            : t('ingest.uploading_files')}
         </span>
         {bytesText && (
           <span className="tabular-nums text-xs text-muted-foreground">
@@ -229,11 +233,8 @@ function UploadingBody({ status }: { status: IngestStatus }) {
       )}
       <Bar value={barValue} max={barMax} tone="sky" />
       {status.totalFiles > 0 && (
-        <div className="text-xs text-muted-foreground border-t border-zinc-800 pt-3 mt-3">
-          <span className="tabular-nums">{status.filesSaved}</span>
-          {' of '}
-          <span className="tabular-nums">{status.totalFiles}</span>
-          {' files saved'}
+        <div className="text-xs text-muted-foreground border-t border-zinc-800 pt-3 mt-3 tabular-nums">
+          {t('ingest.files_saved_of', { saved: status.filesSaved, total: status.totalFiles })}
         </div>
       )}
     </div>
@@ -241,6 +242,7 @@ function UploadingBody({ status }: { status: IngestStatus }) {
 }
 
 function ProcessingBody({ status }: { status: IngestStatus }) {
+  const t = useT()
   const hasStage = !!status.stage
   const hasTasks = status.tasks.length > 0
   const showWorking = !hasStage && !hasTasks
@@ -284,15 +286,12 @@ function ProcessingBody({ status }: { status: IngestStatus }) {
       )}
 
       {showWorking && (
-        <div className="text-sm text-muted-foreground">Working…</div>
+        <div className="text-sm text-muted-foreground">{t('ingest.working')}</div>
       )}
 
       {(status.filesSaved > 0 || status.indexed > 0) && (
-        <div className="text-xs text-muted-foreground border-t border-zinc-800 pt-3">
-          <span className="tabular-nums">{status.filesSaved}</span>
-          {' files saved · '}
-          <span className="tabular-nums">{status.indexed}</span>
-          {' files indexed'}
+        <div className="text-xs text-muted-foreground border-t border-zinc-800 pt-3 tabular-nums">
+          {t('ingest.files_saved_indexed', { saved: status.filesSaved, indexed: status.indexed })}
         </div>
       )}
     </div>
@@ -300,11 +299,12 @@ function ProcessingBody({ status }: { status: IngestStatus }) {
 }
 
 function CompleteBody({ status }: { status: IngestStatus }) {
+  const t = useT()
   const fileCount = Math.max(status.indexed, status.filesSaved, status.totalFiles)
   const parts: string[] = []
-  if (fileCount > 0) parts.push(`${fileCount} files indexed`)
-  if (status.totalChunks > 0) parts.push(`${status.totalChunks} chunks`)
-  const summary = parts.length > 0 ? parts.join(' · ') : 'Ingestion finished'
+  if (fileCount > 0) parts.push(t('ingest.files_indexed', { count: fileCount }))
+  if (status.totalChunks > 0) parts.push(t('ingest.chunks', { count: status.totalChunks }))
+  const summary = parts.length > 0 ? parts.join(' · ') : t('ingest.finished')
   return (
     <div className="mt-3 text-sm text-emerald-200 tabular-nums">
       {summary}
@@ -313,9 +313,10 @@ function CompleteBody({ status }: { status: IngestStatus }) {
 }
 
 function ErrorBody({ status }: { status: IngestStatus }) {
+  const t = useT()
   return (
     <div className="mt-3 text-sm text-red-200">
-      {status.errorMessage ?? 'Ingestion failed.'}
+      {status.errorMessage ?? t('ingest.failed_default')}
     </div>
   )
 }

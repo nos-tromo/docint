@@ -65,4 +65,83 @@ export const de: Strings = {
   // upload
   'upload.drop_hint': 'Dateien hier ablegen oder klicken, um sie auszuwählen.',
   'upload.choose_folder': 'Oder einen Ordner auswählen',
+
+  // shared transport-error suffix
+  'common.transport_suffix': ' (Transport: {detail})',
+
+  // chat
+  'chat.title': 'Chat',
+  'chat.download': 'Herunterladen',
+  'chat.you': 'Sie',
+  'chat.assistant': 'Assistent',
+  'chat.no_answer': '(keine Antwort)',
+  'chat.error_title': 'Chat-Fehler',
+  'chat.sources': 'Quellen',
+  'chat.ask_placeholder': 'Etwas fragen…',
+  'chat.send': 'Senden',
+  'chat.query_mode': 'Abfragemodus',
+  'chat.mode_answer': 'Antwort',
+  'chat.mode_entity_occurrence': 'Entitätsvorkommen',
+  'chat.mode_entity_occurrence_multi': 'Entitätsvorkommen (mehrfach)',
+  'chat.retrieval': 'Abruf',
+  'chat.retrieval_session': 'Sitzung',
+  'chat.retrieval_stateless': 'Zustandslos',
+  'chat.error_wrong_collection':
+    'Dieser Chat gehört zu einer anderen Sammlung — wechseln Sie zu dieser Sammlung, um ihn fortzusetzen, oder starten Sie einen neuen Chat.',
+  'chat.error_no_collection': 'Wählen Sie eine Sammlung aus, bevor Sie chatten.',
+  'chat.error_stream_ended':
+    'Der Chat-Stream wurde unerwartet beendet — das Backend ist möglicherweise abgestürzt (Speichermangel beim Laden der NER/LLM-Modelle ist die übliche Ursache). Prüfen Sie die Backend-Logs und versuchen Sie es erneut.',
+  'chat.open_original': 'Original öffnen ↗',
+  'chat.entity_disambiguation': 'Entitäten-Disambiguierung',
+  'chat.candidates': 'Kandidaten',
+  'chat.groups': 'Gruppen',
+  'chat.group_fallback': 'Gruppe {n}',
+  'chat.enable_filters': 'Metadatenfilter aktivieren',
+  'chat.mime_pattern': 'MIME-Muster',
+  'chat.hate_speech_only': 'Nur Hassrede',
+  'chat.date_from': 'Datum von',
+  'chat.date_to': 'Datum bis',
+  'chat.custom_rules': 'Benutzerdefinierte Regeln',
+  'chat.add_rule': '+ Regel',
+  'chat.field_placeholder': 'Feld',
+  'chat.value_placeholder': 'Wert',
+  'chat.remove_rule_aria': 'Regel entfernen',
+  'chat.graph_debug': 'Graph-Debug',
+  'chat.validation_mismatch_title':
+    'Die Antwortvalidierung hat eine mögliche Abweichung gemeldet',
+  'chat.validation_mismatch_default_detail':
+    'Mögliche Abweichung zwischen Antwort und abgerufenen Quellen.',
+  'chat.validation_passed_title': 'Antwortvalidierung bestanden',
+  'chat.validation_unavailable_title': 'Antwortvalidierung nicht verfügbar',
+  'chat.validation_not_validated_title': 'Antwort nicht validiert',
+  'chat.validation_default_detail':
+    'Die Validierung wurde für diese Antwort übersprungen oder war nicht verfügbar.',
+
+  // ingest
+  'ingest.title': 'Datenaufnahme',
+  'ingest.button': 'Aufnehmen',
+  'ingest.busy': 'Wird aufgenommen…',
+  'ingest.error_truncated':
+    'Die Datenaufnahme wurde unterbrochen, bevor sie abgeschlossen war. Das Backend ist möglicherweise abgestürzt (Speichermangel beim Laden der NER/LLM-Modelle ist bei CSV-/Großtext-Aufnahmen die übliche Ursache). Prüfen Sie die Backend-Logs und versuchen Sie es erneut mit mehr für Docker zugewiesenem Speicher.',
+  'ingest.status_idle': 'Inaktiv',
+  'ingest.status_uploading': 'Wird hochgeladen',
+  'ingest.status_processing': 'Wird verarbeitet',
+  'ingest.status_complete': 'Abgeschlossen',
+  'ingest.status_failed': 'Fehlgeschlagen',
+  'ingest.saving_file': 'Datei {current} von {total} wird gespeichert',
+  'ingest.uploading_files': 'Dateien werden hochgeladen',
+  'ingest.files_saved_of': '{saved} von {total} Dateien gespeichert',
+  'ingest.files_saved_indexed':
+    '{saved} Dateien gespeichert · {indexed} Dateien indexiert',
+  'ingest.working': 'Wird bearbeitet…',
+  'ingest.files_indexed': '{count} Dateien indexiert',
+  'ingest.chunks': '{count} Chunks',
+  'ingest.finished': 'Datenaufnahme abgeschlossen',
+  'ingest.failed_default': 'Datenaufnahme fehlgeschlagen.',
+
+  // inspector orphans
+  'inspector.file_types': 'Dateitypen',
+  'inspector.entity_types': 'Entitätstypen',
+  'inspector.none_extracted': 'keine extrahiert',
+  'inspector.download_session_sources': 'Sitzungsquellen herunterladen (ZIP)',
 }

@@ -5,8 +5,10 @@ import { useUiStore } from '@/stores/ui'
 import { formatScore, sourceLabel } from '@/lib/sourceLabel'
 import { referenceMetadataItems } from '@/lib/referenceMetadata'
 import { TranslateControl } from '@/components/common/TranslateControl'
+import { useT } from '@/i18n/LanguageContext'
 
 export function Citation({ source }: { source: Source }) {
+  const t = useT()
   const [open, setOpen] = useState(false)
   const collection = useUiStore((s) => s.selectedCollection)
   const refMeta = referenceMetadataItems(source.reference_metadata)
@@ -40,7 +42,7 @@ export function Citation({ source }: { source: Source }) {
               rel="noreferrer"
               className="text-xs text-blue-400 hover:text-blue-300"
             >
-              Open original ↗
+              {t('chat.open_original')}
             </a>
           )}
         </div>
