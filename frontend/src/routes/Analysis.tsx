@@ -14,21 +14,20 @@ import { useConfig } from '@/hooks/useConfig'
 import { resolveGraphTopK } from '@/lib/graphTopK'
 import type { NerEntityRow } from '@/api/types'
 import { cn } from '@/lib/cn'
+import { useT } from '@/i18n/LanguageContext'
 
-const TABS = ['NER', 'Hate speech', 'Summary'] as const
-type Tab = (typeof TABS)[number]
+const TAB_IDS = ['ner', 'hate', 'summary'] as const
+type Tab = (typeof TAB_IDS)[number]
 
-const NER_VIEWS = [
-  { value: 'table', label: 'Table' },
-  { value: 'graph', label: 'Graph' }
-] as const
-type NerView = (typeof NER_VIEWS)[number]['value']
+const NER_VIEW_IDS = ['table', 'graph'] as const
+type NerView = (typeof NER_VIEW_IDS)[number]
 
 const keyOf = (text: string | null | undefined, type: string | null | undefined) =>
   `${text ?? ''}::${type ?? ''}`
 
 export function Analysis() {
-  const [tab, setTab] = useState<Tab>('NER')
+  const t = useT()
+  const [tab, setTab] = useState<Tab>('ner')
   const [nerView, setNerView] = useState<NerView>('table')
   const collection = useUiStore((s) => s.selectedCollection)
   const mergeMode = useUiStore((s) => s.entityMergeMode)
@@ -123,64 +122,72 @@ export function Analysis() {
     []
   )
 
+  const tabLabel: Record<Tab, string> = {
+    ner: t('analysis.tab_ner'),
+    hate: t('analysis.tab_hate'),
+    summary: t('analysis.tab_summary')
+  }
+  const nerViewLabel: Record<NerView, string> = {
+    table: t('entities.view_table'),
+    graph: t('entities.view_graph')
+  }
+
   return (
     <div className="p-8 space-y-4">
-      <h1 className="text-2xl font-semibold">Analysis</h1>
+      <h1 className="text-2xl font-semibold">{t('analysis.title')}</h1>
       <nav className="flex gap-2 border-b border-border">
-        {TABS.map((t) => (
+        {TAB_IDS.map((id) => (
           <button
-            key={t}
+            key={id}
             type="button"
-            onClick={() => setTab(t)}
+            onClick={() => setTab(id)}
             className={cn(
               'px-3 py-2 text-sm -mb-px border-b-2',
-              tab === t ? 'border-foreground' : 'border-transparent text-muted-foreground'
+              tab === id ? 'border-foreground' : 'border-transparent text-muted-foreground'
             )}
           >
-            {t}
+            {tabLabel[id]}
           </button>
         ))}
       </nav>
-      {tab === 'NER' && (
+      {tab === 'ner' && (
         <div className="space-y-3">
           {collection && (
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div
                 role="group"
-                aria-label="Entity view"
+                aria-label={t('entities.view_group_aria')}
                 className="inline-flex overflow-hidden rounded-md border border-border text-sm"
               >
-                {NER_VIEWS.map((v) => (
+                {NER_VIEW_IDS.map((v) => (
                   <button
-                    key={v.value}
+                    key={v}
                     type="button"
-                    aria-pressed={nerView === v.value}
-                    onClick={() => setNerView(v.value)}
+                    aria-pressed={nerView === v}
+                    onClick={() => setNerView(v)}
                     className={cn(
                       'px-3 py-1 transition-colors',
-                      nerView === v.value
+                      nerView === v
                         ? 'bg-zinc-800 text-foreground'
                         : 'text-muted-foreground hover:text-foreground'
                     )}
                   >
-                    {v.label}
+                    {nerViewLabel[v]}
                   </button>
                 ))}
               </div>
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <span>Merge mode</span>
+                <span>{t('entities.merge_mode_label')}</span>
                 <MergeModeToggle />
               </div>
             </div>
           )}
           {!collection ? (
-            <p className="text-sm text-muted-foreground">
-              Select a collection to inspect entities.
-            </p>
+            <p className="text-sm text-muted-foreground">{t('entities.select_collection')}</p>
           ) : stats.isLoading ? (
-            <p className="text-sm text-muted-foreground">Loading entities…</p>
+            <p className="text-sm text-muted-foreground">{t('entities.loading')}</p>
           ) : entities.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No entities found in this collection.</p>
+            <p className="text-sm text-muted-foreground">{t('entities.empty')}</p>
           ) : (
             <div className="space-y-4">
               {nerView === 'table' ? (
@@ -219,7 +226,7 @@ export function Analysis() {
           )}
         </div>
       )}
-      {tab === 'Hate speech' && (
+      {tab === 'hate' && (
         <HateSpeechTable
           rows={hateRows}
           isFetching={hate.isFetching}
@@ -229,7 +236,7 @@ export function Analysis() {
           reportDedupeKeys={reportDedupeKeys}
         />
       )}
-      {tab === 'Summary' && <SummaryPanel reportDedupeKeys={reportDedupeKeys} />}
+      {tab === 'summary' && <SummaryPanel reportDedupeKeys={reportDedupeKeys} />}
     </div>
   )
 }

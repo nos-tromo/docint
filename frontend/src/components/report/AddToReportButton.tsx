@@ -6,6 +6,7 @@ import type { Report, ReportItemInput } from '@/api/types'
 import { reportKey, useAddReportItem, useCreateReport, useRemoveReportItem } from '@/hooks/useReports'
 import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
+import { useT } from '@/i18n/LanguageContext'
 
 interface Props {
   item: ReportItemInput
@@ -20,6 +21,7 @@ interface Props {
  * from the cached report so the surrounding row never needs its own query.
  */
 export function AddToReportButton({ item, inReport, className }: Props) {
+  const t = useT()
   const qc = useQueryClient()
   const activeReportId = useReportStore((s) => s.activeReportId)
   const setActiveReportId = useReportStore((s) => s.setActiveReportId)
@@ -47,7 +49,7 @@ export function AddToReportButton({ item, inReport, className }: Props) {
       let reportId = activeReportId
       if (reportId == null) {
         const created = await createReport.mutateAsync({
-          title: 'Untitled report',
+          title: t('report.untitled_title'),
           collection_name: collection ?? undefined
         })
         reportId = created.id
@@ -62,7 +64,13 @@ export function AddToReportButton({ item, inReport, className }: Props) {
     }
   }
 
-  const label = pending ? '…' : failed ? 'Retry' : inReport ? '✓ In report' : '+ Report'
+  const label = pending
+    ? '…'
+    : failed
+      ? t('report.retry')
+      : inReport
+        ? t('report.in_report')
+        : t('report.add_button')
   return (
     <Button
       type="button"
@@ -70,13 +78,7 @@ export function AddToReportButton({ item, inReport, className }: Props) {
       size="sm"
       disabled={pending}
       aria-pressed={inReport}
-      title={
-        failed
-          ? 'Could not reach the server — click to retry'
-          : inReport
-            ? 'Remove from report'
-            : 'Add to report'
-      }
+      title={failed ? t('report.retry_title') : inReport ? t('report.remove_title') : t('report.add_title')}
       onClick={handleClick}
       className={cn('shrink-0 whitespace-nowrap', className)}
     >

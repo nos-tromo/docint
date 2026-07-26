@@ -8,12 +8,37 @@ import { useTranslatable, type TranslationPayload } from '@/hooks/useTranslatabl
 import { TranslateToggle } from '@/components/common/TranslateToggle'
 import { ClampedText } from '@/components/common/ClampedText'
 import { hateSpeechSnapshot } from '@/lib/reportSnapshots'
+import { useT } from '@/i18n/LanguageContext'
+import type { Strings } from '@/i18n'
 
 export type { HateSpeechRow }
 
 // Shared column template for the header row and every body row. Metadata is a
 // single column (reason / confidence / chunk id / reference metadata).
 const HATE_GRID = '2.5rem 6.5rem minmax(8rem,0.8fr) minmax(9rem,1.1fr) minmax(12rem,1.8fr) 6rem'
+
+// The `category`/`confidence` values are protocol (the fixed enum in
+// docint/utils/prompts/{en,de}/hate_speech.txt): never translate the raw
+// value itself, only its display label — an unrecognized value (e.g. a future
+// category) falls back to showing the raw string as-is.
+const CATEGORY_LABEL_KEY: Partial<Record<string, keyof Strings>> = {
+  race: 'hate.category_race',
+  ethnicity: 'hate.category_ethnicity',
+  religion: 'hate.category_religion',
+  gender: 'hate.category_gender',
+  sexual_orientation: 'hate.category_sexual_orientation',
+  disability: 'hate.category_disability',
+  nationality: 'hate.category_nationality',
+  extremism: 'hate.category_extremism',
+  other: 'hate.category_other',
+  none: 'hate.category_none',
+  unknown: 'hate.category_unknown'
+}
+
+function labelFor(raw: string, map: Partial<Record<string, keyof Strings>>, t: (key: keyof Strings) => string): string {
+  const key = map[raw.toLowerCase()]
+  return key ? t(key) : raw
+}
 
 interface Props {
   rows: HateSpeechRow[]
@@ -24,11 +49,11 @@ interface Props {
   reportDedupeKeys?: Set<string>
 }
 
-function locationParts(r: HateSpeechRow): string {
+function locationParts(r: HateSpeechRow, t: (key: keyof Strings, vars?: Record<string, string | number>) => string): string {
   const parts: string[] = []
-  if (r.page_label) parts.push(`page ${r.page_label}`)
-  else if (r.page !== null && r.page !== undefined) parts.push(`page ${r.page}`)
-  if (r.row !== null && r.row !== undefined) parts.push(`row ${r.row}`)
+  if (r.page_label) parts.push(t('common.loc_page', { page: r.page_label }))
+  else if (r.page !== null && r.page !== undefined) parts.push(t('common.loc_page', { page: r.page }))
+  if (r.row !== null && r.row !== undefined) parts.push(t('common.loc_row', { row: r.row }))
   return parts.join(', ')
 }
 
@@ -46,21 +71,26 @@ function HateSpeechTableRow({
   index: number
   reportDedupeKeys?: Set<string>
 }) {
+  const i18n = useT()
   const [translation, setTranslation] = useState<TranslationPayload | null>(null)
   const reportItem = hateSpeechSnapshot(row, translation ?? undefined)
   const inReport = reportDedupeKeys?.has(reportItem.dedupe_key) ?? false
   const refMeta = referenceMetadataItems(row.reference_metadata)
   const chunkText = (row.chunk_text ?? row.text ?? '').trim()
-  const t = useTranslatable(chunkText, setTranslation)
-  const source = row.source_ref ?? row.filename ?? 'Unknown source'
-  const location = locationParts(row)
-  const category = (row.category ?? 'unknown').trim()
+  const translationState = useTranslatable(chunkText, setTranslation)
+  const source = row.source_ref ?? row.filename ?? i18n('common.unknown_source')
+  const location = locationParts(row, i18n)
+  const category = labelFor((row.category ?? 'unknown').trim(), CATEGORY_LABEL_KEY, i18n)
   const reason = (row.reason ?? '').trim()
 
   const metadata: Array<{ label: string; value: string }> = []
-  if (reason) metadata.push({ label: 'Reason', value: reason })
-  if (row.confidence) metadata.push({ label: 'Confidence', value: String(row.confidence) })
-  if (row.chunk_id) metadata.push({ label: 'Chunk ID', value: row.chunk_id })
+  if (reason) metadata.push({ label: i18n('common.meta_reason'), value: reason })
+  // `confidence` is protocol data (the fixed high|medium|low enum) rendered
+  // verbatim, like `Filetype`/`Reader` elsewhere — only its label is swept.
+  if (row.confidence) {
+    metadata.push({ label: i18n('common.meta_confidence'), value: String(row.confidence) })
+  }
+  if (row.chunk_id) metadata.push({ label: i18n('common.meta_chunk_id'), value: row.chunk_id })
   for (const item of refMeta) metadata.push(item)
 
   return (
@@ -92,22 +122,32 @@ function HateSpeechTableRow({
       <div className="min-w-0">
         {chunkText ? (
           <>
-            {t.shown && (
+            {translationState.shown && (
               <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                Translation
+                {i18n('common.translation')}
               </div>
             )}
-            <ClampedText length={(t.translation ?? chunkText).length}>{t.translation ?? chunkText}</ClampedText>
-            {t.failed && (
-              <div className="mt-1 text-[11px] text-muted-foreground">Translation unavailable — showing original.</div>
+            <ClampedText length={(translationState.translation ?? chunkText).length}>
+              {translationState.translation ?? chunkText}
+            </ClampedText>
+            {translationState.failed && (
+              <div className="mt-1 text-[11px] text-muted-foreground">
+                {i18n('common.translation_unavailable')}
+              </div>
             )}
           </>
         ) : (
-          <span className="text-xs text-muted-foreground">Chunk text unavailable.</span>
+          <span className="text-xs text-muted-foreground">{i18n('common.chunk_text_unavailable')}</span>
         )}
       </div>
       <div className="flex items-center justify-end gap-1">
-        {chunkText && <TranslateToggle shown={t.shown} busy={t.busy} onClick={t.toggle} />}
+        {chunkText && (
+          <TranslateToggle
+            shown={translationState.shown}
+            busy={translationState.busy}
+            onClick={translationState.toggle}
+          />
+        )}
         {reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
       </div>
     </div>
@@ -127,6 +167,7 @@ export function HateSpeechTable({
   collection,
   reportDedupeKeys
 }: Props) {
+  const t = useT()
   const scrollRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -138,7 +179,7 @@ export function HateSpeechTable({
   if (!rows.length) {
     return (
       <div className="text-sm text-muted-foreground">
-        {isFetching ? 'Loading flagged content…' : 'No flagged content.'}
+        {isFetching ? t('hate.loading') : t('hate.empty')}
       </div>
     )
   }
@@ -147,7 +188,7 @@ export function HateSpeechTable({
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
-          {rows.length} flagged chunk{rows.length === 1 ? '' : 's'}
+          {t(rows.length === 1 ? 'hate.count_one' : 'hate.count_other', { count: rows.length })}
           {hasNextPage ? '+' : ''}.
         </p>
         {collection && (
@@ -156,7 +197,7 @@ export function HateSpeechTable({
             download
             className="px-3 py-1 rounded-md border border-border text-sm"
           >
-            CSV
+            {t('common.csv_button')}
           </a>
         )}
       </div>
@@ -166,11 +207,11 @@ export function HateSpeechTable({
           style={{ gridTemplateColumns: HATE_GRID }}
         >
           <span>#</span>
-          <span>Category</span>
-          <span>Source</span>
-          <span>Metadata</span>
-          <span>Text</span>
-          <span className="text-right">Report</span>
+          <span>{t('hate.col_category')}</span>
+          <span>{t('common.col_source')}</span>
+          <span>{t('common.col_metadata')}</span>
+          <span>{t('common.col_text')}</span>
+          <span className="text-right">{t('common.col_report')}</span>
         </div>
         <div
           ref={scrollRef}
@@ -205,7 +246,7 @@ export function HateSpeechTable({
                 disabled={isFetching}
                 className="px-3 py-1 rounded-md border border-border text-sm disabled:opacity-50"
               >
-                {isFetching ? 'Loading…' : 'Load more'}
+                {isFetching ? t('common.loading_ellipsis') : t('table.load_more')}
               </button>
             </div>
           )}

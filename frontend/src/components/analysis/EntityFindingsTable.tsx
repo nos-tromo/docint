@@ -3,6 +3,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import type { EntityMergeMode, NerEntityRow, NerSourceRow } from '@/api/types'
 import { csvExportHref } from '@/api/collections'
 import { EntityFinding } from './EntityFinding'
+import { useT } from '@/i18n/LanguageContext'
 
 // Single source of truth for the table's column widths; the header row and
 // every body row share it so columns line up. Metadata is one flexible column.
@@ -46,6 +47,7 @@ export function EntityFindingsTable({
   entityMergeMode,
   reportDedupeKeys
 }: Props) {
+  const t = useT()
   const scrollRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
     count: findings.length,
@@ -60,15 +62,13 @@ export function EntityFindingsTable({
   )
 
   if (!selected) {
-    return (
-      <p className="text-sm text-muted-foreground">
-        Pick an entity to see the chunks where it appears.
-      </p>
-    )
+    return <p className="text-sm text-muted-foreground">{t('entities.pick_entity_hint')}</p>
   }
 
   // Mirrors the backend's ner-sources `entity_label` (``text [TYPE]``) so a
-  // report's entity column matches the CSV export.
+  // report's entity column matches the CSV export — the 'Unlabeled' fallback
+  // is protocol data (matches the backend's own fallback), not UI chrome, and
+  // must stay untranslated or this key would stop matching the backend value.
   const entityLabel = `${selected.text} [${selected.type || 'Unlabeled'}]`
   const selectedTypeLower = (selected.type || '').toLowerCase()
   const exportParams = {
@@ -81,12 +81,16 @@ export function EntityFindingsTable({
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-3">
         <div className="text-sm">
-          <span className="text-muted-foreground">Findings for </span>
+          <span className="text-muted-foreground">{t('entities.findings_for')} </span>
           <span className="font-medium">{selected.text}</span>
           <span className="text-muted-foreground">
-            {' '}— {findings.length} chunk{findings.length === 1 ? '' : 's'}
+            {' '}—{' '}
+            {t(
+              findings.length === 1 ? 'entities.findings_chunk_one' : 'entities.findings_chunk_other',
+              { count: findings.length }
+            )}
             {hasNextPage ? '+' : ''}
-            {isFetchingFindings ? ' (loading…)' : ''}
+            {isFetchingFindings ? t('entities.findings_loading_suffix') : ''}
           </span>
         </div>
         {collection && (
@@ -95,16 +99,14 @@ export function EntityFindingsTable({
             download
             className="px-3 py-1 rounded-md border border-border text-sm"
           >
-            CSV
+            {t('common.csv_button')}
           </a>
         )}
       </div>
 
       {findings.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          {isFetchingFindings
-            ? 'Loading findings…'
-            : 'No chunks were matched for the selected entity.'}
+          {isFetchingFindings ? t('entities.loading_findings') : t('entities.no_chunks_matched')}
         </p>
       ) : (
         <div className="rounded-md border border-border overflow-hidden">
@@ -113,10 +115,10 @@ export function EntityFindingsTable({
             style={{ gridTemplateColumns: FINDINGS_GRID }}
           >
             <span>#</span>
-            <span>Source</span>
-            <span>Metadata</span>
-            <span>Text</span>
-            <span className="text-right">Report</span>
+            <span>{t('common.col_source')}</span>
+            <span>{t('common.col_metadata')}</span>
+            <span>{t('common.col_text')}</span>
+            <span className="text-right">{t('common.col_report')}</span>
           </div>
           <div
             ref={scrollRef}
@@ -155,7 +157,7 @@ export function EntityFindingsTable({
                   disabled={isFetchingFindings}
                   className="px-3 py-1 rounded-md border border-border text-sm disabled:opacity-50"
                 >
-                  {isFetchingFindings ? 'Loading…' : 'Load more'}
+                  {isFetchingFindings ? t('common.loading_ellipsis') : t('table.load_more')}
                 </button>
               </div>
             )}

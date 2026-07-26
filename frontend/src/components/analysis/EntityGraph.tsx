@@ -12,6 +12,7 @@ import type { NerGraphEdge, NerGraphNode } from '@/api/types'
 import { ENTITY_EDGE_STYLES, legendForNodes, nodeStylesForTypes, toEntityForceGraph } from '@/lib/entityGraphElements'
 import { sanitizeExportFilename } from '@/lib/sanitizeFilename'
 import { GraphTopKControl } from './GraphTopKControl'
+import { useT } from '@/i18n/LanguageContext'
 
 interface Props {
   nodes: NerGraphNode[]
@@ -65,6 +66,7 @@ export function EntityGraph({
   onResetNodeCount,
   exportName
 }: Props) {
+  const t = useT()
   // View-only node removal (mirrors chorus's expand-on-click graphs): removed
   // ids are local component state, never sent upstream. A fresh `nodes` array
   // (new fetch, top-K change, merge-mode switch) resets it, so removal never
@@ -187,11 +189,7 @@ export function EntityGraph({
   )
 
   if (!isLoading && nodes.length === 0) {
-    return (
-      <div className="text-sm text-muted-foreground">
-        No entity relationships to graph for this collection.
-      </div>
-    )
+    return <div className="text-sm text-muted-foreground">{t('entities.graph_empty')}</div>
   }
 
   return (
@@ -209,11 +207,11 @@ export function EntityGraph({
                 <button
                   type="button"
                   onClick={onResetNodeCount}
-                  aria-label="Reset node count"
-                  title="Reset the node count to the deploy default"
+                  aria-label={t('entities.reset_node_count_aria')}
+                  title={t('entities.reset_node_count_title')}
                   className="h-7 px-2 rounded-md border border-border text-xs"
                 >
-                  Reset count
+                  {t('entities.reset_count_button')}
                 </button>
               )}
             </>
@@ -232,7 +230,7 @@ export function EntityGraph({
                   )
                 }}
               >
-                Export JSON
+                {t('entities.export_json')}
               </Button>
               <Button
                 type="button"
@@ -246,14 +244,16 @@ export function EntityGraph({
                   )
                 }}
               >
-                Export GraphML
+                {t('entities.export_graphml')}
               </Button>
               <Button
                 type="button"
                 variant="secondary"
                 onClick={() => {
                   const sanitized = sanitizeExportFilename(exportName ?? 'docint')
-                  const title = exportName ? `${exportName} — entity graph` : 'Entity graph'
+                  const title = exportName
+                    ? t('entities.graph_export_title_with_name', { name: exportName })
+                    : t('entities.graph_export_title_fallback')
                   downloadText(
                     `${sanitized}_entity_graph.html`,
                     toGraphHtml({
@@ -269,7 +269,7 @@ export function EntityGraph({
                   )
                 }}
               >
-                Export HTML
+                {t('entities.export_html')}
               </Button>
             </>
           )}
@@ -285,11 +285,7 @@ export function EntityGraph({
         selectedIds={graphSelection}
         onSelectionChange={handleSelectionChange}
         onDeleteNodes={handleDeleteNodes}
-        statusText={
-          isLoading
-            ? 'Building entity graph…'
-            : 'Scroll to zoom, drag to move, click a node to inspect.'
-        }
+        statusText={isLoading ? t('entities.graph_building') : t('entities.graph_hint')}
         legend={legend}
       />
     </div>

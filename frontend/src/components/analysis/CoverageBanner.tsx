@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import type { SummaryDiagnostics } from '@/api/types'
 import { cn } from '@/lib/cn'
+import { useT } from '@/i18n/LanguageContext'
 
 export function CoverageBanner({ d }: { d: SummaryDiagnostics }) {
+  const t = useT()
   const [open, setOpen] = useState(false)
   const ratioPct = Math.round((d.coverage_ratio ?? 0) * 100)
   const targetPct = Math.round((d.coverage_target ?? 0) * 100)
@@ -15,10 +17,17 @@ export function CoverageBanner({ d }: { d: SummaryDiagnostics }) {
     <div className={cn('rounded-md border px-3 py-2 text-xs', tone)}>
       <div className="flex items-center justify-between">
         <div>
-          Coverage <span className="font-medium">{d.covered_documents}/{d.total_documents}</span>{' '}
-          documents · {ratioPct}% (target {targetPct}%)
+          {t('analysis.coverage_label')}{' '}
+          <span className="font-medium">
+            {d.covered_documents}/{d.total_documents}
+          </span>{' '}
+          {t('analysis.coverage_documents_pct', { pct: ratioPct, targetPct })}
           <span className="ml-2 text-muted-foreground">
-            sampled {d.sampled_count} of {d.candidate_count} (deduped {d.deduped_count})
+            {t('analysis.coverage_sampled', {
+              sampled: d.sampled_count,
+              candidate: d.candidate_count,
+              deduped: d.deduped_count
+            })}
           </span>
         </div>
         {d.uncovered_documents.length > 0 && (
@@ -27,7 +36,9 @@ export function CoverageBanner({ d }: { d: SummaryDiagnostics }) {
             className="underline text-[11px]"
             onClick={() => setOpen((v) => !v)}
           >
-            {open ? 'hide' : `show ${d.uncovered_documents.length} uncovered`}
+            {open
+              ? t('analysis.coverage_hide')
+              : t('analysis.coverage_show_uncovered', { count: d.uncovered_documents.length })}
           </button>
         )}
       </div>

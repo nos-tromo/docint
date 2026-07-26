@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { NerEntityRow } from '@/api/types'
+import { useT } from '@/i18n/LanguageContext'
 
 interface Props {
   entities: NerEntityRow[]
@@ -8,6 +9,10 @@ interface Props {
   keyOf: (e: NerEntityRow) => string
 }
 
+// `type || 'Unlabeled'` mirrors the backend's own fallback (docint/core/ner.py
+// et al.) — the entity's own "type" is protocol data and must not be
+// translated, or the frontend key would diverge from the backend's CSV/report
+// exports and the same-collection value it is deduped/matched against.
 function entityOptionLabel(entity: NerEntityRow): string {
   const type = entity.type || 'Unlabeled'
   return `${entity.text} [${type}] · ${entity.mentions}`
@@ -22,6 +27,7 @@ function entityOptionLabel(entity: NerEntityRow): string {
  * inside a `useMemo` keyed only on the entity list.
  */
 export function EntitySelect({ entities, selectedKey, onSelectEntity, keyOf }: Props) {
+  const t = useT()
   const entityList = useMemo(
     () => entities.filter((e) => (e.text ?? '').trim().length > 0),
     [entities]
@@ -46,9 +52,7 @@ export function EntitySelect({ entities, selectedKey, onSelectEntity, keyOf }: P
   }
 
   if (entityList.length === 0) {
-    return (
-      <div className="text-sm text-muted-foreground">No entities found in this collection.</div>
-    )
+    return <div className="text-sm text-muted-foreground">{t('entities.empty')}</div>
   }
 
   // Keep the entity dropdown's value coherent with the active category: if the
@@ -62,30 +66,30 @@ export function EntitySelect({ entities, selectedKey, onSelectEntity, keyOf }: P
   return (
     <div className="grid grid-cols-[12rem_1fr] gap-3 items-end">
       <label className="flex flex-col gap-1 text-sm">
-        <span className="text-xs uppercase text-muted-foreground">Entity category</span>
+        <span className="text-xs uppercase text-muted-foreground">{t('entities.category_label')}</span>
         <select
-          aria-label="Entity category"
+          aria-label={t('entities.category_label')}
           value={category}
           onChange={(e) => handleCategoryChange(e.target.value)}
           className="bg-zinc-900 border border-border rounded-md px-2 py-1"
         >
-          <option value="">All</option>
-          {types.map((t) => (
-            <option key={t} value={t}>
-              {t}
+          <option value="">{t('entities.category_all')}</option>
+          {types.map((ty) => (
+            <option key={ty} value={ty}>
+              {ty}
             </option>
           ))}
         </select>
       </label>
       <label className="flex flex-col gap-1 text-sm">
-        <span className="text-xs uppercase text-muted-foreground">Entity</span>
+        <span className="text-xs uppercase text-muted-foreground">{t('entities.entity_label')}</span>
         <select
-          aria-label="Entity"
+          aria-label={t('entities.entity_label')}
           value={valueInFiltered}
           onChange={(e) => onSelectEntity(e.target.value || null)}
           className="bg-zinc-900 border border-border rounded-md px-2 py-1"
         >
-          {filtered.length === 0 && <option value="">No entities</option>}
+          {filtered.length === 0 && <option value="">{t('entities.no_entities_option')}</option>}
           {filtered.map((e) => (
             <option key={keyOf(e)} value={keyOf(e)}>
               {entityOptionLabel(e)}

@@ -9,6 +9,7 @@ import { useTranslatable, type TranslationPayload } from '@/hooks/useTranslatabl
 import { TranslateToggle } from '@/components/common/TranslateToggle'
 import { ClampedText } from '@/components/common/ClampedText'
 import { entityFindingSnapshot } from '@/lib/reportSnapshots'
+import { useT } from '@/i18n/LanguageContext'
 
 interface Props {
   index: number
@@ -68,6 +69,7 @@ export function EntityFinding({
   reportDedupeKeys,
   gridTemplate
 }: Props) {
+  const t = useT()
   const [translation, setTranslation] = useState<TranslationPayload | null>(null)
   const reportItem =
     entityLabel != null ? entityFindingSnapshot(source, entityLabel, translation ?? undefined) : null
@@ -76,24 +78,30 @@ export function EntityFinding({
   const refMeta = referenceMetadataItems(source.reference_metadata)
   const chunkText = (source.chunk_text ?? source.text ?? '').trim()
   const segments = highlightSegments(chunkText, highlightTerms)
-  const t = useTranslatable(chunkText, setTranslation)
+  const translationState = useTranslatable(chunkText, setTranslation)
   const mentions = matchedMentions(source, highlightTerms, selectedTypeLower)
   const previewHref =
     collection && source.file_hash ? sourcePreviewUrl(collection, source.file_hash) : null
 
   const locParts: string[] = []
-  if (source.page !== null && source.page !== undefined) locParts.push(`page ${source.page}`)
-  if (source.row !== null && source.row !== undefined) locParts.push(`row ${source.row}`)
+  if (source.page !== null && source.page !== undefined) {
+    locParts.push(t('common.loc_page', { page: source.page }))
+  }
+  if (source.row !== null && source.row !== undefined) {
+    locParts.push(t('common.loc_row', { row: source.row }))
+  }
 
   // Every secondary field collapses into the single Metadata column.
   const metadata: Array<{ label: string; value: string }> = []
   if (source.score !== null && source.score !== undefined) {
-    metadata.push({ label: 'Score', value: source.score.toFixed(3) })
+    metadata.push({ label: t('common.meta_score'), value: source.score.toFixed(3) })
   }
-  if (source.filetype) metadata.push({ label: 'Filetype', value: String(source.filetype) })
-  if (source.source) metadata.push({ label: 'Reader', value: String(source.source) })
-  if (source.chunk_id) metadata.push({ label: 'Chunk ID', value: source.chunk_id })
-  if (source.file_hash) metadata.push({ label: 'File hash', value: shortHash(source.file_hash) })
+  if (source.filetype) metadata.push({ label: t('common.meta_filetype'), value: String(source.filetype) })
+  if (source.source) metadata.push({ label: t('common.meta_reader'), value: String(source.source) })
+  if (source.chunk_id) metadata.push({ label: t('common.meta_chunk_id'), value: source.chunk_id })
+  if (source.file_hash) {
+    metadata.push({ label: t('common.meta_file_hash'), value: shortHash(source.file_hash) })
+  }
   for (const item of refMeta) metadata.push(item)
 
   return (
@@ -105,7 +113,7 @@ export function EntityFinding({
       <div className="text-xs text-muted-foreground tabular-nums pt-0.5">{index}</div>
 
       <div className="min-w-0 space-y-1">
-        <div className="font-medium break-words">{source.filename || 'Unknown source'}</div>
+        <div className="font-medium break-words">{source.filename || t('common.unknown_source')}</div>
         {locParts.length > 0 && (
           <div className="text-xs text-muted-foreground">{locParts.join(', ')}</div>
         )}
@@ -116,7 +124,7 @@ export function EntityFinding({
             rel="noreferrer"
             className="inline-block text-xs text-blue-400 hover:text-blue-300"
           >
-            Open original ↗
+            {t('chat.open_original')}
           </a>
         )}
       </div>
@@ -135,7 +143,7 @@ export function EntityFinding({
           <span className="text-xs text-muted-foreground">—</span>
         )}
         {mentions.length > 0 && (
-          <ul className="flex flex-wrap gap-1" aria-label="Matched mentions">
+          <ul className="flex flex-wrap gap-1" aria-label={t('entities.matched_mentions_aria')}>
             {mentions.map((m, i) => (
               <li
                 key={i}
@@ -155,13 +163,13 @@ export function EntityFinding({
       <div className="min-w-0">
         {chunkText ? (
           <>
-            {t.shown && (
+            {translationState.shown && (
               <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                Translation
+                {t('common.translation')}
               </div>
             )}
-            <ClampedText length={(t.translation ?? chunkText).length}>
-              {t.translation ??
+            <ClampedText length={(translationState.translation ?? chunkText).length}>
+              {translationState.translation ??
                 segments.map((seg, i) =>
                   seg.highlight ? (
                     <mark key={i} className="bg-yellow-300 text-zinc-950 rounded px-0.5">
@@ -172,17 +180,25 @@ export function EntityFinding({
                   )
                 )}
             </ClampedText>
-            {t.failed && (
-              <div className="mt-1 text-[11px] text-muted-foreground">Translation unavailable — showing original.</div>
+            {translationState.failed && (
+              <div className="mt-1 text-[11px] text-muted-foreground">
+                {t('common.translation_unavailable')}
+              </div>
             )}
           </>
         ) : (
-          <span className="text-xs text-muted-foreground">Chunk text unavailable.</span>
+          <span className="text-xs text-muted-foreground">{t('common.chunk_text_unavailable')}</span>
         )}
       </div>
 
       <div className="flex items-center justify-end gap-1">
-        {chunkText && <TranslateToggle shown={t.shown} busy={t.busy} onClick={t.toggle} />}
+        {chunkText && (
+          <TranslateToggle
+            shown={translationState.shown}
+            busy={translationState.busy}
+            onClick={translationState.toggle}
+          />
+        )}
         {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
       </div>
     </div>

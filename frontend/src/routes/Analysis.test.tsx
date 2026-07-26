@@ -4,12 +4,24 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import userEvent from '@testing-library/user-event'
 import { Analysis } from './Analysis'
 import { useUiStore } from '@/stores/ui'
+import { LanguageContext } from '@/i18n/LanguageContext'
 
 function renderAnalysis() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={qc}>
       <Analysis />
+    </QueryClientProvider>
+  )
+}
+
+function renderAnalysisInLanguage(lang: 'en' | 'de') {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return render(
+    <QueryClientProvider client={qc}>
+      <LanguageContext.Provider value={lang}>
+        <Analysis />
+      </LanguageContext.Provider>
     </QueryClientProvider>
   )
 }
@@ -126,5 +138,16 @@ describe('Analysis auto-select guard (table view only)', () => {
       )
       expect(pressedGraphNodes).toHaveLength(0)
     })
+  })
+})
+
+describe('Analysis German smoke test', () => {
+  it('renders the German heading and tab labels', async () => {
+    vi.stubGlobal('fetch', mockFetch())
+    renderAnalysisInLanguage('de')
+
+    expect(await screen.findByRole('heading', { name: 'Analyse' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Hassrede' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Zusammenfassung' })).toBeInTheDocument()
   })
 })

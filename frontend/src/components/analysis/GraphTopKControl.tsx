@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useT } from '@/i18n/LanguageContext'
 
 interface Props {
   /** Current effective node count (already clamped by the parent). */
@@ -18,6 +19,7 @@ interface Props {
  * nothing.
  */
 export function GraphTopKControl({ value, max, onChange }: Props) {
+  const t = useT()
   const [draft, setDraft] = useState(String(value))
 
   // Re-sync the draft when the committed value changes from outside (config
@@ -39,13 +41,13 @@ export function GraphTopKControl({ value, max, onChange }: Props) {
 
   return (
     <label className="flex items-center gap-2 text-xs text-muted-foreground">
-      <span>Nodes</span>
+      <span>{t('table.col_nodes')}</span>
       <input
         type="number"
         min={1}
         max={max}
         value={draft}
-        aria-label="Graph node count"
+        aria-label={t('entities.graph_node_count_aria')}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={(e) => commit(e.target.value)}
         onKeyDown={(e) => {

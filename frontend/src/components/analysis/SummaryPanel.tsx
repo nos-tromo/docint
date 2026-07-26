@@ -11,6 +11,7 @@ import type { SummaryResponse } from '@/api/types'
 import { useUiStore } from '@/stores/ui'
 import { summarySnapshot } from '@/lib/reportSnapshots'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
+import { useT } from '@/i18n/LanguageContext'
 
 interface State {
   text: string
@@ -39,6 +40,7 @@ function reducer(s: State, a: Action): State {
 }
 
 export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<string> }) {
+  const t = useT()
   const collection = useUiStore((s) => s.selectedCollection)
   const [state, dispatch] = useReducer(reducer, {
     text: '',
@@ -83,7 +85,7 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
           disabled={state.busy}
           className="px-3 py-1 rounded-md bg-zinc-100 text-zinc-900 disabled:opacity-50"
         >
-          {state.busy ? 'Generating…' : 'Generate'}
+          {state.busy ? t('analysis.summary_generating') : t('analysis.summary_generate')}
         </button>
         <button
           type="button"
@@ -91,7 +93,7 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
           disabled={state.busy}
           className="px-3 py-1 rounded-md border border-border"
         >
-          Refresh
+          {t('analysis.summary_refresh')}
         </button>
         {state.text && (
           <div className="ml-auto flex items-center gap-2">
@@ -106,7 +108,7 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
               }
               className="px-3 py-1 rounded-md border border-border"
             >
-              Download MD
+              {t('analysis.summary_download_md')}
             </button>
             {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
           </div>
@@ -127,7 +129,7 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
       )}
       {state.meta?.sources && state.meta.sources.length > 0 && (
         <div className="space-y-2">
-          <div className="text-xs uppercase text-muted-foreground">Sources</div>
+          <div className="text-xs uppercase text-muted-foreground">{t('analysis.summary_sources')}</div>
           {state.meta.sources.map((s, i) => (
             <Citation
               key={s.id ?? `${s.filename}-${s.page ?? ''}-${s.row ?? ''}-${i}`}

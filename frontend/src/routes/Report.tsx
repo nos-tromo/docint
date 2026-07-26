@@ -16,22 +16,30 @@ import {
 import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
 import { cn } from '@/lib/cn'
+import { useT } from '@/i18n/LanguageContext'
+import type { Strings } from '@/i18n'
+
+type Translate = (key: keyof Strings, vars?: Record<string, string | number>) => string
 
 // Summaries lead the document, matching the server renderer's SECTION_ORDER.
-const SECTIONS: Array<{ type: ArtifactType; label: string }> = [
-  { type: 'summary', label: 'Summaries' },
-  { type: 'chat_answer', label: 'Chat answers' },
-  { type: 'entity_finding', label: 'Entity findings' },
-  { type: 'hate_speech_finding', label: 'Hate-speech findings' }
-]
+function sections(t: Translate): Array<{ type: ArtifactType; label: string }> {
+  return [
+    { type: 'summary', label: t('report.section_summaries') },
+    { type: 'chat_answer', label: t('report.section_chat_answers') },
+    { type: 'entity_finding', label: t('report.section_entity_findings') },
+    { type: 'hate_speech_finding', label: t('report.section_hate_findings') }
+  ]
+}
 
-const EXPORTS: Array<{ format: ReportExportFormat; label: string; view?: boolean }> = [
-  { format: 'pdf', label: 'PDF' },
-  { format: 'md', label: 'Markdown' },
-  { format: 'html', label: 'HTML', view: true },
-  { format: 'zip', label: 'CSV' },
-  { format: 'json', label: 'JSON' }
-]
+function exportFormats(t: Translate): Array<{ format: ReportExportFormat; label: string; view?: boolean }> {
+  return [
+    { format: 'pdf', label: t('report.format_pdf') },
+    { format: 'md', label: t('report.format_markdown') },
+    { format: 'html', label: t('report.format_html'), view: true },
+    { format: 'zip', label: t('report.format_csv') },
+    { format: 'json', label: t('report.format_json') }
+  ]
+}
 
 function str(snapshot: Record<string, unknown>, key: string): string {
   const v = snapshot[key]
@@ -44,20 +52,23 @@ function truncate(text: string, n = 240): string {
   return t.length > n ? `${t.slice(0, n).trimEnd()} …` : t
 }
 
-function itemTitle(item: ReportItem): string {
+function itemTitle(item: ReportItem, t: Translate): string {
   const s = item.snapshot
   switch (item.artifact_type) {
     case 'chat_answer':
-      return truncate(str(s, 'user_text') || 'Chat answer', 120)
+      return truncate(str(s, 'user_text') || t('report.default_chat_answer'), 120)
     case 'entity_finding':
-      return str(s, 'entity_label') || 'Entity finding'
+      return str(s, 'entity_label') || t('report.default_entity_finding')
     case 'hate_speech_finding': {
+      // `category`/`confidence` are frozen protocol values from the same
+      // fixed enum as HateSpeechTable's — shown verbatim, not translated,
+      // mirroring that component's treatment of the same fields.
       const cat = str(s, 'category')
       const conf = str(s, 'confidence')
-      return [cat, conf && `(${conf})`].filter(Boolean).join(' ') || 'Hate-speech finding'
+      return [cat, conf && `(${conf})`].filter(Boolean).join(' ') || t('report.default_hate_finding')
     }
     default:
-      return str(s, 'collection') || 'Summary'
+      return str(s, 'collection') || t('report.default_summary')
   }
 }
 
@@ -75,14 +86,19 @@ function itemBody(item: ReportItem): string {
   }
 }
 
-function itemSource(item: ReportItem): string {
+function itemSource(item: ReportItem, t: Translate): string {
   const s = item.snapshot
   const file = str(s, 'filename')
-  const loc = str(s, 'page') ? `page ${str(s, 'page')}` : str(s, 'row') ? `row ${str(s, 'row')}` : ''
+  const loc = str(s, 'page')
+    ? t('common.loc_page', { page: str(s, 'page') })
+    : str(s, 'row')
+      ? t('common.loc_row', { row: str(s, 'row') })
+      : ''
   return [file, loc].filter(Boolean).join(' · ')
 }
 
 export function Report() {
+  const t = useT()
   const collection = useUiStore((s) => s.selectedCollection)
   const activeReportId = useReportStore((s) => s.activeReportId)
   const setActiveReportId = useReportStore((s) => s.setActiveReportId)
@@ -113,7 +129,7 @@ export function Report() {
   const onCreate = async () => {
     try {
       const created = await createReport.mutateAsync({
-        title: 'Untitled report',
+        title: t('report.untitled_title'),
         collection_name: collection ?? undefined
       })
       setActiveReportId(created.id)
@@ -123,7 +139,7 @@ export function Report() {
   }
 
   const onDelete = (id: number) => {
-    if (!confirm('Delete this report? This cannot be undone.')) return
+    if (!confirm(t('report.delete_confirm'))) return
     deleteReport.mutate(id, {
       onSuccess: () => {
         if (activeReportId === id) setActiveReportId(null)
@@ -152,19 +168,19 @@ export function Report() {
     <div className="p-8 grid grid-cols-[18rem_1fr] gap-6 h-full">
       <aside className="flex flex-col gap-3 min-h-0">
         <div className="flex items-center justify-between">
-          <h1 className="text-xl font-semibold">Reports</h1>
+          <h1 className="text-xl font-semibold">{t('report.title')}</h1>
           <Button variant="primary" size="sm" onClick={onCreate} disabled={createReport.isPending}>
-            + New
+            {t('common.new_session')}
           </Button>
         </div>
         {createReport.isError && (
-          <p className="text-xs text-red-400">Couldn’t create the report — is the backend reachable?</p>
+          <p className="text-xs text-red-400">{t('report.create_error')}</p>
         )}
         <ul className="flex-1 overflow-auto space-y-1">
           {reports.isError ? (
-            <li className="px-2 py-1 text-sm text-red-400">Failed to load reports.</li>
+            <li className="px-2 py-1 text-sm text-red-400">{t('report.load_error')}</li>
           ) : reportList.length === 0 ? (
-            <li className="px-2 py-1 text-sm text-muted-foreground">No reports yet.</li>
+            <li className="px-2 py-1 text-sm text-muted-foreground">{t('report.empty_list')}</li>
           ) : null}
           {reportList.map((r) => {
             const isActive = r.id === activeReportId
@@ -186,7 +202,7 @@ export function Report() {
                   type="button"
                   onClick={() => onDelete(r.id)}
                   className="text-xs text-zinc-500 hover:text-red-400 px-1"
-                  aria-label="Delete report"
+                  aria-label={t('report.delete_aria')}
                 >
                   ×
                 </button>
@@ -198,18 +214,16 @@ export function Report() {
 
       <section className="flex flex-col min-h-0">
         {!activeReportId ? (
-          <p className="text-sm text-muted-foreground">
-            Select a report, or create one and add artifacts from Chat or Analysis.
-          </p>
+          <p className="text-sm text-muted-foreground">{t('report.select_hint')}</p>
         ) : active.isError ? (
           <p className="text-sm text-muted-foreground">
-            This report could not be loaded.{' '}
+            {t('report.load_failed')}{' '}
             <button type="button" className="underline" onClick={() => setActiveReportId(null)}>
-              Clear selection
+              {t('report.clear_selection')}
             </button>
           </p>
         ) : !report ? (
-          <p className="text-sm text-muted-foreground">Loading report…</p>
+          <p className="text-sm text-muted-foreground">{t('report.loading')}</p>
         ) : (
           <>
             <div className="flex items-start justify-between gap-3 mb-4">
@@ -224,15 +238,15 @@ export function Report() {
                     }
                   }}
                   className="w-full bg-transparent text-2xl font-semibold outline-hidden border-b border-transparent focus:border-border"
-                  aria-label="Report title"
+                  aria-label={t('report.title_aria')}
                 />
                 <div className="flex flex-wrap gap-x-6 gap-y-1.5">
                   <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <span className="uppercase tracking-wide">Operator</span>
+                    <span className="uppercase tracking-wide">{t('report.operator_label')}</span>
                     <input
                       key={`op-${report.id}`}
                       defaultValue={report.operator ?? ''}
-                      placeholder="Bearbeiter/-in"
+                      placeholder={t('report.operator_label')}
                       onBlur={(e) => {
                         const operator = e.target.value
                         if (operator !== (report.operator ?? '')) {
@@ -240,15 +254,15 @@ export function Report() {
                         }
                       }}
                       className="bg-zinc-950 border border-border rounded px-2 py-1 text-xs text-foreground"
-                      aria-label="Operator (Bearbeiter/-in)"
+                      aria-label={t('report.operator_label')}
                     />
                   </label>
                   <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <span className="uppercase tracking-wide">File reference</span>
+                    <span className="uppercase tracking-wide">{t('report.reference_label')}</span>
                     <input
                       key={`ref-${report.id}`}
                       defaultValue={report.reference_number ?? ''}
-                      placeholder="Aktenzeichen"
+                      placeholder={t('report.reference_label')}
                       onBlur={(e) => {
                         const reference_number = e.target.value
                         if (reference_number !== (report.reference_number ?? '')) {
@@ -256,7 +270,7 @@ export function Report() {
                         }
                       }}
                       className="bg-zinc-950 border border-border rounded px-2 py-1 text-xs text-foreground"
-                      aria-label="File reference (Aktenzeichen)"
+                      aria-label={t('report.reference_label')}
                     />
                   </label>
                   <label className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -265,9 +279,9 @@ export function Report() {
                       checked={report.show_toc ?? true}
                       onChange={(e) => updateReport.mutate({ id: report.id, show_toc: e.target.checked })}
                       className="accent-primary"
-                      aria-label="Table of contents"
+                      aria-label={t('report.toc_label')}
                     />
-                    <span className="uppercase tracking-wide">Table of contents</span>
+                    <span className="uppercase tracking-wide">{t('report.toc_label')}</span>
                   </label>
                   <label className="flex items-center gap-2 text-xs text-muted-foreground">
                     <input
@@ -277,9 +291,9 @@ export function Report() {
                         updateReport.mutate({ id: report.id, show_collection_overview: e.target.checked })
                       }
                       className="accent-primary"
-                      aria-label="Document overview"
+                      aria-label={t('report.document_overview')}
                     />
-                    <span className="uppercase tracking-wide">Document overview</span>
+                    <span className="uppercase tracking-wide">{t('report.document_overview')}</span>
                   </label>
                   {(report.show_collection_overview ?? true) && (
                     <button
@@ -289,10 +303,12 @@ export function Report() {
                       className="text-xs text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground disabled:opacity-50"
                     >
                       {refreshOverview.isPending
-                        ? 'Refreshing…'
+                        ? t('report.refresh_overview_pending')
                         : report.collection_overview?.captured_at
-                          ? `Refresh overview (captured ${report.collection_overview.captured_at.slice(0, 10)})`
-                          : 'Capture overview'}
+                          ? t('report.refresh_overview_captured', {
+                              date: report.collection_overview.captured_at.slice(0, 10)
+                            })
+                          : t('report.capture_overview')}
                     </button>
                   )}
                 </div>
@@ -305,17 +321,17 @@ export function Report() {
                   className="px-3 py-1 rounded-md border border-border text-sm hover:bg-zinc-900"
                   aria-haspopup="menu"
                 >
-                  Download ▾
+                  {t('chat.download')} ▾
                 </button>
                 <div className="absolute right-0 top-full z-10 hidden pt-1 group-hover:block group-focus-within:block">
                   <div className="flex flex-col min-w-[11rem] rounded-md border border-border bg-zinc-950 p-1 shadow-lg">
-                    {EXPORTS.map((e) => (
+                    {exportFormats(t).map((e) => (
                       <a
                         key={e.format}
                         href={reportExportHref(report.id, e.format)}
                         {...(e.view ? { target: '_blank', rel: 'noreferrer' } : { download: true })}
                         className="block rounded px-3 py-1.5 text-sm hover:bg-zinc-800 whitespace-nowrap"
-                        title={e.view ? 'Open in a new tab' : `Download ${e.label}`}
+                        title={e.view ? t('report.open_new_tab_title') : t('report.download_format_title', { label: e.label })}
                       >
                         {e.label}
                       </a>
@@ -327,12 +343,11 @@ export function Report() {
 
             {items.length === 0 && overviewToShow === null ? (
               <p className="text-sm text-muted-foreground">
-                This report is empty. Use the “+ Report” control on a chat answer, entity finding, or
-                hate-speech finding to add it here.
+                {t('report.empty_report_hint', { control: t('report.add_button') })}
               </p>
             ) : (
               <div className="flex-1 overflow-auto space-y-6 pr-2">
-                {SECTIONS.map(({ type, label }) => {
+                {sections(t).map(({ type, label }) => {
                   const sectionItems = items.filter((i) => i.artifact_type === type)
                   if (sectionItems.length === 0) return null
                   return (
@@ -344,9 +359,9 @@ export function Report() {
                         <div key={item.id} className="rounded-md border border-border bg-zinc-900 p-3 space-y-2">
                           <div className="flex items-start justify-between gap-2">
                             <div className="min-w-0">
-                              <div className="font-medium text-sm break-words">{itemTitle(item)}</div>
-                              {itemSource(item) && (
-                                <div className="text-xs text-muted-foreground">{itemSource(item)}</div>
+                              <div className="font-medium text-sm break-words">{itemTitle(item, t)}</div>
+                              {itemSource(item, t) && (
+                                <div className="text-xs text-muted-foreground">{itemSource(item, t)}</div>
                               )}
                             </div>
                             <div className="flex items-center gap-1 shrink-0">
@@ -355,7 +370,7 @@ export function Report() {
                                 onClick={() => move(item, -1)}
                                 disabled={si === 0}
                                 className="px-1.5 text-muted-foreground hover:text-foreground disabled:opacity-30"
-                                aria-label="Move up"
+                                aria-label={t('report.move_up_aria')}
                               >
                                 ↑
                               </button>
@@ -364,7 +379,7 @@ export function Report() {
                                 onClick={() => move(item, 1)}
                                 disabled={si === sectionItems.length - 1}
                                 className="px-1.5 text-muted-foreground hover:text-foreground disabled:opacity-30"
-                                aria-label="Move down"
+                                aria-label={t('report.move_down_aria')}
                               >
                                 ↓
                               </button>
@@ -372,7 +387,7 @@ export function Report() {
                                 type="button"
                                 onClick={() => removeItem.mutate({ reportId: report.id, itemId: item.id })}
                                 className="px-1.5 text-zinc-500 hover:text-red-400"
-                                aria-label="Remove item"
+                                aria-label={t('report.remove_item_aria')}
                               >
                                 ×
                               </button>
@@ -386,7 +401,7 @@ export function Report() {
                           <input
                             key={`note-${item.id}`}
                             defaultValue={item.note ?? ''}
-                            placeholder="Add a note…"
+                            placeholder={t('report.note_placeholder')}
                             onBlur={(e) => {
                               const note = e.target.value
                               if (note !== (item.note ?? '')) {
