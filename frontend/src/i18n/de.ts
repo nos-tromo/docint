@@ -11,7 +11,6 @@ export const de: Strings = {
 
   // common
   'common.copied': 'Kopiert',
-  'common.copy': 'Kopieren',
   'common.active': 'Aktiv',
   'common.collection': 'Sammlung',
   'common.choose_collection': 'Sammlung auswählen…',
@@ -65,6 +64,10 @@ export const de: Strings = {
   // upload
   'upload.drop_hint': 'Dateien hier ablegen oder klicken, um sie auszuwählen.',
   'upload.choose_folder': 'Oder einen Ordner auswählen',
+  'upload.files_one': '{count} Datei',
+  'upload.files_other': '{count} Dateien',
+  'upload.clear_all': 'Alle entfernen',
+  'common.remove': 'Entfernen',
 
   // shared transport-error suffix
   'common.transport_suffix': ' (Transport: {detail})',
@@ -180,7 +183,6 @@ export const de: Strings = {
   'entities.category_all': 'Alle',
   'entities.entity_label': 'Entität',
   'entities.no_entities_option': 'Keine Entitäten',
-  'entities.type_unlabeled': 'Unbezeichnet',
   'entities.graph_node_count_aria': 'Anzahl der Graphknoten',
   'entities.reset_node_count_aria': 'Knotenanzahl zurücksetzen',
   'entities.reset_node_count_title': 'Die Knotenanzahl auf den Standardwert zurücksetzen',
@@ -252,7 +254,6 @@ export const de: Strings = {
   'report.refresh_overview_pending': 'Wird aktualisiert…',
   'report.refresh_overview_captured': 'Übersicht aktualisieren (erfasst {date})',
   'report.capture_overview': 'Übersicht erfassen',
-  'report.download_button': 'Herunterladen',
   'report.open_new_tab_title': 'In neuem Tab öffnen',
   'report.download_format_title': '{label} herunterladen',
   'report.format_pdf': 'PDF',

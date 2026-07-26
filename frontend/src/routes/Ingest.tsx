@@ -207,6 +207,11 @@ export function Ingest() {
         files={state.files}
         onRemove={(i) => dispatch({ type: 'remove_file', i })}
         onClear={() => dispatch({ type: 'reset_files' })}
+        labels={{
+          files: (n) => t(n === 1 ? 'upload.files_one' : 'upload.files_other', { count: n }),
+          clearAll: t('upload.clear_all'),
+          remove: t('common.remove')
+        }}
       />
 
       <Button

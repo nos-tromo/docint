@@ -23,7 +23,7 @@ export function TranslateToggle({
   const t = useT()
   return (
     <HoverIconAction
-      icon={busy ? <Spinner /> : <TranslateGlyph />}
+      icon={busy ? <Spinner label={t('common.loading_ellipsis')} /> : <TranslateGlyph />}
       label={shown ? t('common.show_original') : t('common.translate')}
       aria-pressed={shown}
       disabled={busy}

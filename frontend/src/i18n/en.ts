@@ -9,7 +9,6 @@ export const en = {
 
   // common
   'common.copied': 'Copied',
-  'common.copy': 'Copy',
   'common.active': 'Active',
   'common.collection': 'Collection',
   'common.choose_collection': 'Choose a collection…',
@@ -62,6 +61,10 @@ export const en = {
   // upload
   'upload.drop_hint': 'Drop files here or click to choose.',
   'upload.choose_folder': 'Or choose a folder',
+  'upload.files_one': '{count} file',
+  'upload.files_other': '{count} files',
+  'upload.clear_all': 'Clear all',
+  'common.remove': 'Remove',
 
   // shared transport-error suffix
   'common.transport_suffix': ' (transport: {detail})',
@@ -174,7 +177,6 @@ export const en = {
   'entities.category_all': 'All',
   'entities.entity_label': 'Entity',
   'entities.no_entities_option': 'No entities',
-  'entities.type_unlabeled': 'Unlabeled',
   'entities.graph_node_count_aria': 'Graph node count',
   'entities.reset_node_count_aria': 'Reset node count',
   'entities.reset_node_count_title': 'Reset the node count to the deploy default',
@@ -246,7 +248,6 @@ export const en = {
   'report.refresh_overview_pending': 'Refreshing…',
   'report.refresh_overview_captured': 'Refresh overview (captured {date})',
   'report.capture_overview': 'Capture overview',
-  'report.download_button': 'Download',
   'report.open_new_tab_title': 'Open in a new tab',
   'report.download_format_title': 'Download {label}',
   'report.format_pdf': 'PDF',
