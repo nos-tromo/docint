@@ -274,12 +274,12 @@ def test_admin_ingests_into_cross_owner_collection(client: TestClient) -> None:
     assert client.get("/collections/list", headers=ADMIN).json() == []
 
 
-def test_admin_lists_own_sessions_scoped_to_cross_owner_collection(client: TestClient, _patch_rag: _OwnRAG) -> None:
-    """Admin's /sessions/list?owner=alice resolves alice's collection, not the admin's empty namespace.
+def test_admin_lists_cross_owner_sessions_with_owner_param(client: TestClient, _patch_rag: _OwnRAG) -> None:
+    """Admin's /sessions/list?owner=alice lists *alice's* sessions in alice's collection.
 
-    The collection lookup must use the effective owner (alice) so it resolves
-    at all; the session listing itself stays scoped to the admin's own
-    identity, never alice's — an admin never sees another owner's sessions.
+    Both the collection lookup and the session-owner scope use the effective
+    owner (alice): an admin browsing a foreign namespace must see that owner's
+    chats there, not their own empty list.
     """
     _ingest(client, "alice", "alpha")
 
@@ -290,8 +290,17 @@ def test_admin_lists_own_sessions_scoped_to_cross_owner_collection(client: TestC
     assert resp.json()["sessions"] != []
 
     owner_arg, collection_arg = _patch_rag._sessions.listed[-1]
-    assert owner_arg == "root"  # session ownership stays on principal.name, not effective_owner
-    assert collection_arg is not None  # but the collection resolved under alice's namespace
+    assert owner_arg == "alice"  # session scope follows effective_owner, not the admin's name
+    assert collection_arg is not None  # and the collection resolved under alice's namespace
+
+
+def test_non_admin_owner_param_does_not_rescope_sessions(client: TestClient, _patch_rag: _OwnRAG) -> None:
+    """A non-admin passing ?owner= keeps their own session scope."""
+    resp = client.get("/sessions/list", params={"owner": "alice"}, headers={"X-Auth-User": "bob"})
+    assert resp.status_code == 200
+
+    owner_arg, _ = _patch_rag._sessions.listed[-1]
+    assert owner_arg == "bob"
 
 
 def test_collections_list_all_admin_shape(client: TestClient) -> None:

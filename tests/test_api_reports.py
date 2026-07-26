@@ -358,3 +358,44 @@ def test_create_is_failsoft_when_capture_raises(client: TestClient, monkeypatch:
     monkeypatch.setattr(api_module.rag, "list_documents", _boom)
     created = _create(client, collection="c1")
     assert created["collection_overview"] is None
+
+
+# --- admin cross-owner access (owner query param) ---
+
+ADMIN = {"X-Auth-User": "root", "X-Auth-Groups": "admins"}
+
+
+def test_admin_lists_cross_owner_reports_with_owner_param(client: TestClient) -> None:
+    """GET /reports?owner=alice as an admin returns alice's reports."""
+    resp = client.post(
+        "/reports", json={"title": "Alice case", "collection_name": None}, headers={"X-Auth-User": "alice"}
+    )
+    assert resp.status_code == 200
+
+    listed = client.get("/reports", params={"owner": "alice"}, headers=ADMIN).json()["reports"]
+    assert [r["title"] for r in listed] == ["Alice case"]
+
+    # Without the owner param the admin is in their own (empty) namespace.
+    assert client.get("/reports", headers=ADMIN).json()["reports"] == []
+
+
+def test_admin_reads_cross_owner_report_with_owner_param(client: TestClient) -> None:
+    """GET /reports/{id}?owner=alice as an admin returns alice's report; without it, 404."""
+    created = client.post(
+        "/reports", json={"title": "Alice case", "collection_name": None}, headers={"X-Auth-User": "alice"}
+    ).json()
+    rid = created["id"]
+
+    assert client.get(f"/reports/{rid}", params={"owner": "alice"}, headers=ADMIN).status_code == 200
+    assert client.get(f"/reports/{rid}", headers=ADMIN).status_code == 404
+
+
+def test_non_admin_owner_param_does_not_rescope_reports(client: TestClient) -> None:
+    """A non-admin passing ?owner= keeps their own report scope (404 cross-owner)."""
+    created = client.post(
+        "/reports", json={"title": "Alice case", "collection_name": None}, headers={"X-Auth-User": "alice"}
+    ).json()
+    rid = created["id"]
+
+    assert client.get(f"/reports/{rid}", params={"owner": "alice"}, headers={"X-Auth-User": "bob"}).status_code == 404
+    assert client.get("/reports", params={"owner": "alice"}, headers={"X-Auth-User": "bob"}).json()["reports"] == []

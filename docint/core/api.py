@@ -1066,12 +1066,12 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
                 else:
                     session_id = rag.start_session(
                         payload.session_id,
-                        owner=principal.name,
+                        owner=principal.effective_owner,
                     )
                     data = rag.chat(
                         payload.question,
                         session_id=session_id,
-                        owner=principal.name,
+                        owner=principal.effective_owner,
                         metadata_filters=metadata_filters,
                         metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
                         metadata_filter_rules=payload.metadata_filters,
@@ -1175,7 +1175,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
         payload.query_mode not in {"entity_occurrence", "entity_occurrence_multi"}
         and payload.retrieval_mode != "stateless"
     ):
-        session_owner = principal.name
+        session_owner = principal.effective_owner
         # Up-front collection-pin check so a mismatch is a clean 409 rather than
         # an in-stream SSE error: resuming an owned session against a different
         # collection must be refused before any retrieval runs.
@@ -2093,7 +2093,7 @@ def _capture_collection_overview(report_id: int, collection: str, principal: Pri
     with _scoped_collection(collection, principal):
         documents = rag.list_documents()
     overview = build_collection_overview(documents, collection, datetime.now(UTC))
-    return rag.ensure_report_manager().set_collection_overview_snapshot(report_id, principal.name, overview)
+    return rag.ensure_report_manager().set_collection_overview_snapshot(report_id, principal.effective_owner, overview)
 
 
 @app.get("/collections/{name}/export/documents.csv", tags=["Query"])
@@ -2269,9 +2269,9 @@ def list_sessions(
     When ``collection`` (a *logical* name) is supplied it is resolved to its
     physical Qdrant name under the caller's effective owner (an admin's
     ``owner`` query param, or the caller themself) and the listing is
-    restricted to sessions pinned to it and owned by the calling principal —
-    an admin browsing a foreign collection sees only their own sessions
-    pinned to it, never the owner's. A collection that does not resolve
+    restricted to sessions pinned to it and owned by that same effective
+    owner — an admin browsing a foreign collection sees the owner's
+    sessions there, exactly as the owner would. A collection that does not resolve
     (not owned by the effective owner, or no longer exists) yields an empty
     list rather than a 404 — a stale client selection must not break the
     sidebar. When ``collection`` is omitted, every session the caller owns
@@ -2293,9 +2293,9 @@ def list_sessions(
             physical = rag.ensure_collection_owner_manager().resolve(principal.effective_owner, collection)
             if physical is None:
                 return {"sessions": []}
-            sessions = sm.list_sessions(principal.name, collection=physical)
+            sessions = sm.list_sessions(principal.effective_owner, collection=physical)
         else:
-            sessions = sm.list_sessions(principal.name)
+            sessions = sm.list_sessions(principal.effective_owner)
         return {"sessions": sessions}
     except Exception as e:
         logger.error("Error listing sessions: {}", e)
@@ -2328,7 +2328,7 @@ def get_session_history(
             principal; 500 on unexpected errors.
     """
     try:
-        messages = rag.ensure_session_manager().get_session_history(session_id, principal.name)
+        messages = rag.ensure_session_manager().get_session_history(session_id, principal.effective_owner)
     except HTTPException:
         raise
     except Exception as e:
@@ -2419,7 +2419,7 @@ def export_session_sources_zip(session_id: str, principal: Principal = Depends(r
             owned by another principal.
     """
     try:
-        files = _collect_session_source_files(session_id, principal.name)
+        files = _collect_session_source_files(session_id, principal.effective_owner)
     except Exception as e:
         logger.error("Error assembling session sources for {}: {}", session_id, e)
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -2471,7 +2471,7 @@ def delete_session(session_id: str, principal: Principal = Depends(resolve_princ
             principal; 500 on unexpected errors.
     """
     try:
-        success = rag.ensure_session_manager().delete_session(session_id, principal.name)
+        success = rag.ensure_session_manager().delete_session(session_id, principal.effective_owner)
     except HTTPException:
         raise
     except Exception as e:
@@ -2496,7 +2496,7 @@ def create_report(payload: ReportCreateIn, principal: Principal = Depends(resolv
     try:
         report = rag.ensure_report_manager().create_report(
             title=payload.title,
-            owner=principal.name,
+            owner=principal.effective_owner,
             collection_name=payload.collection_name,
             operator=payload.operator,
             reference_number=payload.reference_number,
@@ -2534,7 +2534,7 @@ def list_reports(
         dict[str, list[dict[str, Any]]]: The caller's report summaries.
     """
     try:
-        return {"reports": rag.ensure_report_manager().list_reports(principal.name, collection)}
+        return {"reports": rag.ensure_report_manager().list_reports(principal.effective_owner, collection)}
     except Exception as e:
         logger.error("Error listing reports: {}", e)
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -2554,7 +2554,7 @@ def get_report(report_id: int, principal: Principal = Depends(resolve_principal)
     Raises:
         HTTPException: 404 when the report is missing or not owned.
     """
-    return _get_owned_report(report_id, principal.name)
+    return _get_owned_report(report_id, principal.effective_owner)
 
 
 @app.patch("/reports/{report_id}", tags=["Reports"])
@@ -2578,7 +2578,7 @@ def update_report(
     """
     report = rag.ensure_report_manager().update_report(
         report_id,
-        principal.name,
+        principal.effective_owner,
         title=payload.title,
         operator=payload.operator,
         reference_number=payload.reference_number,
@@ -2612,7 +2612,7 @@ def refresh_report_collection_overview(
             principal (or its collection is no longer owned); 400 when the report
             has no collection; 502 when the manifest build fails.
     """
-    report = _get_owned_report(report_id, principal.name)
+    report = _get_owned_report(report_id, principal.effective_owner)
     collection = report.get("collection_name")
     if not collection:
         raise HTTPException(status_code=400, detail="Report has no collection to summarize.")
@@ -2640,7 +2640,7 @@ def delete_report(report_id: int, principal: Principal = Depends(resolve_princip
     Raises:
         HTTPException: 404 when the report is missing or not owned.
     """
-    if not rag.ensure_report_manager().delete_report(report_id, principal.name):
+    if not rag.ensure_report_manager().delete_report(report_id, principal.effective_owner):
         raise HTTPException(status_code=404, detail="Report not found.")
     return {"ok": True}
 
@@ -2666,7 +2666,7 @@ def add_report_item(
     """
     item = rag.ensure_report_manager().add_item(
         report_id,
-        principal.name,
+        principal.effective_owner,
         artifact_type=payload.artifact_type,
         dedupe_key=payload.dedupe_key,
         snapshot=payload.snapshot,
@@ -2698,7 +2698,7 @@ def annotate_report_item(
     Raises:
         HTTPException: 404 when the report/item is missing or not owned.
     """
-    item = rag.ensure_report_manager().annotate_item(report_id, principal.name, item_id, note=payload.note)
+    item = rag.ensure_report_manager().annotate_item(report_id, principal.effective_owner, item_id, note=payload.note)
     if item is None:
         raise HTTPException(status_code=404, detail="Report or item not found.")
     return item
@@ -2723,7 +2723,7 @@ def remove_report_item(
     Raises:
         HTTPException: 404 when the report/item is missing or not owned.
     """
-    if not rag.ensure_report_manager().remove_item(report_id, principal.name, item_id):
+    if not rag.ensure_report_manager().remove_item(report_id, principal.effective_owner, item_id):
         raise HTTPException(status_code=404, detail="Report or item not found.")
     return {"ok": True}
 
@@ -2747,7 +2747,7 @@ def reorder_report_items(
     Raises:
         HTTPException: 404 when the report is missing or not owned.
     """
-    report = rag.ensure_report_manager().reorder_items(report_id, principal.name, payload.item_ids)
+    report = rag.ensure_report_manager().reorder_items(report_id, principal.effective_owner, payload.item_ids)
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found.")
     return report
@@ -2758,7 +2758,7 @@ def export_report_markdown(report_id: int, principal: Principal = Depends(resolv
     """Export a report as a single Markdown document (attachment download)."""
     from docint.core.state.report_render import render_markdown
 
-    report = _get_owned_report(report_id, principal.name)
+    report = _get_owned_report(report_id, principal.effective_owner)
     return Response(
         content=render_markdown(report),
         media_type="text/markdown; charset=utf-8",
@@ -2771,7 +2771,7 @@ def export_report_html(report_id: int, principal: Principal = Depends(resolve_pr
     """Export a report as a self-contained HTML document (served inline)."""
     from docint.core.state.report_render import render_html
 
-    report = _get_owned_report(report_id, principal.name)
+    report = _get_owned_report(report_id, principal.effective_owner)
     return Response(
         content=render_html(report),
         media_type="text/html; charset=utf-8",
@@ -2784,7 +2784,7 @@ def export_report_json(report_id: int, principal: Principal = Depends(resolve_pr
     """Export the full report (with snapshots) as JSON (attachment download)."""
     from docint.core.state.report_render import render_json
 
-    report = _get_owned_report(report_id, principal.name)
+    report = _get_owned_report(report_id, principal.effective_owner)
     return Response(
         content=render_json(report),
         media_type="application/json",
@@ -2797,7 +2797,7 @@ def export_report_zip(report_id: int, principal: Principal = Depends(resolve_pri
     """Export a report as a ZIP bundle of per-type CSVs (attachment download)."""
     from docint.core.state.report_render import report_csv_bundle
 
-    report = _get_owned_report(report_id, principal.name)
+    report = _get_owned_report(report_id, principal.effective_owner)
     return Response(
         content=report_csv_bundle(report),
         media_type="application/zip",
@@ -2814,7 +2814,7 @@ def export_report_pdf(report_id: int, principal: Principal = Depends(resolve_pri
     """
     from docint.core.state.report_render import PdfEngineUnavailableError, render_pdf
 
-    report = _get_owned_report(report_id, principal.name)
+    report = _get_owned_report(report_id, principal.effective_owner)
     try:
         pdf_bytes = render_pdf(report)
     except PdfEngineUnavailableError as e:
