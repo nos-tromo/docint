@@ -403,7 +403,19 @@ MEDIA_FILETYPES=.mp4,.mov,.mkv,.webm,.avi,.m4v,.mpg,.mpeg,.mp3,.m4a,.wav,.flac,.
 # non-image file to Nextext regardless of extension.
 ```
 
-## Translation
+## Localization
+
+The single env var `RESPONSE_LANGUAGE` (values `en` | `de`, default `en`) controls
+the *entire* app — both backend and SPA chrome — with one knob:
+
+- **Backend**: prompts, `ui_strings` in reports, and export captions (PDF headers,
+  CSV column names). Unknown values silently fall back to `en`.
+- **SPA**: The React interface — buttons, labels, navigation, form hints, and
+  error messages — flows from a typed locale catalog (`frontend/src/i18n/`)
+  with `en` and `de` as canonical languages (316 keys across all screens,
+  maintained in parity with each new feature).
+
+### On-Demand Translation of Source Content
 
 Chat source citations, entity findings, and hate-speech findings each show a
 hover/focus-revealed **Translate** control. Clicking it fetches an on-demand
