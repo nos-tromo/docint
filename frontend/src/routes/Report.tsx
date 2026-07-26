@@ -18,6 +18,7 @@ import { useUiStore } from '@/stores/ui'
 import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
 import type { Strings } from '@/i18n'
+import { hateCategoryLabel } from '@/lib/hateCategoryLabel'
 
 type Translate = (key: keyof Strings, vars?: Record<string, string | number>) => string
 
@@ -60,12 +61,15 @@ function itemTitle(item: ReportItem, t: Translate): string {
     case 'entity_finding':
       return str(s, 'entity_label') || t('report.default_entity_finding')
     case 'hate_speech_finding': {
-      // `category`/`confidence` are frozen protocol values from the same
-      // fixed enum as HateSpeechTable's — shown verbatim, not translated,
-      // mirroring that component's treatment of the same fields.
+      // `category` is a frozen protocol value from the same fixed enum as
+      // HateSpeechTable's — mapped through the same shared label lookup so a
+      // category reads identically in Analysis and in Report (e.g. German
+      // "Rasse", not "race"). `confidence` stays verbatim, mirroring
+      // HateSpeechTable's treatment of that field.
       const cat = str(s, 'category')
       const conf = str(s, 'confidence')
-      return [cat, conf && `(${conf})`].filter(Boolean).join(' ') || t('report.default_hate_finding')
+      const label = cat ? hateCategoryLabel(cat, t) : ''
+      return [label, conf && `(${conf})`].filter(Boolean).join(' ') || t('report.default_hate_finding')
     }
     default:
       return str(s, 'collection') || t('report.default_summary')

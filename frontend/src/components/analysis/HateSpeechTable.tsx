@@ -10,35 +10,13 @@ import { ClampedText } from '@/components/common/ClampedText'
 import { hateSpeechSnapshot } from '@/lib/reportSnapshots'
 import { useT } from '@/i18n/LanguageContext'
 import type { Strings } from '@/i18n'
+import { hateCategoryLabel } from '@/lib/hateCategoryLabel'
 
 export type { HateSpeechRow }
 
 // Shared column template for the header row and every body row. Metadata is a
 // single column (reason / confidence / chunk id / reference metadata).
 const HATE_GRID = '2.5rem 6.5rem minmax(8rem,0.8fr) minmax(9rem,1.1fr) minmax(12rem,1.8fr) 6rem'
-
-// The `category`/`confidence` values are protocol (the fixed enum in
-// docint/utils/prompts/{en,de}/hate_speech.txt): never translate the raw
-// value itself, only its display label — an unrecognized value (e.g. a future
-// category) falls back to showing the raw string as-is.
-const CATEGORY_LABEL_KEY: Partial<Record<string, keyof Strings>> = {
-  race: 'hate.category_race',
-  ethnicity: 'hate.category_ethnicity',
-  religion: 'hate.category_religion',
-  gender: 'hate.category_gender',
-  sexual_orientation: 'hate.category_sexual_orientation',
-  disability: 'hate.category_disability',
-  nationality: 'hate.category_nationality',
-  extremism: 'hate.category_extremism',
-  other: 'hate.category_other',
-  none: 'hate.category_none',
-  unknown: 'hate.category_unknown'
-}
-
-function labelFor(raw: string, map: Partial<Record<string, keyof Strings>>, t: (key: keyof Strings) => string): string {
-  const key = map[raw.toLowerCase()]
-  return key ? t(key) : raw
-}
 
 interface Props {
   rows: HateSpeechRow[]
@@ -80,7 +58,7 @@ function HateSpeechTableRow({
   const translationState = useTranslatable(chunkText, setTranslation)
   const source = row.source_ref ?? row.filename ?? i18n('common.unknown_source')
   const location = locationParts(row, i18n)
-  const category = labelFor((row.category ?? 'unknown').trim(), CATEGORY_LABEL_KEY, i18n)
+  const category = hateCategoryLabel((row.category ?? 'unknown').trim(), i18n)
   const reason = (row.reason ?? '').trim()
 
   const metadata: Array<{ label: string; value: string }> = []
