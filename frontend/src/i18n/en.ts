@@ -94,6 +94,8 @@ export const en = {
   'chat.error_no_collection': 'Select a collection before chatting.',
   'chat.error_stream_ended':
     'Chat stream ended unexpectedly — the backend may have crashed (out of memory while loading NER/LLM models is the usual cause). Check backend logs and try again.',
+  'chat.error_context_overflow':
+    'The request is too large for the model – Try a shorter question or select fewer documents.',
   'chat.open_original': 'Open original ↗',
   'chat.entity_disambiguation': 'Entity disambiguation',
   'chat.candidates': 'Candidates',
@@ -138,6 +140,7 @@ export const en = {
   'ingest.chunks': '{count} chunks',
   'ingest.finished': 'Ingestion finished',
   'ingest.failed_default': 'Ingestion failed.',
+  'ingest.save_failed_file': 'Upload failed: “{filename}” could not be saved.',
 
   // inspector orphans
   'inspector.file_types': 'File types',

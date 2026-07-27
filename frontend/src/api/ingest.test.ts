@@ -205,3 +205,56 @@ describe('buildIngestFormData', () => {
     expect(buildIngestFormData('c1', [f], true).get('defer_ingest')).toBe('true')
   })
 })
+
+it('appends the machine-readable code to the finalize failure message', async () => {
+  global.fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stagedBatch('a.txt'))
+    .mockResolvedValueOnce(
+      sseResponse(
+        `event: ingestion_started\ndata: ${JSON.stringify({ collection: 'c1' })}\n\n` +
+          `event: error\ndata: ${JSON.stringify({ message: 'Ingestion failed.', code: 'ingestion_failed' })}\n\n`
+      )
+    ) as unknown as typeof fetch
+
+  const events = await collect(streamIngestUploadBatched('c1', [fileOfSize('a.txt', 10)], 1000))
+  const terminal = events[events.length - 1]
+  expect(terminal.event).toBe('error')
+  expect(String(terminal.data.message)).toBe('Ingestion failed. (ingestion_failed)')
+})
+
+it('names the failing file on a save_failed event when it matches the upload list', async () => {
+  global.fetch = vi
+    .fn()
+    .mockResolvedValueOnce(
+      sseResponse(
+        `event: start\ndata: ${JSON.stringify({ collection: 'c1', files: ['a.txt'] })}\n\n` +
+          `event: error\ndata: ${JSON.stringify({ message: 'Failed to save file.', code: 'save_failed', filename: 'a.txt' })}\n\n`
+      )
+    )
+    .mockResolvedValueOnce(finalizeStream()) as unknown as typeof fetch
+
+  const events = await collect(streamIngestUploadBatched('c1', [fileOfSize('a.txt', 10)], 1000))
+  const err = events.find((e) => e.event === 'error')
+  expect(err).toBeDefined()
+  expect(String(err!.data.message)).toContain('a.txt')
+  expect(String(err!.data.message)).toContain('(save_failed)')
+})
+
+it('never names a file the client did not upload on save_failed', async () => {
+  global.fetch = vi
+    .fn()
+    .mockResolvedValueOnce(
+      sseResponse(
+        `event: start\ndata: ${JSON.stringify({ collection: 'c1', files: ['a.txt'] })}\n\n` +
+          `event: error\ndata: ${JSON.stringify({ message: 'Failed to save file.', code: 'save_failed', filename: '../../etc/passwd' })}\n\n`
+      )
+    )
+    .mockResolvedValueOnce(finalizeStream()) as unknown as typeof fetch
+
+  const events = await collect(streamIngestUploadBatched('c1', [fileOfSize('a.txt', 10)], 1000))
+  const err = events.find((e) => e.event === 'error')
+  expect(err).toBeDefined()
+  expect(String(err!.data.message)).not.toContain('passwd')
+  expect(String(err!.data.message)).toBe('Ingestion failed. (save_failed)')
+})

@@ -21,3 +21,33 @@ export function describeError(err: unknown): ErrorDescriptor {
   }
   return { key: 'common.error_unknown' }
 }
+
+import type { Strings } from '@/i18n'
+
+/** Specific catalog copy for stream error codes that deserve their own
+ *  message; every other valid code renders its fallback key's copy. */
+const STREAM_ERROR_KEYS: Partial<Record<string, keyof Strings>> = {
+  context_overflow: 'chat.error_context_overflow',
+}
+
+/** SSE error codes are a closed backend enum (see docint/core/errors.py);
+ *  only strings matching this shape may ever reach the screen. */
+const CODE_TOKEN = /^[a-z][a-z0-9_]{0,39}$/
+
+/** Render a stream-error message from a backend `code` field.
+ *
+ *  The code is protocol, not prose: it is regex-validated before display and
+ *  shown as a bare token — the triage counterpart of the HTTP status on
+ *  request errors. Anything that is not a valid token renders the fallback
+ *  catalog copy alone. */
+export function streamErrorText(
+  t: (key: keyof Strings, vars?: Record<string, string | number>) => string,
+  code: unknown,
+  fallbackKey: keyof Strings,
+  vars?: Record<string, string | number>,
+): string {
+  const token = typeof code === 'string' && CODE_TOKEN.test(code) ? code : null
+  const key = (token && STREAM_ERROR_KEYS[token]) || fallbackKey
+  const base = t(key, vars)
+  return token ? `${base} (${token})` : base
+}

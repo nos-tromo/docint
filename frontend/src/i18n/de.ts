@@ -100,6 +100,8 @@ export const de: Strings = {
   'chat.error_no_collection': 'Wählen Sie eine Sammlung aus, bevor Sie einen Chat starten.',
   'chat.error_stream_ended':
     'Der Chat-Stream wurde unerwartet beendet.',
+  'chat.error_context_overflow':
+    'Die Anfrage ist zu groß für das Modell – Bitte stellen Sie eine kürzere Frage oder wählen Sie weniger Dokumente aus.',
   'chat.open_original': 'Original öffnen ↗',
   'chat.entity_disambiguation': 'Entitäten-Disambiguierung',
   'chat.candidates': 'Kandidaten',
@@ -147,6 +149,7 @@ export const de: Strings = {
   'ingest.chunks': '{count} Chunks',
   'ingest.finished': 'Datenimport abgeschlossen',
   'ingest.failed_default': 'Datenimport fehlgeschlagen.',
+  'ingest.save_failed_file': 'Upload fehlgeschlagen: „{filename}“ konnte nicht gespeichert werden.',
 
   // inspector orphans
   'inspector.file_types': 'Dateitypen',

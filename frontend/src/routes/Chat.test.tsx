@@ -377,3 +377,33 @@ describe('Chat session-history validation restoration', () => {
     expect(screen.queryByText(/response validation passed/i)).toBeNull()
   })
 })
+
+  it('appends the machine-readable code to the stream-error copy', async () => {
+    const frames = 'data: {"error":"Internal server error","code":"generation_failed"}\n\n'
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, body: bodyFromString(frames) })
+    )
+    renderChat()
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    await waitFor(() => {
+      expect(screen.getByText(/\(generation_failed\)/)).toBeInTheDocument()
+    })
+    expect(screen.getByText(/stream ended unexpectedly/i)).toBeInTheDocument()
+  })
+
+  it('shows actionable copy for a context_overflow stream error', async () => {
+    const frames = 'data: {"error":"Internal server error","code":"context_overflow"}\n\n'
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, body: bodyFromString(frames) })
+    )
+    renderChat()
+    await userEvent.type(await screen.findByPlaceholderText(/ask something/i), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    await waitFor(() => {
+      expect(screen.getByText(/too large for the model/i)).toBeInTheDocument()
+    })
+    expect(screen.getByText(/\(context_overflow\)/)).toBeInTheDocument()
+  })
