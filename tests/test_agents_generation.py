@@ -3,9 +3,12 @@
 from typing import Any, cast
 
 import pytest
+from loguru import logger
 
 from docint.agents.generation import MAX_SOURCE_CHARS, ResultValidationResponseAgent
 from docint.agents.types import RetrievalResult, Turn
+
+MARKER = "MARKER-SECRET-1234"
 
 
 @pytest.fixture(autouse=True)
@@ -225,6 +228,42 @@ def test_validation_agent_without_model_reports_unavailable_reason() -> None:
     assert finalized.validation_checked is False
     assert finalized.validation_mismatch is None
     assert finalized.validation_reason == "Validation model unavailable."
+
+
+def test_validation_agent_request_exception_reason_is_generic_and_logged() -> None:
+    """An exception from the validator LLM must not leak into ``validation_reason``.
+
+    ``validation_reason`` persists to the session DB and is returned via the
+    API, so it must be static text; the real exception detail belongs in logs
+    only.
+    """
+
+    class _RaisingLLM:
+        """Fake LLM whose ``complete`` always raises."""
+
+        def complete(self, prompt: str) -> Any:
+            """Raise a marked exception instead of returning a response.
+
+            Args:
+                prompt: The prompt string (ignored).
+            """
+            raise RuntimeError(MARKER)
+
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, _RaisingLLM()))
+    result = RetrievalResult(answer="answer", sources=[{"text": "source evidence"}])
+
+    records: list[str] = []
+    sink_id = logger.add(lambda m: records.append(str(m)), level="DEBUG")
+    try:
+        finalized = agent.finalize(result, Turn(user_input="question"))
+    finally:
+        logger.remove(sink_id)
+
+    assert finalized.validation_checked is False
+    assert finalized.validation_mismatch is None
+    assert finalized.validation_reason == "Validation request failed."
+    assert MARKER not in (finalized.validation_reason or "")
+    assert any(MARKER in r for r in records)
 
 
 def test_validation_agent_prompt_includes_reference_metadata() -> None:
