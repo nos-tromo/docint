@@ -852,7 +852,7 @@ def test_collections_list_failure(monkeypatch: pytest.MonkeyPatch, client: TestC
     monkeypatch.setattr(api_module.rag, "list_collections", raiser)
     response = client.get("/collections/list")
     assert response.status_code == 500
-    assert response.json()["detail"] == "boom"
+    assert response.json()["detail"] == "Request failed."
 
 
 def test_collections_select_is_nonmutating(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
@@ -1957,7 +1957,7 @@ def test_collections_ner_failure(monkeypatch: pytest.MonkeyPatch, client: TestCl
     monkeypatch.setattr(api_module.rag, "get_collection_ner", raiser)
     response = client.get("/collections/ner")
     assert response.status_code == 500
-    assert response.json()["detail"] == "boom"
+    assert response.json()["detail"] == "Request failed."
 
 
 def test_collections_ner_stats_failure(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
@@ -1983,7 +1983,7 @@ def test_collections_ner_stats_failure(monkeypatch: pytest.MonkeyPatch, client: 
     monkeypatch.setattr(api_module.rag, "get_collection_ner_stats", raiser)
     response = client.get("/collections/ner/stats")
     assert response.status_code == 500
-    assert response.json()["detail"] == "boom"
+    assert response.json()["detail"] == "Request failed."
 
 
 def test_collections_ner_search_failure(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
@@ -2009,7 +2009,7 @@ def test_collections_ner_search_failure(monkeypatch: pytest.MonkeyPatch, client:
     monkeypatch.setattr(api_module.rag, "search_collection_ner_entities", raiser)
     response = client.get("/collections/ner/search", params={"q": "ac"})
     assert response.status_code == 500
-    assert response.json()["detail"] == "boom"
+    assert response.json()["detail"] == "Request failed."
 
 
 def test_collections_hate_speech_failure(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
@@ -2036,7 +2036,7 @@ def test_collections_hate_speech_failure(monkeypatch: pytest.MonkeyPatch, client
     monkeypatch.setattr(api_module.rag, "get_collection_hate_speech", raiser)
     response = client.get("/collections/hate-speech")
     assert response.status_code == 500
-    assert response.json()["detail"] == "boom"
+    assert response.json()["detail"] == "Request failed."
 
 
 def test_query_requires_collection(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
@@ -2338,7 +2338,7 @@ def test_ingest_missing_directory(monkeypatch: pytest.MonkeyPatch, client: TestC
     monkeypatch.setattr(api_module, "_resolve_data_dir", lambda: missing)
     response = client.post("/ingest", json={"collection": "abc"})
     assert response.status_code == 400
-    assert "Data directory does not exist" in response.json()["detail"]
+    assert response.json()["detail"] == "Server storage is not available."
 
 
 def test_ingest_sync_generic_exception_propagates_as_500(
@@ -2388,7 +2388,7 @@ def test_ingest_sync_generic_exception_propagates_as_500(
     # ``EmptyIngestionError``.
     response = client.post("/ingest", json={"collection": "col", "hybrid": True})
     assert response.status_code == 500
-    assert "Qdrant unreachable" in response.json()["detail"]
+    assert response.json()["detail"] == "Request failed."
 
 
 def test_ingest_upload_empty_emits_warning_and_completes(
