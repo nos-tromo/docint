@@ -150,7 +150,7 @@ export function IngestionStatus({ status }: { status: IngestStatus }) {
       {status.phase === 'uploading' && <UploadingBody status={status} />}
       {status.phase === 'processing' && <ProcessingBody status={status} />}
       {status.phase === 'complete' && <CompleteBody status={status} />}
-      {status.phase === 'error' && <ErrorBody status={status} />}
+      {status.phase === 'error' && <ErrorBody />}
     </div>
   )
 }
@@ -336,11 +336,7 @@ function CompleteBody({ status }: { status: IngestStatus }) {
   )
 }
 
-function ErrorBody({ status }: { status: IngestStatus }) {
+function ErrorBody() {
   const t = useT()
-  return (
-    <div className="mt-3 text-sm text-red-200">
-      {status.errorMessage ?? t('ingest.failed_default')}
-    </div>
-  )
+  return <div className="mt-3 text-sm text-red-200">{t('ingest.failed_default')}</div>
 }

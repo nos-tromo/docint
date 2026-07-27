@@ -37,7 +37,6 @@ export interface IngestStatus {
   indexed: number
   /** Total chunks observed across "indexed N chunks" messages. */
   totalChunks: number
-  errorMessage?: string
   startedAt?: number
   finishedAt?: number
 }
@@ -266,12 +265,10 @@ export function deriveIngestStatus(
       }
       case 'error': {
         status.phase = 'error'
-        // Leave errorMessage undefined when the backend sends none — the sole
-        // fallback point is IngestionStatus.tsx's ErrorBody, which shows the
-        // localized `ingest.failed_default`. A hardcoded English fallback
-        // here would always win (this reducer runs before that component
-        // ever sees the status), silently defeating the catalog fallback.
-        status.errorMessage = strOf(d.message)
+        // No message field is captured: `d.message` is a static protocol
+        // flag from the backend (post-D2), never user-safe prose, so it
+        // must never reach render state. IngestionStatus.tsx's ErrorBody
+        // always shows the localized `ingest.failed_default` catalog copy.
         status.finishedAt = ev.receivedAt
         break
       }

@@ -150,17 +150,17 @@ describe('streamIngestUploadBatched', () => {
     expect(String(events[3].data.message)).toContain('per-upload limit')
   })
 
-  it('surfaces a finalize failure as a terminal error', async () => {
+  it('surfaces a finalize failure as a terminal error with generic catalog copy, never the backend message', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(stagedBatch('a'))
-      .mockResolvedValueOnce(finalizeStream({ error: 'Embedding endpoint unreachable' }))
+      .mockResolvedValueOnce(finalizeStream({ error: 'Embedding endpoint unreachable at internal-host:9000' }))
     vi.stubGlobal('fetch', fetchMock)
 
     const events = await collect(streamIngestUploadBatched('c1', [fileOfSize('a', 100)], 1_000_000))
 
     expect(events.map((e) => e.event)).toEqual(['start', 'file_saved', 'ingestion_started', 'error'])
-    expect(String(events.at(-1)?.data.message)).toContain('Embedding endpoint unreachable')
+    expect(events.at(-1)?.data.message).toBe('Ingestion failed.')
   })
 
   it('completes as empty (with warning) when finalize finds nothing ingestable', async () => {
