@@ -72,9 +72,9 @@ export const de: Strings = {
   // shared error copy
   'common.owned_by_suffix': ' (Eigentümer/-in: {owner})',
   'common.error_request':
-    'Fehler ({status}) – Bitte versuchen Sie es erneut oder kontaktieren Sie den Support.',
+    'Etwas ist schiefgelaufen ({status}) – Bitte versuchen Sie es erneut oder kontaktieren Sie den Support.',
   'common.error_unknown':
-    'Fehler – Bitte versuchen Sie es erneut oder kontaktieren Sie den Support.',
+    'Etwas ist schiefgelaufen – Bitte versuchen Sie es erneut oder kontaktieren Sie den Support.',
   'common.error_network':
     'Dienst nicht erreichbar – Bitte prüfen Sie Ihre Verbindung oder versuchen Sie es später erneut.',
 
@@ -131,7 +131,7 @@ export const de: Strings = {
   'ingest.button': 'Importieren',
   'ingest.busy': 'Wird importiert…',
   'ingest.error_truncated':
-    'Der Datenimport wurde unterbrochen, bevor er abgeschlossen war. Versuchen Sie es erneut oder kontaktieren Sie den Support.',
+    'Der Datenimport wurde unterbrochen, bevor er abgeschlossen war.',
   'ingest.status_idle': 'Inaktiv',
   'ingest.status_uploading': 'Wird hochgeladen',
   'ingest.status_processing': 'Wird verarbeitet',
@@ -234,7 +234,7 @@ export const de: Strings = {
   'analysis.coverage_hide': 'ausblenden',
   'analysis.coverage_show_uncovered': '{count} nicht abgedeckte anzeigen',
   'analysis.summary_failed':
-    'Die Zusammenfassung konnte nicht erstellt werden. Bitte erneut versuchen oder den Support kontaktieren.',
+    'Die Zusammenfassung konnte nicht erstellt werden.',
   'analysis.summary_generating': 'Wird erstellt…',
   'analysis.summary_generate': 'Erstellen',
   'analysis.summary_refresh': 'Aktualisieren',

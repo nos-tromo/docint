@@ -229,7 +229,7 @@ export const en = {
   'analysis.summary_refresh': 'Refresh',
   'analysis.summary_download_md': 'Download MD',
   'analysis.summary_sources': 'Sources',
-  'analysis.summary_failed': 'Summary generation failed. Please try again or contact support.',
+  'analysis.summary_failed': 'Summary generation failed.',
 
   // report
   'report.title': 'Reports',
