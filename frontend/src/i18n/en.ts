@@ -66,9 +66,11 @@ export const en = {
   'upload.clear_all': 'Clear all',
   'common.remove': 'Remove',
 
-  // shared transport-error suffix
-  'common.transport_suffix': ' (transport: {detail})',
+  // shared error copy
   'common.owned_by_suffix': ' (owner: {owner})',
+  'common.error_request': 'Something went wrong ({status}). Please try again or contact support.',
+  'common.error_unknown': 'Something went wrong. Please try again or contact support.',
+  'common.error_network': 'Service unreachable. Please check your connection or try again later.',
 
   // chat
   'chat.title': 'Chat',

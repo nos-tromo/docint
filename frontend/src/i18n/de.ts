@@ -69,9 +69,14 @@ export const de: Strings = {
   'upload.clear_all': 'Alle entfernen',
   'common.remove': 'Entfernen',
 
-  // shared transport-error suffix
-  'common.transport_suffix': ' (Transport: {detail})',
+  // shared error copy
   'common.owned_by_suffix': ' (Eigentümer/-in: {owner})',
+  'common.error_request':
+    'Etwas ist schiefgelaufen ({status}). Bitte erneut versuchen oder den Support kontaktieren.',
+  'common.error_unknown':
+    'Etwas ist schiefgelaufen. Bitte erneut versuchen oder den Support kontaktieren.',
+  'common.error_network':
+    'Dienst nicht erreichbar. Bitte Verbindung prüfen oder später erneut versuchen.',
 
   // chat
   'chat.title': 'Chat',

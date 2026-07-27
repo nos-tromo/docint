@@ -168,13 +168,10 @@ export function Ingest() {
       if (sawTerminal) {
         setError(e instanceof Error ? e.message : String(e))
       } else {
-        // The fetch/stream threw before any terminal event arrived. The
-        // raw browser message ("network error" / "Failed to fetch") is
-        // not actionable on its own — the real cause is almost always
-        // the backend dying mid-stream. Show the truncation notice and
-        // append the underlying message so the cause is still visible.
-        const detail = e instanceof Error ? e.message : String(e)
-        setError(truncationMessage + t('common.transport_suffix', { detail }))
+        // The fetch/stream threw before any terminal event arrived — almost
+        // always the backend dying mid-stream. The underlying message is not
+        // user-visible (see describeError); the truncation notice stands alone.
+        setError(truncationMessage)
       }
     } finally {
       dispatch({ type: 'done' })
