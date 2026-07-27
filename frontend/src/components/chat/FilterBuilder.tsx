@@ -1,8 +1,10 @@
 import { useChatFiltersStore } from '@/stores/chatFilters'
+import { useT } from '@/i18n/LanguageContext'
 
 const OPERATORS = ['eq', 'neq', 'contains', 'gte', 'lte', 'in']
 
 export function FilterBuilder() {
+  const t = useT()
   const s = useChatFiltersStore()
   return (
     <div className="rounded-md border border-border bg-zinc-900 p-3 space-y-3 text-sm">
@@ -12,14 +14,14 @@ export function FilterBuilder() {
           checked={s.filterEnabled}
           onChange={(e) => s.setFilterEnabled(e.target.checked)}
         />
-        Enable metadata filters
+        {t('chat.enable_filters')}
       </label>
 
       {s.filterEnabled && (
         <>
           <div className="grid grid-cols-2 gap-2">
             <label className="flex flex-col gap-1">
-              <span className="text-xs text-muted-foreground">MIME pattern</span>
+              <span className="text-xs text-muted-foreground">{t('chat.mime_pattern')}</span>
               <input
                 value={s.mimePattern}
                 onChange={(e) => s.setMimePattern(e.target.value)}
@@ -28,7 +30,7 @@ export function FilterBuilder() {
               />
             </label>
             <label className="flex flex-col gap-1">
-              <span className="text-xs text-muted-foreground">Hate-speech only</span>
+              <span className="text-xs text-muted-foreground">{t('chat.hate_speech_only')}</span>
               <input
                 type="checkbox"
                 checked={s.hateSpeechOnly}
@@ -37,7 +39,7 @@ export function FilterBuilder() {
               />
             </label>
             <label className="flex flex-col gap-1">
-              <span className="text-xs text-muted-foreground">Date from</span>
+              <span className="text-xs text-muted-foreground">{t('chat.date_from')}</span>
               <input
                 type="date"
                 value={s.dateFrom}
@@ -46,7 +48,7 @@ export function FilterBuilder() {
               />
             </label>
             <label className="flex flex-col gap-1">
-              <span className="text-xs text-muted-foreground">Date to</span>
+              <span className="text-xs text-muted-foreground">{t('chat.date_to')}</span>
               <input
                 type="date"
                 value={s.dateTo}
@@ -58,13 +60,13 @@ export function FilterBuilder() {
 
           <div>
             <div className="flex items-center justify-between mb-2">
-              <span className="text-xs text-muted-foreground">Custom rules</span>
+              <span className="text-xs text-muted-foreground">{t('chat.custom_rules')}</span>
               <button
                 type="button"
                 onClick={() => s.addRule()}
                 className="text-xs px-2 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700"
               >
-                + Rule
+                {t('chat.add_rule')}
               </button>
             </div>
             <ul className="space-y-2">
@@ -73,7 +75,7 @@ export function FilterBuilder() {
                   <input
                     value={r.field}
                     onChange={(e) => s.updateRule(r.id, { field: e.target.value })}
-                    placeholder="field"
+                    placeholder={t('chat.field_placeholder')}
                     className="bg-zinc-950 border border-border rounded-md px-2 py-1"
                   />
                   <select
@@ -90,14 +92,14 @@ export function FilterBuilder() {
                   <input
                     value={r.value}
                     onChange={(e) => s.updateRule(r.id, { value: e.target.value })}
-                    placeholder="value"
+                    placeholder={t('chat.value_placeholder')}
                     className="bg-zinc-950 border border-border rounded-md px-2 py-1"
                   />
                   <button
                     type="button"
                     onClick={() => s.removeRule(r.id)}
                     className="text-xs text-red-400 hover:text-red-300"
-                    aria-label="Remove rule"
+                    aria-label={t('chat.remove_rule_aria')}
                   >
                     ×
                   </button>

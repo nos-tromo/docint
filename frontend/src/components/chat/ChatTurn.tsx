@@ -7,6 +7,7 @@ import { GraphDebugPanel } from './GraphDebugPanel'
 import { EntityCandidatesPanel } from './EntityCandidatesPanel'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
 import { chatAnswerSnapshot } from '@/lib/reportSnapshots'
+import { useT } from '@/i18n/LanguageContext'
 
 export interface ChatTurnData {
   user: string
@@ -60,6 +61,7 @@ export function ChatTurn({
   turnIdx?: number
   reportDedupeKeys?: Set<string>
 }) {
+  const t = useT()
   const sources = dedupeSources(turn.meta?.sources ?? [])
   const reportItem =
     turn.done && turn.assistant && sessionId && turnIdx != null
@@ -75,12 +77,12 @@ export function ChatTurn({
   return (
     <article className="space-y-3">
       <div className="rounded-md bg-zinc-900 px-4 py-2 self-end max-w-2xl ml-auto">
-        <div className="text-xs text-muted-foreground mb-1">You</div>
+        <div className="text-xs text-muted-foreground mb-1">{t('chat.you')}</div>
         <div className="whitespace-pre-wrap">{turn.user}</div>
       </div>
       <div className="rounded-md bg-zinc-950 border border-border px-4 py-3">
         <div className="flex items-center justify-between gap-2 mb-1">
-          <div className="text-xs text-muted-foreground">Assistant</div>
+          <div className="text-xs text-muted-foreground">{t('chat.assistant')}</div>
           {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
         </div>
         {turn.assistant ? (
@@ -88,18 +90,18 @@ export function ChatTurn({
             <Markdown remarkPlugins={[remarkGfm]}>{turn.assistant}</Markdown>
           </div>
         ) : (
-          <div className="text-muted-foreground">{turn.done ? '(no answer)' : '…'}</div>
+          <div className="text-muted-foreground">{turn.done ? t('chat.no_answer') : '…'}</div>
         )}
         {turn.error && (
           <div className="mt-3 rounded-md border border-red-700 bg-red-950 px-3 py-2 text-xs text-red-200">
-            <div className="font-medium">Chat error</div>
+            <div className="font-medium">{t('chat.error_title')}</div>
             <div className="mt-1 whitespace-pre-wrap">{turn.error}</div>
           </div>
         )}
         {turn.meta && <ValidationBanner v={turn.meta} />}
         {sources.length > 0 && (
           <div className="mt-3 space-y-2">
-            <div className="text-xs uppercase text-muted-foreground">Sources</div>
+            <div className="text-xs uppercase text-muted-foreground">{t('chat.sources')}</div>
             {sources.map((s, i) => (
               <Citation key={s.id ?? `${s.filename}-${s.page ?? ''}-${s.row ?? ''}-${i}`} source={s} />
             ))}

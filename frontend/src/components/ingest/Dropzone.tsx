@@ -1,5 +1,6 @@
 import { useRef, useState, type DragEvent } from 'react'
 import { cn } from '@/lib/cn'
+import { useT } from '@/i18n/LanguageContext'
 
 export function Dropzone({
   onFiles,
@@ -8,6 +9,7 @@ export function Dropzone({
   onFiles: (files: File[]) => void
   disabled?: boolean
 }) {
+  const t = useT()
   const [hover, setHover] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
@@ -35,7 +37,7 @@ export function Dropzone({
         disabled && 'opacity-50 pointer-events-none'
       )}
     >
-      <p>Drop files here or click to choose.</p>
+      <p>{t('upload.drop_hint')}</p>
       <button
         type="button"
         className="mt-3 underline"
@@ -44,7 +46,7 @@ export function Dropzone({
           folderInputRef.current?.click()
         }}
       >
-        Or choose a folder
+        {t('upload.choose_folder')}
       </button>
       <input
         ref={inputRef}

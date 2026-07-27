@@ -15,6 +15,7 @@ import { ChatTurn, type ChatTurnData } from '@/components/chat/ChatTurn'
 import { FilterBuilder } from '@/components/chat/FilterBuilder'
 import { downloadText } from '@/lib/csv'
 import { chatTranscriptToText } from '@/lib/exports'
+import { useT } from '@/i18n/LanguageContext'
 
 interface State {
   turns: ChatTurnData[]
@@ -65,6 +66,7 @@ function reducer(s: State, a: Action): State {
 }
 
 export function Chat() {
+  const t = useT()
   const params = useParams()
   const sessionIdParam = params.sessionId ?? null
   const setCurrentSessionId = useUiStore((s) => s.setCurrentSessionId)
@@ -169,17 +171,13 @@ export function Chat() {
       // from the reader; flag the likely cause and keep the raw detail.
       let error: string
       if (e instanceof ApiError && e.status === 409) {
-        error =
-          'This chat belongs to a different collection — switch to that ' +
-          'collection to continue it, or start a new chat.'
+        error = t('chat.error_wrong_collection')
       } else if (e instanceof ApiError && e.status === 400) {
-        error = 'Select a collection before chatting.'
+        error = t('chat.error_no_collection')
       } else {
         const detail = e instanceof Error ? e.message : String(e)
         error =
-          'Chat stream ended unexpectedly — the backend may have crashed ' +
-          '(out of memory while loading NER/LLM models is the usual cause). ' +
-          `Check backend logs and try again. (transport: ${detail})`
+          t('chat.error_stream_ended') + t('common.transport_suffix', { detail })
       }
       dispatch({ type: 'fail', error })
     } finally {
@@ -191,19 +189,19 @@ export function Chat() {
     <div className="p-8 grid grid-cols-[1fr_22rem] gap-6 h-full">
       <section className="flex flex-col h-full">
         <div className="flex items-center justify-between mb-4">
-          <h1 className="text-2xl font-semibold">Chat</h1>
+          <h1 className="text-2xl font-semibold">{t('chat.title')}</h1>
           {state.turns.length > 0 && (
             <button
               type="button"
               onClick={() =>
                 downloadText(
                   `chat_${currentSessionId ?? 'session'}.txt`,
-                  chatTranscriptToText(state.turns)
+                  chatTranscriptToText(state.turns, t)
                 )
               }
               className="px-3 py-1 rounded-md border border-border text-sm"
             >
-              Download
+              {t('chat.download')}
             </button>
           )}
         </div>
@@ -237,7 +235,7 @@ export function Chat() {
                 void send()
               }
             }}
-            placeholder="Ask something…"
+            placeholder={t('chat.ask_placeholder')}
             rows={1}
             className="flex-1 bg-zinc-900 border border-border rounded-md px-3 py-2 resize-none max-h-40 leading-6"
           />
@@ -246,7 +244,7 @@ export function Chat() {
             type="submit"
             disabled={state.inflight || !state.draft.trim()}
           >
-            {state.inflight ? '…' : 'Send'}
+            {state.inflight ? '…' : t('chat.send')}
           </Button>
         </form>
       </section>
@@ -254,19 +252,21 @@ export function Chat() {
       <aside className="space-y-4">
         <div className="flex flex-col gap-2 text-sm">
           <label className="flex flex-col gap-1">
-            <span className="text-xs uppercase text-muted-foreground">Query mode</span>
+            <span className="text-xs uppercase text-muted-foreground">{t('chat.query_mode')}</span>
             <select
               value={filters.queryMode}
               onChange={(e) => filters.setQueryMode(e.target.value as typeof filters.queryMode)}
               className="bg-zinc-900 border border-border rounded-md px-2 py-1"
             >
-              <option value="answer">Answer</option>
-              <option value="entity_occurrence">Entity occurrence</option>
-              <option value="entity_occurrence_multi">Entity occurrence (multi)</option>
+              <option value="answer">{t('chat.mode_answer')}</option>
+              <option value="entity_occurrence">{t('chat.mode_entity_occurrence')}</option>
+              <option value="entity_occurrence_multi">
+                {t('chat.mode_entity_occurrence_multi')}
+              </option>
             </select>
           </label>
           <label className="flex flex-col gap-1">
-            <span className="text-xs uppercase text-muted-foreground">Retrieval</span>
+            <span className="text-xs uppercase text-muted-foreground">{t('chat.retrieval')}</span>
             <select
               value={filters.retrievalMode}
               onChange={(e) =>
@@ -274,8 +274,8 @@ export function Chat() {
               }
               className="bg-zinc-900 border border-border rounded-md px-2 py-1"
             >
-              <option value="session">Session</option>
-              <option value="stateless">Stateless</option>
+              <option value="session">{t('chat.retrieval_session')}</option>
+              <option value="stateless">{t('chat.retrieval_stateless')}</option>
             </select>
           </label>
         </div>

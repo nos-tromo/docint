@@ -8,8 +8,10 @@ import { KpiCard } from '@/components/common/KpiCard'
 import { MergeModeToggle } from '@/components/common/MergeModeToggle'
 import { TopEntitiesChart } from '@/components/dashboard/TopEntitiesChart'
 import { cn } from '@/lib/cn'
+import { useT } from '@/i18n/LanguageContext'
 
 export function Dashboard() {
+  const t = useT()
   const collection = useUiStore((s) => s.selectedCollection)
   const mergeMode = useUiStore((s) => s.entityMergeMode)
   const { data: collections, isError } = useCollections()
@@ -26,11 +28,11 @@ export function Dashboard() {
 
   return (
     <div className="p-8 space-y-6">
-      <h1 className="text-2xl font-semibold">Dashboard</h1>
+      <h1 className="text-2xl font-semibold">{t('dashboard.title')}</h1>
 
       <div className="grid grid-cols-4 gap-4">
         <KpiCard
-          label="Backend"
+          label={t('dashboard.kpi_backend')}
           value={
             <span className="flex items-center gap-2">
               <span
@@ -43,30 +45,30 @@ export function Dashboard() {
                     : 'bg-primary shadow-[0_0_6px_var(--color-primary)]'
                 )}
               />
-              {isError ? 'offline' : 'online'}
+              {isError ? t('dashboard.status_offline') : t('dashboard.status_online')}
             </span>
           }
         />
-        <KpiCard label="Collections" value={collections?.mine.length ?? null} />
+        <KpiCard label={t('dashboard.kpi_collections')} value={collections?.mine.length ?? null} />
         <KpiCard
-          label="Documents"
+          label={t('table.aria_documents')}
           value={collection ? documentsCount?.count ?? null : '—'}
-          hint={collection ? `in ${collection}` : 'select a collection'}
+          hint={collection ? t('dashboard.kpi_hint_in', { collection }) : t('dashboard.kpi_hint_select')}
         />
         <KpiCard
-          label="Sessions"
+          label={t('common.sessions')}
           value={collection ? sessionsData?.sessions.length ?? null : '—'}
-          hint={collection ? `in ${collection}` : 'select a collection'}
+          hint={collection ? t('dashboard.kpi_hint_in', { collection }) : t('dashboard.kpi_hint_select')}
         />
       </div>
 
       <section className="rounded-lg border border-border bg-zinc-900 p-4">
         <header className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-medium">Top entities</h2>
+          <h2 className="text-lg font-medium">{t('dashboard.top_entities')}</h2>
           <div className="flex items-center gap-3 text-sm">
             <MergeModeToggle />
             <label className="flex items-center gap-2">
-              top-k
+              {t('dashboard.top_k_label')}
               <input
                 type="number"
                 min={1}
@@ -77,7 +79,7 @@ export function Dashboard() {
               />
             </label>
             <label className="flex items-center gap-2">
-              min mentions
+              {t('dashboard.min_mentions_label')}
               <input
                 type="number"
                 min={1}
@@ -89,16 +91,16 @@ export function Dashboard() {
           </div>
         </header>
         {!collection ? (
-          <div className="text-sm text-muted-foreground">Select a collection to see entities.</div>
+          <div className="text-sm text-muted-foreground">{t('dashboard.select_collection_entities')}</div>
         ) : (
           <TopEntitiesChart data={stats.data?.top_entities ?? []} />
         )}
       </section>
 
       <section className="rounded-lg border border-border bg-zinc-900 p-4">
-        <h2 className="text-lg font-medium mb-3">Recent sessions</h2>
+        <h2 className="text-lg font-medium mb-3">{t('dashboard.recent_sessions')}</h2>
         {!collection ? (
-          <div className="text-sm text-muted-foreground">Select a collection to see its chats.</div>
+          <div className="text-sm text-muted-foreground">{t('common.select_collection_to_see_chats')}</div>
         ) : (
           <ul className="space-y-1 text-sm">
             {sessionsData?.sessions.slice(0, 10).map((s) => (

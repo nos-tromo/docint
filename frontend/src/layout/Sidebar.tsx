@@ -9,24 +9,29 @@ import { useUiStore } from '@/stores/ui'
 import { cn } from '@/lib/cn'
 import { VersionBadge } from '@/components/VersionBadge'
 import { buildCollectionEntries, entryMatches, type CollectionEntry } from '@/lib/collectionEntries'
+import { useT } from '@/i18n/LanguageContext'
 
 const NAV = [
-  { to: '/', label: 'Dashboard' },
-  { to: '/chat', label: 'Chat' },
-  { to: '/ingest', label: 'Ingest' },
-  { to: '/analysis', label: 'Analysis' },
-  { to: '/inspector', label: 'Inspector' },
-  { to: '/report', label: 'Report' }
-]
+  { to: '/', key: 'nav.dashboard' },
+  { to: '/chat', key: 'nav.chat' },
+  { to: '/ingest', key: 'nav.ingest' },
+  { to: '/analysis', key: 'nav.analysis' },
+  { to: '/inspector', key: 'nav.inspector' },
+  { to: '/report', key: 'nav.report' }
+] as const
 
-function getSessionsStatusMessage(error: unknown) {
+function getSessionsStatusMessage(
+  error: unknown,
+  t: ReturnType<typeof useT>
+) {
   if (error instanceof ApiError && error.status === 401) {
-    return 'Session history requires an authenticated user or DOCINT_DEFAULT_IDENTITY.'
+    return t('common.sessions_error_auth')
   }
-  return 'Failed to load chats.'
+  return t('common.sessions_error_default')
 }
 
 export function Sidebar() {
+  const t = useT()
   const navigate = useNavigate()
   const location = useLocation()
   const { data: collections } = useCollections()
@@ -92,8 +97,8 @@ export function Sidebar() {
   }
 
   const onDeleteCollection = (name: string, owner: string | null) => {
-    const label = owner ? `"${name}" (owner: ${owner})` : `"${name}"`
-    if (!confirm(`Delete collection ${label}? This cannot be undone.`)) return
+    const label = owner ? `"${name}"${t('common.owned_by_suffix', { owner })}` : `"${name}"`
+    if (!confirm(t('common.delete_collection_confirm', { label }))) return
     deleteCollectionMutation.mutate(name, {
       onSuccess: () => {
         if (selected === name) {
@@ -118,7 +123,7 @@ export function Sidebar() {
   }
 
   const onDeleteSession = (id: string) => {
-    if (!confirm('Delete this chat?')) return
+    if (!confirm(t('common.delete_session_confirm'))) return
     deleteSessionMutation.mutate(id, {
       onSuccess: () => {
         if (currentSessionId === id) setCurrentSessionId(null)
@@ -131,7 +136,7 @@ export function Sidebar() {
       <h2 className="text-lg font-semibold tracking-tight">Document Intelligence</h2>
 
       <nav className="flex flex-col gap-1">
-        {NAV.map(({ to, label }) => (
+        {NAV.map(({ to, key }) => (
           <NavLink
             key={to}
             to={to}
@@ -143,13 +148,13 @@ export function Sidebar() {
               )
             }
           >
-            {label}
+            {t(key)}
           </NavLink>
         ))}
       </nav>
 
       <section>
-        <label className="text-xs uppercase text-muted-foreground">Collection</label>
+        <label className="text-xs uppercase text-muted-foreground">{t('common.collection')}</label>
         <div
           data-testid={selected ? 'active-collection' : undefined}
           className={cn(
@@ -168,7 +173,7 @@ export function Sidebar() {
           />
           {selected && (
             <span className="text-[10px] uppercase tracking-wide text-primary shrink-0">
-              Active
+              {t('common.active')}
             </span>
           )}
           {selected && selectedOwner && (
@@ -177,13 +182,13 @@ export function Sidebar() {
             </span>
           )}
           <select
-            aria-label="Select collection"
+            aria-label={t('common.select_collection_aria')}
             className="min-w-0 flex-1 cursor-pointer bg-zinc-950 text-sm text-foreground outline-hidden"
             value={selectedIndex >= 0 ? String(selectedIndex) : ''}
             onChange={(e) => onSelectCollection(entries[Number(e.target.value)])}
           >
             <option value="" disabled>
-              {entries.length ? 'Choose a collection…' : 'No collections yet'}
+              {entries.length ? t('common.choose_collection') : t('common.no_collections')}
             </option>
             {collections?.mine.map((c) => (
               <option key={`own:${c}`} value={String(entries.findIndex((e) => entryMatches(e, c, null)))}>
@@ -207,8 +212,8 @@ export function Sidebar() {
             <button
               type="button"
               onClick={() => onDeleteCollection(selected, selectedOwner)}
-              aria-label={`Delete collection ${selected}`}
-              title="Delete this collection"
+              aria-label={t('common.delete_collection_aria', { name: selected })}
+              title={t('common.delete_collection_title')}
               className="shrink-0 text-zinc-500 transition-colors hover:text-red-400"
             >
               <svg
@@ -229,34 +234,36 @@ export function Sidebar() {
         </div>
         {!selected && (
           <p className="mt-1.5 text-xs text-muted-foreground">
-            No active collection — pick one to query.
+            {t('common.no_active_collection')}
           </p>
         )}
       </section>
 
       <section className="flex-1 min-h-0 flex flex-col">
         <div className="flex items-center justify-between">
-          <label className="text-xs uppercase text-muted-foreground">Sessions</label>
+          <label className="text-xs uppercase text-muted-foreground">{t('common.sessions')}</label>
           <Button
             variant="primary"
             size="sm"
             onClick={onNewChat}
           >
-            + New
+            {t('common.new_session')}
           </Button>
         </div>
         <ul className="mt-2 flex-1 overflow-auto space-y-1">
           {sessionsLoading && (
-            <li className="px-2 py-1 text-sm text-muted-foreground">Loading chats...</li>
+            <li className="px-2 py-1 text-sm text-muted-foreground">{t('common.loading_chats')}</li>
           )}
           {!sessionsLoading && sessionsError && (
             <li role="alert" className="rounded-md border border-amber-900/60 bg-amber-500/10 px-2 py-2 text-sm text-amber-200">
-              {getSessionsStatusMessage(sessionsError)}
+              {getSessionsStatusMessage(sessionsError, t)}
             </li>
           )}
           {!sessionsLoading && !sessionsError && sessions.length === 0 && (
             <li className="px-2 py-1 text-sm text-muted-foreground">
-              {selected ? 'No chats in this collection yet.' : 'Select a collection to see its chats.'}
+              {selected
+                ? t('common.no_chats_in_collection')
+                : t('common.select_collection_to_see_chats')}
             </li>
           )}
           {!sessionsLoading && !sessionsError && sessions.map((s) => {
@@ -272,13 +279,13 @@ export function Sidebar() {
                   )}
                   title={s.title ?? s.id}
                 >
-                  {s.title?.trim() || `Session ${s.id.slice(0, 8)}`}
+                  {s.title?.trim() || t('common.session_title_fallback', { id: s.id.slice(0, 8) })}
                 </button>
                 <button
                   type="button"
                   onClick={() => onDeleteSession(s.id)}
                   className="text-xs text-zinc-500 hover:text-red-400 px-1"
-                  aria-label="Delete session"
+                  aria-label={t('common.delete_session_aria')}
                 >
                   ×
                 </button>

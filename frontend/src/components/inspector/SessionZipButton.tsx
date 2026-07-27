@@ -1,5 +1,6 @@
 import { useUiStore } from '@/stores/ui'
 import { url } from '@/api/client'
+import { useT } from '@/i18n/LanguageContext'
 
 /**
  * Triggers the server-side session-sources ZIP stream.
@@ -10,6 +11,7 @@ import { url } from '@/api/client'
  * ``qdrant-sources`` volume, so the browser only handles the download.
  */
 export function SessionZipButton() {
+  const t = useT()
   const sessionId = useUiStore((s) => s.currentSessionId)
   const collection = useUiStore((s) => s.selectedCollection)
   if (!sessionId || !collection) return null
@@ -21,7 +23,7 @@ export function SessionZipButton() {
       download={`session-${sessionId}-sources.zip`}
       className="px-3 py-1 rounded-md border border-border text-sm"
     >
-      Download session sources (ZIP)
+      {t('inspector.download_session_sources')}
     </a>
   )
 }

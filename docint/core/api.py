@@ -51,6 +51,7 @@ from docint.utils.cursor import InvalidCursorError
 from docint.utils.env_cfg import (
     load_frontend_env,
     load_host_env,
+    load_language_env,
     load_metrics_env,
     load_path_env,
     load_response_validation_env,
@@ -738,6 +739,7 @@ class FrontendConfigOut(BaseModel):
     graph_max_top_k: int
     collection_timeout: int
     max_upload_bytes: int
+    language: str
 
 
 class FileTypeCount(BaseModel):
@@ -848,17 +850,20 @@ class ReportListOut(BaseModel):
 
 
 @app.get("/config", response_model=FrontendConfigOut, tags=["Meta"])
-def get_frontend_config() -> dict[str, int]:
+def get_frontend_config() -> dict[str, int | str]:
     """Return deploy-time frontend configuration for the SPA.
 
     Served without a principal dependency so the SPA can read it on first load,
     before any collection or session exists. Values are read from environment
-    variables on each call (see :func:`docint.utils.env_cfg.load_frontend_env`).
+    variables on each call (see :func:`docint.utils.env_cfg.load_frontend_env`
+    and :func:`docint.utils.env_cfg.load_language_env`).
 
     Returns:
-        dict[str, int]: ``graph_top_k``, ``graph_max_top_k``,
-        ``collection_timeout`` and ``max_upload_bytes`` (the per-request upload
-        ceiling nginx enforces, which the SPA uses to size its upload batches).
+        dict[str, int | str]: ``graph_top_k``, ``graph_max_top_k``,
+        ``collection_timeout``, ``max_upload_bytes`` (the per-request upload
+        ceiling nginx enforces, which the SPA uses to size its upload batches),
+        and ``language`` (the active ``RESPONSE_LANGUAGE`` locale, ``"en"`` or
+        ``"de"``).
     """
     cfg = load_frontend_env()
     return {
@@ -866,6 +871,7 @@ def get_frontend_config() -> dict[str, int]:
         "graph_max_top_k": cfg.graph_max_top_k,
         "collection_timeout": cfg.collection_timeout,
         "max_upload_bytes": cfg.max_upload_bytes,
+        "language": load_language_env().code,
     }
 
 

@@ -4,6 +4,10 @@ import { withOwner } from './client'
 import { planUploadBatches } from '@/lib/uploadBatches'
 import { formatBytes } from '@/lib/ingestStatus'
 import type { IngestEvent } from './types'
+import type { Strings } from '@/i18n'
+import { defaultT } from '@/i18n/defaultT'
+
+type Translate = (key: keyof Strings, vars?: Record<string, string | number>) => string
 
 /**
  * Fraction of the server's per-request upload ceiling the client packs each
@@ -46,20 +50,28 @@ export interface BatchFailure {
  *
  * @param f - The failed batch descriptor.
  * @param limitBytes - The server's per-request ceiling, for the 413 message.
+ * @param t - Translate function; defaults to the English catalog for pure/test callers.
  * @returns A sentence describing the failure and how to recover.
  */
-export function describeBatchFailure(f: BatchFailure, limitBytes: number): string {
-  const label = f.files.length === 1 ? `"${f.files[0]}"` : `${f.files.length} files`
+export function describeBatchFailure(
+  f: BatchFailure,
+  limitBytes: number,
+  t: Translate = defaultT
+): string {
+  const label =
+    f.files.length === 1 ? `"${f.files[0]}"` : t('ingest.batch_files_count', { count: f.files.length })
   if (f.status === 413) {
-    return (
-      `Batch ${f.batch}/${f.total} (${label}) is larger than the ` +
-      `${formatBytes(limitBytes)} per-upload limit and was skipped. Raise ` +
-      `DOCINT_CLIENT_MAX_BODY_SIZE and restart, or remove the oversized file, ` +
-      `then re-ingest — already-ingested files are skipped automatically.`
-    )
+    return t('ingest.batch_too_large', {
+      batch: f.batch,
+      total: f.total,
+      label,
+      limit: formatBytes(limitBytes)
+    })
   }
-  const suffix = f.status ? ` (HTTP ${f.status})` : ' (network error)'
-  return `Batch ${f.batch}/${f.total} (${label}) failed${suffix} and was skipped; other batches continued.`
+  if (f.status) {
+    return t('ingest.batch_failed_http', { batch: f.batch, total: f.total, label, status: f.status })
+  }
+  return t('ingest.batch_failed_network', { batch: f.batch, total: f.total, label })
 }
 
 const fileLabel = (f: File): string => f.webkitRelativePath || f.name
@@ -103,13 +115,15 @@ const fileLabel = (f: File): string => f.webkitRelativePath || f.name
  *   `/config` `max_upload_bytes`); the packing budget is this times
  *   `UPLOAD_SAFETY_MARGIN`.
  * @param signal - Optional abort signal cancelling the in-flight request.
+ * @param t - Translate function; defaults to the English catalog for pure/test callers.
  * @yields Normalised `IngestEvent`s, each stamped with `receivedAt`.
  */
 export async function* streamIngestUploadBatched(
   collection: string,
   files: File[],
   limitBytes: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  t: Translate = defaultT
 ): AsyncGenerator<IngestEvent, void, unknown> {
   const budgetBytes = Math.max(1, Math.floor(limitBytes * UPLOAD_SAFETY_MARGIN))
   const batches = planUploadBatches(files, budgetBytes)
@@ -152,17 +166,15 @@ export async function* streamIngestUploadBatched(
       failures.push(failure)
       // Surface inline (shows in the event log) but keep going — one bad batch
       // must not sink the rest of a large upload.
-      yield stamp('warning', { message: describeBatchFailure(failure, limitBytes) })
+      yield stamp('warning', { message: describeBatchFailure(failure, limitBytes, t) })
     }
   }
 
   if (!anySaved) {
     const anyTooLarge = failures.some((f) => f.status === 413)
     const message = anyTooLarge
-      ? `Upload failed: every batch exceeded the ${formatBytes(limitBytes)} per-upload limit. ` +
-        `Raise DOCINT_CLIENT_MAX_BODY_SIZE and restart, or upload smaller files.`
-      : `Upload failed: none of the ${failures.length} batch(es) were accepted. ` +
-        `Check that the backend is running and reachable, then retry.`
+      ? t('ingest.upload_failed_too_large', { limit: formatBytes(limitBytes) })
+      : t('ingest.upload_failed_rejected', { count: failures.length })
     yield stamp('error', { message })
     return
   }
@@ -179,7 +191,7 @@ export async function* streamIngestUploadBatched(
         continue // fold into the single synthetic terminal below
       }
       if (ev.event === 'error') {
-        finalizeError = typeof data.message === 'string' ? data.message : 'Ingestion failed'
+        finalizeError = typeof data.message === 'string' ? data.message : t('ingest.failed_default')
         continue
       }
       yield stamp(ev.event as IngestEvent['event'], data)
@@ -199,9 +211,10 @@ export async function* streamIngestUploadBatched(
     ...(failedFiles.length > 0
       ? {
           failed_files: failedFiles,
-          failed_message:
-            `Completed, but ${failedFiles.length} file(s) were skipped: ` +
-            `${failedFiles.join(', ')}. See the warnings above for details.`
+          failed_message: t('ingest.partial_failure_message', {
+            count: failedFiles.length,
+            files: failedFiles.join(', ')
+          })
         }
       : {})
   })

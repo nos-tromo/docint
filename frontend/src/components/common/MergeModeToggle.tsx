@@ -1,11 +1,12 @@
 import type { EntityMergeMode } from '@/api/types'
 import { useUiStore } from '@/stores/ui'
 import { cn } from '@/lib/cn'
+import { useT } from '@/i18n/LanguageContext'
 
-const MODES: { value: EntityMergeMode; label: string }[] = [
-  { value: 'resolved', label: 'Resolved' },
-  { value: 'orthographic', label: 'Orthographic' },
-  { value: 'exact', label: 'Exact' }
+const MODES: { value: EntityMergeMode; key: 'common.merge_resolved' | 'common.merge_orthographic' | 'common.merge_exact' }[] = [
+  { value: 'resolved', key: 'common.merge_resolved' },
+  { value: 'orthographic', key: 'common.merge_orthographic' },
+  { value: 'exact', key: 'common.merge_exact' }
 ]
 
 /**
@@ -16,13 +17,14 @@ const MODES: { value: EntityMergeMode; label: string }[] = [
  * entities); "Orthographic"/"Exact" expose the pre-resolution clustering.
  */
 export function MergeModeToggle() {
+  const t = useT()
   const mode = useUiStore((s) => s.entityMergeMode)
   const setMode = useUiStore((s) => s.setEntityMergeMode)
 
   return (
     <div
       role="group"
-      aria-label="Entity merge mode"
+      aria-label={t('common.entity_merge_mode_aria')}
       className="inline-flex overflow-hidden rounded-md border border-border text-sm"
     >
       {MODES.map((m) => (
@@ -38,7 +40,7 @@ export function MergeModeToggle() {
               : 'text-muted-foreground hover:text-foreground'
           )}
         >
-          {m.label}
+          {t(m.key)}
         </button>
       ))}
     </div>

@@ -268,8 +268,8 @@ describe('Chat SSE handling', () => {
     await userEvent.click(screen.getByRole('button', { name: /send/i }))
 
     await waitFor(() => {
-      expect(screen.getByText('doc.pdf · p. 3')).toBeInTheDocument()
-      expect(screen.getByText('doc.pdf · p. 7')).toBeInTheDocument()
+      expect(screen.getByText('doc.pdf · page 3')).toBeInTheDocument()
+      expect(screen.getByText('doc.pdf · page 7')).toBeInTheDocument()
       // Two text-file chunks with no page/row are kept because their
       // chunk text differs.
       expect(screen.getAllByText('transcript.txt')).toHaveLength(2)

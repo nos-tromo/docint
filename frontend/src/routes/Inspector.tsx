@@ -4,8 +4,10 @@ import { useUiStore } from '@/stores/ui'
 import { DocumentTable } from '@/components/inspector/DocumentTable'
 import { DocumentSummary } from '@/components/inspector/DocumentSummary'
 import { SessionZipButton } from '@/components/inspector/SessionZipButton'
+import { useT } from '@/i18n/LanguageContext'
 
 export function Inspector() {
+  const t = useT()
   const collection = useUiStore((s) => s.selectedCollection)
   const query = useDocumentsPages()
   const { data: summary } = useDocumentsSummary()
@@ -16,13 +18,13 @@ export function Inspector() {
   return (
     <div className="p-8 space-y-6">
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-semibold">Inspector</h1>
+        <h1 className="text-2xl font-semibold">{t('inspector.title')}</h1>
         <SessionZipButton />
       </div>
       {!collection ? (
-        <div className="text-sm text-muted-foreground">Select a collection.</div>
+        <div className="text-sm text-muted-foreground">{t('inspector.select_collection')}</div>
       ) : query.isLoading ? (
-        <div className="text-sm text-muted-foreground">Loading…</div>
+        <div className="text-sm text-muted-foreground">{t('common.loading_ellipsis')}</div>
       ) : (
         <>
           <DocumentSummary summary={summary} />

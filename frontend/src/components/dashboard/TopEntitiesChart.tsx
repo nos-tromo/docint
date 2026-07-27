@@ -1,9 +1,11 @@
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import type { NerEntityRow } from '@/api/types'
+import { useT } from '@/i18n/LanguageContext'
 
 export function TopEntitiesChart({ data }: { data: NerEntityRow[] }) {
+  const t = useT()
   if (!data.length) {
-    return <div className="text-sm text-muted-foreground">No entities yet.</div>
+    return <div className="text-sm text-muted-foreground">{t('dashboard.chart_empty')}</div>
   }
   // Recharts' ResponsiveContainer measures the parent via ResizeObserver
   // and collapses to 0×0 inside flex columns until layout settles. The
@@ -34,7 +36,7 @@ export function TopEntitiesChart({ data }: { data: NerEntityRow[] }) {
             }}
             labelStyle={{ color: 'rgb(244 244 245)' }}
           />
-          <Bar dataKey="mentions" name="Mentions" fill="rgb(244 244 245)" />
+          <Bar dataKey="mentions" name={t('dashboard.chart_mentions')} fill="rgb(244 244 245)" />
         </BarChart>
       </ResponsiveContainer>
     </div>

@@ -9,6 +9,7 @@ import type { IngestEvent } from '@/api/types'
 import { Dropzone } from '@/components/ingest/Dropzone'
 import { IngestionStatus } from '@/components/ingest/IngestionStatus'
 import { deriveIngestStatus } from '@/lib/ingestStatus'
+import { useT } from '@/i18n/LanguageContext'
 
 /**
  * Per-request upload ceiling assumed only until `/config` loads (or if that
@@ -77,6 +78,7 @@ export function reducer(s: State, a: Action): State {
 }
 
 export function Ingest() {
+  const t = useT()
   const [state, dispatch] = useReducer(reducer, {
     collection: '',
     files: [],
@@ -117,14 +119,16 @@ export function Ingest() {
     // "Failed to fetch" — both end up here without a terminal event,
     // and we should surface the same actionable message in either case
     // rather than relaying the raw transport-level message verbatim.
-    const truncationMessage =
-      'Ingestion was interrupted before completing. The backend may have ' +
-      'crashed (out of memory while loading NER/LLM models is the usual ' +
-      'cause for CSV/large-text ingests). Check the backend logs and try ' +
-      'again with more memory allocated to Docker.'
+    const truncationMessage = t('ingest.error_truncated')
     let sawTerminal = false
     try {
-      for await (const ev of streamIngestUploadBatched(state.collection, state.files, limitBytes)) {
+      for await (const ev of streamIngestUploadBatched(
+        state.collection,
+        state.files,
+        limitBytes,
+        undefined,
+        t
+      )) {
         dispatch({ type: 'event', v: ev })
         if (ev.event === 'warning') {
           // A batch was skipped (e.g. a lone oversize file → 413, or a transient
@@ -136,7 +140,7 @@ export function Ingest() {
         }
         if (ev.event === 'error') {
           const data = ev.data as Record<string, unknown>
-          setError(String(data.message ?? 'Ingestion failed'))
+          setError(String(data.message ?? t('ingest.failed_default')))
           sawTerminal = true
           continue
         }
@@ -170,7 +174,7 @@ export function Ingest() {
         // the backend dying mid-stream. Show the truncation notice and
         // append the underlying message so the cause is still visible.
         const detail = e instanceof Error ? e.message : String(e)
-        setError(`${truncationMessage} (transport: ${detail})`)
+        setError(truncationMessage + t('common.transport_suffix', { detail }))
       }
     } finally {
       dispatch({ type: 'done' })
@@ -179,10 +183,10 @@ export function Ingest() {
 
   return (
     <div className="p-8 max-w-3xl space-y-4">
-      <h1 className="text-2xl font-semibold">Ingest</h1>
+      <h1 className="text-2xl font-semibold">{t('ingest.title')}</h1>
 
       <label className="flex flex-col gap-1 text-sm max-w-sm">
-        <span className="text-xs uppercase text-muted-foreground">Collection</span>
+        <span className="text-xs uppercase text-muted-foreground">{t('common.collection')}</span>
         <input
           list="existing-collections"
           value={state.collection}
@@ -203,6 +207,11 @@ export function Ingest() {
         files={state.files}
         onRemove={(i) => dispatch({ type: 'remove_file', i })}
         onClear={() => dispatch({ type: 'reset_files' })}
+        labels={{
+          files: (n) => t(n === 1 ? 'upload.files_one' : 'upload.files_other', { count: n }),
+          clearAll: t('upload.clear_all'),
+          remove: t('common.remove')
+        }}
       />
 
       <Button
@@ -210,7 +219,7 @@ export function Ingest() {
         onClick={submit}
         disabled={state.busy || !state.collection || state.files.length === 0}
       >
-        {state.busy ? 'Ingesting…' : 'Ingest'}
+        {state.busy ? t('ingest.busy') : t('ingest.button')}
       </Button>
 
       {error && <div className="text-red-400 text-sm">{error}</div>}

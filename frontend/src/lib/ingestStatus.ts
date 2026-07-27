@@ -266,7 +266,12 @@ export function deriveIngestStatus(
       }
       case 'error': {
         status.phase = 'error'
-        status.errorMessage = strOf(d.message) ?? 'Ingestion failed'
+        // Leave errorMessage undefined when the backend sends none — the sole
+        // fallback point is IngestionStatus.tsx's ErrorBody, which shows the
+        // localized `ingest.failed_default`. A hardcoded English fallback
+        // here would always win (this reducer runs before that component
+        // ever sees the status), silently defeating the catalog fallback.
+        status.errorMessage = strOf(d.message)
         status.finishedAt = ev.receivedAt
         break
       }

@@ -1,9 +1,16 @@
 import type { ReferenceMetadata } from '@/api/types'
+import type { Strings } from '@/i18n'
+import { defaultT } from '@/i18n/defaultT'
 
 // Mirrors docint/utils/reference_metadata.py REFERENCE_METADATA_FIELDS and
 // preserves its display order. The body-text fields (text/parent_text/
 // anchor_text) are listed but the inline summary skips them by default,
 // matching the Streamlit `reference_metadata_inline` behavior.
+//
+// `label` stays the English literal (read directly by referenceMetadata.test.ts
+// and used as the fallback for a field with no catalog entry); the actual
+// display label a caller sees comes from `LABEL_KEY` below, resolved through
+// the caller's own `t`.
 export const REFERENCE_METADATA_FIELDS: Array<{ key: keyof ReferenceMetadata; label: string }> = [
   { key: 'network', label: 'Network' },
   { key: 'type', label: 'Type' },
@@ -33,11 +40,41 @@ export const REFERENCE_METADATA_FIELDS: Array<{ key: keyof ReferenceMetadata; la
   { key: 'source_file', label: 'Source File' }
 ]
 
+const LABEL_KEY: Partial<Record<string, keyof Strings>> = {
+  network: 'common.refmeta_network',
+  type: 'common.refmeta_type',
+  uuid: 'common.refmeta_uuid',
+  posting_uuid: 'common.refmeta_posting_uuid',
+  posting_id: 'common.refmeta_posting_id',
+  media_id: 'common.refmeta_media_id',
+  url: 'common.refmeta_url',
+  posting_network: 'common.refmeta_posting_network',
+  posting_author: 'common.refmeta_posting_author',
+  posting_author_id: 'common.refmeta_posting_author_id',
+  posting_vanity: 'common.refmeta_posting_vanity',
+  posting_timestamp: 'common.refmeta_posting_timestamp',
+  posting_url: 'common.refmeta_posting_url',
+  posting_text: 'common.refmeta_posting_text',
+  timestamp: 'common.refmeta_timestamp',
+  author: 'common.refmeta_author',
+  author_id: 'common.refmeta_author_id',
+  vanity: 'common.refmeta_vanity',
+  text: 'common.refmeta_text',
+  text_id: 'common.refmeta_text_id',
+  parent_text: 'common.refmeta_parent_text',
+  anchor_text: 'common.refmeta_anchor_text',
+  speaker: 'common.refmeta_speaker',
+  language: 'common.refmeta_language',
+  detected_language: 'common.refmeta_detected_language',
+  source_file: 'common.refmeta_source_file'
+}
+
 const BODY_TEXT_KEYS = new Set(['text', 'parent_text', 'anchor_text'])
 
 export function referenceMetadataItems(
   meta: ReferenceMetadata | undefined,
-  options: { includeText?: boolean } = {}
+  options: { includeText?: boolean } = {},
+  t: (key: keyof Strings, vars?: Record<string, string | number>) => string = defaultT
 ): Array<{ label: string; value: string }> {
   if (!meta) return []
   const { includeText = false } = options
@@ -48,7 +85,8 @@ export function referenceMetadataItems(
     if (raw === null || raw === undefined) continue
     const text = String(raw).trim()
     if (!text) continue
-    items.push({ label, value: text })
+    const labelKey = LABEL_KEY[key as string]
+    items.push({ label: labelKey ? t(labelKey) : label, value: text })
   }
   return items
 }

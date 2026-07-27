@@ -1,4 +1,6 @@
 import type { CollectionOverviewSnapshot } from '@/api/types'
+import { useT } from '@/i18n/LanguageContext'
+import type { Strings } from '@/i18n'
 
 /** Pages-or-rows cell for a manifest row (em-dash when neither applies). */
 function units(doc: { page_count: number; row_count: number | null }): string {
@@ -7,9 +9,21 @@ function units(doc: { page_count: number; row_count: number | null }): string {
   return '—'
 }
 
-/** "N noun" with a plural "s" unless N is exactly 1 (all strip nouns pluralize with a bare "s"). */
-function count(n: number, noun: string): string {
-  return `${n} ${noun}${n === 1 ? '' : 's'}`
+/**
+ * "N noun" via the matching one/other catalog pair. `document` reuses the
+ * shared `table.documents_*` pair (same wording as the collection's document
+ * count elsewhere in the SPA); the other three are report-scoped keys.
+ */
+function count(
+  n: number,
+  base: 'document' | 'node' | 'filetype' | 'entitytype',
+  t: (key: keyof Strings, vars?: Record<string, string | number>) => string
+): string {
+  if (base === 'document') {
+    return t(n === 1 ? 'table.documents_one' : 'table.documents_other', { count: n })
+  }
+  const key = n === 1 ? (`report.count_${base}_one` as keyof Strings) : (`report.count_${base}_other` as keyof Strings)
+  return t(key, { count: n })
 }
 
 /**
@@ -18,21 +32,25 @@ function count(n: number, noun: string): string {
  * (the report exports); this mirrors it for the on-screen preview.
  */
 export function CollectionOverviewPreview({ overview }: { overview: CollectionOverviewSnapshot }) {
+  const t = useT()
   return (
     <div className="space-y-2">
-      <h2 className="text-sm font-medium uppercase tracking-wide text-muted-foreground">Document overview</h2>
+      <h2 className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
+        {t('report.document_overview')}
+      </h2>
       <div className="text-xs text-muted-foreground">
-        {count(overview.document_count, 'document')} · {count(overview.node_count, 'node')} ·{' '}
-        {count(overview.file_types.length, 'file type')} · {count(overview.entity_types.length, 'entity type')}
+        {count(overview.document_count, 'document', t)} · {count(overview.node_count, 'node', t)} ·{' '}
+        {count(overview.file_types.length, 'filetype', t)} ·{' '}
+        {count(overview.entity_types.length, 'entitytype', t)}
       </div>
       <div className="overflow-auto rounded-md border border-border">
         <table className="w-full text-xs">
           <thead className="text-muted-foreground">
             <tr>
-              <th className="text-left px-2 py-1 font-medium">Document</th>
-              <th className="text-left px-2 py-1 font-medium">Type</th>
-              <th className="text-right px-2 py-1 font-medium">Pages / rows</th>
-              <th className="text-left px-2 py-1 font-medium">Hash</th>
+              <th className="text-left px-2 py-1 font-medium">{t('report.col_document')}</th>
+              <th className="text-left px-2 py-1 font-medium">{t('table.col_type')}</th>
+              <th className="text-right px-2 py-1 font-medium">{t('report.col_pages_rows')}</th>
+              <th className="text-left px-2 py-1 font-medium">{t('table.col_hash')}</th>
             </tr>
           </thead>
           <tbody>
