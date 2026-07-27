@@ -1391,11 +1391,10 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
         except ValueError as exc:
             msg = str(exc)
             if "context window" in msg.lower() or "context size" in msg.lower():
-                logger.warning("Context window overflow during SSE generation: {}", exc)
-                yield f"data: {json.dumps({'error': msg})}\n\n"
+                logger.warning("Context window overflow during SSE generation: {}", msg)
             else:
                 logger.exception("Stream error during SSE generation")
-                yield f"data: {json.dumps({'error': 'Internal server error'})}\n\n"
+            yield f"data: {json.dumps({'error': 'Internal server error'})}\n\n"
         except Exception:
             logger.exception("Stream error during SSE generation")
             yield f"data: {json.dumps({'error': 'Internal server error'})}\n\n"
@@ -3247,13 +3246,10 @@ async def _stream_collection_ingestion(
                 {"collection": name, "data_dir": str(batch_dir), "empty": True},
             )
             return
-        logger.error("Error during streamed ingestion: {}", exc)
-        # Include the exception class + message so the user can tell at a glance
-        # whether the failure was, e.g., an embedding-endpoint outage versus a
-        # Qdrant connectivity issue versus a parse error.
+        logger.opt(exception=exc).error("Ingestion stream failed")
         yield _format_sse(
             "error",
-            {"message": f"Ingestion failed: {type(exc).__name__}: {exc}"},
+            {"message": "Ingestion failed."},
         )
 
 
