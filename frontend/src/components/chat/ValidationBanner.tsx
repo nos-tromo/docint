@@ -33,7 +33,9 @@ function resolveSpec(v: ValidationFields, t: ReturnType<typeof useT>): BannerSpe
   // validation_checked is false / null / undefined — validation either
   // didn't run or couldn't complete. Always surface this rather than
   // suppressing the banner, so users can see at a glance that the
-  // response is unverified.
+  // response is unverified. Unlike the mismatch case above, this branch's
+  // backend `reason` can carry a raw caught-exception message (validation
+  // model/transport failure) — never render it; catalog copy only.
   return {
     tone: 'border-zinc-700 bg-zinc-900 text-zinc-300',
     icon: 'ⓘ',
@@ -41,7 +43,7 @@ function resolveSpec(v: ValidationFields, t: ReturnType<typeof useT>): BannerSpe
       v.validation_checked === false
         ? t('chat.validation_unavailable_title')
         : t('chat.validation_not_validated_title'),
-    detail: reason ?? t('chat.validation_default_detail')
+    detail: t('chat.validation_default_detail')
   }
 }
 

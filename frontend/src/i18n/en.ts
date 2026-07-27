@@ -59,16 +59,18 @@ export const en = {
   'table.copy_hash': 'Copy hash for {filename}',
 
   // upload
-  'upload.drop_hint': 'Drop files here or click to choose.',
+  'upload.drop_hint': 'Drag files here or click',
   'upload.choose_folder': 'Or choose a folder',
   'upload.files_one': '{count} file',
   'upload.files_other': '{count} files',
   'upload.clear_all': 'Clear all',
   'common.remove': 'Remove',
 
-  // shared transport-error suffix
-  'common.transport_suffix': ' (transport: {detail})',
+  // shared error copy
   'common.owned_by_suffix': ' (owner: {owner})',
+  'common.error_request': 'Something went wrong ({status}). Please try again or contact support.',
+  'common.error_unknown': 'Something went wrong. Please try again or contact support.',
+  'common.error_network': 'Service unreachable. Please check your connection or try again later.',
 
   // chat
   'chat.title': 'Chat',
@@ -227,6 +229,7 @@ export const en = {
   'analysis.summary_refresh': 'Refresh',
   'analysis.summary_download_md': 'Download MD',
   'analysis.summary_sources': 'Sources',
+  'analysis.summary_failed': 'Summary generation failed.',
 
   // report
   'report.title': 'Reports',

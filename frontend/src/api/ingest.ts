@@ -191,13 +191,17 @@ export async function* streamIngestUploadBatched(
         continue // fold into the single synthetic terminal below
       }
       if (ev.event === 'error') {
-        finalizeError = typeof data.message === 'string' ? data.message : t('ingest.failed_default')
+        // `data.message` is a protocol flag post-D2, not prose — always
+        // fall through to catalog copy rather than rendering the field.
+        finalizeError = t('ingest.failed_default')
         continue
       }
       yield stamp(ev.event as IngestEvent['event'], data)
     }
-  } catch (err) {
-    finalizeError = err instanceof Error ? err.message : String(err)
+  } catch {
+    // A transport/stream failure carries no user-safe text of its own —
+    // catalog copy stands in, same as the finalize `error` event above.
+    finalizeError = t('ingest.failed_default')
   }
 
   if (finalizeError) {

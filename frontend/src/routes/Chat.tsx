@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom'
 import { Button } from '@infra/ui'
 import { streamQuery } from '@/api/chat'
 import { ApiError } from '@/api/client'
+import { describeError } from '@/api/errorMessage'
 import type { ChatFinalEvent } from '@/api/types'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSessionHistory } from '@/hooks/useSessions'
@@ -153,7 +154,9 @@ export function Chat() {
           continue
         }
         if (typeof data.error === 'string') {
-          dispatch({ type: 'fail', error: data.error })
+          // Post-D2 the backend sends a static protocol flag here, not
+          // prose — never render the field itself.
+          dispatch({ type: 'fail', error: t('chat.error_stream_ended') })
           continue
         }
         const final = data as unknown as ChatFinalEvent
@@ -168,16 +171,20 @@ export function Chat() {
       // with no active collection (400) reaches here as a typed ApiError. Give
       // each an actionable message. Anything else is a transport failure — a
       // backend OOM mid-stream surfaces as a generic "network error" TypeError
-      // from the reader; flag the likely cause and keep the raw detail.
+      // from the reader; the underlying message is not user-visible (see
+      // describeError), so just report the stream ended.
       let error: string
       if (e instanceof ApiError && e.status === 409) {
         error = t('chat.error_wrong_collection')
       } else if (e instanceof ApiError && e.status === 400) {
         error = t('chat.error_no_collection')
+      } else if (e instanceof ApiError) {
+        const d = describeError(e)
+        error = t(d.key, d.vars)
       } else {
-        const detail = e instanceof Error ? e.message : String(e)
-        error =
-          t('chat.error_stream_ended') + t('common.transport_suffix', { detail })
+        // A pure transport failure (stream aborted mid-read) has no status
+        // to report; the actionable message is that the stream ended.
+        error = t('chat.error_stream_ended')
       }
       dispatch({ type: 'fail', error })
     } finally {

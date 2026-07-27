@@ -97,8 +97,10 @@ describe('Chat SSE handling', () => {
     })
   })
 
-  it('marks the turn done on an untyped error frame instead of waiting forever', async () => {
-    const frames = 'data: {"error":"boom"}\n\n'
+  it('marks the turn done on an untyped error frame instead of waiting forever, never rendering the raw field', async () => {
+    // The backend's `error` field is a static protocol flag post-D2, not
+    // prose — the UI must show catalog copy instead of the field itself.
+    const frames = 'data: {"error":"boom: internal-host:9000 unreachable"}\n\n'
 
     vi.stubGlobal(
       'fetch',
@@ -114,14 +116,15 @@ describe('Chat SSE handling', () => {
     await waitFor(() => {
       expect(screen.getByText(/\(no answer\)/i)).toBeInTheDocument()
     })
-    expect(screen.getByText(/boom/)).toBeInTheDocument()
+    expect(screen.getByText(/stream ended unexpectedly/i)).toBeInTheDocument()
+    expect(screen.queryByText(/boom/)).not.toBeInTheDocument()
   })
 
   it('surfaces a backend-likely-crashed message when the stream throws (e.g., OOM kill)', async () => {
     // Reader.read() rejects with a TypeError mid-stream — the same shape
     // the browser fetch surfaces when nginx closes the upstream because
-    // the backend died. The chat reducer must convert this into an
-    // actionable message instead of relaying "network error" verbatim.
+    // the backend died. The chat reducer must convert this into a static,
+    // generic message — never relaying the raw transport error verbatim.
     const aborting = new ReadableStream<Uint8Array>({
       start(c) {
         const enc = new TextEncoder()
@@ -144,8 +147,8 @@ describe('Chat SSE handling', () => {
         screen.getByText(/stream ended unexpectedly/i)
       ).toBeInTheDocument()
     })
-    // Underlying transport detail is preserved for forensics.
-    expect(screen.getByText(/network error/)).toBeInTheDocument()
+    // The raw transport error is never rendered — only static, generic copy.
+    expect(screen.queryByText(/network error/)).not.toBeInTheDocument()
   })
 
   it('Enter submits, Shift+Enter inserts a newline', async () => {

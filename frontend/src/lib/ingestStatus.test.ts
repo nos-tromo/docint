@@ -338,13 +338,16 @@ describe('deriveIngestStatus', () => {
     }
   })
 
-  it('records error events with phase=error and the message', () => {
+  it('records error events with phase=error and never carries the backend message into state', () => {
+    // The event's `message` is a protocol flag, not user-safe prose — the
+    // derived status must not surface it; IngestionStatus.tsx renders
+    // catalog copy for every error regardless of this field.
     const events: IngestEvent[] = [
       { event: 'start', data: { collection: 'c', target_dir: '/t', files: [] } },
       { event: 'error', data: { message: 'boom' } }
     ]
     const status = deriveIngestStatus(events)
     expect(status.phase).toBe('error')
-    expect(status.errorMessage).toBe('boom')
+    expect(status).not.toHaveProperty('errorMessage')
   })
 })
