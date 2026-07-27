@@ -31,20 +31,24 @@ describe('ValidationBanner', () => {
     expect(screen.getByText(/not supported/i)).toBeInTheDocument()
   })
 
-  it('shows an unavailable banner with the reason when validation could not run', () => {
+  it('shows an unavailable banner with generic catalog copy, never the raw backend reason', () => {
+    // The backend reason for "unavailable" can be a raw caught-exception
+    // message (see docint/agents/generation.py's exception branch) — it
+    // must never reach the DOM even when the field is populated.
     render(
       <ValidationBanner
         v={{
           validation_checked: false,
           validation_mismatch: null as unknown as boolean,
-          validation_reason: 'Validation model unavailable.'
+          validation_reason: 'Validation request failed: connection refused to internal-host:9000'
         }}
       />
     )
     expect(
       screen.getByText(/response validation unavailable/i)
     ).toBeInTheDocument()
-    expect(screen.getByText(/model unavailable/i)).toBeInTheDocument()
+    expect(screen.getByText(/skipped or unavailable/i)).toBeInTheDocument()
+    expect(screen.queryByText(/connection refused/i)).not.toBeInTheDocument()
   })
 
   it('always renders a skipped/unavailable notice even with no validation signal', () => {

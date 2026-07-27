@@ -1,6 +1,7 @@
 import { useMemo, useReducer, useState } from 'react'
 import { Button, FileList, mergeFiles } from '@infra/ui'
 import { streamIngestUploadBatched } from '@/api/ingest'
+import { describeError } from '@/api/errorMessage'
 import { useSelectCollection, useCollections, collectionsKey } from '@/hooks/useCollections'
 import { useConfig } from '@/hooks/useConfig'
 import { useQueryClient } from '@tanstack/react-query'
@@ -139,8 +140,9 @@ export function Ingest() {
           continue
         }
         if (ev.event === 'error') {
-          const data = ev.data as Record<string, unknown>
-          setError(String(data.message ?? t('ingest.failed_default')))
+          // The event's `message` is a protocol flag post-D2, not prose —
+          // always show catalog copy rather than rendering the field.
+          setError(t('ingest.failed_default'))
           sawTerminal = true
           continue
         }
@@ -166,7 +168,8 @@ export function Ingest() {
       if (!sawTerminal) setError(truncationMessage)
     } catch (e) {
       if (sawTerminal) {
-        setError(e instanceof Error ? e.message : String(e))
+        const d = describeError(e)
+        setError(t(d.key, d.vars))
       } else {
         // The fetch/stream threw before any terminal event arrived — almost
         // always the backend dying mid-stream. The underlying message is not

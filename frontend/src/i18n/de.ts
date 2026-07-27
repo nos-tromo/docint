@@ -233,6 +233,8 @@ export const de: Strings = {
   'analysis.coverage_sampled': 'Stichprobe {sampled} von {candidate} (dedupliziert {deduped})',
   'analysis.coverage_hide': 'ausblenden',
   'analysis.coverage_show_uncovered': '{count} nicht abgedeckte anzeigen',
+  'analysis.summary_failed':
+    'Die Zusammenfassung konnte nicht erstellt werden. Bitte erneut versuchen oder den Support kontaktieren.',
   'analysis.summary_generating': 'Wird erstellt…',
   'analysis.summary_generate': 'Erstellen',
   'analysis.summary_refresh': 'Aktualisieren',

@@ -97,8 +97,10 @@ describe('Chat SSE handling', () => {
     })
   })
 
-  it('marks the turn done on an untyped error frame instead of waiting forever', async () => {
-    const frames = 'data: {"error":"boom"}\n\n'
+  it('marks the turn done on an untyped error frame instead of waiting forever, never rendering the raw field', async () => {
+    // The backend's `error` field is a static protocol flag post-D2, not
+    // prose — the UI must show catalog copy instead of the field itself.
+    const frames = 'data: {"error":"boom: internal-host:9000 unreachable"}\n\n'
 
     vi.stubGlobal(
       'fetch',
@@ -114,7 +116,8 @@ describe('Chat SSE handling', () => {
     await waitFor(() => {
       expect(screen.getByText(/\(no answer\)/i)).toBeInTheDocument()
     })
-    expect(screen.getByText(/boom/)).toBeInTheDocument()
+    expect(screen.getByText(/stream ended unexpectedly/i)).toBeInTheDocument()
+    expect(screen.queryByText(/boom/)).not.toBeInTheDocument()
   })
 
   it('surfaces a backend-likely-crashed message when the stream throws (e.g., OOM kill)', async () => {
