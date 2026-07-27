@@ -44,6 +44,7 @@ from docint.agents import (
 from docint.agents.history import build_prior_turn
 from docint.cli import ingest as ingest_module
 from docint.core.auth.principal import Principal, resolve_principal
+from docint.core.errors import install_error_handlers
 from docint.core.rag import RAG, EmptyIngestionError
 from docint.core.retrieval_filters import build_metadata_filters, build_qdrant_filter
 from docint.core.state.session_manager import SessionCollectionMismatchError
@@ -84,6 +85,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+install_error_handlers(app)
 
 # Prometheus metrics for the obs-plane scrape target. Aggregate request
 # counters/histograms only (method, path template, status code, latency) —
@@ -927,8 +929,8 @@ def collections_list(
             others=[AdminOwnerCollections(owner=o, collections=c) for o, c in others.items()],
         )
     except Exception as e:
-        logger.error("HTTPException: Error listing collections: {}", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.opt(exception=e).error("Error listing collections")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
 @app.post("/collections/select", response_model=SelectCollectionOut, tags=["Collections"])
@@ -996,8 +998,8 @@ def collections_delete(name: str, principal: Principal = Depends(resolve_princip
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("HTTPException: Error deleting collection: {}", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.opt(exception=e).error("Error deleting collection")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
 @app.post("/query", response_model=QueryOut, tags=["Query"])
@@ -1146,10 +1148,10 @@ def query(payload: QueryIn, request: Request) -> dict[str, Any]:
     except HTTPException:
         raise
     except SessionCollectionMismatchError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail="Session is pinned to a different collection.") from exc
     except Exception as exc:
-        logger.error("Unexpected error processing query: {}", exc)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.opt(exception=exc).error("Unexpected error processing query")
+        raise HTTPException(status_code=500, detail="Request failed.") from exc
 
 
 @app.post("/stream_query", tags=["Query"])
@@ -1190,7 +1192,7 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
             if pinned is not None and pinned != physical:
                 raise HTTPException(
                     status_code=409,
-                    detail=f"Session '{payload.session_id}' is pinned to a different collection.",
+                    detail="Session is pinned to a different collection.",
                 )
 
     async def _stream_body() -> AsyncIterator[str]:
@@ -1469,8 +1471,8 @@ def summarize(
                 **validation,
             }
         except HTTPException as e:
-            logger.error("HTTPException: Error generating summary: {}", e)
-            raise HTTPException(status_code=500, detail=str(e)) from e
+            logger.opt(exception=e).error("Error generating summary")
+            raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
 @app.post("/summarize/stream", tags=["Query"])
@@ -1583,8 +1585,8 @@ def get_collection_ner(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Error fetching collection NER: {}", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.opt(exception=e).error("Error fetching collection NER")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
 @app.get("/collections/hate-speech", tags=["Query"])
@@ -1635,10 +1637,10 @@ def get_collection_hate_speech(
     except HTTPException:
         raise
     except InvalidCursorError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise HTTPException(status_code=400, detail="Invalid request.") from e
     except Exception as e:
-        logger.error("Error fetching collection hate-speech results: {}", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.opt(exception=e).error("Error fetching collection hate-speech results")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
 @app.get("/collections/ner/sources", tags=["Query"])
@@ -1691,10 +1693,10 @@ def get_collection_ner_sources(
     except HTTPException:
         raise
     except InvalidCursorError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise HTTPException(status_code=400, detail="Invalid request.") from e
     except Exception as e:
-        logger.error("Error fetching collection NER sources: {}", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.opt(exception=e).error("Error fetching collection NER sources")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
 @app.post("/collections/ner/warm", tags=["Query"])
@@ -1726,8 +1728,8 @@ async def warm_collection_ner(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Error warming collection NER aggregate: {}", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.opt(exception=e).error("Error warming collection NER aggregate")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
 @app.get("/collections/ner/stats", response_model=NERStatsOut, tags=["Query"])
@@ -1771,8 +1773,8 @@ def get_collection_ner_stats(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Error fetching collection NER stats: {}", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.opt(exception=e).error("Error fetching collection NER stats")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
 @app.get("/collections/ner/search", response_model=NERSearchOut, tags=["Query"])
@@ -1815,8 +1817,8 @@ def search_collection_ner_entities(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Error searching collection entities: {}", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.opt(exception=e).error("Error searching collection entities")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
 @app.get("/collections/ner/graph", response_model=NERGraphOut, tags=["Query"])
@@ -1867,8 +1869,8 @@ def get_collection_ner_graph(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Error building collection NER graph: {}", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.opt(exception=e).error("Error building collection NER graph")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
 @app.post("/collections/entities/resolve", tags=["Query"])
@@ -1909,8 +1911,8 @@ def resolve_collection_entities(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Error resolving collection entities: {}", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.opt(exception=e).error("Error resolving collection entities")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
 @app.get("/collections/documents", tags=["Query"])
@@ -1951,10 +1953,10 @@ def get_collection_documents(
     except HTTPException:
         raise
     except InvalidCursorError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise HTTPException(status_code=400, detail="Invalid request.") from e
     except Exception as e:
-        logger.error("Error fetching collection documents: {}", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.opt(exception=e).error("Error fetching collection documents")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
 @app.get("/collections/documents/count", tags=["Query"])
@@ -1979,8 +1981,8 @@ def get_collection_documents_count(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Error fetching collection document count: {}", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.opt(exception=e).error("Error fetching collection document count")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
 @app.get("/collections/documents/summary", response_model=DocumentsSummaryOut, tags=["Query"])
@@ -2008,8 +2010,8 @@ def get_collection_documents_summary(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Error fetching collection document summary: {}", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.opt(exception=e).error("Error fetching collection document summary")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
 def _csv_attachment_headers(stem: str) -> dict[str, str]:
@@ -2304,8 +2306,8 @@ def list_sessions(
             sessions = sm.list_sessions(principal.effective_owner)
         return {"sessions": sessions}
     except Exception as e:
-        logger.error("Error listing sessions: {}", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.opt(exception=e).error("Error listing sessions")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
 @app.get(
@@ -2338,8 +2340,8 @@ def get_session_history(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Error fetching history: {}", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.opt(exception=e).error("Error fetching history")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
     # NOTE: empty also covers "owned but zero turns" (brand-new session),
     # which collapses to 404 here; acceptable for Plan 1 (see Plan 2).
     if not messages:
@@ -2427,8 +2429,8 @@ def export_session_sources_zip(session_id: str, principal: Principal = Depends(r
     try:
         files = _collect_session_source_files(session_id, principal.effective_owner)
     except Exception as e:
-        logger.error("Error assembling session sources for {}: {}", session_id, e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.opt(exception=e).error(f"Error assembling session sources for {session_id}")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
 
     if not files:
         raise HTTPException(status_code=404, detail="No source files found for this session")
@@ -2481,8 +2483,8 @@ def delete_session(session_id: str, principal: Principal = Depends(resolve_princ
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Error deleting session: {}", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.opt(exception=e).error("Error deleting session")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
     if not success:
         raise HTTPException(status_code=404, detail="Session not found.")
     return {"ok": success}
@@ -2509,8 +2511,8 @@ def create_report(payload: ReportCreateIn, principal: Principal = Depends(resolv
             session_id=payload.session_id,
         )
     except Exception as e:
-        logger.error("Error creating report: {}", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.opt(exception=e).error("Error creating report")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
 
     # Default-on document overview: capture once at create. Fail-soft — a Qdrant
     # hiccup must not fail report creation; the snapshot stays null until a
@@ -2542,8 +2544,8 @@ def list_reports(
     try:
         return {"reports": rag.ensure_report_manager().list_reports(principal.effective_owner, collection)}
     except Exception as e:
-        logger.error("Error listing reports: {}", e)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.opt(exception=e).error("Error listing reports")
+        raise HTTPException(status_code=500, detail="Request failed.") from e
 
 
 @app.get("/reports/{report_id}", tags=["Reports"])
@@ -2824,7 +2826,8 @@ def export_report_pdf(report_id: int, principal: Principal = Depends(resolve_pri
     try:
         pdf_bytes = render_pdf(report)
     except PdfEngineUnavailableError as e:
-        raise HTTPException(status_code=503, detail=str(e)) from e
+        logger.opt(exception=e).error("PDF export engine unavailable")
+        raise HTTPException(status_code=503, detail="PDF export is not available.") from e
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -2865,7 +2868,7 @@ def agent_chat(payload: AgentChatIn, request: Request) -> AgentChatOut:
             orchestrator = _build_orchestrator()
             result = orchestrator.handle_turn(turn, context=ctx)
     except SessionCollectionMismatchError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail="Session is pinned to a different collection.") from exc
 
     if result.clarification is not None and result.clarification.needed:
         if ctx:
@@ -2934,7 +2937,7 @@ def ingest(payload: IngestIn, request: Request) -> dict[str, bool | str]:
         logger.error("HTTPException: Data directory does not exist: {}", data_dir)
         raise HTTPException(
             status_code=400,
-            detail=f"Data directory does not exist: {data_dir}",
+            detail="Server storage is not available.",
         )
 
     try:
@@ -2956,8 +2959,8 @@ def ingest(payload: IngestIn, request: Request) -> dict[str, bool | str]:
             "empty": True,
         }
     except Exception as exc:
-        logger.error("Unexpected error during ingestion of '{}': {}", name, exc)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.opt(exception=exc).error(f"Unexpected error during ingestion of '{name}'")
+        raise HTTPException(status_code=500, detail="Request failed.") from exc
 
     return {
         "ok": True,
@@ -2992,7 +2995,7 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
         if pinned is not None and pinned != physical:
             raise HTTPException(
                 status_code=409,
-                detail=f"Session '{payload.session_id}' is pinned to a different collection.",
+                detail="Session is pinned to a different collection.",
             )
 
     async def event_generator() -> AsyncIterator[str]:
