@@ -163,7 +163,7 @@ export const en = {
 
   // entities (Analysis: NER tab + components)
   'analysis.title': 'Analysis',
-  'analysis.tab_ner': 'NER',
+  'analysis.tab_ner': 'Entities',
   'analysis.tab_hate': 'Hate speech',
   'analysis.tab_summary': 'Summary',
   'entities.view_group_aria': 'Entity view',

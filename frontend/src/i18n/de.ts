@@ -4,9 +4,9 @@ export const de: Strings = {
   // nav
   'nav.dashboard': 'Dashboard',
   'nav.chat': 'Chat',
-  'nav.ingest': 'Datenaufnahme',
+  'nav.ingest': 'Datenimport',
   'nav.analysis': 'Analyse',
-  'nav.inspector': 'Inspektion',
+  'nav.inspector': 'Überblick',
   'nav.report': 'Bericht',
 
   // common
@@ -19,14 +19,14 @@ export const de: Strings = {
   'common.delete_collection_aria': 'Sammlung {name} löschen',
   'common.delete_collection_title': 'Diese Sammlung löschen',
   'common.delete_collection_confirm':
-    'Sammlung {label} löschen? Dies kann nicht rückgängig gemacht werden.',
+    'Sammlung {label} löschen? Diese Aktion kann nicht rückgängig gemacht werden.',
   'common.no_active_collection': 'Keine aktive Sammlung — wählen Sie eine aus, um Anfragen zu stellen.',
   'common.sessions': 'Sitzungen',
   'common.new_session': '+ Neu',
   'common.loading_chats': 'Lädt Chats...',
   'common.sessions_error_default': 'Chats konnten nicht geladen werden.',
   'common.sessions_error_auth':
-    'Der Sitzungsverlauf erfordert einen authentifizierten Benutzer oder DOCINT_DEFAULT_IDENTITY.',
+    'Der Sitzungsverlauf erfordert einen authentifizierten User.',
   'common.no_chats_in_collection': 'Noch keine Chats in dieser Sammlung.',
   'common.select_collection_to_see_chats': 'Wählen Sie eine Sammlung aus, um deren Chats zu sehen.',
   'common.session_title_fallback': 'Sitzung {id}',
@@ -38,7 +38,7 @@ export const de: Strings = {
   'common.translation': 'Übersetzung',
   'common.show_original': 'Original anzeigen',
   'common.translation_unavailable': 'Übersetzung nicht verfügbar — Original wird angezeigt.',
-  'common.entity_merge_mode_aria': 'Entitäten-Zusammenführungsmodus',
+  'common.entity_merge_mode_aria': 'Entitäten-Zusammenführung',
   'common.merge_resolved': 'Aufgelöst',
   'common.merge_orthographic': 'Orthografisch',
   'common.merge_exact': 'Exakt',
@@ -56,7 +56,7 @@ export const de: Strings = {
   'table.loading_suffix': '· lädt…',
   'table.export_csv': 'CSV exportieren',
   'table.empty_title': 'Noch keine Dokumente in dieser Sammlung.',
-  'table.empty_hint': 'Nehmen Sie Dateien für die Datenaufnahme auf, um sie hier zu sehen.',
+  'table.empty_hint': 'Nehmen Sie Dateien für den Datenimport auf, um sie hier zu sehen.',
   'table.load_more': 'Weitere laden',
   'table.aria_documents': 'Dokumente',
   'table.copy_hash': 'Hash für {filename} kopieren',
@@ -85,16 +85,16 @@ export const de: Strings = {
   'chat.send': 'Senden',
   'chat.query_mode': 'Abfragemodus',
   'chat.mode_answer': 'Antwort',
-  'chat.mode_entity_occurrence': 'Entitätsvorkommen',
-  'chat.mode_entity_occurrence_multi': 'Entitätsvorkommen (mehrfach)',
+  'chat.mode_entity_occurrence': 'Entitäten',
+  'chat.mode_entity_occurrence_multi': 'Entitäten (mehrfach)',
   'chat.retrieval': 'Abruf',
-  'chat.retrieval_session': 'Sitzung',
-  'chat.retrieval_stateless': 'Zustandslos',
+  'chat.retrieval_session': 'Kompletten Chat einbeziehen (stateful)',
+  'chat.retrieval_stateless': 'Nur aktuellste Nachricht (stateless)',
   'chat.error_wrong_collection':
     'Dieser Chat gehört zu einer anderen Sammlung — wechseln Sie zu dieser Sammlung, um ihn fortzusetzen, oder starten Sie einen neuen Chat.',
-  'chat.error_no_collection': 'Wählen Sie eine Sammlung aus, bevor Sie chatten.',
+  'chat.error_no_collection': 'Wählen Sie eine Sammlung aus, bevor Sie einen Chat starten.',
   'chat.error_stream_ended':
-    'Der Chat-Stream wurde unerwartet beendet — das Backend ist möglicherweise abgestürzt (Speichermangel beim Laden der NER/LLM-Modelle ist die übliche Ursache). Prüfen Sie die Backend-Logs und versuchen Sie es erneut.',
+    'Der Chat-Stream wurde unerwartet beendet.',
   'chat.open_original': 'Original öffnen ↗',
   'chat.entity_disambiguation': 'Entitäten-Disambiguierung',
   'chat.candidates': 'Kandidaten',
@@ -102,7 +102,7 @@ export const de: Strings = {
   'chat.group_fallback': 'Gruppe {n}',
   'chat.enable_filters': 'Metadatenfilter aktivieren',
   'chat.mime_pattern': 'MIME-Muster',
-  'chat.hate_speech_only': 'Nur Hassrede',
+  'chat.hate_speech_only': 'Nur Hatespeech',
   'chat.date_from': 'Datum von',
   'chat.date_to': 'Datum bis',
   'chat.custom_rules': 'Benutzerdefinierte Regeln',
@@ -112,7 +112,7 @@ export const de: Strings = {
   'chat.remove_rule_aria': 'Regel entfernen',
   'chat.graph_debug': 'Graph-Debug',
   'chat.validation_mismatch_title':
-    'Die Antwortvalidierung hat eine mögliche Abweichung gemeldet',
+    'Die Antwortvalidierung hat eine mögliche Abweichung ergeben',
   'chat.validation_mismatch_default_detail':
     'Mögliche Abweichung zwischen Antwort und abgerufenen Quellen.',
   'chat.validation_passed_title': 'Antwortvalidierung bestanden',
@@ -122,11 +122,11 @@ export const de: Strings = {
     'Die Validierung wurde für diese Antwort übersprungen oder war nicht verfügbar.',
 
   // ingest
-  'ingest.title': 'Datenaufnahme',
-  'ingest.button': 'Aufnehmen',
-  'ingest.busy': 'Wird aufgenommen…',
+  'ingest.title': 'Datenimport',
+  'ingest.button': 'Importieren',
+  'ingest.busy': 'Wird importiert…',
   'ingest.error_truncated':
-    'Die Datenaufnahme wurde unterbrochen, bevor sie abgeschlossen war. Das Backend ist möglicherweise abgestürzt (Speichermangel beim Laden der NER/LLM-Modelle ist bei CSV-/Großtext-Aufnahmen die übliche Ursache). Prüfen Sie die Backend-Logs und versuchen Sie es erneut mit mehr für Docker zugewiesenem Speicher.',
+    'Der Datenimport wurde unterbrochen, bevor er abgeschlossen war. Versuchen Sie es erneut oder kontaktieren Sie den Support.',
   'ingest.status_idle': 'Inaktiv',
   'ingest.status_uploading': 'Wird hochgeladen',
   'ingest.status_processing': 'Wird verarbeitet',
@@ -140,8 +140,8 @@ export const de: Strings = {
   'ingest.working': 'Wird bearbeitet…',
   'ingest.files_indexed': '{count} Dateien indexiert',
   'ingest.chunks': '{count} Chunks',
-  'ingest.finished': 'Datenaufnahme abgeschlossen',
-  'ingest.failed_default': 'Datenaufnahme fehlgeschlagen.',
+  'ingest.finished': 'Datenimport abgeschlossen',
+  'ingest.failed_default': 'Datenimport fehlgeschlagen.',
 
   // inspector orphans
   'inspector.file_types': 'Dateitypen',
@@ -169,13 +169,13 @@ export const de: Strings = {
 
   // entities (Analysis: NER tab + components)
   'analysis.title': 'Analyse',
-  'analysis.tab_ner': 'NER',
-  'analysis.tab_hate': 'Hassrede',
+  'analysis.tab_ner': 'Entitäten',
+  'analysis.tab_hate': 'Hatespeech',
   'analysis.tab_summary': 'Zusammenfassung',
   'entities.view_group_aria': 'Entitätsansicht',
   'entities.view_table': 'Tabelle',
   'entities.view_graph': 'Graph',
-  'entities.merge_mode_label': 'Zusammenführungsmodus',
+  'entities.merge_mode_label': 'Zusammenführung',
   'entities.select_collection': 'Wählen Sie eine Sammlung aus, um Entitäten zu prüfen.',
   'entities.loading': 'Lädt Entitäten…',
   'entities.empty': 'Keine Entitäten in dieser Sammlung gefunden.',
@@ -237,15 +237,15 @@ export const de: Strings = {
   // report
   'report.title': 'Berichte',
   'report.untitled_title': 'Unbenannter Bericht',
-  'report.create_error': 'Bericht konnte nicht erstellt werden — ist das Backend erreichbar?',
+  'report.create_error': 'Bericht konnte nicht erstellt werden.',
   'report.load_error': 'Berichte konnten nicht geladen werden.',
   'report.empty_list': 'Noch keine Berichte.',
   'report.delete_aria': 'Bericht löschen',
-  'report.delete_confirm': 'Diesen Bericht löschen? Dies kann nicht rückgängig gemacht werden.',
+  'report.delete_confirm': 'Diesen Bericht löschen? Diese Aktion kann nicht rückgängig gemacht werden.',
   'report.select_hint': 'Wählen Sie einen Bericht aus oder erstellen Sie einen und fügen Sie Artefakte aus Chat oder Analyse hinzu.',
   'report.load_failed': 'Dieser Bericht konnte nicht geladen werden.',
   'report.clear_selection': 'Auswahl aufheben',
-  'report.loading': 'Lädt Bericht…',
+  'report.loading': 'Bericht wird geladen…',
   'report.title_aria': 'Berichtstitel',
   'report.operator_label': 'Bearbeiter/-in',
   'report.reference_label': 'Aktenzeichen',
@@ -262,14 +262,14 @@ export const de: Strings = {
   'report.format_csv': 'CSV',
   'report.format_json': 'JSON',
   'report.empty_report_hint':
-    'Dieser Bericht ist leer. Verwenden Sie die Schaltfläche „{control}“ bei einer Chat-Antwort, einem Entitätsfund oder einem Hassrede-Fund, um sie hier hinzuzufügen.',
+    'Dieser Bericht ist leer. Verwenden Sie die Schaltfläche „{control}“ bei einer Chat-Antwort, einem Entitätsfund oder einem Hatespeech-Fund, um sie hier hinzuzufügen.',
   'report.section_summaries': 'Zusammenfassungen',
   'report.section_chat_answers': 'Chat-Antworten',
   'report.section_entity_findings': 'Entitätsfunde',
-  'report.section_hate_findings': 'Hassrede-Funde',
+  'report.section_hate_findings': 'Hatespeech-Funde',
   'report.default_chat_answer': 'Chat-Antwort',
   'report.default_entity_finding': 'Entitätsfund',
-  'report.default_hate_finding': 'Hassrede-Fund',
+  'report.default_hate_finding': 'Hatespeech-Fund',
   'report.default_summary': 'Zusammenfassung',
   'report.move_up_aria': 'Nach oben verschieben',
   'report.move_down_aria': 'Nach unten verschieben',
@@ -307,7 +307,7 @@ export const de: Strings = {
   'dashboard.chart_mentions': 'Erwähnungen',
 
   // inspector route wrapper
-  'inspector.title': 'Inspektion',
+  'inspector.title': 'Überblick',
   'inspector.select_collection': 'Wählen Sie eine Sammlung aus.',
 
   // reference-metadata field labels (shared by chat citations, entity
@@ -356,7 +356,7 @@ export const de: Strings = {
 
   // ingest stage/task label mapping (LABEL_KEY-style, mirrors hate.category_*)
   'ingest.stage_processing_pdfs': 'PDFs werden verarbeitet',
-  'ingest.task_hate_detection': 'Hassrede-Erkennung',
+  'ingest.task_hate_detection': 'Hatespeech-Erkennung',
   'ingest.stage_progress': '{current} von {total}',
 
   // document-format unit words (documentFormat.ts)
