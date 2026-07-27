@@ -76,7 +76,7 @@ export const de: Strings = {
   'common.error_unknown':
     'Fehler – Bitte versuchen Sie es erneut oder kontaktieren Sie den Support.',
   'common.error_network':
-    'Dienst nicht erreichbar. Bitte Verbindung prüfen oder später erneut versuchen.',
+    'Dienst nicht erreichbar – Bitte prüfen Sie Ihre Verbindung oder versuchen Sie es später erneut.',
 
   // chat
   'chat.title': 'Chat',
