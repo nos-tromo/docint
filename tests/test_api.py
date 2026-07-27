@@ -3979,3 +3979,80 @@ def test_ner_graph_clamps_top_k_to_configured_max(client: TestClient, monkeypatc
 
     assert response.status_code == 200
     assert cast(DummyRAG, api_module.rag).ner_graph_top_ks[-1] == 300
+
+
+def test_stream_query_error_event_carries_context_overflow_code(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """A context-window overflow tags the generic stream error with its code.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        client: The TestClient instance.
+    """
+    original_run_query = type(api_module.rag).run_query
+
+    def _exploding_run_query(self: Any, *a: Any, **kw: Any) -> Any:
+        raise ValueError("The query and retrieved context exceed the configured context window (4096 tokens).")
+
+    monkeypatch.setattr(type(api_module.rag), "run_query", _exploding_run_query)
+    try:
+        with client.stream(
+            "POST",
+            "/stream_query",
+            json={"question": "hello", "retrieval_mode": "stateless"},
+        ) as resp:
+            text = "".join(chunk.decode() for chunk in resp.iter_raw())
+    finally:
+        monkeypatch.setattr(type(api_module.rag), "run_query", original_run_query)
+
+    assert '"code": "context_overflow"' in text
+    assert "context window" not in text.replace('"code": "context_overflow"', "")
+
+
+def test_stream_query_error_event_carries_generation_failed_code(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """A generic stream failure tags the error event with the generation code.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        client: The TestClient instance.
+    """
+    original_run_query = type(api_module.rag).run_query
+
+    def _exploding_run_query(self: Any, *a: Any, **kw: Any) -> Any:
+        raise RuntimeError("boom-generic")
+
+    monkeypatch.setattr(type(api_module.rag), "run_query", _exploding_run_query)
+    try:
+        with client.stream(
+            "POST",
+            "/stream_query",
+            json={"question": "hello", "retrieval_mode": "stateless"},
+        ) as resp:
+            text = "".join(chunk.decode() for chunk in resp.iter_raw())
+    finally:
+        monkeypatch.setattr(type(api_module.rag), "run_query", original_run_query)
+
+    assert '"code": "generation_failed"' in text
+    assert "boom-generic" not in text
+
+
+def test_summarize_stream_error_event_carries_code(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+    """A summary-stream failure tags the error event with its code.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        client: The TestClient instance.
+    """
+
+    def _exploding_stream(self: Any, *a: Any, **kw: Any) -> Any:
+        raise RuntimeError("boom-summary")
+
+    monkeypatch.setattr(type(api_module.rag), "stream_summarize_collection", _exploding_stream)
+    with client.stream("POST", "/summarize/stream") as resp:
+        text = "".join(chunk.decode() for chunk in resp.iter_raw())
+
+    assert '"code": "summary_failed"' in text
+    assert "boom-summary" not in text

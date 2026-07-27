@@ -118,3 +118,63 @@ def test_ingest_upload_stream_error_is_generic_and_logged(
         assert any(MARKER in r for r in records)
     finally:
         logger.remove(sink_id)
+
+
+def test_ingest_stream_error_event_carries_code(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """The finalize-stage SSE ``error`` event carries the machine-readable code."""
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+
+    def raising_ingest(
+        collection: str,
+        path: Path,
+        hybrid: bool = True,
+        progress_callback: Any = None,
+    ) -> None:
+        _ = (collection, path, hybrid, progress_callback)
+        raise RuntimeError(MARKER)
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", raising_ingest)
+
+    resp = client.post(
+        "/ingest/upload",
+        data={"collection": "boom-collection"},
+        files={"files": ("a.txt", b"hello", "text/plain")},
+    )
+    assert resp.status_code == 200
+    body = resp.text
+    assert "event: error" in body
+    assert '"code": "ingestion_failed"' in body
+    assert MARKER not in body
+
+
+def test_ingest_save_failure_is_static_with_code_and_filename(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """A file-save failure emits a static message plus code and structured filename."""
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+
+    def raising_hash(path: Path) -> str:
+        _ = path
+        raise RuntimeError(MARKER)
+
+    monkeypatch.setattr(api_module, "compute_file_hash", raising_hash)
+
+    records, sink_id = _capture_logs()
+    try:
+        resp = client.post(
+            "/ingest/upload",
+            data={"collection": "boom-collection"},
+            files={"files": ("a.txt", b"hello", "text/plain")},
+        )
+        assert resp.status_code == 200
+        body = resp.text
+        assert "event: error" in body
+        assert '"message": "Failed to save file."' in body
+        assert '"code": "save_failed"' in body
+        assert '"filename": "a.txt"' in body
+        assert MARKER not in body
+        assert any(MARKER in r for r in records)
+    finally:
+        logger.remove(sink_id)
