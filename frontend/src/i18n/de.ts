@@ -72,9 +72,9 @@ export const de: Strings = {
   // shared error copy
   'common.owned_by_suffix': ' (Eigentümer/-in: {owner})',
   'common.error_request':
-    'Etwas ist schiefgelaufen ({status}). Bitte erneut versuchen oder den Support kontaktieren.',
+    'Fehler ({status}) – Bitte versuchen Sie es erneut oder kontaktieren Sie den Support.',
   'common.error_unknown':
-    'Etwas ist schiefgelaufen. Bitte erneut versuchen oder den Support kontaktieren.',
+    'Fehler – Bitte versuchen Sie es erneut oder kontaktieren Sie den Support.',
   'common.error_network':
     'Dienst nicht erreichbar. Bitte Verbindung prüfen oder später erneut versuchen.',
 
