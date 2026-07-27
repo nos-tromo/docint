@@ -147,7 +147,8 @@ describe('Analysis German smoke test', () => {
     renderAnalysisInLanguage('de')
 
     expect(await screen.findByRole('heading', { name: 'Analyse' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Hassrede' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Hatespeech' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Entitäten' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Zusammenfassung' })).toBeInTheDocument()
   })
 })
