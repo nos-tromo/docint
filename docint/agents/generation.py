@@ -159,10 +159,10 @@ class ResultValidationResponseAgent(ResponseAgent):
             )
             return result
         except Exception as exc:
-            logger.warning("Response validation failed: {}", exc)
+            logger.opt(exception=exc).error("Response validation request failed")
             self._set_validation_unavailable(
                 result,
-                reason=f"Validation request failed: {exc}",
+                reason="Validation request failed.",
             )
             return result
 
