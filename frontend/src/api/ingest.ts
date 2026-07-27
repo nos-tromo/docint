@@ -1,4 +1,5 @@
 import { streamUpload, UploadHttpError } from './upload'
+import { streamErrorText } from './errorMessage'
 import { streamSse } from './sse'
 import { withOwner } from './client'
 import { planUploadBatches } from '@/lib/uploadBatches'
@@ -157,6 +158,21 @@ export async function* streamIngestUploadBatched(
         // Swallow the per-batch `start` (one synthetic start already emitted)
         // and `upload_complete` (staged-only terminal); forward save progress.
         if (ev.event === 'start' || ev.event === 'upload_complete') continue
+        if (ev.event === 'error') {
+          // Backend error events are protocol flags — never forward their
+          // message. A save_failed event names the failing file in a
+          // structured field; render it only when it matches a file the
+          // client itself uploaded (echo-of-client-data, provably not prose).
+          const echoed =
+            typeof data.filename === 'string' && files.map(fileLabel).includes(data.filename)
+              ? (data.filename as string)
+              : null
+          const message = echoed
+            ? streamErrorText(t, data.code, 'ingest.save_failed_file', { filename: echoed })
+            : streamErrorText(t, data.code, 'ingest.failed_default')
+          yield stamp('error', { message })
+          continue
+        }
         yield stamp(ev.event as IngestEvent['event'], data)
       }
       anySaved = true
@@ -191,9 +207,9 @@ export async function* streamIngestUploadBatched(
         continue // fold into the single synthetic terminal below
       }
       if (ev.event === 'error') {
-        // `data.message` is a protocol flag post-D2, not prose — always
-        // fall through to catalog copy rather than rendering the field.
-        finalizeError = t('ingest.failed_default')
+        // `data.message` is a protocol flag post-D2, not prose — render
+        // catalog copy, tagged with the validated machine-readable code.
+        finalizeError = streamErrorText(t, data.code, 'ingest.failed_default')
         continue
       }
       yield stamp(ev.event as IngestEvent['event'], data)

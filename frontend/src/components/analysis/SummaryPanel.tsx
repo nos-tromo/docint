@@ -2,7 +2,7 @@ import { useReducer } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { streamSummary } from '@/api/analysis'
-import { describeError } from '@/api/errorMessage'
+import { describeError, streamErrorText } from '@/api/errorMessage'
 import { Citation } from '@/components/chat/Citation'
 import { ValidationBanner } from '@/components/chat/ValidationBanner'
 import { downloadText } from '@/lib/csv'
@@ -65,8 +65,9 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
         }
         if (typeof data.error === 'string') {
           // Post-D2 the backend sends a static protocol flag here, not
-          // prose — never render the field itself.
-          dispatch({ type: 'fail', error: t('analysis.summary_failed') })
+          // prose — never render the field itself. The validated `code`
+          // token selects the copy and is shown for support triage.
+          dispatch({ type: 'fail', error: streamErrorText(t, data.code, 'analysis.summary_failed') })
           continue
         }
         dispatch({ type: 'done', meta: data as unknown as SummaryResponse })

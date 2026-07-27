@@ -338,16 +338,29 @@ describe('deriveIngestStatus', () => {
     }
   })
 
-  it('records error events with phase=error and never carries the backend message into state', () => {
-    // The event's `message` is a protocol flag, not user-safe prose — the
-    // derived status must not surface it; IngestionStatus.tsx renders
-    // catalog copy for every error regardless of this field.
+  it('records error events with phase=error and captures the client-composed message', () => {
+    // Every `error` event reaching this reducer has been composed
+    // client-side by streamIngestUploadBatched (backend error events are
+    // intercepted and rewritten to catalog copy there — see the
+    // save_failed / finalize tests in api/ingest.test.ts), so the message
+    // is safe to carry into render state.
     const events: IngestEvent[] = [
       { event: 'start', data: { collection: 'c', target_dir: '/t', files: [] } },
-      { event: 'error', data: { message: 'boom' } }
+      { event: 'error', data: { message: 'Ingestion failed. (ingestion_failed)' } }
     ]
     const status = deriveIngestStatus(events)
     expect(status.phase).toBe('error')
-    expect(status).not.toHaveProperty('errorMessage')
+    expect(status.errorMessage).toBe('Ingestion failed. (ingestion_failed)')
+  })
+})
+
+describe('deriveIngestStatus error message capture', () => {
+  it('captures the (client-composed) error message for display', () => {
+    const status = deriveIngestStatus([
+      { event: 'start', data: { collection: 'c1', files: ['a.txt'] }, receivedAt: 1 },
+      { event: 'error', data: { message: 'Upload failed: every batch was rejected.' }, receivedAt: 2 },
+    ])
+    expect(status.phase).toBe('error')
+    expect(status.errorMessage).toBe('Upload failed: every batch was rejected.')
   })
 })

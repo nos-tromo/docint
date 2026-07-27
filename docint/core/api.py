@@ -1392,12 +1392,13 @@ async def stream_query(payload: QueryIn, request: Request) -> StreamingResponse:
             msg = str(exc)
             if "context window" in msg.lower() or "context size" in msg.lower():
                 logger.warning("Context window overflow during SSE generation: {}", msg)
+                yield f"data: {json.dumps({'error': 'Internal server error', 'code': 'context_overflow'})}\n\n"
             else:
                 logger.exception("Stream error during SSE generation")
-            yield f"data: {json.dumps({'error': 'Internal server error'})}\n\n"
+                yield f"data: {json.dumps({'error': 'Internal server error', 'code': 'generation_failed'})}\n\n"
         except Exception:
             logger.exception("Stream error during SSE generation")
-            yield f"data: {json.dumps({'error': 'Internal server error'})}\n\n"
+            yield f"data: {json.dumps({'error': 'Internal server error', 'code': 'generation_failed'})}\n\n"
 
     async def event_generator() -> AsyncIterator[str]:
         """Bind the request's physical collection, then stream the body.
@@ -1536,7 +1537,8 @@ async def summarize_stream(
                 yield f"data: {json.dumps(payload_out)}\n\n"
         except Exception as e:
             logger.error("Stream error: {}", e)
-            yield f"data: {json.dumps({'error': 'An internal error occurred during streaming.'})}\n\n"
+            failure = {"error": "An internal error occurred during streaming.", "code": "summary_failed"}
+            yield f"data: {json.dumps(failure)}\n\n"
 
     async def event_generator() -> AsyncIterator[str]:
         """Bind the request's physical collection, then stream the summary body.
@@ -3249,7 +3251,7 @@ async def _stream_collection_ingestion(
         logger.opt(exception=exc).error("Ingestion stream failed")
         yield _format_sse(
             "error",
-            {"message": "Ingestion failed."},
+            {"message": "Ingestion failed.", "code": "ingestion_failed"},
         )
 
 
@@ -3351,11 +3353,14 @@ async def ingest_upload(
                         "path": str(dest),
                     },
                 )
-            except Exception as exc:  # pragma: no cover - streamed errors are logged
-                logger.error("Error saving uploaded file {}: {}", filename, exc)
+            except Exception as exc:
+                logger.opt(exception=exc).error("Error saving uploaded file {}", filename)
+                # `filename` travels as a structured field (client-supplied
+                # name, echoed) so the SPA can validate it against its own
+                # upload list before display; the message itself stays static.
                 yield _format_sse(
                     "error",
-                    {"message": f"Failed to save {filename}"},
+                    {"message": "Failed to save file.", "code": "save_failed", "filename": filename},
                 )
                 return
 

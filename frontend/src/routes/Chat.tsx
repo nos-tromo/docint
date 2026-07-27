@@ -3,7 +3,7 @@ import { useParams } from 'react-router-dom'
 import { Button } from '@infra/ui'
 import { streamQuery } from '@/api/chat'
 import { ApiError } from '@/api/client'
-import { describeError } from '@/api/errorMessage'
+import { describeError, streamErrorText } from '@/api/errorMessage'
 import type { ChatFinalEvent } from '@/api/types'
 import { useChatFiltersStore } from '@/stores/chatFilters'
 import { useSessionHistory } from '@/hooks/useSessions'
@@ -155,8 +155,9 @@ export function Chat() {
         }
         if (typeof data.error === 'string') {
           // Post-D2 the backend sends a static protocol flag here, not
-          // prose — never render the field itself.
-          dispatch({ type: 'fail', error: t('chat.error_stream_ended') })
+          // prose — never render the field itself. The validated `code`
+          // token selects the copy and is shown for support triage.
+          dispatch({ type: 'fail', error: streamErrorText(t, data.code, 'chat.error_stream_ended') })
           continue
         }
         const final = data as unknown as ChatFinalEvent

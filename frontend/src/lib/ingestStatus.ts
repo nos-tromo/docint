@@ -38,6 +38,9 @@ export interface IngestStatus {
   /** Total chunks observed across "indexed N chunks" messages. */
   totalChunks: number
   startedAt?: number
+  /** Client-composed terminal error copy (never backend prose — see the
+   *  `error` case in `deriveIngestStatus`). */
+  errorMessage?: string
   finishedAt?: number
 }
 
@@ -265,10 +268,11 @@ export function deriveIngestStatus(
       }
       case 'error': {
         status.phase = 'error'
-        // No message field is captured: `d.message` is a static protocol
-        // flag from the backend (post-D2), never user-safe prose, so it
-        // must never reach render state. IngestionStatus.tsx's ErrorBody
-        // always shows the localized `ingest.failed_default` catalog copy.
+        // Safe to capture: every `error` event reaching this reducer has
+        // been composed client-side by streamIngestUploadBatched (backend
+        // error events are intercepted there and rewritten to catalog
+        // copy) — `message` is never backend prose.
+        status.errorMessage = strOf(d.message)
         status.finishedAt = ev.receivedAt
         break
       }
