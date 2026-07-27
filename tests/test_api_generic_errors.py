@@ -5,6 +5,7 @@ fall back to ``DOCINT_DEFAULT_IDENTITY`` ("test-operator"), matching the
 conventions in ``tests/test_api_collections_ownership.py``.
 """
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -80,6 +81,40 @@ def test_swept_endpoint_returns_static_detail_and_logs_marker(
         assert resp.status_code == 500
         assert resp.json() == {"detail": "Request failed."}
         assert MARKER not in resp.text
+        assert any(MARKER in r for r in records)
+    finally:
+        logger.remove(sink_id)
+
+
+def test_ingest_upload_stream_error_is_generic_and_logged(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """A raising ingest pipeline emits a generic SSE ``error`` event; the marker only appears in logs."""
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+
+    def raising_ingest(
+        collection: str,
+        path: Path,
+        hybrid: bool = True,
+        progress_callback: Any = None,
+    ) -> None:
+        _ = (collection, path, hybrid, progress_callback)
+        raise RuntimeError(MARKER)
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", raising_ingest)
+
+    records, sink_id = _capture_logs()
+    try:
+        resp = client.post(
+            "/ingest/upload",
+            data={"collection": "boom-collection"},
+            files={"files": ("a.txt", b"hello", "text/plain")},
+        )
+        assert resp.status_code == 200
+        body = resp.text
+        assert "event: error" in body
+        assert '"message": "Ingestion failed."' in body
+        assert MARKER not in body
         assert any(MARKER in r for r in records)
     finally:
         logger.remove(sink_id)

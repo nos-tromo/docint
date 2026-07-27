@@ -3027,10 +3027,14 @@ def test_query_forwards_retrieval_query_to_validation_payload(
     assert captured.get("question") == "What?"
 
 
-def test_stream_query_context_window_overflow_surfaces_descriptive_error(
+def test_stream_query_context_window_overflow_returns_generic_error(
     monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    """Context-window overflow should surface a descriptive error instead of 'Internal server error'.
+    """Context-window overflow surfaces the generic stream error, not the raw exception text.
+
+    The descriptive message (env var names, token counts) is logged for
+    operators but never sent to the client — only static, i18n-driven text
+    may reach the SPA.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
@@ -3058,8 +3062,8 @@ def test_stream_query_context_window_overflow_surfaces_descriptive_error(
     finally:
         monkeypatch.setattr(type(api_module.rag), "run_query", original_run_query)
 
-    assert "OPENAI_CTX_WINDOW" in text
-    assert "Internal server error" not in text
+    assert "OPENAI_CTX_WINDOW" not in text
+    assert "Internal server error" in text
 
 
 # ---------------------------------------------------------------------------
