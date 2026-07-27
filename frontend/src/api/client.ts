@@ -12,7 +12,8 @@ const BASE = apiBase()
 
 export class ApiError extends Error {
   constructor(public status: number, public detail: unknown) {
-    super(`API error ${status}: ${JSON.stringify(detail)}`)
+    super(`API ${status}`)
+    this.name = 'ApiError'
   }
 }
 

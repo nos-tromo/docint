@@ -120,8 +120,8 @@ describe('Chat SSE handling', () => {
   it('surfaces a backend-likely-crashed message when the stream throws (e.g., OOM kill)', async () => {
     // Reader.read() rejects with a TypeError mid-stream — the same shape
     // the browser fetch surfaces when nginx closes the upstream because
-    // the backend died. The chat reducer must convert this into an
-    // actionable message instead of relaying "network error" verbatim.
+    // the backend died. The chat reducer must convert this into a static,
+    // generic message — never relaying the raw transport error verbatim.
     const aborting = new ReadableStream<Uint8Array>({
       start(c) {
         const enc = new TextEncoder()
@@ -144,8 +144,8 @@ describe('Chat SSE handling', () => {
         screen.getByText(/stream ended unexpectedly/i)
       ).toBeInTheDocument()
     })
-    // Underlying transport detail is preserved for forensics.
-    expect(screen.getByText(/network error/)).toBeInTheDocument()
+    // The raw transport error is never rendered — only static, generic copy.
+    expect(screen.queryByText(/network error/)).not.toBeInTheDocument()
   })
 
   it('Enter submits, Shift+Enter inserts a newline', async () => {
