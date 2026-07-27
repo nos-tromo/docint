@@ -1537,7 +1537,8 @@ async def summarize_stream(
                 yield f"data: {json.dumps(payload_out)}\n\n"
         except Exception as e:
             logger.error("Stream error: {}", e)
-            yield f"data: {json.dumps({'error': 'An internal error occurred during streaming.', 'code': 'summary_failed'})}\n\n"
+            failure = {"error": "An internal error occurred during streaming.", "code": "summary_failed"}
+            yield f"data: {json.dumps(failure)}\n\n"
 
     async def event_generator() -> AsyncIterator[str]:
         """Bind the request's physical collection, then stream the summary body.
