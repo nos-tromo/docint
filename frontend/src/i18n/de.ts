@@ -62,7 +62,7 @@ export const de: Strings = {
   'table.copy_hash': 'Hash für {filename} kopieren',
 
   // upload
-  'upload.drop_hint': 'Dateien hier ablegen oder klicken, um sie auszuwählen.',
+  'upload.drop_hint': 'Dateien hierher ziehen oder klicken',
   'upload.choose_folder': 'Oder einen Ordner auswählen',
   'upload.files_one': '{count} Datei',
   'upload.files_other': '{count} Dateien',

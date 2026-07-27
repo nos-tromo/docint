@@ -59,7 +59,7 @@ export const en = {
   'table.copy_hash': 'Copy hash for {filename}',
 
   // upload
-  'upload.drop_hint': 'Drop files here or click to choose.',
+  'upload.drop_hint': 'Drag files here or click',
   'upload.choose_folder': 'Or choose a folder',
   'upload.files_one': '{count} file',
   'upload.files_other': '{count} files',
