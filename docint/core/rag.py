@@ -2634,13 +2634,21 @@ class RAG:
         )
 
     def _build_ingestion_pipeline(
-        self, progress_callback: Callable[[str], None] | None = None
+        self,
+        progress_callback: Callable[[str], None] | None = None,
+        *,
+        ner: bool | None = None,
+        hate_speech: bool | None = None,
     ) -> DocumentIngestionPipeline:
         """Instantiate a document ingestion pipeline using current settings.
 
         Args:
             progress_callback (Callable[[str], None] | None): Optional callback for
                 reporting ingestion progress.
+            ner (bool | None): Per-request NER override; ``None`` keeps the
+                env default (``NER_ENABLED``).
+            hate_speech (bool | None): Per-request hate-speech override;
+                ``None`` keeps the env default (``ENABLE_HATE_SPEECH_DETECTION``).
 
         Returns:
             DocumentIngestionPipeline: The instantiated ingestion pipeline.
@@ -2652,8 +2660,9 @@ class RAG:
             logger.error("ValueError: data_dir cannot be None for ingestion pipeline.")
             raise ValueError("data_dir cannot be None for ingestion pipeline.")
 
-        hate_speech_enabled = load_hate_speech_env().enabled
-        use_llm_ner = self.ner_enabled and self.openai_inference_provider.lower() in {"openai"}
+        hate_speech_enabled = load_hate_speech_env().enabled if hate_speech is None else hate_speech
+        ner_enabled = self.ner_enabled if ner is None else ner
+        use_llm_ner = ner_enabled and self.openai_inference_provider.lower() in {"openai"}
 
         shared_text_model: OpenAI | None = None
         if use_llm_ner or hate_speech_enabled:
@@ -2670,6 +2679,8 @@ class RAG:
             ner_model=ner_model,
             progress_callback=progress_callback,
             hate_speech_model=hate_speech_model,
+            ner_override=ner,
+            hate_speech_override=hate_speech,
             openai_inference_provider=self.openai_inference_provider,
             target_collection=self.qdrant_collection,
             image_ingestion_service=self._image_ingestion_service,
@@ -5474,6 +5485,8 @@ class RAG:
         *,
         build_query_engine: bool = True,
         progress_callback: Callable[[str], None] | None = None,
+        ner: bool | None = None,
+        hate_speech: bool | None = None,
     ) -> None:
         """Ingest documents from the specified directory into the Qdrant collection.
 
@@ -5484,6 +5497,10 @@ class RAG:
                 loading large reranker/generation models. Defaults to True.
             progress_callback (Callable[[str], None] | None): Optional callback for
                 reporting ingestion progress.
+            ner (bool | None): Per-request NER override; ``None`` keeps the
+                env default.
+            hate_speech (bool | None): Per-request hate-speech override;
+                ``None`` keeps the env default.
 
         Raises:
             EmptyIngestionError: When no documents/nodes were produced and the
@@ -5518,7 +5535,7 @@ class RAG:
             storage_context=storage_ctx,
         )
 
-        pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
+        pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback, ner=ner, hate_speech=hate_speech)
         manifest = self._build_ingest_manifest()
         manifest_completed = manifest.completed_files(self.qdrant_collection)
         existing_hashes = self._get_existing_file_hashes() | manifest_completed
@@ -5713,6 +5730,8 @@ class RAG:
         *,
         build_query_engine: bool = True,
         progress_callback: Callable[[str], None] | None = None,
+        ner: bool | None = None,
+        hate_speech: bool | None = None,
     ) -> None:
         """Asynchronously ingest documents from the specified directory into the Qdrant collection.
 
@@ -5722,6 +5741,10 @@ class RAG:
                 after ingestion. Defaults to True.
             progress_callback (Callable[[str], None] | None): Optional callback for
                 reporting ingestion progress.
+            ner (bool | None): Per-request NER override; ``None`` keeps the
+                env default.
+            hate_speech (bool | None): Per-request hate-speech override;
+                ``None`` keeps the env default.
 
         Raises:
             RuntimeError: If the index is not initialized for async ingestion.
@@ -5752,7 +5775,7 @@ class RAG:
             storage_context=storage_ctx,
         )
 
-        pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback)
+        pipeline = self._build_ingestion_pipeline(progress_callback=progress_callback, ner=ner, hate_speech=hate_speech)
         manifest = self._build_ingest_manifest()
         manifest_completed = manifest.completed_files(self.qdrant_collection)
         existing_hashes = self._get_existing_file_hashes() | manifest_completed

@@ -147,6 +147,7 @@ def test_ingest_docs_invokes_rag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
             *,
             build_query_engine: bool = True,
             progress_callback: Callable[[str], None] | None = None,
+            **kwargs: Any,
         ) -> None:
             """Placeholder ingest_docs method for the test double.
 
@@ -157,6 +158,7 @@ def test_ingest_docs_invokes_rag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
                 progress_callback (Callable[[str], None] | None, optional): Optional callback
                     that receives progress updates as status messages during ingestion.
                     Defaults to None.
+                **kwargs: Ignored extra ingest flags (ner / hate_speech).
             """
             calls.path = path
             calls.build_query_engine = build_query_engine

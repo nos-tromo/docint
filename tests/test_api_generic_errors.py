@@ -97,6 +97,7 @@ def test_ingest_upload_stream_error_is_generic_and_logged(
         path: Path,
         hybrid: bool = True,
         progress_callback: Any = None,
+        **kwargs: Any,
     ) -> None:
         _ = (collection, path, hybrid, progress_callback)
         raise RuntimeError(MARKER)
@@ -131,6 +132,7 @@ def test_ingest_stream_error_event_carries_code(
         path: Path,
         hybrid: bool = True,
         progress_callback: Any = None,
+        **kwargs: Any,
     ) -> None:
         _ = (collection, path, hybrid, progress_callback)
         raise RuntimeError(MARKER)
