@@ -1,7 +1,7 @@
 import { streamUpload, UploadHttpError } from './upload'
 import { streamErrorText } from './errorMessage'
 import { streamSse } from './sse'
-import { withOwner } from './client'
+import { url, withOwner } from './client'
 import { planUploadBatches } from '@/lib/uploadBatches'
 import { formatBytes } from '@/lib/ingestStatus'
 import type { IngestEvent } from './types'
@@ -240,7 +240,10 @@ export async function* streamIngestUploadBatched(
   })
 }
 
+// Used as an <a href>, not fetched — must carry the sub-path base itself.
 export const sourcePreviewUrl = (collection: string, file_hash: string) =>
-  withOwner(
-    `/sources/preview?collection=${encodeURIComponent(collection)}&file_hash=${encodeURIComponent(file_hash)}`
+  url(
+    withOwner(
+      `/sources/preview?collection=${encodeURIComponent(collection)}&file_hash=${encodeURIComponent(file_hash)}`
+    )
   )
