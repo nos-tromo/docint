@@ -30,6 +30,7 @@ def _cfg(
     llm: bool = True,
     case_normalize: bool = True,
     k: int = 5,
+    batch_size: int = 50,
 ) -> ResolutionConfig:
     """Build a ``ResolutionConfig`` for tests.
 
@@ -38,6 +39,7 @@ def _cfg(
         llm: Whether the LLM tie-break is enabled.
         case_normalize: Whether the in-run cache casefolds surfaces.
         k: Candidate fan-out.
+        batch_size: Embed batch size for ``resolve_collection``.
 
     Returns:
         ResolutionConfig: The configured dataclass.
@@ -47,6 +49,7 @@ def _cfg(
         llm_tiebreak_enabled=llm,
         case_normalize=case_normalize,
         vector_k=k,
+        batch_size=batch_size,
     )
 
 
@@ -347,3 +350,51 @@ def test_resolve_collection_empty_input_does_not_embed() -> None:
     )
     assert isinstance(summary, ResolutionSummary)
     assert summary.processed == 0
+
+
+def test_resolve_collection_embeds_in_batches() -> None:
+    """Surfaces are embedded in slices of cfg.batch_size, most-mentioned first."""
+    surfaces = [
+        SurfaceMention(surface=s, entity_type="LOC", mentions=m)
+        for s, m in [("A", 5), ("B", 4), ("C", 3), ("D", 2), ("E", 1)]
+    ]
+    call_sizes: list[list[str]] = []
+    vectors: dict[str, list[float]] = {s: [1.0, float(i)] for i, s in enumerate("ABCDE")}
+
+    def embed(texts: list[str]) -> list[list[float]]:
+        call_sizes.append(list(texts))
+        return [vectors[t] for t in texts]
+
+    store = FakeStore()
+    summary = resolve_collection(
+        store,
+        surfaces,
+        embed_fn=embed,
+        chat_fn=_chat_fn("NONE"),
+        prompt_header="h",
+        cfg=_cfg(batch_size=2),
+    )
+    assert [len(c) for c in call_sizes] == [2, 2, 1]
+    assert call_sizes[0] == ["A", "B"]  # global most-mentioned-first order kept
+    assert summary.processed == 5
+
+
+def test_batching_preserves_cross_batch_clustering() -> None:
+    """A case variant in a later batch still attaches via the in-run cache."""
+    surfaces = [
+        SurfaceMention(surface="Berlin", entity_type="LOC", mentions=2),
+        SurfaceMention(surface="berlin", entity_type="LOC", mentions=1),
+    ]
+    embed = _embed_fn({"Berlin": [1.0, 0.0], "berlin": [1.0, 0.0]})
+    store = FakeStore()
+    summary = resolve_collection(
+        store,
+        surfaces,
+        embed_fn=embed,
+        chat_fn=_chat_fn("NONE"),
+        prompt_header="h",
+        cfg=_cfg(batch_size=1),
+    )
+    assert summary.minted == 1
+    assert summary.attached == 1
+    assert summary.entities_touched == 1

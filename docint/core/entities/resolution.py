@@ -218,7 +218,8 @@ def resolve_collection(
         embed_fn (EmbedFn): Batch embed callable (handles its own chunking).
         chat_fn (ChatFn): Chat callable for tie-breaks.
         prompt_header (str): Locale-aware tie-break preamble.
-        cfg (ResolutionConfig): Resolution thresholds/toggles.
+        cfg (ResolutionConfig): Resolution thresholds/toggles;
+            ``cfg.batch_size`` bounds each embed slice.
 
     Returns:
         ResolutionSummary: Outcome counts for the run.
@@ -227,13 +228,23 @@ def resolve_collection(
     if not ordered:
         return ResolutionSummary(processed=0, minted=0, attached=0, skipped=0, entities_touched=0)
 
-    vectors = embed_fn([m.surface for m in ordered])
+    # Embed in slices of cfg.batch_size so memory stays bounded on large
+    # collections. The global most-mentioned-first sort happened above, and
+    # the in-run cache / store writes persist across slices, so results are
+    # identical to a single-shot run.
+    batch_size = max(1, int(getattr(cfg, "batch_size", len(ordered))))
+
+    def _batched_pairs() -> Iterable[tuple[SurfaceMention, list[float]]]:
+        for start in range(0, len(ordered), batch_size):
+            chunk = ordered[start : start + batch_size]
+            vectors = embed_fn([m.surface for m in chunk])
+            yield from zip(chunk, vectors, strict=True)
 
     run_cache: dict[tuple[str, str], str] = {}
     touched: set[str] = set()
     minted = attached = skipped = 0
 
-    for mention, vector in zip(ordered, vectors, strict=True):
+    for mention, vector in _batched_pairs():
         cache_key = (
             normalize_surface(mention.surface, case_normalize=cfg.case_normalize),
             mention.entity_type.lower(),

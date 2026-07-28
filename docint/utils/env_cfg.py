@@ -1203,6 +1203,7 @@ class ResolutionConfig:
     llm_tiebreak_enabled: bool
     case_normalize: bool
     vector_k: int
+    batch_size: int = 50
 
 
 def load_resolution_env(
@@ -1210,6 +1211,7 @@ def load_resolution_env(
     default_llm_tiebreak_enabled: bool = True,
     default_case_normalize: bool = True,
     default_vector_k: int = 5,
+    default_batch_size: int = 50,
 ) -> ResolutionConfig:
     """Load entity-resolution configuration from environment variables.
 
@@ -1222,6 +1224,8 @@ def load_resolution_env(
             before the in-run clustering cache key is built.
         default_vector_k (int): Number of nearest candidates fetched from the
             entity vector index per surface form.
+        default_batch_size (int): Embed/resolve batch size used when neither
+            ``RES_BATCH_SIZE`` nor ``INGESTION_BATCH_SIZE`` is set.
 
     Returns:
         ResolutionConfig: Resolved configuration.
@@ -1257,12 +1261,26 @@ def load_resolution_env(
     if not (1 <= vector_k <= 100):
         raise ValueError(f"RES_VECTOR_K={vector_k!r} is out of range — must be between 1 and 100.")
 
+    raw_batch = os.getenv("RES_BATCH_SIZE")
+    if raw_batch is not None and raw_batch.strip():
+        try:
+            batch_size = int(raw_batch)
+        except ValueError as exc:
+            raise ValueError(f"RES_BATCH_SIZE must be an integer, got {raw_batch!r}") from exc
+    else:
+        # Resolution streams at the same cadence as streamed ingestion unless
+        # explicitly overridden.
+        batch_size = int(os.getenv("INGESTION_BATCH_SIZE", default_batch_size))
+    if batch_size < 1:
+        raise ValueError(f"RES_BATCH_SIZE={batch_size!r} is out of range — must be >= 1.")
+
     return ResolutionConfig(
         embed_cluster_threshold=embed_cluster_threshold,
         llm_tiebreak_enabled=str(os.getenv("RES_LLM_TIEBREAK", default_llm_tiebreak_enabled)).lower()
         in {"true", "1", "yes"},
         case_normalize=str(os.getenv("RES_CASE_NORMALIZE", default_case_normalize)).lower() in {"true", "1", "yes"},
         vector_k=vector_k,
+        batch_size=batch_size,
     )
 
 
