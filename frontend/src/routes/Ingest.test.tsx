@@ -10,13 +10,15 @@ import { useUiStore } from '@/stores/ui'
 // The ingest stream is mocked to "create" the new collection: consuming it
 // flips the shared collections list to include `gamma`, then emits the terminal
 // event — mirroring the backend, where the collection exists only after ingest.
-const h = vi.hoisted(() => ({ collections: [] as string[] }))
+const h = vi.hoisted(() => ({ collections: [] as string[], calls: [] as unknown[][] }))
 vi.mock('@/api/ingest', () => ({
-  streamIngestUploadBatched: () =>
-    (async function* () {
+  streamIngestUploadBatched: (...args: unknown[]) => {
+    h.calls.push(args)
+    return (async function* () {
       h.collections = ['gamma']
       yield { event: 'ingestion_complete', data: {} }
     })()
+  }
 }))
 
 function jsonRes(body: unknown) {
@@ -25,6 +27,7 @@ function jsonRes(body: unknown) {
 
 beforeEach(() => {
   h.collections = []
+  h.calls = []
   useUiStore.setState({ selectedCollection: null, currentSessionId: null, previewModal: null })
   vi.stubGlobal(
     'fetch',
@@ -32,6 +35,7 @@ beforeEach(() => {
       const u = typeof input === 'string' ? input : input.toString()
       if (u.includes('/collections/list')) return jsonRes(h.collections)
       if (u.includes('/collections/select')) return jsonRes({ ok: true, name: 'gamma' })
+      if (u.includes('/config/ingest-defaults')) return jsonRes({ ner: true, hate_speech: false })
       if (u.includes('/config'))
         return jsonRes({ graph_top_k: 0, graph_max_top_k: 0, collection_timeout: 0, max_upload_bytes: 1024 * 1024 })
       if (u.includes('/sessions/list')) return jsonRes({ sessions: [] })
@@ -72,5 +76,45 @@ describe('Ingest → collection auto-selection', () => {
     await waitFor(() => {
       expect(useUiStore.getState().selectedCollection).toBe('gamma')
     })
+  })
+})
+
+describe('Ingest → enrichment controls', () => {
+  it('seeds the checkboxes from the deployment defaults', async () => {
+    renderIngestAndSidebar()
+    const ner = (await screen.findByLabelText('Extract entities')) as HTMLInputElement
+    const hate = screen.getByLabelText('Detect hate speech') as HTMLInputElement
+    const resolve = screen.getByLabelText('Resolve entities after ingest') as HTMLInputElement
+    await waitFor(() => expect(ner.checked).toBe(true))
+    expect(hate.checked).toBe(false)
+    expect(resolve.checked).toBe(false)
+    expect(resolve.disabled).toBe(false)
+  })
+
+  it('disables auto-resolve while entity extraction is off', async () => {
+    renderIngestAndSidebar()
+    const ner = (await screen.findByLabelText('Extract entities')) as HTMLInputElement
+    await waitFor(() => expect(ner.checked).toBe(true))
+    await userEvent.click(ner)
+    const resolve = screen.getByLabelText('Resolve entities after ingest') as HTMLInputElement
+    expect(resolve.disabled).toBe(true)
+  })
+
+  it('forwards the chosen flags into the upload stream call', async () => {
+    renderIngestAndSidebar()
+    const ner = (await screen.findByLabelText('Extract entities')) as HTMLInputElement
+    await waitFor(() => expect(ner.checked).toBe(true))
+    await userEvent.click(screen.getByLabelText('Detect hate speech'))
+    await userEvent.click(screen.getByLabelText('Resolve entities after ingest'))
+
+    const file = new File(['x'], 'a.txt', { type: 'text/plain' })
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    await userEvent.upload(input, file)
+    fireEvent.change(screen.getByPlaceholderText(/collection/i), { target: { value: 'gamma' } })
+    await userEvent.click(screen.getByRole('button', { name: /^ingest$/i }))
+
+    await waitFor(() => expect(h.calls.length).toBe(1))
+    const options = h.calls[0][5] as Record<string, unknown>
+    expect(options).toMatchObject({ ner: true, hateSpeech: true, resolve: true })
   })
 })

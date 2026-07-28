@@ -258,3 +258,40 @@ it('never names a file the client did not upload on save_failed', async () => {
   expect(String(err!.data.message)).not.toContain('passwd')
   expect(String(err!.data.message)).toBe('Ingestion failed. (save_failed)')
 })
+
+it('forwards enrichment flags as FormData fields and finalize body fields', async () => {
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce(stagedBatch('a.txt'))
+    .mockResolvedValueOnce(finalizeStream())
+  global.fetch = fetchMock as unknown as typeof fetch
+
+  await collect(
+    streamIngestUploadBatched('c1', [fileOfSize('a.txt', 10)], 1000, undefined, undefined, {
+      ner: false,
+      hateSpeech: true,
+      resolve: true,
+    })
+  )
+  const uploadBody = fetchMock.mock.calls[0][1].body as FormData
+  expect(uploadBody.get('ner')).toBe('false')
+  expect(uploadBody.get('hate_speech')).toBe('true')
+  const finalizeBody = JSON.parse(fetchMock.mock.calls[1][1].body as string)
+  expect(finalizeBody).toMatchObject({ ner: false, hate_speech: true, resolve: true })
+})
+
+it('omits enrichment fields entirely when no options are given', async () => {
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce(stagedBatch('a.txt'))
+    .mockResolvedValueOnce(finalizeStream())
+  global.fetch = fetchMock as unknown as typeof fetch
+
+  await collect(streamIngestUploadBatched('c1', [fileOfSize('a.txt', 10)], 1000))
+  const uploadBody = fetchMock.mock.calls[0][1].body as FormData
+  expect(uploadBody.get('ner')).toBeNull()
+  expect(uploadBody.get('hate_speech')).toBeNull()
+  const finalizeBody = JSON.parse(fetchMock.mock.calls[1][1].body as string)
+  expect(finalizeBody.ner).toBeUndefined()
+  expect(finalizeBody.resolve).toBeUndefined()
+})
