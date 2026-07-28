@@ -142,7 +142,10 @@ export function Ingest() {
         limitBytes,
         undefined,
         t,
-        { ner: nerEnabled, hateSpeech: hateEnabled, resolve: nerEnabled && resolveEnabled }
+        // Before the deployment defaults have seeded (endpoint failed or a
+        // rolling deploy where the backend lacks it yet), send NO explicit
+        // flags so the env defaults keep applying server-side.
+        seeded ? { ner: nerEnabled, hateSpeech: hateEnabled, resolve: nerEnabled && resolveEnabled } : {}
       )) {
         dispatch({ type: 'event', v: ev })
         if (ev.event === 'warning') {

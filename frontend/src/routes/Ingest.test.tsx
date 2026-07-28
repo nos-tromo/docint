@@ -118,3 +118,30 @@ describe('Ingest → enrichment controls', () => {
     expect(options).toMatchObject({ ner: true, hateSpeech: true, resolve: true })
   })
 })
+
+describe('Ingest → enrichment defaults unavailable', () => {
+  it('submits no explicit flags before the defaults have seeded', async () => {
+    // Simulate /config/ingest-defaults failing (SPA newer than backend, or a
+    // transient error): the env defaults must keep applying server-side.
+    const base = global.fetch as unknown as (input: RequestInfo | URL) => Promise<Response>
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const u = typeof input === 'string' ? input : input.toString()
+        if (u.includes('/config/ingest-defaults'))
+          return { ok: false, status: 404, json: async (): Promise<unknown> => ({}), text: async (): Promise<string> => '{}' }
+        return base(input)
+      })
+    )
+    renderIngestAndSidebar()
+    const file = new File(['x'], 'a.txt', { type: 'text/plain' })
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    await userEvent.upload(input, file)
+    fireEvent.change(screen.getByPlaceholderText(/collection/i), { target: { value: 'gamma' } })
+    await userEvent.click(screen.getByRole('button', { name: /^ingest$/i }))
+
+    await waitFor(() => expect(h.calls.length).toBe(1))
+    const options = h.calls[0][5] as Record<string, unknown>
+    expect(options).toEqual({})
+  })
+})
