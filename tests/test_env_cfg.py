@@ -724,3 +724,41 @@ def test_frontend_config_max_never_below_default(monkeypatch: pytest.MonkeyPatch
 
     assert cfg.graph_top_k == 300
     assert cfg.graph_max_top_k == 300
+
+
+def test_res_batch_size_defaults_to_ingestion_batch_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RES_BATCH_SIZE follows INGESTION_BATCH_SIZE when unset.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.delenv("RES_BATCH_SIZE", raising=False)
+    monkeypatch.setenv("INGESTION_BATCH_SIZE", "7")
+    assert load_resolution_env().batch_size == 7
+
+
+def test_res_batch_size_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit RES_BATCH_SIZE wins over the ingestion batch size.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.setenv("INGESTION_BATCH_SIZE", "7")
+    monkeypatch.setenv("RES_BATCH_SIZE", "3")
+    assert load_resolution_env().batch_size == 3
+
+
+def test_res_batch_size_rejects_invalid_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Non-integer or non-positive RES_BATCH_SIZE values raise ValueError.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.setenv("RES_BATCH_SIZE", "abc")
+    with pytest.raises(ValueError, match="RES_BATCH_SIZE"):
+        load_resolution_env()
+    monkeypatch.setenv("RES_BATCH_SIZE", "0")
+    with pytest.raises(ValueError, match="RES_BATCH_SIZE"):
+        load_resolution_env()
