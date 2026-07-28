@@ -84,20 +84,11 @@ describe('Ingest → enrichment controls', () => {
     renderIngestAndSidebar()
     const ner = (await screen.findByLabelText('Extract entities')) as HTMLInputElement
     const hate = screen.getByLabelText('Detect hate speech') as HTMLInputElement
-    const resolve = screen.getByLabelText('Resolve entities after ingest') as HTMLInputElement
     await waitFor(() => expect(ner.checked).toBe(true))
     expect(hate.checked).toBe(false)
-    expect(resolve.checked).toBe(false)
-    expect(resolve.disabled).toBe(false)
-  })
-
-  it('disables auto-resolve while entity extraction is off', async () => {
-    renderIngestAndSidebar()
-    const ner = (await screen.findByLabelText('Extract entities')) as HTMLInputElement
-    await waitFor(() => expect(ner.checked).toBe(true))
-    await userEvent.click(ner)
-    const resolve = screen.getByLabelText('Resolve entities after ingest') as HTMLInputElement
-    expect(resolve.disabled).toBe(true)
+    // Resolution is not a user decision: it follows entity extraction
+    // automatically (RES_AUTO_RESOLVE is the operator kill-switch).
+    expect(screen.queryByLabelText(/resolve/i)).toBeNull()
   })
 
   it('forwards the chosen flags into the upload stream call', async () => {
@@ -105,7 +96,6 @@ describe('Ingest → enrichment controls', () => {
     const ner = (await screen.findByLabelText('Extract entities')) as HTMLInputElement
     await waitFor(() => expect(ner.checked).toBe(true))
     await userEvent.click(screen.getByLabelText('Detect hate speech'))
-    await userEvent.click(screen.getByLabelText('Resolve entities after ingest'))
 
     const file = new File(['x'], 'a.txt', { type: 'text/plain' })
     const input = document.querySelector('input[type="file"]') as HTMLInputElement
@@ -115,7 +105,7 @@ describe('Ingest → enrichment controls', () => {
 
     await waitFor(() => expect(h.calls.length).toBe(1))
     const options = h.calls[0][5] as Record<string, unknown>
-    expect(options).toMatchObject({ ner: true, hateSpeech: true, resolve: true })
+    expect(options).toEqual({ ner: true, hateSpeech: true })
   })
 })
 

@@ -762,3 +762,15 @@ def test_res_batch_size_rejects_invalid_values(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("RES_BATCH_SIZE", "0")
     with pytest.raises(ValueError, match="RES_BATCH_SIZE"):
         load_resolution_env()
+
+
+def test_res_auto_resolve_defaults_on_and_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RES_AUTO_RESOLVE defaults to enabled and honors an explicit off.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.delenv("RES_AUTO_RESOLVE", raising=False)
+    assert load_resolution_env().auto_resolve is True
+    monkeypatch.setenv("RES_AUTO_RESOLVE", "false")
+    assert load_resolution_env().auto_resolve is False

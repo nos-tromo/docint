@@ -270,14 +270,14 @@ it('forwards enrichment flags as FormData fields and finalize body fields', asyn
     streamIngestUploadBatched('c1', [fileOfSize('a.txt', 10)], 1000, undefined, undefined, {
       ner: false,
       hateSpeech: true,
-      resolve: true,
     })
   )
   const uploadBody = fetchMock.mock.calls[0][1].body as FormData
   expect(uploadBody.get('ner')).toBe('false')
   expect(uploadBody.get('hate_speech')).toBe('true')
   const finalizeBody = JSON.parse(fetchMock.mock.calls[1][1].body as string)
-  expect(finalizeBody).toMatchObject({ ner: false, hate_speech: true, resolve: true })
+  expect(finalizeBody).toMatchObject({ ner: false, hate_speech: true })
+  expect(finalizeBody.resolve).toBeUndefined()
 })
 
 it('omits enrichment fields entirely when no options are given', async () => {

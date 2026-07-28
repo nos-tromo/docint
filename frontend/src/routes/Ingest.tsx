@@ -93,7 +93,6 @@ export function Ingest() {
   const { data: ingestDefaults } = useIngestDefaults()
   const [nerEnabled, setNerEnabled] = useState(false)
   const [hateEnabled, setHateEnabled] = useState(false)
-  const [resolveEnabled, setResolveEnabled] = useState(false)
   // Seed once from the deployment defaults; the user's clicks win afterwards.
   const [seeded, setSeeded] = useState(false)
   useEffect(() => {
@@ -145,7 +144,7 @@ export function Ingest() {
         // Before the deployment defaults have seeded (endpoint failed or a
         // rolling deploy where the backend lacks it yet), send NO explicit
         // flags so the env defaults keep applying server-side.
-        seeded ? { ner: nerEnabled, hateSpeech: hateEnabled, resolve: nerEnabled && resolveEnabled } : {}
+        seeded ? { ner: nerEnabled, hateSpeech: hateEnabled } : {}
       )) {
         dispatch({ type: 'event', v: ev })
         if (ev.event === 'warning') {
@@ -247,15 +246,6 @@ export function Ingest() {
             onChange={(e) => setHateEnabled(e.target.checked)}
           />
           {t('ingest.opt_hate')}
-        </label>
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={nerEnabled && resolveEnabled}
-            disabled={!nerEnabled}
-            onChange={(e) => setResolveEnabled(e.target.checked)}
-          />
-          {t('ingest.opt_resolve')}
         </label>
       </fieldset>
 

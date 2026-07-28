@@ -152,7 +152,6 @@ export const de: Strings = {
   'ingest.save_failed_file': 'Upload fehlgeschlagen: „{filename}“ konnte nicht gespeichert werden.',
   'ingest.opt_ner': 'Entitäten extrahieren',
   'ingest.opt_hate': 'Hatespeech erkennen',
-  'ingest.opt_resolve': 'Entitäten nach dem Import auflösen',
 
   // inspector orphans
   'inspector.file_types': 'Dateitypen',

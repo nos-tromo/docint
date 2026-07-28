@@ -23,8 +23,6 @@ export interface IngestEnrichmentOptions {
   ner?: boolean
   /** Per-request hate-speech override; omitted -> deployment env default. */
   hateSpeech?: boolean
-  /** Run entity resolution automatically after a successful ingest. */
-  resolve?: boolean
 }
 
 export function buildIngestFormData(
@@ -221,8 +219,7 @@ export async function* streamIngestUploadBatched(
         collection,
         hybrid: true,
         ...(options.ner !== undefined ? { ner: options.ner } : {}),
-        ...(options.hateSpeech !== undefined ? { hate_speech: options.hateSpeech } : {}),
-        ...(options.resolve !== undefined ? { resolve: options.resolve } : {})
+        ...(options.hateSpeech !== undefined ? { hate_speech: options.hateSpeech } : {})
       },
       signal
     )) {

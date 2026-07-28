@@ -57,6 +57,7 @@ from docint.utils.env_cfg import (
     load_metrics_env,
     load_ner_env,
     load_path_env,
+    load_resolution_env,
     load_response_validation_env,
 )
 from docint.utils.hashing import compute_file_hash
@@ -697,7 +698,6 @@ class IngestIn(BaseModel):
     hybrid: bool | None = True
     ner: bool | None = None
     hate_speech: bool | None = None
-    resolve: bool = False
 
 
 class IngestOut(BaseModel):
@@ -3111,6 +3111,23 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+def _auto_resolve_requested(ner: bool | None) -> bool:
+    """Whether resolution should follow this ingest run automatically.
+
+    Resolution is part of entity extraction: it runs whenever the run's
+    effective NER is on (per-request override, else ``NER_ENABLED``), unless
+    the operator disabled it via ``RES_AUTO_RESOLVE``.
+
+    Args:
+        ner (bool | None): The per-request NER override, if any.
+
+    Returns:
+        bool: ``True`` when resolution should run after the ingest.
+    """
+    ner_effective = load_ner_env().enabled if ner is None else ner
+    return ner_effective and load_resolution_env().auto_resolve
+
+
 async def _stream_collection_ingestion(
     name: str,
     physical: str,
@@ -3449,7 +3466,14 @@ async def ingest_upload(
             return
 
         async for frame in _stream_collection_ingestion(
-            name, physical, batch_dir, hybrid, request, ner=ner, hate_speech=hate_speech
+            name,
+            physical,
+            batch_dir,
+            hybrid,
+            request,
+            ner=ner,
+            hate_speech=hate_speech,
+            resolve=_auto_resolve_requested(ner),
         ):
             yield frame
 
@@ -3516,7 +3540,7 @@ async def ingest_finalize(payload: IngestIn, request: Request) -> StreamingRespo
             request,
             ner=payload.ner,
             hate_speech=payload.hate_speech,
-            resolve=payload.resolve,
+            resolve=_auto_resolve_requested(payload.ner),
         ):
             yield frame
 

@@ -142,12 +142,35 @@ def test_ingest_upload_forwards_flags(monkeypatch: pytest.MonkeyPatch, client: T
     assert recorded.get("hate_speech") is True
 
 
-def test_ingest_finalize_auto_resolve_runs_and_reports(
+def _stage_then_finalize(client: TestClient, collection: str, finalize_body: dict[str, Any]) -> str:
+    """Stage one file, then finalize; return the finalize SSE body.
+
+    Args:
+        client: The API test client.
+        collection: Logical collection name for the run.
+        finalize_body: Extra JSON fields for the finalize call.
+
+    Returns:
+        str: The finalize response body.
+    """
+    resp = client.post(
+        "/ingest/upload",
+        data={"collection": collection, "defer_ingest": "true"},
+        files={"files": ("a.txt", b"hello", "text/plain")},
+    )
+    assert resp.status_code == 200
+    resp = client.post("/ingest/finalize", json={"collection": collection, **finalize_body})
+    assert resp.status_code == 200
+    return resp.text
+
+
+def test_ingest_finalize_auto_resolves_when_ner_active(
     monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
 ) -> None:
-    """Finalize with resolve=true runs resolution and reports its summary."""
+    """Resolution runs automatically whenever the run's effective NER is on."""
     monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
     monkeypatch.setattr(api_module.ingest_module, "ingest_docs", lambda *a, **k: None)
+    monkeypatch.setenv("NER_ENABLED", "false")
     summary = ResolutionSummary(processed=3, minted=1, attached=2, skipped=0, entities_touched=2)
     calls: list[bool] = []
 
@@ -157,26 +180,54 @@ def test_ingest_finalize_auto_resolve_runs_and_reports(
 
     monkeypatch.setattr(type(api_module.rag), "resolve_entities", fake_resolve)
 
-    # Stage a file first so finalize has something to ingest.
-    resp = client.post(
-        "/ingest/upload",
-        data={"collection": "auto-col", "defer_ingest": "true"},
-        files={"files": ("a.txt", b"hello", "text/plain")},
-    )
-    assert resp.status_code == 200
-
-    resp = client.post("/ingest/finalize", json={"collection": "auto-col", "resolve": True})
-    assert resp.status_code == 200
-    body = resp.text
+    body = _stage_then_finalize(client, "auto-col", {"ner": True})
     assert calls == [True]
     assert '"resolution"' in body
     assert '"minted": 1' in body
 
 
+def test_ingest_finalize_env_ner_default_triggers_auto_resolve(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """With no per-request flag, NER_ENABLED=true alone triggers resolution."""
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", lambda *a, **k: None)
+    monkeypatch.setenv("NER_ENABLED", "true")
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        type(api_module.rag),
+        "resolve_entities",
+        lambda self, *, progress_callback=None: (
+            calls.append(True),
+            ResolutionSummary(processed=0, minted=0, attached=0, skipped=0, entities_touched=0),
+        )[1],
+    )
+    _stage_then_finalize(client, "env-auto-col", {})
+    assert calls == [True]
+
+
+def test_ingest_finalize_env_kill_switch_disables_auto_resolve(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """RES_AUTO_RESOLVE=false suppresses auto-resolution even with NER on."""
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", lambda *a, **k: None)
+    monkeypatch.setenv("NER_ENABLED", "true")
+    monkeypatch.setenv("RES_AUTO_RESOLVE", "false")
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        type(api_module.rag),
+        "resolve_entities",
+        lambda self, *, progress_callback=None: calls.append(True),
+    )
+    _stage_then_finalize(client, "kill-col", {})
+    assert calls == []
+
+
 def test_ingest_finalize_without_resolve_skips_resolution(
     monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
 ) -> None:
-    """Finalize without the flag never touches resolution."""
+    """A run with NER off (explicitly and via env) never touches resolution."""
     monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
     monkeypatch.setattr(api_module.ingest_module, "ingest_docs", lambda *a, **k: None)
     calls: list[bool] = []
@@ -186,12 +237,6 @@ def test_ingest_finalize_without_resolve_skips_resolution(
         lambda self, *, progress_callback=None: calls.append(True),
     )
 
-    resp = client.post(
-        "/ingest/upload",
-        data={"collection": "no-auto-col", "defer_ingest": "true"},
-        files={"files": ("a.txt", b"hello", "text/plain")},
-    )
-    assert resp.status_code == 200
-    resp = client.post("/ingest/finalize", json={"collection": "no-auto-col"})
-    assert resp.status_code == 200
+    monkeypatch.setenv("NER_ENABLED", "false")
+    _stage_then_finalize(client, "no-auto-col", {"ner": False})
     assert calls == []
