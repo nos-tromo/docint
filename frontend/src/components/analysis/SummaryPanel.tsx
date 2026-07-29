@@ -1,6 +1,8 @@
 import { useReducer } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { useTheme } from '@infra/ui'
+import { cn } from '@/lib/cn'
 import { streamSummary } from '@/api/analysis'
 import { describeError, streamErrorText } from '@/api/errorMessage'
 import { Citation } from '@/components/chat/Citation'
@@ -42,6 +44,8 @@ function reducer(s: State, a: Action): State {
 
 export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<string> }) {
   const t = useT()
+  // See ChatTurn.tsx: `prose-invert` only belongs on a dark background.
+  const { resolved } = useTheme()
   const collection = useUiStore((s) => s.selectedCollection)
   const [state, dispatch] = useReducer(reducer, {
     text: '',
@@ -88,7 +92,7 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
           type="button"
           onClick={() => generate(false)}
           disabled={state.busy}
-          className="px-3 py-1 rounded-md bg-zinc-100 text-zinc-900 disabled:opacity-50"
+          className="px-3 py-1 rounded-md bg-foreground text-background disabled:opacity-50"
         >
           {state.busy ? t('analysis.summary_generating') : t('analysis.summary_generate')}
         </button>
@@ -122,8 +126,13 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
 
       {state.error && <div className="text-red-400 text-sm">{state.error}</div>}
       {state.text && (
-        <div className="rounded-md border border-border bg-zinc-900 p-4 text-sm">
-          <div className="prose prose-invert prose-sm max-w-none prose-p:my-2 prose-pre:bg-zinc-950 prose-code:before:content-none prose-code:after:content-none">
+        <div className="rounded-md border border-border bg-muted p-4 text-sm">
+          <div
+            className={cn(
+              'prose prose-sm max-w-none prose-p:my-2 prose-pre:bg-muted prose-code:before:content-none prose-code:after:content-none',
+              resolved === 'dark' && 'prose-invert'
+            )}
+          >
             <Markdown remarkPlugins={[remarkGfm]}>{state.text}</Markdown>
           </div>
         </div>

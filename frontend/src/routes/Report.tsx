@@ -195,7 +195,7 @@ export function Report() {
                   onClick={() => setActiveReportId(r.id)}
                   className={cn(
                     'flex-1 text-left text-sm px-2 py-1.5 rounded-md truncate',
-                    isActive ? 'bg-primary/10 text-primary' : 'hover:bg-zinc-900'
+                    isActive ? 'bg-primary/10 text-primary' : 'hover:bg-muted'
                   )}
                   title={r.title}
                 >
@@ -205,7 +205,7 @@ export function Report() {
                 <button
                   type="button"
                   onClick={() => onDelete(r.id)}
-                  className="text-xs text-zinc-500 hover:text-red-400 px-1"
+                  className="text-xs text-muted-foreground hover:text-red-400 px-1"
                   aria-label={t('report.delete_aria')}
                 >
                   ×
@@ -257,7 +257,7 @@ export function Report() {
                           updateReport.mutate({ id: report.id, operator })
                         }
                       }}
-                      className="bg-zinc-950 border border-border rounded px-2 py-1 text-xs text-foreground"
+                      className="bg-muted border border-border rounded px-2 py-1 text-xs text-foreground"
                       aria-label={t('report.operator_label')}
                     />
                   </label>
@@ -273,7 +273,7 @@ export function Report() {
                           updateReport.mutate({ id: report.id, reference_number })
                         }
                       }}
-                      className="bg-zinc-950 border border-border rounded px-2 py-1 text-xs text-foreground"
+                      className="bg-muted border border-border rounded px-2 py-1 text-xs text-foreground"
                       aria-label={t('report.reference_label')}
                     />
                   </label>
@@ -322,19 +322,19 @@ export function Report() {
               <div className="relative group shrink-0">
                 <button
                   type="button"
-                  className="px-3 py-1 rounded-md border border-border text-sm hover:bg-zinc-900"
+                  className="px-3 py-1 rounded-md border border-border text-sm hover:bg-muted"
                   aria-haspopup="menu"
                 >
                   {t('chat.download')} ▾
                 </button>
                 <div className="absolute right-0 top-full z-10 hidden pt-1 group-hover:block group-focus-within:block">
-                  <div className="flex flex-col min-w-[11rem] rounded-md border border-border bg-zinc-950 p-1 shadow-lg">
+                  <div className="flex flex-col min-w-[11rem] rounded-md border border-border bg-muted p-1 shadow-lg">
                     {exportFormats(t).map((e) => (
                       <a
                         key={e.format}
                         href={reportExportHref(report.id, e.format)}
                         {...(e.view ? { target: '_blank', rel: 'noreferrer' } : { download: true })}
-                        className="block rounded px-3 py-1.5 text-sm hover:bg-zinc-800 whitespace-nowrap"
+                        className="block rounded px-3 py-1.5 text-sm hover:bg-accent whitespace-nowrap"
                         title={e.view ? t('report.open_new_tab_title') : t('report.download_format_title', { label: e.label })}
                       >
                         {e.label}
@@ -360,7 +360,7 @@ export function Report() {
                         {label} ({sectionItems.length})
                       </h2>
                       {sectionItems.map((item, si) => (
-                        <div key={item.id} className="rounded-md border border-border bg-zinc-900 p-3 space-y-2">
+                        <div key={item.id} className="rounded-md border border-border bg-muted p-3 space-y-2">
                           <div className="flex items-start justify-between gap-2">
                             <div className="min-w-0">
                               <div className="font-medium text-sm break-words">{itemTitle(item, t)}</div>
@@ -390,7 +390,7 @@ export function Report() {
                               <button
                                 type="button"
                                 onClick={() => removeItem.mutate({ reportId: report.id, itemId: item.id })}
-                                className="px-1.5 text-zinc-500 hover:text-red-400"
+                                className="px-1.5 text-muted-foreground hover:text-red-400"
                                 aria-label={t('report.remove_item_aria')}
                               >
                                 ×
@@ -412,7 +412,7 @@ export function Report() {
                                 updateItem.mutate({ reportId: report.id, itemId: item.id, note: note || null })
                               }
                             }}
-                            className="w-full bg-zinc-950 border border-border rounded px-2 py-1 text-xs"
+                            className="w-full bg-muted border border-border rounded px-2 py-1 text-xs"
                           />
                         </div>
                       ))}

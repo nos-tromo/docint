@@ -1,10 +1,19 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="light dark" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Document Intelligence</title>
+    <script>
+      /* infra-ui theme: stamp explicit choice before first paint (FOUC guard) */
+      ;(function () {
+        try {
+          var t = localStorage.getItem('infra-ui-theme')
+          if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t
+        } catch (e) {}
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

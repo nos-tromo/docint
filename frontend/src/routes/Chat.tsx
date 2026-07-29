@@ -245,7 +245,7 @@ export function Chat() {
             }}
             placeholder={t('chat.ask_placeholder')}
             rows={1}
-            className="flex-1 bg-zinc-900 border border-border rounded-md px-3 py-2 resize-none max-h-40 leading-6"
+            className="flex-1 bg-muted border border-border rounded-md px-3 py-2 resize-none max-h-40 leading-6"
           />
           <Button
             variant="primary"
@@ -264,7 +264,7 @@ export function Chat() {
             <select
               value={filters.queryMode}
               onChange={(e) => filters.setQueryMode(e.target.value as typeof filters.queryMode)}
-              className="bg-zinc-900 border border-border rounded-md px-2 py-1"
+              className="bg-muted border border-border rounded-md px-2 py-1"
             >
               <option value="answer">{t('chat.mode_answer')}</option>
               <option value="entity_occurrence">{t('chat.mode_entity_occurrence')}</option>
@@ -280,7 +280,7 @@ export function Chat() {
               onChange={(e) =>
                 filters.setRetrievalMode(e.target.value as typeof filters.retrievalMode)
               }
-              className="bg-zinc-900 border border-border rounded-md px-2 py-1"
+              className="bg-muted border border-border rounded-md px-2 py-1"
             >
               <option value="session">{t('chat.retrieval_session')}</option>
               <option value="stateless">{t('chat.retrieval_stateless')}</option>

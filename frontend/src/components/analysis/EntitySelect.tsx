@@ -71,7 +71,7 @@ export function EntitySelect({ entities, selectedKey, onSelectEntity, keyOf }: P
           aria-label={t('entities.category_label')}
           value={category}
           onChange={(e) => handleCategoryChange(e.target.value)}
-          className="bg-zinc-900 border border-border rounded-md px-2 py-1"
+          className="bg-muted border border-border rounded-md px-2 py-1"
         >
           <option value="">{t('entities.category_all')}</option>
           {types.map((ty) => (
@@ -87,7 +87,7 @@ export function EntitySelect({ entities, selectedKey, onSelectEntity, keyOf }: P
           aria-label={t('entities.entity_label')}
           value={valueInFiltered}
           onChange={(e) => onSelectEntity(e.target.value || null)}
-          className="bg-zinc-900 border border-border rounded-md px-2 py-1"
+          className="bg-muted border border-border rounded-md px-2 py-1"
         >
           {filtered.length === 0 && <option value="">{t('entities.no_entities_option')}</option>}
           {filtered.map((e) => (

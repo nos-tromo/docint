@@ -106,7 +106,7 @@ export function EntityFinding({
 
   return (
     <div
-      className="group grid items-start gap-3 border-b border-border px-3 py-2.5 text-sm hover:bg-zinc-900/40"
+      className="group grid items-start gap-3 border-b border-border px-3 py-2.5 text-sm hover:bg-muted/40"
       style={{ gridTemplateColumns: gridTemplate }}
       data-testid="entity-finding-row"
     >
@@ -147,7 +147,7 @@ export function EntityFinding({
             {mentions.map((m, i) => (
               <li
                 key={i}
-                className="inline-flex items-center gap-1 rounded border border-border bg-zinc-950 px-1.5 py-0.5 text-[11px]"
+                className="inline-flex items-center gap-1 rounded border border-border bg-muted px-1.5 py-0.5 text-[11px]"
               >
                 <span>{m.text}</span>
                 {m.type && <span className="text-muted-foreground">· {m.type}</span>}

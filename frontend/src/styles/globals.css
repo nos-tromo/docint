@@ -4,8 +4,16 @@
 @source "../../node_modules/@infra/ui/dist";
 
 :root {
-  color-scheme: dark;
-  --app-accent: hsl(160 84% 39%);   /* emerald — docint's brand accent */
+  /* color-scheme is theme-reactive — @infra/ui's theme.css sets it per
+     light/dark state (light default, [data-theme='dark'] override,
+     prefers-color-scheme fallback). Do not hardcode it here. */
+  /* emerald — docint's brand accent. L=27% here is the LIGHT-theme value
+     (WCAG AA as text-primary on the light `--color-background`: ~5.0:1,
+     the brand's original L=39% only clears ~2.6:1 on white). The dark-theme
+     value (L=39%, ~9:1 on the dark background) lives in the two overrides
+     below, mirroring @infra/ui's own light/dark/prefers-color-scheme
+     pattern in theme.css so this tracks data-theme exactly. */
+  --app-accent: hsl(160 84% 27%);
   /* Single source of truth for the app font. Tailwind's `sans` AND `mono`
      families both resolve to this var (see tailwind.config.ts), so every
      piece of text — including markdown code blocks and any stray
@@ -15,6 +23,38 @@
   /* Override @infra/ui's default monospace stack so all text (incl. code
      blocks in prose) stays Inter, matching docint's unified-font design. */
   --font-mono: var(--app-font);
+
+  /* Status-tone foreground colors for IngestionStatus (text/icon rendered
+     directly on the theme-reactive `bg-muted` panel, not inside a
+     self-contained fixed-dark chip like ValidationBanner). Values below are
+     the LIGHT-theme set, each measured >=4.5:1 (WCAG AA) against
+     `--color-muted` at hsl(240 5% 96%): sky ~5.5:1, amber ~5.5:1,
+     emerald ~5.5:1, red ~6.0:1. Dark-theme values (also >=4.5:1 against
+     `--color-muted` at hsl(240 4% 16%): sky ~5.6:1, amber ~7.5:1,
+     emerald ~8.4:1, red ~5.1:1) live in the two overrides below, mirroring
+     the --app-accent / theme.css light-dark-media pattern. */
+  --status-sky-fg: hsl(199 70% 33%);
+  --status-amber-fg: hsl(38 92% 28%);
+  --status-emerald-fg: hsl(152 70% 26%);
+  --status-red-fg: hsl(0 70% 42%);
+}
+
+:root[data-theme='dark'] {
+  --app-accent: hsl(160 84% 39%);
+  --status-sky-fg: hsl(199 70% 55%);
+  --status-amber-fg: hsl(38 92% 55%);
+  --status-emerald-fg: hsl(152 70% 55%);
+  --status-red-fg: hsl(0 70% 68%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --app-accent: hsl(160 84% 39%);
+    --status-sky-fg: hsl(199 70% 55%);
+    --status-amber-fg: hsl(38 92% 55%);
+    --status-emerald-fg: hsl(152 70% 55%);
+    --status-red-fg: hsl(0 70% 68%);
+  }
 }
 
 html, body, #root {
@@ -43,10 +83,11 @@ option {
 
 /* Explicitly theme native <option> popup on Linux/GTK where the OS
    theme overrides transparent/inherited colours, causing unreadable
-   light-text-on-light-background in the dropdown list. */
+   light-text-on-light-background in the dropdown list. Uses the semantic
+   tokens (not literal colors) so it tracks the active theme. */
 option {
-  background-color: rgb(9 9 11);
-  color: rgb(244 244 245);
+  background-color: var(--color-background);
+  color: var(--color-foreground);
 }
 
 * {
@@ -57,6 +98,6 @@ option {
   width: 10px;
   height: 10px;
 }
-::-webkit-scrollbar-track { @apply bg-zinc-900; }
-::-webkit-scrollbar-thumb { @apply bg-zinc-700 rounded-full; }
-::-webkit-scrollbar-thumb:hover { @apply bg-zinc-600; }
+::-webkit-scrollbar-track { @apply bg-muted; }
+::-webkit-scrollbar-thumb { @apply bg-border rounded-full; }
+::-webkit-scrollbar-thumb:hover { @apply bg-muted-foreground/50; }

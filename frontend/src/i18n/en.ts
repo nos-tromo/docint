@@ -7,6 +7,12 @@ export const en = {
   'nav.inspector': 'Inspector',
   'nav.report': 'Report',
 
+  // AppHeader (portal link + theme toggle)
+  'appHeader.home': 'Apps',
+  'appHeader.theme_system': 'system',
+  'appHeader.theme_light': 'light',
+  'appHeader.theme_dark': 'dark',
+
   // common
   'common.copied': 'Copied',
   'common.active': 'Active',
