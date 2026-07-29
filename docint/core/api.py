@@ -51,10 +51,13 @@ from docint.core.state.session_manager import SessionCollectionMismatchError
 from docint.utils.cursor import InvalidCursorError
 from docint.utils.env_cfg import (
     load_frontend_env,
+    load_hate_speech_env,
     load_host_env,
     load_language_env,
     load_metrics_env,
+    load_ner_env,
     load_path_env,
+    load_resolution_env,
     load_response_validation_env,
 )
 from docint.utils.hashing import compute_file_hash
@@ -681,11 +684,20 @@ class SummarizeOut(BaseModel):
     validation_reason: str | None = None
 
 
+class IngestDefaultsOut(BaseModel):
+    """Deployment-default enrichment toggles for the ingest UI."""
+
+    ner: bool
+    hate_speech: bool
+
+
 class IngestIn(BaseModel):
     """Request payload triggering ingestion into a named collection."""
 
     collection: str
     hybrid: bool | None = True
+    ner: bool | None = None
+    hate_speech: bool | None = None
 
 
 class IngestOut(BaseModel):
@@ -874,6 +886,23 @@ def get_frontend_config() -> dict[str, int | str]:
         "collection_timeout": cfg.collection_timeout,
         "max_upload_bytes": cfg.max_upload_bytes,
         "language": load_language_env().code,
+    }
+
+
+@app.get("/config/ingest-defaults", response_model=IngestDefaultsOut, tags=["Meta"])
+def get_ingest_defaults() -> dict[str, bool]:
+    """Return the deployment's default enrichment toggles for the ingest UI.
+
+    Served without a principal dependency (like ``/config``) so the SPA can
+    seed its checkboxes; the values mirror ``NER_ENABLED`` and
+    ``ENABLE_HATE_SPEECH_DETECTION``.
+
+    Returns:
+        dict[str, bool]: ``ner`` and ``hate_speech`` deployment defaults.
+    """
+    return {
+        "ner": load_ner_env().enabled,
+        "hate_speech": load_hate_speech_env().enabled,
     }
 
 
@@ -3082,12 +3111,33 @@ async def agent_chat_stream(payload: AgentChatIn, request: Request) -> Streaming
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+def _auto_resolve_requested(ner: bool | None) -> bool:
+    """Whether resolution should follow this ingest run automatically.
+
+    Resolution is part of entity extraction: it runs whenever the run's
+    effective NER is on (per-request override, else ``NER_ENABLED``), unless
+    the operator disabled it via ``RES_AUTO_RESOLVE``.
+
+    Args:
+        ner (bool | None): The per-request NER override, if any.
+
+    Returns:
+        bool: ``True`` when resolution should run after the ingest.
+    """
+    ner_effective = load_ner_env().enabled if ner is None else ner
+    return ner_effective and load_resolution_env().auto_resolve
+
+
 async def _stream_collection_ingestion(
     name: str,
     physical: str,
     batch_dir: Path,
     hybrid: bool | None,
     request: Request,
+    *,
+    ner: bool | None = None,
+    hate_speech: bool | None = None,
+    resolve: bool = False,
 ) -> AsyncIterator[str]:
     """Run ingestion over ``batch_dir`` and yield SSE event frames.
 
@@ -3110,6 +3160,11 @@ async def _stream_collection_ingestion(
         batch_dir (Path): Directory of staged source files to ingest.
         hybrid (bool | None): Whether to enable hybrid search (defaults to True).
         request (Request): The incoming request, for disconnect detection.
+        ner (bool | None): Per-request NER override; ``None`` keeps the env default.
+        hate_speech (bool | None): Per-request hate-speech override; ``None``
+            keeps the env default.
+        resolve (bool): When ``True``, run entity resolution after a successful
+            ingest and report its summary on the terminal event.
 
     Yields:
         str: SSE-formatted event frames.
@@ -3163,11 +3218,15 @@ async def _stream_collection_ingestion(
             """
             try:
                 await to_thread.run_sync(
-                    ingest_module.ingest_docs,
-                    physical,
-                    batch_dir,
-                    hybrid if hybrid is not None else True,
-                    progress_callback,
+                    functools.partial(
+                        ingest_module.ingest_docs,
+                        physical,
+                        batch_dir,
+                        hybrid if hybrid is not None else True,
+                        progress_callback,
+                        ner=ner,
+                        hate_speech=hate_speech,
+                    )
                 )
                 _safe_put(None)
             except asyncio.CancelledError:
@@ -3225,10 +3284,31 @@ async def _stream_collection_ingestion(
             )
             yield _format_sse(event_name, {"message": msg})
 
-        yield _format_sse(
-            "ingestion_complete",
-            {"collection": name, "data_dir": str(batch_dir)},
-        )
+        terminal: dict[str, Any] = {"collection": name, "data_dir": str(batch_dir)}
+        if resolve:
+            yield _format_sse("ingestion_progress", {"message": "Resolving entities..."})
+
+            def _run_resolution() -> Any:
+                with rag.collection_scope(physical):
+                    return rag.resolve_entities()
+
+            try:
+                summary = await to_thread.run_sync(_run_resolution)
+            except Exception:
+                logger.exception("Auto-resolution after ingest failed for '{}'", name)
+                yield _format_sse(
+                    "warning",
+                    {"message": "Entity resolution failed.", "collection": name},
+                )
+            else:
+                terminal["resolution"] = {
+                    "processed": summary.processed,
+                    "minted": summary.minted,
+                    "attached": summary.attached,
+                    "skipped": summary.skipped,
+                    "entities_touched": summary.entities_touched,
+                }
+        yield _format_sse("ingestion_complete", terminal)
     except Exception as exc:  # pragma: no cover - streamed errors are logged
         if isinstance(exc, ValueError) and "No files found" in str(exc):
             # The staged directory held no reader-supported files (e.g. only
@@ -3259,6 +3339,8 @@ async def _stream_collection_ingestion(
 async def ingest_upload(
     request: Request,
     collection: str = Form(...),
+    ner: bool | None = Form(None),
+    hate_speech: bool | None = Form(None),
     files: list[UploadFile] = File(...),  # noqa: B008 — FastAPI dependency marker
     hybrid: bool | None = Form(True),
     defer_ingest: bool = Form(False),
@@ -3271,6 +3353,10 @@ async def ingest_upload(
         collection (str): The name of the collection to ingest into.
         files (list[UploadFile]): The list of files to upload.
         hybrid (bool | None): Whether to enable hybrid search (default: True).
+        ner (bool | None): Per-request NER override; ``None`` keeps the env
+            default (``NER_ENABLED``).
+        hate_speech (bool | None): Per-request hate-speech override; ``None``
+            keeps the env default (``ENABLE_HATE_SPEECH_DETECTION``).
         defer_ingest (bool): When ``True``, save the file(s) but do NOT ingest —
             the caller runs one ingestion pass afterwards via
             ``/ingest/finalize``. The SPA sets this on every batch of a large,
@@ -3379,7 +3465,16 @@ async def ingest_upload(
             )
             return
 
-        async for frame in _stream_collection_ingestion(name, physical, batch_dir, hybrid, request):
+        async for frame in _stream_collection_ingestion(
+            name,
+            physical,
+            batch_dir,
+            hybrid,
+            request,
+            ner=ner,
+            hate_speech=hate_speech,
+            resolve=_auto_resolve_requested(ner),
+        ):
             yield frame
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
@@ -3437,7 +3532,16 @@ async def ingest_finalize(payload: IngestIn, request: Request) -> StreamingRespo
                 {"collection": name, "data_dir": str(batch_dir), "empty": True},
             )
             return
-        async for frame in _stream_collection_ingestion(name, physical, batch_dir, hybrid, request):
+        async for frame in _stream_collection_ingestion(
+            name,
+            physical,
+            batch_dir,
+            hybrid,
+            request,
+            ner=payload.ner,
+            hate_speech=payload.hate_speech,
+            resolve=_auto_resolve_requested(payload.ner),
+        ):
             yield frame
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

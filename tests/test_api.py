@@ -2263,6 +2263,7 @@ def test_ingest_success(monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp
         path: Any,
         hybrid: bool = True,
         progress_callback: Any = None,
+        **kwargs: Any,
     ) -> None:
         """Fake implementation of the ingest_docs function for testing purposes.
 
@@ -2271,6 +2272,7 @@ def test_ingest_success(monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp
             path (Path): The path to the data to ingest.
             hybrid (bool, optional): Whether to use hybrid ingestion. Defaults to True.
             progress_callback (callable, optional): A callback function for progress updates. Defaults to None.
+            **kwargs: Ignored extra ingest flags (ner / hate_speech).
         """
         called.args = (
             collection,
@@ -2365,6 +2367,7 @@ def test_ingest_sync_generic_exception_propagates_as_500(
         path: Path,
         hybrid: bool = True,
         progress_callback: Any = None,
+        **kwargs: Any,
     ) -> None:
         """Simulate a hard runtime failure during ingestion.
 
@@ -2373,6 +2376,7 @@ def test_ingest_sync_generic_exception_propagates_as_500(
             path (Path): Source directory path (ignored).
             hybrid (bool): Whether hybrid retrieval was requested (ignored).
             progress_callback (Any): Optional progress callback (ignored).
+            **kwargs: Ignored extra ingest flags (ner / hate_speech).
 
         Raises:
             RuntimeError: Always, to mimic an infrastructure failure.
@@ -2414,6 +2418,7 @@ def test_ingest_upload_empty_emits_warning_and_completes(
         path: Path,
         hybrid: bool = True,
         progress_callback: Any = None,
+        **kwargs: Any,
     ) -> None:
         """Simulate an ingestion run that produced no documents.
 
@@ -2422,6 +2427,7 @@ def test_ingest_upload_empty_emits_warning_and_completes(
             path (Path): Source directory path (ignored).
             hybrid (bool): Whether hybrid retrieval was requested (ignored).
             progress_callback (Any): Optional progress callback (ignored).
+            **kwargs: Ignored extra ingest flags (ner / hate_speech).
         """
         _ = (path, hybrid, progress_callback)
         raise api_module.EmptyIngestionError(collection)
@@ -2467,7 +2473,9 @@ def test_ingest_upload_defer_saves_without_ingesting(
     monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
     calls: list[Path] = []
 
-    def spy_ingest(collection: str, path: Path, hybrid: bool = True, progress_callback: Any = None) -> None:
+    def spy_ingest(
+        collection: str, path: Path, hybrid: bool = True, progress_callback: Any = None, **kwargs: Any
+    ) -> None:
         """Record that ingestion was invoked (it must not be, when deferring)."""
         _ = (collection, hybrid, progress_callback)
         calls.append(path)
@@ -2503,7 +2511,9 @@ def test_ingest_finalize_ingests_staged_files(
     monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
     calls: list[Path] = []
 
-    def spy_ingest(collection: str, path: Path, hybrid: bool = True, progress_callback: Any = None) -> None:
+    def spy_ingest(
+        collection: str, path: Path, hybrid: bool = True, progress_callback: Any = None, **kwargs: Any
+    ) -> None:
         """Record the directory ingestion ran over."""
         _ = (collection, hybrid, progress_callback)
         calls.append(path)
@@ -2577,7 +2587,9 @@ def test_ingest_soft_completes_when_reader_finds_no_supported_files(
     """
     monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
 
-    def raise_no_files(collection: str, path: Path, hybrid: bool = True, progress_callback: Any = None) -> None:
+    def raise_no_files(
+        collection: str, path: Path, hybrid: bool = True, progress_callback: Any = None, **kwargs: Any
+    ) -> None:
         """Simulate the reader finding no ingestable files in ``path``."""
         _ = (collection, hybrid, progress_callback)
         raise ValueError(f"No files found in {path}.")
@@ -2633,6 +2645,7 @@ def test_ingest_upload_success_does_not_warm_query_engine(
         path: Path,
         hybrid: bool = True,
         progress_callback: Any = None,
+        **kwargs: Any,
     ) -> None:
         """Simulate a successful, no-op ingestion run.
 
@@ -2645,6 +2658,7 @@ def test_ingest_upload_success_does_not_warm_query_engine(
             path (Path): Source directory path (ignored).
             hybrid (bool): Whether hybrid retrieval was requested (ignored).
             progress_callback (Any): Optional progress callback (ignored).
+            **kwargs: Ignored extra ingest flags (ner / hate_speech).
         """
         _ = (collection, path, hybrid, progress_callback)
 
@@ -2725,6 +2739,7 @@ def test_ingest_upload_cancels_awaiter_on_client_disconnect(
         path: Path,
         hybrid: bool = True,
         progress_callback: Any = None,
+        **kwargs: Any,
     ) -> None:
         """Block long enough for the disconnect poll to fire first.
 
@@ -2733,6 +2748,7 @@ def test_ingest_upload_cancels_awaiter_on_client_disconnect(
             path (Path): Source directory path (ignored).
             hybrid (bool): Whether hybrid retrieval was requested (ignored).
             progress_callback (Any): Optional progress callback (ignored).
+            **kwargs: Ignored extra ingest flags (ner / hate_speech).
         """
         _ = (collection, path, hybrid, progress_callback)
         time.sleep(0.3)
@@ -2802,6 +2818,7 @@ def test_ingest_upload_poll_continues_when_still_connected(
         path: Path,
         hybrid: bool = True,
         progress_callback: Any = None,
+        **kwargs: Any,
     ) -> None:
         """Block long enough for the poll to fire at least once.
 
@@ -2810,6 +2827,7 @@ def test_ingest_upload_poll_continues_when_still_connected(
             path (Path): Source directory path (ignored).
             hybrid (bool): Whether hybrid retrieval was requested (ignored).
             progress_callback (Any): Optional progress callback (ignored).
+            **kwargs: Ignored extra ingest flags (ner / hate_speech).
         """
         _ = (collection, path, hybrid, progress_callback)
         time.sleep(0.15)  # ~3x poll interval
@@ -2876,6 +2894,7 @@ def test_ingest_sync_empty_returns_empty_flag(
         path: Path,
         hybrid: bool = True,
         progress_callback: Any = None,
+        **kwargs: Any,
     ) -> None:
         """Simulate an ingestion run that produced no documents.
 
@@ -2884,6 +2903,7 @@ def test_ingest_sync_empty_returns_empty_flag(
             path (Path): Source directory path (ignored).
             hybrid (bool): Whether hybrid retrieval was requested (ignored).
             progress_callback (Any): Optional progress callback (ignored).
+            **kwargs: Ignored extra ingest flags (ner / hate_speech).
         """
         _ = (path, hybrid, progress_callback)
         raise api_module.EmptyIngestionError(collection)
@@ -2935,6 +2955,7 @@ def test_ingest_sync_success_does_not_warm_query_engine(
         path: Path,
         hybrid: bool = True,
         progress_callback: Any = None,
+        **kwargs: Any,
     ) -> None:
         """Simulate a successful, no-op synchronous ingestion run.
 
@@ -2946,6 +2967,7 @@ def test_ingest_sync_success_does_not_warm_query_engine(
             path (Path): Source directory path (ignored).
             hybrid (bool): Whether hybrid retrieval was requested (ignored).
             progress_callback (Any): Optional progress callback (ignored).
+            **kwargs: Ignored extra ingest flags (ner / hate_speech).
         """
         _ = (collection, path, hybrid, progress_callback)
 
@@ -3860,6 +3882,7 @@ def test_ingest_upload_preserves_subdir_structure(
         path: Path,
         hybrid: bool = True,
         progress_callback: Any = None,
+        **kwargs: Any,
     ) -> None:
         """Simulate an ingestion run.
 
@@ -3868,6 +3891,7 @@ def test_ingest_upload_preserves_subdir_structure(
             path (Path): Source directory path (ignored).
             hybrid (bool): Whether hybrid retrieval was requested (ignored).
             progress_callback (Any): Optional progress callback (ignored).
+            **kwargs: Ignored extra ingest flags (ner / hate_speech).
         """
         _ = (collection, path, hybrid, progress_callback)
 

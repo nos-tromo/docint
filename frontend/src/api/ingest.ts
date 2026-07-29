@@ -18,10 +18,18 @@ type Translate = (key: keyof Strings, vars?: Record<string, string | number>) =>
  */
 export const UPLOAD_SAFETY_MARGIN = 0.9
 
+export interface IngestEnrichmentOptions {
+  /** Per-request NER override; omitted -> deployment env default. */
+  ner?: boolean
+  /** Per-request hate-speech override; omitted -> deployment env default. */
+  hateSpeech?: boolean
+}
+
 export function buildIngestFormData(
   collection: string,
   files: File[],
-  deferIngest = false
+  deferIngest = false,
+  options: IngestEnrichmentOptions = {}
 ): FormData {
   const fd = new FormData()
   fd.append('collection', collection)
@@ -29,6 +37,10 @@ export function buildIngestFormData(
   // /ingest/finalize pass (see streamIngestUploadBatched). Omitted when false so
   // the single-request default keeps its existing save+ingest behaviour.
   if (deferIngest) fd.append('defer_ingest', 'true')
+  // Enrichment overrides ride on the staged batches too so a future
+  // non-deferred call behaves identically; omitted keys keep the env default.
+  if (options.ner !== undefined) fd.append('ner', String(options.ner))
+  if (options.hateSpeech !== undefined) fd.append('hate_speech', String(options.hateSpeech))
   for (const f of files) fd.append('files', f, f.webkitRelativePath || f.name)
   return fd
 }
@@ -124,7 +136,8 @@ export async function* streamIngestUploadBatched(
   files: File[],
   limitBytes: number,
   signal?: AbortSignal,
-  t: Translate = defaultT
+  t: Translate = defaultT,
+  options: IngestEnrichmentOptions = {}
 ): AsyncGenerator<IngestEvent, void, unknown> {
   const budgetBytes = Math.max(1, Math.floor(limitBytes * UPLOAD_SAFETY_MARGIN))
   const batches = planUploadBatches(files, budgetBytes)
@@ -151,7 +164,7 @@ export async function* streamIngestUploadBatched(
     try {
       for await (const ev of streamUpload(
         '/ingest/upload',
-        buildIngestFormData(collection, batch, true),
+        buildIngestFormData(collection, batch, true, options),
         signal
       )) {
         const data = (ev.data ?? {}) as Record<string, unknown>
@@ -200,7 +213,16 @@ export async function* streamIngestUploadBatched(
   let empty = false
   let finalizeError: string | null = null
   try {
-    for await (const ev of streamSse('/ingest/finalize', { collection, hybrid: true }, signal)) {
+    for await (const ev of streamSse(
+      '/ingest/finalize',
+      {
+        collection,
+        hybrid: true,
+        ...(options.ner !== undefined ? { ner: options.ner } : {}),
+        ...(options.hateSpeech !== undefined ? { hate_speech: options.hateSpeech } : {})
+      },
+      signal
+    )) {
       const data = (ev.data ?? {}) as Record<string, unknown>
       if (ev.event === 'ingestion_complete') {
         if (data.empty === true) empty = true

@@ -1,6 +1,7 @@
-import { useMemo, useReducer, useState } from 'react'
+import { useEffect, useMemo, useReducer, useState } from 'react'
 import { Button, FileList, mergeFiles } from '@infra/ui'
 import { streamIngestUploadBatched } from '@/api/ingest'
+import { useIngestDefaults } from '@/hooks/useIngestDefaults'
 import { describeError } from '@/api/errorMessage'
 import { useSelectCollection, useCollections, collectionsKey } from '@/hooks/useCollections'
 import { useConfig } from '@/hooks/useConfig'
@@ -89,6 +90,17 @@ export function Ingest() {
   })
   const [error, setError] = useState<string | null>(null)
   const [warnings, setWarnings] = useState<string[]>([])
+  const { data: ingestDefaults } = useIngestDefaults()
+  const [nerEnabled, setNerEnabled] = useState(false)
+  const [hateEnabled, setHateEnabled] = useState(false)
+  // Seed once from the deployment defaults; the user's clicks win afterwards.
+  const [seeded, setSeeded] = useState(false)
+  useEffect(() => {
+    if (seeded || !ingestDefaults) return
+    setNerEnabled(ingestDefaults.ner)
+    setHateEnabled(ingestDefaults.hate_speech)
+    setSeeded(true)
+  }, [seeded, ingestDefaults])
   const setSelected = useUiStore((s) => s.setSelectedCollection)
   const selectMutation = useSelectCollection()
   const qc = useQueryClient()
@@ -128,7 +140,11 @@ export function Ingest() {
         state.files,
         limitBytes,
         undefined,
-        t
+        t,
+        // Before the deployment defaults have seeded (endpoint failed or a
+        // rolling deploy where the backend lacks it yet), send NO explicit
+        // flags so the env defaults keep applying server-side.
+        seeded ? { ner: nerEnabled, hateSpeech: hateEnabled } : {}
       )) {
         dispatch({ type: 'event', v: ev })
         if (ev.event === 'warning') {
@@ -213,6 +229,25 @@ export function Ingest() {
           remove: t('common.remove')
         }}
       />
+
+      <fieldset className="space-y-1 text-sm" disabled={state.busy}>
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={nerEnabled}
+            onChange={(e) => setNerEnabled(e.target.checked)}
+          />
+          {t('ingest.opt_ner')}
+        </label>
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={hateEnabled}
+            onChange={(e) => setHateEnabled(e.target.checked)}
+          />
+          {t('ingest.opt_hate')}
+        </label>
+      </fieldset>
 
       <Button
         variant="primary"

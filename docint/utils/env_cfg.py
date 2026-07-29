@@ -1204,6 +1204,7 @@ class ResolutionConfig:
     case_normalize: bool
     vector_k: int
     batch_size: int = 50
+    auto_resolve: bool = True
 
 
 def load_resolution_env(
@@ -1281,6 +1282,7 @@ def load_resolution_env(
         case_normalize=str(os.getenv("RES_CASE_NORMALIZE", default_case_normalize)).lower() in {"true", "1", "yes"},
         vector_k=vector_k,
         batch_size=batch_size,
+        auto_resolve=str(os.getenv("RES_AUTO_RESOLVE", "true")).lower() in {"true", "1", "yes"},
     )
 
 

@@ -149,6 +149,11 @@ class DocumentIngestionPipeline:
     ner_model: OpenAI | None
     progress_callback: Callable[[str], None] | None
     hate_speech_model: OpenAI | None = None
+    # Per-request enrichment overrides: None keeps the deployment env default
+    # (NER_ENABLED / ENABLE_HATE_SPEECH_DETECTION); an explicit bool wins for
+    # this run only.
+    ner_override: bool | None = None
+    hate_speech_override: bool | None = None
 
     # --- Cleaning config ---
     clean_fn: CleanFn = basic_clean
@@ -197,7 +202,7 @@ class DocumentIngestionPipeline:
         """Post-initialization to load configurations and set up components."""
         # --- Named Entity Recognition (NER) config ---
         ner_cfg = load_ner_env()
-        ner_enabled = ner_cfg.enabled
+        ner_enabled = ner_cfg.enabled if self.ner_override is None else self.ner_override
         self.ner_max_workers = ner_cfg.max_workers
 
         if ner_enabled:
@@ -209,7 +214,9 @@ class DocumentIngestionPipeline:
                 self.entity_extractor = None
 
         hate_speech_cfg = load_hate_speech_env()
-        self.hate_speech_enabled = hate_speech_cfg.enabled
+        self.hate_speech_enabled = (
+            hate_speech_cfg.enabled if self.hate_speech_override is None else self.hate_speech_override
+        )
         self.hate_speech_max_chars = hate_speech_cfg.max_chars
         self.hate_speech_max_workers = hate_speech_cfg.max_workers
         if self.hate_speech_enabled and self.hate_speech_model is not None:
