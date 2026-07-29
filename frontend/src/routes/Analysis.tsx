@@ -168,7 +168,7 @@ export function Analysis() {
                     className={cn(
                       'px-3 py-1 transition-colors',
                       nerView === v
-                        ? 'bg-zinc-800 text-foreground'
+                        ? 'bg-muted text-foreground'
                         : 'text-muted-foreground hover:text-foreground'
                     )}
                   >

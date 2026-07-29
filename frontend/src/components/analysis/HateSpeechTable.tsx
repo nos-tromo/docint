@@ -67,7 +67,7 @@ function HateSpeechTableRow({
 
   return (
     <div
-      className="group grid items-start gap-3 border-b border-border px-3 py-2.5 text-sm hover:bg-zinc-900/40"
+      className="group grid items-start gap-3 border-b border-border px-3 py-2.5 text-sm hover:bg-muted/40"
       style={{ gridTemplateColumns: HATE_GRID }}
       data-testid="hate-speech-row"
     >
@@ -171,7 +171,7 @@ export function HateSpeechTable({
       </div>
       <div className="rounded-md border border-border overflow-hidden">
         <div
-          className="grid gap-3 px-3 py-2 bg-zinc-900 border-b border-border text-[11px] uppercase tracking-wide text-muted-foreground"
+          className="grid gap-3 px-3 py-2 bg-muted border-b border-border text-[11px] uppercase tracking-wide text-muted-foreground"
           style={{ gridTemplateColumns: HATE_GRID }}
         >
           <span>#</span>

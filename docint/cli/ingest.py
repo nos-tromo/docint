@@ -25,6 +25,9 @@ def ingest_docs(
     data_dir: Path,
     hybrid: bool = True,
     progress_callback: Callable[[str], None] | None = None,
+    *,
+    ner: bool | None = None,
+    hate_speech: bool | None = None,
 ) -> None:
     """Ingest documents from the specified directory into the Qdrant collection.
 
@@ -34,6 +37,10 @@ def ingest_docs(
         hybrid (bool): Whether to enable hybrid search. Defaults to True.
         progress_callback (Callable[[str], None] | None): Optional callback for
             reporting ingestion progress.
+        ner (bool | None): Per-request NER override; ``None`` keeps the env
+            default (``NER_ENABLED``).
+        hate_speech (bool | None): Per-request hate-speech override; ``None``
+            keeps the env default (``ENABLE_HATE_SPEECH_DETECTION``).
 
     Raises:
         EmptyIngestionError: When the source directory yielded no usable
@@ -52,6 +59,8 @@ def ingest_docs(
             data_dir,
             build_query_engine=False,
             progress_callback=progress_callback or (lambda msg: logger.info(msg)),
+            ner=ner,
+            hate_speech=hate_speech,
         )
     finally:
         rag.unload_models()

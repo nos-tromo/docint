@@ -7,6 +7,12 @@ export const en = {
   'nav.inspector': 'Inspector',
   'nav.report': 'Report',
 
+  // AppHeader (portal link + theme toggle)
+  'appHeader.home': 'Apps',
+  'appHeader.theme_system': 'system',
+  'appHeader.theme_light': 'light',
+  'appHeader.theme_dark': 'dark',
+
   // common
   'common.copied': 'Copied',
   'common.active': 'Active',
@@ -142,6 +148,8 @@ export const en = {
   'ingest.finished': 'Ingestion finished',
   'ingest.failed_default': 'Ingestion failed.',
   'ingest.save_failed_file': 'Upload failed: “{filename}” could not be saved.',
+  'ingest.opt_ner': 'Extract entities',
+  'ingest.opt_hate': 'Detect hate speech',
 
   // inspector orphans
   'inspector.file_types': 'File types',

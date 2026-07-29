@@ -9,6 +9,12 @@ export const de: Strings = {
   'nav.inspector': 'Überblick',
   'nav.report': 'Bericht',
 
+  // AppHeader (Portal-Link + Theme-Umschalter)
+  'appHeader.home': 'Übersicht',
+  'appHeader.theme_system': 'System',
+  'appHeader.theme_light': 'Hell',
+  'appHeader.theme_dark': 'Dunkel',
+
   // common
   'common.copied': 'Kopiert',
   'common.active': 'Aktiv',
@@ -151,6 +157,8 @@ export const de: Strings = {
   'ingest.finished': 'Datenimport abgeschlossen',
   'ingest.failed_default': 'Datenimport fehlgeschlagen.',
   'ingest.save_failed_file': 'Upload fehlgeschlagen: „{filename}“ konnte nicht gespeichert werden.',
+  'ingest.opt_ner': 'Entitäten extrahieren',
+  'ingest.opt_hate': 'Hatespeech erkennen',
 
   // inspector orphans
   'inspector.file_types': 'Dateitypen',

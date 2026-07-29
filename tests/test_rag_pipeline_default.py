@@ -283,7 +283,7 @@ def test_rag_excludes_pdfs_from_legacy_ingestion(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(
         RAG,
         "_build_ingestion_pipeline",
-        lambda self, progress_callback=None: fake_pipeline,
+        lambda self, progress_callback=None, **_overrides: fake_pipeline,
     )
     monkeypatch.setattr(
         RAG,

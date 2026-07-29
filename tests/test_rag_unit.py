@@ -4009,7 +4009,7 @@ def _patch_ingest_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         RAG,
         "_build_ingestion_pipeline",
-        lambda self, progress_callback=None: _FakePipeline(),
+        lambda self, progress_callback=None, **_overrides: _FakePipeline(),
     )
     monkeypatch.setattr(RAG, "_get_existing_file_hashes", lambda self: set())
     monkeypatch.setattr(rag_module, "CorePDFPipelineReader", _FakeCorePDFReader)

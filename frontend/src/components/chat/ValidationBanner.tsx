@@ -37,7 +37,7 @@ function resolveSpec(v: ValidationFields, t: ReturnType<typeof useT>): BannerSpe
   // backend `reason` can carry a raw caught-exception message (validation
   // model/transport failure) — never render it; catalog copy only.
   return {
-    tone: 'border-zinc-700 bg-zinc-900 text-zinc-300',
+    tone: 'border-border bg-muted text-muted-foreground',
     icon: 'ⓘ',
     title:
       v.validation_checked === false

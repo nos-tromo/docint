@@ -33,7 +33,7 @@ export function Dropzone({
       onClick={() => inputRef.current?.click()}
       className={cn(
         'rounded-lg border-2 border-dashed p-10 text-center cursor-pointer',
-        hover ? 'border-foreground bg-zinc-900' : 'border-border',
+        hover ? 'border-foreground bg-muted' : 'border-border',
         disabled && 'opacity-50 pointer-events-none'
       )}
     >

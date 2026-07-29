@@ -111,7 +111,7 @@ export function EntityFindingsTable({
       ) : (
         <div className="rounded-md border border-border overflow-hidden">
           <div
-            className="grid gap-3 px-3 py-2 bg-zinc-900 border-b border-border text-[11px] uppercase tracking-wide text-muted-foreground"
+            className="grid gap-3 px-3 py-2 bg-muted border-b border-border text-[11px] uppercase tracking-wide text-muted-foreground"
             style={{ gridTemplateColumns: FINDINGS_GRID }}
           >
             <span>#</span>

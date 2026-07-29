@@ -1,5 +1,7 @@
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { useTheme } from '@infra/ui'
+import { cn } from '@/lib/cn'
 import type { ChatFinalEvent, Source } from '@/api/types'
 import { Citation } from './Citation'
 import { ValidationBanner } from './ValidationBanner'
@@ -62,6 +64,10 @@ export function ChatTurn({
   reportDedupeKeys?: Set<string>
 }) {
   const t = useT()
+  // The typography plugin's `prose-invert` hardcodes light-on-dark prose
+  // colors; only apply it when the resolved theme is actually dark, or
+  // markdown answers render illegibly on the light-theme `bg-muted` panel.
+  const { resolved } = useTheme()
   const sources = dedupeSources(turn.meta?.sources ?? [])
   const reportItem =
     turn.done && turn.assistant && sessionId && turnIdx != null
@@ -76,17 +82,22 @@ export function ChatTurn({
   const inReport = reportItem != null && (reportDedupeKeys?.has(reportItem.dedupe_key) ?? false)
   return (
     <article className="space-y-3">
-      <div className="rounded-md bg-zinc-900 px-4 py-2 self-end max-w-2xl ml-auto">
+      <div className="rounded-md bg-muted px-4 py-2 self-end max-w-2xl ml-auto">
         <div className="text-xs text-muted-foreground mb-1">{t('chat.you')}</div>
         <div className="whitespace-pre-wrap">{turn.user}</div>
       </div>
-      <div className="rounded-md bg-zinc-950 border border-border px-4 py-3">
+      <div className="rounded-md bg-muted border border-border px-4 py-3">
         <div className="flex items-center justify-between gap-2 mb-1">
           <div className="text-xs text-muted-foreground">{t('chat.assistant')}</div>
           {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
         </div>
         {turn.assistant ? (
-          <div className="prose prose-invert prose-sm max-w-none prose-p:my-2 prose-pre:bg-zinc-900 prose-code:before:content-none prose-code:after:content-none">
+          <div
+            className={cn(
+              'prose prose-sm max-w-none prose-p:my-2 prose-pre:bg-muted prose-code:before:content-none prose-code:after:content-none',
+              resolved === 'dark' && 'prose-invert'
+            )}
+          >
             <Markdown remarkPlugins={[remarkGfm]}>{turn.assistant}</Markdown>
           </div>
         ) : (
