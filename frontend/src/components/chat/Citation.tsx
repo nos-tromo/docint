@@ -25,7 +25,7 @@ export function Citation({ source }: { source: Source }) {
       {open && (
         <div className="mt-2 space-y-2">
           {refMeta.length > 0 && (
-            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+            <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
               {refMeta.map(({ label, value }) => (
                 <div key={label} className="contents">
                   <dt className="text-muted-foreground">{label}</dt>

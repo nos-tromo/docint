@@ -97,3 +97,32 @@ describe('HateSpeechTable', () => {
     expect(snap.snapshot.translation).toEqual({ text: 'übersetzt', target_lang: 'de', model: 'm' })
   })
 })
+
+it('caps the metadata value track so unbreakable values cannot overflow the column', () => {
+  // Regression: grid items default to min-content minimums, and
+  // overflow-wrap:break-word does NOT reduce min-content — a long URL in a
+  // plain `1fr` value track widens the dl across the Text column and makes
+  // the body scroller wider than the fixed header (misaligned columns).
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  render(
+    <QueryClientProvider client={qc}>
+      <HateSpeechTable
+        rows={[
+          {
+            chunk_id: 'c1',
+            category: 'other',
+            reason: 'why',
+            confidence: 'high',
+            chunk_text: 'text',
+            reference_metadata: {
+              url: 'https://example.invalid/' + 'x'.repeat(160),
+            },
+          } as never,
+        ]}
+        collection="c"
+      />
+    </QueryClientProvider>
+  )
+  const dl = document.querySelector('[data-testid="hate-speech-row"] dl')
+  expect(dl?.className).toContain('grid-cols-[auto_minmax(0,1fr)]')
+})

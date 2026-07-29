@@ -190,3 +190,30 @@ describe('EntityFinding', () => {
     expect(snap.snapshot.translation).toEqual({ text: 'übersetzt', target_lang: 'de', model: 'm' })
   })
 })
+
+it('caps the metadata value track so unbreakable values cannot overflow the column', () => {
+  // Same regression class as HateSpeechTable: min-content flooring of a plain
+  // `1fr` track by an unbreakable metadata value (URL/id/path).
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  render(
+    <QueryClientProvider client={qc}>
+      <EntityFinding
+        index={1}
+        source={
+          {
+            filename: 'f.csv',
+            chunk_id: 'c1',
+            chunk_text: 'text',
+            reference_metadata: { url: 'https://example.invalid/' + 'x'.repeat(160) },
+            entities: [],
+          } as never
+        }
+        highlightTerms={[]}
+        selectedTypeLower=""
+        gridTemplate="1fr"
+      />
+    </QueryClientProvider>
+  )
+  const dl = document.querySelector('dl')
+  expect(dl?.className).toContain('grid-cols-[auto_minmax(0,1fr)]')
+})
