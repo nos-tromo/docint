@@ -16,7 +16,8 @@ import { hateCategoryLabel } from '@/lib/hateCategoryLabel'
 export type { HateSpeechRow }
 
 // Shared column template for the header row and every body row. Metadata is a
-// single column (reason / confidence / chunk id / reference metadata).
+// single column: a clamped reason block above curated reference-metadata
+// pills (confidence and chunk id stay display-dropped).
 const HATE_GRID = '2.5rem 6.5rem minmax(8rem,0.8fr) minmax(9rem,1.1fr) minmax(12rem,1.8fr) 6rem'
 
 interface Props {
@@ -38,8 +39,10 @@ function locationParts(r: HateSpeechRow, t: (key: keyof Strings, vars?: Record<s
 
 /**
  * One flagged chunk rendered as a table row. The former accordion's hidden
- * fields (reason, confidence, chunk id, reference metadata) are flattened into
- * a single Metadata column shown inline, mirroring the entity findings table.
+ * reason and reference metadata are shown inline in a single Metadata
+ * column — a clamped reason block above curated metadata pills. Confidence
+ * and chunk id remain protocol data (CSV export, report snapshots) but are
+ * not surfaced in this display cell.
  */
 function HateSpeechTableRow({
   row,
