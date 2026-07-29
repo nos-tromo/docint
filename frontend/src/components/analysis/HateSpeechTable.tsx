@@ -79,9 +79,7 @@ function HateSpeechTableRow({
       </div>
       <div className="min-w-0 space-y-1.5">
         {reason && (
-          <ClampedText length={reason.length} className="text-xs text-zinc-300">
-            {reason}
-          </ClampedText>
+          <ClampedText length={reason.length}>{reason}</ClampedText>
         )}
         {reason && pills.length > 0 && <div className="border-t border-border" />}
         <MetadataPills items={pills} />
