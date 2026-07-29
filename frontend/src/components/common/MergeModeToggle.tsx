@@ -36,7 +36,7 @@ export function MergeModeToggle() {
           className={cn(
             'px-3 py-1 transition-colors',
             mode === m.value
-              ? 'bg-zinc-800 text-foreground'
+              ? 'bg-muted text-foreground'
               : 'text-muted-foreground hover:text-foreground'
           )}
         >

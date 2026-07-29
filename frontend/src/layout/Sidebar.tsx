@@ -132,7 +132,7 @@ export function Sidebar() {
   }
 
   return (
-    <aside className="w-72 border-r border-border p-4 flex flex-col gap-4 bg-zinc-950">
+    <aside className="w-72 border-r border-border p-4 flex flex-col gap-4 bg-muted">
       <h2 className="text-lg font-semibold tracking-tight">Document Intelligence</h2>
 
       <nav className="flex flex-col gap-1">
@@ -143,7 +143,7 @@ export function Sidebar() {
             end={to === '/'}
             className={({ isActive }) =>
               cn(
-                'rounded-md px-3 py-2 text-sm hover:bg-zinc-800',
+                'rounded-md px-3 py-2 text-sm hover:bg-muted',
                 isActive && 'bg-primary/15 text-primary'
               )
             }
@@ -168,7 +168,7 @@ export function Sidebar() {
               'h-2 w-2 shrink-0 rounded-full',
               selected
                 ? 'bg-primary shadow-[0_0_6px_var(--color-primary)]'
-                : 'bg-zinc-600'
+                : 'bg-muted-foreground/40'
             )}
           />
           {selected && (
@@ -183,7 +183,7 @@ export function Sidebar() {
           )}
           <select
             aria-label={t('common.select_collection_aria')}
-            className="min-w-0 flex-1 cursor-pointer bg-zinc-950 text-sm text-foreground outline-hidden"
+            className="min-w-0 flex-1 cursor-pointer bg-muted text-sm text-foreground outline-hidden"
             value={selectedIndex >= 0 ? String(selectedIndex) : ''}
             onChange={(e) => onSelectCollection(entries[Number(e.target.value)])}
           >
@@ -214,7 +214,7 @@ export function Sidebar() {
               onClick={() => onDeleteCollection(selected, selectedOwner)}
               aria-label={t('common.delete_collection_aria', { name: selected })}
               title={t('common.delete_collection_title')}
-              className="shrink-0 text-zinc-500 transition-colors hover:text-red-400"
+              className="shrink-0 text-muted-foreground transition-colors hover:text-red-400"
             >
               <svg
                 viewBox="0 0 24 24"
@@ -275,7 +275,7 @@ export function Sidebar() {
                   onClick={() => onPickSession(s.id)}
                   className={cn(
                     'flex-1 text-left text-sm px-2 py-1 rounded-md truncate',
-                    active ? 'bg-primary/10 text-primary' : 'hover:bg-zinc-900'
+                    active ? 'bg-primary/10 text-primary' : 'hover:bg-muted'
                   )}
                   title={s.title ?? s.id}
                 >
@@ -284,7 +284,7 @@ export function Sidebar() {
                 <button
                   type="button"
                   onClick={() => onDeleteSession(s.id)}
-                  className="text-xs text-zinc-500 hover:text-red-400 px-1"
+                  className="text-xs text-muted-foreground hover:text-red-400 px-1"
                   aria-label={t('common.delete_session_aria')}
                 >
                   ×

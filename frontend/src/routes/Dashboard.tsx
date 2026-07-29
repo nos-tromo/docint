@@ -62,7 +62,7 @@ export function Dashboard() {
         />
       </div>
 
-      <section className="rounded-lg border border-border bg-zinc-900 p-4">
+      <section className="rounded-lg border border-border bg-muted p-4">
         <header className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-medium">{t('dashboard.top_entities')}</h2>
           <div className="flex items-center gap-3 text-sm">
@@ -75,7 +75,7 @@ export function Dashboard() {
                 max={100}
                 value={topK}
                 onChange={(e) => setTopK(Number(e.target.value))}
-                className="w-16 bg-zinc-950 border border-border rounded-md px-2 py-1"
+                className="w-16 bg-muted border border-border rounded-md px-2 py-1"
               />
             </label>
             <label className="flex items-center gap-2">
@@ -85,7 +85,7 @@ export function Dashboard() {
                 min={1}
                 value={minMentions}
                 onChange={(e) => setMinMentions(Number(e.target.value))}
-                className="w-16 bg-zinc-950 border border-border rounded-md px-2 py-1"
+                className="w-16 bg-muted border border-border rounded-md px-2 py-1"
               />
             </label>
           </div>
@@ -97,7 +97,7 @@ export function Dashboard() {
         )}
       </section>
 
-      <section className="rounded-lg border border-border bg-zinc-900 p-4">
+      <section className="rounded-lg border border-border bg-muted p-4">
         <h2 className="text-lg font-medium mb-3">{t('dashboard.recent_sessions')}</h2>
         {!collection ? (
           <div className="text-sm text-muted-foreground">{t('common.select_collection_to_see_chats')}</div>

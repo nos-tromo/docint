@@ -208,7 +208,7 @@ export function Ingest() {
           value={state.collection}
           onChange={(e) => dispatch({ type: 'set_collection', v: e.target.value })}
           placeholder="my-collection"
-          className="bg-zinc-900 border border-border rounded-md px-2 py-1 text-sm"
+          className="bg-muted border border-border rounded-md px-2 py-1 text-sm"
         />
         <datalist id="existing-collections">
           {collections?.mine.map((c) => (

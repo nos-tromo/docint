@@ -24,7 +24,7 @@ export function TranslateControl({ rawText, onTranslated, className }: Props) {
   const t = useT()
   const body = translatable.translation ?? rawText
   return (
-    <div className={cn('group relative rounded bg-zinc-950/70 p-2.5 pr-9 text-xs', className)}>
+    <div className={cn('group relative rounded bg-muted/70 p-2.5 pr-9 text-xs', className)}>
       <TranslateToggle
         shown={translatable.shown}
         busy={translatable.busy}

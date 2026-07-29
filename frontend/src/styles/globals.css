@@ -4,8 +4,16 @@
 @source "../../node_modules/@infra/ui/dist";
 
 :root {
-  color-scheme: dark;
-  --app-accent: hsl(160 84% 39%);   /* emerald — docint's brand accent */
+  /* color-scheme is theme-reactive — @infra/ui's theme.css sets it per
+     light/dark state (light default, [data-theme='dark'] override,
+     prefers-color-scheme fallback). Do not hardcode it here. */
+  /* emerald — docint's brand accent. L=27% here is the LIGHT-theme value
+     (WCAG AA as text-primary on the light `--color-background`: ~5.0:1,
+     the brand's original L=39% only clears ~2.6:1 on white). The dark-theme
+     value (L=39%, ~9:1 on the dark background) lives in the two overrides
+     below, mirroring @infra/ui's own light/dark/prefers-color-scheme
+     pattern in theme.css so this tracks data-theme exactly. */
+  --app-accent: hsl(160 84% 27%);
   /* Single source of truth for the app font. Tailwind's `sans` AND `mono`
      families both resolve to this var (see tailwind.config.ts), so every
      piece of text — including markdown code blocks and any stray
@@ -15,6 +23,16 @@
   /* Override @infra/ui's default monospace stack so all text (incl. code
      blocks in prose) stays Inter, matching docint's unified-font design. */
   --font-mono: var(--app-font);
+}
+
+:root[data-theme='dark'] {
+  --app-accent: hsl(160 84% 39%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --app-accent: hsl(160 84% 39%);
+  }
 }
 
 html, body, #root {
@@ -43,10 +61,11 @@ option {
 
 /* Explicitly theme native <option> popup on Linux/GTK where the OS
    theme overrides transparent/inherited colours, causing unreadable
-   light-text-on-light-background in the dropdown list. */
+   light-text-on-light-background in the dropdown list. Uses the semantic
+   tokens (not literal colors) so it tracks the active theme. */
 option {
-  background-color: rgb(9 9 11);
-  color: rgb(244 244 245);
+  background-color: var(--color-background);
+  color: var(--color-foreground);
 }
 
 * {
@@ -57,6 +76,6 @@ option {
   width: 10px;
   height: 10px;
 }
-::-webkit-scrollbar-track { @apply bg-zinc-900; }
-::-webkit-scrollbar-thumb { @apply bg-zinc-700 rounded-full; }
-::-webkit-scrollbar-thumb:hover { @apply bg-zinc-600; }
+::-webkit-scrollbar-track { @apply bg-muted; }
+::-webkit-scrollbar-thumb { @apply bg-border rounded-full; }
+::-webkit-scrollbar-thumb:hover { @apply bg-muted-foreground/50; }

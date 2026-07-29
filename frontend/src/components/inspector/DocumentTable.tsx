@@ -203,12 +203,12 @@ export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, colle
       </div>
 
       {docs.length === 0 && !isFetching ? (
-        <div className="rounded-lg border border-dashed border-border bg-zinc-900/50 p-10 text-center">
+        <div className="rounded-lg border border-dashed border-border bg-muted/50 p-10 text-center">
           <p className="text-sm text-muted-foreground">{t('table.empty_title')}</p>
           <p className="mt-1 text-xs text-muted-foreground">{t('table.empty_hint')}</p>
         </div>
       ) : (
-        <div className="overflow-hidden rounded-lg border border-border bg-zinc-900">
+        <div className="overflow-hidden rounded-lg border border-border bg-muted">
           <div
             ref={scrollRef}
             className="max-h-[70vh] overflow-auto"
@@ -221,7 +221,7 @@ export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, colle
                 <div
                   key={hg.id}
                   role="row"
-                  className="sticky top-0 z-10 grid gap-x-4 border-b border-border bg-zinc-900 px-4 py-2.5 text-xs font-medium uppercase tracking-wide text-muted-foreground"
+                  className="sticky top-0 z-10 grid gap-x-4 border-b border-border bg-muted px-4 py-2.5 text-xs font-medium uppercase tracking-wide text-muted-foreground"
                   style={{ gridTemplateColumns: GRID_COLUMNS }}
                 >
                   {hg.headers.map((h) => (

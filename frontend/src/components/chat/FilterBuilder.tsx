@@ -7,7 +7,7 @@ export function FilterBuilder() {
   const t = useT()
   const s = useChatFiltersStore()
   return (
-    <div className="rounded-md border border-border bg-zinc-900 p-3 space-y-3 text-sm">
+    <div className="rounded-md border border-border bg-muted p-3 space-y-3 text-sm">
       <label className="flex items-center gap-2">
         <input
           type="checkbox"
@@ -26,7 +26,7 @@ export function FilterBuilder() {
                 value={s.mimePattern}
                 onChange={(e) => s.setMimePattern(e.target.value)}
                 placeholder="application/pdf"
-                className="bg-zinc-950 border border-border rounded-md px-2 py-1"
+                className="bg-muted border border-border rounded-md px-2 py-1"
               />
             </label>
             <label className="flex flex-col gap-1">
@@ -44,7 +44,7 @@ export function FilterBuilder() {
                 type="date"
                 value={s.dateFrom}
                 onChange={(e) => s.setDateFrom(e.target.value)}
-                className="bg-zinc-950 border border-border rounded-md px-2 py-1"
+                className="bg-muted border border-border rounded-md px-2 py-1"
               />
             </label>
             <label className="flex flex-col gap-1">
@@ -53,7 +53,7 @@ export function FilterBuilder() {
                 type="date"
                 value={s.dateTo}
                 onChange={(e) => s.setDateTo(e.target.value)}
-                className="bg-zinc-950 border border-border rounded-md px-2 py-1"
+                className="bg-muted border border-border rounded-md px-2 py-1"
               />
             </label>
           </div>
@@ -64,7 +64,7 @@ export function FilterBuilder() {
               <button
                 type="button"
                 onClick={() => s.addRule()}
-                className="text-xs px-2 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700"
+                className="text-xs px-2 py-1 rounded-md bg-muted hover:bg-muted"
               >
                 {t('chat.add_rule')}
               </button>
@@ -76,12 +76,12 @@ export function FilterBuilder() {
                     value={r.field}
                     onChange={(e) => s.updateRule(r.id, { field: e.target.value })}
                     placeholder={t('chat.field_placeholder')}
-                    className="bg-zinc-950 border border-border rounded-md px-2 py-1"
+                    className="bg-muted border border-border rounded-md px-2 py-1"
                   />
                   <select
                     value={r.operator}
                     onChange={(e) => s.updateRule(r.id, { operator: e.target.value })}
-                    className="bg-zinc-950 border border-border rounded-md px-2 py-1"
+                    className="bg-muted border border-border rounded-md px-2 py-1"
                   >
                     {OPERATORS.map((o) => (
                       <option key={o} value={o}>
@@ -93,7 +93,7 @@ export function FilterBuilder() {
                     value={r.value}
                     onChange={(e) => s.updateRule(r.id, { value: e.target.value })}
                     placeholder={t('chat.value_placeholder')}
-                    className="bg-zinc-950 border border-border rounded-md px-2 py-1"
+                    className="bg-muted border border-border rounded-md px-2 py-1"
                   />
                   <button
                     type="button"

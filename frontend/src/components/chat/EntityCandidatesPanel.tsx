@@ -19,7 +19,7 @@ export function EntityCandidatesPanel({ meta }: { meta: ChatFinalEvent }) {
   if (candidates.length === 0 && groups.length === 0) return null
 
   return (
-    <div className="rounded-md border border-border bg-zinc-900 p-3 space-y-3 text-sm">
+    <div className="rounded-md border border-border bg-muted p-3 space-y-3 text-sm">
       <div className="text-xs uppercase text-muted-foreground">{t('chat.entity_disambiguation')}</div>
 
       {candidates.length > 0 && (
@@ -32,7 +32,7 @@ export function EntityCandidatesPanel({ meta }: { meta: ChatFinalEvent }) {
               return (
                 <li
                   key={i}
-                  className="rounded-md bg-zinc-800 px-2 py-0.5 text-xs"
+                  className="rounded-md bg-muted px-2 py-0.5 text-xs"
                   title={type ?? undefined}
                 >
                   {label}
@@ -52,7 +52,7 @@ export function EntityCandidatesPanel({ meta }: { meta: ChatFinalEvent }) {
               const label = readField(g, 'label', 'name', 'text') ?? t('chat.group_fallback', { n: i + 1 })
               const members = ((g as Record<string, unknown>).members ?? (g as Record<string, unknown>).candidates ?? []) as unknown[]
               return (
-                <li key={i} className="rounded-md bg-zinc-950 px-2 py-1">
+                <li key={i} className="rounded-md bg-muted px-2 py-1">
                   <div className="font-medium text-xs">{label}</div>
                   {members.length > 0 && (
                     <ul className="mt-1 flex flex-wrap gap-1">
@@ -61,7 +61,7 @@ export function EntityCandidatesPanel({ meta }: { meta: ChatFinalEvent }) {
                         return (
                           <li
                             key={j}
-                            className="rounded bg-zinc-800 px-1.5 py-0.5 text-[11px]"
+                            className="rounded bg-muted px-1.5 py-0.5 text-[11px]"
                           >
                             {ml}
                           </li>

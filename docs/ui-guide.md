@@ -19,7 +19,7 @@ which proxies API calls to the backend on `:8000`.
 | Routing | `react-router-dom` v7 (`src/routes/Router.tsx`) |
 | Server state | TanStack Query (`src/api/queryClient.ts`) |
 | Client state | Zustand (`src/stores/`) |
-| Styling | Tailwind CSS (dark theme) |
+| Styling | Tailwind CSS v4 + `@infra/ui` semantic tokens (light default, OS-preference/`AppHeader`-toggled dark) |
 | Tests | Vitest + Testing Library (happy-dom) |
 
 `package.json` scripts: `dev`, `build` (`tsc -b && vite build`), `preview`,
@@ -30,9 +30,10 @@ which proxies API calls to the backend on `:8000`.
 - `index.html` → `src/main.tsx` mounts `<App>` into `#root`.
 - `src/App.tsx` wraps the tree in the TanStack Query provider and the
   React Router `BrowserRouter`, then renders `src/routes/Router.tsx`.
-- `src/layout/Shell.tsx` is the persistent layout (sidebar + main area);
-  `src/layout/Sidebar.tsx` holds the navigation, the collection selector,
-  and the session list.
+- `src/layout/Shell.tsx` is the persistent layout: `@infra/ui`'s `AppHeader`
+  (federation portal link + light/dark/system theme toggle) on top, then a
+  sidebar + main-area row below; `src/layout/Sidebar.tsx` holds the
+  navigation, the collection selector, and the session list.
 
 ## Routes
 

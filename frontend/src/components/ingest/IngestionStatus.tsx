@@ -46,9 +46,9 @@ function taskLabel(raw: string, t: (key: keyof Strings) => string): string {
 
 const PHASE_THEME: Record<IngestPhase, PhaseTheme> = {
   idle: {
-    border: 'border-zinc-800',
-    pill: 'bg-zinc-500',
-    label: 'text-zinc-300',
+    border: 'border-border',
+    pill: 'bg-muted-foreground',
+    label: 'text-muted-foreground',
     textKey: 'ingest.status_idle',
     pulse: false,
     tone: 'sky'
@@ -106,7 +106,7 @@ function Bar({
           ? 'bg-emerald-500'
           : 'bg-red-500'
   return (
-    <div className="h-1.5 w-full rounded-full bg-zinc-800 overflow-hidden">
+    <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
       <div
         className={cn('h-full transition-[width] duration-300 ease-out', fill)}
         style={{ width: `${pct}%` }}
@@ -141,7 +141,7 @@ export function IngestionStatus({ status }: { status: IngestStatus }) {
 
   return (
     <div
-      className={cn('rounded-lg border bg-zinc-950 p-4', theme.border)}
+      className={cn('rounded-lg border bg-muted p-4', theme.border)}
       role="status"
       aria-live="polite"
     >
@@ -257,7 +257,7 @@ function UploadingBody({ status }: { status: IngestStatus }) {
       )}
       <Bar value={barValue} max={barMax} tone="sky" />
       {status.totalFiles > 0 && (
-        <div className="text-xs text-muted-foreground border-t border-zinc-800 pt-3 mt-3 tabular-nums">
+        <div className="text-xs text-muted-foreground border-t border-border pt-3 mt-3 tabular-nums">
           {t('ingest.files_saved_of', { saved: status.filesSaved, total: status.totalFiles })}
         </div>
       )}
@@ -294,7 +294,7 @@ function ProcessingBody({ status }: { status: IngestStatus }) {
       )}
 
       {hasTasks && (
-        <div className={cn('space-y-2', hasStage && 'border-t border-zinc-800 pt-3')}>
+        <div className={cn('space-y-2', hasStage && 'border-t border-border pt-3')}>
           {status.tasks.map((task) => (
             <div key={task.key} className="space-y-1">
               <div className="flex items-baseline justify-between gap-2">
@@ -314,7 +314,7 @@ function ProcessingBody({ status }: { status: IngestStatus }) {
       )}
 
       {(status.filesSaved > 0 || status.indexed > 0) && (
-        <div className="text-xs text-muted-foreground border-t border-zinc-800 pt-3 tabular-nums">
+        <div className="text-xs text-muted-foreground border-t border-border pt-3 tabular-nums">
           {t('ingest.files_saved_indexed', { saved: status.filesSaved, indexed: status.indexed })}
         </div>
       )}

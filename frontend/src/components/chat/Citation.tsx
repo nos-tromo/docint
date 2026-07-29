@@ -13,7 +13,7 @@ export function Citation({ source }: { source: Source }) {
   const collection = useUiStore((s) => s.selectedCollection)
   const refMeta = referenceMetadataItems(source.reference_metadata, {}, t)
   return (
-    <div className="rounded-md border border-border bg-zinc-900 px-3 py-2 text-sm">
+    <div className="rounded-md border border-border bg-muted px-3 py-2 text-sm">
       <button
         type="button"
         className="flex items-center justify-between w-full gap-2"
