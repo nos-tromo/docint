@@ -12,7 +12,7 @@ export function MetadataPills({ items }: { items: MetadataPillItem[] }) {
       {items.map((item) => (
         <li
           key={item.key}
-          className="inline-flex items-center gap-1 rounded border border-border bg-zinc-950 px-1.5 py-0.5 text-[11px]"
+          className="inline-flex items-center gap-1 rounded border border-border bg-muted px-1.5 py-0.5 text-[11px]"
         >
           {item.href ? (
             <a
