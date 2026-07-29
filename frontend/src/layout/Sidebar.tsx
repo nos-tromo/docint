@@ -143,7 +143,7 @@ export function Sidebar() {
             end={to === '/'}
             className={({ isActive }) =>
               cn(
-                'rounded-md px-3 py-2 text-sm hover:bg-muted',
+                'rounded-md px-3 py-2 text-sm hover:bg-accent',
                 isActive && 'bg-primary/15 text-primary'
               )
             }
@@ -254,8 +254,12 @@ export function Sidebar() {
           {sessionsLoading && (
             <li className="px-2 py-1 text-sm text-muted-foreground">{t('common.loading_chats')}</li>
           )}
+          {/* Opaque self-contained chip (fixed dark bg + light fg), matching
+              ValidationBanner's convention — not a translucent tint over the
+              theme-reactive sidebar background, which loses contrast in the
+              light theme. */}
           {!sessionsLoading && sessionsError && (
-            <li role="alert" className="rounded-md border border-amber-900/60 bg-amber-500/10 px-2 py-2 text-sm text-amber-200">
+            <li role="alert" className="rounded-md border border-amber-700 bg-amber-950 px-2 py-2 text-sm text-amber-200">
               {getSessionsStatusMessage(sessionsError, t)}
             </li>
           )}
@@ -275,7 +279,7 @@ export function Sidebar() {
                   onClick={() => onPickSession(s.id)}
                   className={cn(
                     'flex-1 text-left text-sm px-2 py-1 rounded-md truncate',
-                    active ? 'bg-primary/10 text-primary' : 'hover:bg-muted'
+                    active ? 'bg-primary/10 text-primary' : 'hover:bg-accent'
                   )}
                   title={s.title ?? s.id}
                 >

@@ -64,7 +64,7 @@ export function FilterBuilder() {
               <button
                 type="button"
                 onClick={() => s.addRule()}
-                className="text-xs px-2 py-1 rounded-md bg-muted hover:bg-muted"
+                className="text-xs px-2 py-1 rounded-md border border-border bg-background hover:bg-accent"
               >
                 {t('chat.add_rule')}
               </button>

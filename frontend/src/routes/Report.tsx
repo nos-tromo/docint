@@ -334,7 +334,7 @@ export function Report() {
                         key={e.format}
                         href={reportExportHref(report.id, e.format)}
                         {...(e.view ? { target: '_blank', rel: 'noreferrer' } : { download: true })}
-                        className="block rounded px-3 py-1.5 text-sm hover:bg-muted whitespace-nowrap"
+                        className="block rounded px-3 py-1.5 text-sm hover:bg-accent whitespace-nowrap"
                         title={e.view ? t('report.open_new_tab_title') : t('report.download_format_title', { label: e.label })}
                       >
                         {e.label}

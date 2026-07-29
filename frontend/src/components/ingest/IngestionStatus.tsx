@@ -56,7 +56,10 @@ const PHASE_THEME: Record<IngestPhase, PhaseTheme> = {
   uploading: {
     border: 'border-sky-700',
     pill: 'bg-sky-400',
-    label: 'text-sky-200',
+    // text-[var(--status-*-fg)]: text rendered directly on the theme-reactive
+    // bg-muted panel below needs its own light/dark pair (see globals.css) —
+    // a fixed Tailwind shade like text-sky-200 is only AA on a dark bg.
+    label: 'text-[var(--status-sky-fg)]',
     textKey: 'ingest.status_uploading',
     pulse: true,
     tone: 'sky'
@@ -64,7 +67,7 @@ const PHASE_THEME: Record<IngestPhase, PhaseTheme> = {
   processing: {
     border: 'border-amber-700',
     pill: 'bg-amber-400',
-    label: 'text-amber-200',
+    label: 'text-[var(--status-amber-fg)]',
     textKey: 'ingest.status_processing',
     pulse: true,
     tone: 'amber'
@@ -72,7 +75,7 @@ const PHASE_THEME: Record<IngestPhase, PhaseTheme> = {
   complete: {
     border: 'border-emerald-700',
     pill: 'bg-emerald-400',
-    label: 'text-emerald-200',
+    label: 'text-[var(--status-emerald-fg)]',
     textKey: 'ingest.status_complete',
     pulse: false,
     tone: 'emerald'
@@ -80,7 +83,7 @@ const PHASE_THEME: Record<IngestPhase, PhaseTheme> = {
   error: {
     border: 'border-red-700',
     pill: 'bg-red-400',
-    label: 'text-red-200',
+    label: 'text-[var(--status-red-fg)]',
     textKey: 'ingest.status_failed',
     pulse: false,
     tone: 'red'
@@ -175,7 +178,9 @@ function Header({
           <span
             className={cn(
               'text-xs font-medium',
-              status.phase === 'complete' ? 'text-emerald-200' : 'text-red-200'
+              status.phase === 'complete'
+                ? 'text-[var(--status-emerald-fg)]'
+                : 'text-[var(--status-red-fg)]'
             )}
             aria-hidden="true"
           >
@@ -330,7 +335,7 @@ function CompleteBody({ status }: { status: IngestStatus }) {
   if (status.totalChunks > 0) parts.push(t('ingest.chunks', { count: status.totalChunks }))
   const summary = parts.length > 0 ? parts.join(' · ') : t('ingest.finished')
   return (
-    <div className="mt-3 text-sm text-emerald-200 tabular-nums">
+    <div className="mt-3 text-sm text-[var(--status-emerald-fg)] tabular-nums">
       {summary}
     </div>
   )
@@ -341,7 +346,7 @@ function ErrorBody({ status }: { status: IngestStatus }) {
   // errorMessage is client-composed catalog copy (see deriveIngestStatus);
   // the generic key stands in when no terminal message was captured.
   return (
-    <div className="mt-3 text-sm text-red-200">
+    <div className="mt-3 text-sm text-[var(--status-red-fg)]">
       {status.errorMessage ?? t('ingest.failed_default')}
     </div>
   )

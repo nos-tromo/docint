@@ -32,7 +32,7 @@ export function EntityCandidatesPanel({ meta }: { meta: ChatFinalEvent }) {
               return (
                 <li
                   key={i}
-                  className="rounded-md bg-muted px-2 py-0.5 text-xs"
+                  className="rounded-md border border-border bg-background px-2 py-0.5 text-xs"
                   title={type ?? undefined}
                 >
                   {label}
@@ -52,7 +52,7 @@ export function EntityCandidatesPanel({ meta }: { meta: ChatFinalEvent }) {
               const label = readField(g, 'label', 'name', 'text') ?? t('chat.group_fallback', { n: i + 1 })
               const members = ((g as Record<string, unknown>).members ?? (g as Record<string, unknown>).candidates ?? []) as unknown[]
               return (
-                <li key={i} className="rounded-md bg-muted px-2 py-1">
+                <li key={i} className="rounded-md border border-border bg-background px-2 py-1">
                   <div className="font-medium text-xs">{label}</div>
                   {members.length > 0 && (
                     <ul className="mt-1 flex flex-wrap gap-1">
