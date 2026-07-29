@@ -7,7 +7,6 @@ import { useCollections, useDeleteCollection, useSelectCollection } from '@/hook
 import { useDeleteSession, useSessions, sessionsKey } from '@/hooks/useSessions'
 import { useUiStore } from '@/stores/ui'
 import { cn } from '@/lib/cn'
-import { VersionBadge } from '@/components/VersionBadge'
 import { buildCollectionEntries, entryMatches, type CollectionEntry } from '@/lib/collectionEntries'
 import { useT } from '@/i18n/LanguageContext'
 
@@ -133,8 +132,6 @@ export function Sidebar() {
 
   return (
     <aside className="w-72 border-r border-border p-4 flex flex-col gap-4 bg-muted">
-      <h2 className="text-lg font-semibold tracking-tight">Document Intelligence</h2>
-
       <nav className="flex flex-col gap-1">
         {NAV.map(({ to, key }) => (
           <NavLink
@@ -298,9 +295,6 @@ export function Sidebar() {
           })}
         </ul>
       </section>
-      <div className="pt-4">
-        <VersionBadge />
-      </div>
     </aside>
   )
 }

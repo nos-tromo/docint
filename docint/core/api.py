@@ -778,6 +778,12 @@ class VersionOut(BaseModel):
     version: str
 
 
+class WhoamiOut(BaseModel):
+    """The resolved calling identity, for the SPA header."""
+
+    username: str
+
+
 class AgentChatIn(BaseModel):
     """Request payload for a single agent chat turn."""
 
@@ -910,6 +916,23 @@ def get_ingest_defaults() -> dict[str, bool]:
 def get_version() -> VersionOut:
     """Return the running app version (unauthenticated, no principal)."""
     return VersionOut(version=__version__)
+
+
+@app.get("/whoami", response_model=WhoamiOut, tags=["Meta"])
+def get_whoami(principal: Principal = Depends(resolve_principal)) -> WhoamiOut:  # noqa: B008 — FastAPI dependency marker
+    """Return the resolved calling identity, for the SPA's AppHeader.
+
+    Principal-gated like every collection-scoped endpoint (401 without a
+    trusted header or a configured dev default identity) — unlike ``/config``
+    and ``/version``, which are deliberately unauthenticated.
+
+    Args:
+        principal (Principal): The resolved request principal.
+
+    Returns:
+        WhoamiOut: The caller's resolved principal name.
+    """
+    return WhoamiOut(username=principal.name)
 
 
 @app.get("/collections/list", response_model=list[str] | AdminCollectionsOut, tags=["Collections"])

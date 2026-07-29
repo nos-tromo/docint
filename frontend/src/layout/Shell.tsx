@@ -2,17 +2,23 @@ import type { ReactNode } from 'react'
 import { AppHeader } from '@infra/ui'
 import { Sidebar } from './Sidebar'
 import { useT } from '@/i18n/LanguageContext'
+import { useWhoami } from '@/hooks/useWhoami'
+import { useVersion } from '@/hooks/useVersion'
 
 export function Shell({ children }: { children: ReactNode }) {
   const t = useT()
+  const { data: whoami } = useWhoami()
+  const { data: version } = useVersion()
   return (
     <div className="min-h-screen flex flex-col bg-background text-foreground">
       <AppHeader
         title="docint"
-        // No identity source: X-Auth-User is a trusted header the edge
-        // gateway injects server-side for the backend only, never surfaced
-        // to the SPA — the header hides the user block when undefined.
-        user={undefined}
+        // The backend's trusted-header principal (X-Auth-User) is resolved
+        // server-side and echoed back via the authenticated GET /whoami —
+        // undefined while loading or on a fetch error, so the header simply
+        // omits the user block rather than showing a stale/wrong identity.
+        user={whoami?.username}
+        version={version?.version ? `v${version.version}` : undefined}
         homeLabel={t('appHeader.home')}
         themeLabels={{
           system: t('appHeader.theme_system'),
