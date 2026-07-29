@@ -2,12 +2,13 @@ import { useState } from 'react'
 import type { NerSourceRow } from '@/api/types'
 import { useUiStore } from '@/stores/ui'
 import { sourcePreviewUrl } from '@/api/ingest'
-import { referenceMetadataItems } from '@/lib/referenceMetadata'
+import { referenceMetadataPills, type MetadataPillItem } from '@/lib/referenceMetadata'
 import { highlightSegments } from '@/lib/highlight'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
 import { useTranslatable, type TranslationPayload } from '@/hooks/useTranslatable'
 import { TranslateToggle } from '@/components/common/TranslateToggle'
 import { ClampedText } from '@/components/common/ClampedText'
+import { MetadataPills } from '@/components/common/MetadataPills'
 import { entityFindingSnapshot } from '@/lib/reportSnapshots'
 import { useT } from '@/i18n/LanguageContext'
 
@@ -26,11 +27,6 @@ interface Props {
   reportDedupeKeys?: Set<string>
   /** Shared CSS grid template so every row aligns with the table header. */
   gridTemplate: string
-}
-
-function shortHash(hash: string | undefined | null): string {
-  if (!hash) return ''
-  return hash.length > 14 ? `${hash.slice(0, 10)}…${hash.slice(-4)}` : hash
 }
 
 function matchedMentions(
@@ -54,9 +50,10 @@ function matchedMentions(
 }
 
 /**
- * One finding (chunk) rendered as a table row. The previously-collapsed
- * locator and reference-metadata fields are flattened into a single "Metadata"
- * cell shown inline, so a long entity's findings are scannable without
+ * One finding (chunk) rendered as a table row. Locator and reference-metadata
+ * fields render as a curated pill list in a single "Metadata" cell (opaque IDs
+ * like chunk id and file hash are display-dropped but remain in CSV export
+ * and report snapshots), so a long entity's findings are scannable without
  * expanding each one. Only the (optionally long) chunk text stays behind a
  * per-row "Show more" toggle.
  */
@@ -75,7 +72,6 @@ export function EntityFinding({
     entityLabel != null ? entityFindingSnapshot(source, entityLabel, translation ?? undefined) : null
   const inReport = reportItem != null && (reportDedupeKeys?.has(reportItem.dedupe_key) ?? false)
   const collection = useUiStore((s) => s.selectedCollection)
-  const refMeta = referenceMetadataItems(source.reference_metadata, {}, t)
   const chunkText = (source.chunk_text ?? source.text ?? '').trim()
   const segments = highlightSegments(chunkText, highlightTerms)
   const translationState = useTranslatable(chunkText, setTranslation)
@@ -91,18 +87,16 @@ export function EntityFinding({
     locParts.push(t('common.loc_row', { row: source.row }))
   }
 
-  // Every secondary field collapses into the single Metadata column.
-  const metadata: Array<{ label: string; value: string }> = []
+  // Every secondary field collapses into the single Metadata column, as a
+  // curated pill list. Chunk id and file hash stay display-dropped (still in
+  // CSV export and report snapshots).
+  const pills: MetadataPillItem[] = []
   if (source.score !== null && source.score !== undefined) {
-    metadata.push({ label: t('common.meta_score'), value: source.score.toFixed(3) })
+    pills.push({ key: 'score', label: t('common.meta_score'), value: source.score.toFixed(3) })
   }
-  if (source.filetype) metadata.push({ label: t('common.meta_filetype'), value: String(source.filetype) })
-  if (source.source) metadata.push({ label: t('common.meta_reader'), value: String(source.source) })
-  if (source.chunk_id) metadata.push({ label: t('common.meta_chunk_id'), value: source.chunk_id })
-  if (source.file_hash) {
-    metadata.push({ label: t('common.meta_file_hash'), value: shortHash(source.file_hash) })
-  }
-  for (const item of refMeta) metadata.push(item)
+  if (source.filetype) pills.push({ key: 'filetype', value: String(source.filetype) })
+  if (source.source) pills.push({ key: 'reader', value: String(source.source) })
+  pills.push(...referenceMetadataPills(source.reference_metadata, t))
 
   return (
     <div
@@ -130,15 +124,8 @@ export function EntityFinding({
       </div>
 
       <div className="min-w-0 space-y-1.5">
-        {metadata.length > 0 ? (
-          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-0.5 text-xs">
-            {metadata.map(({ label, value }) => (
-              <div key={label} className="contents">
-                <dt className="text-muted-foreground whitespace-nowrap">{label}</dt>
-                <dd className="break-words">{value}</dd>
-              </div>
-            ))}
-          </dl>
+        {pills.length > 0 ? (
+          <MetadataPills items={pills} />
         ) : (
           <span className="text-xs text-muted-foreground">—</span>
         )}

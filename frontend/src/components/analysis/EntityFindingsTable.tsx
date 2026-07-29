@@ -52,7 +52,7 @@ export function EntityFindingsTable({
   const virtualizer = useVirtualizer({
     count: findings.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 132,
+    estimateSize: () => 104,
     overscan: 8
   })
 

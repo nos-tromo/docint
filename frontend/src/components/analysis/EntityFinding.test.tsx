@@ -20,7 +20,7 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks())
 
 describe('EntityFinding', () => {
-  it('shows source, locator and reference metadata inline (no expansion needed)', () => {
+  it('renders score, filetype and reader as pills; drops chunk id and file hash', () => {
     const source: NerSourceRow = {
       chunk_id: 'chunk-42',
       filename: 'paper.pdf',
@@ -48,15 +48,16 @@ describe('EntityFinding', () => {
     // Source column.
     expect(screen.getByText('paper.pdf')).toBeInTheDocument()
     expect(screen.getByText('page 7')).toBeInTheDocument()
-    // Metadata is collapsed into one column (a single dl).
-    const dl = screen.getByText(/^Score$/).closest('dl') as HTMLElement
-    expect(within(dl).getByText('0.840')).toBeInTheDocument()
-    expect(within(dl).getByText(/^Filetype$/)).toBeInTheDocument()
-    expect(within(dl).getByText('application/pdf')).toBeInTheDocument()
-    expect(within(dl).getByText(/^Chunk ID$/)).toBeInTheDocument()
-    expect(within(dl).getByText('chunk-42')).toBeInTheDocument()
-    expect(within(dl).getByText(/^File hash$/)).toBeInTheDocument()
-    expect(within(dl).getByText(/^Author$/)).toBeInTheDocument()
+    // Metadata is a curated pill list.
+    const pills = screen.getByTestId('metadata-pills')
+    expect(within(pills).getByText('Score')).toBeInTheDocument()
+    expect(within(pills).getByText('0.840')).toBeInTheDocument()
+    expect(within(pills).getByText('application/pdf')).toBeInTheDocument()
+    expect(within(pills).getByText('core_pdf')).toBeInTheDocument()
+    expect(within(pills).getByText(/^Author$/)).toBeInTheDocument()
+    expect(screen.queryByText(/^Chunk ID$/)).not.toBeInTheDocument()
+    expect(screen.queryByText('chunk-42')).not.toBeInTheDocument()
+    expect(screen.queryByText(/^File hash$/)).not.toBeInTheDocument()
     // Chunk text is rendered inline.
     expect(screen.getByText('The quick brown')).toBeInTheDocument()
   })
@@ -191,10 +192,12 @@ describe('EntityFinding', () => {
   })
 })
 
-it('caps the metadata value track so unbreakable values cannot overflow the column', () => {
-  // Same regression class as HateSpeechTable: min-content flooring of a plain
-  // `1fr` track by an unbreakable metadata value (URL/id/path).
+it('breaks unbreakable metadata values instead of overflowing the column', () => {
+  // Same regression class as HateSpeechTable: the pills cell wraps each
+  // value with `break-all` instead of relying on a plain `1fr` value track,
+  // which does not shrink below an unbreakable value's min-content width.
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const longValue = 'x'.repeat(160)
   render(
     <QueryClientProvider client={qc}>
       <EntityFinding
@@ -204,7 +207,7 @@ it('caps the metadata value track so unbreakable values cannot overflow the colu
             filename: 'f.csv',
             chunk_id: 'c1',
             chunk_text: 'text',
-            reference_metadata: { url: 'https://example.invalid/' + 'x'.repeat(160) },
+            reference_metadata: { type: longValue },
             entities: [],
           } as never
         }
@@ -214,6 +217,6 @@ it('caps the metadata value track so unbreakable values cannot overflow the colu
       />
     </QueryClientProvider>
   )
-  const dl = document.querySelector('dl')
-  expect(dl?.className).toContain('grid-cols-[auto_minmax(0,1fr)]')
+  const pillValue = screen.getByText(longValue)
+  expect(pillValue.className).toContain('break-all')
 })
