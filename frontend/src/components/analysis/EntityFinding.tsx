@@ -87,9 +87,6 @@ export function EntityFinding({
     locParts.push(t('common.loc_row', { row: source.row }))
   }
 
-  // Every secondary field collapses into the single Metadata column, as a
-  // curated pill list. Chunk id and file hash stay display-dropped (still in
-  // CSV export and report snapshots).
   const pills: MetadataPillItem[] = []
   if (source.score !== null && source.score !== undefined) {
     pills.push({ key: 'score', label: t('common.meta_score'), value: source.score.toFixed(3) })

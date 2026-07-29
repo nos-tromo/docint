@@ -119,4 +119,30 @@ describe('referenceMetadataPills', () => {
   it('returns [] for undefined metadata', () => {
     expect(referenceMetadataPills(undefined)).toEqual([])
   })
+
+  it('excludes posting_text like the other body-text fields', () => {
+    const pills = referenceMetadataPills({
+      network: 'Instagram',
+      posting_text: 'A full posting body that should never render as a bare pill.'
+    })
+    expect(pills).toEqual([{ key: 'network', value: 'Instagram' }])
+  })
+
+  it('only emits an href for http(s) URLs, falling back to a plain value pill otherwise', () => {
+    const pills = referenceMetadataPills({
+      url: 'javascript:alert(1)',
+      posting_url: 'https://fb.example/p1'
+    })
+    expect(pills).toContainEqual({ key: 'url', value: 'javascript:alert(1)' })
+    expect(pills).toContainEqual({
+      key: 'posting_url',
+      value: 'Open link ↗',
+      href: 'https://fb.example/p1'
+    })
+  })
+
+  it('falls back to a plain value pill for a malformed URL', () => {
+    const pills = referenceMetadataPills({ url: 'not a url' })
+    expect(pills).toEqual([{ key: 'url', value: 'not a url' }])
+  })
 })
