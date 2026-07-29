@@ -43,6 +43,7 @@ export const de: Strings = {
   'common.merge_orthographic': 'Orthografisch',
   'common.merge_exact': 'Exakt',
   'common.loading_ellipsis': 'Lädt…',
+  'common.pill_open_link': 'Beitrag öffnen ↗',
 
   // table (shared DataTable chrome)
   'table.col_filename': 'Dateiname',

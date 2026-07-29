@@ -40,6 +40,7 @@ export const en = {
   'common.merge_orthographic': 'Orthographic',
   'common.merge_exact': 'Exact',
   'common.loading_ellipsis': 'Loading…',
+  'common.pill_open_link': 'Open link ↗',
 
   // table (shared DataTable chrome)
   'table.col_filename': 'Filename',
