@@ -63,16 +63,17 @@ def test_ingest_proxy_uses_configurable_request_limit() -> None:
 
 def test_frontend_nginx_proxies_config_endpoint() -> None:
     """The SPA's /config fetch must reach the backend, not the SPA fallback."""
-    nginx_conf = (REPO_ROOT / "frontend" / "nginx" / "default.conf").read_text(encoding="utf-8")
-
-    assert "query|summarize|agent|config|version" in nginx_conf
+    assert "config" in _nginx_api_route_tokens()
 
 
 def test_frontend_nginx_proxies_version_endpoint() -> None:
     """The SPA's /version fetch must reach the backend, not the SPA fallback."""
-    nginx_conf = (REPO_ROOT / "frontend" / "nginx" / "default.conf").read_text(encoding="utf-8")
+    assert "version" in _nginx_api_route_tokens()
 
-    assert "config|version|docs" in nginx_conf
+
+def test_frontend_nginx_proxies_whoami_endpoint() -> None:
+    """The header's /whoami fetch must reach the backend, not the SPA fallback."""
+    assert "whoami" in _nginx_api_route_tokens()
 
 
 def test_frontend_nginx_proxies_translate_endpoint() -> None:
@@ -100,6 +101,11 @@ def _vite_api_prefixes() -> list[str]:
     match = re.search(r"API_PREFIXES\s*=\s*\[([^\]]*)\]", vite_conf)
     assert match is not None, "API_PREFIXES array not found in vite.config.ts"
     return [tok.strip().strip("'\"") for tok in match.group(1).split(",") if tok.strip()]
+
+
+def test_frontend_vite_proxies_whoami_endpoint() -> None:
+    """The Vite dev server must proxy /whoami to the backend, not 404."""
+    assert "whoami" in _vite_api_prefixes()
 
 
 def test_frontend_vite_proxies_translate_endpoint() -> None:

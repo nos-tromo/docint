@@ -8,7 +8,7 @@ const __dirname = dirname(__filename)
 
 const BACKEND = 'http://localhost:8000'
 
-const API_PREFIXES = ['collections', 'config', 'version', 'sessions', 'reports', 'sources', 'query', 'stream_query', 'summarize', 'ingest', 'agent', 'translate']
+const API_PREFIXES = ['collections', 'config', 'version', 'sessions', 'reports', 'sources', 'query', 'stream_query', 'summarize', 'ingest', 'agent', 'translate', 'whoami']
 
 export default defineConfig({
   base: '/docint/',
