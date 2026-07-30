@@ -45,6 +45,7 @@ from docint.agents.history import build_prior_turn
 from docint.cli import ingest as ingest_module
 from docint.core.auth.principal import Principal, resolve_principal
 from docint.core.errors import install_error_handlers
+from docint.core.jobs import IngestJobManager, IngestJobState, JobStatus, PushEvent
 from docint.core.rag import RAG, EmptyIngestionError
 from docint.core.retrieval_filters import build_metadata_filters, build_qdrant_filter
 from docint.core.state.session_manager import SessionCollectionMismatchError
@@ -100,14 +101,9 @@ if load_metrics_env().enabled:
 
 rag = RAG(qdrant_collection="")
 SIMULATED_STREAM_TOKEN_DELAY_SECONDS = 0.03
-# Interval (seconds) between checks for client disconnect while the SSE
-# ingestion stream is otherwise idle. Shorter values notice disconnects
-# faster at a tiny CPU cost; longer values are cheaper. 1 s is a
-# compromise. Tests may monkeypatch this to a smaller value.
-INGEST_DISCONNECT_POLL_INTERVAL_S = 1.0
 # Interval (seconds) between client-disconnect checks while a blocking sync
 # generator (chat/summary streaming) is being drained on a worker thread.
-# Mirrors INGEST_DISCONNECT_POLL_INTERVAL_S; tests may monkeypatch it small.
+# Tests may monkeypatch this to a smaller value.
 STREAM_DISCONNECT_POLL_INTERVAL_S = 1.0
 
 # Agent components (kept lightweight; swap with richer agents as needed)
@@ -3167,211 +3163,77 @@ def _auto_resolve_requested(ner: bool | None) -> bool:
     return ner_effective and load_resolution_env().auto_resolve
 
 
-async def _stream_collection_ingestion(
-    name: str,
-    physical: str,
-    batch_dir: Path,
-    hybrid: bool | None,
-    request: Request,
-    *,
-    ner: bool | None = None,
-    hate_speech: bool | None = None,
-    resolve: bool = False,
-) -> AsyncIterator[str]:
-    """Run ingestion over ``batch_dir`` and yield SSE event frames.
+def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
+    """Execute one ingest job: pipeline, then optional entity resolution.
 
-    Shared by ``/ingest/upload`` (after it saves a batch of files) and
-    ``/ingest/finalize`` (which ingests files staged by earlier ``defer_ingest``
-    uploads without receiving any new file). Yields ``ingestion_started`` first,
-    then ``ingestion_progress`` / ``warning`` frames, and terminates with exactly
-    one of ``ingestion_complete`` (including the soft ``empty`` outcomes) or
-    ``error``. Polls ``request.is_disconnected()`` so a client hangup cancels the
-    awaiter; the worker thread runs to completion and its output is discarded.
+    Injected into :class:`IngestJobManager` so ``core/jobs.py`` stays free of
+    docint domain imports. Runs on a worker thread; ``push`` is thread-safe.
 
-    A directory that holds no reader-supported files (e.g. only audio/video,
-    which the ingestion ``required_exts`` whitelist filters out) surfaces as a
-    soft ``empty`` completion rather than a hard error, so a mixed upload never
-    fails just because one slice of it had nothing ingestable.
+    Resolution runs *here*, inside the job, rather than in a request handler —
+    which is the fix for it being silently skipped whenever the client had
+    disconnected.
 
     Args:
-        name (str): The caller's logical collection name (used in messages).
-        physical (str): The owner-namespaced physical Qdrant collection.
-        batch_dir (Path): Directory of staged source files to ingest.
-        hybrid (bool | None): Whether to enable hybrid search (defaults to True).
-        request (Request): The incoming request, for disconnect detection.
-        ner (bool | None): Per-request NER override; ``None`` keeps the env default.
-        hate_speech (bool | None): Per-request hate-speech override; ``None``
-            keeps the env default.
-        resolve (bool): When ``True``, run entity resolution after a successful
-            ingest and report its summary on the terminal event.
+        state (IngestJobState): The job being executed.
+        push (PushEvent): Thread-safe event publisher.
 
-    Yields:
-        str: SSE-formatted event frames.
+    Returns:
+        dict[str, Any]: ``{"empty": bool, "resolution": dict | None}``.
     """
-    yield _format_sse("ingestion_started", {"collection": name})
+    if not state.batch_dir.is_dir():
+        # Nothing was staged (e.g. every upload batch failed, or finalize was
+        # called with nothing ever uploaded). Report a soft empty completion
+        # instead of letting the reader fail on a missing directory.
+        push("warning", {"message": f"No staged files found for '{state.logical_name}'."})
+        return {"empty": True, "resolution": None}
+
+    empty = False
     try:
-        queue: asyncio.Queue[str | None | Exception] = asyncio.Queue()
-        loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
-
-        def _safe_put(item: str | None | Exception) -> None:
-            """Enqueue a message, tolerating a closed loop after disconnect.
-
-            If the event loop has already been torn down (e.g., the coroutine
-            was cancelled and the loop is gone by the time the worker thread
-            finishes), we log rather than silently dropping the message.
-
-            Args:
-                item (str | None | Exception): The message or sentinel to
-                    enqueue. ``None`` signals normal completion; ``Exception``
-                    signals failure.
-            """
-            try:
-                loop.call_soon_threadsafe(queue.put_nowait, item)
-            except Exception as exc:
-                # CPython raises RuntimeError("Event loop is closed"); uvloop or
-                # an OS-level SIGPIPE/EBADF during teardown can surface OSError /
-                # BrokenPipeError. Catch broadly so an exception from the worker
-                # thread still lands in the log rather than vanishing.
-                logger.warning(
-                    "Could not enqueue ingest message for collection '{}' (loop unavailable after disconnect): {}",
-                    name,
-                    exc,
-                )
-
-        def progress_callback(msg: str) -> None:
-            """Report a progress message from the worker thread.
-
-            Args:
-                msg (str): Progress message to be reported.
-            """
-            _safe_put(msg)
-
-        async def run_ingestion() -> None:
-            """Run the ingestion process in a separate thread.
-
-            Logs cancellation and worker-thread exceptions explicitly so a
-            disconnected client does not cause silent data loss. The underlying
-            worker thread cannot be killed (Python has no safe thread-kill
-            primitive), so on cancellation we only release the awaiting
-            coroutine; the thread runs to completion and its output is discarded.
-            """
-            try:
-                await to_thread.run_sync(
-                    functools.partial(
-                        ingest_module.ingest_docs,
-                        physical,
-                        batch_dir,
-                        hybrid if hybrid is not None else True,
-                        progress_callback,
-                        ner=ner,
-                        hate_speech=hate_speech,
-                    )
-                )
-                _safe_put(None)
-            except asyncio.CancelledError:
-                logger.warning(
-                    "Ingestion task for collection '{}' cancelled; the worker "
-                    "thread will continue until ingest_docs returns and its "
-                    "output will be discarded.",
-                    name,
-                )
-                raise
-            except Exception as e:
-                logger.error("Ingestion of collection '{}' failed: {}", name, e)
-                _safe_put(e)
-
-        ingestion_task = asyncio.create_task(run_ingestion())
-
-        # Poll periodically so client disconnects are noticed even when the
-        # worker is quiet (embedding batches, etc.). The interval is a
-        # module-level constant so tests can override it.
-        while True:
-            try:
-                msg = await asyncio.wait_for(
-                    queue.get(),
-                    timeout=INGEST_DISCONNECT_POLL_INTERVAL_S,
-                )
-            except TimeoutError:
-                if await request.is_disconnected():
-                    ingestion_task.cancel()
-                    logger.warning(
-                        "Client disconnected during ingestion for collection "
-                        "'{}'; cancelled the awaiter. Worker thread continues "
-                        "to completion.",
-                        name,
-                    )
-                    return
-                continue
-            if msg is None:
-                break
-            if isinstance(msg, EmptyIngestionError):
-                yield _format_sse(
-                    "warning",
-                    {"message": str(msg), "collection": msg.collection_name},
-                )
-                yield _format_sse(
-                    "ingestion_complete",
-                    {"collection": name, "data_dir": str(batch_dir), "empty": True},
-                )
-                return
-            if isinstance(msg, Exception):
-                raise msg
-            event_name = (
-                "warning"
-                if isinstance(msg, str) and msg.strip().lower().startswith("warning:")
-                else "ingestion_progress"
-            )
-            yield _format_sse(event_name, {"message": msg})
-
-        terminal: dict[str, Any] = {"collection": name, "data_dir": str(batch_dir)}
-        if resolve:
-            yield _format_sse("ingestion_progress", {"message": "Resolving entities..."})
-
-            def _run_resolution() -> Any:
-                with rag.collection_scope(physical):
-                    return rag.resolve_entities()
-
-            try:
-                summary = await to_thread.run_sync(_run_resolution)
-            except Exception:
-                logger.exception("Auto-resolution after ingest failed for '{}'", name)
-                yield _format_sse(
-                    "warning",
-                    {"message": "Entity resolution failed.", "collection": name},
-                )
-            else:
-                terminal["resolution"] = {
-                    "processed": summary.processed,
-                    "minted": summary.minted,
-                    "attached": summary.attached,
-                    "skipped": summary.skipped,
-                    "entities_touched": summary.entities_touched,
-                }
-        yield _format_sse("ingestion_complete", terminal)
-    except Exception as exc:  # pragma: no cover - streamed errors are logged
-        if isinstance(exc, ValueError) and "No files found" in str(exc):
-            # The staged directory held no reader-supported files (e.g. only
-            # audio/video, which required_exts filters out). Treat as a soft
-            # empty ingest, not a hard failure, so a mixed upload whose media
-            # files are not directly ingestable still completes cleanly.
-            logger.warning(
-                "No ingestable files for collection '{}'; completing as empty.",
-                name,
-            )
-            yield _format_sse(
-                "warning",
-                {"message": f"No ingestable files found for '{name}'.", "collection": name},
-            )
-            yield _format_sse(
-                "ingestion_complete",
-                {"collection": name, "data_dir": str(batch_dir), "empty": True},
-            )
-            return
-        logger.opt(exception=exc).error("Ingestion stream failed")
-        yield _format_sse(
-            "error",
-            {"message": "Ingestion failed.", "code": "ingestion_failed"},
+        ingest_module.ingest_docs(
+            state.physical,
+            state.batch_dir,
+            state.hybrid,
+            lambda msg: push(
+                "warning" if msg.strip().lower().startswith("warning:") else "ingestion_progress",
+                {"message": msg},
+            ),
+            ner=state.ner,
+            hate_speech=state.hate_speech,
         )
+    except EmptyIngestionError as exc:
+        push("warning", {"message": str(exc), "collection": exc.collection_name})
+        return {"empty": True, "resolution": None}
+    except ValueError as exc:
+        if "No files found" not in str(exc):
+            raise
+        # The staged directory held no reader-supported files (e.g. only
+        # audio/video, which required_exts filters out). A soft empty ingest,
+        # not a hard failure.
+        logger.warning("No ingestable files for collection '{}'; completing as empty.", state.logical_name)
+        push("warning", {"message": f"No ingestable files found for '{state.logical_name}'."})
+        return {"empty": True, "resolution": None}
+
+    resolution: dict[str, Any] | None = None
+    if state.resolve:
+        push("ingestion_progress", {"message": "Resolving entities..."})
+        try:
+            with rag.collection_scope(state.physical):
+                summary = rag.resolve_entities()
+        except Exception:
+            logger.exception("Auto-resolution after ingest failed for '{}'", state.logical_name)
+            push("warning", {"message": "Entity resolution failed."})
+        else:
+            resolution = {
+                "processed": summary.processed,
+                "minted": summary.minted,
+                "attached": summary.attached,
+                "skipped": summary.skipped,
+                "entities_touched": summary.entities_touched,
+            }
+    return {"empty": empty, "resolution": resolution}
+
+
+job_manager = IngestJobManager(runner=_run_ingest_job)
 
 
 @app.post("/ingest/upload", tags=["Ingestion"])
@@ -3382,13 +3244,20 @@ async def ingest_upload(
     hate_speech: bool | None = Form(None),
     files: list[UploadFile] = File(...),  # noqa: B008 — FastAPI dependency marker
     hybrid: bool | None = Form(True),
-    defer_ingest: bool = Form(False),
 ) -> StreamingResponse:
-    """Upload files for ingestion and stream progress as SSE events.
+    """Upload and stage files for a collection, streaming save progress as SSE events.
+
+    Saves the file(s) to the collection's batch directory but does NOT ingest
+    them — the caller runs one ingestion pass afterwards via
+    ``/ingest/finalize``, which queues a server-owned job. The SPA uploads a
+    large selection as several batches so ingestion happens once over the
+    whole staged directory instead of once per batch (re-initializing the
+    pipeline's models per batch and hard-failing on any batch that happened
+    to hold only reader-unsupported files, e.g. audio/video → "No files
+    found").
 
     Args:
-        request (Request): The incoming request, used to detect client
-            disconnect so the awaiter can be cancelled promptly.
+        request (Request): The incoming request, used to resolve the principal.
         collection (str): The name of the collection to ingest into.
         files (list[UploadFile]): The list of files to upload.
         hybrid (bool | None): Whether to enable hybrid search (default: True).
@@ -3396,15 +3265,10 @@ async def ingest_upload(
             default (``NER_ENABLED``).
         hate_speech (bool | None): Per-request hate-speech override; ``None``
             keeps the env default (``ENABLE_HATE_SPEECH_DETECTION``).
-        defer_ingest (bool): When ``True``, save the file(s) but do NOT ingest —
-            the caller runs one ingestion pass afterwards via
-            ``/ingest/finalize``. The SPA sets this on every batch of a large,
-            client-split upload so ingestion happens once over the whole staged
-            directory instead of once per batch. Defaults to ``False`` (save +
-            ingest, the single-request behaviour).
 
     Returns:
-        StreamingResponse: A streaming response that yields SSE events during ingestion.
+        StreamingResponse: A streaming response that yields SSE events while
+        the file(s) are saved to disk.
 
     Raises:
         HTTPException: If the collection name is missing or no files are provided.
@@ -3489,101 +3353,149 @@ async def ingest_upload(
                 )
                 return
 
-        if defer_ingest:
-            # Staged-only mode: the file(s) are saved but NOT ingested here. The
-            # SPA uploads a large selection as several deferred batches (each
-            # under the nginx request cap), then calls /ingest/finalize once to
-            # run a single ingestion pass over the whole directory. Ingesting
-            # per batch instead would re-init the models for every batch and
-            # hard-fail on any batch that happened to hold only reader-
-            # unsupported files (e.g. audio/video → SimpleDirectoryReader's
-            # "No files found").
-            yield _format_sse(
-                "upload_complete",
-                {"collection": name, "files_saved": len(files)},
-            )
-            return
-
-        async for frame in _stream_collection_ingestion(
-            name,
-            physical,
-            batch_dir,
-            hybrid,
-            request,
-            ner=ner,
-            hate_speech=hate_speech,
-            resolve=_auto_resolve_requested(ner),
-        ):
-            yield frame
+        yield _format_sse(
+            "upload_complete",
+            {"collection": name, "files_saved": len(files)},
+        )
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-@app.post("/ingest/finalize", tags=["Ingestion"])
-async def ingest_finalize(payload: IngestIn, request: Request) -> StreamingResponse:
-    """Ingest a collection's already-staged upload batches (receives no files).
+@app.post("/ingest/finalize", status_code=202, tags=["Ingestion"])
+async def ingest_finalize(payload: IngestIn, request: Request) -> dict[str, str]:
+    """Queue an ingest job over a collection's already-staged upload batches.
 
-    The SPA uploads a large selection as several ``defer_ingest`` batches to
-    ``/ingest/upload`` (each saved but not ingested), then calls this once to run
-    a single ingestion pass over the whole staged directory, streaming the same
-    SSE ingestion events as ``/ingest/upload``. Being fileless, this request
-    cannot trip the nginx request-size cap, so ingestion still runs even if an
-    individual upload batch failed.
+    The SPA uploads a large selection as several batches to ``/ingest/upload``
+    (each saved but not ingested), then calls this once. Ingestion runs as a
+    server-owned job: progress is consumed from ``GET /ingest/jobs/events``, so
+    a browser reload no longer severs the run's only view.
 
     Args:
-        payload (IngestIn): The collection (logical name) and hybrid flag.
-        request (Request): The incoming request, used to resolve the principal
-            and detect client disconnect.
+        payload (IngestIn): Collection (logical name) and run options.
+        request (Request): The incoming request, for principal resolution.
 
     Returns:
-        StreamingResponse: SSE stream of ingestion events (``ingestion_started``
-        … ``ingestion_complete`` / ``error``).
+        dict[str, str]: ``{"job_id": ...}``.
 
     Raises:
-        HTTPException: 400 if the collection name is missing.
+        HTTPException: 400 when the collection name is blank; 404 when the
+            caller does not own it; 409 (detail carries the existing
+            ``job_id``) when that collection already has a job in flight.
     """
+    principal = resolve_principal(request)
     name = payload.collection.strip()
     if not name:
         logger.error("HTTPException: Collection name required for finalize")
         raise HTTPException(status_code=400, detail="Collection name required")
-
-    principal = resolve_principal(request)
     physical = rag.ensure_collection_owner_manager().register(principal.effective_owner, name)
-    batch_dir = _resolve_qdrant_src_dir() / physical
-    hybrid = payload.hybrid
 
-    async def event_stream() -> AsyncIterator[str]:
-        """Yield the shared ingestion SSE stream for the staged directory.
+    existing = await job_manager.active_for(principal.effective_owner, physical)
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "Ingestion already in progress.", "job_id": existing.job_id},
+        )
 
-        Yields:
-            str: SSE-formatted event frames.
-        """
-        if not batch_dir.is_dir():
-            # Nothing was staged (e.g. every upload batch failed). Report a soft
-            # empty completion instead of erroring on a missing directory.
-            yield _format_sse("ingestion_started", {"collection": name})
-            yield _format_sse(
-                "warning",
-                {"message": f"No staged files found for '{name}'.", "collection": name},
-            )
-            yield _format_sse(
-                "ingestion_complete",
-                {"collection": name, "data_dir": str(batch_dir), "empty": True},
-            )
-            return
-        async for frame in _stream_collection_ingestion(
-            name,
-            physical,
-            batch_dir,
-            hybrid,
-            request,
-            ner=payload.ner,
-            hate_speech=payload.hate_speech,
-            resolve=_auto_resolve_requested(payload.ner),
-        ):
-            yield frame
+    state = await job_manager.create(
+        owner=principal.effective_owner,
+        logical_name=name,
+        physical=physical,
+        batch_dir=_resolve_qdrant_src_dir() / physical,
+        hybrid=payload.hybrid if payload.hybrid is not None else True,
+        ner=payload.ner,
+        hate_speech=payload.hate_speech,
+        resolve=_auto_resolve_requested(payload.ner),
+    )
+    return {"job_id": state.job_id}
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+@app.get("/ingest/jobs", tags=["Ingestion"])
+async def list_ingest_jobs(request: Request) -> dict[str, list[dict[str, Any]]]:
+    """List the caller's ingest jobs, newest first.
+
+    The frontend calls this on load to re-discover and re-attach to jobs that
+    outlived a browser reload.
+
+    Args:
+        request (Request): The incoming request, for principal resolution.
+
+    Returns:
+        dict[str, list[dict[str, Any]]]: ``{"jobs": [snapshot, ...]}``.
+    """
+    principal = resolve_principal(request)
+    states = await job_manager.list_for_owner(principal.effective_owner)
+    return {"jobs": [s.snapshot() for s in states]}
+
+
+# NB: declared BEFORE /ingest/jobs/{job_id}. FastAPI matches routes in
+# declaration order, so the reverse order parses "events" as a job id.
+@app.get("/ingest/jobs/events", tags=["Ingestion"])
+async def ingest_job_events(request: Request) -> StreamingResponse:
+    """Stream SSE events for every job the caller owns, over one connection.
+
+    Replays each job's collapsed history on connect, so a client that
+    reconnects mid-run resumes the live view instead of waiting for the next
+    frame.
+
+    Args:
+        request (Request): The incoming request, for principal resolution.
+
+    Returns:
+        StreamingResponse: ``text/event-stream`` of tagged job frames.
+    """
+    principal = resolve_principal(request)
+    return StreamingResponse(
+        job_manager.subscribe_owner(principal.effective_owner),
+        media_type="text/event-stream",
+    )
+
+
+@app.get("/ingest/jobs/{job_id}", tags=["Ingestion"])
+async def get_ingest_job(job_id: str, request: Request) -> dict[str, Any]:
+    """Return a point-in-time snapshot of one owned job.
+
+    Args:
+        job_id (str): Job identifier.
+        request (Request): The incoming request, for principal resolution.
+
+    Returns:
+        dict[str, Any]: The job snapshot.
+
+    Raises:
+        HTTPException: 404 when unknown or owned by someone else — the two are
+            deliberately indistinguishable so existence never leaks.
+    """
+    principal = resolve_principal(request)
+    state = await job_manager.get(job_id, principal.effective_owner)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return state.snapshot()
+
+
+@app.delete("/ingest/jobs/{job_id}", tags=["Ingestion"])
+async def delete_ingest_job(job_id: str, request: Request) -> dict[str, bool]:
+    """Dismiss a finished job from the registry.
+
+    Args:
+        job_id (str): Job identifier.
+        request (Request): The incoming request, for principal resolution.
+
+    Returns:
+        dict[str, bool]: ``{"ok": True}``.
+
+    Raises:
+        HTTPException: 404 when unknown or cross-owner; 409 while the job is
+            still running — the worker thread cannot be killed, so a dismissed
+            running job would keep writing unobserved.
+    """
+    principal = resolve_principal(request)
+    state = await job_manager.get(job_id, principal.effective_owner)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if state.status in (JobStatus.QUEUED, JobStatus.RUNNING):
+        raise HTTPException(status_code=409, detail="Job is still running")
+    await job_manager.remove(job_id, principal.effective_owner)
+    return {"ok": True}
 
 
 @app.get("/sources/preview", tags=["Sources"])

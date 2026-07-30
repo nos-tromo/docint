@@ -5,10 +5,13 @@ fall back to ``DOCINT_DEFAULT_IDENTITY`` ("test-operator"), matching the
 conventions in ``tests/test_api_collections_ownership.py``.
 """
 
+import json
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import run_ingest
 from fastapi.testclient import TestClient
 from loguru import logger
 
@@ -25,9 +28,18 @@ def _default_identity(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def client() -> TestClient:
-    """Create a TestClient that exercises the real installed handlers."""
-    return TestClient(api_module.app, raise_server_exceptions=False)
+def client() -> Generator[TestClient, None, None]:
+    """Create a TestClient that exercises the real installed handlers.
+
+    Entered as a context manager so a single portal (and its background
+    event-loop thread) stays alive for the whole test: ingest jobs run as a
+    detached ``asyncio`` task meant to outlive the request that queued them,
+    and a bare, non-context-managed ``TestClient`` opens a brand-new
+    throwaway event loop per call — orphaning that task the instant the
+    queuing request returns.
+    """
+    with TestClient(api_module.app, raise_server_exceptions=False) as client:
+        yield client
 
 
 def _capture_logs() -> tuple[list[str], int]:
@@ -86,10 +98,36 @@ def test_swept_endpoint_returns_static_detail_and_logs_marker(
         logger.remove(sink_id)
 
 
-def test_ingest_upload_stream_error_is_generic_and_logged(
+def test_ingest_finalize_job_error_is_generic_and_logged(
     monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
 ) -> None:
-    """A raising ingest pipeline emits a generic SSE ``error`` event; the marker only appears in logs."""
+    """A raising ingest job fails with a static message; the marker only appears in logs.
+
+    ``/ingest/upload`` no longer runs the pipeline at all — it only stages
+    files (see the ``client`` fixture docstring). This now drives the
+    failure through ``/ingest/finalize``'s job and asserts on the job's
+    snapshot (``GET /ingest/jobs/{job_id}``) instead of an SSE body.
+
+    This replaces both ``test_ingest_upload_stream_error_is_generic_and_logged``
+    and ``test_ingest_stream_error_event_carries_code``. The machine-readable
+    ``code: "ingestion_failed"`` companion field on the underlying SSE
+    ``error`` event is ``docint/core/jobs.py`` behavior (``IngestJobManager._worker``'s
+    failure path), already covered by
+    ``tests/test_ingest_jobs.py::test_failed_runner_marks_job_failed_without_leaking_detail``
+    and not duplicated here. That event is also not reachable through an
+    HTTP test transport for this assertion: ``/ingest/jobs/events`` never
+    terminates on its own, and every in-process ASGI transport available here
+    (sync ``TestClient`` and async ``httpx.ASGITransport``) fully drains a
+    response before returning anything — see
+    ``tests/test_ingest_jobs_api.py::test_events_route_is_not_shadowed_by_the_job_id_route``
+    for the same finding. This test asserts only what actually changed: how a
+    caller observes a failed run through the new job-polling contract.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture.
+    """
     monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
 
     def raising_ingest(
@@ -106,49 +144,21 @@ def test_ingest_upload_stream_error_is_generic_and_logged(
 
     records, sink_id = _capture_logs()
     try:
-        resp = client.post(
+        staged = client.post(
             "/ingest/upload",
             data={"collection": "boom-collection"},
             files={"files": ("a.txt", b"hello", "text/plain")},
         )
-        assert resp.status_code == 200
-        body = resp.text
-        assert "event: error" in body
-        assert '"message": "Ingestion failed."' in body
-        assert MARKER not in body
+        assert staged.status_code == 200
+
+        snapshot = run_ingest(client, "boom-collection", {})
+
+        assert snapshot["status"] == "failed"
+        assert snapshot["error"] == "Ingestion failed."
+        assert MARKER not in json.dumps(snapshot)
         assert any(MARKER in r for r in records)
     finally:
         logger.remove(sink_id)
-
-
-def test_ingest_stream_error_event_carries_code(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
-) -> None:
-    """The finalize-stage SSE ``error`` event carries the machine-readable code."""
-    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
-
-    def raising_ingest(
-        collection: str,
-        path: Path,
-        hybrid: bool = True,
-        progress_callback: Any = None,
-        **kwargs: Any,
-    ) -> None:
-        _ = (collection, path, hybrid, progress_callback)
-        raise RuntimeError(MARKER)
-
-    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", raising_ingest)
-
-    resp = client.post(
-        "/ingest/upload",
-        data={"collection": "boom-collection"},
-        files={"files": ("a.txt", b"hello", "text/plain")},
-    )
-    assert resp.status_code == 200
-    body = resp.text
-    assert "event: error" in body
-    assert '"code": "ingestion_failed"' in body
-    assert MARKER not in body
 
 
 def test_ingest_save_failure_is_static_with_code_and_filename(

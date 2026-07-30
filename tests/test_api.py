@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from conftest import run_ingest
 from fastapi.testclient import TestClient
 
 import docint.core.api as api_module
@@ -818,13 +819,21 @@ def _patch_rag(monkeypatch: pytest.MonkeyPatch) -> Any | None:
 
 
 @pytest.fixture
-def client() -> TestClient:
+def client() -> Generator[TestClient, None, None]:
     """Create a TestClient for testing the FastAPI application.
 
-    Returns:
+    Entered as a context manager so a single portal (and its background
+    event-loop thread) stays alive for the whole test: ingest jobs
+    (``docint/core/jobs.py``) run as a detached ``asyncio`` task meant to
+    outlive the request that queued them, and a bare, non-context-managed
+    ``TestClient`` opens a brand-new throwaway event loop per call — orphaning
+    that task the instant the queuing request returns.
+
+    Yields:
         TestClient: The TestClient instance.
     """
-    return TestClient(api_module.app)
+    with TestClient(api_module.app) as client:
+        yield client
 
 
 def test_collections_list_success(client: TestClient) -> None:
@@ -2398,13 +2407,17 @@ def test_ingest_sync_generic_exception_propagates_as_500(
 def test_ingest_upload_empty_emits_warning_and_completes(
     monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
 ) -> None:
-    """Empty ingestion via /ingest/upload yields a warning + empty completion event.
+    """An empty ingest job completes with a warning message, not an error.
 
-    Verifies the API translates :class:`EmptyIngestionError` into an SSE
-    ``warning`` event followed by an ``ingestion_complete`` event with
-    ``"empty": true`` and skips ``rag.select_collection`` (which would
-    otherwise raise ``ValueError`` because the collection was never
-    created), instead of surfacing a generic ``"Ingestion failed"``.
+    Verifies the job runner translates :class:`EmptyIngestionError` into a
+    ``completed`` snapshot with ``empty: true`` and a warning message
+    referencing the collection, and skips ``rag.select_collection`` (which
+    would otherwise raise ``ValueError`` because the collection was never
+    created) — instead of surfacing a generic "Ingestion failed".
+
+    Ingestion staging (``/ingest/upload``) no longer runs the pipeline itself
+    — it only saves files. The actual ingest now runs as a job queued by
+    ``/ingest/finalize``.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -2434,23 +2447,23 @@ def test_ingest_upload_empty_emits_warning_and_completes(
 
     monkeypatch.setattr(api_module.ingest_module, "ingest_docs", fake_ingest)
 
-    response = client.post(
+    staged = client.post(
         "/ingest/upload",
         data={"collection": "silence-test", "hybrid": "false"},
         files={"files": ("silence.m4a", b"\x00" * 32, "audio/mp4")},
     )
+    assert staged.status_code == 200
 
-    assert response.status_code == 200
-    body = response.text
+    snapshot = run_ingest(client, "silence-test", {})
 
-    # The SSE payload should contain a warning event referencing the collection
-    # and an ingestion_complete event flagged as empty=true. It should NOT
-    # contain a generic "Ingestion failed" error event.
-    assert "event: warning" in body
-    assert "silence-test" in body
-    assert "event: ingestion_complete" in body
-    assert '"empty": true' in body
-    assert "Ingestion failed" not in body
+    # The completed job must carry a warning message referencing the
+    # collection and be flagged empty. It must NOT carry a generic
+    # "Ingestion failed" error.
+    assert snapshot["status"] == "completed"
+    assert snapshot["empty"] is True
+    assert snapshot["message"] is not None
+    assert "silence-test" in snapshot["message"]
+    assert snapshot["error"] is None
 
     # select_collection must NOT have been called — DummyRAG.selected stays empty.
     assert cast(Any, api_module.rag).selected == []
@@ -2459,11 +2472,13 @@ def test_ingest_upload_empty_emits_warning_and_completes(
 def test_ingest_upload_defer_saves_without_ingesting(
     monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
 ) -> None:
-    """``defer_ingest=true`` stages the file(s) but runs no ingestion pass.
+    """``/ingest/upload`` stages the file(s) but runs no ingestion pass.
 
-    The SPA uploads a large selection as several deferred batches, then triggers
-    a single ingestion via ``/ingest/finalize``; a staged batch must emit
-    ``upload_complete`` and never call ``ingest_docs``.
+    Staging is now unconditional (there is no ``defer_ingest`` toggle anymore
+    — every upload only saves files). The SPA uploads a large selection as
+    several batches, then triggers a single ingestion via ``/ingest/finalize``,
+    which queues a job. A staged batch must emit ``upload_complete`` and never
+    call ``ingest_docs``.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -2476,7 +2491,7 @@ def test_ingest_upload_defer_saves_without_ingesting(
     def spy_ingest(
         collection: str, path: Path, hybrid: bool = True, progress_callback: Any = None, **kwargs: Any
     ) -> None:
-        """Record that ingestion was invoked (it must not be, when deferring)."""
+        """Record that ingestion was invoked (it must not be, during upload)."""
         _ = (collection, hybrid, progress_callback)
         calls.append(path)
 
@@ -2484,7 +2499,7 @@ def test_ingest_upload_defer_saves_without_ingesting(
 
     response = client.post(
         "/ingest/upload",
-        data={"collection": "stage-1", "defer_ingest": "true"},
+        data={"collection": "stage-1"},
         files={"files": ("a.txt", b"hello", "text/plain")},
     )
 
@@ -2501,7 +2516,7 @@ def test_ingest_upload_defer_saves_without_ingesting(
 def test_ingest_finalize_ingests_staged_files(
     monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
 ) -> None:
-    """``/ingest/finalize`` runs one ingestion pass over the staged directory.
+    """``/ingest/finalize`` queues a job that runs one ingestion pass over the staged directory.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -2522,19 +2537,16 @@ def test_ingest_finalize_ingests_staged_files(
 
     staged = client.post(
         "/ingest/upload",
-        data={"collection": "final-1", "defer_ingest": "true"},
+        data={"collection": "final-1"},
         files={"files": ("a.txt", b"hello", "text/plain")},
     )
     assert staged.status_code == 200
     assert calls == []  # staged, not yet ingested
 
-    response = client.post("/ingest/finalize", json={"collection": "final-1"})
+    snapshot = run_ingest(client, "final-1", {})
 
-    assert response.status_code == 200
-    body = response.text
-    assert "event: ingestion_started" in body
-    assert "event: ingestion_complete" in body
-    assert "Ingestion failed" not in body
+    assert snapshot["status"] == "completed"
+    assert snapshot["error"] is None
     # Exactly one ingestion pass, over the whole staged directory.
     assert calls == [tmp_path / "final-1"]
 
@@ -2560,13 +2572,13 @@ def test_ingest_finalize_missing_dir_completes_empty(
 
     monkeypatch.setattr(api_module.ingest_module, "ingest_docs", spy_ingest)
 
-    response = client.post("/ingest/finalize", json={"collection": "never-staged"})
+    snapshot = run_ingest(client, "never-staged", {})
 
-    assert response.status_code == 200
-    body = response.text
-    assert "event: warning" in body
-    assert '"empty": true' in body
-    assert "Ingestion failed" not in body
+    assert snapshot["status"] == "completed"
+    assert snapshot["empty"] is True
+    assert snapshot["message"] is not None
+    assert snapshot["error"] is None
+    assert called is False
     assert called is False
 
 
@@ -2575,10 +2587,10 @@ def test_ingest_soft_completes_when_reader_finds_no_supported_files(
 ) -> None:
     """A "No files found" reader error becomes a soft-empty completion.
 
-    A batch (or finalize) whose directory holds only reader-unsupported files
+    A finalize job whose staged directory holds only reader-unsupported files
     (e.g. audio/video, which the ``required_exts`` whitelist filters out) makes
     ``SimpleDirectoryReader`` raise ``ValueError("No files found ...")``. That
-    must surface as a warning + empty completion, not a hard ``error`` event.
+    must surface as a warning + empty completion, not a ``failed`` job.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
@@ -2596,27 +2608,29 @@ def test_ingest_soft_completes_when_reader_finds_no_supported_files(
 
     monkeypatch.setattr(api_module.ingest_module, "ingest_docs", raise_no_files)
 
-    response = client.post(
+    staged = client.post(
         "/ingest/upload",
         data={"collection": "media-only"},
         files={"files": ("clip.mp4", b"\x00" * 16, "video/mp4")},
     )
+    assert staged.status_code == 200
 
-    assert response.status_code == 200
-    body = response.text
-    assert "event: warning" in body
-    assert '"empty": true' in body
-    assert "No ingestable files" in body
-    assert "Ingestion failed" not in body
+    snapshot = run_ingest(client, "media-only", {})
+
+    assert snapshot["status"] == "completed"
+    assert snapshot["empty"] is True
+    assert snapshot["message"] is not None
+    assert "No ingestable files" in snapshot["message"]
+    assert snapshot["error"] is None
 
 
 def test_ingest_upload_success_does_not_warm_query_engine(
     monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
 ) -> None:
-    """Successful ``/ingest/upload`` must not eagerly warm the query engine.
+    """A successful ingest job must not eagerly warm the query engine.
 
     Regression guard for an OOM-kill observed on CPU Docker containers with
-    the default 8 GB limit: the ingest SSE handler previously called
+    the default 8 GB limit: the ingest handler previously called
     ``rag.create_index()`` and ``rag.create_query_engine()`` on the
     module-level ``api.rag`` singleton immediately after a successful
     ingestion. That warmup triggered the reranker (bge-reranker-v2-m3,
@@ -2649,9 +2663,8 @@ def test_ingest_upload_success_does_not_warm_query_engine(
     ) -> None:
         """Simulate a successful, no-op ingestion run.
 
-        Returning cleanly causes the SSE handler to enqueue a ``None``
-        sentinel and break out of the progress loop, which is exactly the
-        code path that previously reached the eager warmup block.
+        Returning cleanly is exactly the code path that previously reached
+        the eager warmup block.
 
         Args:
             collection (str): Collection name (ignored).
@@ -2670,18 +2683,18 @@ def test_ingest_upload_success_does_not_warm_query_engine(
     assert dummy_rag.created_index == 0
     assert dummy_rag.created_query_engine == 0
 
-    response = client.post(
+    staged = client.post(
         "/ingest/upload",
         data={"collection": "warmup-guard", "hybrid": "true"},
         files={"files": ("hello.txt", b"hello world", "text/plain")},
     )
+    assert staged.status_code == 200
 
-    # The ingest itself must still succeed and emit the completion event —
-    # we are not regressing success signalling, only removing the warmup.
-    assert response.status_code == 200
-    body = response.text
-    assert "event: ingestion_complete" in body
-    assert "Ingestion failed" not in body
+    # The ingest itself must still succeed — we are not regressing success
+    # signalling, only removing the warmup.
+    snapshot = run_ingest(client, "warmup-guard", {})
+    assert snapshot["status"] == "completed"
+    assert snapshot["error"] is None
 
     # Core assertion: neither the index nor the query engine may be built
     # eagerly during a successful ingest. Both counters must remain zero.
@@ -2700,63 +2713,61 @@ def test_ingest_upload_success_does_not_warm_query_engine(
     )
 
 
-def test_ingest_upload_cancels_awaiter_on_client_disconnect(
+def test_ingest_finalize_job_ignores_request_disconnect(
     monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
 ) -> None:
-    """Client disconnect mid-ingest cancels the awaiter and exits cleanly.
+    """The ingest job runs to completion independent of the initiating request.
 
-    The SSE ``/ingest/upload`` endpoint now polls
-    ``request.is_disconnected()`` while waiting on the worker queue so
-    that a disconnected client doesn't leave an orphan coroutine
-    blocked on a queue no one will read. On disconnect, the awaiter is
-    cancelled, a warning is logged, and the generator returns without
-    emitting ``ingestion_complete``. The worker thread itself runs to
-    completion (Python has no safe thread kill), but its output is
-    safely discarded.
+    This replaces two obsolete tests
+    (``test_ingest_upload_cancels_awaiter_on_client_disconnect`` and
+    ``test_ingest_upload_poll_continues_when_still_connected``) that pinned
+    down the *old* SSE design: ``/ingest/upload`` used to run ingestion
+    in-request and poll ``request.is_disconnected()`` while waiting, cancelling
+    the awaiter (and silently skipping entity resolution) on a hangup. That
+    polling loop and ``INGEST_DISCONNECT_POLL_INTERVAL_S`` no longer exist —
+    ingestion now runs as a job dispatched by ``/ingest/finalize``, decoupled
+    from any single request's lifecycle (this is *the* fix motivating the
+    server-owned job registry: a reload or hangup no longer discards progress
+    or skips resolution).
 
-    Implementation detail: we monkeypatch
-    ``INGEST_DISCONNECT_POLL_INTERVAL_S`` to a tiny value so the test
-    finishes in well under a second, and override ``is_disconnected``
-    on the Starlette ``Request`` class to simulate an immediate
-    disconnect. A brief ``time.sleep`` in ``fake_ingest`` guarantees
-    the poll path is reached before the worker enqueues the success
-    sentinel.
+    Pins the new behavior down: even with ``Request.is_disconnected`` patched
+    to always report a disconnect (the worst case under the old design), the
+    job still reaches ``completed`` when polled on a separate request — because
+    nothing in the new flow ever calls ``is_disconnected`` at all.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
         client (TestClient): The TestClient instance.
         tmp_path (Path): The temporary path fixture, used as the uploads dir.
     """
-    import time
-
     from starlette.requests import Request as StarletteRequest
 
     monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
-    monkeypatch.setattr(api_module, "INGEST_DISCONNECT_POLL_INTERVAL_S", 0.05)
+    calls: list[Path] = []
 
-    def blocking_fake_ingest(
+    def fake_ingest(
         collection: str,
         path: Path,
         hybrid: bool = True,
         progress_callback: Any = None,
         **kwargs: Any,
     ) -> None:
-        """Block long enough for the disconnect poll to fire first.
+        """Record that the run completed.
 
         Args:
             collection (str): Collection name (ignored).
-            path (Path): Source directory path (ignored).
+            path (Path): Source directory path.
             hybrid (bool): Whether hybrid retrieval was requested (ignored).
             progress_callback (Any): Optional progress callback (ignored).
             **kwargs: Ignored extra ingest flags (ner / hate_speech).
         """
-        _ = (collection, path, hybrid, progress_callback)
-        time.sleep(0.3)
+        _ = (collection, hybrid, progress_callback)
+        calls.append(path)
 
-    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", blocking_fake_ingest)
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", fake_ingest)
 
     async def always_disconnected(_self: StarletteRequest) -> bool:
-        """Simulate an immediate client disconnect.
+        """Simulate a client that hangs up immediately after every check.
 
         Args:
             _self (StarletteRequest): The Request instance (ignored).
@@ -2768,105 +2779,18 @@ def test_ingest_upload_cancels_awaiter_on_client_disconnect(
 
     monkeypatch.setattr(StarletteRequest, "is_disconnected", always_disconnected)
 
-    response = client.post(
+    staged = client.post(
         "/ingest/upload",
-        data={"collection": "disconnect-guard", "hybrid": "true"},
+        data={"collection": "disconnect-guard"},
         files={"files": ("hello.txt", b"hello world", "text/plain")},
     )
+    assert staged.status_code == 200
 
-    # Connection opened successfully (SSE headers sent)...
-    assert response.status_code == 200
-    body = response.text
-    # ... but the stream was cut short — no completion event, no error event.
-    assert "event: ingestion_complete" not in body, (
-        "ingestion_complete must NOT be emitted when the awaiter is cancelled; "
-        "the worker thread still runs but its output is discarded."
-    )
-    assert "Ingestion failed" not in body, "Cancellation must not be surfaced as a generic ingestion failure."
+    snapshot = run_ingest(client, "disconnect-guard", {})
 
-
-def test_ingest_upload_poll_continues_when_still_connected(
-    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
-) -> None:
-    """Poll timeouts without disconnect must not prematurely exit the stream.
-
-    The ``asyncio.wait_for(queue.get())`` timeout branch has two outcomes:
-    ``is_disconnected() -> True`` (cancel & return) and
-    ``is_disconnected() -> False`` (continue polling).
-    ``test_ingest_upload_cancels_awaiter_on_client_disconnect`` exercises
-    the first branch. This test exercises the "still connected → continue"
-    branch: the fake worker blocks longer than a single poll interval so
-    the timeout fires at least once, but ``is_disconnected`` always
-    returns ``False`` — the stream must keep draining until the worker's
-    completion sentinel arrives, and ``ingestion_complete`` must still be
-    emitted.
-
-    Args:
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
-        client (TestClient): The TestClient instance.
-        tmp_path (Path): The temporary path fixture, used as the uploads dir.
-    """
-    import time
-
-    from starlette.requests import Request as StarletteRequest
-
-    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
-    monkeypatch.setattr(api_module, "INGEST_DISCONNECT_POLL_INTERVAL_S", 0.05)
-
-    def slow_fake_ingest(
-        collection: str,
-        path: Path,
-        hybrid: bool = True,
-        progress_callback: Any = None,
-        **kwargs: Any,
-    ) -> None:
-        """Block long enough for the poll to fire at least once.
-
-        Args:
-            collection (str): Collection name (ignored).
-            path (Path): Source directory path (ignored).
-            hybrid (bool): Whether hybrid retrieval was requested (ignored).
-            progress_callback (Any): Optional progress callback (ignored).
-            **kwargs: Ignored extra ingest flags (ner / hate_speech).
-        """
-        _ = (collection, path, hybrid, progress_callback)
-        time.sleep(0.15)  # ~3x poll interval
-
-    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", slow_fake_ingest)
-
-    poll_count: dict[str, int] = {"n": 0}
-
-    async def always_connected(_self: StarletteRequest) -> bool:
-        """Simulate a stable connection — client stays the full duration.
-
-        Args:
-            _self (StarletteRequest): The Request instance (ignored).
-
-        Returns:
-            bool: Always ``False``.
-        """
-        poll_count["n"] += 1
-        return False
-
-    monkeypatch.setattr(StarletteRequest, "is_disconnected", always_connected)
-
-    response = client.post(
-        "/ingest/upload",
-        data={"collection": "connected-guard", "hybrid": "true"},
-        files={"files": ("hello.txt", b"hello world", "text/plain")},
-    )
-
-    assert response.status_code == 200
-    body = response.text
-    assert "event: ingestion_complete" in body, (
-        "With is_disconnected always False, the poll must not cancel the "
-        "awaiter — the worker's completion sentinel must reach the client."
-    )
-    assert "Ingestion failed" not in body
-    assert poll_count["n"] >= 1, (
-        "Poll interval (0.05 s) is shorter than fake_ingest's sleep (0.15 s), "
-        "so is_disconnected must have been consulted at least once."
-    )
+    assert snapshot["status"] == "completed"
+    assert snapshot["error"] is None
+    assert calls == [tmp_path / "disconnect-guard"]
 
 
 def test_ingest_sync_empty_returns_empty_flag(

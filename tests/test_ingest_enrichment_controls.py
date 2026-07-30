@@ -4,11 +4,13 @@ The env config stays the deployment default; explicit per-request flags
 override it for one ingest run only.
 """
 
+from collections.abc import Generator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from conftest import run_ingest
 from fastapi.testclient import TestClient
 
 import docint.cli.ingest as ingest_cli
@@ -26,9 +28,18 @@ def _default_identity(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def client() -> TestClient:
-    """Create a TestClient against the real app."""
-    return TestClient(api_module.app, raise_server_exceptions=False)
+def client() -> Generator[TestClient, None, None]:
+    """Create a TestClient against the real app.
+
+    Entered as a context manager so a single portal (and its background
+    event-loop thread) stays alive for the whole test: ingest jobs run as a
+    detached ``asyncio`` task meant to outlive the request that queued them,
+    and a bare, non-context-managed ``TestClient`` opens a brand-new
+    throwaway event loop per call — orphaning that task the instant the
+    queuing request returns.
+    """
+    with TestClient(api_module.app, raise_server_exceptions=False) as client:
+        yield client
 
 
 def _pipeline(tmp_path: Path, **overrides: Any) -> DocumentIngestionPipeline:
@@ -121,8 +132,13 @@ def test_ingest_defaults_endpoint_reflects_env(monkeypatch: pytest.MonkeyPatch, 
     assert resp.json() == {"ner": True, "hate_speech": False}
 
 
-def test_ingest_upload_forwards_flags(monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path) -> None:
-    """POST /ingest/upload threads explicit ner/hate_speech flags to ingest_docs."""
+def test_ingest_finalize_forwards_flags(monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path) -> None:
+    """POST /ingest/finalize threads explicit ner/hate_speech flags to ingest_docs.
+
+    ``/ingest/upload`` only stages files now — it never calls ``ingest_docs``.
+    The per-request enrichment flags take effect at finalize time, since that
+    is what actually queues the ingest job.
+    """
     monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
     recorded: dict[str, Any] = {}
 
@@ -132,36 +148,40 @@ def test_ingest_upload_forwards_flags(monkeypatch: pytest.MonkeyPatch, client: T
         recorded.update(kwargs)
 
     monkeypatch.setattr(api_module.ingest_module, "ingest_docs", fake_ingest)
-    resp = client.post(
+    staged = client.post(
         "/ingest/upload",
-        data={"collection": "flags-col", "ner": "false", "hate_speech": "true"},
+        data={"collection": "flags-col"},
         files={"files": ("a.txt", b"hello", "text/plain")},
     )
-    assert resp.status_code == 200
+    assert staged.status_code == 200
+
+    snapshot = run_ingest(client, "flags-col", extra={"ner": False, "hate_speech": True})
+
+    assert snapshot["status"] == "completed"
     assert recorded.get("ner") is False
     assert recorded.get("hate_speech") is True
 
 
-def _stage_then_finalize(client: TestClient, collection: str, finalize_body: dict[str, Any]) -> str:
-    """Stage one file, then finalize; return the finalize SSE body.
+def _stage_then_finalize(
+    client: TestClient, collection: str, finalize_body: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Stage one file, then finalize and wait for the job to finish.
 
     Args:
         client: The API test client.
         collection: Logical collection name for the run.
-        finalize_body: Extra JSON fields for the finalize call.
+        finalize_body: Extra ``IngestIn`` fields for the finalize call.
 
     Returns:
-        str: The finalize response body.
+        dict[str, Any]: The job's terminal snapshot.
     """
     resp = client.post(
         "/ingest/upload",
-        data={"collection": collection, "defer_ingest": "true"},
+        data={"collection": collection},
         files={"files": ("a.txt", b"hello", "text/plain")},
     )
     assert resp.status_code == 200
-    resp = client.post("/ingest/finalize", json={"collection": collection, **finalize_body})
-    assert resp.status_code == 200
-    return resp.text
+    return run_ingest(client, collection, extra=finalize_body)
 
 
 def test_ingest_finalize_auto_resolves_when_ner_active(
@@ -180,10 +200,12 @@ def test_ingest_finalize_auto_resolves_when_ner_active(
 
     monkeypatch.setattr(type(api_module.rag), "resolve_entities", fake_resolve)
 
-    body = _stage_then_finalize(client, "auto-col", {"ner": True})
+    snapshot = _stage_then_finalize(client, "auto-col", {"ner": True})
+
+    assert snapshot["status"] == "completed"
     assert calls == [True]
-    assert '"resolution"' in body
-    assert '"minted": 1' in body
+    assert snapshot["resolution"] is not None
+    assert snapshot["resolution"]["minted"] == 1
 
 
 def test_ingest_finalize_env_ner_default_triggers_auto_resolve(
@@ -202,7 +224,7 @@ def test_ingest_finalize_env_ner_default_triggers_auto_resolve(
             ResolutionSummary(processed=0, minted=0, attached=0, skipped=0, entities_touched=0),
         )[1],
     )
-    _stage_then_finalize(client, "env-auto-col", {})
+    _stage_then_finalize(client, "env-auto-col")
     assert calls == [True]
 
 
@@ -220,7 +242,7 @@ def test_ingest_finalize_env_kill_switch_disables_auto_resolve(
         "resolve_entities",
         lambda self, *, progress_callback=None: calls.append(True),
     )
-    _stage_then_finalize(client, "kill-col", {})
+    _stage_then_finalize(client, "kill-col")
     assert calls == []
 
 
@@ -238,5 +260,6 @@ def test_ingest_finalize_without_resolve_skips_resolution(
     )
 
     monkeypatch.setenv("NER_ENABLED", "false")
-    _stage_then_finalize(client, "no-auto-col", {"ner": False})
+    snapshot = _stage_then_finalize(client, "no-auto-col", {"ner": False})
+    assert snapshot["status"] == "completed"
     assert calls == []

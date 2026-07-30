@@ -74,20 +74,37 @@ and chat. It ships with:
   shared cache volumes.
 - If you use an outbound proxy, put the proxy variables in `.env` so Compose,
   image builds, and containers use the same values.
-- Large uploads are handled by client-side batching plus a single deferred
-   ingestion pass. The Ingest view uploads a file selection as several *staged*
-   `/ingest/upload` batches (`defer_ingest`, saved but not ingested) that each
-   stay under the frontend nginx proxy's per-request cap
-   (`DOCINT_CLIENT_MAX_BODY_SIZE`, default `1g`, advertised to the SPA via
-   `GET /config` as `max_upload_bytes`), then calls `/ingest/finalize` once to
-   ingest the whole staged directory. So the total upload size is no longer
-   bounded by that cap; ingestion sees the complete selection at once (a batch
-   that happens to hold only media never trips a "No files found" error, and the
-   models load once instead of per batch); and a failed upload batch is reported
-   without blocking the rest — finalize still runs, and already-saved files are
-   skipped on retry (ingestion is idempotent by file hash). Raise
-   `DOCINT_CLIENT_MAX_BODY_SIZE` in `.env` only if a *single* file exceeds the
-   default `1g` (both the frontend and backend services read the same value).
+- Large uploads are handled by client-side batching plus a single ingest job.
+   The Ingest view uploads a file selection as several *staged* `/ingest/upload`
+   batches (each call only saves files — it never ingests) that stay under the
+   frontend nginx proxy's per-request cap (`DOCINT_CLIENT_MAX_BODY_SIZE`,
+   default `1g`, advertised to the SPA via `GET /config` as
+   `max_upload_bytes`), then calls `POST /ingest/finalize` once to queue an
+   ingest job (`202 {job_id}`) over the whole staged directory. So the total
+   upload size is no longer bounded by that cap; ingestion sees the complete
+   selection at once (a batch that happens to hold only media never trips a
+   "No files found" error, and the models load once instead of per batch); and
+   a failed upload batch is reported without blocking the rest — finalize
+   still runs, and already-saved files are skipped on retry (ingestion is
+   idempotent by file hash). Raise `DOCINT_CLIENT_MAX_BODY_SIZE` in `.env` only
+   if a *single* file exceeds the default `1g` (both the frontend and backend
+   services read the same value).
+- **Ingest jobs.** Ingestion runs as a server-owned job (`docint/core/jobs.py`),
+   not on the request that started it — so a browser reload no longer discards
+   progress or silently skips entity resolution. Endpoints: `POST
+   /ingest/finalize` queues a job (`202 {job_id}`; `409` with the existing
+   `job_id` if that collection already has a job in flight); `GET /ingest/jobs`
+   lists the caller's jobs, newest first; `GET /ingest/jobs/events` is an SSE
+   stream of every owned job's events, multiplexed over one connection and
+   replaying each job's collapsed history on connect so a reconnecting client
+   resumes the live view; `GET /ingest/jobs/{job_id}` returns a point-in-time
+   snapshot; `DELETE /ingest/jobs/{job_id}` dismisses a finished job (`409`
+   while still queued/running). Jobs are held in memory, bounded by
+   `DOCINT_INGEST_CONCURRENCY` (default `1`, serial) — set higher only if the
+   inference backend can absorb concurrent embedding/NER/hate-speech traffic
+   from more than one ingest at a time. Jobs survive a browser reload but not a
+   backend restart; the staged files remain on disk either way, so a re-run is
+   cheap (hash-deduped).
 - Session persistence uses one SQLite file path. Set `SESSIONS_DB_PATH` for
   the normal case or `SESSION_STORE` if you want to supply a full SQLAlchemy
   database URL.

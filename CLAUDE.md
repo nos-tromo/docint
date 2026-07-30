@@ -78,6 +78,21 @@ React SPA (frontend/) → FastAPI (docint/core/api.py) → AgentOrchestrator (do
 **Key modules:**
 - `docint/core/rag.py` — Core RAG engine: ingestion, retrieval, postprocessing (reranking, parent context, source diversity), collection management. The active collection is **per-request**, not a shared singleton: `qdrant_collection` is a property over a `ContextVar` bound by `RAG.collection_scope(physical)`, and `index`/`query_engine` are per-collection thread-safe LRU caches (so concurrent users on different collections don't interfere — see the multi-tenant convention below).
 - `docint/core/api.py` — FastAPI app with endpoints for chat, ingestion, collections, citations; streams responses. `GET /metrics` exposes Prometheus request counters/histograms (via `prometheus-fastapi-instrumentator`) for the obs-plane scrape target — aggregate only, no document or user data; unauthenticated like `/version`/`/config`; toggle with `METRICS_ENABLED` (default `true`, see `env_cfg.load_metrics_env`).
+- `docint/core/jobs.py` — **Ingest job registry**: `IngestJobManager` holds
+  runs in memory keyed by `job_id`, owner-scoped, bounded by
+  `DOCINT_INGEST_CONCURRENCY` (default 1). `POST /ingest/finalize` queues a job
+  and returns `202 {job_id}`; clients consume progress from the
+  owner-multiplexed `GET /ingest/jobs/events`, which replays a **collapsed**
+  history on connect (started + every warning + latest progress + terminal), so
+  a browser reload re-attaches mid-run. A second job for a collection already
+  ingesting is refused with 409 carrying the in-flight `job_id` — overlapping
+  runs can double-write, since file hashes are only recorded after a run's
+  final node batch. Entity resolution runs as a stage *inside* the job, so it
+  no longer depends on a client being attached. Jobs survive a browser reload
+  but **not** a backend restart (in-memory by design, mirroring Nextext's
+  `nextext/api/jobs.py`); the staged files remain on disk and hash dedup makes
+  a re-run cheap. The module holds no docint domain imports — the pipeline call
+  is injected as a `runner`.
 - `docint/agents/orchestrator.py` — Coordinates understanding, clarification, retrieval, and generation agents
 - `docint/core/ingest/ingestion_pipeline.py` — Document processing, chunking, metadata extraction
 - `docint/core/ingest/social_linker.py` — Joins a social export's `postings.csv` to its `media.csv` manifest + files (counter-stripped `Media ID`, basename resolution within one flat directory) and routes each linked file to the right backend: still images through `images_service.py` (CLIP); audio/video by delegating per-file Nextext routing to the shared `media_transcribe.py` engine. Every artifact — image embedding, keyframe, transcript segment — is stamped with the parent posting's `posting_uuid`, which `_attach_posting_group` uses to group a post with all its media at retrieval time. Artifacts additionally carry the posting's own reference fields (`posting_network`/`posting_author`/`posting_timestamp`/`posting_url`/`posting_text`, built via `build_posting_reference_index` from the `TableReader` postings profile) merged *additively* into their `reference_metadata` — a transcript segment keeps `network: nextext`/`type: transcript_segment`. Pre-existing collections need a re-ingest to gain these fields (no payload migration).
