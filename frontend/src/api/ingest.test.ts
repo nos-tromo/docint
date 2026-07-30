@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { buildIngestFormData, streamIngestUploadBatched } from './ingest'
+import { buildIngestFormData, streamIngestUploadBatched, type BatchFailure } from './ingest'
 import type { IngestEvent } from './types'
 
 afterEach(() => vi.restoreAllMocks())
@@ -26,7 +26,7 @@ function sseResponse(frames: string) {
   }
 }
 
-/** SSE frames for one staged (defer_ingest) upload batch: start → file_saved → upload_complete. */
+/** SSE frames for one staged upload batch: start → file_saved → upload_complete. */
 function stagedBatch(filename: string) {
   return sseResponse(
     `event: start\ndata: ${JSON.stringify({ collection: 'c1', files: [filename] })}\n\n` +
@@ -35,151 +35,132 @@ function stagedBatch(filename: string) {
   )
 }
 
-/** SSE frames for the /ingest/finalize ingestion pass. */
-function finalizeStream(opts?: { empty?: boolean; error?: string; warning?: string }) {
-  const started = `event: ingestion_started\ndata: ${JSON.stringify({ collection: 'c1' })}\n\n`
-  if (opts?.error) {
-    return sseResponse(started + `event: error\ndata: ${JSON.stringify({ message: opts.error })}\n\n`)
-  }
-  const warn = opts?.warning
-    ? `event: warning\ndata: ${JSON.stringify({ message: opts.warning, collection: 'c1' })}\n\n`
-    : ''
-  return sseResponse(
-    started +
-      warn +
-      `event: ingestion_complete\ndata: ${JSON.stringify({ collection: 'c1', empty: opts?.empty ?? false })}\n\n`
-  )
-}
-
+/** Drain the generator, splitting its yielded events from its final return value. */
 async function collect(
-  gen: AsyncGenerator<IngestEvent, void, unknown>
-): Promise<Array<{ event: string; data: Record<string, unknown> }>> {
-  const out: Array<{ event: string; data: Record<string, unknown> }> = []
-  for await (const ev of gen) out.push({ event: ev.event, data: ev.data })
-  return out
+  gen: AsyncGenerator<IngestEvent, { anySaved: boolean; failures: BatchFailure[] }, unknown>
+): Promise<{
+  events: Array<{ event: string; data: Record<string, unknown> }>
+  result: { anySaved: boolean; failures: BatchFailure[] }
+}> {
+  const events: Array<{ event: string; data: Record<string, unknown> }> = []
+  let next = await gen.next()
+  while (!next.done) {
+    events.push({ event: next.value.event, data: next.value.data })
+    next = await gen.next()
+  }
+  return { events, result: next.value }
 }
-
-const lastCallUrl = (m: ReturnType<typeof vi.fn>): string => String(m.mock.calls.at(-1)?.[0])
 
 describe('streamIngestUploadBatched', () => {
-  it('stages each batch then finalises once, normalised to one logical stream', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(stagedBatch('a'))
-      .mockResolvedValueOnce(stagedBatch('b'))
-      .mockResolvedValueOnce(finalizeStream())
+  it('stages every batch, normalised to one logical upload stream', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(stagedBatch('a')).mockResolvedValueOnce(stagedBatch('b'))
     vi.stubGlobal('fetch', fetchMock)
 
     // budget = floor(1000 * 0.9) = 900; two 500-byte files → two batches.
     const files = [fileOfSize('a', 500), fileOfSize('b', 500)]
-    const events = await collect(streamIngestUploadBatched('c1', files, 1000))
+    const { events, result } = await collect(streamIngestUploadBatched('c1', files, 1000))
 
-    // Two staged uploads + one finalize.
-    expect(fetchMock).toHaveBeenCalledTimes(3)
-    expect(lastCallUrl(fetchMock)).toContain('/ingest/finalize')
-    // Every upload batch must set defer_ingest so nothing ingests per batch.
-    expect((fetchMock.mock.calls[0][1].body as FormData).get('defer_ingest')).toBe('true')
-    // One synthetic start (all files), both file_saved forwarded, finalize's
-    // ingestion_started forwarded, one synthetic terminal complete.
-    expect(events.map((e) => e.event)).toEqual([
-      'start',
-      'file_saved',
-      'file_saved',
-      'ingestion_started',
-      'ingestion_complete'
-    ])
+    // Two staged uploads — no finalize call; queuing the job is the caller's job now.
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    // One synthetic start (all files) plus both file_saved forwarded.
+    expect(events.map((e) => e.event)).toEqual(['start', 'file_saved', 'file_saved'])
     expect(events[0].data.files).toEqual(['a', 'b'])
-    expect(events.at(-1)?.data).toMatchObject({ collection: 'c1', empty: false })
-    expect(events.at(-1)?.data.failed_files).toBeUndefined()
+    expect(result).toEqual({ anySaved: true, failures: [] })
   })
 
-  it('stages a small selection as a single batch then finalises', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(stagedBatch('a'))
-      .mockResolvedValueOnce(finalizeStream())
+  it('stages a small selection as a single batch', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(stagedBatch('a'))
     vi.stubGlobal('fetch', fetchMock)
 
-    const events = await collect(streamIngestUploadBatched('c1', [fileOfSize('a', 100)], 1_000_000))
+    const { events, result } = await collect(
+      streamIngestUploadBatched('c1', [fileOfSize('a', 100)], 1_000_000)
+    )
 
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    expect(events.map((e) => e.event)).toEqual([
-      'start',
-      'file_saved',
-      'ingestion_started',
-      'ingestion_complete'
-    ])
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(events.map((e) => e.event)).toEqual(['start', 'file_saved'])
+    expect(result).toEqual({ anySaved: true, failures: [] })
   })
 
-  it('continues past a 413 batch, still finalises, and flags the partial failure', async () => {
+  it('continues past a 413 batch and reports it as a partial failure', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(stagedBatch('a'))
       .mockResolvedValueOnce({ ok: false, status: 413, body: null })
-      .mockResolvedValueOnce(finalizeStream())
     vi.stubGlobal('fetch', fetchMock)
 
     const files = [fileOfSize('a', 500), fileOfSize('big', 500)]
-    const events = await collect(streamIngestUploadBatched('c1', files, 1000))
+    const { events, result } = await collect(streamIngestUploadBatched('c1', files, 1000))
 
-    // The bad batch surfaces as a warning; finalize still ingests the staged file.
-    expect(fetchMock).toHaveBeenCalledTimes(3)
-    expect(lastCallUrl(fetchMock)).toContain('/ingest/finalize')
-    expect(events.map((e) => e.event)).toEqual([
-      'start',
-      'file_saved',
-      'warning',
-      'ingestion_started',
-      'ingestion_complete'
-    ])
+    // The bad batch surfaces as a warning; the good one still uploads.
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(events.map((e) => e.event)).toEqual(['start', 'file_saved', 'warning'])
     expect(String(events[2].data.message)).toContain('per-upload limit')
-    expect(events.at(-1)?.data.failed_files).toEqual(['big'])
-    expect(String(events.at(-1)?.data.failed_message)).toContain('big')
+    expect(result.anySaved).toBe(true)
+    expect(result.failures).toEqual([{ batch: 2, total: 2, files: ['big'], status: 413 }])
   })
 
-  it('emits a terminal error and skips finalize when every batch fails', async () => {
+  it('emits a terminal error when every batch fails to upload', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 413, body: null })
     vi.stubGlobal('fetch', fetchMock)
 
     const files = [fileOfSize('a', 500), fileOfSize('b', 500)]
-    const events = await collect(streamIngestUploadBatched('c1', files, 1000))
+    const { events, result } = await collect(streamIngestUploadBatched('c1', files, 1000))
 
-    // Nothing was staged → finalize is NOT called (still 2 fetches).
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(events.map((e) => e.event)).toEqual(['start', 'warning', 'warning', 'error'])
     expect(String(events[3].data.message)).toContain('per-upload limit')
+    expect(result.anySaved).toBe(false)
+    expect(result.failures).toHaveLength(2)
   })
 
-  it('surfaces a finalize failure as a terminal error with generic catalog copy, never the backend message', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(stagedBatch('a'))
-      .mockResolvedValueOnce(finalizeStream({ error: 'Embedding endpoint unreachable at internal-host:9000' }))
-    vi.stubGlobal('fetch', fetchMock)
+  it('names the failing file on a save_failed event when it matches the upload list', async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      sseResponse(
+        `event: start\ndata: ${JSON.stringify({ collection: 'c1', files: ['a.txt'] })}\n\n` +
+          `event: error\ndata: ${JSON.stringify({ message: 'Failed to save file.', code: 'save_failed', filename: 'a.txt' })}\n\n`
+      )
+    ) as unknown as typeof fetch
 
-    const events = await collect(streamIngestUploadBatched('c1', [fileOfSize('a', 100)], 1_000_000))
-
-    expect(events.map((e) => e.event)).toEqual(['start', 'file_saved', 'ingestion_started', 'error'])
-    expect(events.at(-1)?.data.message).toBe('Ingestion failed.')
+    const { events } = await collect(streamIngestUploadBatched('c1', [fileOfSize('a.txt', 10)], 1000))
+    const err = events.find((e) => e.event === 'error')
+    expect(err).toBeDefined()
+    expect(String(err!.data.message)).toContain('a.txt')
+    expect(String(err!.data.message)).toContain('(save_failed)')
   })
 
-  it('completes as empty (with warning) when finalize finds nothing ingestable', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(stagedBatch('clip.mp4'))
-      .mockResolvedValueOnce(finalizeStream({ empty: true, warning: 'No ingestable files found' }))
+  it('never names a file the client did not upload on save_failed', async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      sseResponse(
+        `event: start\ndata: ${JSON.stringify({ collection: 'c1', files: ['a.txt'] })}\n\n` +
+          `event: error\ndata: ${JSON.stringify({ message: 'Failed to save file.', code: 'save_failed', filename: '../../etc/passwd' })}\n\n`
+      )
+    ) as unknown as typeof fetch
+
+    const { events } = await collect(streamIngestUploadBatched('c1', [fileOfSize('a.txt', 10)], 1000))
+    const err = events.find((e) => e.event === 'error')
+    expect(err).toBeDefined()
+    expect(String(err!.data.message)).not.toContain('passwd')
+    expect(String(err!.data.message)).toBe('Ingestion failed. (save_failed)')
+  })
+
+  it('never forwards enrichment flags into the staged upload body — /ingest/upload stages only and discards them', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(stagedBatch('a.txt'))
     vi.stubGlobal('fetch', fetchMock)
 
-    const events = await collect(streamIngestUploadBatched('c1', [fileOfSize('clip.mp4', 100)], 1_000_000))
-
-    expect(events.map((e) => e.event)).toEqual([
-      'start',
-      'file_saved',
-      'ingestion_started',
-      'warning',
-      'ingestion_complete'
-    ])
-    expect(events.at(-1)?.data).toMatchObject({ empty: true })
+    // The trailing options argument is accepted only for a still-compiling
+    // caller's sake (see the function's docstring); it must not leak into
+    // the wire payload even when a caller does pass one.
+    await collect(
+      streamIngestUploadBatched('c1', [fileOfSize('a.txt', 10)], 1000, undefined, undefined, {
+        ner: false,
+        hateSpeech: true
+      })
+    )
+    const uploadBody = fetchMock.mock.calls[0][1].body as FormData
+    expect(uploadBody.get('ner')).toBeNull()
+    expect(uploadBody.get('hate_speech')).toBeNull()
+    expect(uploadBody.get('defer_ingest')).toBeNull()
+    expect([...uploadBody.keys()].sort()).toEqual(['collection', 'files'])
   })
 })
 
@@ -199,99 +180,15 @@ describe('buildIngestFormData', () => {
     expect((fd.getAll('files') as File[])[0].name).toBe('b.png')
   })
 
-  it('appends defer_ingest only when staging', () => {
+  it('sends only collection and files — no defer_ingest, ner, or hate_speech', () => {
+    // /ingest/upload stages only (Task 4 deleted these fields from the
+    // backend); sending them would be dead payload the server discards.
+    // Enrichment now travels solely on the createIngestJob call.
     const f = new File([new Uint8Array([1])], 'b.png', { type: 'image/png' })
-    expect(buildIngestFormData('c1', [f]).get('defer_ingest')).toBeNull()
-    expect(buildIngestFormData('c1', [f], true).get('defer_ingest')).toBe('true')
+    const fd = buildIngestFormData('c1', [f])
+    expect(fd.get('defer_ingest')).toBeNull()
+    expect(fd.get('ner')).toBeNull()
+    expect(fd.get('hate_speech')).toBeNull()
+    expect([...fd.keys()].sort()).toEqual(['collection', 'files'])
   })
-})
-
-it('appends the machine-readable code to the finalize failure message', async () => {
-  global.fetch = vi
-    .fn()
-    .mockResolvedValueOnce(stagedBatch('a.txt'))
-    .mockResolvedValueOnce(
-      sseResponse(
-        `event: ingestion_started\ndata: ${JSON.stringify({ collection: 'c1' })}\n\n` +
-          `event: error\ndata: ${JSON.stringify({ message: 'Ingestion failed.', code: 'ingestion_failed' })}\n\n`
-      )
-    ) as unknown as typeof fetch
-
-  const events = await collect(streamIngestUploadBatched('c1', [fileOfSize('a.txt', 10)], 1000))
-  const terminal = events[events.length - 1]
-  expect(terminal.event).toBe('error')
-  expect(String(terminal.data.message)).toBe('Ingestion failed. (ingestion_failed)')
-})
-
-it('names the failing file on a save_failed event when it matches the upload list', async () => {
-  global.fetch = vi
-    .fn()
-    .mockResolvedValueOnce(
-      sseResponse(
-        `event: start\ndata: ${JSON.stringify({ collection: 'c1', files: ['a.txt'] })}\n\n` +
-          `event: error\ndata: ${JSON.stringify({ message: 'Failed to save file.', code: 'save_failed', filename: 'a.txt' })}\n\n`
-      )
-    )
-    .mockResolvedValueOnce(finalizeStream()) as unknown as typeof fetch
-
-  const events = await collect(streamIngestUploadBatched('c1', [fileOfSize('a.txt', 10)], 1000))
-  const err = events.find((e) => e.event === 'error')
-  expect(err).toBeDefined()
-  expect(String(err!.data.message)).toContain('a.txt')
-  expect(String(err!.data.message)).toContain('(save_failed)')
-})
-
-it('never names a file the client did not upload on save_failed', async () => {
-  global.fetch = vi
-    .fn()
-    .mockResolvedValueOnce(
-      sseResponse(
-        `event: start\ndata: ${JSON.stringify({ collection: 'c1', files: ['a.txt'] })}\n\n` +
-          `event: error\ndata: ${JSON.stringify({ message: 'Failed to save file.', code: 'save_failed', filename: '../../etc/passwd' })}\n\n`
-      )
-    )
-    .mockResolvedValueOnce(finalizeStream()) as unknown as typeof fetch
-
-  const events = await collect(streamIngestUploadBatched('c1', [fileOfSize('a.txt', 10)], 1000))
-  const err = events.find((e) => e.event === 'error')
-  expect(err).toBeDefined()
-  expect(String(err!.data.message)).not.toContain('passwd')
-  expect(String(err!.data.message)).toBe('Ingestion failed. (save_failed)')
-})
-
-it('forwards enrichment flags as FormData fields and finalize body fields', async () => {
-  const fetchMock = vi
-    .fn()
-    .mockResolvedValueOnce(stagedBatch('a.txt'))
-    .mockResolvedValueOnce(finalizeStream())
-  global.fetch = fetchMock as unknown as typeof fetch
-
-  await collect(
-    streamIngestUploadBatched('c1', [fileOfSize('a.txt', 10)], 1000, undefined, undefined, {
-      ner: false,
-      hateSpeech: true,
-    })
-  )
-  const uploadBody = fetchMock.mock.calls[0][1].body as FormData
-  expect(uploadBody.get('ner')).toBe('false')
-  expect(uploadBody.get('hate_speech')).toBe('true')
-  const finalizeBody = JSON.parse(fetchMock.mock.calls[1][1].body as string)
-  expect(finalizeBody).toMatchObject({ ner: false, hate_speech: true })
-  expect(finalizeBody.resolve).toBeUndefined()
-})
-
-it('omits enrichment fields entirely when no options are given', async () => {
-  const fetchMock = vi
-    .fn()
-    .mockResolvedValueOnce(stagedBatch('a.txt'))
-    .mockResolvedValueOnce(finalizeStream())
-  global.fetch = fetchMock as unknown as typeof fetch
-
-  await collect(streamIngestUploadBatched('c1', [fileOfSize('a.txt', 10)], 1000))
-  const uploadBody = fetchMock.mock.calls[0][1].body as FormData
-  expect(uploadBody.get('ner')).toBeNull()
-  expect(uploadBody.get('hate_speech')).toBeNull()
-  const finalizeBody = JSON.parse(fetchMock.mock.calls[1][1].body as string)
-  expect(finalizeBody.ner).toBeUndefined()
-  expect(finalizeBody.resolve).toBeUndefined()
 })

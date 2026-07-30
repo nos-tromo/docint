@@ -1,6 +1,5 @@
 import { streamUpload, UploadHttpError } from './upload'
 import { streamErrorText } from './errorMessage'
-import { streamSse } from './sse'
 import { url, withOwner } from './client'
 import { planUploadBatches } from '@/lib/uploadBatches'
 import { formatBytes } from '@/lib/ingestStatus'
@@ -25,22 +24,17 @@ export interface IngestEnrichmentOptions {
   hateSpeech?: boolean
 }
 
-export function buildIngestFormData(
-  collection: string,
-  files: File[],
-  deferIngest = false,
-  options: IngestEnrichmentOptions = {}
-): FormData {
+/**
+ * Build the multipart body for a staged upload batch.
+ *
+ * `/ingest/upload` stages files only — it no longer runs the pipeline, so it
+ * has no use for enrichment flags. Those travel solely on the
+ * `createIngestJob` (`/ingest/finalize`) call the run controller makes once
+ * every batch is staged (see `stores/ingestRun.ts`).
+ */
+export function buildIngestFormData(collection: string, files: File[]): FormData {
   const fd = new FormData()
   fd.append('collection', collection)
-  // Staged-only upload: save the files but defer ingestion to a single
-  // /ingest/finalize pass (see streamIngestUploadBatched). Omitted when false so
-  // the single-request default keeps its existing save+ingest behaviour.
-  if (deferIngest) fd.append('defer_ingest', 'true')
-  // Enrichment overrides ride on the staged batches too so a future
-  // non-deferred call behaves identically; omitted keys keep the env default.
-  if (options.ner !== undefined) fd.append('ner', String(options.ner))
-  if (options.hateSpeech !== undefined) fd.append('hate_speech', String(options.hateSpeech))
   for (const f of files) fd.append('files', f, f.webkitRelativePath || f.name)
   return fd
 }
@@ -90,37 +84,34 @@ export function describeBatchFailure(
 const fileLabel = (f: File): string => f.webkitRelativePath || f.name
 
 /**
- * Upload a file selection in size-bounded batches, then run a single ingestion
- * pass — yielding one normalised ingest event stream.
+ * Upload a file selection in size-bounded batches, staging every batch on the
+ * server — yielding one normalised upload event stream.
  *
  * Why batch: nginx caps each request body at `client_max_body_size`, so one
  * multipart POST carrying every file is rejected with 413 once the selection
  * exceeds the ceiling (the original crash). Splitting into batches that each
  * stay under the ceiling makes the total upload size unbounded by that cap.
  *
- * Why decouple upload from ingestion: the batches are uploaded **staged-only**
- * (`defer_ingest`), then one `/ingest/finalize` call ingests the whole staged
- * directory at once. Ingesting per batch instead would (a) re-init the models
- * for every batch, and (b) hard-fail any batch that happened to hold only
- * reader-unsupported files — e.g. a batch of just audio/video, which the backend
- * `required_exts` whitelist filters out, yields "No files found". A single
- * finalize pass sees the whole selection, so the images/docs are always found.
- * Being fileless, finalize can't 413, so ingestion still runs even if some
- * upload batch failed.
+ * This function owns only the upload leg. Ingestion itself is queued
+ * separately as a server-owned job (`createIngestJob` in `api/jobs.ts`,
+ * called by `stores/ingestRun.ts` once this generator returns) rather than
+ * run inline here — a browser reload or navigation no longer severs the
+ * run's only view, because the job survives independently of this call.
+ * This generator therefore no longer manufactures a terminal
+ * `ingestion_complete`/`error` event for ingestion; its return value reports
+ * only the upload outcome.
  *
- * The streams are normalised so downstream consumers (`deriveIngestStatus`, the
- * Ingest view) still see one logical ingest:
+ * The stream is normalised so downstream consumers (`deriveIngestStatus`, the
+ * ingest run store) see one logical upload:
  * - one synthetic `start` up front listing every file;
  * - each batch's `upload_progress` / `file_saved` forwarded (progress
  *   accumulates); per-batch `start` and `upload_complete` swallowed;
- * - finalize's `ingestion_started` / `ingestion_progress` / `warning` forwarded;
- * - one synthetic terminal: `ingestion_complete`, or `error` if every upload
- *   batch failed or finalize itself failed.
+ * - a terminal `error` only when every batch failed to upload.
  *
  * Upload failures are non-fatal: a batch that errors (a lone oversize file →
  * 413, or a transient drop) is reported as a `warning` and the rest still
- * upload; the terminal `ingestion_complete` carries `failed_files` /
- * `failed_message` so the UI can flag partial failures.
+ * upload; the returned `failures` list is how the caller learns which files
+ * never made it to the server.
  *
  * @param collection - Target logical collection name.
  * @param files - The full selection to upload, in user order.
@@ -129,7 +120,12 @@ const fileLabel = (f: File): string => f.webkitRelativePath || f.name
  *   `UPLOAD_SAFETY_MARGIN`.
  * @param signal - Optional abort signal cancelling the in-flight request.
  * @param t - Translate function; defaults to the English catalog for pure/test callers.
+ * @param _options - Accepted only so `Ingest.tsx`'s existing call site keeps
+ *   compiling until it is rebuilt; enrichment now travels solely on the
+ *   `createIngestJob` call the run controller makes after this generator
+ *   returns, so it is not applied here.
  * @yields Normalised `IngestEvent`s, each stamped with `receivedAt`.
+ * @returns Whether any batch saved, and the list of batches that failed.
  */
 export async function* streamIngestUploadBatched(
   collection: string,
@@ -137,8 +133,8 @@ export async function* streamIngestUploadBatched(
   limitBytes: number,
   signal?: AbortSignal,
   t: Translate = defaultT,
-  options: IngestEnrichmentOptions = {}
-): AsyncGenerator<IngestEvent, void, unknown> {
+  _options: IngestEnrichmentOptions = {}
+): AsyncGenerator<IngestEvent, { anySaved: boolean; failures: BatchFailure[] }, unknown> {
   const budgetBytes = Math.max(1, Math.floor(limitBytes * UPLOAD_SAFETY_MARGIN))
   const batches = planUploadBatches(files, budgetBytes)
 
@@ -162,11 +158,7 @@ export async function* streamIngestUploadBatched(
     const batch = batches[i]
     const batchNames = batch.map(fileLabel)
     try {
-      for await (const ev of streamUpload(
-        '/ingest/upload',
-        buildIngestFormData(collection, batch, true, options),
-        signal
-      )) {
+      for await (const ev of streamUpload('/ingest/upload', buildIngestFormData(collection, batch), signal)) {
         const data = (ev.data ?? {}) as Record<string, unknown>
         // Swallow the per-batch `start` (one synthetic start already emitted)
         // and `upload_complete` (staged-only terminal); forward save progress.
@@ -205,61 +197,13 @@ export async function* streamIngestUploadBatched(
       ? t('ingest.upload_failed_too_large', { limit: formatBytes(limitBytes) })
       : t('ingest.upload_failed_rejected', { count: failures.length })
     yield stamp('error', { message })
-    return
+    return { anySaved, failures }
   }
 
-  // Stage 2 — one ingestion pass over everything staged above.
-  const failedFiles = failures.flatMap((f) => f.files)
-  let empty = false
-  let finalizeError: string | null = null
-  try {
-    for await (const ev of streamSse(
-      '/ingest/finalize',
-      {
-        collection,
-        hybrid: true,
-        ...(options.ner !== undefined ? { ner: options.ner } : {}),
-        ...(options.hateSpeech !== undefined ? { hate_speech: options.hateSpeech } : {})
-      },
-      signal
-    )) {
-      const data = (ev.data ?? {}) as Record<string, unknown>
-      if (ev.event === 'ingestion_complete') {
-        if (data.empty === true) empty = true
-        continue // fold into the single synthetic terminal below
-      }
-      if (ev.event === 'error') {
-        // `data.message` is a protocol flag post-D2, not prose — render
-        // catalog copy, tagged with the validated machine-readable code.
-        finalizeError = streamErrorText(t, data.code, 'ingest.failed_default')
-        continue
-      }
-      yield stamp(ev.event as IngestEvent['event'], data)
-    }
-  } catch {
-    // A transport/stream failure carries no user-safe text of its own —
-    // catalog copy stands in, same as the finalize `error` event above.
-    finalizeError = t('ingest.failed_default')
-  }
-
-  if (finalizeError) {
-    yield stamp('error', { message: finalizeError })
-    return
-  }
-
-  yield stamp('ingestion_complete', {
-    collection,
-    empty,
-    ...(failedFiles.length > 0
-      ? {
-          failed_files: failedFiles,
-          failed_message: t('ingest.partial_failure_message', {
-            count: failedFiles.length,
-            files: failedFiles.join(', ')
-          })
-        }
-      : {})
-  })
+  // Stage 2 is no longer this function's job: ingestion is queued separately
+  // as a server-owned job (see `stores/ingestRun.ts` -> `createIngestJob`), so
+  // a browser reload no longer severs the run's only view.
+  return { anySaved, failures }
 }
 
 // Used as an <a href>, not fetched — must carry the sub-path base itself.
