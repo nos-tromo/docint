@@ -18,12 +18,20 @@ network.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import uuid
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+
+from anyio import to_thread
+from loguru import logger
+
+from docint.utils.env_cfg import load_ingest_concurrency
 
 TERMINAL_EVENTS: frozenset[str] = frozenset({"ingestion_complete", "error"})
 
@@ -160,3 +168,279 @@ class IngestJobState:
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
         }
+
+
+PushEvent = Callable[[str, dict[str, Any]], None]
+JobRunner = Callable[[IngestJobState, PushEvent], dict[str, Any]]
+
+_PING_INTERVAL_S = 15.0
+
+
+class IngestJobManager:
+    """In-memory ingest job store and worker dispatcher.
+
+    Jobs are held in a dict keyed by ``job_id`` and scoped by ``owner``. Async
+    workers bounded by an ``asyncio.Semaphore`` (``DOCINT_INGEST_CONCURRENCY``,
+    default 1) run the injected ``runner`` on a worker thread. Clients attach
+    with :meth:`subscribe_owner`, which replays each owned job's collapsed
+    history before live-tailing — so a browser that reloads mid-run re-attaches
+    and resumes the live view.
+
+    There is no durable storage and no TTL: a job is retained until its owner
+    removes it or the process exits.
+    """
+
+    def __init__(self, runner: JobRunner, concurrency: int | None = None) -> None:
+        """Initialize the manager.
+
+        Args:
+            runner (JobRunner): Blocking callable executing one job. Receives
+                the job state and a thread-safe ``push(event, payload)``.
+                Returns ``{"empty": bool, "resolution": dict | None}``.
+            concurrency (int | None): Worker semaphore size. Defaults to
+                :func:`docint.utils.env_cfg.load_ingest_concurrency`.
+        """
+        self._runner = runner
+        self._jobs: dict[str, IngestJobState] = {}
+        self._subscribers: dict[str, list[asyncio.Queue[str | None]]] = {}
+        self._lock = asyncio.Lock()
+        self._semaphore = asyncio.Semaphore(concurrency if concurrency is not None else load_ingest_concurrency())
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    async def create(
+        self,
+        *,
+        owner: str,
+        logical_name: str,
+        physical: str,
+        batch_dir: Path,
+        hybrid: bool,
+        ner: bool | None,
+        hate_speech: bool | None,
+        resolve: bool,
+    ) -> IngestJobState:
+        """Register a job and dispatch its worker.
+
+        Args:
+            owner (str): Resolved principal owning the job.
+            logical_name (str): The caller's collection name.
+            physical (str): Owner-namespaced Qdrant collection name.
+            batch_dir (Path): Directory of staged source files.
+            hybrid (bool): Whether hybrid search is enabled for the run.
+            ner (bool | None): Per-request NER override.
+            hate_speech (bool | None): Per-request hate-speech override.
+            resolve (bool): Whether entity resolution follows the ingest.
+
+        Returns:
+            IngestJobState: The newly registered job.
+        """
+        state = IngestJobState(
+            job_id=uuid.uuid4().hex,
+            owner=owner,
+            logical_name=logical_name,
+            physical=physical,
+            batch_dir=batch_dir,
+            hybrid=hybrid,
+            ner=ner,
+            hate_speech=hate_speech,
+            resolve=resolve,
+        )
+        async with self._lock:
+            self._jobs[state.job_id] = state
+        task = asyncio.create_task(self._worker(state))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return state
+
+    async def get(self, job_id: str, owner: str) -> IngestJobState | None:
+        """Return an owned job, or ``None``.
+
+        Args:
+            job_id (str): Job identifier.
+            owner (str): Resolved principal; a mismatch reads as absent so
+                routes can 404 without leaking existence.
+
+        Returns:
+            IngestJobState | None: The job when owned by ``owner``.
+        """
+        async with self._lock:
+            state = self._jobs.get(job_id)
+        return state if state is not None and state.owner == owner else None
+
+    async def active_for(self, owner: str, physical: str) -> IngestJobState | None:
+        """Return the owner's unfinished job for a collection, if any.
+
+        Used to reject a second concurrent ingest into the same collection:
+        overlapping runs can double-write, because file hashes are only
+        recorded as ingested after a run's final node batch.
+
+        Args:
+            owner (str): Resolved principal.
+            physical (str): Owner-namespaced Qdrant collection name.
+
+        Returns:
+            IngestJobState | None: The queued/running job, if one exists.
+        """
+        async with self._lock:
+            for state in self._jobs.values():
+                if (
+                    state.owner == owner
+                    and state.physical == physical
+                    and state.status in (JobStatus.QUEUED, JobStatus.RUNNING)
+                ):
+                    return state
+        return None
+
+    async def list_for_owner(self, owner: str) -> list[IngestJobState]:
+        """Return the owner's jobs, newest first.
+
+        Powers the frontend's reload re-discovery.
+
+        Args:
+            owner (str): Resolved principal.
+
+        Returns:
+            list[IngestJobState]: Owned jobs, newest first.
+        """
+        async with self._lock:
+            states = [s for s in self._jobs.values() if s.owner == owner]
+        states.sort(key=lambda s: s.created_at, reverse=True)
+        return states
+
+    async def remove(self, job_id: str, owner: str) -> bool:
+        """Drop an owned job from the registry.
+
+        Callers are responsible for refusing to remove a running job — the
+        worker thread cannot be killed, so a removed-but-running job would
+        keep writing with nobody watching.
+
+        Args:
+            job_id (str): Job identifier.
+            owner (str): Resolved principal.
+
+        Returns:
+            bool: ``True`` when a job was removed.
+        """
+        async with self._lock:
+            state = self._jobs.get(job_id)
+            if state is None or state.owner != owner:
+                return False
+            del self._jobs[job_id]
+        return True
+
+    async def subscribe_owner(self, owner: str) -> AsyncGenerator[str, None]:
+        """Yield SSE frames for every job this owner has, over one connection.
+
+        Replays each owned job's collapsed history on connect (oldest job
+        first), then live-tails every subsequent frame — including jobs created
+        after the stream opened. A job reaching a terminal state does not close
+        the stream; it serves the owner's other and future jobs until the client
+        disconnects.
+
+        Args:
+            owner (str): Resolved principal.
+
+        Yields:
+            str: SSE-formatted frames, each payload tagged with ``job_id``.
+        """
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        async with self._lock:
+            # Snapshot + register atomically: put_nowait never awaits, so no
+            # concurrently dispatched frame can slip between replay and
+            # registration (dispatch runs on this same loop thread).
+            owned = sorted(
+                (s for s in self._jobs.values() if s.owner == owner),
+                key=lambda s: s.created_at,
+            )
+            for state in owned:
+                for frame in state.history():
+                    queue.put_nowait(frame)
+            self._subscribers.setdefault(owner, []).append(queue)
+        try:
+            while True:
+                try:
+                    frame = await asyncio.wait_for(queue.get(), timeout=_PING_INTERVAL_S)
+                except TimeoutError:
+                    yield ": ping\n\n"
+                    continue
+                if frame is None:
+                    return
+                yield frame
+        finally:
+            async with self._lock:
+                queues = self._subscribers.get(owner)
+                if queues is not None and queue in queues:
+                    queues.remove(queue)
+                if queues is not None and not queues:
+                    del self._subscribers[owner]
+
+    async def stop(self) -> None:
+        """Close every open subscriber stream on shutdown."""
+        async with self._lock:
+            for queues in self._subscribers.values():
+                for queue in queues:
+                    queue.put_nowait(None)
+            self._subscribers.clear()
+
+    async def _worker(self, state: IngestJobState) -> None:
+        """Run one job's pipeline once a worker slot is free.
+
+        Args:
+            state (IngestJobState): The job to process.
+        """
+        async with self._semaphore:
+            state.status = JobStatus.RUNNING
+            state.started_at = _utcnow()
+            loop = asyncio.get_running_loop()
+
+            def _push(event_name: str, payload: dict[str, Any]) -> None:
+                """Publish an event to history and subscribers (thread-safe).
+
+                Tags every frame with ``job_id`` at this single choke point, so
+                each frame is self-identifying on the multiplexed owner stream.
+
+                Args:
+                    event_name (str): SSE event name.
+                    payload (dict[str, Any]): JSON-serializable payload.
+                """
+                tagged = {"job_id": state.job_id, **payload}
+                frame = format_sse(event_name, tagged)
+                loop.call_soon_threadsafe(self._dispatch, state, event_name, frame)
+
+            _push("ingestion_started", {"collection": state.logical_name})
+            try:
+                result = await to_thread.run_sync(self._runner, state, _push)
+            except Exception:
+                logger.exception("Ingest job {} failed.", state.job_id)
+                state.status = JobStatus.FAILED
+                state.error = "Ingestion failed."
+                state.finished_at = _utcnow()
+                # Static protocol copy only: the exception text can carry
+                # connection strings or file paths and never reaches a client.
+                _push("error", {"message": "Ingestion failed.", "code": "ingestion_failed"})
+                return
+            state.empty = bool(result.get("empty", False))
+            state.resolution = result.get("resolution")
+            state.status = JobStatus.COMPLETED
+            state.finished_at = _utcnow()
+            terminal: dict[str, Any] = {
+                "collection": state.logical_name,
+                "empty": state.empty,
+            }
+            if state.resolution is not None:
+                terminal["resolution"] = state.resolution
+            _push("ingestion_complete", terminal)
+
+    def _dispatch(self, state: IngestJobState, event_name: str, frame: str) -> None:
+        """Record a frame in history and fan it out.
+
+        Runs on the event-loop thread (scheduled via ``call_soon_threadsafe``).
+
+        Args:
+            state (IngestJobState): The job emitting the frame.
+            event_name (str): SSE event name.
+            frame (str): Pre-rendered SSE frame.
+        """
+        state.record(event_name, frame)
+        for queue in self._subscribers.get(state.owner, ()):
+            queue.put_nowait(frame)
