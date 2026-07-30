@@ -18,9 +18,9 @@ function renderShell() {
 }
 
 describe('Shell', () => {
-  it('renders sidebar and main slot', () => {
+  it('renders a single header (AppHeader title) and the main slot', () => {
     renderShell()
-    expect(screen.getByText(/document intelligence/i)).toBeInTheDocument()
+    expect(screen.getByText('docint')).toBeInTheDocument()
     expect(screen.getByText('main content')).toBeInTheDocument()
   })
 })

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { getConfig } from './config'
+import { getConfig, getWhoami } from './config'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -30,5 +30,14 @@ describe('config api', () => {
     const call = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(String(call[0])).toContain('/config')
     expect(cfg).toEqual(body)
+  })
+
+  it('getWhoami GETs /whoami and returns the parsed body', async () => {
+    const body = { username: 'alice' }
+    mockFetch(body)
+    const whoami = await getWhoami()
+    const call = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(String(call[0])).toContain('/whoami')
+    expect(whoami).toEqual(body)
   })
 })
