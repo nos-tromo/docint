@@ -52,6 +52,20 @@ function dirEntry(path: string, pages: Entry[][]): Entry {
   }
 }
 
+/** A file whose `webkitRelativePath` is already defined non-configurable, so
+ *  the traversal's `Object.defineProperty` re-stamp throws — proves one
+ *  un-stampable file doesn't sink the whole batch. */
+function unstampableFileEntry(path: string): Entry {
+  const f = new File([new Uint8Array([1])], path.split('/').pop() as string)
+  Object.defineProperty(f, 'webkitRelativePath', { value: 'preset', configurable: false })
+  return {
+    isFile: true,
+    isDirectory: false,
+    fullPath: path,
+    file: (cb) => cb(f)
+  }
+}
+
 function dropWith(entries: Entry[]) {
   return {
     preventDefault: () => {},
@@ -97,5 +111,20 @@ describe('Dropzone folder drop', () => {
     const f = new File([new Uint8Array([1])], 'legacy.pdf')
     fireEvent.drop(zone, { preventDefault: () => {}, dataTransfer: { items: [], files: [f] } })
     await waitFor(() => expect(onFiles).toHaveBeenCalledWith([f]))
+  })
+
+  it('still queues the whole batch when one file cannot be path-stamped', async () => {
+    const onFiles = vi.fn()
+    render(<Dropzone onFiles={onFiles} />)
+    const zone = screen.getByText(/drag files here/i).closest('div') as HTMLElement
+
+    fireEvent.drop(
+      zone,
+      dropWith([unstampableFileEntry('/export/locked.pdf'), fileEntry('/export/ok.pdf')])
+    )
+
+    await waitFor(() => expect(onFiles).toHaveBeenCalled())
+    const names = (onFiles.mock.calls[0][0] as File[]).map((f) => f.name)
+    expect(names.sort()).toEqual(['locked.pdf', 'ok.pdf'])
   })
 })

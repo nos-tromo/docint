@@ -15,10 +15,16 @@ type FsEntry = {
  *  file as `webkitRelativePath || name`, so stamp the tree path or dropped
  *  folders flatten and same-named files across subfolders collide. */
 function withRelativePath(file: File, fullPath: string): File {
-  Object.defineProperty(file, 'webkitRelativePath', {
-    value: fullPath.replace(/^\//, ''),
-    configurable: true
-  })
+  try {
+    Object.defineProperty(file, 'webkitRelativePath', {
+      value: fullPath.replace(/^\//, ''),
+      configurable: true
+    })
+  } catch {
+    // Some engines may reject redefining a non-configurable property. A file
+    // with a bare name is far better than losing the whole drop —
+    // ingest.ts already falls back to f.name when webkitRelativePath is unset.
+  }
   return file
 }
 
@@ -67,20 +73,27 @@ export function Dropzone({
     setHover(false)
     if (disabled) return
     // DataTransfer is neutered once this handler returns, so pull every entry
-    // out synchronously BEFORE awaiting anything.
+    // (and the plain-file fallback list) out synchronously BEFORE awaiting
+    // anything.
+    const plain = Array.from(e.dataTransfer.files)
     const entries = Array.from(e.dataTransfer.items ?? [])
       .map((item) => (item as unknown as { webkitGetAsEntry?: () => FsEntry | null }).webkitGetAsEntry?.() ?? null)
       .filter((entry): entry is FsEntry => entry !== null)
     if (!entries.length) {
       // No entries API (or no entries): keep the plain-file behavior.
-      const list = Array.from(e.dataTransfer.files)
-      if (list.length) onFiles(list)
+      if (plain.length) onFiles(plain)
       return
     }
-    void Promise.all(entries.map(collectFiles)).then((groups) => {
-      const list = groups.flat()
-      if (list.length) onFiles(list)
-    })
+    void Promise.all(entries.map(collectFiles))
+      .then((groups) => {
+        const list = groups.flat()
+        if (list.length) onFiles(list)
+      })
+      .catch(() => {
+        // Traversal failed unexpectedly: fall back to whatever plain files
+        // were present rather than silently losing the whole drop.
+        if (plain.length) onFiles(plain)
+      })
   }
 
   return (
