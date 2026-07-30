@@ -4,14 +4,24 @@ import { INGEST_JOB_EVENTS_PATH } from '@/api/jobs'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
 import type { IngestEvent } from '@/api/types'
 
-// Deliberately short: each *consecutive* failed attempt still carries its own
-// real connection latency (DNS/TCP/TLS, or the browser's own fetch timeout on
-// a truly dead network), so this delay is a minor addend to the total
-// giveup time, not the dominant cost. Keeping it short also keeps the test
-// suite's wall-clock cost for the reconnect-budget tests bounded.
-const RECONNECT_DELAY_MS = 300
-/** Consecutive reconnect attempts before the stream is declared lost. */
-export const MAX_RECONNECTS = 5
+/**
+ * Reconnect timing, exposed as a mutable config object rather than plain
+ * constants so tests can shrink `reconnectDelayMs` for the reconnect-budget
+ * tests without touching the production value. `reconnectDelayMs` (1500ms)
+ * times `maxReconnects` (5) is the give-up window a real user rides out
+ * silently — e.g. a rolling backend deploy or container restart — before
+ * `streamLost` flips and they need to reconnect by hand; narrowing it would
+ * be a real change in production resilience, not just a test-speed tweak.
+ * Fake timers were considered for the tests instead, but this hook's retry
+ * loop is built on an async-generator SSE read loop, and fake timers do not
+ * compose cleanly with pending microtask chains like that — this seam avoids
+ * the risk entirely while keeping the tests on real timers.
+ */
+export const ingestStreamConfig = {
+  reconnectDelayMs: 1500,
+  /** Consecutive reconnect attempts before the stream is declared lost. */
+  maxReconnects: 5
+}
 
 /**
  * Subscribe to the owner-multiplexed ingest job stream and fan its frames into
@@ -22,9 +32,10 @@ export const MAX_RECONNECTS = 5
  * job's collapsed history on connect, and the store's fold is idempotent over
  * a replay, so reconnecting is always safe.
  *
- * Reconnects up to {@link MAX_RECONNECTS} consecutive times; any received
- * event resets the budget. On exhaustion the store's `streamLost` flag lets
- * the UI offer a manual reconnect rather than freezing on the last frame.
+ * Reconnects up to {@link ingestStreamConfig}'s `maxReconnects` consecutive
+ * times; any received event resets the budget. On exhaustion the store's
+ * `streamLost` flag lets the UI offer a manual reconnect rather than
+ * freezing on the last frame.
  */
 export function useIngestJobStream(): void {
   useEffect(() => {
@@ -36,7 +47,7 @@ export function useIngestJobStream(): void {
     const { appendEvent, setStreamLost } = useIngestJobsStore.getState()
 
     async function run(): Promise<void> {
-      while (!cancelled && reconnects <= MAX_RECONNECTS) {
+      while (!cancelled && reconnects <= ingestStreamConfig.maxReconnects) {
         try {
           for await (const frame of streamSseGet(INGEST_JOB_EVENTS_PATH, controller.signal)) {
             reconnects = 0 // a real event resets the consecutive-failure budget
@@ -55,11 +66,11 @@ export function useIngestJobStream(): void {
         }
         if (cancelled) return
         reconnects += 1
-        if (reconnects > MAX_RECONNECTS) {
+        if (reconnects > ingestStreamConfig.maxReconnects) {
           setStreamLost(true)
           return
         }
-        await new Promise((resolve) => setTimeout(resolve, RECONNECT_DELAY_MS))
+        await new Promise((resolve) => setTimeout(resolve, ingestStreamConfig.reconnectDelayMs))
       }
     }
 
