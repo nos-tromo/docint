@@ -111,4 +111,33 @@ describe('useIngestJobStream', () => {
       timeout: 15000
     })
   }, 20000)
+
+  it('reconnects when retryStream() is called after the stream was lost', async () => {
+    // Fails until the budget is exhausted and streamLost flips, exactly like
+    // the test above. `retryStream()` must then make the hook's effect
+    // re-subscribe (a fresh connection) rather than staying given up forever.
+    const failing = vi.fn(async () => new Response(null, { status: 500 }))
+    vi.stubGlobal('fetch', failing)
+
+    renderHook(() => useIngestJobStream())
+
+    await waitFor(() => expect(useIngestJobsStore.getState().streamLost).toBe(true), {
+      timeout: 15000
+    })
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(streamOf([sse('ingestion_started', { job_id: 'a', collection: 'mydocs' })]), {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' }
+          })
+      )
+    )
+    useIngestJobsStore.getState().retryStream()
+
+    await waitFor(() => expect(useIngestJobsStore.getState().events['a']).toHaveLength(1))
+    expect(useIngestJobsStore.getState().streamLost).toBe(false)
+  }, 20000)
 })

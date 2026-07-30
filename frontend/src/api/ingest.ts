@@ -17,13 +17,6 @@ type Translate = (key: keyof Strings, vars?: Record<string, string | number>) =>
  */
 export const UPLOAD_SAFETY_MARGIN = 0.9
 
-export interface IngestEnrichmentOptions {
-  /** Per-request NER override; omitted -> deployment env default. */
-  ner?: boolean
-  /** Per-request hate-speech override; omitted -> deployment env default. */
-  hateSpeech?: boolean
-}
-
 /**
  * Build the multipart body for a staged upload batch.
  *
@@ -120,10 +113,6 @@ const fileLabel = (f: File): string => f.webkitRelativePath || f.name
  *   `UPLOAD_SAFETY_MARGIN`.
  * @param signal - Optional abort signal cancelling the in-flight request.
  * @param t - Translate function; defaults to the English catalog for pure/test callers.
- * @param _options - Accepted only so `Ingest.tsx`'s existing call site keeps
- *   compiling until it is rebuilt; enrichment now travels solely on the
- *   `createIngestJob` call the run controller makes after this generator
- *   returns, so it is not applied here.
  * @yields Normalised `IngestEvent`s, each stamped with `receivedAt`.
  * @returns Whether any batch saved, and the list of batches that failed.
  */
@@ -132,8 +121,7 @@ export async function* streamIngestUploadBatched(
   files: File[],
   limitBytes: number,
   signal?: AbortSignal,
-  t: Translate = defaultT,
-  _options: IngestEnrichmentOptions = {}
+  t: Translate = defaultT
 ): AsyncGenerator<IngestEvent, { anySaved: boolean; failures: BatchFailure[] }, unknown> {
   const budgetBytes = Math.max(1, Math.floor(limitBytes * UPLOAD_SAFETY_MARGIN))
   const batches = planUploadBatches(files, budgetBytes)

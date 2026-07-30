@@ -69,6 +69,20 @@ describe('useIngestRunStore', () => {
     expect(useIngestRunStore.getState().files.map((f) => f.name)).toEqual(['a.txt', 'b.txt'])
   })
 
+  it('removes a file at the given index', () => {
+    const s = useIngestRunStore.getState()
+    s.addFiles([file('a.txt'), file('b.txt'), file('c.txt')])
+    s.removeFile(1)
+    expect(useIngestRunStore.getState().files.map((f) => f.name)).toEqual(['a.txt', 'c.txt'])
+  })
+
+  it('clears all picked files', () => {
+    const s = useIngestRunStore.getState()
+    s.addFiles([file('a.txt')])
+    s.clearFiles()
+    expect(useIngestRunStore.getState().files).toEqual([])
+  })
+
   it('does not persist File objects', () => {
     const s = useIngestRunStore.getState()
     s.setCollection('mydocs')

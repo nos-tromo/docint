@@ -5,6 +5,7 @@ import { MemoryRouter, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Sidebar } from './Sidebar'
 import { useUiStore } from '@/stores/ui'
+import { useIngestJobsStore } from '@/stores/ingestJobs'
 
 function mockFetch(map: Record<string, unknown>) {
   return vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
@@ -53,6 +54,7 @@ function renderSidebarAt(initialPath: string) {
 
 beforeEach(() => {
   useUiStore.setState({ selectedCollection: null, currentSessionId: null, previewModal: null })
+  useIngestJobsStore.getState().clear()
 })
 
 afterEach(() => {
@@ -317,5 +319,51 @@ describe('Sidebar navigation', () => {
     // entry appended later would fail this test instead of passing silently.
     const hrefs = Array.from(document.querySelectorAll('nav a')).map((a) => a.getAttribute('href'))
     expect(hrefs).toEqual(['/', '/ingest', '/inspector', '/chat', '/analysis', '/report'])
+  })
+})
+
+describe('Sidebar ingest job badge', () => {
+  it('badges the Ingest nav entry while a job is running', async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': [],
+      '/sessions/list': { sessions: [] }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    useIngestJobsStore.getState().appendEvent('job-1', {
+      event: 'ingestion_started',
+      data: { job_id: 'job-1', collection: 'mydocs' },
+      receivedAt: Date.now()
+    })
+
+    renderSidebar()
+    expect(await screen.findByLabelText(/ingestion running|verarbeitung läuft/i)).toBeInTheDocument()
+  })
+
+  it('drops the badge once the job completes', async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': [],
+      '/sessions/list': { sessions: [] }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { appendEvent } = useIngestJobsStore.getState()
+    appendEvent('job-1', {
+      event: 'ingestion_started',
+      data: { job_id: 'job-1', collection: 'mydocs' },
+      receivedAt: Date.now()
+    })
+    appendEvent('job-1', {
+      event: 'ingestion_complete',
+      data: { job_id: 'job-1', collection: 'mydocs' },
+      receivedAt: Date.now()
+    })
+
+    renderSidebar()
+    await waitFor(() => {
+      const calls = fetchMock.mock.calls.map((c) => String(c[0]))
+      expect(calls.some((u) => u.includes('/collections/list'))).toBe(true)
+    })
+    expect(screen.queryByLabelText(/ingestion running|verarbeitung läuft/i)).not.toBeInTheDocument()
   })
 })

@@ -143,19 +143,14 @@ describe('streamIngestUploadBatched', () => {
     expect(String(err!.data.message)).toBe('Ingestion failed. (save_failed)')
   })
 
-  it('never forwards enrichment flags into the staged upload body — /ingest/upload stages only and discards them', async () => {
+  it('never puts enrichment flags into the staged upload body — /ingest/upload stages only', async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(stagedBatch('a.txt'))
     vi.stubGlobal('fetch', fetchMock)
 
-    // The trailing options argument is accepted only for a still-compiling
-    // caller's sake (see the function's docstring); it must not leak into
-    // the wire payload even when a caller does pass one.
-    await collect(
-      streamIngestUploadBatched('c1', [fileOfSize('a.txt', 10)], 1000, undefined, undefined, {
-        ner: false,
-        hateSpeech: true
-      })
-    )
+    // Enrichment travels solely on the `createIngestJob` (`/ingest/finalize`)
+    // call the run controller makes once every batch is staged — this
+    // function has no enrichment parameter at all.
+    await collect(streamIngestUploadBatched('c1', [fileOfSize('a.txt', 10)], 1000))
     const uploadBody = fetchMock.mock.calls[0][1].body as FormData
     expect(uploadBody.get('ner')).toBeNull()
     expect(uploadBody.get('hate_speech')).toBeNull()

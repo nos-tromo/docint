@@ -6,6 +6,7 @@ import { ApiError } from '@/api/client'
 import { useCollections, useDeleteCollection, useSelectCollection } from '@/hooks/useCollections'
 import { useDeleteSession, useSessions, sessionsKey } from '@/hooks/useSessions'
 import { useUiStore } from '@/stores/ui'
+import { useIngestJobsStore, selectHasRunningJob } from '@/stores/ingestJobs'
 import { cn } from '@/lib/cn'
 import { buildCollectionEntries, entryMatches, type CollectionEntry } from '@/lib/collectionEntries'
 import { useT } from '@/i18n/LanguageContext'
@@ -39,6 +40,7 @@ export function Sidebar() {
   const { data: sessionsData, isLoading: sessionsLoading, error: sessionsError } = useSessions()
   const deleteSessionMutation = useDeleteSession()
   const qc = useQueryClient()
+  const hasRunningJob = useIngestJobsStore(selectHasRunningJob)
   const selected = useUiStore((s) => s.selectedCollection)
   const selectedOwner = useUiStore((s) => s.selectedOwner)
   const setSelected = useUiStore((s) => s.setSelectedCollection)
@@ -146,6 +148,12 @@ export function Sidebar() {
             }
           >
             {t(key)}
+            {to === '/ingest' && hasRunningJob && (
+              <span
+                aria-label={t('nav.ingest_running')}
+                className="ml-2 inline-block h-2 w-2 animate-pulse rounded-full bg-primary align-middle"
+              />
+            )}
           </NavLink>
         ))}
       </nav>

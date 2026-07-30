@@ -38,6 +38,10 @@ export const ingestStreamConfig = {
  * freezing on the last frame.
  */
 export function useIngestJobStream(): void {
+  // Re-subscribing needs a dependency that changes: `retryStream()` bumps
+  // this so a user-triggered reconnect (after `streamLost`) tears down the
+  // old effect and opens a fresh connection.
+  const retryNonce = useIngestJobsStore((s) => s.retryNonce)
   useEffect(() => {
     const controller = new AbortController()
     let cancelled = false
@@ -79,5 +83,5 @@ export function useIngestJobStream(): void {
       cancelled = true
       controller.abort()
     }
-  }, [])
+  }, [retryNonce])
 }

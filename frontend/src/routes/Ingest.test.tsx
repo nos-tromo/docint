@@ -1,137 +1,124 @@
-import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
+import { render, screen, waitFor } from '@testing-library/react'
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import type { ReactElement } from 'react'
 import { Ingest } from './Ingest'
-import { Sidebar } from '@/layout/Sidebar'
-import { useUiStore } from '@/stores/ui'
-
-// The ingest stream is mocked to "create" the new collection: consuming it
-// flips the shared collections list to include `gamma`, then emits the terminal
-// event — mirroring the backend, where the collection exists only after ingest.
-const h = vi.hoisted(() => ({ collections: [] as string[], calls: [] as unknown[][] }))
-vi.mock('@/api/ingest', () => ({
-  streamIngestUploadBatched: (...args: unknown[]) => {
-    h.calls.push(args)
-    return (async function* () {
-      h.collections = ['gamma']
-      yield { event: 'ingestion_complete', data: {} }
-    })()
-  }
-}))
+import { useIngestRunStore } from '@/stores/ingestRun'
+import { useIngestJobsStore } from '@/stores/ingestJobs'
 
 function jsonRes(body: unknown) {
   return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) }
 }
 
-beforeEach(() => {
-  h.collections = []
-  h.calls = []
-  useUiStore.setState({ selectedCollection: null, currentSessionId: null, previewModal: null })
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (input: RequestInfo | URL) => {
-      const u = typeof input === 'string' ? input : input.toString()
-      if (u.includes('/collections/list')) return jsonRes(h.collections)
-      if (u.includes('/collections/select')) return jsonRes({ ok: true, name: 'gamma' })
-      if (u.includes('/config/ingest-defaults')) return jsonRes({ ner: true, hate_speech: false })
-      if (u.includes('/config'))
-        return jsonRes({ graph_top_k: 0, graph_max_top_k: 0, collection_timeout: 0, max_upload_bytes: 1024 * 1024 })
-      if (u.includes('/sessions/list')) return jsonRes({ sessions: [] })
-      return jsonRes(null)
-    })
+function renderIn(ui: ReactElement) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter>{ui}</MemoryRouter>
+    </QueryClientProvider>
   )
+}
+
+let fetchMock: ReturnType<typeof vi.fn>
+
+beforeEach(() => {
+  useIngestRunStore.getState().reset()
+  useIngestJobsStore.getState().clear()
+  fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const u = typeof input === 'string' ? input : input.toString()
+    if (u.includes('/collections/select')) return jsonRes({ ok: true, name: 'mydocs' })
+    if (u.includes('/collections/list')) return jsonRes([])
+    if (u.includes('/config/ingest-defaults')) return jsonRes({ ner: false, hate_speech: false })
+    if (u.includes('/ingest/jobs')) return jsonRes({ jobs: [] })
+    if (u.includes('/config'))
+      return jsonRes({
+        graph_top_k: 0,
+        graph_max_top_k: 0,
+        collection_timeout: 0,
+        max_upload_bytes: 1024 * 1024,
+        language: 'en'
+      })
+    return jsonRes(null)
+  })
+  vi.stubGlobal('fetch', fetchMock)
 })
 
 afterEach(() => {
   vi.restoreAllMocks()
 })
 
-function renderIngestAndSidebar() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return render(
-    <QueryClientProvider client={qc}>
-      <MemoryRouter>
-        <Ingest />
-        <Sidebar />
-      </MemoryRouter>
-    </QueryClientProvider>
-  )
+/** Count calls whose URL matches a substring, across every fetch so far. */
+function callsMatching(pattern: string): number {
+  return fetchMock.mock.calls.filter((c) => String(c[0]).includes(pattern)).length
 }
 
-describe('Ingest → collection auto-selection', () => {
-  it('keeps the new collection selected after ingesting into it', async () => {
-    const { container } = renderIngestAndSidebar()
+describe('Ingest', () => {
+  it('restores the collection name from the store on mount', () => {
+    useIngestRunStore.getState().setCollection('mydocs')
+    renderIn(<Ingest />)
+    // The collection input carries a `list` attribute (the existing-collections
+    // datalist), which gives it the ARIA "combobox" role rather than "textbox".
+    expect(screen.getByRole('combobox', { name: /collection/i })).toHaveValue('mydocs')
+  })
 
-    await userEvent.type(screen.getByPlaceholderText('my-collection'), 'gamma')
-    // The Dropzone's file input is hidden (Tailwind `hidden` = display:none), so
-    // set files via fireEvent.change rather than userEvent.upload (which enforces
-    // visibility).
-    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
-    fireEvent.change(fileInput, { target: { files: [new File(['x'], 'a.txt', { type: 'text/plain' })] } })
-
-    await userEvent.click(screen.getByRole('button', { name: /^ingest$/i }))
-
-    await waitFor(() => {
-      expect(useUiStore.getState().selectedCollection).toBe('gamma')
+  it('renders live progress for the active job', async () => {
+    useIngestRunStore.setState({ activeJobId: 'job-1' })
+    useIngestJobsStore.getState().appendEvent('job-1', {
+      event: 'ingestion_progress',
+      data: { job_id: 'job-1', message: 'Extracting entities: 3/9 chunks processed' },
+      receivedAt: Date.now()
     })
-  })
-})
 
-describe('Ingest → enrichment controls', () => {
-  it('seeds the checkboxes from the deployment defaults', async () => {
-    renderIngestAndSidebar()
-    const ner = (await screen.findByLabelText('Extract entities')) as HTMLInputElement
-    const hate = screen.getByLabelText('Detect hate speech') as HTMLInputElement
-    await waitFor(() => expect(ner.checked).toBe(true))
-    expect(hate.checked).toBe(false)
-    // Resolution is not a user decision: it follows entity extraction
-    // automatically (RES_AUTO_RESOLVE is the operator kill-switch).
-    expect(screen.queryByLabelText(/resolve/i)).toBeNull()
+    renderIn(<Ingest />)
+    await waitFor(() => expect(screen.getByText(/3\s*\/\s*9/)).toBeInTheDocument())
   })
 
-  it('forwards the chosen flags into the upload stream call', async () => {
-    renderIngestAndSidebar()
-    const ner = (await screen.findByLabelText('Extract entities')) as HTMLInputElement
-    await waitFor(() => expect(ner.checked).toBe(true))
-    await userEvent.click(screen.getByLabelText('Detect hate speech'))
-
-    const file = new File(['x'], 'a.txt', { type: 'text/plain' })
-    const input = document.querySelector('input[type="file"]') as HTMLInputElement
-    await userEvent.upload(input, file)
-    fireEvent.change(screen.getByPlaceholderText(/collection/i), { target: { value: 'gamma' } })
-    await userEvent.click(screen.getByRole('button', { name: /^ingest$/i }))
-
-    await waitFor(() => expect(h.calls.length).toBe(1))
-    const options = h.calls[0][5] as Record<string, unknown>
-    expect(options).toEqual({ ner: true, hateSpeech: true })
-  })
-})
-
-describe('Ingest → enrichment defaults unavailable', () => {
-  it('submits no explicit flags before the defaults have seeded', async () => {
-    // Simulate /config/ingest-defaults failing (SPA newer than backend, or a
-    // transient error): the env defaults must keep applying server-side.
-    const base = global.fetch as unknown as (input: RequestInfo | URL) => Promise<Response>
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        const u = typeof input === 'string' ? input : input.toString()
-        if (u.includes('/config/ingest-defaults'))
-          return { ok: false, status: 404, json: async (): Promise<unknown> => ({}), text: async (): Promise<string> => '{}' }
-        return base(input)
-      })
+  it('offers a re-run when the active job is unknown to the server', async () => {
+    useIngestRunStore.setState({ activeJobId: 'ghost' })
+    renderIn(<Ingest />)
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /run again|erneut/i })).toBeInTheDocument()
     )
-    renderIngestAndSidebar()
-    const file = new File(['x'], 'a.txt', { type: 'text/plain' })
-    const input = document.querySelector('input[type="file"]') as HTMLInputElement
-    await userEvent.upload(input, file)
-    fireEvent.change(screen.getByPlaceholderText(/collection/i), { target: { value: 'gamma' } })
-    await userEvent.click(screen.getByRole('button', { name: /^ingest$/i }))
+  })
+})
 
-    await waitFor(() => expect(h.calls.length).toBe(1))
-    const options = h.calls[0][5] as Record<string, unknown>
-    expect(options).toEqual({})
+describe('Ingest post-ingest side effects', () => {
+  it('selects the collection exactly once, even when the terminal event replays', async () => {
+    // Regression test for the reconnect-replay case: the SSE stream resets a
+    // job's log on `ingestion_started` and re-delivers its whole collapsed
+    // history, so a naive effect keyed only on "last event is
+    // ingestion_complete" would re-fire the collection-select side effect on
+    // every replay.
+    useIngestRunStore.setState({ activeJobId: 'job-1', collection: 'mydocs' })
+    const { appendEvent } = useIngestJobsStore.getState()
+    const complete = () =>
+      appendEvent('job-1', {
+        event: 'ingestion_complete',
+        data: { job_id: 'job-1', collection: 'mydocs' },
+        receivedAt: Date.now()
+      })
+    appendEvent('job-1', {
+      event: 'ingestion_started',
+      data: { job_id: 'job-1', collection: 'mydocs' },
+      receivedAt: Date.now()
+    })
+    complete()
+
+    renderIn(<Ingest />)
+    await waitFor(() => expect(callsMatching('/collections/select')).toBe(1))
+
+    // Simulate a reconnect replay of the same job's history.
+    appendEvent('job-1', {
+      event: 'ingestion_started',
+      data: { job_id: 'job-1', collection: 'mydocs' },
+      receivedAt: Date.now()
+    })
+    complete()
+
+    // Give a wrongly-re-firing effect a chance to make a second call before
+    // asserting the count stayed at one.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(callsMatching('/collections/select')).toBe(1)
   })
 })

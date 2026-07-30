@@ -13,15 +13,21 @@ export interface IngestJobsState {
   events: Record<string, IngestEvent[]>
   /** True once the SSE stream exhausted its reconnect budget. */
   streamLost: boolean
+  /** Bumped to force `useIngestJobStream` to re-subscribe after giving up. */
+  retryNonce: number
   appendEvent: (jobId: string, ev: IngestEvent) => void
   setStreamLost: (v: boolean) => void
   dropJob: (jobId: string) => void
+  /** Clear the lost-stream flag and bump `retryNonce` so the stream hook's
+   *  effect re-runs and opens a fresh connection. */
+  retryStream: () => void
   clear: () => void
 }
 
 export const useIngestJobsStore = create<IngestJobsState>((set) => ({
   events: {},
   streamLost: false,
+  retryNonce: 0,
   appendEvent: (jobId, ev) =>
     set((s) => ({
       events: {
@@ -45,8 +51,20 @@ export const useIngestJobsStore = create<IngestJobsState>((set) => ({
       delete events[jobId]
       return { events }
     }),
-  clear: () => set({ events: {}, streamLost: false })
+  retryStream: () => set((s) => ({ streamLost: false, retryNonce: s.retryNonce + 1 })),
+  clear: () => set({ events: {}, streamLost: false, retryNonce: 0 })
 }))
+
+/**
+ * Whether any tracked job is still running — i.e. it has started and has not
+ * yet produced a terminal frame. Drives the sidebar badge.
+ */
+export const selectHasRunningJob = (s: IngestJobsState): boolean =>
+  Object.values(s.events).some(
+    (events) =>
+      events.length > 0 &&
+      !events.some((e) => e.event === 'ingestion_complete' || e.event === 'error')
+  )
 
 /** Stable selector for one job's log; returns a frozen empty array when absent. */
 const EMPTY: IngestEvent[] = []
