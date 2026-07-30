@@ -103,6 +103,18 @@ describe('Dropzone folder drop', () => {
     expect((onFiles.mock.calls[0][0] as File[]).map((f) => f.name)).toEqual(['x.pdf'])
   })
 
+  it('reports an empty drop instead of failing silently', async () => {
+    const onFiles = vi.fn()
+    const onEmpty = vi.fn()
+    render(<Dropzone onFiles={onFiles} onEmpty={onEmpty} />)
+    const zone = screen.getByText(/drag files here/i).closest('div') as HTMLElement
+
+    // A dropped directory that contains nothing at all.
+    fireEvent.drop(zone, dropWith([dirEntry('/empty', [[]])]))
+    await waitFor(() => expect(onEmpty).toHaveBeenCalledTimes(1))
+    expect(onFiles).not.toHaveBeenCalled()
+  })
+
   it('falls back to dataTransfer.files when the entries API is unavailable', async () => {
     const onFiles = vi.fn()
     render(<Dropzone onFiles={onFiles} />)

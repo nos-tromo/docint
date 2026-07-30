@@ -202,6 +202,34 @@ describe('Report view — document overview', () => {
     })
   })
 
+  it('persists a manual operator edit without re-applying the prefill', async () => {
+    const patches: { url: string; body: unknown }[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string, init?: RequestInit) => {
+        const url = String(u)
+        if (url.includes('/whoami')) {
+          return { ok: true, status: 200, json: async () => ({ username: 'jane.doe', display_name: 'Jane Doe' }) }
+        }
+        if (url.includes('/reports/1') && init?.method === 'PATCH') {
+          patches.push({ url, body: JSON.parse(String(init.body)) })
+          return { ok: true, status: 200, json: async () => reportDetail }
+        }
+        if (url.includes('/reports/1')) return { ok: true, status: 200, json: async () => reportDetail }
+        if (url.endsWith('/reports')) {
+          return { ok: true, status: 200, json: async () => ({ reports: [{ ...reportDetail, items: undefined }] }) }
+        }
+        return { ok: true, status: 200, json: async () => ({}) }
+      })
+    )
+    renderReport()
+    const input = await screen.findByPlaceholderText(/operator|sachbearbeit/i)
+    fireEvent.change(input, { target: { value: 'Someone Else' } })
+    fireEvent.blur(input)
+    await waitFor(() => expect(patches).toHaveLength(1))
+    expect((patches[0].body as { operator?: string }).operator).toBe('Someone Else')
+  })
+
   it('creates a report with the signed-in display name as operator', async () => {
     const calls: { url: string; body: unknown }[] = []
     let whoamiCallCount = 0

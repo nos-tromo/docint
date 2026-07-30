@@ -29,6 +29,7 @@ export const de: Strings = {
   'common.no_active_collection': 'Keine aktive Sammlung — wählen Sie eine aus, um Anfragen zu stellen.',
   'common.sessions': 'Sitzungen',
   'common.new_session': '+ Neu',
+  'common.new_report': 'Neuer Bericht',
   'common.loading_chats': 'Lädt Chats...',
   'common.sessions_error_default': 'Chats konnten nicht geladen werden.',
   'common.sessions_error_auth':
@@ -133,6 +134,7 @@ export const de: Strings = {
 
   // ingest
   'ingest.title': 'Datenimport',
+  'ingest.drop_empty': 'Nichts hinzugefügt — dieser Ablagevorgang enthielt keine Dateien.',
   'ingest.button': 'Importieren',
   'ingest.busy': 'Wird importiert…',
   'ingest.error_truncated':

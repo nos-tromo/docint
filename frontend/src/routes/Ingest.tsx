@@ -123,7 +123,9 @@ export function Ingest() {
     // oversized body (nginx 413), and ingestion sees the whole selection at once.
     const limitBytes = config?.max_upload_bytes ?? FALLBACK_UPLOAD_LIMIT_BYTES
     const sizes: Record<string, number> = {}
-    for (const f of state.files) sizes[f.name] = f.size
+    // Key by the same label the ingest event stream uses (api/ingest.ts),
+    // or per-file byte totals miss for every file inside a dropped folder.
+    for (const f of state.files) sizes[f.webkitRelativePath || f.name] = f.size
     dispatch({ type: 'start', sizes })
     // Track whether the backend ever produced a terminal event so that
     // we can tell "ingestion finished" from "the SSE stream died". An
@@ -217,7 +219,11 @@ export function Ingest() {
         </datalist>
       </label>
 
-      <Dropzone disabled={state.busy} onFiles={(v) => dispatch({ type: 'add_files', v })} />
+      <Dropzone
+        disabled={state.busy}
+        onFiles={(v) => dispatch({ type: 'add_files', v })}
+        onEmpty={() => setError(t('ingest.drop_empty'))}
+      />
 
       <FileList
         files={state.files}
@@ -257,7 +263,7 @@ export function Ingest() {
         {state.busy ? t('ingest.busy') : t('ingest.button')}
       </Button>
 
-      {error && <div className="text-red-400 text-sm">{error}</div>}
+      {error && <div className="text-[var(--status-red-fg)] text-sm">{error}</div>}
       {warnings.length > 0 && (
         <ul className="text-amber-400 text-sm space-y-1" role="alert">
           {warnings.map((w, i) => (

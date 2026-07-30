@@ -58,9 +58,13 @@ async function collectFiles(entry: FsEntry): Promise<File[]> {
 
 export function Dropzone({
   onFiles,
+  onEmpty,
   disabled
 }: {
   onFiles: (files: File[]) => void
+  /** Called when a drop yields no usable files (empty folder, or a traversal
+   *  the browser refused) — otherwise the drop would fail silently. */
+  onEmpty?: () => void
   disabled?: boolean
 }) {
   const t = useT()
@@ -82,17 +86,20 @@ export function Dropzone({
     if (!entries.length) {
       // No entries API (or no entries): keep the plain-file behavior.
       if (plain.length) onFiles(plain)
+      else onEmpty?.()
       return
     }
     void Promise.all(entries.map(collectFiles))
       .then((groups) => {
         const list = groups.flat()
         if (list.length) onFiles(list)
+        else onEmpty?.()
       })
       .catch(() => {
         // Traversal failed unexpectedly: fall back to whatever plain files
         // were present rather than silently losing the whole drop.
         if (plain.length) onFiles(plain)
+        else onEmpty?.()
       })
   }
 
