@@ -7,6 +7,7 @@ import {
   getNerStats
 } from '@/api/collections'
 import { useUiStore } from '@/stores/ui'
+import { ENTITY_MERGE_MODE } from '@/api/types'
 
 export function useNerStats(params: Parameters<typeof getNerStats>[0]) {
   const collection = useUiStore((s) => s.selectedCollection)
@@ -26,11 +27,11 @@ export function useNerGraph(params: { topKNodes: number; enabled?: boolean }) {
   const collection = useUiStore((s) => s.selectedCollection)
   const topKNodes = params.topKNodes
   return useQuery({
-    queryKey: ['ner-graph', collection, 'resolved', topKNodes],
+    queryKey: ['ner-graph', collection, ENTITY_MERGE_MODE, topKNodes],
     queryFn: () =>
       getNerGraph({
         top_k_nodes: topKNodes,
-        entity_merge_mode: 'resolved',
+        entity_merge_mode: ENTITY_MERGE_MODE,
         collection: collection ?? undefined
       }),
     enabled: !!collection && (params.enabled ?? true)
@@ -47,13 +48,13 @@ export function useNerGraph(params: { topKNodes: number; enabled?: boolean }) {
 export function useNerSources(entityKey: string | null) {
   const collection = useUiStore((s) => s.selectedCollection)
   return useInfiniteQuery({
-    queryKey: ['ner-sources', collection, entityKey, 'resolved'],
+    queryKey: ['ner-sources', collection, entityKey, ENTITY_MERGE_MODE],
     queryFn: ({ pageParam }) =>
       getNerSourcesPage({
         cursor: pageParam as string | null,
         limit: 50,
         entity_key: entityKey ?? undefined,
-        entity_merge_mode: 'resolved',
+        entity_merge_mode: ENTITY_MERGE_MODE,
         collection: collection ?? undefined
       }),
     initialPageParam: null as string | null,

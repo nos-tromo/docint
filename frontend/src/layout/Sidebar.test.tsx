@@ -313,7 +313,9 @@ describe('Sidebar navigation', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     renderSidebar()
+    // Assert the full <nav> contents (not just a prefix slice) so a 7th nav
+    // entry appended later would fail this test instead of passing silently.
     const hrefs = Array.from(document.querySelectorAll('nav a')).map((a) => a.getAttribute('href'))
-    expect(hrefs.slice(0, 6)).toEqual(['/', '/ingest', '/inspector', '/chat', '/analysis', '/report'])
+    expect(hrefs).toEqual(['/', '/ingest', '/inspector', '/chat', '/analysis', '/report'])
   })
 })

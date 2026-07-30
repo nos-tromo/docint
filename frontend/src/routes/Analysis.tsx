@@ -11,7 +11,7 @@ import { SummaryPanel } from '@/components/analysis/SummaryPanel'
 import { warmCollectionNer } from '@/api/collections'
 import { useConfig } from '@/hooks/useConfig'
 import { resolveGraphTopK } from '@/lib/graphTopK'
-import type { NerEntityRow } from '@/api/types'
+import { ENTITY_MERGE_MODE, type NerEntityRow } from '@/api/types'
 import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
 
@@ -47,7 +47,7 @@ export function Analysis() {
     top_k: 500,
     min_mentions: 1,
     include_relations: false,
-    entity_merge_mode: 'resolved'
+    entity_merge_mode: ENTITY_MERGE_MODE
   })
 
   // Background-warm the NER aggregate as soon as a collection is selected;
@@ -213,7 +213,7 @@ export function Analysis() {
                 hasNextPage={!!ner.hasNextPage}
                 onLoadMore={() => ner.fetchNextPage()}
                 collection={collection}
-                entityMergeMode="resolved"
+                entityMergeMode={ENTITY_MERGE_MODE}
                 reportDedupeKeys={reportDedupeKeys}
               />
             </div>

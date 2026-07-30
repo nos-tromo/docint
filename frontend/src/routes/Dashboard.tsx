@@ -4,6 +4,7 @@ import { useDocumentsCount } from '@/hooks/useDocuments'
 import { useNerStats } from '@/hooks/useNer'
 import { useSessions } from '@/hooks/useSessions'
 import { useUiStore } from '@/stores/ui'
+import { ENTITY_MERGE_MODE } from '@/api/types'
 import { KpiCard } from '@/components/common/KpiCard'
 import { TopEntitiesChart } from '@/components/dashboard/TopEntitiesChart'
 import { cn } from '@/lib/cn'
@@ -21,7 +22,7 @@ export function Dashboard() {
     top_k: topK,
     min_mentions: minMentions,
     include_relations: false,
-    entity_merge_mode: 'resolved'
+    entity_merge_mode: ENTITY_MERGE_MODE
   })
 
   return (

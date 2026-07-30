@@ -49,9 +49,8 @@ which proxies API calls to the backend on `:8000`.
 
 KPI cards (backend status, collection / document / session counts), a
 top-entities chart (`src/components/dashboard/TopEntitiesChart.tsx`) with
-top-k / min-mention filters and an entity merge-mode toggle, and a recent-
-sessions list. Hooks: `useCollections`, `useDocumentsCount`, `useNerStats`,
-`useSessions`.
+top-k / min-mention filters, and a recent-sessions list. Hooks:
+`useCollections`, `useDocumentsCount`, `useNerStats`, `useSessions`.
 
 ### Chat (`src/routes/Chat.tsx`)
 
@@ -78,7 +77,7 @@ Three tabs: **NER**, **Hate Speech** (`HateSpeechTable`), and **Summary**
 opened.
 
 The **NER** tab opens with a **Table / Graph** view toggle (only one is shown
-at a time) and a merge-mode toggle:
+at a time):
 
 - **Table** — an `EntitySelect` category + entity picker. The category filter
   re-filters the entity dropdown and pre-selects that category's top entity.
@@ -130,8 +129,8 @@ the table has lazily loaded (the counts are not derived from the loaded rows).
   current session id, and preview modal. There is no merge-mode control or
   store field: the UI always requests merged (resolved) entities, while the
   API's `entity_merge_mode` parameter remains for the backend contract.
-  Persisted to `localStorage` (session id only; the collection is
-  intentionally not persisted).
+  Persisted to `localStorage`: the active collection + owner, current
+  session id, and the graph node-count override.
 - **`src/stores/chatFilters.ts`** (`useChatFiltersStore`) — query mode,
   retrieval mode, and the metadata-filter builder state; `buildPayload()`
   serialises it for requests. In-memory only.
