@@ -8,7 +8,6 @@ beforeEach(() => {
     selectedOwner: null,
     currentSessionId: null,
     previewModal: null,
-    entityMergeMode: 'resolved',
     graphTopK: null
   })
 })
@@ -31,19 +30,10 @@ describe('useUiStore', () => {
     expect(useUiStore.getState().currentSessionId).toBeNull()
   })
 
-  it('defaults the entity merge mode to resolved', () => {
-    expect(useUiStore.getState().entityMergeMode).toBe('resolved')
-  })
-
-  it('updates the entity merge mode', () => {
-    useUiStore.getState().setEntityMergeMode('orthographic')
-    expect(useUiStore.getState().entityMergeMode).toBe('orthographic')
-  })
-
-  it('persists the entity merge mode across reloads', () => {
-    useUiStore.getState().setEntityMergeMode('exact')
-    const persisted = JSON.parse(localStorage.getItem('docint-ui')!).state
-    expect(persisted.entityMergeMode).toBe('exact')
+  it('no longer carries an entity merge mode', () => {
+    const state = useUiStore.getState() as unknown as Record<string, unknown>
+    expect('entityMergeMode' in state).toBe(false)
+    expect('setEntityMergeMode' in state).toBe(false)
   })
 
   it('defaults graphTopK to null', () => {

@@ -100,7 +100,7 @@ at a time) and a merge-mode toggle:
   or more nodes shows a **Remove node**/**Remove {n} nodes** button
   (Backspace/Delete also works); removal is view-only local state in
   `EntityGraph` — the underlying NER data is untouched, and removed nodes
-  reappear on the next fetch, top-K change, or merge-mode switch. **Export
+  reappear on the next fetch or top-K change. **Export
   JSON**/**Export GraphML**/**Export HTML** buttons (shown once the graph is
   non-empty) serialize the current view state — respecting node removals —
   via `@infra/ui`'s `toGraphJson`/`toGraphML`/`toGraphHtml` + `downloadText`;
@@ -127,10 +127,11 @@ the table has lazily loaded (the counts are not derived from the loaded rows).
 ## State
 
 - **`src/stores/ui.ts`** (`useUiStore`, Zustand) — selected collection,
-  current session id, preview modal, and entity merge mode
-  (`exact` | `orthographic` | `resolved`). Persisted to `localStorage`
-  (session id + merge mode only; the collection is intentionally not
-  persisted).
+  current session id, and preview modal. There is no merge-mode control or
+  store field: the UI always requests merged (resolved) entities, while the
+  API's `entity_merge_mode` parameter remains for the backend contract.
+  Persisted to `localStorage` (session id only; the collection is
+  intentionally not persisted).
 - **`src/stores/chatFilters.ts`** (`useChatFiltersStore`) — query mode,
   retrieval mode, and the metadata-filter builder state; `buildPayload()`
   serialises it for requests. In-memory only.

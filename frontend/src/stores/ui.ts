@@ -1,6 +1,5 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { EntityMergeMode } from '@/api/types'
 import { setOwnerParam } from '@/api/client'
 
 export interface PreviewModal {
@@ -14,11 +13,9 @@ interface UiState {
   selectedOwner: string | null
   currentSessionId: string | null
   previewModal: PreviewModal | null
-  entityMergeMode: EntityMergeMode
   graphTopK: number | null
   setSelectedCollection: (name: string | null, owner?: string | null) => void
   setCurrentSessionId: (id: string | null) => void
-  setEntityMergeMode: (mode: EntityMergeMode) => void
   setGraphTopK: (n: number | null) => void
   openPreview: (modal: PreviewModal) => void
   closePreview: () => void
@@ -31,7 +28,6 @@ export const useUiStore = create<UiState>()(
       selectedOwner: null,
       currentSessionId: null,
       previewModal: null,
-      entityMergeMode: 'resolved',
       graphTopK: null,
       setSelectedCollection: (name, owner = null) =>
         set((s) =>
@@ -48,7 +44,6 @@ export const useUiStore = create<UiState>()(
             : { selectedCollection: name, selectedOwner: owner, currentSessionId: null }
         ),
       setCurrentSessionId: (id) => set({ currentSessionId: id }),
-      setEntityMergeMode: (mode) => set({ entityMergeMode: mode }),
       setGraphTopK: (n) => set({ graphTopK: n }),
       openPreview: (modal) => set({ previewModal: modal }),
       closePreview: () => set({ previewModal: null })
@@ -65,23 +60,20 @@ export const useUiStore = create<UiState>()(
         selectedCollection: s.selectedCollection,
         selectedOwner: s.selectedOwner,
         currentSessionId: s.currentSessionId,
-        entityMergeMode: s.entityMergeMode,
         graphTopK: s.graphTopK
       }),
-      version: 3,
+      version: 4,
       migrate: (persisted) => {
         const prior = (persisted ?? {}) as {
           selectedCollection?: string | null
           selectedOwner?: string | null
           currentSessionId?: string | null
-          entityMergeMode?: EntityMergeMode
           graphTopK?: number | null
         }
         return {
           selectedCollection: prior.selectedCollection ?? null,
           selectedOwner: prior.selectedOwner ?? null,
           currentSessionId: prior.currentSessionId ?? null,
-          entityMergeMode: prior.entityMergeMode ?? 'resolved',
           graphTopK: prior.graphTopK ?? null
         }
       }

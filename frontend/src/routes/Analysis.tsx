@@ -9,7 +9,6 @@ import { EntityFindingsTable } from '@/components/analysis/EntityFindingsTable'
 import { HateSpeechTable } from '@/components/analysis/HateSpeechTable'
 import { SummaryPanel } from '@/components/analysis/SummaryPanel'
 import { warmCollectionNer } from '@/api/collections'
-import { MergeModeToggle } from '@/components/common/MergeModeToggle'
 import { useConfig } from '@/hooks/useConfig'
 import { resolveGraphTopK } from '@/lib/graphTopK'
 import type { NerEntityRow } from '@/api/types'
@@ -30,7 +29,6 @@ export function Analysis() {
   const [tab, setTab] = useState<Tab>('ner')
   const [nerView, setNerView] = useState<NerView>('table')
   const collection = useUiStore((s) => s.selectedCollection)
-  const mergeMode = useUiStore((s) => s.entityMergeMode)
   const cfg = useConfig()
   const graphTopK = useUiStore((s) => s.graphTopK)
   const setGraphTopK = useUiStore((s) => s.setGraphTopK)
@@ -49,7 +47,7 @@ export function Analysis() {
     top_k: 500,
     min_mentions: 1,
     include_relations: false,
-    entity_merge_mode: mergeMode
+    entity_merge_mode: 'resolved'
   })
 
   // Background-warm the NER aggregate as soon as a collection is selected;
@@ -176,10 +174,6 @@ export function Analysis() {
                   </button>
                 ))}
               </div>
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <span>{t('entities.merge_mode_label')}</span>
-                <MergeModeToggle />
-              </div>
             </div>
           )}
           {!collection ? (
@@ -219,7 +213,7 @@ export function Analysis() {
                 hasNextPage={!!ner.hasNextPage}
                 onLoadMore={() => ner.fetchNextPage()}
                 collection={collection}
-                entityMergeMode={mergeMode}
+                entityMergeMode="resolved"
                 reportDedupeKeys={reportDedupeKeys}
               />
             </div>

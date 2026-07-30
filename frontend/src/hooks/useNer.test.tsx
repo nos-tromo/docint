@@ -8,7 +8,7 @@ import { useUiStore } from '@/stores/ui'
 afterEach(() => vi.restoreAllMocks())
 
 beforeEach(() => {
-  useUiStore.setState({ selectedCollection: null, entityMergeMode: 'resolved' })
+  useUiStore.setState({ selectedCollection: null })
 })
 
 function mockFetch(body: unknown) {
