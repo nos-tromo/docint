@@ -537,21 +537,61 @@ class IngestJobManager:
             state.started_at = _utcnow()
             loop = asyncio.get_running_loop()
 
-            def _push(event_name: str, payload: dict[str, Any]) -> None:
-                """Publish an event to history and subscribers (thread-safe).
+            def _frame(event_name: str, payload: dict[str, Any]) -> str:
+                """Tag a payload with the job id and render it as an SSE frame.
 
-                Tags every frame with ``job_id`` at this single choke point, so
-                each frame is self-identifying on the multiplexed owner stream.
+                Single choke point for both dispatch paths below, so every
+                frame is self-identifying on the multiplexed owner stream
+                regardless of which thread produced it.
+
+                Args:
+                    event_name (str): SSE event name.
+                    payload (dict[str, Any]): JSON-serializable payload.
+
+                Returns:
+                    str: The rendered SSE frame.
+                """
+                tagged = {"job_id": state.job_id, **payload}
+                return format_sse(event_name, tagged)
+
+            def _emit(event_name: str, payload: dict[str, Any]) -> None:
+                """Dispatch a frame synchronously. Loop thread only.
+
+                Used for the frames ``_worker`` produces itself
+                (``ingestion_started`` and both terminal events), which
+                already run on the loop thread — right beside the status
+                change each announces. Routing those through
+                ``call_soon_threadsafe`` too (as ``_push`` below must) would
+                defer recording the frame to a *later* loop iteration,
+                leaving a window where ``state.status`` already reads
+                ``FAILED``/``COMPLETED`` but ``state.history()`` does not yet
+                contain the matching terminal frame — observable by a caller
+                that polls status then immediately reads history (or
+                attaches to the events stream) in that window.
 
                 Args:
                     event_name (str): SSE event name.
                     payload (dict[str, Any]): JSON-serializable payload.
                 """
-                tagged = {"job_id": state.job_id, **payload}
-                frame = format_sse(event_name, tagged)
+                self._dispatch(state, event_name, _frame(event_name, payload))
+
+            def _push(event_name: str, payload: dict[str, Any]) -> None:
+                """Publish an event from the worker thread (thread-safe).
+
+                Handed to the injected runner as its ``push`` callable — the
+                runner executes on a worker thread (via
+                ``to_thread.run_sync``), so this genuinely needs the
+                threadsafe hop back onto the loop thread. ``_worker``'s own
+                frames use ``_emit`` instead; see its docstring for why.
+
+                Args:
+                    event_name (str): SSE event name.
+                    payload (dict[str, Any]): JSON-serializable payload.
+                """
+                frame = _frame(event_name, payload)
                 loop.call_soon_threadsafe(self._dispatch, state, event_name, frame)
 
-            _push("ingestion_started", {"collection": state.logical_name})
+            _emit("ingestion_started", {"collection": state.logical_name})
             try:
                 result = await to_thread.run_sync(self._runner, state, _push)
             except Exception:
@@ -561,7 +601,7 @@ class IngestJobManager:
                 state.finished_at = _utcnow()
                 # Static protocol copy only: the exception text can carry
                 # connection strings or file paths and never reaches a client.
-                _push("error", {"message": "Ingestion failed.", "code": "ingestion_failed"})
+                _emit("error", {"message": "Ingestion failed.", "code": "ingestion_failed"})
                 return
             state.empty = bool(result.get("empty", False))
             state.resolution = result.get("resolution")
@@ -573,7 +613,7 @@ class IngestJobManager:
             }
             if state.resolution is not None:
                 terminal["resolution"] = state.resolution
-            _push("ingestion_complete", terminal)
+            _emit("ingestion_complete", terminal)
 
     def _dispatch(self, state: IngestJobState, event_name: str, frame: str) -> None:
         """Record a frame in history and fan it out.
