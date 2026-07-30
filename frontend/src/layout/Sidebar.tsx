@@ -12,10 +12,10 @@ import { useT } from '@/i18n/LanguageContext'
 
 const NAV = [
   { to: '/', key: 'nav.dashboard' },
-  { to: '/chat', key: 'nav.chat' },
   { to: '/ingest', key: 'nav.ingest' },
-  { to: '/analysis', key: 'nav.analysis' },
   { to: '/inspector', key: 'nav.inspector' },
+  { to: '/chat', key: 'nav.chat' },
+  { to: '/analysis', key: 'nav.analysis' },
   { to: '/report', key: 'nav.report' }
 ] as const
 

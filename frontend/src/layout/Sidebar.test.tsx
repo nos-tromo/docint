@@ -303,3 +303,17 @@ describe('Sidebar keeps the current section when switching collections', () => {
     expect(screen.getByTestId('location-probe').textContent).toBe('/chat')
   })
 })
+
+describe('Sidebar navigation', () => {
+  it('orders sections dashboard, ingest, inspector, chat, analysis, report', () => {
+    const fetchMock = mockFetch({
+      '/collections/list': [],
+      '/sessions/list': { sessions: [] }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderSidebar()
+    const hrefs = Array.from(document.querySelectorAll('nav a')).map((a) => a.getAttribute('href'))
+    expect(hrefs.slice(0, 6)).toEqual(['/', '/ingest', '/inspector', '/chat', '/analysis', '/report'])
+  })
+})
