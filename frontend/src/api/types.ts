@@ -379,6 +379,24 @@ export interface SummaryResponse extends ValidationFields {
   summary_diagnostics?: SummaryDiagnostics
 }
 
+/**
+ * Server-owned ingest job snapshot, served by the `/ingest/jobs*` endpoints.
+ * `collection` is the caller's logical name — the physical owner-namespaced
+ * name is never echoed to the client.
+ */
+export interface IngestJobSnapshot {
+  job_id: string
+  collection: string
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  message: string | null
+  error: string | null
+  empty: boolean
+  resolution: Record<string, number> | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+}
+
 export interface AppConfig {
   graph_top_k: number
   graph_max_top_k: number
