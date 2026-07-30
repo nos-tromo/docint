@@ -4,7 +4,7 @@ export const en = {
   'nav.chat': 'Chat',
   'nav.ingest': 'Ingest',
   'nav.analysis': 'Analysis',
-  'nav.inspector': 'Inspector',
+  'nav.inspector': 'Documents',
   'nav.report': 'Report',
 
   // AppHeader (portal link + theme toggle)
@@ -311,7 +311,7 @@ export const en = {
   'dashboard.chart_mentions': 'Mentions',
 
   // inspector route wrapper
-  'inspector.title': 'Inspector',
+  'inspector.title': 'Documents',
   'inspector.select_collection': 'Select a collection.',
 
   // reference-metadata field labels (shared by chat citations, entity
