@@ -30,7 +30,8 @@ const rows: HateSpeechRow[] = [
     reference_metadata: {
       author: 'Carol',
       network: 'docs',
-      timestamp: '2026-02-14'
+      timestamp: '2026-02-14',
+      posting_timestamp: '2025-09-17 15:15:30.000000'
     }
   }
 ]
@@ -45,16 +46,18 @@ describe('HateSpeechTable', () => {
     expect(within(row).getByText(/Body of the flagged passage/)).toBeInTheDocument()
   })
 
-  it('flattens reason, confidence and reference metadata into the metadata column', () => {
+  it('shows a clamped reason block and metadata pills; drops confidence and chunk id', () => {
     renderWithClient(<HateSpeechTable rows={rows} collection="alpha" />)
-    const dl = screen.getByText(/^Reason$/).closest('dl') as HTMLElement
-    expect(within(dl).getByText(/Targets a protected group/)).toBeInTheDocument()
-    expect(within(dl).getByText(/^Confidence$/)).toBeInTheDocument()
-    expect(within(dl).getByText('high')).toBeInTheDocument()
-    expect(within(dl).getByText(/^Author$/)).toBeInTheDocument()
-    expect(within(dl).getByText('Carol')).toBeInTheDocument()
-    expect(within(dl).getByText(/^Network$/)).toBeInTheDocument()
-    expect(within(dl).getByText('docs')).toBeInTheDocument()
+    // Reason is prose, no label.
+    expect(screen.getByText('Targets a protected group.')).toBeInTheDocument()
+    // Reference metadata renders as pills.
+    expect(screen.getByTestId('metadata-pills')).toBeInTheDocument()
+    expect(screen.getByText('2026-02-14')).toBeInTheDocument()
+    // Fractional seconds are trimmed off a timestamp pill.
+    expect(screen.getByText('2025-09-17 15:15:30')).toBeInTheDocument()
+    // Confidence and chunk id are display-dropped (still in CSV/report).
+    expect(screen.queryByText('high')).not.toBeInTheDocument()
+    expect(screen.queryByText('h1')).not.toBeInTheDocument()
   })
 
   it('shows the empty state when nothing was flagged', () => {
@@ -96,4 +99,35 @@ describe('HateSpeechTable', () => {
     )
     expect(snap.snapshot.translation).toEqual({ text: 'übersetzt', target_lang: 'de', model: 'm' })
   })
+})
+
+it('breaks unbreakable metadata values instead of overflowing the column', () => {
+  // Regression (former `dl` layout): grid items default to min-content
+  // minimums, and overflow-wrap:break-word does NOT reduce min-content — a
+  // long unbroken value in a plain `1fr` value track widened the metadata
+  // cell across the Text column, misaligning the body scroller with the
+  // fixed header. The pills cell instead wraps each value with `break-all`.
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const longValue = 'x'.repeat(160)
+  render(
+    <QueryClientProvider client={qc}>
+      <HateSpeechTable
+        rows={[
+          {
+            chunk_id: 'c1',
+            category: 'other',
+            reason: 'why',
+            confidence: 'high',
+            chunk_text: 'text',
+            reference_metadata: {
+              type: longValue
+            }
+          } as never
+        ]}
+        collection="c"
+      />
+    </QueryClientProvider>
+  )
+  const pillValue = screen.getByText(longValue)
+  expect(pillValue.className).toContain('break-all')
 })

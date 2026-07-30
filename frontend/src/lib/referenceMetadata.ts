@@ -71,6 +71,78 @@ const LABEL_KEY: Partial<Record<string, keyof Strings>> = {
 
 const BODY_TEXT_KEYS = new Set(['text', 'parent_text', 'anchor_text'])
 
+export interface MetadataPillItem {
+  key: string
+  label?: string
+  value: string
+  href?: string
+}
+
+// Display-only curation for the Analysis tables' pill cells. Opaque IDs stay
+// available in CSV exports and report snapshots; they are only dropped here.
+const PILL_EXCLUDED_KEYS = new Set([
+  'uuid',
+  'posting_uuid',
+  'posting_id',
+  'media_id',
+  'author_id',
+  'posting_author_id',
+  'text_id',
+  'posting_text'
+])
+const PILL_LABELED_KEYS = new Set(['author', 'posting_author', 'vanity', 'posting_vanity', 'speaker'])
+const PILL_TIMESTAMP_KEYS = new Set(['timestamp', 'posting_timestamp'])
+const PILL_URL_KEYS = new Set(['url', 'posting_url'])
+
+// Reference metadata originates from ingested (untrusted) social exports, so
+// a value only becomes a clickable href when it parses as an absolute
+// http(s) URL — anything else (javascript:, data:, malformed text) falls
+// back to a plain, non-linked value pill.
+function safeHttpUrl(value: string): string | null {
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? value : null
+  } catch {
+    return null
+  }
+}
+
+export function referenceMetadataPills(
+  meta: ReferenceMetadata | undefined,
+  t: (key: keyof Strings, vars?: Record<string, string | number>) => string = defaultT
+): MetadataPillItem[] {
+  if (!meta) return []
+  const pills: MetadataPillItem[] = []
+  for (const { key, label } of REFERENCE_METADATA_FIELDS) {
+    const k = key as string
+    if (BODY_TEXT_KEYS.has(k) || PILL_EXCLUDED_KEYS.has(k)) continue
+    const raw = meta[key]
+    if (raw === null || raw === undefined) continue
+    const text = String(raw).trim()
+    if (!text) continue
+    if (PILL_URL_KEYS.has(k)) {
+      const href = safeHttpUrl(text)
+      if (href) {
+        pills.push({ key: k, value: t('common.pill_open_link'), href })
+      } else {
+        pills.push({ key: k, value: text })
+      }
+      continue
+    }
+    if (PILL_TIMESTAMP_KEYS.has(k)) {
+      pills.push({ key: k, value: text.replace(/\.\d+$/, '') })
+      continue
+    }
+    if (PILL_LABELED_KEYS.has(k)) {
+      const labelKey = LABEL_KEY[k]
+      pills.push({ key: k, label: labelKey ? t(labelKey) : label, value: text })
+      continue
+    }
+    pills.push({ key: k, value: text })
+  }
+  return pills
+}
+
 export function referenceMetadataItems(
   meta: ReferenceMetadata | undefined,
   options: { includeText?: boolean } = {},

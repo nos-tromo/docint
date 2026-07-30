@@ -2,11 +2,12 @@ import { useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { csvExportHref } from '@/api/collections'
 import type { HateSpeechRow } from '@/api/types'
-import { referenceMetadataItems } from '@/lib/referenceMetadata'
+import { referenceMetadataPills } from '@/lib/referenceMetadata'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
 import { useTranslatable, type TranslationPayload } from '@/hooks/useTranslatable'
 import { TranslateToggle } from '@/components/common/TranslateToggle'
 import { ClampedText } from '@/components/common/ClampedText'
+import { MetadataPills } from '@/components/common/MetadataPills'
 import { hateSpeechSnapshot } from '@/lib/reportSnapshots'
 import { useT } from '@/i18n/LanguageContext'
 import type { Strings } from '@/i18n'
@@ -15,7 +16,8 @@ import { hateCategoryLabel } from '@/lib/hateCategoryLabel'
 export type { HateSpeechRow }
 
 // Shared column template for the header row and every body row. Metadata is a
-// single column (reason / confidence / chunk id / reference metadata).
+// single column: a clamped reason block above curated reference-metadata
+// pills (confidence and chunk id stay display-dropped).
 const HATE_GRID = '2.5rem 6.5rem minmax(8rem,0.8fr) minmax(9rem,1.1fr) minmax(12rem,1.8fr) 6rem'
 
 interface Props {
@@ -37,8 +39,10 @@ function locationParts(r: HateSpeechRow, t: (key: keyof Strings, vars?: Record<s
 
 /**
  * One flagged chunk rendered as a table row. The former accordion's hidden
- * fields (reason, confidence, chunk id, reference metadata) are flattened into
- * a single Metadata column shown inline, mirroring the entity findings table.
+ * reason and reference metadata are shown inline in a single Metadata
+ * column — a clamped reason block above curated metadata pills. Confidence
+ * and chunk id remain protocol data (CSV export, report snapshots) but are
+ * not surfaced in this display cell.
  */
 function HateSpeechTableRow({
   row,
@@ -53,23 +57,13 @@ function HateSpeechTableRow({
   const [translation, setTranslation] = useState<TranslationPayload | null>(null)
   const reportItem = hateSpeechSnapshot(row, translation ?? undefined)
   const inReport = reportDedupeKeys?.has(reportItem.dedupe_key) ?? false
-  const refMeta = referenceMetadataItems(row.reference_metadata, {}, i18n)
+  const pills = referenceMetadataPills(row.reference_metadata, i18n)
   const chunkText = (row.chunk_text ?? row.text ?? '').trim()
   const translationState = useTranslatable(chunkText, setTranslation)
   const source = row.source_ref ?? row.filename ?? i18n('common.unknown_source')
   const location = locationParts(row, i18n)
   const category = hateCategoryLabel((row.category ?? 'unknown').trim(), i18n)
   const reason = (row.reason ?? '').trim()
-
-  const metadata: Array<{ label: string; value: string }> = []
-  if (reason) metadata.push({ label: i18n('common.meta_reason'), value: reason })
-  // `confidence` is protocol data (the fixed high|medium|low enum) rendered
-  // verbatim, like `Filetype`/`Reader` elsewhere — only its label is swept.
-  if (row.confidence) {
-    metadata.push({ label: i18n('common.meta_confidence'), value: String(row.confidence) })
-  }
-  if (row.chunk_id) metadata.push({ label: i18n('common.meta_chunk_id'), value: row.chunk_id })
-  for (const item of refMeta) metadata.push(item)
 
   return (
     <div
@@ -83,17 +77,13 @@ function HateSpeechTableRow({
         <div className="break-words">{source}</div>
         {location && <div className="text-xs text-muted-foreground">{location}</div>}
       </div>
-      <div className="min-w-0">
-        {metadata.length > 0 ? (
-          <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-xs">
-            {metadata.map(({ label, value }) => (
-              <div key={label} className="contents">
-                <dt className="text-muted-foreground whitespace-nowrap">{label}</dt>
-                <dd className="break-words">{value}</dd>
-              </div>
-            ))}
-          </dl>
-        ) : (
+      <div className="min-w-0 space-y-1.5">
+        {reason && (
+          <ClampedText length={reason.length}>{reason}</ClampedText>
+        )}
+        {reason && pills.length > 0 && <div className="border-t border-border" />}
+        <MetadataPills items={pills} />
+        {!reason && pills.length === 0 && (
           <span className="text-xs text-muted-foreground">—</span>
         )}
       </div>
@@ -150,7 +140,7 @@ export function HateSpeechTable({
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 120,
+    estimateSize: () => 96,
     overscan: 8
   })
 
