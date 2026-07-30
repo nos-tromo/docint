@@ -1987,3 +1987,33 @@ def load_summary_env(
             ),
         ),
     )
+
+
+def load_ingest_concurrency(default: int = 1) -> int:
+    """Max ingest jobs the ``IngestJobManager`` runs concurrently.
+
+    Read from ``DOCINT_INGEST_CONCURRENCY``. Defaults to 1 (serial), matching
+    Nextext's ``NEXTEXT_JOB_CONCURRENCY``: ingestion is memory-hungry and
+    shares the remote embedding/NER endpoints with every other tenant, so
+    overlapping runs is opt-in. Unparseable values fall back to ``default``
+    and values below 1 clamp to 1 (both with a warning), so a misconfigured
+    environment can never produce a zero or negative semaphore.
+
+    Args:
+        default (int): Fallback when the variable is unset or unparseable.
+
+    Returns:
+        int: The configured concurrency, at least 1.
+    """
+    raw = os.getenv("DOCINT_INGEST_CONCURRENCY", "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid DOCINT_INGEST_CONCURRENCY {!r}; using {}.", raw, default)
+        return default
+    if value < 1:
+        logger.warning("DOCINT_INGEST_CONCURRENCY {} is < 1; clamping to 1.", value)
+        return 1
+    return value
