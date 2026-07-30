@@ -89,11 +89,13 @@ export const useIngestRunStore = create<IngestRunState>()(
 
         let anySaved = false
         let failures: BatchFailure[] = []
+        let lastEvent: IngestEvent | null = null
         try {
           const stream = streamIngestUploadBatched(collection, files, limitBytes, undefined, t)
           let next = await stream.next()
           while (!next.done) {
             const ev = next.value
+            lastEvent = ev
             set((s) => ({ uploadEvents: [...s.uploadEvents, ev] }))
             if (ev.event === 'warning') {
               const message = (ev.data as { message?: unknown }).message
@@ -111,7 +113,16 @@ export const useIngestRunStore = create<IngestRunState>()(
         }
 
         if (!anySaved) {
-          set({ uploading: false, error: t('ingest.upload_failed_rejected', { count: failures.length }) })
+          // The generator's own terminal `error` event (already appended to
+          // `uploadEvents` above) already picked the more actionable message
+          // — e.g. distinguishing "every file is over the size limit" from a
+          // generic rejection. Reuse it instead of recomputing a duplicate,
+          // less-specific message here, which is how the two drifted apart.
+          const terminalMessage =
+            lastEvent?.event === 'error' && typeof lastEvent.data.message === 'string'
+              ? lastEvent.data.message
+              : t('ingest.upload_failed_rejected', { count: failures.length })
+          set({ uploading: false, error: terminalMessage })
           return
         }
 
