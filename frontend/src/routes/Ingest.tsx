@@ -10,7 +10,7 @@ import { useUiStore } from '@/stores/ui'
 import type { IngestEvent } from '@/api/types'
 import { Dropzone } from '@/components/ingest/Dropzone'
 import { IngestionStatus } from '@/components/ingest/IngestionStatus'
-import { deriveIngestStatus } from '@/lib/ingestStatus'
+import { deriveIngestStatus, progressKind } from '@/lib/ingestStatus'
 import { useT } from '@/i18n/LanguageContext'
 
 /**
@@ -40,18 +40,6 @@ type Action =
   | { type: 'start'; sizes: Record<string, number> }
   | { type: 'event'; v: IngestEvent }
   | { type: 'done' }
-
-// Progress messages like "Extracting entities: 1/2 chunks processed" and
-// "Extracting entities: 2/2 chunks processed" share a kind (digits stripped)
-// and should update one event entry in place instead of stacking. The
-// derived status snapshot does its own collapsing too, but this keeps
-// `state.events` from growing without bound on long-running ingests.
-function progressKind(ev: IngestEvent): string | null {
-  if (ev.event !== 'ingestion_progress') return null
-  const message = (ev.data as { message?: unknown })?.message
-  if (typeof message !== 'string') return null
-  return message.replace(/\d+/g, '#').trim()
-}
 
 export function reducer(s: State, a: Action): State {
   switch (a.type) {

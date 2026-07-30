@@ -124,6 +124,40 @@ export function parseProgressMessage(message: string): ParsedProgress {
   return { kind: 'unknown' }
 }
 
+/**
+ * Return the "kind" of a progress event — its message with digits masked — so
+ * consecutive updates of the same counter collapse into one entry.
+ *
+ * "Extracting entities: 1/9 chunks processed" and ".. 2/9 .." share a kind;
+ * only the newest carries information, and a long run emits thousands.
+ *
+ * @param ev - The event to classify.
+ * @returns The masked message, or null for non-progress events.
+ */
+export function progressKind(ev: IngestEvent): string | null {
+  if (ev.event !== 'ingestion_progress') return null
+  const message = (ev.data as { message?: unknown })?.message
+  if (typeof message !== 'string') return null
+  return message.replace(/\d+/g, '#').trim()
+}
+
+/**
+ * Append an event to a log, collapsing a repeat of the previous progress kind
+ * in place. Keeps the log bounded on long ingests.
+ *
+ * @param events - The existing log.
+ * @param next - The event to append.
+ * @returns A new log array.
+ */
+export function appendCollapsedEvent(events: IngestEvent[], next: IngestEvent): IngestEvent[] {
+  const last = events[events.length - 1]
+  const nextKind = progressKind(next)
+  if (nextKind && last && nextKind === progressKind(last)) {
+    return [...events.slice(0, -1), next]
+  }
+  return [...events, next]
+}
+
 function dataOf(ev: IngestEvent): Record<string, unknown> {
   return (ev.data ?? {}) as Record<string, unknown>
 }
