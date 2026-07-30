@@ -6,7 +6,7 @@ export const de: Strings = {
   'nav.chat': 'Chat',
   'nav.ingest': 'Datenimport',
   'nav.analysis': 'Analyse',
-  'nav.inspector': 'Überblick',
+  'nav.inspector': 'Dokumente',
   'nav.report': 'Bericht',
 
   // AppHeader (Portal-Link + Theme-Umschalter)
@@ -321,7 +321,7 @@ export const de: Strings = {
   'dashboard.chart_mentions': 'Erwähnungen',
 
   // inspector route wrapper
-  'inspector.title': 'Überblick',
+  'inspector.title': 'Dokumente',
   'inspector.select_collection': 'Wählen Sie eine Sammlung aus.',
 
   // reference-metadata field labels (shared by chat citations, entity
