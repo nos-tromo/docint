@@ -6,8 +6,12 @@ export const listReports = (collection?: string) =>
 
 export const getReport = (id: number) => apiGet<Report>(`/reports/${id}`)
 
-export const createReport = (body: { title: string; collection_name?: string | null; session_id?: string | null }) =>
-  apiPost<Report>('/reports', body)
+export const createReport = (body: {
+  title: string
+  collection_name?: string | null
+  session_id?: string | null
+  operator?: string
+}) => apiPost<Report>('/reports', body)
 
 export const updateReport = (
   id: number,
