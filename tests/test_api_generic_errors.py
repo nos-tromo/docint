@@ -111,14 +111,15 @@ def test_ingest_finalize_job_error_is_generic_and_logged(
     This replaces both ``test_ingest_upload_stream_error_is_generic_and_logged``
     and ``test_ingest_stream_error_event_carries_code``. The machine-readable
     ``code: "ingestion_failed"`` companion field on the underlying SSE
-    ``error`` event is ``docint/core/jobs.py`` behavior (``IngestJobManager._worker``'s
-    failure path), already covered by
-    ``tests/test_ingest_jobs.py::test_failed_runner_marks_job_failed_without_leaking_detail``
-    and not duplicated here. That event is also not reachable through an
-    HTTP test transport for this assertion: ``/ingest/jobs/events`` never
-    terminates on its own, and every in-process ASGI transport available here
-    (sync ``TestClient`` and async ``httpx.ASGITransport``) fully drains a
-    response before returning anything — see
+    ``error`` event is ``docint/core/jobs.py`` behavior
+    (``IngestJobManager._worker``'s failure path) and is covered at that
+    layer by
+    ``tests/test_ingest_jobs.py::test_failed_runner_error_frame_carries_machine_readable_code``,
+    not duplicated here. That event is not reachable through an HTTP test
+    transport for this assertion: ``/ingest/jobs/events`` never terminates on
+    its own, and every in-process ASGI transport available here (sync
+    ``TestClient`` and async ``httpx.ASGITransport``) fully drains a response
+    before returning anything — see
     ``tests/test_ingest_jobs_api.py::test_events_route_is_not_shadowed_by_the_job_id_route``
     for the same finding. This test asserts only what actually changed: how a
     caller observes a failed run through the new job-polling contract.

@@ -6,7 +6,7 @@ import io
 import json
 import zipfile
 from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -81,7 +81,31 @@ init_logger()
 # CORS allowlist for the Vite dev server during local development.
 allowed_origins = load_host_env().cors_allowed_origins.split(",")
 
-app = FastAPI(title="Document Intelligence")
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Close every open ingest-job subscriber stream on shutdown.
+
+    ``GET /ingest/jobs/events`` never terminates on its own — each connection
+    idles on a ping loop until the client disconnects. Without this, uvicorn's
+    graceful shutdown (which waits on in-flight responses) would stall on
+    every still-attached tab until the forced-exit timeout. ``job_manager`` is
+    resolved as a module global at call time (defined further down this
+    file), not at import time — the lifespan only ever runs long after the
+    module has finished loading.
+
+    Args:
+        _app (FastAPI): The FastAPI application (unused; required by the
+            lifespan protocol).
+
+    Yields:
+        None: Startup is a no-op; only shutdown does anything.
+    """
+    yield
+    await job_manager.stop()
+
+
+app = FastAPI(title="Document Intelligence", lifespan=_lifespan)
 app.add_middleware(
     middleware_class=cast(Any, CORSMiddleware),
     allow_origins=allowed_origins,
@@ -3240,31 +3264,24 @@ job_manager = IngestJobManager(runner=_run_ingest_job)
 async def ingest_upload(
     request: Request,
     collection: str = Form(...),
-    ner: bool | None = Form(None),
-    hate_speech: bool | None = Form(None),
     files: list[UploadFile] = File(...),  # noqa: B008 — FastAPI dependency marker
-    hybrid: bool | None = Form(True),
 ) -> StreamingResponse:
     """Upload and stage files for a collection, streaming save progress as SSE events.
 
     Saves the file(s) to the collection's batch directory but does NOT ingest
     them — the caller runs one ingestion pass afterwards via
-    ``/ingest/finalize``, which queues a server-owned job. The SPA uploads a
-    large selection as several batches so ingestion happens once over the
-    whole staged directory instead of once per batch (re-initializing the
-    pipeline's models per batch and hard-failing on any batch that happened
-    to hold only reader-unsupported files, e.g. audio/video → "No files
-    found").
+    ``/ingest/finalize``, which queues a server-owned job and takes the run's
+    ``hybrid``/``ner``/``hate_speech`` options (this endpoint has none — it
+    only writes bytes to disk). The SPA uploads a large selection as several
+    batches so ingestion happens once over the whole staged directory instead
+    of once per batch (re-initializing the pipeline's models per batch and
+    hard-failing on any batch that happened to hold only reader-unsupported
+    files, e.g. audio/video → "No files found").
 
     Args:
         request (Request): The incoming request, used to resolve the principal.
         collection (str): The name of the collection to ingest into.
         files (list[UploadFile]): The list of files to upload.
-        hybrid (bool | None): Whether to enable hybrid search (default: True).
-        ner (bool | None): Per-request NER override; ``None`` keeps the env
-            default (``NER_ENABLED``).
-        hate_speech (bool | None): Per-request hate-speech override; ``None``
-            keeps the env default (``ENABLE_HATE_SPEECH_DETECTION``).
 
     Returns:
         StreamingResponse: A streaming response that yields SSE events while
@@ -3389,14 +3406,11 @@ async def ingest_finalize(payload: IngestIn, request: Request) -> dict[str, str]
         raise HTTPException(status_code=400, detail="Collection name required")
     physical = rag.ensure_collection_owner_manager().register(principal.effective_owner, name)
 
-    existing = await job_manager.active_for(principal.effective_owner, physical)
-    if existing is not None:
-        raise HTTPException(
-            status_code=409,
-            detail={"message": "Ingestion already in progress.", "job_id": existing.job_id},
-        )
-
-    state = await job_manager.create(
+    # create_if_idle() checks for an in-flight job and creates one only if
+    # idle, atomically under one lock. A separate active_for() check followed
+    # by a separate create() call would be a TOCTOU: two interleaved finalize
+    # requests could both observe no in-flight job and both create one.
+    state, created = await job_manager.create_if_idle(
         owner=principal.effective_owner,
         logical_name=name,
         physical=physical,
@@ -3406,6 +3420,11 @@ async def ingest_finalize(payload: IngestIn, request: Request) -> dict[str, str]
         hate_speech=payload.hate_speech,
         resolve=_auto_resolve_requested(payload.ner),
     )
+    if not created:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "Ingestion already in progress.", "job_id": state.job_id},
+        )
     return {"job_id": state.job_id}
 
 

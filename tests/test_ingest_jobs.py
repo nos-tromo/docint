@@ -166,6 +166,67 @@ async def test_failed_runner_marks_job_failed_without_leaking_detail() -> None:
 
 
 @pytest.mark.anyio
+async def test_failed_runner_error_frame_carries_machine_readable_code() -> None:
+    """The terminal SSE ``error`` frame carries ``code: "ingestion_failed"``.
+
+    This is the machine-readable contract API/frontend consumers switch on
+    (as opposed to ``state.error``, which is prose for display). Pinned here
+    at the source (``IngestJobManager._worker``'s failure path) rather than
+    at the API layer, where driving ``/ingest/jobs/events`` — which never
+    terminates on its own — through an HTTP test transport isn't viable; see
+    ``tests/test_api_generic_errors.py::test_ingest_finalize_job_error_is_generic_and_logged``.
+    """
+
+    def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        raise RuntimeError("boom")
+
+    manager = IngestJobManager(runner=runner)
+    state = await _create(manager)
+    await _drain(manager, state)
+
+    terminal = state.history()[-1]
+    assert "event: error" in terminal
+    assert '"code": "ingestion_failed"' in terminal
+    await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_create_if_idle_is_atomic_under_concurrent_calls() -> None:
+    """Two concurrent ``create_if_idle`` calls for one collection must not both create a job.
+
+    Regression guard for the TOCTOU a separate ``active_for()`` check +
+    ``create()`` call would have: two ``/ingest/finalize`` requests
+    interleaving between those two lock acquisitions could both observe "no
+    job in flight" and both create one, defeating the double-write guard the
+    409 exists to enforce. ``asyncio.gather`` races two calls through the
+    *same* manager; because both go through ``create_if_idle``'s single lock
+    acquisition, the outcome is deterministic regardless of which one the
+    event loop happens to run first: exactly one creates a job, and the other
+    is handed that same job back.
+    """
+    manager = IngestJobManager(runner=_noop_runner)
+    kwargs: dict[str, Any] = {
+        "owner": "alice",
+        "logical_name": "mydocs",
+        "physical": "p1",
+        "batch_dir": Path("/nonexistent/batch"),
+        "hybrid": True,
+        "ner": None,
+        "hate_speech": None,
+        "resolve": False,
+    }
+
+    (state_a, created_a), (state_b, created_b) = await asyncio.gather(
+        manager.create_if_idle(**kwargs), manager.create_if_idle(**kwargs)
+    )
+
+    assert {created_a, created_b} == {True, False}
+    assert state_a.job_id == state_b.job_id
+    await _drain(manager, state_a)
+    await manager.stop()
+
+
+@pytest.mark.anyio
 async def test_get_is_owner_scoped() -> None:
     """Test that get() returns a job for its owner and None for anyone else."""
     manager = IngestJobManager(runner=_noop_runner)

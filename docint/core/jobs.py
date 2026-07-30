@@ -219,7 +219,13 @@ class IngestJobManager:
         hate_speech: bool | None,
         resolve: bool,
     ) -> IngestJobState:
-        """Register a job and dispatch its worker.
+        """Register a job and dispatch its worker, unconditionally.
+
+        Callers that must refuse a second concurrent job for the same
+        ``(owner, physical)`` pair — i.e. every route — should use
+        :meth:`create_if_idle` instead: a separate ``active_for()`` check
+        before calling this method is a TOCTOU (two interleaved callers can
+        both observe no in-flight job and both create one).
 
         Args:
             owner (str): Resolved principal owning the job.
@@ -234,8 +240,7 @@ class IngestJobManager:
         Returns:
             IngestJobState: The newly registered job.
         """
-        state = IngestJobState(
-            job_id=uuid.uuid4().hex,
+        state = self._new_state(
             owner=owner,
             logical_name=logical_name,
             physical=physical,
@@ -247,10 +252,119 @@ class IngestJobManager:
         )
         async with self._lock:
             self._jobs[state.job_id] = state
+        self._dispatch_worker(state)
+        return state
+
+    async def create_if_idle(
+        self,
+        *,
+        owner: str,
+        logical_name: str,
+        physical: str,
+        batch_dir: Path,
+        hybrid: bool,
+        ner: bool | None,
+        hate_speech: bool | None,
+        resolve: bool,
+    ) -> tuple[IngestJobState, bool]:
+        """Atomically check for an in-flight job and create one only if idle.
+
+        The check (:meth:`active_for`'s logic) and the insert must share a
+        single ``self._lock`` acquisition, not two separate ones. Two
+        ``POST /ingest/finalize`` requests for the same collection can
+        interleave at the ``await`` between a check and a later create call;
+        if the check and the create were separate lock acquisitions, both
+        requests could observe "no job in flight" and both create one —
+        defeating the very guard this exists to enforce (overlapping runs can
+        double-write, since file hashes are only recorded as ingested after a
+        run's final node batch). Doing both under one lock makes the two
+        outcomes ("this call created a job" / "another job is already there")
+        mutually exclusive and exhaustive: at most one concurrent caller for a
+        given ``(owner, physical)`` ever sees ``created=True``.
+
+        Args:
+            owner (str): Resolved principal owning the job.
+            logical_name (str): The caller's collection name.
+            physical (str): Owner-namespaced Qdrant collection name.
+            batch_dir (Path): Directory of staged source files.
+            hybrid (bool): Whether hybrid search is enabled for the run.
+            ner (bool | None): Per-request NER override.
+            hate_speech (bool | None): Per-request hate-speech override.
+            resolve (bool): Whether entity resolution follows the ingest.
+
+        Returns:
+            tuple[IngestJobState, bool]: ``(state, created)``. When
+            ``created`` is ``True``, ``state`` is the newly dispatched job
+            (caller should respond 202). When ``False``, ``state`` is the
+            pre-existing queued/running job for this ``(owner, physical)``
+            (caller should respond 409 carrying its ``job_id``).
+        """
+        async with self._lock:
+            existing = self._active_locked(owner, physical)
+            if existing is not None:
+                return existing, False
+            state = self._new_state(
+                owner=owner,
+                logical_name=logical_name,
+                physical=physical,
+                batch_dir=batch_dir,
+                hybrid=hybrid,
+                ner=ner,
+                hate_speech=hate_speech,
+                resolve=resolve,
+            )
+            self._jobs[state.job_id] = state
+        self._dispatch_worker(state)
+        return state, True
+
+    def _new_state(
+        self,
+        *,
+        owner: str,
+        logical_name: str,
+        physical: str,
+        batch_dir: Path,
+        hybrid: bool,
+        ner: bool | None,
+        hate_speech: bool | None,
+        resolve: bool,
+    ) -> IngestJobState:
+        """Build a fresh, unregistered job state.
+
+        Args:
+            owner (str): Resolved principal owning the job.
+            logical_name (str): The caller's collection name.
+            physical (str): Owner-namespaced Qdrant collection name.
+            batch_dir (Path): Directory of staged source files.
+            hybrid (bool): Whether hybrid search is enabled for the run.
+            ner (bool | None): Per-request NER override.
+            hate_speech (bool | None): Per-request hate-speech override.
+            resolve (bool): Whether entity resolution follows the ingest.
+
+        Returns:
+            IngestJobState: A new, not-yet-registered job state.
+        """
+        return IngestJobState(
+            job_id=uuid.uuid4().hex,
+            owner=owner,
+            logical_name=logical_name,
+            physical=physical,
+            batch_dir=batch_dir,
+            hybrid=hybrid,
+            ner=ner,
+            hate_speech=hate_speech,
+            resolve=resolve,
+        )
+
+    def _dispatch_worker(self, state: IngestJobState) -> None:
+        """Schedule a job's worker task and track it for cleanup.
+
+        Args:
+            state (IngestJobState): The job to run.
+        """
         task = asyncio.create_task(self._worker(state))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
-        return state
 
     async def get(self, job_id: str, owner: str) -> IngestJobState | None:
         """Return an owned job, or ``None``.
@@ -274,6 +388,12 @@ class IngestJobManager:
         overlapping runs can double-write, because file hashes are only
         recorded as ingested after a run's final node batch.
 
+        This is a point-in-time read only. A caller that means to act on the
+        result by creating a job if none is found must use
+        :meth:`create_if_idle` instead of calling this and then ``create()``
+        separately — those would be two lock acquisitions with a TOCTOU gap
+        between them.
+
         Args:
             owner (str): Resolved principal.
             physical (str): Owner-namespaced Qdrant collection name.
@@ -282,13 +402,25 @@ class IngestJobManager:
             IngestJobState | None: The queued/running job, if one exists.
         """
         async with self._lock:
-            for state in self._jobs.values():
-                if (
-                    state.owner == owner
-                    and state.physical == physical
-                    and state.status in (JobStatus.QUEUED, JobStatus.RUNNING)
-                ):
-                    return state
+            return self._active_locked(owner, physical)
+
+    def _active_locked(self, owner: str, physical: str) -> IngestJobState | None:
+        """Find the owner's unfinished job for a collection; caller must hold ``self._lock``.
+
+        Args:
+            owner (str): Resolved principal.
+            physical (str): Owner-namespaced Qdrant collection name.
+
+        Returns:
+            IngestJobState | None: The queued/running job, if one exists.
+        """
+        for state in self._jobs.values():
+            if (
+                state.owner == owner
+                and state.physical == physical
+                and state.status in (JobStatus.QUEUED, JobStatus.RUNNING)
+            ):
+                return state
         return None
 
     async def list_for_owner(self, owner: str) -> list[IngestJobState]:

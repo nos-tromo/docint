@@ -53,6 +53,7 @@ def _stage(client: TestClient, collection: str, user: str = "alice") -> None:
 
 
 def test_finalize_returns_a_job_id(client: TestClient) -> None:
+    """`/ingest/finalize` queues a job and returns 202 with its id."""
     _stage(client, "mydocs")
     res = client.post("/ingest/finalize", json={"collection": "mydocs"}, headers=_headers())
 
@@ -63,6 +64,7 @@ def test_finalize_returns_a_job_id(client: TestClient) -> None:
 def test_finalize_409s_with_the_existing_job_when_already_running(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A second finalize for the same collection 409s, carrying the in-flight job id."""
     import threading
 
     gate = threading.Event()
@@ -82,6 +84,7 @@ def test_finalize_409s_with_the_existing_job_when_already_running(
 
 
 def test_jobs_list_is_owner_scoped(client: TestClient) -> None:
+    """`GET /ingest/jobs` lists only the caller's own jobs."""
     _stage(client, "mydocs", user="alice")
     client.post("/ingest/finalize", json={"collection": "mydocs"}, headers=_headers("alice"))
 
@@ -90,10 +93,9 @@ def test_jobs_list_is_owner_scoped(client: TestClient) -> None:
 
 
 def test_job_snapshot_404s_cross_owner(client: TestClient) -> None:
+    """`GET /ingest/jobs/{job_id}` 404s for a caller who does not own the job."""
     _stage(client, "mydocs", user="alice")
-    job_id = client.post(
-        "/ingest/finalize", json={"collection": "mydocs"}, headers=_headers("alice")
-    ).json()["job_id"]
+    job_id = client.post("/ingest/finalize", json={"collection": "mydocs"}, headers=_headers("alice")).json()["job_id"]
 
     assert client.get(f"/ingest/jobs/{job_id}", headers=_headers("alice")).status_code == 200
     assert client.get(f"/ingest/jobs/{job_id}", headers=_headers("bob")).status_code == 404
@@ -131,6 +133,7 @@ def test_events_route_is_not_shadowed_by_the_job_id_route() -> None:
 
 
 def test_delete_409s_while_running(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`DELETE /ingest/jobs/{job_id}` refuses to dismiss a still-running job."""
     import threading
 
     gate = threading.Event()
@@ -141,9 +144,7 @@ def test_delete_409s_while_running(client: TestClient, monkeypatch: pytest.Monke
 
     monkeypatch.setattr(api_module.job_manager, "_runner", _blocking)
     _stage(client, "mydocs")
-    job_id = client.post(
-        "/ingest/finalize", json={"collection": "mydocs"}, headers=_headers()
-    ).json()["job_id"]
+    job_id = client.post("/ingest/finalize", json={"collection": "mydocs"}, headers=_headers()).json()["job_id"]
 
     assert client.delete(f"/ingest/jobs/{job_id}", headers=_headers()).status_code == 409
     gate.set()
