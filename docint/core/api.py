@@ -782,6 +782,10 @@ class WhoamiOut(BaseModel):
     """The resolved calling identity, for the SPA header."""
 
     username: str
+    # Decorative only — the edge gateway's Authelia displayname, injected
+    # alongside (not instead of) X-Auth-User. Never part of principal
+    # resolution/identity; None when the gateway isn't in front (dev).
+    display_name: str | None = None
 
 
 class AgentChatIn(BaseModel):
@@ -919,20 +923,32 @@ def get_version() -> VersionOut:
 
 
 @app.get("/whoami", response_model=WhoamiOut, tags=["Meta"])
-def get_whoami(principal: Principal = Depends(resolve_principal)) -> WhoamiOut:  # noqa: B008 — FastAPI dependency marker
+def get_whoami(
+    request: Request,
+    principal: Principal = Depends(resolve_principal),  # noqa: B008 — FastAPI dependency marker
+) -> WhoamiOut:
     """Return the resolved calling identity, for the SPA's AppHeader.
 
     Principal-gated like every collection-scoped endpoint (401 without a
     trusted header or a configured dev default identity) — unlike ``/config``
     and ``/version``, which are deliberately unauthenticated.
 
+    ``display_name`` is read straight off the ``X-Auth-Name`` request header
+    (Authelia's displayname, injected by the edge gateway) and is purely
+    decorative — it plays no part in identity/principal resolution, unlike
+    ``username``. ``None`` when the header is absent (dev without the
+    gateway in front).
+
     Args:
+        request (Request): The incoming request, for the decorative
+            ``X-Auth-Name`` header.
         principal (Principal): The resolved request principal.
 
     Returns:
-        WhoamiOut: The caller's resolved principal name.
+        WhoamiOut: The caller's resolved principal name plus, if present,
+            the gateway's decorative display name.
     """
-    return WhoamiOut(username=principal.name)
+    return WhoamiOut(username=principal.name, display_name=request.headers.get("X-Auth-Name"))
 
 
 @app.get("/collections/list", response_model=list[str] | AdminCollectionsOut, tags=["Collections"])

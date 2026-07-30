@@ -17,7 +17,9 @@ export function Shell({ children }: { children: ReactNode }) {
         // server-side and echoed back via the authenticated GET /whoami —
         // undefined while loading or on a fetch error, so the header simply
         // omits the user block rather than showing a stale/wrong identity.
-        user={whoami?.username}
+        // display_name (the gateway's decorative X-Auth-Name) is preferred
+        // when present; falls back to username until that header is deployed.
+        user={whoami?.display_name ?? whoami?.username}
         version={version?.version ? `v${version.version}` : undefined}
         homeLabel={t('appHeader.home')}
         themeLabels={{
