@@ -28,6 +28,14 @@ export interface IngestRunState {
   ner: boolean
   hate: boolean
   activeJobId: string | null
+  /**
+   * Id of the job whose terminal `ingestion_complete` has already triggered
+   * the view's post-ingest collection-select side effect. Persisted (like
+   * `activeJobId`) rather than kept in component state, so navigating away
+   * and back — or a reload — doesn't repeat the effect for a job that was
+   * already handled in an earlier mount.
+   */
+  handledJobId: string | null
   files: File[]
   uploadEvents: IngestEvent[]
   failedFiles: string[]
@@ -53,6 +61,19 @@ export interface IngestRunState {
    * @param t - Translate function for user-facing error copy.
    */
   start: (limitBytes: number, t: Translate) => Promise<void>
+  /**
+   * Mark `jobId` as having already triggered the post-ingest side effect.
+   * Called once, synchronously, the moment the view observes that job's
+   * terminal `ingestion_complete` frame.
+   */
+  markJobHandled: (jobId: string) => void
+  /**
+   * Adopt `jobId` as the active run without touching the upload leg — used
+   * to re-queue an interrupted run (the staged files are already on the
+   * server; `POST /ingest/finalize` re-ingests over them directly) or to
+   * adopt a 409-in-flight job id.
+   */
+  adoptJob: (jobId: string) => void
   dismissActive: () => void
   reset: () => void
 }
@@ -73,6 +94,7 @@ export const useIngestRunStore = create<IngestRunState>()(
       ner: false,
       hate: false,
       activeJobId: null,
+      handledJobId: null,
       ...transient,
       setCollection: (collection) => set({ collection }),
       setNer: (ner) => set({ ner }),
@@ -80,8 +102,20 @@ export const useIngestRunStore = create<IngestRunState>()(
       addFiles: (v) => set((s) => ({ files: mergeFiles(s.files, v) })),
       removeFile: (i) => set((s) => ({ files: s.files.filter((_, idx) => idx !== i) })),
       clearFiles: () => set({ files: [] }),
-      dismissActive: () => set({ activeJobId: null, uploadEvents: [], failedFiles: [] }),
-      reset: () => set({ collection: '', ner: false, hate: false, activeJobId: null, ...transient }),
+      markJobHandled: (jobId) => set({ handledJobId: jobId }),
+      adoptJob: (jobId) =>
+        set({ activeJobId: jobId, handledJobId: null, uploadEvents: [], failedFiles: [], error: null }),
+      dismissActive: () =>
+        set({ activeJobId: null, handledJobId: null, uploadEvents: [], failedFiles: [] }),
+      reset: () =>
+        set({
+          collection: '',
+          ner: false,
+          hate: false,
+          activeJobId: null,
+          handledJobId: null,
+          ...transient
+        }),
       start: async (limitBytes, t) => {
         const { collection, files, ner, hate, uploading } = get()
         if (!collection || files.length === 0 || uploading) return
@@ -156,7 +190,8 @@ export const useIngestRunStore = create<IngestRunState>()(
         collection: s.collection,
         ner: s.ner,
         hate: s.hate,
-        activeJobId: s.activeJobId
+        activeJobId: s.activeJobId,
+        handledJobId: s.handledJobId
       }),
       version: 1
     }

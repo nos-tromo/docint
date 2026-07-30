@@ -30,6 +30,7 @@ beforeEach(() => {
     if (u.includes('/collections/select')) return jsonRes({ ok: true, name: 'mydocs' })
     if (u.includes('/collections/list')) return jsonRes([])
     if (u.includes('/config/ingest-defaults')) return jsonRes({ ner: false, hate_speech: false })
+    if (u.includes('/ingest/finalize')) return jsonRes({ job_id: 'job-2' })
     if (u.includes('/ingest/jobs')) return jsonRes({ jobs: [] })
     if (u.includes('/config'))
       return jsonRes({
@@ -72,6 +73,18 @@ describe('Ingest', () => {
 
     renderIn(<Ingest />)
     await waitFor(() => expect(screen.getByText(/3\s*\/\s*9/)).toBeInTheDocument())
+    // Regression guard: `useIngestJobs()` is 30s-stale and nothing
+    // invalidates it on job creation, so the `/ingest/jobs` list fetched at
+    // mount (stubbed to `{jobs: []}` above) can never contain a job the user
+    // just started. Without live SSE evidence (this job's own events) also
+    // being required, the interrupted banner would render right alongside
+    // this very progress. Wait for the `/ingest/jobs` fetch to actually
+    // settle (not just be dispatched) before asserting its absence, or a
+    // still-pending query (`jobs` still `undefined`) would let the assertion
+    // pass for the wrong reason.
+    await waitFor(() => expect(callsMatching('/ingest/jobs')).toBeGreaterThanOrEqual(1))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(screen.queryByText(/interrupted/i)).not.toBeInTheDocument()
   })
 
   it('offers a re-run when the active job is unknown to the server', async () => {
@@ -120,5 +133,104 @@ describe('Ingest post-ingest side effects', () => {
     // asserting the count stayed at one.
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(callsMatching('/collections/select')).toBe(1)
+  })
+
+  it('does not repeat the effect across an unmount + remount for the same completed job', async () => {
+    // `activeJobId` is persisted and the job's event log lives in the
+    // module-level job store, so navigating away and back (or a reload)
+    // still observes the same terminal frame. A component-local guard (e.g.
+    // a `useRef`) resets on remount and would repeat the side effect.
+    useIngestRunStore.setState({ activeJobId: 'job-1', collection: 'mydocs' })
+    const { appendEvent } = useIngestJobsStore.getState()
+    appendEvent('job-1', {
+      event: 'ingestion_started',
+      data: { job_id: 'job-1', collection: 'mydocs' },
+      receivedAt: Date.now()
+    })
+    appendEvent('job-1', {
+      event: 'ingestion_complete',
+      data: { job_id: 'job-1', collection: 'mydocs' },
+      receivedAt: Date.now()
+    })
+
+    const { unmount } = renderIn(<Ingest />)
+    await waitFor(() => expect(callsMatching('/collections/select')).toBe(1))
+    unmount()
+
+    renderIn(<Ingest />)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(callsMatching('/collections/select')).toBe(1)
+  })
+})
+
+describe('Ingest — second run in the same tab', () => {
+  it('does not show the previous job as complete while a second run is still uploading', async () => {
+    // `activeJobId` still points at the *previous* run's job until
+    // `createIngestJob` resolves for the new run (stores/ingestRun.ts). This
+    // reproduces that exact window directly via store state, mirroring what
+    // `run.start()` produces mid-flight.
+    useIngestRunStore.setState({ activeJobId: 'job-1', collection: 'mydocs' })
+    const { appendEvent } = useIngestJobsStore.getState()
+    appendEvent('job-1', {
+      event: 'ingestion_started',
+      data: { job_id: 'job-1', collection: 'mydocs' },
+      receivedAt: Date.now()
+    })
+    appendEvent('job-1', {
+      event: 'ingestion_complete',
+      data: { job_id: 'job-1', collection: 'mydocs' },
+      receivedAt: Date.now()
+    })
+
+    renderIn(<Ingest />)
+    await waitFor(() => expect(callsMatching('/collections/select')).toBe(1))
+
+    useIngestRunStore.setState({
+      uploading: true,
+      uploadEvents: [
+        { event: 'start', data: { collection: 'mydocs', files: ['b.txt'] }, receivedAt: Date.now() },
+        { event: 'upload_progress', data: { filename: 'b.txt', bytes_written: 5 }, receivedAt: Date.now() }
+      ]
+    })
+
+    await waitFor(() => expect(screen.getByText('Uploading')).toBeInTheDocument())
+    expect(screen.queryByText('Complete')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /dismiss/i })).not.toBeInTheDocument()
+  })
+})
+
+describe('Ingest — interrupted run', () => {
+  it('re-queues directly (finalize only) instead of re-uploading', async () => {
+    useIngestRunStore.setState({ activeJobId: 'ghost', collection: 'mydocs' })
+    renderIn(<Ingest />)
+
+    // Let the deployment-defaults seed settle first (it writes `ner`/`hate`
+    // on mount), then make an explicit choice — mirrors a user ticking a box
+    // before hitting "Run again", and avoids racing the seed effect.
+    const nerCheckbox = (await screen.findByLabelText('Extract entities')) as HTMLInputElement
+    await waitFor(() => expect(nerCheckbox.checked).toBe(false))
+    useIngestRunStore.getState().setNer(true)
+
+    const rerun = await screen.findByRole('button', { name: /run again|erneut/i })
+    rerun.click()
+
+    await waitFor(() => expect(callsMatching('/ingest/finalize')).toBe(1))
+    expect(callsMatching('/ingest/upload')).toBe(0)
+    await waitFor(() => expect(useIngestRunStore.getState().activeJobId).toBe('job-2'))
+
+    const finalizeCall = fetchMock.mock.calls.find((c) => String(c[0]).includes('/ingest/finalize'))!
+    const body = JSON.parse((finalizeCall[1] as RequestInit).body as string)
+    expect(body).toEqual({ collection: 'mydocs', hybrid: true, ner: true, hate_speech: false })
+  })
+
+  it('lets the user dismiss a permanently-interrupted (ghost) job', async () => {
+    useIngestRunStore.setState({ activeJobId: 'ghost' })
+    renderIn(<Ingest />)
+
+    const dismiss = await screen.findByRole('button', { name: /dismiss/i })
+    dismiss.click()
+
+    await waitFor(() => expect(useIngestRunStore.getState().activeJobId).toBeNull())
+    expect(screen.queryByText(/interrupted/i)).not.toBeInTheDocument()
   })
 })
