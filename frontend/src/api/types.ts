@@ -215,6 +215,14 @@ export interface NerDocumentRow {
 
 export type EntityMergeMode = 'orthographic' | 'exact' | 'resolved'
 
+/**
+ * The entity-merge mode the UI requests. The backend's `entity_merge_mode`
+ * parameter also accepts 'exact'/'orthographic' (see `docint/core/ner.py`),
+ * but the frontend has no control for switching modes — it always pins to
+ * the durable, canonical-entity grouping.
+ */
+export const ENTITY_MERGE_MODE: EntityMergeMode = 'resolved'
+
 export interface NerStats {
   totals: {
     unique_entities: number

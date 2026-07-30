@@ -201,4 +201,64 @@ describe('Report view — document overview', () => {
       expect(post).toBeTruthy()
     })
   })
+
+  it('creates a report with the signed-in display name as operator', async () => {
+    const calls: { url: string; body: unknown }[] = []
+    let whoamiCallCount = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string, init?: RequestInit) => {
+        const url = String(u)
+        if (url.includes('/whoami')) {
+          whoamiCallCount++
+          return { ok: true, status: 200, json: async () => ({ username: 'jane.doe', display_name: 'Jane Doe' }) }
+        }
+        if (url.endsWith('/reports') && init?.method === 'POST') {
+          calls.push({ url, body: JSON.parse(String(init.body)) })
+          return { ok: true, status: 200, json: async () => ({ ...reportDetail, id: 2 }) }
+        }
+        if (url.includes('/reports/')) return { ok: true, status: 200, json: async () => reportDetail }
+        if (url.endsWith('/reports')) {
+          return { ok: true, status: 200, json: async () => ({ reports: [{ ...reportDetail, items: undefined }] }) }
+        }
+        return { ok: true, status: 200, json: async () => ({}) }
+      })
+    )
+    renderReport()
+    // Wait for whoami to be fetched
+    await waitFor(() => expect(whoamiCallCount).toBeGreaterThan(0))
+    fireEvent.click(await screen.findByRole('button', { name: /New/i }))
+    await waitFor(() => expect(calls).toHaveLength(1))
+    expect((calls[0].body as { operator?: string }).operator).toBe('Jane Doe')
+  })
+
+  it('omits operator when no identity is available', async () => {
+    const calls: { body: unknown }[] = []
+    let whoamiCallCount = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string, init?: RequestInit) => {
+        const url = String(u)
+        if (url.includes('/whoami')) {
+          whoamiCallCount++
+          return { ok: false, status: 401, json: async () => ({}) }
+        }
+        if (url.endsWith('/reports') && init?.method === 'POST') {
+          calls.push({ body: JSON.parse(String(init.body)) })
+          return { ok: true, status: 200, json: async () => ({ ...reportDetail, id: 3 }) }
+        }
+        if (url.includes('/reports/')) return { ok: true, status: 200, json: async () => reportDetail }
+        if (url.endsWith('/reports')) {
+          return { ok: true, status: 200, json: async () => ({ reports: [{ ...reportDetail, items: undefined }] }) }
+        }
+        return { ok: true, status: 200, json: async () => ({}) }
+      })
+    )
+    renderReport()
+    // Wait for whoami to fail
+    await waitFor(() => expect(whoamiCallCount).toBeGreaterThan(0))
+    fireEvent.click(await screen.findByRole('button', { name: /New/i }))
+    await waitFor(() => expect(calls).toHaveLength(1))
+    expect('operator' in (calls[0].body as Record<string, unknown>)).toBe(false)
+  })
 })

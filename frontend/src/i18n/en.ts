@@ -41,10 +41,6 @@ export const en = {
   'common.translation': 'Translation',
   'common.show_original': 'Show original',
   'common.translation_unavailable': 'Translation unavailable — showing original.',
-  'common.entity_merge_mode_aria': 'Entity merge mode',
-  'common.merge_resolved': 'Resolved',
-  'common.merge_orthographic': 'Orthographic',
-  'common.merge_exact': 'Exact',
   'common.loading_ellipsis': 'Loading…',
   'common.pill_open_link': 'Open link ↗',
 
@@ -183,7 +179,6 @@ export const en = {
   'entities.view_group_aria': 'Entity view',
   'entities.view_table': 'Table',
   'entities.view_graph': 'Graph',
-  'entities.merge_mode_label': 'Merge mode',
   'entities.select_collection': 'Select a collection to inspect entities.',
   'entities.loading': 'Loading entities…',
   'entities.empty': 'No entities found in this collection.',

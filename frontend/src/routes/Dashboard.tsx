@@ -4,8 +4,8 @@ import { useDocumentsCount } from '@/hooks/useDocuments'
 import { useNerStats } from '@/hooks/useNer'
 import { useSessions } from '@/hooks/useSessions'
 import { useUiStore } from '@/stores/ui'
+import { ENTITY_MERGE_MODE } from '@/api/types'
 import { KpiCard } from '@/components/common/KpiCard'
-import { MergeModeToggle } from '@/components/common/MergeModeToggle'
 import { TopEntitiesChart } from '@/components/dashboard/TopEntitiesChart'
 import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
@@ -13,7 +13,6 @@ import { useT } from '@/i18n/LanguageContext'
 export function Dashboard() {
   const t = useT()
   const collection = useUiStore((s) => s.selectedCollection)
-  const mergeMode = useUiStore((s) => s.entityMergeMode)
   const { data: collections, isError } = useCollections()
   const { data: documentsCount } = useDocumentsCount()
   const { data: sessionsData } = useSessions()
@@ -23,7 +22,7 @@ export function Dashboard() {
     top_k: topK,
     min_mentions: minMentions,
     include_relations: false,
-    entity_merge_mode: mergeMode
+    entity_merge_mode: ENTITY_MERGE_MODE
   })
 
   return (
@@ -66,7 +65,6 @@ export function Dashboard() {
         <header className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-medium">{t('dashboard.top_entities')}</h2>
           <div className="flex items-center gap-3 text-sm">
-            <MergeModeToggle />
             <label className="flex items-center gap-2">
               {t('dashboard.top_k_label')}
               <input

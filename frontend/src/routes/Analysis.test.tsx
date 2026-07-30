@@ -70,7 +70,7 @@ function mockFetch() {
 }
 
 beforeEach(() => {
-  useUiStore.setState({ selectedCollection: 'alpha', entityMergeMode: 'resolved', graphTopK: null })
+  useUiStore.setState({ selectedCollection: 'alpha', graphTopK: null })
 })
 
 afterEach(() => {
@@ -138,6 +138,34 @@ describe('Analysis auto-select guard (table view only)', () => {
       )
       expect(pressedGraphNodes).toHaveLength(0)
     })
+  })
+})
+
+describe('Analysis entity merge mode is fixed to resolved', () => {
+  it('does not render a merge-mode control', async () => {
+    vi.stubGlobal('fetch', mockFetch())
+    renderAnalysis()
+
+    await screen.findByRole('option', { name: /Acme/i })
+    expect(screen.queryByRole('group', { name: /merge/i })).not.toBeInTheDocument()
+  })
+
+  it('requests the entity graph with entity_merge_mode=resolved', async () => {
+    const fetchMock = mockFetch()
+    vi.stubGlobal('fetch', fetchMock)
+    renderAnalysis()
+
+    await screen.findByRole('option', { name: /Acme/i })
+    await userEvent.click(screen.getByRole('button', { name: 'Graph' }))
+    await screen.findByRole('button', { name: /Acme \(ORG\)/ })
+
+    const graphCall = fetchMock.mock.calls.find(([input]) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      return url.includes('/collections/ner/graph')
+    })
+    expect(graphCall).toBeDefined()
+    const url = typeof graphCall![0] === 'string' ? graphCall![0] : graphCall![0].toString()
+    expect(url).toContain('entity_merge_mode=resolved')
   })
 })
 

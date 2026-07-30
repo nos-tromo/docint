@@ -2,6 +2,60 @@ import { useRef, useState, type DragEvent } from 'react'
 import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
 
+/** Minimal shape of the non-standard entries API we consume. */
+type FsEntry = {
+  isFile: boolean
+  isDirectory: boolean
+  fullPath: string
+  file?: (onOk: (f: File) => void, onErr?: (e: unknown) => void) => void
+  createReader?: () => { readEntries: (onOk: (e: FsEntry[]) => void, onErr?: (e: unknown) => void) => void }
+}
+
+/** `entry.file()` yields an empty webkitRelativePath; ingest.ts uploads each
+ *  file as `webkitRelativePath || name`, so stamp the tree path or dropped
+ *  folders flatten and same-named files across subfolders collide. */
+function withRelativePath(file: File, fullPath: string): File {
+  try {
+    Object.defineProperty(file, 'webkitRelativePath', {
+      value: fullPath.replace(/^\//, ''),
+      configurable: true
+    })
+  } catch {
+    // Some engines may reject redefining a non-configurable property. A file
+    // with a bare name is far better than losing the whole drop —
+    // ingest.ts already falls back to f.name when webkitRelativePath is unset.
+  }
+  return file
+}
+
+/** readEntries returns at most ~100 entries per call; loop until it yields an
+ *  empty page or large folders are silently truncated. */
+async function readAllEntries(dir: FsEntry): Promise<FsEntry[]> {
+  const reader = dir.createReader?.()
+  if (!reader) return []
+  const all: FsEntry[] = []
+  for (;;) {
+    const page = await new Promise<FsEntry[]>((resolve) => reader.readEntries(resolve, () => resolve([])))
+    if (!page.length) return all
+    all.push(...page)
+  }
+}
+
+async function collectFiles(entry: FsEntry): Promise<File[]> {
+  if (entry.isFile) {
+    const file = await new Promise<File | null>((resolve) =>
+      entry.file ? entry.file(resolve, () => resolve(null)) : resolve(null)
+    )
+    return file ? [withRelativePath(file, entry.fullPath)] : []
+  }
+  if (entry.isDirectory) {
+    const children = await readAllEntries(entry)
+    const nested = await Promise.all(children.map(collectFiles))
+    return nested.flat()
+  }
+  return []
+}
+
 export function Dropzone({
   onFiles,
   disabled
@@ -18,8 +72,28 @@ export function Dropzone({
     e.preventDefault()
     setHover(false)
     if (disabled) return
-    const list = Array.from(e.dataTransfer.files)
-    if (list.length) onFiles(list)
+    // DataTransfer is neutered once this handler returns, so pull every entry
+    // (and the plain-file fallback list) out synchronously BEFORE awaiting
+    // anything.
+    const plain = Array.from(e.dataTransfer.files)
+    const entries = Array.from(e.dataTransfer.items ?? [])
+      .map((item) => (item as unknown as { webkitGetAsEntry?: () => FsEntry | null }).webkitGetAsEntry?.() ?? null)
+      .filter((entry): entry is FsEntry => entry !== null)
+    if (!entries.length) {
+      // No entries API (or no entries): keep the plain-file behavior.
+      if (plain.length) onFiles(plain)
+      return
+    }
+    void Promise.all(entries.map(collectFiles))
+      .then((groups) => {
+        const list = groups.flat()
+        if (list.length) onFiles(list)
+      })
+      .catch(() => {
+        // Traversal failed unexpectedly: fall back to whatever plain files
+        // were present rather than silently losing the whole drop.
+        if (plain.length) onFiles(plain)
+      })
   }
 
   return (

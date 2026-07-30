@@ -2,13 +2,14 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
-import { useHateSpeechPages, useNerStats } from './useNer'
+import { useHateSpeechPages, useNerSources, useNerStats } from './useNer'
 import { useUiStore } from '@/stores/ui'
+import { ENTITY_MERGE_MODE } from '@/api/types'
 
 afterEach(() => vi.restoreAllMocks())
 
 beforeEach(() => {
-  useUiStore.setState({ selectedCollection: null, entityMergeMode: 'resolved' })
+  useUiStore.setState({ selectedCollection: null })
 })
 
 function mockFetch(body: unknown) {
@@ -69,5 +70,39 @@ describe('analysis hooks thread the selected collection into requests', () => {
     expect(
       fetchMock.mock.calls.some(([u]) => String(u).includes('/collections/ner/stats'))
     ).toBe(false)
+  })
+
+  it('useNerStats sends the pinned entity_merge_mode on the real request', async () => {
+    const fetchMock = mockFetch({})
+    useUiStore.setState({ selectedCollection: 'docs' })
+
+    renderHook(
+      () =>
+        useNerStats({ top_k: 10, include_relations: false, entity_merge_mode: ENTITY_MERGE_MODE }),
+      { wrapper }
+    )
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([u]) =>
+        String(u).includes('/collections/ner/stats')
+      )
+      expect(call).toBeDefined()
+      expect(String(call![0])).toContain(`entity_merge_mode=${ENTITY_MERGE_MODE}`)
+    })
+  })
+
+  it('useNerSources sends the pinned entity_merge_mode on the real request', async () => {
+    const fetchMock = mockFetch({ items: [], next_cursor: null })
+    useUiStore.setState({ selectedCollection: 'docs' })
+
+    renderHook(() => useNerSources('Acme::org'), { wrapper })
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([u]) =>
+        String(u).includes('/collections/ner/sources')
+      )
+      expect(call).toBeDefined()
+      expect(String(call![0])).toContain(`entity_merge_mode=${ENTITY_MERGE_MODE}`)
+    })
   })
 })

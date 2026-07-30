@@ -13,6 +13,7 @@ import {
   useUpdateReport,
   useUpdateReportItem
 } from '@/hooks/useReports'
+import { useWhoami } from '@/hooks/useWhoami'
 import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
 import { cn } from '@/lib/cn'
@@ -107,6 +108,7 @@ export function Report() {
   const activeReportId = useReportStore((s) => s.activeReportId)
   const setActiveReportId = useReportStore((s) => s.setActiveReportId)
 
+  const whoami = useWhoami()
   const reports = useReports()
   const active = useReport(activeReportId)
   const createReport = useCreateReport()
@@ -134,7 +136,11 @@ export function Report() {
     try {
       const created = await createReport.mutateAsync({
         title: t('report.untitled_title'),
-        collection_name: collection ?? undefined
+        collection_name: collection ?? undefined,
+        // Create-time default only: the operator field stays editable, and an
+        // unknown identity (dev without the gateway, or a failed /whoami) must
+        // leave it empty rather than guess.
+        operator: whoami.data?.display_name ?? whoami.data?.username
       })
       setActiveReportId(created.id)
     } catch {

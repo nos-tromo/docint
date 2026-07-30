@@ -303,3 +303,19 @@ describe('Sidebar keeps the current section when switching collections', () => {
     expect(screen.getByTestId('location-probe').textContent).toBe('/chat')
   })
 })
+
+describe('Sidebar navigation', () => {
+  it('orders sections dashboard, ingest, inspector, chat, analysis, report', () => {
+    const fetchMock = mockFetch({
+      '/collections/list': [],
+      '/sessions/list': { sessions: [] }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderSidebar()
+    // Assert the full <nav> contents (not just a prefix slice) so a 7th nav
+    // entry appended later would fail this test instead of passing silently.
+    const hrefs = Array.from(document.querySelectorAll('nav a')).map((a) => a.getAttribute('href'))
+    expect(hrefs).toEqual(['/', '/ingest', '/inspector', '/chat', '/analysis', '/report'])
+  })
+})

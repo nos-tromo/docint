@@ -44,10 +44,6 @@ export const de: Strings = {
   'common.translation': 'Übersetzung',
   'common.show_original': 'Original anzeigen',
   'common.translation_unavailable': 'Übersetzung nicht verfügbar — Original wird angezeigt.',
-  'common.entity_merge_mode_aria': 'Entitäten-Zusammenführung',
-  'common.merge_resolved': 'Aufgelöst',
-  'common.merge_orthographic': 'Orthografisch',
-  'common.merge_exact': 'Exakt',
   'common.loading_ellipsis': 'Lädt…',
   'common.pill_open_link': 'Beitrag öffnen ↗',
 
@@ -192,7 +188,6 @@ export const de: Strings = {
   'entities.view_group_aria': 'Entitätsansicht',
   'entities.view_table': 'Tabelle',
   'entities.view_graph': 'Graph',
-  'entities.merge_mode_label': 'Zusammenführung',
   'entities.select_collection': 'Wählen Sie eine Sammlung aus, um Entitäten zu prüfen.',
   'entities.loading': 'Lädt Entitäten…',
   'entities.empty': 'Keine Entitäten in dieser Sammlung gefunden.',

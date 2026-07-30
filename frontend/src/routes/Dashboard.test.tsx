@@ -60,6 +60,17 @@ describe('Dashboard backend status indicator', () => {
   })
 })
 
+describe('Dashboard entity merge mode is fixed to resolved', () => {
+  it('does not render a merge-mode control', async () => {
+    useUiStore.setState({ selectedCollection: 'alpha' })
+    vi.stubGlobal('fetch', mockFetch(true))
+    renderDashboard()
+
+    await screen.findByTestId('backend-status-dot')
+    expect(screen.queryByRole('group', { name: /merge/i })).not.toBeInTheDocument()
+  })
+})
+
 describe('Dashboard sessions panel scoping', () => {
   it('prompts to select a collection in the recent-sessions panel when none is active', async () => {
     vi.stubGlobal('fetch', mockFetch(true))
