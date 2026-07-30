@@ -263,3 +263,40 @@ async def test_remove_is_owner_scoped() -> None:
     assert await manager.remove(state.job_id, owner="alice") is True
     assert await manager.get(state.job_id, owner="alice") is None
     await manager.stop()
+
+
+@pytest.mark.anyio
+async def test_remove_refuses_a_running_job() -> None:
+    """Test that remove() refuses a queued/running job even for its owner.
+
+    A removed-but-running job would keep writing with nobody watching, and
+    would silently defeat active_for()'s double-write guard — both only ever
+    see self._jobs, so a removed running job drops out of both at once.
+    """
+    gate = asyncio.Event()
+
+    def runner(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        asyncio.run_coroutine_threadsafe(_wait(gate), state_loop).result(timeout=5)
+        return {"empty": False, "resolution": None}
+
+    async def _wait(event: asyncio.Event) -> None:
+        await event.wait()
+
+    state_loop = asyncio.get_running_loop()
+    manager = IngestJobManager(runner=runner)
+    state = await _create(manager, physical="p1")
+
+    for _ in range(200):
+        if state.status is JobStatus.RUNNING:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("job never reached RUNNING")
+
+    assert await manager.remove(state.job_id, owner="alice") is False
+    assert await manager.get(state.job_id, owner="alice") is state
+    assert await manager.active_for("alice", "p1") is state
+
+    gate.set()
+    await _drain(manager, state)
+    await manager.stop()

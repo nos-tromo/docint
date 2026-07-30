@@ -308,22 +308,34 @@ class IngestJobManager:
         return states
 
     async def remove(self, job_id: str, owner: str) -> bool:
-        """Drop an owned job from the registry.
+        """Drop an owned, finished job from the registry.
 
-        Callers are responsible for refusing to remove a running job — the
-        worker thread cannot be killed, so a removed-but-running job would
-        keep writing with nobody watching.
+        Refuses a queued/running job even from its owner — the worker thread
+        cannot be killed, so a removed-but-running job would keep writing
+        with nobody watching, and would drop out of ``active_for()``'s view
+        (it only sees ``self._jobs``), silently defeating the double-write
+        guard that method exists to enforce. It would also become invisible
+        to any new ``subscribe_owner()`` replay (e.g. a reloaded tab). Route
+        callers are expected to separately reject a running job with a 409
+        before ever calling this; the check here is defense in depth, not a
+        replacement for that.
 
         Args:
             job_id (str): Job identifier.
             owner (str): Resolved principal.
 
         Returns:
-            bool: ``True`` when a job was removed.
+            bool: ``True`` when a finished job was removed. ``False`` both
+            when the job isn't owned by ``owner`` and when it is still
+            queued or running — the two reasons are deliberately
+            indistinguishable to the caller, so cross-owner probing can't be
+            told apart from a legitimate "still running" refusal.
         """
         async with self._lock:
             state = self._jobs.get(job_id)
             if state is None or state.owner != owner:
+                return False
+            if state.status in (JobStatus.QUEUED, JobStatus.RUNNING):
                 return False
             del self._jobs[job_id]
         return True
