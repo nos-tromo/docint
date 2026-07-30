@@ -26,6 +26,7 @@ export const en = {
   'common.no_active_collection': 'No active collection — pick one to query.',
   'common.sessions': 'Sessions',
   'common.new_session': '+ New',
+  'common.new_report': 'New report',
   'common.loading_chats': 'Loading chats...',
   'common.sessions_error_default': 'Failed to load chats.',
   'common.sessions_error_auth':
@@ -125,6 +126,7 @@ export const en = {
 
   // ingest
   'ingest.title': 'Ingest',
+  'ingest.drop_empty': 'Nothing to add — that drop contained no files.',
   'ingest.button': 'Ingest',
   'ingest.busy': 'Ingesting…',
   'ingest.error_truncated':

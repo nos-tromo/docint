@@ -179,12 +179,19 @@ export function Report() {
       <aside className="flex flex-col gap-3 min-h-0">
         <div className="flex items-center justify-between">
           <h1 className="text-xl font-semibold">{t('report.title')}</h1>
-          <Button variant="primary" size="sm" onClick={onCreate} disabled={createReport.isPending}>
-            {t('common.new_session')}
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={onCreate}
+            // Also gated while /whoami is in flight: creating before the
+            // identity resolves would store a report with no operator.
+            disabled={createReport.isPending || whoami.isLoading}
+          >
+            {t('common.new_report')}
           </Button>
         </div>
         {createReport.isError && (
-          <p className="text-xs text-red-400">{t('report.create_error')}</p>
+          <p className="text-xs text-[var(--status-red-fg)]">{t('report.create_error')}</p>
         )}
         <ul className="flex-1 overflow-auto space-y-1">
           {reports.isError ? (

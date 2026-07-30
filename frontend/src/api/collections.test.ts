@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { setOwnerParam } from './client'
+import { ENTITY_MERGE_MODE } from './types'
 import {
   csvExportHref,
   getDocumentsCount,
@@ -115,6 +116,17 @@ describe('collections api carries the selected collection', () => {
     expect(csvExportHref('docs', 'hate-speech')).toContain(
       '/collections/docs/export/hate-speech.csv'
     )
+  })
+
+  it('csvExportHref carries the pinned entity merge mode and drops empty params', () => {
+    const href = csvExportHref('docs', 'entities', {
+      entity_text: 'Acme',
+      entity_type: 'ORG',
+      entity_merge_mode: ENTITY_MERGE_MODE
+    })
+    expect(href).toContain(`entity_merge_mode=${ENTITY_MERGE_MODE}`)
+    expect(href).toContain('entity_text=Acme')
+    expect(csvExportHref('docs', 'entities', { entity_text: '' })).not.toContain('entity_text=')
   })
 
   it('csvExportHref includes the owner param when an owner context is set', () => {
