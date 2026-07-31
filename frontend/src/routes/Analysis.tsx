@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import { useHateSpeechPages, useNerGraph, useNerSources, useNerStats } from '@/hooks/useNer'
 import { useReportDedupeKeys } from '@/hooks/useReports'
 import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
+import { selectEntityKeyFor, useAnalysisUiStore } from '@/stores/analysisUi'
 import { EntitySelect } from '@/components/analysis/EntitySelect'
 import { EntityGraph } from '@/components/analysis/EntityGraph'
 import { EntityFindingsTable } from '@/components/analysis/EntityFindingsTable'
@@ -26,8 +27,10 @@ const keyOf = (text: string | null | undefined, type: string | null | undefined)
 
 export function Analysis() {
   const t = useT()
-  const [tab, setTab] = useState<Tab>('ner')
-  const [nerView, setNerView] = useState<NerView>('table')
+  const tab = useAnalysisUiStore((s) => s.tab)
+  const setTab = useAnalysisUiStore((s) => s.setTab)
+  const nerView = useAnalysisUiStore((s) => s.nerView)
+  const setNerView = useAnalysisUiStore((s) => s.setNerView)
   const collection = useUiStore((s) => s.selectedCollection)
   const cfg = useConfig()
   const graphTopK = useUiStore((s) => s.graphTopK)
@@ -60,13 +63,12 @@ export function Analysis() {
   }, [collection])
 
   const entities = useMemo(() => stats.data?.top_entities ?? [], [stats.data])
-  const [selectedEntityKey, setSelectedEntityKey] = useState<string | null>(null)
-
-  // Reset selection when the collection changes so we don't keep an entity
-  // key that doesn't exist in the new collection's aggregate.
-  useEffect(() => {
-    setSelectedEntityKey(null)
-  }, [collection])
+  const selectedEntityKey = useAnalysisUiStore(selectEntityKeyFor(collection))
+  const setEntity = useAnalysisUiStore((s) => s.setEntity)
+  const setSelectedEntityKey = useCallback(
+    (key: string | null) => setEntity(key, collection),
+    [setEntity, collection]
+  )
 
   // Seed a sensible default selection (the top entity) once the list loads, so
   // the findings panel and dropdown aren't empty on arrival. Scoped to the
@@ -80,7 +82,7 @@ export function Analysis() {
     if (nerView !== 'table' || selectedEntityKey || entities.length === 0) return
     const top = entities.find((e) => (e.text ?? '').trim().length > 0)
     if (top) setSelectedEntityKey(keyOf(top.text, top.type))
-  }, [entities, selectedEntityKey, nerView])
+  }, [entities, selectedEntityKey, nerView, setSelectedEntityKey])
 
   // The selected entity row (for highlight terms / labels / CSV). Falls back to
   // a minimal row parsed from the key so graph clicks on entities outside the
