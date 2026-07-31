@@ -227,6 +227,32 @@ class TestPipelineConfig:
         cfg = load_pipeline_config()
         assert cfg.artifacts_dir == custom
 
+    def test_vision_ocr_timeout_inherits_openai_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Without an explicit override the OCR budget follows ``OPENAI_TIMEOUT``.
+
+        A hardcoded default silently contradicts the endpoint's configured
+        budget: a slow vision model that chat tolerates gets cut off mid-flight
+        and surfaces as ``Request timed out``.
+
+        Args:
+            monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture for env manipulation.
+        """
+        monkeypatch.delenv("PIPELINE_VISION_OCR_TIMEOUT", raising=False)
+        monkeypatch.setenv("OPENAI_TIMEOUT", "240")
+        cfg = load_pipeline_config()
+        assert cfg.vision_ocr_timeout == 240.0
+
+    def test_vision_ocr_timeout_override_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An explicit ``PIPELINE_VISION_OCR_TIMEOUT`` still overrides the inherited value.
+
+        Args:
+            monkeypatch (pytest.MonkeyPatch): The pytest monkeypatch fixture for env manipulation.
+        """
+        monkeypatch.setenv("OPENAI_TIMEOUT", "240")
+        monkeypatch.setenv("PIPELINE_VISION_OCR_TIMEOUT", "45")
+        cfg = load_pipeline_config()
+        assert cfg.vision_ocr_timeout == 45.0
+
 
 # ---------------------------------------------------------------------------
 # Triage tests
@@ -1298,6 +1324,193 @@ class TestOCR:
         assert "Recovered text" in spans[0].text
         # Two API calls: initial attempt + reduced-resolution retry
         assert mock_create.call_count == 2
+
+    def test_vision_ocr_exhausted_timeouts_skip_higher_detail_recovery(self) -> None:
+        """When every attempt fails at transport level, no larger image is sent.
+
+        A transport failure is not an empty answer.  Escalating to a
+        higher-detail image after two timeouts sends *more* bytes to an
+        endpoint that has already proven too slow.
+        """
+        from docint.core.readers.documents.ocr import VisionOCREngine
+
+        mock_page = MagicMock()
+        mock_page.get_width.return_value = 612.0
+        mock_page.get_height.return_value = 792.0
+
+        from PIL import Image as PILImage
+
+        img = PILImage.new("RGB", (900, 3000), color="white")
+        mock_bitmap = MagicMock()
+        mock_bitmap.to_pil.return_value = img
+        mock_page.render.return_value = mock_bitmap
+
+        mock_pdf = MagicMock()
+        mock_pdf.__getitem__ = MagicMock(return_value=mock_page)
+
+        with (
+            patch("docint.core.readers.documents.ocr.pypdfium2") as mock_pdfium,
+            patch("docint.core.readers.documents.ocr.OpenAIPipeline") as MockPipeline,
+            patch("docint.core.readers.documents.ocr._OpenAI"),
+            patch("docint.core.readers.documents.ocr.load_openai_env"),
+            patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+        ):
+            mock_pdfium.PdfDocument.return_value = mock_pdf
+            pipeline_instance = MagicMock()
+            pipeline_instance.load_prompt.return_value = "Extract text"
+            pipeline_instance.seed = 42
+            pipeline_instance.temperature = 0.0
+            pipeline_instance.top_p = 0.0
+            MockPipeline.return_value = pipeline_instance
+            mock_model_env.return_value.vision_model_file = "test-vision.gguf"
+
+            engine = VisionOCREngine(
+                "/fake/doc.pdf",
+                timeout=10.0,
+                max_retries=0,
+                max_image_dimension=1024,
+                max_tokens=4096,
+            )
+
+            with patch.object(
+                engine._vision_client.chat.completions,
+                "create",
+                side_effect=RuntimeError("Request timed out."),
+            ) as mock_create:
+                spans = engine.ocr_page(0)
+
+        assert spans == []
+        # Initial attempt + half-resolution retry only - no third, larger call.
+        assert mock_create.call_count == 2
+
+    def test_vision_ocr_stops_after_consecutive_page_failures(self) -> None:
+        """Repeated total failures disable the engine instead of retrying every page.
+
+        An unreachable or overloaded endpoint otherwise costs minutes per page
+        for the whole document while producing nothing.
+        """
+        from docint.core.readers.documents.ocr import VisionOCREngine
+
+        mock_page = MagicMock()
+        mock_page.get_width.return_value = 612.0
+        mock_page.get_height.return_value = 792.0
+
+        from PIL import Image as PILImage
+
+        img = PILImage.new("RGB", (900, 3000), color="white")
+        mock_bitmap = MagicMock()
+        mock_bitmap.to_pil.return_value = img
+        mock_page.render.return_value = mock_bitmap
+
+        mock_pdf = MagicMock()
+        mock_pdf.__getitem__ = MagicMock(return_value=mock_page)
+
+        with (
+            patch("docint.core.readers.documents.ocr.pypdfium2") as mock_pdfium,
+            patch("docint.core.readers.documents.ocr.OpenAIPipeline") as MockPipeline,
+            patch("docint.core.readers.documents.ocr._OpenAI"),
+            patch("docint.core.readers.documents.ocr.load_openai_env"),
+            patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+        ):
+            mock_pdfium.PdfDocument.return_value = mock_pdf
+            pipeline_instance = MagicMock()
+            pipeline_instance.load_prompt.return_value = "Extract text"
+            pipeline_instance.seed = 42
+            pipeline_instance.temperature = 0.0
+            pipeline_instance.top_p = 0.0
+            MockPipeline.return_value = pipeline_instance
+            mock_model_env.return_value.vision_model_file = "test-vision.gguf"
+
+            engine = VisionOCREngine(
+                "/fake/doc.pdf",
+                timeout=10.0,
+                max_retries=0,
+                max_image_dimension=1024,
+                max_tokens=4096,
+            )
+            budget = VisionOCREngine._MAX_CONSECUTIVE_PAGE_FAILURES
+
+            with patch.object(
+                engine._vision_client.chat.completions,
+                "create",
+                side_effect=RuntimeError("Request timed out."),
+            ) as mock_create:
+                for page_index in range(budget + 3):
+                    assert engine.ocr_page(page_index) == []
+
+            # Two calls per page until the budget is spent, then nothing.
+            assert mock_create.call_count == budget * 2
+
+    def test_vision_ocr_success_resets_failure_budget(self) -> None:
+        """A page that answers clears the consecutive-failure counter.
+
+        Isolated slow pages must not accumulate into a permanent shutdown of an
+        otherwise working endpoint.
+        """
+        from docint.core.readers.documents.ocr import VisionOCREngine
+
+        mock_page = MagicMock()
+        mock_page.get_width.return_value = 612.0
+        mock_page.get_height.return_value = 792.0
+
+        from PIL import Image as PILImage
+
+        img = PILImage.new("RGB", (900, 3000), color="white")
+        mock_bitmap = MagicMock()
+        mock_bitmap.to_pil.return_value = img
+        mock_page.render.return_value = mock_bitmap
+
+        mock_pdf = MagicMock()
+        mock_pdf.__getitem__ = MagicMock(return_value=mock_page)
+
+        with (
+            patch("docint.core.readers.documents.ocr.pypdfium2") as mock_pdfium,
+            patch("docint.core.readers.documents.ocr.OpenAIPipeline") as MockPipeline,
+            patch("docint.core.readers.documents.ocr._OpenAI"),
+            patch("docint.core.readers.documents.ocr.load_openai_env"),
+            patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+        ):
+            mock_pdfium.PdfDocument.return_value = mock_pdf
+            pipeline_instance = MagicMock()
+            pipeline_instance.load_prompt.return_value = "Extract text"
+            pipeline_instance.seed = 42
+            pipeline_instance.temperature = 0.0
+            pipeline_instance.top_p = 0.0
+            MockPipeline.return_value = pipeline_instance
+            mock_model_env.return_value.vision_model_file = "test-vision.gguf"
+
+            ok = MagicMock()
+            ok.choices = [MagicMock()]
+            ok.choices[0].message.content = "Page text"
+
+            engine = VisionOCREngine(
+                "/fake/doc.pdf",
+                timeout=10.0,
+                max_retries=0,
+                max_image_dimension=1024,
+                max_tokens=4096,
+            )
+            budget = VisionOCREngine._MAX_CONSECUTIVE_PAGE_FAILURES
+
+            timeout = RuntimeError("Request timed out.")
+            # Fail every page but the one immediately before the budget runs out.
+            side_effects: list[object] = []
+            for _ in range(budget - 1):
+                side_effects.extend([timeout, timeout])
+            side_effects.append(ok)
+            for _ in range(budget - 1):
+                side_effects.extend([timeout, timeout])
+
+            with patch.object(
+                engine._vision_client.chat.completions,
+                "create",
+                side_effect=side_effects,
+            ) as mock_create:
+                for page_index in range(2 * budget - 1):
+                    engine.ocr_page(page_index)
+
+            # The successful page reset the counter, so every page was attempted.
+            assert mock_create.call_count == len(side_effects)
 
     def test_vision_ocr_retries_on_empty_with_higher_detail(self) -> None:
         """When OCR returns empty text, VisionOCREngine should retry at higher detail."""

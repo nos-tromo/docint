@@ -205,7 +205,7 @@ page-level PDF pipeline in `docint/core/readers/documents/`.
 | `PIPELINE_MAX_WORKERS` | `4` | Parallel workers per document. |
 | `PIPELINE_FORCE_REPROCESS` | `false` | Ignore cached artifacts. |
 | `PIPELINE_ENABLE_VISION_OCR` | `true` | Use the vision LLM as an OCR fallback. |
-| `PIPELINE_VISION_OCR_TIMEOUT` | `60.0` | Per-request timeout for the vision OCR call. |
+| `PIPELINE_VISION_OCR_TIMEOUT` | inherits `OPENAI_TIMEOUT` | Per-request timeout for the vision OCR call. Set it only to give OCR a *tighter* budget than the rest of the app — vision models are typically far slower on image input than on text, so a fixed low value cuts every page off mid-flight and surfaces as `Request timed out`. |
 | `PIPELINE_VISION_OCR_MAX_RETRIES` | `1` | Per-call retries. |
 | `PIPELINE_VISION_OCR_MAX_IMAGE_DIM` | `1024` | Max pixel dimension for rendered OCR images. |
 | `PIPELINE_VISION_OCR_MAX_TOKENS` | `4096` | Max tokens the vision LLM may generate per OCR call. |

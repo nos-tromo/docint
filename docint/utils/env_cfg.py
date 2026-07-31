@@ -1621,7 +1621,7 @@ def load_pipeline_config(
     default_force_reprocess: bool = False,
     default_max_workers: int = 4,
     default_enable_vision_ocr: bool = True,
-    default_vision_ocr_timeout: float = 60.0,
+    default_vision_ocr_timeout: float | None = None,
     default_vision_ocr_max_retries: int = 1,
     default_vision_ocr_max_image_dimension: int = 1024,
     default_vision_ocr_max_tokens: int = 4096,
@@ -1639,8 +1639,9 @@ def load_pipeline_config(
         default_max_workers (int): Default maximum parallel workers for document processing.
         default_enable_vision_ocr (bool): Default flag to enable vision OCR fallback for scanned
             pages.
-        default_vision_ocr_timeout (float): Default per-request timeout in seconds for vision OCR
-            API calls.
+        default_vision_ocr_timeout (float | None): Default per-request timeout in seconds for
+            vision OCR API calls. ``None`` inherits ``OPENAI_TIMEOUT``, so the OCR client cannot
+            silently undercut the budget configured for the very endpoint it calls.
         default_vision_ocr_max_retries (int): Default maximum retries for a single vision OCR
             API call.
         default_vision_ocr_max_image_dimension (int): Default max pixel dimension for images sent
@@ -1658,8 +1659,9 @@ def load_pipeline_config(
         - max_workers (int): Maximum parallel workers for document-level processing.
         - enable_vision_ocr (bool): When True, use the vision LLM as a fallback OCR engine for
             scanned pages that have no extractable text layer.
-        - vision_ocr_timeout (float): Per-request timeout in seconds for vision OCR API calls
-            (separate from the global ``OPENAI_TIMEOUT``).
+        - vision_ocr_timeout (float): Per-request timeout in seconds for vision OCR API calls.
+            Defaults to the global ``OPENAI_TIMEOUT``; set ``PIPELINE_VISION_OCR_TIMEOUT`` to
+            give OCR a tighter budget than the rest of the app.
         - vision_ocr_max_retries (int): Maximum retries for a single vision OCR API call.
         - vision_ocr_max_image_dimension (int): Maximum pixel dimension (width or height) for
             images sent to the vision OCR endpoint. Larger renders are down-scaled before
@@ -1671,6 +1673,17 @@ def load_pipeline_config(
     if not pipeline_version:
         pipeline_version = default_pipeline_version
 
+    # Vision OCR shares the chat endpoint, so an unset budget follows
+    # OPENAI_TIMEOUT rather than a fixed value that a slow vision model would
+    # blow through on every page.
+    raw_vision_ocr_timeout = os.getenv("PIPELINE_VISION_OCR_TIMEOUT")
+    if raw_vision_ocr_timeout is not None and raw_vision_ocr_timeout.strip():
+        vision_ocr_timeout = float(raw_vision_ocr_timeout)
+    elif default_vision_ocr_timeout is not None:
+        vision_ocr_timeout = float(default_vision_ocr_timeout)
+    else:
+        vision_ocr_timeout = load_openai_env().timeout
+
     return PipelineConfig(
         text_coverage_threshold=float(os.getenv("PIPELINE_TEXT_COVERAGE_THRESHOLD", default_text_coverage_threshold)),
         pipeline_version=pipeline_version,
@@ -1679,7 +1692,7 @@ def load_pipeline_config(
         force_reprocess=os.getenv("PIPELINE_FORCE_REPROCESS", "false").lower() in {"true", "1", "yes"},
         max_workers=int(os.getenv("PIPELINE_MAX_WORKERS", default_max_workers)),
         enable_vision_ocr=os.getenv("PIPELINE_ENABLE_VISION_OCR", "true").lower() in {"true", "1", "yes"},
-        vision_ocr_timeout=float(os.getenv("PIPELINE_VISION_OCR_TIMEOUT", default_vision_ocr_timeout)),
+        vision_ocr_timeout=vision_ocr_timeout,
         vision_ocr_max_retries=int(os.getenv("PIPELINE_VISION_OCR_MAX_RETRIES", default_vision_ocr_max_retries)),
         vision_ocr_max_image_dimension=int(
             os.getenv(
