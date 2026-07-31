@@ -110,14 +110,21 @@ class VisionOCREngine(OCREngine):
 
     * renders at a conservative DPI and caps the pixel dimensions,
     * encodes the image as JPEG (much smaller payload than PNG),
-    * sends the request through a dedicated OpenAI client with a short
-      timeout and limited retries,
+    * sends the request through a dedicated OpenAI client whose timeout
+      and retry count are configured independently of the shared chat
+      client (see ``PIPELINE_VISION_OCR_TIMEOUT``),
     * caps the response length with ``max_tokens``,
-    * on a timeout, automatically retries once at half resolution.
+    * on a timeout, automatically retries once at half resolution,
+    * gives up on the document once several consecutive pages fail
+      outright, so an unreachable endpoint costs seconds rather than
+      minutes per page.
     """
 
     # Default limits used when no explicit values are supplied.
     _DEFAULT_TIMEOUT: float = 60.0
+    # Consecutive pages that may fail with no response at all before the
+    # engine stops calling the endpoint for the rest of the document.
+    _MAX_CONSECUTIVE_PAGE_FAILURES: int = 3
     _DEFAULT_MAX_RETRIES: int = 1
     _DEFAULT_MAX_IMAGE_DIM: int = 1024
     _EMPTY_RETRY_MAX_IMAGE_DIM: int = 1536
@@ -171,6 +178,8 @@ class VisionOCREngine(OCREngine):
         self._max_retries = max_retries if max_retries is not None else self._DEFAULT_MAX_RETRIES
         self._max_image_dim = max_image_dimension if max_image_dimension is not None else self._DEFAULT_MAX_IMAGE_DIM
         self._max_tokens = max_tokens if max_tokens is not None else self._DEFAULT_MAX_TOKENS
+        self._consecutive_page_failures = 0
+        self._disabled = False
 
         # Build a dedicated OpenAI client with the OCR-specific
         # timeout / retry settings so we don't block the pipeline for
@@ -201,6 +210,13 @@ class VisionOCREngine(OCREngine):
             list[OCRSpan]: List of ``OCRSpan`` items with the extracted text.
         """
         spans: list[OCRSpan] = []
+        if self._disabled:
+            logger.debug(
+                "Vision OCR disabled after {} consecutive failures; skipping page {}",
+                self._MAX_CONSECUTIVE_PAGE_FAILURES,
+                page_index,
+            )
+            return spans
         try:
             page = self._pdf[page_index]
             # Render at configured DPI (scale = DPI / 72).
@@ -221,9 +237,16 @@ class VisionOCREngine(OCREngine):
                 len(img_b64) * 3 / 4 / 1024,
             )
 
+            # ``responded`` distinguishes "the model answered, but with
+            # nothing" from "no attempt ever reached the model".  Only the
+            # former is worth a higher-detail retry; escalating after a
+            # transport failure just sends a bigger payload to an endpoint
+            # that already proved too slow.
             text: str | None = None
+            responded = False
             try:
                 text = self._call_vision_ocr(img_b64)
+                responded = True
             except RuntimeError:
                 # On timeout / error, retry once at half resolution.
                 half_dim = max(self._max_image_dim // 2, 256)
@@ -236,8 +259,15 @@ class VisionOCREngine(OCREngine):
                 img_b64 = self._encode_jpeg(pil_image)
                 try:
                     text = self._call_vision_ocr(img_b64)
+                    responded = True
                 except RuntimeError:
                     pass  # logged inside _call_vision_ocr
+
+            if not responded:
+                self._note_page_failure(page_index)
+                return spans
+
+            self._consecutive_page_failures = 0
 
             # Empty-output recovery pass at a higher detail setting.
             if not (text and text.strip()):
@@ -260,13 +290,16 @@ class VisionOCREngine(OCREngine):
                         "Return all visible text exactly as it appears. "
                         "Do not summarize or translate."
                     )
+                    # Track the image actually sent before the call, so the
+                    # give-up warning below reports the payload that failed
+                    # rather than the previous attempt's.
+                    pil_image = recovery_image
+                    img_b64 = recovery_b64
                     try:
                         text = self._call_vision_ocr(
                             recovery_b64,
                             prompt_override=recovery_prompt,
                         )
-                        pil_image = recovery_image
-                        img_b64 = recovery_b64
                     except RuntimeError:
                         pass  # logged inside _call_vision_ocr
 
@@ -301,6 +334,32 @@ class VisionOCREngine(OCREngine):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _note_page_failure(self, page_index: int) -> None:
+        """Record a page where no attempt reached the vision endpoint.
+
+        Once ``_MAX_CONSECUTIVE_PAGE_FAILURES`` pages in a row fail this way
+        the endpoint is treated as unusable for the rest of the document and
+        the engine stops calling it, rather than spending the full timeout
+        budget on every remaining page.
+
+        Args:
+            page_index (int): Zero-based number of the page that failed.
+        """
+        self._consecutive_page_failures += 1
+        logger.warning(
+            "Vision OCR got no response for page {} ({}/{} consecutive failures)",
+            page_index,
+            self._consecutive_page_failures,
+            self._MAX_CONSECUTIVE_PAGE_FAILURES,
+        )
+        if self._consecutive_page_failures >= self._MAX_CONSECUTIVE_PAGE_FAILURES:
+            self._disabled = True
+            logger.error(
+                "Vision OCR endpoint unresponsive after {} consecutive pages; "
+                "disabling vision OCR for the rest of this document",
+                self._consecutive_page_failures,
+            )
 
     @staticmethod
     def _cap_image(
