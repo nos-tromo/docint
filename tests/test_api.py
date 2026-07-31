@@ -2469,6 +2469,73 @@ def test_ingest_upload_empty_emits_warning_and_completes(
     assert cast(Any, api_module.rag).selected == []
 
 
+def test_ingest_empty_warning_omits_physical_collection_name(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """The job's warning message never echoes the physical, owner-namespaced name.
+
+    Regression test for a leak where ``EmptyIngestionError``'s ``str()`` (built
+    from the physical, owner-namespaced collection) was pushed verbatim as the
+    job's warning message. The test above
+    (``test_ingest_upload_empty_emits_warning_and_completes``) can't catch this
+    on its own — its stub ``register()`` returns the logical name unchanged, so
+    physical and logical happen to be equal there. This test uses an owner
+    manager stub whose physical name differs from the logical one, matching
+    production's ``u{hash}__{logical}`` namespacing.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture.
+    """
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+
+    physical = "u3f2a91bc44d0__mydocs"
+
+    class NamespacingOwners:
+        """Owner manager stub whose physical name differs from the logical one."""
+
+        def register(self, owner: str | None, logical: str) -> str:
+            return physical
+
+    monkeypatch.setattr(api_module.rag, "ensure_collection_owner_manager", lambda: NamespacingOwners())
+
+    def fake_ingest(
+        collection: str,
+        path: Path,
+        hybrid: bool = True,
+        progress_callback: Any = None,
+        **kwargs: Any,
+    ) -> None:
+        """Simulate an ingestion run that produced no documents.
+
+        Args:
+            collection (str): Physical collection name passed by the job runner.
+            path (Path): Source directory path (ignored).
+            hybrid (bool): Whether hybrid retrieval was requested (ignored).
+            progress_callback (Any): Optional progress callback (ignored).
+            **kwargs: Ignored extra ingest flags (ner / hate_speech).
+        """
+        _ = (path, hybrid, progress_callback)
+        raise api_module.EmptyIngestionError(collection)
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", fake_ingest)
+
+    # /ingest/finalize points the job at `_resolve_qdrant_src_dir() / physical`;
+    # this stub's register() doesn't go through /ingest/upload's own
+    # directory-naming, so stage the directory directly.
+    (tmp_path / physical).mkdir(parents=True, exist_ok=True)
+
+    snapshot = run_ingest(client, "mydocs", {})
+
+    assert snapshot["status"] == "completed"
+    assert snapshot["empty"] is True
+    assert snapshot["message"] is not None
+    assert "mydocs" in snapshot["message"]
+    assert physical not in snapshot["message"]
+    assert snapshot["collection"] == "mydocs"
+
+
 def test_ingest_upload_defer_saves_without_ingesting(
     monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
 ) -> None:

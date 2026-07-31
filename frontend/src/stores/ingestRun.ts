@@ -29,6 +29,14 @@ export interface IngestRunState {
   hate: boolean
   activeJobId: string | null
   /**
+   * The collection `activeJobId` was queued against, captured at queue time.
+   * Read by the interrupted-run "Run again" flow instead of the live
+   * `collection` field, which the user can edit between the interruption and
+   * the click — otherwise a re-run can finalize a different collection than
+   * the one that was actually interrupted.
+   */
+  activeJobCollection: string | null
+  /**
    * Id of the job whose terminal `ingestion_complete` has already triggered
    * the view's post-ingest collection-select side effect. Persisted (like
    * `activeJobId`) rather than kept in component state, so navigating away
@@ -94,6 +102,7 @@ export const useIngestRunStore = create<IngestRunState>()(
       ner: false,
       hate: false,
       activeJobId: null,
+      activeJobCollection: null,
       handledJobId: null,
       ...transient,
       setCollection: (collection) => set({ collection }),
@@ -106,13 +115,20 @@ export const useIngestRunStore = create<IngestRunState>()(
       adoptJob: (jobId) =>
         set({ activeJobId: jobId, handledJobId: null, uploadEvents: [], failedFiles: [], error: null }),
       dismissActive: () =>
-        set({ activeJobId: null, handledJobId: null, uploadEvents: [], failedFiles: [] }),
+        set({
+          activeJobId: null,
+          activeJobCollection: null,
+          handledJobId: null,
+          uploadEvents: [],
+          failedFiles: []
+        }),
       reset: () =>
         set({
           collection: '',
           ner: false,
           hate: false,
           activeJobId: null,
+          activeJobCollection: null,
           handledJobId: null,
           ...transient
         }),
@@ -169,6 +185,7 @@ export const useIngestRunStore = create<IngestRunState>()(
           })
           set({
             activeJobId: job_id,
+            activeJobCollection: collection,
             uploading: false,
             files: [],
             failedFiles: failures.flatMap((f) => f.files)
@@ -191,6 +208,7 @@ export const useIngestRunStore = create<IngestRunState>()(
         ner: s.ner,
         hate: s.hate,
         activeJobId: s.activeJobId,
+        activeJobCollection: s.activeJobCollection,
         handledJobId: s.handledJobId
       }),
       version: 1

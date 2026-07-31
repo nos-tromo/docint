@@ -388,6 +388,8 @@ export const en = {
   // jobs are server-owned and survive a reload/navigation)
   'ingest.job_interrupted':
     'This run was interrupted and its progress is no longer available. The uploaded files are still on the server — re-running skips whatever was already indexed.',
+  'ingest.job_queued':
+    'Waiting for a worker slot — this run will start as soon as the current ingest finishes.',
   'ingest.job_rerun': 'Run again',
   'ingest.stream_lost': 'Live updates disconnected.',
   'ingest.reconnect': 'Reconnect',

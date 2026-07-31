@@ -398,6 +398,8 @@ export const de: Strings = {
   // jobs are server-owned and survive a reload/navigation)
   'ingest.job_interrupted':
     'Dieser Durchlauf wurde unterbrochen; der Fortschritt ist nicht mehr verfügbar. Die hochgeladenen Dateien liegen weiterhin auf dem Server — ein erneuter Lauf überspringt bereits Indexiertes.',
+  'ingest.job_queued':
+    'Warten auf einen freien Verarbeitungsplatz — dieser Lauf startet, sobald der aktuelle Import abgeschlossen ist.',
   'ingest.job_rerun': 'Erneut ausführen',
   'ingest.stream_lost': 'Live-Aktualisierung getrennt.',
   'ingest.reconnect': 'Neu verbinden',

@@ -105,8 +105,21 @@ export function Ingest() {
   // id, so a new `activeJobId` is a brand-new cache entry with no stale data
   // to race against: `data`/`error` start undefined and `interrupted` stays
   // false until an actual 404 comes back — no invalidation effect needed.
+  // A completed-but-undismissed job also 404s after a backend restart (its
+  // in-memory record is gone either way), but `handledJobId` already records
+  // "this job reached `ingestion_complete`" — so excluding that case keeps a
+  // run that actually finished from reading as interrupted.
   const interrupted =
-    jobQuery.isError && jobQuery.error instanceof ApiError && jobQuery.error.status === 404
+    jobQuery.isError &&
+    jobQuery.error instanceof ApiError &&
+    jobQuery.error.status === 404 &&
+    run.handledJobId !== run.activeJobId
+
+  // A job waiting on the server's concurrency semaphore emits zero frames
+  // until it starts running (docint/core/jobs.py) — without this, `status`
+  // never leaves `phase: 'idle'` and the whole status block below is gated
+  // out, so the run vanishes from view with no card, no spinner, no error.
+  const queued = jobQuery.data?.status === 'queued'
 
   // Post-ingest side effects: select the collection and refresh the owned
   // list once, the moment the active job's log reaches its terminal
@@ -162,7 +175,17 @@ export function Ingest() {
   // as interrupted (cleared the moment the original job was queued).
   const rerunMutation = useMutation({
     mutationFn: () =>
-      createIngestJob({ collection: run.collection, hybrid: true, ner: run.ner, hate_speech: run.hate }),
+      // Re-run against the collection the interrupted job was actually
+      // queued for, not the live form field — the user can edit `run.collection`
+      // between the interruption and clicking "Run again". Falls back to the
+      // live field only for state persisted before `activeJobCollection`
+      // existed.
+      createIngestJob({
+        collection: run.activeJobCollection ?? run.collection,
+        hybrid: true,
+        ner: run.ner,
+        hate_speech: run.hate
+      }),
     onSuccess: ({ job_id }) => {
       // No cache invalidation needed: `adoptJob` points `activeJobId` at the
       // new job id, which `jobQuery` (keyed by that id) picks up as a
@@ -239,12 +262,22 @@ export function Ingest() {
       {(dropError || run.error) && (
         <div className="text-[var(--status-red-fg)] text-sm">{dropError ?? run.error}</div>
       )}
-      {run.warnings.length > 0 && (
+      {/* Derived from the merged upload+job log (`status.warnings`), not
+          `run.warnings` (upload leg only) — a job-stream warning (a
+          soft-empty ingest, a failed post-ingest entity resolution) is just
+          as actionable and must not go unreported. */}
+      {status.warnings.length > 0 && (
         <ul className="text-amber-400 text-sm space-y-1" role="alert">
-          {run.warnings.map((w, i) => (
+          {status.warnings.map((w, i) => (
             <li key={i}>{w}</li>
           ))}
         </ul>
+      )}
+
+      {queued && !interrupted && (
+        <div className="rounded-md border border-border p-3 text-sm text-muted-foreground" role="status">
+          {t('ingest.job_queued')}
+        </div>
       )}
 
       {interrupted && (

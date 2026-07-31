@@ -3224,8 +3224,18 @@ def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
             ner=state.ner,
             hate_speech=state.hate_speech,
         )
-    except EmptyIngestionError as exc:
-        push("warning", {"message": str(exc), "collection": exc.collection_name})
+    except EmptyIngestionError:
+        # Never forward str(exc)/exc.collection_name here: both carry the
+        # physical, owner-namespaced collection name (see EmptyIngestionError's
+        # construction sites in rag.py), and this message is caller-facing —
+        # snapshot() promises only the logical name is ever echoed.
+        push(
+            "warning",
+            {
+                "message": f"No content was ingested into '{state.logical_name}'.",
+                "collection": state.logical_name,
+            },
+        )
         return {"empty": True, "resolution": None}
     except ValueError as exc:
         if "No files found" not in str(exc):
@@ -3432,8 +3442,9 @@ async def ingest_finalize(payload: IngestIn, request: Request) -> dict[str, str]
 async def list_ingest_jobs(request: Request) -> dict[str, list[dict[str, Any]]]:
     """List the caller's ingest jobs, newest first.
 
-    The frontend calls this on load to re-discover and re-attach to jobs that
-    outlived a browser reload.
+    Not called by the SPA — reload re-discovery goes through the persisted
+    ``activeJobId`` plus the SSE replay instead (see ``GET /ingest/jobs/events``).
+    Available for other/future clients that want to enumerate a caller's jobs.
 
     Args:
         request (Request): The incoming request, for principal resolution.

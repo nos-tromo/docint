@@ -426,7 +426,9 @@ class IngestJobManager:
     async def list_for_owner(self, owner: str) -> list[IngestJobState]:
         """Return the owner's jobs, newest first.
 
-        Powers the frontend's reload re-discovery.
+        Not used for the frontend's reload re-discovery — that goes through
+        the persisted ``activeJobId`` plus the SSE replay instead. Available
+        for other/future clients that want to enumerate a caller's jobs.
 
         Args:
             owner (str): Resolved principal.

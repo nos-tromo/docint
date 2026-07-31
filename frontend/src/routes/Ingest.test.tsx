@@ -27,12 +27,15 @@ let fetchMock: ReturnType<typeof vi.fn>
  *  never/no-longer heard of this job" (resolves 404, matching the real
  *  `getIngestJob` contract). */
 let knownJobIds: Set<string>
+/** Job ids the mocked `/ingest/jobs/{id}` endpoint reports as still
+ *  `queued` (waiting on the concurrency semaphore) rather than `running`. */
+let queuedJobIds: Set<string>
 
 function jobSnapshot(id: string) {
   return {
     job_id: id,
     collection: 'mydocs',
-    status: 'running' as const,
+    status: (queuedJobIds.has(id) ? 'queued' : 'running') as 'queued' | 'running',
     message: null,
     error: null,
     empty: false,
@@ -56,6 +59,7 @@ beforeEach(() => {
   useIngestRunStore.getState().reset()
   useIngestJobsStore.getState().clear()
   knownJobIds = new Set()
+  queuedJobIds = new Set()
   fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const u = typeof input === 'string' ? input : input.toString()
     if (u.includes('/collections/select')) return jsonRes({ ok: true, name: 'mydocs' })
@@ -156,6 +160,43 @@ describe('Ingest', () => {
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /run again|erneut/i })).toBeInTheDocument()
     )
+  })
+
+  it('shows a queued notice for a job with no frames yet, instead of rendering nothing', async () => {
+    // Regression test: with the default DOCINT_INGEST_CONCURRENCY=1, a
+    // second ingest sits in `queued` and emits zero SSE frames until a
+    // worker slot frees up — `status.phase` never leaves 'idle' and the
+    // whole status block is otherwise gated out, so the run would vanish
+    // from view with no card, no spinner, no error.
+    useIngestRunStore.setState({ activeJobId: 'job-1' })
+    knownJobIds.add('job-1')
+    queuedJobIds.add('job-1')
+    // No jobEvents at all — this is the exact state a queued job is in.
+
+    renderIn(<Ingest />)
+    await waitFor(() =>
+      expect(screen.getByText('Waiting for a worker slot — this run will start as soon as the current ingest finishes.')).toBeInTheDocument()
+    )
+    // Not interrupted — the server knows about the job, it just hasn't started.
+    expect(screen.queryByText(/interrupted/i)).not.toBeInTheDocument()
+  })
+
+  it('does not read a completed-but-undismissed job as interrupted after a backend restart', async () => {
+    // Regression test: `activeJobId` is persisted, so after any backend
+    // restart `getIngestJob` 404s regardless of how the job ended. Without
+    // consulting `handledJobId` (which already records "this job reached
+    // ingestion_complete"), a run that finished successfully would flash the
+    // "interrupted" banner and a spurious Run-again button.
+    useIngestRunStore.setState({ activeJobId: 'job-1', handledJobId: 'job-1' })
+    // `knownJobIds` stays empty — `getIngestJob('job-1')` 404s, as it would
+    // after a restart wiped the in-memory job registry.
+
+    renderIn(<Ingest />)
+    await waitFor(() => expect(screen.queryByText(/collection/i)).toBeInTheDocument())
+    // Give the 404 a chance to resolve and the (absent) banner a chance to render.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(screen.queryByText(/interrupted/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /run again|erneut/i })).not.toBeInTheDocument()
   })
 })
 
@@ -289,6 +330,28 @@ describe('Ingest — interrupted run', () => {
     const finalizeCall = fetchMock.mock.calls.find((c) => String(c[0]).includes('/ingest/finalize'))!
     const body = JSON.parse((finalizeCall[1] as RequestInit).body as string)
     expect(body).toEqual({ collection: 'mydocs', hybrid: true, ner: true, hate_speech: false })
+  })
+
+  it('re-runs against the job\'s captured collection, not an edited live form field', async () => {
+    // Regression test: `run.collection` is the live, user-editable form
+    // field — if the user changes it between the interruption and clicking
+    // "Run again", the button must still finalize the collection the
+    // interrupted job actually targeted (`activeJobCollection`, captured at
+    // queue time), not whatever the field currently holds.
+    useIngestRunStore.setState({
+      activeJobId: 'ghost',
+      collection: 'edited-after-interruption',
+      activeJobCollection: 'original-mydocs'
+    })
+    renderIn(<Ingest />)
+
+    const rerun = await screen.findByRole('button', { name: /run again|erneut/i })
+    rerun.click()
+
+    await waitFor(() => expect(callsMatching('/ingest/finalize')).toBe(1))
+    const finalizeCall = fetchMock.mock.calls.find((c) => String(c[0]).includes('/ingest/finalize'))!
+    const body = JSON.parse((finalizeCall[1] as RequestInit).body as string)
+    expect(body.collection).toBe('original-mydocs')
   })
 
   it('lets the user dismiss a permanently-interrupted (ghost) job', async () => {
