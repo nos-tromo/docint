@@ -4,9 +4,11 @@ import { Sidebar } from './Sidebar'
 import { useT } from '@/i18n/LanguageContext'
 import { useWhoami } from '@/hooks/useWhoami'
 import { useVersion } from '@/hooks/useVersion'
+import { useIngestJobStream } from '@/hooks/useIngestJobStream'
 
 export function Shell({ children }: { children: ReactNode }) {
   const t = useT()
+  useIngestJobStream()
   const { data: whoami } = useWhoami()
   const { data: version } = useVersion()
   return (

@@ -38,9 +38,22 @@ export interface IngestStatus {
   /** Total chunks observed across "indexed N chunks" messages. */
   totalChunks: number
   startedAt?: number
-  /** Client-composed terminal error copy (never backend prose — see the
-   *  `error` case in `deriveIngestStatus`). */
+  /** Terminal error copy — set only for client-composed `error` events (see
+   *  the `error` case in `deriveIngestStatus`); left `undefined` for a
+   *  backend-composed one so the renderer's catalog fallback is used instead
+   *  of untranslated backend prose. */
   errorMessage?: string
+  /** Machine-readable error code from a backend-composed `error` event
+   *  (jobs.py's closed enum, e.g. `ingestion_failed`). The renderer passes it
+   *  through `streamErrorText` so localized catalog copy carries the
+   *  regex-validated code token for support triage — the behavior PR #356
+   *  established for the old finalize stream. `undefined` on client-composed
+   *  errors, which never set a code. */
+  errorCode?: string
+  /** Non-terminal warning messages accumulated from `warning` events across
+   *  both the upload leg and the job leg — e.g. a soft-empty ingest or a
+   *  failed post-ingest entity resolution. */
+  warnings: string[]
   finishedAt?: number
 }
 
@@ -124,6 +137,40 @@ export function parseProgressMessage(message: string): ParsedProgress {
   return { kind: 'unknown' }
 }
 
+/**
+ * Return the "kind" of a progress event — its message with digits masked — so
+ * consecutive updates of the same counter collapse into one entry.
+ *
+ * "Extracting entities: 1/9 chunks processed" and ".. 2/9 .." share a kind;
+ * only the newest carries information, and a long run emits thousands.
+ *
+ * @param ev - The event to classify.
+ * @returns The masked message, or null for non-progress events.
+ */
+export function progressKind(ev: IngestEvent): string | null {
+  if (ev.event !== 'ingestion_progress') return null
+  const message = (ev.data as { message?: unknown })?.message
+  if (typeof message !== 'string') return null
+  return message.replace(/\d+/g, '#').trim()
+}
+
+/**
+ * Append an event to a log, collapsing a repeat of the previous progress kind
+ * in place. Keeps the log bounded on long ingests.
+ *
+ * @param events - The existing log.
+ * @param next - The event to append.
+ * @returns A new log array.
+ */
+export function appendCollapsedEvent(events: IngestEvent[], next: IngestEvent): IngestEvent[] {
+  const last = events[events.length - 1]
+  const nextKind = progressKind(next)
+  if (nextKind && last && nextKind === progressKind(last)) {
+    return [...events.slice(0, -1), next]
+  }
+  return [...events, next]
+}
+
 function dataOf(ev: IngestEvent): Record<string, unknown> {
   return (ev.data ?? {}) as Record<string, unknown>
 }
@@ -161,7 +208,8 @@ export function deriveIngestStatus(
     filesSaved: 0,
     tasks: [],
     indexed: 0,
-    totalChunks: 0
+    totalChunks: 0,
+    warnings: []
   }
 
   for (const ev of events) {
@@ -257,6 +305,14 @@ export function deriveIngestStatus(
         // unknown kinds intentionally ignored — UI falls back to "Working…"
         break
       }
+      case 'warning': {
+        // Every warning is unique information (a soft-empty ingest, a
+        // reader-unsupported batch, a failed post-ingest entity resolution)
+        // and the run can emit several — accumulate rather than overwrite.
+        const message = strOf(d.message)
+        if (message) status.warnings = [...status.warnings, message]
+        break
+      }
       case 'ingestion_complete': {
         status.phase = 'complete'
         status.collection = strOf(d.collection) ?? status.collection
@@ -268,11 +324,17 @@ export function deriveIngestStatus(
       }
       case 'error': {
         status.phase = 'error'
-        // Safe to capture: every `error` event reaching this reducer has
-        // been composed client-side by streamIngestUploadBatched (backend
-        // error events are intercepted there and rewritten to catalog
-        // copy) — `message` is never backend prose.
-        status.errorMessage = strOf(d.message)
+        // Not every `error` event reaching this reducer is client-composed:
+        // the upload leg's own errors are rewritten to catalog copy by
+        // streamIngestUploadBatched, but job-stream errors (jobs.py) carry
+        // the backend's static protocol copy straight through, tagged with a
+        // `code` field the client-composed ones never set. Capture `message`
+        // only for the client-composed case — never render backend prose —
+        // and capture `code` for the backend case, so ErrorBody can render
+        // localized catalog copy tagged with the validated code token
+        // (via streamErrorText) instead of an undifferentiated fallback.
+        status.errorMessage = typeof d.code === 'string' ? undefined : strOf(d.message)
+        status.errorCode = typeof d.code === 'string' ? d.code : undefined
         status.finishedAt = ev.receivedAt
         break
       }

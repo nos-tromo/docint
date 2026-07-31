@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import userEvent from '@testing-library/user-event'
 import { Analysis } from './Analysis'
 import { useUiStore } from '@/stores/ui'
+import { useAnalysisUiStore } from '@/stores/analysisUi'
 import { LanguageContext } from '@/i18n/LanguageContext'
 
 function renderAnalysis() {
@@ -71,6 +72,7 @@ function mockFetch() {
 
 beforeEach(() => {
   useUiStore.setState({ selectedCollection: 'alpha', graphTopK: null })
+  useAnalysisUiStore.setState({ tab: 'ner', nerView: 'table', entity: null })
 })
 
 afterEach(() => {
@@ -166,6 +168,16 @@ describe('Analysis entity merge mode is fixed to resolved', () => {
     expect(graphCall).toBeDefined()
     const url = typeof graphCall![0] === 'string' ? graphCall![0] : graphCall![0].toString()
     expect(url).toContain('entity_merge_mode=resolved')
+  })
+})
+
+describe('Analysis position', () => {
+  it('restores the persisted tab on mount', () => {
+    vi.stubGlobal('fetch', mockFetch())
+    useAnalysisUiStore.setState({ tab: 'hate', nerView: 'table', entity: null })
+    renderAnalysis()
+
+    expect(screen.getByRole('button', { name: /hate|hass/i })).toHaveClass('border-foreground')
   })
 })
 

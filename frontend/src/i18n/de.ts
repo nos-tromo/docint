@@ -137,8 +137,6 @@ export const de: Strings = {
   'ingest.drop_empty': 'Nichts hinzugefügt — dieser Ablagevorgang enthielt keine Dateien.',
   'ingest.button': 'Importieren',
   'ingest.busy': 'Wird importiert…',
-  'ingest.error_truncated':
-    'Der Datenimport wurde unterbrochen, bevor er abgeschlossen war.',
   'ingest.status_idle': 'Inaktiv',
   'ingest.status_uploading': 'Wird hochgeladen',
   'ingest.status_processing': 'Wird verarbeitet',
@@ -395,4 +393,16 @@ export const de: Strings = {
     'Upload fehlgeschlagen: Keiner der {count} Batches wurde akzeptiert. Prüfen Sie, ob das Backend läuft und erreichbar ist, und versuchen Sie es erneut.',
   'ingest.partial_failure_message':
     'Abgeschlossen, aber {count} Datei(en) wurden übersprungen: {files}. Details siehe Warnungen oben.',
+
+  // ingest job store/view (Ingest.tsx reads from ingestRun/ingestJobs stores;
+  // jobs are server-owned and survive a reload/navigation)
+  'ingest.job_interrupted':
+    'Dieser Durchlauf wurde unterbrochen; der Fortschritt ist nicht mehr verfügbar. Die hochgeladenen Dateien liegen weiterhin auf dem Server — ein erneuter Lauf überspringt bereits Indexiertes.',
+  'ingest.job_queued':
+    'Warten auf einen freien Verarbeitungsplatz — dieser Lauf startet, sobald der aktuelle Import abgeschlossen ist.',
+  'ingest.job_rerun': 'Erneut ausführen',
+  'ingest.stream_lost': 'Live-Aktualisierung getrennt.',
+  'ingest.reconnect': 'Neu verbinden',
+  'ingest.dismiss': 'Ausblenden',
+  'nav.ingest_running': 'Verarbeitung läuft',
 }

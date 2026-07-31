@@ -5,6 +5,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Chat } from './Chat'
 import { useUiStore } from '@/stores/ui'
+import { useChatUiStore } from '@/stores/chatUi'
 
 function bodyFromString(s: string): ReadableStream<Uint8Array> {
   const enc = new TextEncoder()
@@ -31,6 +32,7 @@ function renderChat() {
 
 beforeEach(() => {
   useUiStore.setState({ selectedCollection: null, currentSessionId: null, previewModal: null })
+  useChatUiStore.setState({ drafts: {} })
 })
 
 afterEach(() => {
@@ -375,6 +377,39 @@ describe('Chat session-history validation restoration', () => {
       expect(screen.getByText(/response not validated/i)).toBeInTheDocument()
     })
     expect(screen.queryByText(/response validation passed/i)).toBeNull()
+  })
+})
+
+describe('Chat drafts', () => {
+  it('restores the draft for the open session on mount', async () => {
+    mockHistoryFetch([])
+    useChatUiStore.getState().setDraft('sess-restored', 'half typed question')
+
+    renderChatWithSession('sess-restored')
+
+    expect(await screen.findByPlaceholderText(/ask something/i)).toHaveValue(
+      'half typed question'
+    )
+  })
+
+  it('clears the draft after sending', async () => {
+    useChatUiStore.getState().setDraft('new', 'half typed question')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        body: bodyFromString('data: {"response":"ok","sources":[],"session_id":"s"}\n\n')
+      })
+    )
+
+    renderChat()
+
+    const textarea = await screen.findByPlaceholderText(/ask something/i)
+    expect(textarea).toHaveValue('half typed question')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    await waitFor(() => expect(useChatUiStore.getState().drafts['new']).toBeUndefined())
   })
 })
 

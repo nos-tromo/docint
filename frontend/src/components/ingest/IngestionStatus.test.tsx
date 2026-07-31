@@ -25,4 +25,19 @@ describe('IngestionStatus error body', () => {
     render(<IngestionStatus status={errorStatus()} />)
     expect(screen.getByText('Ingestion failed.')).toBeInTheDocument()
   })
+
+  it('tags a backend job error with its validated code token', () => {
+    // A backend-composed error carries errorCode, never errorMessage; the
+    // catalog copy is rendered with the code appended for support triage
+    // (streamErrorText), matching the chat/summary stream-error behavior.
+    render(<IngestionStatus status={errorStatus({ errorCode: 'ingestion_failed' })} />)
+    expect(screen.getByText('Ingestion failed. (ingestion_failed)')).toBeInTheDocument()
+  })
+
+  it('does not append a token that fails code validation', () => {
+    // The code is protocol, regex-validated before display; anything not
+    // matching the closed-enum token shape renders the fallback copy alone.
+    render(<IngestionStatus status={errorStatus({ errorCode: 'Not A Valid Token!' })} />)
+    expect(screen.getByText('Ingestion failed.')).toBeInTheDocument()
+  })
 })

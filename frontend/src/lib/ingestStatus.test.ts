@@ -118,7 +118,8 @@ describe('deriveIngestStatus', () => {
       filesSaved: 0,
       tasks: [],
       indexed: 0,
-      totalChunks: 0
+      totalChunks: 0,
+      warnings: []
     })
   })
 
@@ -339,11 +340,10 @@ describe('deriveIngestStatus', () => {
   })
 
   it('records error events with phase=error and captures the client-composed message', () => {
-    // Every `error` event reaching this reducer has been composed
-    // client-side by streamIngestUploadBatched (backend error events are
-    // intercepted and rewritten to catalog copy there — see the
-    // save_failed / finalize tests in api/ingest.test.ts), so the message
-    // is safe to carry into render state.
+    // Every client-composed `error` event (streamIngestUploadBatched rewrites
+    // backend upload errors to catalog copy before yielding them) carries no
+    // `code` field — the discriminator the reducer uses below to tell it
+    // apart from a job-stream error.
     const events: IngestEvent[] = [
       { event: 'start', data: { collection: 'c', target_dir: '/t', files: [] } },
       { event: 'error', data: { message: 'Ingestion failed. (ingestion_failed)' } }
@@ -351,6 +351,58 @@ describe('deriveIngestStatus', () => {
     const status = deriveIngestStatus(events)
     expect(status.phase).toBe('error')
     expect(status.errorMessage).toBe('Ingestion failed. (ingestion_failed)')
+  })
+
+  it('discards a job-stream error frame\'s backend message but captures its code', () => {
+    // Regression test: jobs.py:604 emits {"message": "Ingestion failed.",
+    // "code": "ingestion_failed"} straight through — untranslated backend
+    // prose. The `code` field (absent on every client-composed error) is the
+    // discriminator; when present, errorMessage must stay undefined (never
+    // render backend prose) while errorCode carries the machine-readable
+    // token, so ErrorBody can render localized catalog copy tagged with the
+    // code via streamErrorText — the triage behavior PR #356 established.
+    const events: IngestEvent[] = [
+      { event: 'ingestion_started', data: { job_id: 'j1', collection: 'mydocs' } },
+      { event: 'error', data: { job_id: 'j1', message: 'Ingestion failed.', code: 'ingestion_failed' } }
+    ]
+    const status = deriveIngestStatus(events)
+    expect(status.phase).toBe('error')
+    expect(status.errorMessage).toBeUndefined()
+    expect(status.errorCode).toBe('ingestion_failed')
+  })
+
+  it('leaves errorCode undefined for a client-composed error', () => {
+    // Client-composed errors (upload leg) carry catalog copy in `message`
+    // and never a `code`; no token must be appended to their rendering.
+    const events: IngestEvent[] = [
+      { event: 'error', data: { message: 'Upload failed: every batch was rejected.' } }
+    ]
+    const status = deriveIngestStatus(events)
+    expect(status.errorMessage).toBe('Upload failed: every batch was rejected.')
+    expect(status.errorCode).toBeUndefined()
+  })
+
+  it('accumulates warning messages from both the upload and job legs', () => {
+    // Regression test: a soft-empty ingest (EmptyIngestionError / "No files
+    // found") and a failed post-ingest entity resolution both surface only as
+    // a `warning` frame on the job stream — with no reader for them, the run
+    // completes green with no explanation. `status.warnings` must carry every
+    // one, not just the upload leg's.
+    const events: IngestEvent[] = [
+      { event: 'start', data: { collection: 'mydocs', files: ['a.mp3'] } },
+      { event: 'ingestion_started', data: { job_id: 'j1', collection: 'mydocs' } },
+      {
+        event: 'warning',
+        data: { job_id: 'j1', message: "No ingestable files found for 'mydocs'." }
+      },
+      {
+        event: 'ingestion_complete',
+        data: { job_id: 'j1', collection: 'mydocs', empty: true }
+      }
+    ]
+    const status = deriveIngestStatus(events)
+    expect(status.phase).toBe('complete')
+    expect(status.warnings).toEqual(["No ingestable files found for 'mydocs'."])
   })
 })
 

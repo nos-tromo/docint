@@ -774,3 +774,51 @@ def test_res_auto_resolve_defaults_on_and_reads_env(monkeypatch: pytest.MonkeyPa
     assert load_resolution_env().auto_resolve is True
     monkeypatch.setenv("RES_AUTO_RESOLVE", "false")
     assert load_resolution_env().auto_resolve is False
+
+
+def test_load_ingest_concurrency_defaults_to_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default ingest concurrency must be 1 (serial).
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.delenv("DOCINT_INGEST_CONCURRENCY", raising=False)
+    from docint.utils.env_cfg import load_ingest_concurrency
+
+    assert load_ingest_concurrency() == 1
+
+
+def test_load_ingest_concurrency_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Environment variable overrides the default concurrency.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.setenv("DOCINT_INGEST_CONCURRENCY", "3")
+    from docint.utils.env_cfg import load_ingest_concurrency
+
+    assert load_ingest_concurrency() == 3
+
+
+def test_load_ingest_concurrency_clamps_below_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Concurrency below 1 is clamped to 1.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.setenv("DOCINT_INGEST_CONCURRENCY", "0")
+    from docint.utils.env_cfg import load_ingest_concurrency
+
+    assert load_ingest_concurrency() == 1
+
+
+def test_load_ingest_concurrency_falls_back_on_garbage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unparseable values fall back to the default.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.setenv("DOCINT_INGEST_CONCURRENCY", "many")
+    from docint.utils.env_cfg import load_ingest_concurrency
+
+    assert load_ingest_concurrency() == 1

@@ -1,16 +1,18 @@
-import { useEffect, useMemo, useReducer, useState } from 'react'
-import { Button, FileList, mergeFiles } from '@infra/ui'
-import { streamIngestUploadBatched } from '@/api/ingest'
+import { useEffect, useMemo, useState } from 'react'
+import { Button, FileList } from '@infra/ui'
+import { useQueryClient, useMutation, useQuery } from '@tanstack/react-query'
+import { useIngestRunStore } from '@/stores/ingestRun'
+import { useIngestJobsStore, selectJobEvents } from '@/stores/ingestJobs'
 import { useIngestDefaults } from '@/hooks/useIngestDefaults'
-import { describeError } from '@/api/errorMessage'
-import { useSelectCollection, useCollections, collectionsKey } from '@/hooks/useCollections'
+import { dismissIngestJob, createIngestJob, getIngestJob } from '@/api/jobs'
+import { ApiError } from '@/api/client'
+import { selectCollection } from '@/api/collections'
+import { useCollections, collectionsKey } from '@/hooks/useCollections'
 import { useConfig } from '@/hooks/useConfig'
-import { useQueryClient } from '@tanstack/react-query'
 import { useUiStore } from '@/stores/ui'
-import type { IngestEvent } from '@/api/types'
 import { Dropzone } from '@/components/ingest/Dropzone'
 import { IngestionStatus } from '@/components/ingest/IngestionStatus'
-import { deriveIngestStatus } from '@/lib/ingestStatus'
+import { deriveIngestStatus, type IngestStatus } from '@/lib/ingestStatus'
 import { useT } from '@/i18n/LanguageContext'
 
 /**
@@ -20,184 +22,179 @@ import { useT } from '@/i18n/LanguageContext'
  */
 const FALLBACK_UPLOAD_LIMIT_BYTES = 512 * 1024 * 1024
 
-export interface State {
-  collection: string
-  files: File[]
-  events: IngestEvent[]
-  /**
-   * Snapshot of file sizes taken when ingestion starts. `state.files` is
-   * cleared in `'done'` for UX reasons, so we keep the sizes around here
-   * to power the per-file upload progress bar.
-   */
-  fileSizes: Record<string, number>
-  busy: boolean
-}
-type Action =
-  | { type: 'set_collection'; v: string }
-  | { type: 'add_files'; v: File[] }
-  | { type: 'remove_file'; i: number }
-  | { type: 'reset_files' }
-  | { type: 'start'; sizes: Record<string, number> }
-  | { type: 'event'; v: IngestEvent }
-  | { type: 'done' }
-
-// Progress messages like "Extracting entities: 1/2 chunks processed" and
-// "Extracting entities: 2/2 chunks processed" share a kind (digits stripped)
-// and should update one event entry in place instead of stacking. The
-// derived status snapshot does its own collapsing too, but this keeps
-// `state.events` from growing without bound on long-running ingests.
-function progressKind(ev: IngestEvent): string | null {
-  if (ev.event !== 'ingestion_progress') return null
-  const message = (ev.data as { message?: unknown })?.message
-  if (typeof message !== 'string') return null
-  return message.replace(/\d+/g, '#').trim()
-}
-
-export function reducer(s: State, a: Action): State {
-  switch (a.type) {
-    case 'set_collection':
-      return { ...s, collection: a.v }
-    case 'add_files':
-      return { ...s, files: mergeFiles(s.files, a.v) }
-    case 'remove_file':
-      return { ...s, files: s.files.filter((_, i) => i !== a.i) }
-    case 'reset_files':
-      return { ...s, files: [] }
-    case 'start':
-      return { ...s, busy: true, events: [], fileSizes: a.sizes }
-    case 'event': {
-      const last = s.events[s.events.length - 1]
-      const incomingKind = progressKind(a.v)
-      const lastKind = last ? progressKind(last) : null
-      if (incomingKind && incomingKind === lastKind) {
-        return { ...s, events: [...s.events.slice(0, -1), a.v] }
-      }
-      return { ...s, events: [...s.events, a.v] }
-    }
-    case 'done':
-      return { ...s, busy: false, files: [] }
-  }
-}
-
 export function Ingest() {
   const t = useT()
-  const [state, dispatch] = useReducer(reducer, {
-    collection: '',
-    files: [],
-    events: [],
-    fileSizes: {},
-    busy: false
+  const run = useIngestRunStore()
+  const jobEvents = useIngestJobsStore(selectJobEvents(run.activeJobId))
+  const streamLost = useIngestJobsStore((s) => s.streamLost)
+  // Queried directly by job id rather than inferred from a list snapshot —
+  // see the `interrupted` derivation below for why. `enabled: false` when
+  // there's no active job keeps this a no-op the rest of the time.
+  const jobQuery = useQuery({
+    queryKey: ['ingest-job', run.activeJobId],
+    queryFn: () => getIngestJob(run.activeJobId!),
+    enabled: !!run.activeJobId,
+    retry: false,
+    staleTime: 30_000
   })
-  const [error, setError] = useState<string | null>(null)
-  const [warnings, setWarnings] = useState<string[]>([])
   const { data: ingestDefaults } = useIngestDefaults()
-  const [nerEnabled, setNerEnabled] = useState(false)
-  const [hateEnabled, setHateEnabled] = useState(false)
-  // Seed once from the deployment defaults; the user's clicks win afterwards.
+  const { data: collections } = useCollections()
+  const { data: config } = useConfig()
+  const setSelected = useUiStore((s) => s.setSelectedCollection)
+  const qc = useQueryClient()
+
+  const limitBytes = config?.max_upload_bytes ?? FALLBACK_UPLOAD_LIMIT_BYTES
+
+  // A drop that resolves to no files at all (e.g. a folder of only
+  // unreadable entries) never reaches the store — it is a transient,
+  // view-only notice, not part of the run.
+  const [dropError, setDropError] = useState<string | null>(null)
+
+  // Seed the enrichment toggles once from the deployment defaults; the
+  // user's own picks win afterwards for the rest of this mount. Reads the
+  // setters non-reactively (store actions are stable) so they need not be
+  // tracked as effect dependencies.
   const [seeded, setSeeded] = useState(false)
   useEffect(() => {
     if (seeded || !ingestDefaults) return
-    setNerEnabled(ingestDefaults.ner)
-    setHateEnabled(ingestDefaults.hate_speech)
+    const { setNer, setHate } = useIngestRunStore.getState()
+    setNer(ingestDefaults.ner)
+    setHate(ingestDefaults.hate_speech)
     setSeeded(true)
   }, [seeded, ingestDefaults])
-  const setSelected = useUiStore((s) => s.setSelectedCollection)
-  const selectMutation = useSelectCollection()
-  const qc = useQueryClient()
-  const { data: collections } = useCollections()
-  const { data: config } = useConfig()
 
-  const status = useMemo(
-    () => deriveIngestStatus(state.events, state.fileSizes),
-    [state.events, state.fileSizes]
-  )
-
-  const submit = async () => {
-    if (!state.collection || state.files.length === 0) return
-    setError(null)
-    setWarnings([])
-    // The selection is uploaded as staged batches that each stay under the
-    // server's per-request ceiling (`/config` max_upload_bytes; the batched
-    // stream applies the safety margin), then ingested in one finalize pass.
-    // This lets a multi-GB selection ingest instead of being rejected as one
-    // oversized body (nginx 413), and ingestion sees the whole selection at once.
-    const limitBytes = config?.max_upload_bytes ?? FALLBACK_UPLOAD_LIMIT_BYTES
+  // Upload events and job events fold into one timeline, so the existing
+  // (already tested) status reducer keeps working unchanged across the seam
+  // between "uploading to the server" and "the server is ingesting".
+  const fileSizes = useMemo(() => {
     const sizes: Record<string, number> = {}
-    // Key by the same label the ingest event stream uses (api/ingest.ts),
-    // or per-file byte totals miss for every file inside a dropped folder.
-    for (const f of state.files) sizes[f.webkitRelativePath || f.name] = f.size
-    dispatch({ type: 'start', sizes })
-    // Track whether the backend ever produced a terminal event so that
-    // we can tell "ingestion finished" from "the SSE stream died". An
-    // OOM-killed backend either (a) ends the stream silently, or
-    // (b) makes the browser fetch throw with a generic "network error" /
-    // "Failed to fetch" — both end up here without a terminal event,
-    // and we should surface the same actionable message in either case
-    // rather than relaying the raw transport-level message verbatim.
-    const truncationMessage = t('ingest.error_truncated')
-    let sawTerminal = false
-    try {
-      for await (const ev of streamIngestUploadBatched(
-        state.collection,
-        state.files,
-        limitBytes,
-        undefined,
-        t,
-        // Before the deployment defaults have seeded (endpoint failed or a
-        // rolling deploy where the backend lacks it yet), send NO explicit
-        // flags so the env defaults keep applying server-side.
-        seeded ? { ner: nerEnabled, hateSpeech: hateEnabled } : {}
-      )) {
-        dispatch({ type: 'event', v: ev })
-        if (ev.event === 'warning') {
-          // A batch was skipped (e.g. a lone oversize file → 413, or a transient
-          // drop). The upload continues; collect the reason so the user sees why.
-          const data = ev.data as Record<string, unknown>
-          const msg = typeof data.message === 'string' ? data.message : null
-          if (msg) setWarnings((prev) => [...prev, msg])
-          continue
-        }
-        if (ev.event === 'error') {
-          // The event's `message` is a protocol flag post-D2, not prose —
-          // always show catalog copy rather than rendering the field.
-          setError(t('ingest.failed_default'))
-          sawTerminal = true
-          continue
-        }
-        if (ev.event === 'ingestion_complete') {
-          sawTerminal = true
-          await selectMutation.mutateAsync(state.collection)
-          // Refresh the owned-collections list BEFORE selecting: the Sidebar's
-          // reconcile effect clears any active collection not present in that
-          // cached list, so selecting a brand-new collection while the list is
-          // stale would immediately snap the selection back to null. Awaiting the
-          // refetch first ensures the new name is in the list before we select it.
-          await qc.invalidateQueries({ queryKey: collectionsKey })
-          setSelected(state.collection)
-          // Partial success: some batches committed, others were skipped. Keep
-          // the collection selected (its ingested files are usable) but flag the
-          // skipped files so the outcome isn't silently reported as a clean run.
-          const data = ev.data as Record<string, unknown>
-          if (typeof data.failed_message === 'string' && data.failed_message) {
-            setError(data.failed_message)
-          }
-        }
-      }
-      if (!sawTerminal) setError(truncationMessage)
-    } catch (e) {
-      if (sawTerminal) {
-        const d = describeError(e)
-        setError(t(d.key, d.vars))
-      } else {
-        // The fetch/stream threw before any terminal event arrived — almost
-        // always the backend dying mid-stream. The underlying message is not
-        // user-visible (see describeError); the truncation notice stands alone.
-        setError(truncationMessage)
-      }
-    } finally {
-      dispatch({ type: 'done' })
+    for (const f of run.files) sizes[f.webkitRelativePath || f.name] = f.size
+    return sizes
+  }, [run.files])
+
+  const status: IngestStatus = useMemo(() => {
+    // While a fresh upload is in flight, `activeJobId` still points at the
+    // *previous* run's job — `run.start()` only overwrites it once
+    // `createIngestJob` resolves for the new run (stores/ingestRun.ts). So a
+    // second run in the same tab must not merge in the old job's log: its
+    // trailing `ingestion_complete` would land after this run's own upload
+    // events and flip `deriveIngestStatus` to `phase: 'complete'`, wiping the
+    // live `uploadingFile`/`uploadingBytes` fields it clears on that event.
+    const merged = run.uploading ? run.uploadEvents : [...run.uploadEvents, ...jobEvents]
+    const derived = deriveIngestStatus(merged, fileSizes)
+    // A merged log can start mid-stream — reattaching to a job whose
+    // `ingestion_started` frame arrived before this tab did — and still
+    // carry real progress. Treat "an active job has events" as never idle so
+    // progress stays visible even without an explicit phase-setting frame.
+    if (derived.phase === 'idle' && !run.uploading && run.activeJobId && jobEvents.length > 0) {
+      return { ...derived, phase: 'processing' }
     }
-  }
+    return derived
+  }, [run.uploadEvents, jobEvents, fileSizes, run.activeJobId, run.uploading])
+
+  // A job the server 404s on is an interrupted run: the backend restarted
+  // while it was in flight (jobs are in-memory by design). Answered by
+  // querying the job directly — the authoritative source — rather than
+  // inferred from a `/ingest/jobs` *list* snapshot, which went through three
+  // failed attempts at this exact spot (a stale-list false positive; a
+  // permanently-stuck false negative from gating on historical SSE events;
+  // a transient false-positive flash from invalidating a shared list query
+  // but still rendering against its pre-refetch data for one commit). Every
+  // one of those was really an attempt to reason about a snapshot's
+  // freshness relative to job creation. `jobQuery`'s key includes the job
+  // id, so a new `activeJobId` is a brand-new cache entry with no stale data
+  // to race against: `data`/`error` start undefined and `interrupted` stays
+  // false until an actual 404 comes back — no invalidation effect needed.
+  // A completed-but-undismissed job also 404s after a backend restart (its
+  // in-memory record is gone either way), but `handledJobId` already records
+  // "this job reached `ingestion_complete`" — so excluding that case keeps a
+  // run that actually finished from reading as interrupted.
+  const interrupted =
+    jobQuery.isError &&
+    jobQuery.error instanceof ApiError &&
+    jobQuery.error.status === 404 &&
+    run.handledJobId !== run.activeJobId
+
+  // A job waiting on the server's concurrency semaphore emits zero frames
+  // until it starts running (docint/core/jobs.py) — without this, `status`
+  // never leaves `phase: 'idle'` and the whole status block below is gated
+  // out, so the run vanishes from view with no card, no spinner, no error.
+  const queued = jobQuery.data?.status === 'queued'
+
+  // Post-ingest side effects: select the collection and refresh the owned
+  // list once, the moment the active job's log reaches its terminal
+  // `ingestion_complete` frame. Guarded by `handledJobId` — a *persisted*
+  // store field, not a component ref — so this fires once per job id no
+  // matter how many times it's observed: within a mount (a reconnect replay
+  // re-delivers the same terminal frame in a new event-log array) and across
+  // mounts (navigating away and back, or a reload, while the job's log lives
+  // on in the module-level job store and gets replayed by the SSE stream).
+  useEffect(() => {
+    const last = jobEvents[jobEvents.length - 1]
+    if (!run.activeJobId || !last || last.event !== 'ingestion_complete') return
+    if (run.handledJobId === run.activeJobId) return
+    const jobId = run.activeJobId
+    const data = last.data as { collection?: unknown }
+    const name = typeof data.collection === 'string' ? data.collection : run.collection
+    // Mark handled synchronously, before the async work below, so a
+    // re-render triggered by that very write (or any other update while the
+    // work is in flight) can't slip past the guard a second time.
+    useIngestRunStore.getState().markJobHandled(jobId)
+    if (!name) return
+    void (async () => {
+      await selectCollection(name)
+      // Refresh the owned-collections list BEFORE selecting: the Sidebar's
+      // reconcile effect clears any active collection not present in that
+      // cached list, so selecting a brand-new collection while the list is
+      // stale would immediately snap the selection back to null. Awaiting the
+      // refetch first ensures the new name is in the list before we select it.
+      await qc.invalidateQueries({ queryKey: collectionsKey })
+      setSelected(name)
+    })()
+  }, [jobEvents, run.activeJobId, run.handledJobId, run.collection, qc, setSelected])
+
+  const dismissMutation = useMutation({
+    mutationFn: (jobId: string) => dismissIngestJob(jobId),
+    onSuccess: (_data, jobId) => {
+      useIngestJobsStore.getState().dropJob(jobId)
+      run.dismissActive()
+      // `dismissActive()` clears `activeJobId` in the same tick, which
+      // disables `jobQuery` on the next render — but invalidate its cache
+      // entry too, so a dismissed-then-somehow-revisited job id never serves
+      // a stale cached snapshot.
+      void qc.invalidateQueries({ queryKey: ['ingest-job', jobId] })
+    }
+  })
+
+  // Re-queuing an interrupted run does NOT re-upload: the batches this run
+  // already staged are still in the collection's server-side upload
+  // directory (only the in-memory job registry was lost), so re-finalizing
+  // directly is what "re-running skips whatever was already indexed" (the
+  // banner copy) actually promises. `run.start()` would be a no-op here
+  // anyway — `run.files` is always empty by the time a run can be observed
+  // as interrupted (cleared the moment the original job was queued).
+  const rerunMutation = useMutation({
+    mutationFn: () =>
+      // Re-run against the collection the interrupted job was actually
+      // queued for, not the live form field — the user can edit `run.collection`
+      // between the interruption and clicking "Run again". Falls back to the
+      // live field only for state persisted before `activeJobCollection`
+      // existed.
+      createIngestJob({
+        collection: run.activeJobCollection ?? run.collection,
+        hybrid: true,
+        ner: run.ner,
+        hate_speech: run.hate
+      }),
+    onSuccess: ({ job_id }) => {
+      // No cache invalidation needed: `adoptJob` points `activeJobId` at the
+      // new job id, which `jobQuery` (keyed by that id) picks up as a
+      // brand-new, uncached query on its own.
+      useIngestRunStore.getState().adoptJob(job_id)
+    }
+  })
+
+  const busy = run.uploading
 
   return (
     <div className="p-8 max-w-3xl space-y-4">
@@ -207,8 +204,8 @@ export function Ingest() {
         <span className="text-xs uppercase text-muted-foreground">{t('common.collection')}</span>
         <input
           list="existing-collections"
-          value={state.collection}
-          onChange={(e) => dispatch({ type: 'set_collection', v: e.target.value })}
+          value={run.collection}
+          onChange={(e) => run.setCollection(e.target.value)}
           placeholder="my-collection"
           className="bg-muted border border-border rounded-md px-2 py-1 text-sm"
         />
@@ -220,15 +217,18 @@ export function Ingest() {
       </label>
 
       <Dropzone
-        disabled={state.busy}
-        onFiles={(v) => dispatch({ type: 'add_files', v })}
-        onEmpty={() => setError(t('ingest.drop_empty'))}
+        disabled={busy}
+        onFiles={(v) => {
+          setDropError(null)
+          run.addFiles(v)
+        }}
+        onEmpty={() => setDropError(t('ingest.drop_empty'))}
       />
 
       <FileList
-        files={state.files}
-        onRemove={(i) => dispatch({ type: 'remove_file', i })}
-        onClear={() => dispatch({ type: 'reset_files' })}
+        files={run.files}
+        onRemove={(i) => run.removeFile(i)}
+        onClear={() => run.clearFiles()}
         labels={{
           files: (n) => t(n === 1 ? 'upload.files_one' : 'upload.files_other', { count: n }),
           clearAll: t('upload.clear_all'),
@@ -236,20 +236,16 @@ export function Ingest() {
         }}
       />
 
-      <fieldset className="space-y-1 text-sm" disabled={state.busy}>
+      <fieldset className="space-y-1 text-sm" disabled={busy}>
         <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={nerEnabled}
-            onChange={(e) => setNerEnabled(e.target.checked)}
-          />
+          <input type="checkbox" checked={run.ner} onChange={(e) => run.setNer(e.target.checked)} />
           {t('ingest.opt_ner')}
         </label>
         <label className="flex items-center gap-2">
           <input
             type="checkbox"
-            checked={hateEnabled}
-            onChange={(e) => setHateEnabled(e.target.checked)}
+            checked={run.hate}
+            onChange={(e) => run.setHate(e.target.checked)}
           />
           {t('ingest.opt_hate')}
         </label>
@@ -257,21 +253,81 @@ export function Ingest() {
 
       <Button
         variant="primary"
-        onClick={submit}
-        disabled={state.busy || !state.collection || state.files.length === 0}
+        onClick={() => void run.start(limitBytes, t)}
+        disabled={busy || !run.collection || run.files.length === 0}
       >
-        {state.busy ? t('ingest.busy') : t('ingest.button')}
+        {run.uploading ? t('ingest.busy') : t('ingest.button')}
       </Button>
 
-      {error && <div className="text-[var(--status-red-fg)] text-sm">{error}</div>}
-      {warnings.length > 0 && (
+      {(dropError || run.error) && (
+        <div className="text-[var(--status-red-fg)] text-sm">{dropError ?? run.error}</div>
+      )}
+      {/* Derived from the merged upload+job log (`status.warnings`), not
+          `run.warnings` (upload leg only) — a job-stream warning (a
+          soft-empty ingest, a failed post-ingest entity resolution) is just
+          as actionable and must not go unreported. */}
+      {status.warnings.length > 0 && (
         <ul className="text-amber-400 text-sm space-y-1" role="alert">
-          {warnings.map((w, i) => (
+          {status.warnings.map((w, i) => (
             <li key={i}>{w}</li>
           ))}
         </ul>
       )}
-      {status.phase !== 'idle' && <IngestionStatus status={status} />}
+
+      {queued && !interrupted && (
+        <div className="rounded-md border border-border p-3 text-sm text-muted-foreground" role="status">
+          {t('ingest.job_queued')}
+        </div>
+      )}
+
+      {interrupted && (
+        <div className="rounded-md border border-border p-3 text-sm space-y-2" role="status">
+          <p className="text-muted-foreground">{t('ingest.job_interrupted')}</p>
+          <div className="flex gap-2">
+            <Button
+              variant="primary"
+              disabled={rerunMutation.isPending}
+              onClick={() => rerunMutation.mutate()}
+            >
+              {t('ingest.job_rerun')}
+            </Button>
+            {/* An interrupted, never-going-to-report-progress-again job would
+                otherwise strand this banner forever — `activeJobId` is
+                persisted and nothing else clears it. */}
+            <Button variant="secondary" size="sm" onClick={() => run.dismissActive()}>
+              {t('ingest.dismiss')}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {streamLost && (
+        <div className="flex items-center gap-3 text-sm text-amber-400" role="alert">
+          <span>{t('ingest.stream_lost')}</span>
+          <button
+            type="button"
+            className="px-2 py-1 rounded-md border border-border"
+            onClick={() => useIngestJobsStore.getState().retryStream()}
+          >
+            {t('ingest.reconnect')}
+          </button>
+        </div>
+      )}
+
+      {status.phase !== 'idle' && (
+        <div className="space-y-2">
+          <IngestionStatus status={status} />
+          {(status.phase === 'complete' || status.phase === 'error') && run.activeJobId && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => dismissMutation.mutate(run.activeJobId!)}
+            >
+              {t('ingest.dismiss')}
+            </Button>
+          )}
+        </div>
+      )}
     </div>
   )
 }

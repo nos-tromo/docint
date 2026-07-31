@@ -19,7 +19,39 @@ export async function* streamSse(
   if (!res.ok || !res.body) {
     throw new ApiError(res.status, `SSE request failed: ${res.status}`)
   }
-  const reader = res.body.getReader()
+  yield* readSseBody(res.body)
+}
+
+/**
+ * GET variant of {@link streamSse}, for endpoints that stream without a body.
+ *
+ * The owner-multiplexed job stream (`/ingest/jobs/events`) carries no request
+ * payload, so it cannot reuse the POST helper above.
+ *
+ * @param path - API path (owner param and base are applied here).
+ * @param signal - Optional abort signal closing the connection.
+ * @yields Parsed SSE events.
+ */
+export async function* streamSseGet(
+  path: string,
+  signal?: AbortSignal
+): AsyncGenerator<SseEvent, void, unknown> {
+  const res = await fetch(url(withOwner(path)), {
+    method: 'GET',
+    headers: { Accept: 'text/event-stream' },
+    signal
+  })
+  if (!res.ok || !res.body) {
+    throw new ApiError(res.status, `SSE request failed: ${res.status}`)
+  }
+  yield* readSseBody(res.body)
+}
+
+/** Shared frame-reading loop used by both `streamSse` and `streamSseGet`. */
+async function* readSseBody(
+  body: ReadableStream<Uint8Array>
+): AsyncGenerator<SseEvent, void, unknown> {
+  const reader = body.getReader()
   const decoder = new TextDecoder('utf-8')
   let buffer = ''
 

@@ -8,6 +8,7 @@ import {
 } from '@/lib/ingestStatus'
 import { useT } from '@/i18n/LanguageContext'
 import type { Strings } from '@/i18n'
+import { streamErrorText } from '@/api/errorMessage'
 
 type Tone = 'sky' | 'amber' | 'emerald' | 'red'
 
@@ -343,11 +344,15 @@ function CompleteBody({ status }: { status: IngestStatus }) {
 
 function ErrorBody({ status }: { status: IngestStatus }) {
   const t = useT()
-  // errorMessage is client-composed catalog copy (see deriveIngestStatus);
-  // the generic key stands in when no terminal message was captured.
+  // errorMessage is client-composed catalog copy (see deriveIngestStatus).
+  // A backend-composed job error instead carries a machine-readable
+  // errorCode: streamErrorText renders the generic catalog copy tagged with
+  // the regex-validated code token — "Ingestion failed. (ingestion_failed)"
+  // — matching how chat/summary render stream errors for support triage.
+  // With neither set, streamErrorText degrades to the bare catalog copy.
   return (
     <div className="mt-3 text-sm text-[var(--status-red-fg)]">
-      {status.errorMessage ?? t('ingest.failed_default')}
+      {status.errorMessage ?? streamErrorText(t, status.errorCode, 'ingest.failed_default')}
     </div>
   )
 }

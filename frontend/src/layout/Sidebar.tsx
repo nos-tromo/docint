@@ -6,6 +6,8 @@ import { ApiError } from '@/api/client'
 import { useCollections, useDeleteCollection, useSelectCollection } from '@/hooks/useCollections'
 import { useDeleteSession, useSessions, sessionsKey } from '@/hooks/useSessions'
 import { useUiStore } from '@/stores/ui'
+import { useChatUiStore } from '@/stores/chatUi'
+import { useIngestJobsStore, selectHasRunningJob } from '@/stores/ingestJobs'
 import { cn } from '@/lib/cn'
 import { buildCollectionEntries, entryMatches, type CollectionEntry } from '@/lib/collectionEntries'
 import { useT } from '@/i18n/LanguageContext'
@@ -39,6 +41,7 @@ export function Sidebar() {
   const { data: sessionsData, isLoading: sessionsLoading, error: sessionsError } = useSessions()
   const deleteSessionMutation = useDeleteSession()
   const qc = useQueryClient()
+  const hasRunningJob = useIngestJobsStore(selectHasRunningJob)
   const selected = useUiStore((s) => s.selectedCollection)
   const selectedOwner = useUiStore((s) => s.selectedOwner)
   const setSelected = useUiStore((s) => s.setSelectedCollection)
@@ -98,13 +101,22 @@ export function Sidebar() {
   const onDeleteCollection = (name: string, owner: string | null) => {
     const label = owner ? `"${name}"${t('common.owned_by_suffix', { owner })}` : `"${name}"`
     if (!confirm(t('common.delete_collection_confirm', { label }))) return
+    // Snapshot before the mutation fires: `sessions` is only this collection's
+    // list because it's the active one (the `selected === name` branch below),
+    // and it would already be stale/invalidated by the time onSuccess runs.
+    const deletedSessionIds = sessions.map((s) => s.id)
     deleteCollectionMutation.mutate(name, {
       onSuccess: () => {
         if (selected === name) {
           setSelected(null)
           // The backend cascade-deleted this collection's chat sessions; drop
-          // any open one and clear the now-stale session list.
+          // any open one, prune their drafts (there is no dedicated endpoint
+          // to look up which sessions belonged to a now-deleted collection,
+          // so this only covers the case where it was the active one — the
+          // one case the client can see), and clear the now-stale session list.
           setCurrentSessionId(null)
+          const clearDraft = useChatUiStore.getState().clearDraft
+          for (const id of deletedSessionIds) clearDraft(id)
           qc.invalidateQueries({ queryKey: sessionsKey })
         }
       }
@@ -126,6 +138,10 @@ export function Sidebar() {
     deleteSessionMutation.mutate(id, {
       onSuccess: () => {
         if (currentSessionId === id) setCurrentSessionId(null)
+        // Prune unconditionally, not just when this was the open session —
+        // a half-typed draft for a session the user just deleted (often to
+        // remove sensitive content) must not linger in localStorage.
+        useChatUiStore.getState().clearDraft(id)
       }
     })
   }
@@ -133,21 +149,36 @@ export function Sidebar() {
   return (
     <aside className="w-72 border-r border-border p-4 flex flex-col gap-4 bg-muted">
       <nav className="flex flex-col gap-1">
-        {NAV.map(({ to, key }) => (
-          <NavLink
-            key={to}
-            to={to}
-            end={to === '/'}
-            className={({ isActive }) =>
-              cn(
-                'rounded-md px-3 py-2 text-sm hover:bg-accent',
-                isActive && 'bg-primary/15 text-primary'
-              )
-            }
-          >
-            {t(key)}
-          </NavLink>
-        ))}
+        {NAV.map(({ to, key }) => {
+          // The open chat lives on the server and its id is persisted; the
+          // plain /chat link is the only reason leaving and returning showed
+          // an empty transcript. Resolve the target here rather than
+          // redirecting inside Chat.tsx, whose param->store sync would null
+          // the id first. `end` stays keyed on `to` so active-state matching
+          // is unaffected.
+          const target = to === '/chat' && currentSessionId ? `/chat/${currentSessionId}` : to
+          return (
+            <NavLink
+              key={to}
+              to={target}
+              end={to === '/'}
+              className={({ isActive }) =>
+                cn(
+                  'rounded-md px-3 py-2 text-sm hover:bg-accent',
+                  isActive && 'bg-primary/15 text-primary'
+                )
+              }
+            >
+              {t(key)}
+              {to === '/ingest' && hasRunningJob && (
+                <span
+                  aria-label={t('nav.ingest_running')}
+                  className="ml-2 inline-block h-2 w-2 animate-pulse rounded-full bg-primary align-middle"
+                />
+              )}
+            </NavLink>
+          )
+        })}
       </nav>
 
       <section>

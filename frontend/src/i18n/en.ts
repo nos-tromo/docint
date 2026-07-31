@@ -129,8 +129,6 @@ export const en = {
   'ingest.drop_empty': 'Nothing to add — that drop contained no files.',
   'ingest.button': 'Ingest',
   'ingest.busy': 'Ingesting…',
-  'ingest.error_truncated':
-    'Ingestion was interrupted before completing. The backend may have crashed (out of memory while loading NER/LLM models is the usual cause for CSV/large-text ingests). Check the backend logs and try again with more memory allocated to Docker.',
   'ingest.status_idle': 'Idle',
   'ingest.status_uploading': 'Uploading',
   'ingest.status_processing': 'Processing',
@@ -385,4 +383,16 @@ export const en = {
     'Upload failed: none of the {count} batch(es) were accepted. Check that the backend is running and reachable, then retry.',
   'ingest.partial_failure_message':
     'Completed, but {count} file(s) were skipped: {files}. See the warnings above for details.',
+
+  // ingest job store/view (Ingest.tsx reads from ingestRun/ingestJobs stores;
+  // jobs are server-owned and survive a reload/navigation)
+  'ingest.job_interrupted':
+    'This run was interrupted and its progress is no longer available. The uploaded files are still on the server — re-running skips whatever was already indexed.',
+  'ingest.job_queued':
+    'Waiting for a worker slot — this run will start as soon as the current ingest finishes.',
+  'ingest.job_rerun': 'Run again',
+  'ingest.stream_lost': 'Live updates disconnected.',
+  'ingest.reconnect': 'Reconnect',
+  'ingest.dismiss': 'Dismiss',
+  'nav.ingest_running': 'Ingestion running',
 }
