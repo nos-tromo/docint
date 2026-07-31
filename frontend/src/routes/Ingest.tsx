@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Button, FileList } from '@infra/ui'
-import { useQueryClient, useMutation } from '@tanstack/react-query'
+import { useQueryClient, useMutation, useQuery } from '@tanstack/react-query'
 import { useIngestRunStore } from '@/stores/ingestRun'
 import { useIngestJobsStore, selectJobEvents } from '@/stores/ingestJobs'
-import { useIngestJobs, ingestJobsKey } from '@/hooks/useIngestJobs'
 import { useIngestDefaults } from '@/hooks/useIngestDefaults'
-import { dismissIngestJob, createIngestJob } from '@/api/jobs'
+import { dismissIngestJob, createIngestJob, getIngestJob } from '@/api/jobs'
+import { ApiError } from '@/api/client'
 import { selectCollection } from '@/api/collections'
 import { useCollections, collectionsKey } from '@/hooks/useCollections'
 import { useConfig } from '@/hooks/useConfig'
@@ -27,7 +27,16 @@ export function Ingest() {
   const run = useIngestRunStore()
   const jobEvents = useIngestJobsStore(selectJobEvents(run.activeJobId))
   const streamLost = useIngestJobsStore((s) => s.streamLost)
-  const { data: jobs } = useIngestJobs()
+  // Queried directly by job id rather than inferred from a list snapshot —
+  // see the `interrupted` derivation below for why. `enabled: false` when
+  // there's no active job keeps this a no-op the rest of the time.
+  const jobQuery = useQuery({
+    queryKey: ['ingest-job', run.activeJobId],
+    queryFn: () => getIngestJob(run.activeJobId!),
+    enabled: !!run.activeJobId,
+    retry: false,
+    staleTime: 30_000
+  })
   const { data: ingestDefaults } = useIngestDefaults()
   const { data: collections } = useCollections()
   const { data: config } = useConfig()
@@ -83,31 +92,21 @@ export function Ingest() {
     return derived
   }, [run.uploadEvents, jobEvents, fileSizes, run.activeJobId, run.uploading])
 
-  // A persisted job id the server does not list is an interrupted run: the
-  // backend restarted while it was in flight (jobs are in-memory by design).
-  // Derived from list membership alone — NOT also gated on "has this job ever
-  // produced an SSE frame". An earlier version required `jobEvents.length ===
-  // 0` too, reasoning that a job with live evidence can't be interrupted; but
-  // a job that emitted `ingestion_started`/progress and *then* the backend
-  // restarted still has non-empty `jobEvents` forever (nothing ever clears a
-  // job's log once appended), which made that job permanently exempt from
-  // ever being flagged interrupted again, no matter how many times the jobs
-  // list confirmed it was gone — a worse stuck state than the one the
-  // feature exists to catch. The real staleness problem (a job the user just
-  // created not yet showing up in a 30s-stale `/ingest/jobs` fetch) is
-  // instead fixed directly below, by invalidating that query the moment
-  // `activeJobId` changes.
+  // A job the server 404s on is an interrupted run: the backend restarted
+  // while it was in flight (jobs are in-memory by design). Answered by
+  // querying the job directly — the authoritative source — rather than
+  // inferred from a `/ingest/jobs` *list* snapshot, which went through three
+  // failed attempts at this exact spot (a stale-list false positive; a
+  // permanently-stuck false negative from gating on historical SSE events;
+  // a transient false-positive flash from invalidating a shared list query
+  // but still rendering against its pre-refetch data for one commit). Every
+  // one of those was really an attempt to reason about a snapshot's
+  // freshness relative to job creation. `jobQuery`'s key includes the job
+  // id, so a new `activeJobId` is a brand-new cache entry with no stale data
+  // to race against: `data`/`error` start undefined and `interrupted` stays
+  // false until an actual 404 comes back — no invalidation effect needed.
   const interrupted =
-    !!run.activeJobId && !!jobs && !jobs.jobs.some((j) => j.job_id === run.activeJobId)
-
-  // Refetch the jobs list the moment a job becomes active (including a fresh
-  // one), so `interrupted` above is never computed against a pre-creation
-  // snapshot. `createIngestJob` (`POST /ingest/finalize`) resolves only after
-  // the backend has registered the job, so this refetch is guaranteed to see
-  // it — no race that could reintroduce a false-positive interrupted flag.
-  useEffect(() => {
-    if (run.activeJobId) void qc.invalidateQueries({ queryKey: ingestJobsKey })
-  }, [run.activeJobId, qc])
+    jobQuery.isError && jobQuery.error instanceof ApiError && jobQuery.error.status === 404
 
   // Post-ingest side effects: select the collection and refresh the owned
   // list once, the moment the active job's log reaches its terminal
@@ -146,7 +145,11 @@ export function Ingest() {
     onSuccess: (_data, jobId) => {
       useIngestJobsStore.getState().dropJob(jobId)
       run.dismissActive()
-      void qc.invalidateQueries({ queryKey: ingestJobsKey })
+      // `dismissActive()` clears `activeJobId` in the same tick, which
+      // disables `jobQuery` on the next render — but invalidate its cache
+      // entry too, so a dismissed-then-somehow-revisited job id never serves
+      // a stale cached snapshot.
+      void qc.invalidateQueries({ queryKey: ['ingest-job', jobId] })
     }
   })
 
@@ -161,8 +164,10 @@ export function Ingest() {
     mutationFn: () =>
       createIngestJob({ collection: run.collection, hybrid: true, ner: run.ner, hate_speech: run.hate }),
     onSuccess: ({ job_id }) => {
+      // No cache invalidation needed: `adoptJob` points `activeJobId` at the
+      // new job id, which `jobQuery` (keyed by that id) picks up as a
+      // brand-new, uncached query on its own.
       useIngestRunStore.getState().adoptJob(job_id)
-      void qc.invalidateQueries({ queryKey: ingestJobsKey })
     }
   })
 

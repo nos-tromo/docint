@@ -21,9 +21,11 @@ function renderIn(ui: ReactElement) {
 }
 
 let fetchMock: ReturnType<typeof vi.fn>
-/** Job ids the mocked `/ingest/jobs` list currently reports as known. Tests
- *  populate this to mark a job as *not* interrupted; the default (empty) is
- *  "the server has genuinely never/no-longer heard of this job". */
+/** Job ids the mocked `/ingest/jobs/{id}` endpoint currently reports as
+ *  known (resolves 200). Tests populate this to mark a job as *not*
+ *  interrupted; the default (empty) is "the server has genuinely
+ *  never/no-longer heard of this job" (resolves 404, matching the real
+ *  `getIngestJob` contract). */
 let knownJobIds: Set<string>
 
 function jobSnapshot(id: string) {
@@ -41,6 +43,15 @@ function jobSnapshot(id: string) {
   }
 }
 
+function notFoundRes() {
+  return {
+    ok: false,
+    status: 404,
+    json: async () => ({ detail: 'not found' }),
+    text: async () => '{"detail":"not found"}'
+  }
+}
+
 beforeEach(() => {
   useIngestRunStore.getState().reset()
   useIngestJobsStore.getState().clear()
@@ -51,7 +62,10 @@ beforeEach(() => {
     if (u.includes('/collections/list')) return jsonRes([])
     if (u.includes('/config/ingest-defaults')) return jsonRes({ ner: false, hate_speech: false })
     if (u.includes('/ingest/finalize')) return jsonRes({ job_id: 'job-2' })
-    if (u.includes('/ingest/jobs')) return jsonRes({ jobs: [...knownJobIds].map(jobSnapshot) })
+    if (u.includes('/ingest/jobs/')) {
+      const id = u.split('/ingest/jobs/')[1]?.split('?')[0]
+      return id && knownJobIds.has(id) ? jsonRes(jobSnapshot(id)) : notFoundRes()
+    }
     if (u.includes('/config'))
       return jsonRes({
         graph_top_k: 0,
@@ -83,51 +97,38 @@ describe('Ingest', () => {
     expect(screen.getByRole('combobox', { name: /collection/i })).toHaveValue('mydocs')
   })
 
-  it('renders live progress for the active job', async () => {
-    // Mount with no active job first and let the initial (empty)
-    // `/ingest/jobs` fetch settle — mirroring the real timeline: the view is
-    // already mounted (its own `/ingest/jobs` snapshot taken well before this
-    // moment) when the user's run.start()/rerun sets `activeJobId`. Setting
-    // `activeJobId` *before* the first render instead would race this
-    // effect's invalidation against the query's own first-mount fetch and
-    // the two coalesce into one request — a real react-query behavior, but
-    // not the scenario this regression is about.
-    renderIn(<Ingest />)
-    await waitFor(() => expect(callsMatching('/ingest/jobs')).toBeGreaterThanOrEqual(1))
-
+  it('renders live progress for the active job and never flashes the interrupted banner', async () => {
     useIngestRunStore.setState({ activeJobId: 'job-1' })
     useIngestJobsStore.getState().appendEvent('job-1', {
       event: 'ingestion_progress',
       data: { job_id: 'job-1', message: 'Extracting entities: 3/9 chunks processed' },
       receivedAt: Date.now()
     })
-    // The backend has actually already registered this job (the run that
-    // started it queued successfully) — reflect that from here on, and rely
-    // on the view's activeJobId-change effect to invalidate + refetch
-    // `/ingest/jobs` so this becomes visible.
+    // The backend has actually already registered this job — `getIngestJob`
+    // will resolve normally once it's asked.
     knownJobIds.add('job-1')
 
+    renderIn(<Ingest />)
+    // Assert from the very first render, before `getIngestJob('job-1')` has
+    // had any chance to resolve — this is the exact window a prior,
+    // list-based approach flashed the banner in (it served stale
+    // *previous* data while a background refetch was in flight). The
+    // per-job-id query starts with no cached data for a job id it has never
+    // seen, so `jobQuery.isError` is `false` immediately, by construction —
+    // there is nothing to wait for here.
+    expect(screen.queryByText(/interrupted/i)).not.toBeInTheDocument()
+
     await waitFor(() => expect(screen.getByText(/3\s*\/\s*9/)).toBeInTheDocument())
-    // Regression guard: `interrupted` must not render for a job the server
-    // does know about. Wait for the post-activeJobId-change refetch to
-    // actually land (not just be dispatched) before asserting the banner's
-    // absence, or a still-pending/stale query would let the assertion pass
-    // for the wrong reason.
-    await waitFor(() => expect(callsMatching('/ingest/jobs')).toBeGreaterThanOrEqual(2))
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    // Steady state, after the query has actually settled.
     expect(screen.queryByText(/interrupted/i)).not.toBeInTheDocument()
   })
 
-  it('flags a job as interrupted even after it produced events, once the jobs list confirms it is gone', async () => {
-    // Regression test: an earlier fix required `jobEvents.length === 0` to
-    // flag a job interrupted, reasoning that live SSE evidence proves the
-    // server knows about it. But a job that emitted `ingestion_started` and
-    // progress *before* the backend restarted still has a non-empty event
-    // log forever (nothing ever clears it) — that gate made such a job
-    // permanently exempt from ever being flagged interrupted again, no
-    // matter how many times the (mocked, permanently job-less) `/ingest/jobs`
-    // list confirmed it was gone. `interrupted` must be driven by current
-    // list membership alone.
+  it('flags a job as interrupted — with Run-again and Dismiss — once getIngestJob 404s, even if it had produced events', async () => {
+    // Folds in a regression an earlier list-based design failed: a job that
+    // emitted `ingestion_started`/progress before the backend restarted
+    // still has a non-empty event log forever (nothing ever clears it), so
+    // "interrupted" must not be gated on whether the job ever had live SSE
+    // evidence — only on what the server says about it *now*.
     useIngestRunStore.setState({ activeJobId: 'job-1' })
     const { appendEvent } = useIngestJobsStore.getState()
     appendEvent('job-1', {
@@ -140,14 +141,13 @@ describe('Ingest', () => {
       data: { job_id: 'job-1', message: 'Extracting entities: 3/9 chunks processed' },
       receivedAt: Date.now()
     })
-    // `knownJobIds` stays empty (the default) — every `/ingest/jobs` fetch,
-    // including the one the activeJobId-change effect triggers, confirms the
-    // job is genuinely gone.
+    // `knownJobIds` stays empty (the default) — `getIngestJob('job-1')` 404s.
 
     renderIn(<Ingest />)
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /run again|erneut/i })).toBeInTheDocument()
     )
+    expect(screen.getByRole('button', { name: /dismiss/i })).toBeInTheDocument()
   })
 
   it('offers a re-run when the active job is unknown to the server', async () => {
