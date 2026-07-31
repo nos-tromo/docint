@@ -10,6 +10,7 @@ import { useSessionHistory } from '@/hooks/useSessions'
 import { useReportDedupeKeys } from '@/hooks/useReports'
 import { useReportStore } from '@/stores/report'
 import { useUiStore } from '@/stores/ui'
+import { draftKey, useChatUiStore } from '@/stores/chatUi'
 import { useQueryClient } from '@tanstack/react-query'
 import { sessionsKey } from '@/hooks/useSessions'
 import { ChatTurn, type ChatTurnData } from '@/components/chat/ChatTurn'
@@ -21,11 +22,9 @@ import { useT } from '@/i18n/LanguageContext'
 interface State {
   turns: ChatTurnData[]
   inflight: boolean
-  draft: string
 }
 type Action =
   | { type: 'set_turns'; turns: ChatTurnData[] }
-  | { type: 'set_draft'; value: string }
   | { type: 'start'; user: string }
   | { type: 'token'; token: string }
   | { type: 'finalize'; meta: ChatFinalEvent }
@@ -35,12 +34,9 @@ function reducer(s: State, a: Action): State {
   switch (a.type) {
     case 'set_turns':
       return { ...s, turns: a.turns }
-    case 'set_draft':
-      return { ...s, draft: a.value }
     case 'start':
       return {
         ...s,
-        draft: '',
         inflight: true,
         turns: [
           ...s.turns,
@@ -78,8 +74,12 @@ export function Chat() {
   const filters = useChatFiltersStore()
   const qc = useQueryClient()
   const history = useSessionHistory(sessionIdParam)
-  const [state, dispatch] = useReducer(reducer, { turns: [], inflight: false, draft: '' })
+  const [state, dispatch] = useReducer(reducer, { turns: [], inflight: false })
   const abortRef = useRef<AbortController | null>(null)
+  const key = draftKey(sessionIdParam)
+  const draft = useChatUiStore((s) => s.drafts[key] ?? '')
+  const setDraft = useChatUiStore((s) => s.setDraft)
+  const clearDraft = useChatUiStore((s) => s.clearDraft)
 
   useEffect(() => {
     setCurrentSessionId(sessionIdParam)
@@ -113,9 +113,10 @@ export function Chat() {
   }, [history.data, sessionIdParam])
 
   const send = async () => {
-    const message = state.draft.trim()
+    const message = draft.trim()
     if (!message || state.inflight) return
     dispatch({ type: 'start', user: message })
+    clearDraft(key)
 
     const ac = new AbortController()
     abortRef.current = ac
@@ -232,8 +233,8 @@ export function Chat() {
           className="mt-4 flex items-end gap-2"
         >
           <textarea
-            value={state.draft}
-            onChange={(e) => dispatch({ type: 'set_draft', value: e.target.value })}
+            value={draft}
+            onChange={(e) => setDraft(key, e.target.value)}
             onKeyDown={(e) => {
               // Enter submits; Shift+Enter inserts a newline (standard
               // chat-composer behavior). IME composition is excluded so
@@ -250,7 +251,7 @@ export function Chat() {
           <Button
             variant="primary"
             type="submit"
-            disabled={state.inflight || !state.draft.trim()}
+            disabled={state.inflight || !draft.trim()}
           >
             {state.inflight ? '…' : t('chat.send')}
           </Button>
