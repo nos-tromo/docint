@@ -149,27 +149,36 @@ export function Sidebar() {
   return (
     <aside className="w-72 border-r border-border p-4 flex flex-col gap-4 bg-muted">
       <nav className="flex flex-col gap-1">
-        {NAV.map(({ to, key }) => (
-          <NavLink
-            key={to}
-            to={to}
-            end={to === '/'}
-            className={({ isActive }) =>
-              cn(
-                'rounded-md px-3 py-2 text-sm hover:bg-accent',
-                isActive && 'bg-primary/15 text-primary'
-              )
-            }
-          >
-            {t(key)}
-            {to === '/ingest' && hasRunningJob && (
-              <span
-                aria-label={t('nav.ingest_running')}
-                className="ml-2 inline-block h-2 w-2 animate-pulse rounded-full bg-primary align-middle"
-              />
-            )}
-          </NavLink>
-        ))}
+        {NAV.map(({ to, key }) => {
+          // The open chat lives on the server and its id is persisted; the
+          // plain /chat link is the only reason leaving and returning showed
+          // an empty transcript. Resolve the target here rather than
+          // redirecting inside Chat.tsx, whose param->store sync would null
+          // the id first. `end` stays keyed on `to` so active-state matching
+          // is unaffected.
+          const target = to === '/chat' && currentSessionId ? `/chat/${currentSessionId}` : to
+          return (
+            <NavLink
+              key={to}
+              to={target}
+              end={to === '/'}
+              className={({ isActive }) =>
+                cn(
+                  'rounded-md px-3 py-2 text-sm hover:bg-accent',
+                  isActive && 'bg-primary/15 text-primary'
+                )
+              }
+            >
+              {t(key)}
+              {to === '/ingest' && hasRunningJob && (
+                <span
+                  aria-label={t('nav.ingest_running')}
+                  className="ml-2 inline-block h-2 w-2 animate-pulse rounded-full bg-primary align-middle"
+                />
+              )}
+            </NavLink>
+          )
+        })}
       </nav>
 
       <section>

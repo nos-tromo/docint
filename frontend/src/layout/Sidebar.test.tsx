@@ -378,6 +378,38 @@ describe('Sidebar navigation', () => {
   })
 })
 
+describe('Sidebar chat nav link', () => {
+  it('points the Chat nav at the open session', async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': [],
+      '/sessions/list': { sessions: [] }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ currentSessionId: 's-1' })
+
+    renderSidebar()
+
+    expect(screen.getByRole('link', { name: /chat/i })).toHaveAttribute(
+      'href',
+      expect.stringContaining('/chat/s-1')
+    )
+  })
+
+  it('points the Chat nav at a fresh chat when no session is open', async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': [],
+      '/sessions/list': { sessions: [] }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useUiStore.setState({ currentSessionId: null })
+
+    renderSidebar()
+
+    const href = screen.getByRole('link', { name: /chat/i }).getAttribute('href')
+    expect(href).toMatch(/\/chat$/)
+  })
+})
+
 describe('Sidebar ingest job badge', () => {
   it('badges the Ingest nav entry while a job is running', async () => {
     const fetchMock = mockFetch({

@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
 import type { MetadataFilter, QueryMode, RetrievalMode } from '@/api/types'
 
 export interface CustomRule {
@@ -42,40 +43,61 @@ const initial = {
   customRules: [] as CustomRule[]
 }
 
-export const useChatFiltersStore = create<ChatFiltersState>((set, get) => ({
-  ...initial,
-  setQueryMode: (queryMode) => set({ queryMode }),
-  setRetrievalMode: (retrievalMode) => set({ retrievalMode }),
-  setFilterEnabled: (filterEnabled) => set({ filterEnabled }),
-  setMimePattern: (mimePattern) => set({ mimePattern }),
-  setDateFrom: (dateFrom) => set({ dateFrom }),
-  setDateTo: (dateTo) => set({ dateTo }),
-  setHateSpeechOnly: (hateSpeechOnly) => set({ hateSpeechOnly }),
-  addRule: () =>
-    set((s) => ({
-      customRules: [
-        ...s.customRules,
-        { id: crypto.randomUUID(), field: '', operator: 'eq', value: '' }
-      ]
-    })),
-  updateRule: (id, patch) =>
-    set((s) => ({
-      customRules: s.customRules.map((r) => (r.id === id ? { ...r, ...patch } : r))
-    })),
-  removeRule: (id) =>
-    set((s) => ({ customRules: s.customRules.filter((r) => r.id !== id) })),
-  reset: () => set(initial),
-  buildPayload: () => {
-    const s = get()
-    if (!s.filterEnabled) return []
-    const out: MetadataFilter[] = []
-    if (s.mimePattern) out.push({ field: 'mimetype', operator: 'mime_match', value: s.mimePattern })
-    if (s.dateFrom) out.push({ field: 'date', operator: 'date_gte', value: s.dateFrom })
-    if (s.dateTo) out.push({ field: 'date', operator: 'date_lte', value: s.dateTo })
-    if (s.hateSpeechOnly) out.push({ field: 'hate_speech_flagged', operator: 'eq', value: true })
-    for (const r of s.customRules) {
-      if (r.field && r.operator) out.push({ field: r.field, operator: r.operator, value: r.value })
+export const useChatFiltersStore = create<ChatFiltersState>()(
+  persist(
+    (set, get) => ({
+      ...initial,
+      setQueryMode: (queryMode) => set({ queryMode }),
+      setRetrievalMode: (retrievalMode) => set({ retrievalMode }),
+      setFilterEnabled: (filterEnabled) => set({ filterEnabled }),
+      setMimePattern: (mimePattern) => set({ mimePattern }),
+      setDateFrom: (dateFrom) => set({ dateFrom }),
+      setDateTo: (dateTo) => set({ dateTo }),
+      setHateSpeechOnly: (hateSpeechOnly) => set({ hateSpeechOnly }),
+      addRule: () =>
+        set((s) => ({
+          customRules: [
+            ...s.customRules,
+            { id: crypto.randomUUID(), field: '', operator: 'eq', value: '' }
+          ]
+        })),
+      updateRule: (id, patch) =>
+        set((s) => ({
+          customRules: s.customRules.map((r) => (r.id === id ? { ...r, ...patch } : r))
+        })),
+      removeRule: (id) =>
+        set((s) => ({ customRules: s.customRules.filter((r) => r.id !== id) })),
+      reset: () => set(initial),
+      buildPayload: () => {
+        const s = get()
+        if (!s.filterEnabled) return []
+        const out: MetadataFilter[] = []
+        if (s.mimePattern) out.push({ field: 'mimetype', operator: 'mime_match', value: s.mimePattern })
+        if (s.dateFrom) out.push({ field: 'date', operator: 'date_gte', value: s.dateFrom })
+        if (s.dateTo) out.push({ field: 'date', operator: 'date_lte', value: s.dateTo })
+        if (s.hateSpeechOnly) out.push({ field: 'hate_speech_flagged', operator: 'eq', value: true })
+        for (const r of s.customRules) {
+          if (r.field && r.operator) out.push({ field: r.field, operator: r.operator, value: r.value })
+        }
+        return out
+      }
+    }),
+    {
+      name: 'docint-chat-filters',
+      // Query/retrieval mode and a built-up filter set are part of "where I
+      // was" — losing them on reload is the same complaint as losing the
+      // open chat. Actions are excluded automatically by partialize.
+      partialize: (s) => ({
+        queryMode: s.queryMode,
+        retrievalMode: s.retrievalMode,
+        filterEnabled: s.filterEnabled,
+        mimePattern: s.mimePattern,
+        dateFrom: s.dateFrom,
+        dateTo: s.dateTo,
+        hateSpeechOnly: s.hateSpeechOnly,
+        customRules: s.customRules
+      }),
+      version: 1
     }
-    return out
-  }
-}))
+  )
+)
