@@ -353,13 +353,14 @@ describe('deriveIngestStatus', () => {
     expect(status.errorMessage).toBe('Ingestion failed. (ingestion_failed)')
   })
 
-  it('discards a job-stream error frame\'s backend message, leaving errorMessage undefined', () => {
+  it('discards a job-stream error frame\'s backend message but captures its code', () => {
     // Regression test: jobs.py:604 emits {"message": "Ingestion failed.",
     // "code": "ingestion_failed"} straight through — untranslated backend
     // prose. The `code` field (absent on every client-composed error) is the
-    // discriminator; when present, errorMessage must stay undefined so
-    // ErrorBody's `?? t('ingest.failed_default')` fallback renders catalog
-    // copy instead.
+    // discriminator; when present, errorMessage must stay undefined (never
+    // render backend prose) while errorCode carries the machine-readable
+    // token, so ErrorBody can render localized catalog copy tagged with the
+    // code via streamErrorText — the triage behavior PR #356 established.
     const events: IngestEvent[] = [
       { event: 'ingestion_started', data: { job_id: 'j1', collection: 'mydocs' } },
       { event: 'error', data: { job_id: 'j1', message: 'Ingestion failed.', code: 'ingestion_failed' } }
@@ -367,6 +368,18 @@ describe('deriveIngestStatus', () => {
     const status = deriveIngestStatus(events)
     expect(status.phase).toBe('error')
     expect(status.errorMessage).toBeUndefined()
+    expect(status.errorCode).toBe('ingestion_failed')
+  })
+
+  it('leaves errorCode undefined for a client-composed error', () => {
+    // Client-composed errors (upload leg) carry catalog copy in `message`
+    // and never a `code`; no token must be appended to their rendering.
+    const events: IngestEvent[] = [
+      { event: 'error', data: { message: 'Upload failed: every batch was rejected.' } }
+    ]
+    const status = deriveIngestStatus(events)
+    expect(status.errorMessage).toBe('Upload failed: every batch was rejected.')
+    expect(status.errorCode).toBeUndefined()
   })
 
   it('accumulates warning messages from both the upload and job legs', () => {

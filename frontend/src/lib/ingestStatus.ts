@@ -43,6 +43,13 @@ export interface IngestStatus {
    *  backend-composed one so the renderer's catalog fallback is used instead
    *  of untranslated backend prose. */
   errorMessage?: string
+  /** Machine-readable error code from a backend-composed `error` event
+   *  (jobs.py's closed enum, e.g. `ingestion_failed`). The renderer passes it
+   *  through `streamErrorText` so localized catalog copy carries the
+   *  regex-validated code token for support triage — the behavior PR #356
+   *  established for the old finalize stream. `undefined` on client-composed
+   *  errors, which never set a code. */
+  errorCode?: string
   /** Non-terminal warning messages accumulated from `warning` events across
    *  both the upload leg and the job leg — e.g. a soft-empty ingest or a
    *  failed post-ingest entity resolution. */
@@ -322,10 +329,12 @@ export function deriveIngestStatus(
         // streamIngestUploadBatched, but job-stream errors (jobs.py) carry
         // the backend's static protocol copy straight through, tagged with a
         // `code` field the client-composed ones never set. Capture `message`
-        // only for the client-composed case; leave it undefined otherwise so
-        // ErrorBody's `?? t('ingest.failed_default')` fallback renders
-        // catalog copy instead of untranslated backend prose.
+        // only for the client-composed case — never render backend prose —
+        // and capture `code` for the backend case, so ErrorBody can render
+        // localized catalog copy tagged with the validated code token
+        // (via streamErrorText) instead of an undifferentiated fallback.
         status.errorMessage = typeof d.code === 'string' ? undefined : strOf(d.message)
+        status.errorCode = typeof d.code === 'string' ? d.code : undefined
         status.finishedAt = ev.receivedAt
         break
       }
