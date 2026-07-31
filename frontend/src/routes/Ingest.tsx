@@ -85,16 +85,29 @@ export function Ingest() {
 
   // A persisted job id the server does not list is an interrupted run: the
   // backend restarted while it was in flight (jobs are in-memory by design).
-  // Requiring an empty job log too avoids a false positive for a job that was
-  // *just* created: `useIngestJobs()` is 30s-stale and nothing invalidates it
-  // on job creation, so the freshly fetched `jobs` list can trail the real
-  // job by design — but the SSE stream's own `ingestion_started` frame
-  // (near-immediate) is direct evidence the server does know about it.
+  // Derived from list membership alone — NOT also gated on "has this job ever
+  // produced an SSE frame". An earlier version required `jobEvents.length ===
+  // 0` too, reasoning that a job with live evidence can't be interrupted; but
+  // a job that emitted `ingestion_started`/progress and *then* the backend
+  // restarted still has non-empty `jobEvents` forever (nothing ever clears a
+  // job's log once appended), which made that job permanently exempt from
+  // ever being flagged interrupted again, no matter how many times the jobs
+  // list confirmed it was gone — a worse stuck state than the one the
+  // feature exists to catch. The real staleness problem (a job the user just
+  // created not yet showing up in a 30s-stale `/ingest/jobs` fetch) is
+  // instead fixed directly below, by invalidating that query the moment
+  // `activeJobId` changes.
   const interrupted =
-    !!run.activeJobId &&
-    !!jobs &&
-    jobEvents.length === 0 &&
-    !jobs.jobs.some((j) => j.job_id === run.activeJobId)
+    !!run.activeJobId && !!jobs && !jobs.jobs.some((j) => j.job_id === run.activeJobId)
+
+  // Refetch the jobs list the moment a job becomes active (including a fresh
+  // one), so `interrupted` above is never computed against a pre-creation
+  // snapshot. `createIngestJob` (`POST /ingest/finalize`) resolves only after
+  // the backend has registered the job, so this refetch is guaranteed to see
+  // it — no race that could reintroduce a false-positive interrupted flag.
+  useEffect(() => {
+    if (run.activeJobId) void qc.invalidateQueries({ queryKey: ingestJobsKey })
+  }, [run.activeJobId, qc])
 
   // Post-ingest side effects: select the collection and refresh the owned
   // list once, the moment the active job's log reaches its terminal

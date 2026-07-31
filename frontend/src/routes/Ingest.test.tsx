@@ -21,17 +21,37 @@ function renderIn(ui: ReactElement) {
 }
 
 let fetchMock: ReturnType<typeof vi.fn>
+/** Job ids the mocked `/ingest/jobs` list currently reports as known. Tests
+ *  populate this to mark a job as *not* interrupted; the default (empty) is
+ *  "the server has genuinely never/no-longer heard of this job". */
+let knownJobIds: Set<string>
+
+function jobSnapshot(id: string) {
+  return {
+    job_id: id,
+    collection: 'mydocs',
+    status: 'running' as const,
+    message: null,
+    error: null,
+    empty: false,
+    resolution: null,
+    created_at: '',
+    started_at: null,
+    finished_at: null
+  }
+}
 
 beforeEach(() => {
   useIngestRunStore.getState().reset()
   useIngestJobsStore.getState().clear()
+  knownJobIds = new Set()
   fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const u = typeof input === 'string' ? input : input.toString()
     if (u.includes('/collections/select')) return jsonRes({ ok: true, name: 'mydocs' })
     if (u.includes('/collections/list')) return jsonRes([])
     if (u.includes('/config/ingest-defaults')) return jsonRes({ ner: false, hate_speech: false })
     if (u.includes('/ingest/finalize')) return jsonRes({ job_id: 'job-2' })
-    if (u.includes('/ingest/jobs')) return jsonRes({ jobs: [] })
+    if (u.includes('/ingest/jobs')) return jsonRes({ jobs: [...knownJobIds].map(jobSnapshot) })
     if (u.includes('/config'))
       return jsonRes({
         graph_top_k: 0,
@@ -64,27 +84,70 @@ describe('Ingest', () => {
   })
 
   it('renders live progress for the active job', async () => {
+    // Mount with no active job first and let the initial (empty)
+    // `/ingest/jobs` fetch settle — mirroring the real timeline: the view is
+    // already mounted (its own `/ingest/jobs` snapshot taken well before this
+    // moment) when the user's run.start()/rerun sets `activeJobId`. Setting
+    // `activeJobId` *before* the first render instead would race this
+    // effect's invalidation against the query's own first-mount fetch and
+    // the two coalesce into one request — a real react-query behavior, but
+    // not the scenario this regression is about.
+    renderIn(<Ingest />)
+    await waitFor(() => expect(callsMatching('/ingest/jobs')).toBeGreaterThanOrEqual(1))
+
     useIngestRunStore.setState({ activeJobId: 'job-1' })
     useIngestJobsStore.getState().appendEvent('job-1', {
       event: 'ingestion_progress',
       data: { job_id: 'job-1', message: 'Extracting entities: 3/9 chunks processed' },
       receivedAt: Date.now()
     })
+    // The backend has actually already registered this job (the run that
+    // started it queued successfully) — reflect that from here on, and rely
+    // on the view's activeJobId-change effect to invalidate + refetch
+    // `/ingest/jobs` so this becomes visible.
+    knownJobIds.add('job-1')
 
-    renderIn(<Ingest />)
     await waitFor(() => expect(screen.getByText(/3\s*\/\s*9/)).toBeInTheDocument())
-    // Regression guard: `useIngestJobs()` is 30s-stale and nothing
-    // invalidates it on job creation, so the `/ingest/jobs` list fetched at
-    // mount (stubbed to `{jobs: []}` above) can never contain a job the user
-    // just started. Without live SSE evidence (this job's own events) also
-    // being required, the interrupted banner would render right alongside
-    // this very progress. Wait for the `/ingest/jobs` fetch to actually
-    // settle (not just be dispatched) before asserting its absence, or a
-    // still-pending query (`jobs` still `undefined`) would let the assertion
-    // pass for the wrong reason.
-    await waitFor(() => expect(callsMatching('/ingest/jobs')).toBeGreaterThanOrEqual(1))
+    // Regression guard: `interrupted` must not render for a job the server
+    // does know about. Wait for the post-activeJobId-change refetch to
+    // actually land (not just be dispatched) before asserting the banner's
+    // absence, or a still-pending/stale query would let the assertion pass
+    // for the wrong reason.
+    await waitFor(() => expect(callsMatching('/ingest/jobs')).toBeGreaterThanOrEqual(2))
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(screen.queryByText(/interrupted/i)).not.toBeInTheDocument()
+  })
+
+  it('flags a job as interrupted even after it produced events, once the jobs list confirms it is gone', async () => {
+    // Regression test: an earlier fix required `jobEvents.length === 0` to
+    // flag a job interrupted, reasoning that live SSE evidence proves the
+    // server knows about it. But a job that emitted `ingestion_started` and
+    // progress *before* the backend restarted still has a non-empty event
+    // log forever (nothing ever clears it) — that gate made such a job
+    // permanently exempt from ever being flagged interrupted again, no
+    // matter how many times the (mocked, permanently job-less) `/ingest/jobs`
+    // list confirmed it was gone. `interrupted` must be driven by current
+    // list membership alone.
+    useIngestRunStore.setState({ activeJobId: 'job-1' })
+    const { appendEvent } = useIngestJobsStore.getState()
+    appendEvent('job-1', {
+      event: 'ingestion_started',
+      data: { job_id: 'job-1', collection: 'mydocs' },
+      receivedAt: Date.now()
+    })
+    appendEvent('job-1', {
+      event: 'ingestion_progress',
+      data: { job_id: 'job-1', message: 'Extracting entities: 3/9 chunks processed' },
+      receivedAt: Date.now()
+    })
+    // `knownJobIds` stays empty (the default) — every `/ingest/jobs` fetch,
+    // including the one the activeJobId-change effect triggers, confirms the
+    // job is genuinely gone.
+
+    renderIn(<Ingest />)
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /run again|erneut/i })).toBeInTheDocument()
+    )
   })
 
   it('offers a re-run when the active job is unknown to the server', async () => {
@@ -170,6 +233,11 @@ describe('Ingest — second run in the same tab', () => {
     // reproduces that exact window directly via store state, mirroring what
     // `run.start()` produces mid-flight.
     useIngestRunStore.setState({ activeJobId: 'job-1', collection: 'mydocs' })
+    // A completed-but-not-dismissed job stays listed by the real backend
+    // (dismissal is a separate, explicit action) — so it must not read as
+    // interrupted, which would otherwise render a second, unrelated Dismiss
+    // control this test isn't exercising.
+    knownJobIds.add('job-1')
     const { appendEvent } = useIngestJobsStore.getState()
     appendEvent('job-1', {
       event: 'ingestion_started',
