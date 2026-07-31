@@ -6,6 +6,7 @@ import { ApiError } from '@/api/client'
 import { useCollections, useDeleteCollection, useSelectCollection } from '@/hooks/useCollections'
 import { useDeleteSession, useSessions, sessionsKey } from '@/hooks/useSessions'
 import { useUiStore } from '@/stores/ui'
+import { useChatUiStore } from '@/stores/chatUi'
 import { useIngestJobsStore, selectHasRunningJob } from '@/stores/ingestJobs'
 import { cn } from '@/lib/cn'
 import { buildCollectionEntries, entryMatches, type CollectionEntry } from '@/lib/collectionEntries'
@@ -100,13 +101,22 @@ export function Sidebar() {
   const onDeleteCollection = (name: string, owner: string | null) => {
     const label = owner ? `"${name}"${t('common.owned_by_suffix', { owner })}` : `"${name}"`
     if (!confirm(t('common.delete_collection_confirm', { label }))) return
+    // Snapshot before the mutation fires: `sessions` is only this collection's
+    // list because it's the active one (the `selected === name` branch below),
+    // and it would already be stale/invalidated by the time onSuccess runs.
+    const deletedSessionIds = sessions.map((s) => s.id)
     deleteCollectionMutation.mutate(name, {
       onSuccess: () => {
         if (selected === name) {
           setSelected(null)
           // The backend cascade-deleted this collection's chat sessions; drop
-          // any open one and clear the now-stale session list.
+          // any open one, prune their drafts (there is no dedicated endpoint
+          // to look up which sessions belonged to a now-deleted collection,
+          // so this only covers the case where it was the active one — the
+          // one case the client can see), and clear the now-stale session list.
           setCurrentSessionId(null)
+          const clearDraft = useChatUiStore.getState().clearDraft
+          for (const id of deletedSessionIds) clearDraft(id)
           qc.invalidateQueries({ queryKey: sessionsKey })
         }
       }
@@ -128,6 +138,10 @@ export function Sidebar() {
     deleteSessionMutation.mutate(id, {
       onSuccess: () => {
         if (currentSessionId === id) setCurrentSessionId(null)
+        // Prune unconditionally, not just when this was the open session —
+        // a half-typed draft for a session the user just deleted (often to
+        // remove sensitive content) must not linger in localStorage.
+        useChatUiStore.getState().clearDraft(id)
       }
     })
   }

@@ -5,6 +5,7 @@ import { MemoryRouter, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Sidebar } from './Sidebar'
 import { useUiStore } from '@/stores/ui'
+import { useChatUiStore } from '@/stores/chatUi'
 import { useIngestJobsStore } from '@/stores/ingestJobs'
 
 function mockFetch(map: Record<string, unknown>) {
@@ -55,6 +56,7 @@ function renderSidebarAt(initialPath: string) {
 beforeEach(() => {
   useUiStore.setState({ selectedCollection: null, currentSessionId: null, previewModal: null })
   useIngestJobsStore.getState().clear()
+  useChatUiStore.setState({ drafts: {} })
 })
 
 afterEach(() => {
@@ -257,6 +259,60 @@ describe('Sidebar collection selection', () => {
       expect(useUiStore.getState().selectedCollection).toBeNull()
     })
     expect(useUiStore.getState().currentSessionId).toBeNull()
+  })
+})
+
+describe('Sidebar chat draft pruning', () => {
+  it('prunes the chat draft when a session is deleted', async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': ['alpha'],
+      '/sessions/list': {
+        sessions: [{ id: 's1', created_at: '2026-01-01', title: 'First chat', collection: 'alpha' }]
+      },
+      '/sessions/s1': { ok: true }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('confirm', () => true)
+    useUiStore.setState({ selectedCollection: 'alpha' })
+    useChatUiStore.getState().setDraft('s1', 'half typed question')
+
+    renderSidebar()
+
+    const del = await screen.findByLabelText(/delete session/i)
+    await userEvent.click(del)
+
+    await waitFor(() => {
+      expect(useChatUiStore.getState().drafts['s1']).toBeUndefined()
+    })
+  })
+
+  it('prunes the drafts of a deleted collection\'s sessions', async () => {
+    const fetchMock = mockFetch({
+      '/collections/list': ['alpha'],
+      '/sessions/list': {
+        sessions: [
+          { id: 's1', created_at: '2026-01-01', title: 'First chat', collection: 'alpha' },
+          { id: 's2', created_at: '2026-01-02', title: 'Second chat', collection: 'alpha' }
+        ]
+      }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('confirm', () => true)
+    useUiStore.setState({ selectedCollection: 'alpha', currentSessionId: 's1' })
+    useChatUiStore.setState({
+      drafts: { s1: 'half typed question', s2: 'another draft' }
+    })
+
+    renderSidebar()
+    await screen.findByText('First chat')
+
+    const del = await screen.findByLabelText(/delete collection alpha/i)
+    await userEvent.click(del)
+
+    await waitFor(() => {
+      expect(useChatUiStore.getState().drafts['s1']).toBeUndefined()
+      expect(useChatUiStore.getState().drafts['s2']).toBeUndefined()
+    })
   })
 })
 
