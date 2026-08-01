@@ -2,7 +2,7 @@ import { useState } from 'react'
 import type { Source } from '@/api/types'
 import { sourcePreviewUrl } from '@/api/ingest'
 import { useUiStore } from '@/stores/ui'
-import { formatScore, sourceLabel } from '@/lib/sourceLabel'
+import { sourceLabel } from '@/lib/sourceLabel'
 import { referenceMetadataItems } from '@/lib/referenceMetadata'
 import { TranslateControl } from '@/components/common/TranslateControl'
 import { useT } from '@/i18n/LanguageContext'
@@ -16,11 +16,10 @@ export function Citation({ source }: { source: Source }) {
     <div className="rounded-md border border-border bg-muted px-3 py-2 text-sm">
       <button
         type="button"
-        className="flex items-center justify-between w-full gap-2"
+        className="flex items-center justify-between w-full gap-2 text-left"
         onClick={() => setOpen((v) => !v)}
       >
         <span className="truncate">{sourceLabel(source, t)}</span>
-        <span className="text-xs text-muted-foreground">{formatScore(source.score)}</span>
       </button>
       {open && (
         <div className="mt-2 space-y-2">
