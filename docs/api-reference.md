@@ -40,8 +40,13 @@ this doc are declared at the top of `docint/core/api.py:208` and onward.
 | `DELETE` | `/sessions/{session_id}` | `Sessions` | Delete a session. |
 | `POST` | `/agent/chat` | `Agent` | Run the agent orchestrator for one turn (non-streaming). |
 | `POST` | `/agent/chat/stream` | `Agent` | Streaming orchestrator variant (SSE tokens). |
-| `POST` | `/ingest` | `Ingestion` | Trigger ingestion of the configured `DATA_PATH` into a collection. |
-| `POST` | `/ingest/upload` | `Ingestion` | Upload + ingest a single file with streaming progress events. |
+| `POST` | `/ingest/upload` | `Ingestion` | Stage files into a collection's batch directory (upload only, no ingestion). |
+| `POST` | `/ingest/finalize` | `Ingestion` | Queue one ingest job over the staged batches; `202 {job_id}`. |
+| `GET`  | `/ingest/jobs/events` | `Ingestion` | Owner-multiplexed SSE stream of job events, with collapsed replay on connect. |
+| `GET`  | `/ingest/jobs` | `Ingestion` | List the caller's jobs, newest first. |
+| `GET`  | `/ingest/jobs/{job_id}` | `Ingestion` | Snapshot of one owned job. |
+| `DELETE` | `/ingest/jobs/{job_id}` | `Ingestion` | Dismiss a finished job (409 while running). |
+| `POST` | `/ingest` | `Ingestion` | Ingest the configured `DATA_PATH` directly (CLI/batch path). |
 | `GET`  | `/sources/preview` | `Sources` | Return a preview of a source file staged under `QDRANT_SRC_DIR`. |
 
 ## Meta
@@ -276,10 +281,98 @@ tokens.
 
 ## Ingestion
 
+The SPA's ingest flow is two-phase: stage bytes with `POST /ingest/upload`
+(once per batch), then queue **one** server-owned job over the whole staged
+directory with `POST /ingest/finalize`. Progress is consumed from the
+owner-multiplexed SSE stream, not from the request that started the run — so
+navigating away or reloading no longer severs the only view of a run that
+keeps going regardless.
+
+Jobs live in memory. They survive a browser reload (the client re-discovers
+them by owner) but **not** a backend restart; the staged files remain on disk
+and hash dedup makes a re-run cheap. All job endpoints are owner-scoped: a
+job belonging to another principal 404s rather than 403s, so its existence
+never leaks.
+
+### `POST /ingest/upload`
+
+Streaming multipart upload. Accepts one or more files plus a `collection`
+form field, saves them into that collection's batch directory, and streams
+save progress as SSE. It does **not** ingest — the caller runs one ingestion
+pass afterwards via `/ingest/finalize`.
+
+Splitting a large selection across several upload batches means ingestion
+happens once over the whole staged directory, instead of once per batch
+(which would re-initialise the pipeline's models per batch and hard-fail on
+any batch that happened to hold only reader-unsupported files).
+
+### `POST /ingest/finalize`
+
+Queues an ingest job over a collection's already-staged batches. Returns
+`202` immediately:
+
+```json
+{ "job_id": "…" }
+```
+
+Request (`IngestIn`) carries the logical collection name and the run's
+enrichment options (`hybrid`, `ner`, `hate_speech`). Entity resolution runs
+as a stage *inside* the job, so it no longer depends on a client staying
+attached.
+
+| Status | Meaning |
+|---|---|
+| `202` | Job queued; `job_id` returned. |
+| `400` | Blank collection name. |
+| `404` | Caller does not own the collection. |
+| `409` | That collection already has a job in flight — `detail` carries the in-flight `job_id`. |
+
+The `409` is load-bearing, not a convenience: overlapping runs over one
+collection can double-write, because file hashes are only recorded after a
+run's final node batch.
+
+### `GET /ingest/jobs/events`
+
+One SSE connection carrying every job the caller owns, each frame tagged
+with its `job_id`. On connect the stream replays a **collapsed** history per
+job — `ingestion_started`, then the retained warnings, then the latest
+`ingestion_progress`, then the terminal frame — so a browser that reloads
+mid-run re-attaches and resumes the live view.
+
+Progress is collapsed to the newest frame because a long run emits thousands
+of them and only the newest describes the current state. Warnings are
+retained individually, since each carries unique information.
+
+Terminal frames are `ingestion_complete` or `error`. The `error` frame
+carries a machine-readable `code` (`ingestion_failed`) alongside static
+display copy — exception text never reaches a client, as it can carry
+connection strings or file paths.
+
+### `GET /ingest/jobs`
+
+Lists the caller's jobs, newest first. Not used by the SPA (reload
+re-discovery goes through the persisted job id plus the SSE replay);
+available for other clients that want to enumerate a caller's runs.
+
+### `GET /ingest/jobs/{job_id}`
+
+Point-in-time snapshot of one owned job: status, latest message, error,
+and timestamps. The owner-namespaced physical collection name is
+deliberately excluded — callers only ever see their own logical name.
+
+A `404` here is how a client detects an **interrupted** run: the backend
+restarted while the job was in flight.
+
+### `DELETE /ingest/jobs/{job_id}`
+
+Dismisses a finished job from the registry. Refuses with `409` while the job
+is still queued or running: the worker thread cannot be killed, so a
+dismissed running job would keep writing unobserved.
+
 ### `POST /ingest`
 
-Starts an ingestion job over the configured `DATA_PATH`. Source:
-`docint/core/api.py:1126`.
+Ingests the configured `DATA_PATH` directly, without the upload/finalize
+staging dance. This is the CLI and batch path — the SPA does not use it.
 
 Request (`IngestIn`):
 
@@ -290,30 +383,10 @@ Request (`IngestIn`):
 Response (`IngestOut`):
 
 ```json
-{ "ok": true, "collection": "demo", "data_dir": "/var/lib/docint/data", "hybrid": true }
+{ "ok": true, "collection": "demo", "data_dir": "…", "hybrid": true }
 ```
 
-The endpoint returns immediately — follow ingestion progress via logs or
-`/ingest/upload` for file-by-file feedback.
-
-### `POST /ingest/upload`
-
-Streaming multipart upload endpoint. Accepts a single file plus a
-`collection` form field, streams back progress events:
-
-```
-event: progress
-data: {"stage": "upload", "message": "…"}
-
-event: progress
-data: {"stage": "processing", "message": "…"}
-
-event: done
-data: {"ok": true, "stats": {...}}
-```
-
-See `docint/ui/ingest.py` for the reference client that consumes this
-stream.
+Returns when the run completes; follow progress via logs.
 
 ## Sources
 
@@ -350,6 +423,9 @@ helper behind all token-level streaming. It:
    payload, so the client can update citations and metadata in one atomic
    step after the token stream ends.
 
-`POST /ingest/upload` uses a different pattern: it wraps the real
-`ingest` pipeline with a callback that yields **progress events** rather
-than generated tokens.
+The ingestion endpoints use a different pattern: they carry **progress
+events** rather than generated tokens. `POST /ingest/upload` streams the
+save progress of the bytes it is staging, while `GET /ingest/jobs/events`
+streams the run itself — one connection per caller covering every job they
+own, replayed on connect rather than tied to the request that started the
+run.

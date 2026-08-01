@@ -9,12 +9,34 @@ through every stage, from file triage to Qdrant persistence.
 | Caller | Target | Notes |
 |---|---|---|
 | `uv run ingest` | `docint/cli/ingest.py` | Prompts for a collection name, reads files from `DATA_PATH`. |
-| `POST /ingest` | `docint/core/api.py:1126` | Triggers ingestion over the configured `DATA_PATH`. |
-| `POST /ingest/upload` | `docint/core/api.py:1259` | Streaming single-file upload with progress events. |
-| UI Ingest page | `docint/ui/ingest.py` | Browser-driven wrapper over `/ingest/upload`. |
+| `POST /ingest` | `docint/core/api.py` (`ingest`) | Ingests the configured `DATA_PATH` directly. CLI/batch path. |
+| `POST /ingest/upload` | `docint/core/api.py` (`ingest_upload`) | Stages files into the collection's batch directory. Upload only — no ingestion. |
+| `POST /ingest/finalize` | `docint/core/api.py` (`ingest_finalize`) | Queues one server-owned job over the staged batches. The SPA's path. |
+| SPA Ingest page | `frontend/src/routes/Ingest.tsx` | Uploads in batches, then finalizes once; consumes `GET /ingest/jobs/events`. |
 
-All four paths end up calling `RAG.ingest_docs()` in
-`docint/core/rag.py`, which owns the whole pipeline.
+All of them end up calling `RAG.ingest_docs()` in `docint/core/rag.py`,
+which owns the whole pipeline.
+
+### Server-owned jobs
+
+`/ingest/finalize` does not ingest on the request that called it. It
+registers a job in `docint/core/jobs.py` and returns `202 {job_id}`; a
+worker thread runs the pipeline while clients consume progress from the
+owner-multiplexed SSE stream at `GET /ingest/jobs/events`.
+
+This exists because ingestion used to stream progress on the request that
+started it, so any client disconnect — navigation, reload, a closed tab —
+severed the only view of a run that kept going regardless. Jobs are held in
+memory: they survive a browser reload (the client re-discovers them by
+owner) but not a backend restart. The staged files remain on disk either
+way, and hash dedup makes a re-run cheap.
+
+Concurrency is bounded by `DOCINT_INGEST_CONCURRENCY` (default `1`, so runs
+serialise). A second job for a collection that is already ingesting is
+refused with `409` carrying the in-flight `job_id` — overlapping runs can
+double-write, because file hashes are only recorded after a run's final node
+batch. Entity resolution runs as a stage inside the job, so it no longer
+depends on a client staying attached.
 
 ## Supported file types
 

@@ -232,6 +232,13 @@ sizes, batch sizes, and retry behaviour for the ingestion pipeline.
 | `DOCSTORE_RETRY_BACKOFF_SECONDS` | `0.25` | Initial retry backoff. |
 | `DOCSTORE_RETRY_BACKOFF_MAX_SECONDS` | `2.0` | Max retry backoff. |
 
+Ingest *jobs* (the server-owned runs behind `POST /ingest/finalize`) take one
+knob of their own, read by `load_ingest_concurrency()`:
+
+| Variable | Default | Description |
+|---|---|---|
+| `DOCINT_INGEST_CONCURRENCY` | `1` | Ingest jobs allowed to run at once, process-wide. The default serialises runs; raising it is opt-in, and overlapping runs over the *same* collection are refused regardless (409). Unparseable values fall back to `1`. |
+
 The default supported file extensions (hard-coded in
 `load_ingestion_env`) include `.pdf`, `.docx`, `.txt`, `.md`, `.csv`,
 `.tsv`, `.xlsx`, `.xls`, `.parquet`, `.jsonl`, `.jpg`, `.jpeg`, `.png`,
