@@ -2,12 +2,14 @@
 
 import json
 import re
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
 from typing_extensions import override
 
 from docint.agents.types import ResponseAgent, RetrievalResult, Turn
+from docint.utils.env_cfg import load_response_validation_env
 from docint.utils.prompt_loader import load_localized_prompt
 from docint.utils.reference_metadata import format_reference_metadata_block
 
@@ -15,7 +17,22 @@ if TYPE_CHECKING:
     from llama_index.core.llms import LLM
 
 MAX_VALIDATION_SOURCES = 6
-MAX_SOURCE_CHARS = 1200
+
+# Total characters of source body text the validator may see, shared across
+# the sources of one answer (see ``_allocate_source_budget``). A per-source
+# cap made the validator judge a keyhole view of each chunk while the
+# generator answered from the whole thing, so every claim drawn from the tail
+# of a chunk came back flagged as a hallucination.
+DEFAULT_SOURCE_CHAR_BUDGET = 48_000
+
+DEFAULT_TRUNCATION_NOTE = (
+    "NOTE: The source excerpts below are shown truncated — each cut is marked "
+    'with "[... N of M characters not shown ...]". The answer was generated '
+    "from the FULL sources, so a detail you cannot find in a truncated excerpt "
+    "may still be grounded in the hidden text. Do not report a detail as "
+    "ungrounded solely because it is missing from a truncated excerpt; judge "
+    "only contradictions with the text you can actually see."
+)
 
 DEFAULT_RESPONSE_VALIDATOR_PROMPT = (
     "You are a strict response validator for a RAG system.\n"
@@ -71,6 +88,10 @@ class ResultValidationResponseAgent(ResponseAgent):
             "response_validator",
             default=DEFAULT_RESPONSE_VALIDATOR_PROMPT,
         )
+        self._truncation_note = load_localized_prompt(
+            "response_validator_truncation",
+            default=DEFAULT_TRUNCATION_NOTE,
+        ).strip()
 
     @override
     def finalize(self, result: RetrievalResult, turn: Turn) -> RetrievalResult:
@@ -208,7 +229,9 @@ class ResultValidationResponseAgent(ResponseAgent):
         Returns:
             str: Prompt asking for groundedness/relevance validation.
         """
-        sources_text = self._sources_to_text(sources)
+        sources_text, truncated = self._sources_to_text(sources)
+        if truncated:
+            sources_text = f"{self._truncation_note}\n\n{sources_text}"
         diagnostics_text = self._summary_diagnostics_to_text(summary_diagnostics)
         retrieval_context = self._retrieval_context_to_text(
             user_query=query,
@@ -320,25 +343,65 @@ class ResultValidationResponseAgent(ResponseAgent):
         )
         return (coverage_ratio, coverage_target, coverage_unit)
 
-    def _sources_to_text(self, sources: list[dict[str, Any]]) -> str:
-        """Convert source dictionaries to compact text snippets for validation.
+    @staticmethod
+    def _allocate_source_budget(lengths: Sequence[int], budget: int) -> list[int]:
+        """Split a shared character budget across sources, shortest first.
+
+        Each source is offered an equal share of what is left; a source that
+        needs less than its share returns the remainder to the sources still
+        unallocated. So a short source never wastes budget a long one could
+        use, and no single source can starve the others.
+
+        Args:
+            lengths (Sequence[int]): Body length of each source, in order.
+            budget (int): Total characters available across all sources.
+
+        Returns:
+            list[int]: Characters granted to each source, positionally aligned
+            with ``lengths``.
+        """
+        allocation = [0] * len(lengths)
+        remaining_budget = budget
+        order = sorted(range(len(lengths)), key=lambda i: lengths[i])
+        for position, index in enumerate(order):
+            share = remaining_budget // (len(order) - position)
+            granted = min(lengths[index], share)
+            allocation[index] = granted
+            remaining_budget -= granted
+        return allocation
+
+    def _sources_to_text(self, sources: list[dict[str, Any]]) -> tuple[str, bool]:
+        """Convert source dictionaries to text snippets for validation.
 
         Each source renders as a header line (filename | page | row), an
         optional ``reference_metadata`` block (Network, UUID, Timestamp,
-        Author, ...), and the chunk text body capped at ``MAX_SOURCE_CHARS``.
-        The metadata block is emitted untruncated because for table-derived
-        sources (e.g. social posts) the citation fields live there, not in
-        the body — without them the validator would flag answers that
-        legitimately cite metadata as ungrounded.
+        Author, ...), and the chunk text body. The metadata block is emitted
+        untruncated because for table-derived sources (e.g. social posts) the
+        citation fields live there, not in the body — without them the
+        validator would flag answers that legitimately cite metadata as
+        ungrounded.
+
+        Bodies share one budget (``RESPONSE_VALIDATION_SOURCE_BUDGET_CHARS``)
+        rather than each being capped, so the validator sees as much of what
+        the generator saw as the budget allows. Whatever still has to be cut
+        is marked inline and reported back to the caller, which warns the
+        validator not to mistake hidden text for an unsupported claim.
 
         Args:
             sources (list[dict[str, Any]]): Retrieved sources.
 
         Returns:
-            str: Joined source snippets.
+            tuple[str, bool]: The joined source snippets, and whether any body
+            had to be truncated.
         """
+        shown = sources[:MAX_VALIDATION_SOURCES]
+        bodies = [self._source_body(source) for source in shown]
+        budget = load_response_validation_env(default_source_char_budget=DEFAULT_SOURCE_CHAR_BUDGET).source_char_budget
+        allowances = self._allocate_source_budget([len(body) for body in bodies], budget)
+        truncated = False
+
         snippets: list[str] = []
-        for idx, source in enumerate(sources[:MAX_VALIDATION_SOURCES], start=1):
+        for idx, source in enumerate(shown, start=1):
             filename = source.get("filename") or source.get("source_ref") or "Unknown"
             page = source.get("page")
             row = source.get("row")
@@ -348,12 +411,9 @@ class ResultValidationResponseAgent(ResponseAgent):
                 f"row={row if row is not None else 'n/a'}]:"
             )
 
-            text = ""
-            for key in ("text", "content", "chunk", "snippet", "node_text"):
-                value = source.get(key)
-                if value:
-                    text = str(value)
-                    break
+            text = bodies[idx - 1]
+            body, body_truncated = self._fit_body(text, allowances[idx - 1])
+            truncated = truncated or body_truncated
 
             # Suppress ``Text`` from the metadata block only when we already
             # have a top-level body to render separately; otherwise let it
@@ -365,11 +425,51 @@ class ResultValidationResponseAgent(ResponseAgent):
             if metadata_block:
                 parts.append(metadata_block)
             if text:
-                parts.append(f"Text: {text[:MAX_SOURCE_CHARS]}")
+                parts.append(f"Text: {body}")
             elif not metadata_block:
-                parts.append(json.dumps(source, ensure_ascii=False)[:MAX_SOURCE_CHARS])
+                fallback, fallback_truncated = self._fit_body(
+                    json.dumps(source, ensure_ascii=False), allowances[idx - 1] or budget
+                )
+                truncated = truncated or fallback_truncated
+                parts.append(fallback)
             snippets.append("\n".join(parts))
-        return "\n\n".join(snippets) if snippets else "(none)"
+        return ("\n\n".join(snippets) if snippets else "(none)", truncated)
+
+    @staticmethod
+    def _source_body(source: dict[str, Any]) -> str:
+        """Extract the body text of a source, whatever key it arrived under.
+
+        Args:
+            source (dict[str, Any]): One retrieved source.
+
+        Returns:
+            str: The body text, or an empty string when the source carries none.
+        """
+        for key in ("text", "content", "chunk", "snippet", "node_text"):
+            value = source.get(key)
+            if value:
+                return str(value)
+        return ""
+
+    @staticmethod
+    def _fit_body(text: str, allowance: int) -> tuple[str, bool]:
+        """Trim a body to its allowance, marking what was withheld.
+
+        The marker is explicit about the hidden character count so the
+        validator can tell "this source says nothing about X" apart from "I
+        was not shown the part that does".
+
+        Args:
+            text (str): The full body text.
+            allowance (int): Characters this source may show.
+
+        Returns:
+            tuple[str, bool]: The rendered body and whether it was trimmed.
+        """
+        if len(text) <= allowance:
+            return (text, False)
+        hidden = len(text) - allowance
+        return (f"{text[:allowance]}[... {hidden} of {len(text)} characters not shown ...]", True)
 
     def _parse_response(self, text: str) -> dict[str, Any]:
         """Parse JSON payload from the validator model response.

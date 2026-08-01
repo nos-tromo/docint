@@ -195,7 +195,19 @@ questions:
 
 When building the validation prompt, the agent includes retrieval context
 such as the retrieval query (if rewritten), the detected intent, and the
-tool used. If the LLM answers "no" to either question, `validation_mismatch=true`
+tool used.
+
+The source bodies in that prompt share one character budget
+(`RESPONSE_VALIDATION_SOURCE_BUDGET_CHARS`, default 48000) allocated
+shortest-first, with each source's unused share passed on to the longer
+ones. This matters for correctness, not just cost: the generator answers
+from whole chunks, so a validator shown only the head of each chunk reports
+everything drawn from further in as a hallucination. Sources that still do
+not fit are cut with an inline `[... N of M characters not shown ...]`
+marker, and a localized note (`prompts/{en,de}/response_validator_truncation.txt`)
+tells the validator to judge only visible contradictions.
+
+If the LLM answers "no" to either question, `validation_mismatch=true`
 is set on the `QueryOut` / `AgentChatOut` payload and `validation_reason`
 carries the LLM's explanation. The frontend surfaces this as a warning banner.
 

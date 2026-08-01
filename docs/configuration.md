@@ -373,6 +373,7 @@ Loaded by `load_response_validation_env()` (`env_cfg.py:935`).
 | Variable | Default | Description |
 |---|---|---|
 | `RESPONSE_VALIDATION_ENABLED` | `true` | Run the `ResultValidationResponseAgent` to cross-check answers against sources. |
+| `RESPONSE_VALIDATION_SOURCE_BUDGET_CHARS` | `48000` | Total characters of source text shown to the validator, shared across that answer's sources (shortest-first fair share, unused share redistributed). Sources still trimmed are marked inline and the prompt tells the validator not to read hidden text as an unsupported claim. Too small a budget makes the validator flag grounded answers as hallucinated. |
 
 ## Offline mode
 
