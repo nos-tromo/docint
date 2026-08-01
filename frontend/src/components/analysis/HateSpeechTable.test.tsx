@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { HateSpeechTable } from './HateSpeechTable'
 import { hateSpeechSnapshot } from '@/lib/reportSnapshots'
 import type { HateSpeechRow } from '@/api/types'
+import { useUiStore } from '@/stores/ui'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -130,4 +131,43 @@ it('breaks unbreakable metadata values instead of overflowing the column', () =>
   )
   const pillValue = screen.getByText(longValue)
   expect(pillValue.className).toContain('break-all')
+})
+
+function renderRow(row: HateSpeechRow) {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } }
+  })
+  return render(
+    <QueryClientProvider client={qc}>
+      <HateSpeechTable rows={[row]} collection="test-collection" />
+    </QueryClientProvider>
+  )
+}
+
+describe('HateSpeechTable document preview', () => {
+  it('opens the shared preview dialog for the flagged chunk source', async () => {
+    useUiStore.setState({ selectedCollection: 'test-collection', previewModal: null })
+    renderRow({
+      chunk_id: 'c1',
+      filename: 'a.pdf',
+      file_hash: 'hash',
+      chunk_text: 'flagged text',
+      category: 'insult'
+    })
+
+    await userEvent.click(screen.getByRole('button', { name: /preview/i }))
+
+    expect(useUiStore.getState().previewModal).toEqual({
+      collection: 'test-collection',
+      file_hash: 'hash',
+      filename: 'a.pdf'
+    })
+  })
+
+  it('omits the preview action for a finding with no stored file', () => {
+    useUiStore.setState({ selectedCollection: 'test-collection', previewModal: null })
+    renderRow({ chunk_id: 'c1', filename: 'a.pdf', chunk_text: 'flagged text', category: 'insult' })
+
+    expect(screen.queryByRole('button', { name: /preview/i })).not.toBeInTheDocument()
+  })
 })

@@ -87,7 +87,6 @@ export const en = {
   'chat.assistant': 'Assistant',
   'chat.no_answer': '(no answer)',
   'chat.error_title': 'Chat error',
-  'chat.open_original': 'Open original ↗',
   'chat.entities': 'Entities',
   'chat.entities_more': '+{count} more',
   'chat.entity_open_analysis': 'Show in Analysis',

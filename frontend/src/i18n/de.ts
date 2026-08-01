@@ -93,7 +93,6 @@ export const de: Strings = {
   'chat.assistant': 'Assistent',
   'chat.no_answer': '(keine Antwort)',
   'chat.error_title': 'Chat-Fehler',
-  'chat.open_original': 'Original öffnen ↗',
   'chat.entities': 'Entitäten',
   'chat.entities_more': '+{count} weitere',
   'chat.entity_open_analysis': 'In Analyse anzeigen',

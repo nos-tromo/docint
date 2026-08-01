@@ -1,7 +1,5 @@
 import { useState } from 'react'
 import type { NerSourceRow } from '@/api/types'
-import { useUiStore } from '@/stores/ui'
-import { sourcePreviewUrl } from '@/api/ingest'
 import { referenceMetadataPills, type MetadataPillItem } from '@/lib/referenceMetadata'
 import { highlightSegments } from '@/lib/highlight'
 import { AddToReportButton } from '@/components/report/AddToReportButton'
@@ -9,6 +7,7 @@ import { useTranslatable, type TranslationPayload } from '@/hooks/useTranslatabl
 import { TranslateToggle } from '@/components/common/TranslateToggle'
 import { ClampedText } from '@/components/common/ClampedText'
 import { MetadataPills } from '@/components/common/MetadataPills'
+import { SourcePreviewAction } from '@/components/common/SourcePreviewAction'
 import { entityFindingSnapshot } from '@/lib/reportSnapshots'
 import { useT } from '@/i18n/LanguageContext'
 
@@ -90,14 +89,10 @@ export function EntityFinding({
   const reportItem =
     entityLabel != null ? entityFindingSnapshot(source, entityLabel, translation ?? undefined) : null
   const inReport = reportItem != null && (reportDedupeKeys?.has(reportItem.dedupe_key) ?? false)
-  const collection = useUiStore((s) => s.selectedCollection)
   const chunkText = (source.chunk_text ?? source.text ?? '').trim()
   const segments = highlightSegments(chunkText, highlightTerms)
   const translationState = useTranslatable(chunkText, setTranslation)
   const mentions = matchedMentions(source, highlightTerms, selectedTypeLower)
-  const previewHref =
-    collection && source.file_hash ? sourcePreviewUrl(collection, source.file_hash) : null
-
   const locParts: string[] = []
   if (source.page !== null && source.page !== undefined) {
     locParts.push(t('common.loc_page', { page: source.page }))
@@ -125,16 +120,7 @@ export function EntityFinding({
         {locParts.length > 0 && (
           <div className="text-xs text-muted-foreground">{locParts.join(', ')}</div>
         )}
-        {previewHref && (
-          <a
-            href={previewHref}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-block text-xs text-blue-400 hover:text-blue-300"
-          >
-            {t('chat.open_original')}
-          </a>
-        )}
+        <SourcePreviewAction fileHash={source.file_hash} filename={source.filename} />
       </div>
 
       <div className="min-w-0 space-y-1.5">
