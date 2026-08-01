@@ -5796,10 +5796,10 @@ def test_iter_collection_ner_sources_resolved_includes_sibling_aliases(
     assert {s["chunk_id"] for s in ortho_page} == {"c1"}
 
 
-def test_vllm_sparse_encoder_converts_pooling_output(
+def test_remote_sparse_encoder_converts_pooling_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """VLLM sparse encoder should map token scores into Qdrant sparse vectors.
+    """Remote sparse encoder should map token scores into Qdrant sparse vectors.
 
     Args:
         monkeypatch: The monkeypatch fixture.
@@ -5828,7 +5828,7 @@ def test_vllm_sparse_encoder_converts_pooling_output(
 
     monkeypatch.setattr(rag_module.urllib.request, "urlopen", fake_urlopen)
 
-    encoder = rag_module.VLLMSparseEncoder(
+    encoder = rag_module.RemoteSparseEncoder(
         api_base="http://vllm-router:9000/v1",
         api_key="sk-no-key-required",
         model="BAAI/bge-m3",

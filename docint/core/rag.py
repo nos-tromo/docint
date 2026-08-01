@@ -46,6 +46,7 @@ from docint.utils.env_cfg import (
     RerankClientConfig,
     RetrievalConfig,
     SessionConfig,
+    SparseClientConfig,
     SummaryConfig,
     load_embedding_env,
     load_graphrag_env,
@@ -62,6 +63,7 @@ from docint.utils.env_cfg import (
     load_resolution_env,
     load_retrieval_env,
     load_session_env,
+    load_sparse_client_env,
     load_summary_env,
 )
 from docint.utils.translate_client import translate as translate_text
@@ -1726,8 +1728,16 @@ def _vllm_service_root(api_base: str) -> str:
 
 
 @dataclass(slots=True)
-class VLLMSparseEncoder:
-    """Adapter that turns vLLM pooling/tokenize responses into Qdrant sparse vectors."""
+class RemoteSparseEncoder:
+    """Adapter that turns remote pooling/tokenize responses into Qdrant sparse vectors.
+
+    Speaks the vLLM pooling protocol — ``POST {root}/pooling`` with
+    ``task="token_classify"`` plus ``POST {root}/tokenize`` — against
+    either the full vllm-service router (which exposes both as LiteLLM
+    pass-throughs to the ``embed`` backend) or the standalone
+    ``sparse-only`` CPU container. The wire format is frozen: production
+    collections were ingested with it.
+    """
 
     api_base: str
     model: str
@@ -2130,6 +2140,7 @@ class RAG:
     _text_model: OpenAI | None = field(default=None, init=False, repr=False)
     _post_retrieval_text_model: OpenAI | None = field(default=None, init=False, repr=False)
     _reranker: BaseNodePostprocessor | None = field(default=None, init=False, repr=False)
+    sparse_client_config: SparseClientConfig | None = field(default=None, init=False, repr=False)
     _qdrant_client: QdrantClient | None = field(default=None, init=False, repr=False)
     _qdrant_aclient: AsyncQdrantClient | None = field(default=None, init=False, repr=False)
     _parent_context_support_cache: dict[str, bool] = field(default_factory=dict, init=False, repr=False)
@@ -2208,6 +2219,13 @@ class RAG:
         self.openai_thinking_enabled = self.openai_config.thinking_enabled
         self.openai_timeout = self.openai_config.timeout
         self.openai_top_p = self.openai_config.top_p
+
+        # --- Sparse encoder client config (remote on every provider) ---
+        self.sparse_client_config = load_sparse_client_env(
+            default_api_base=self.openai_api_base or "",
+            default_api_key=self.openai_api_key,
+            default_timeout=self.openai_timeout,
+        )
 
         # --- Embedding context budget (separate from chat LLM) ---
         self.embed_ctx_tokens = self.embedding_config.ctx_tokens
@@ -2785,7 +2803,7 @@ class RAG:
             "enable_hybrid": self.enable_hybrid,
         }
         if self.enable_hybrid and self.openai_inference_provider.lower() == "vllm":
-            sparse_encoder = VLLMSparseEncoder(
+            sparse_encoder = RemoteSparseEncoder(
                 api_base=self.openai_api_base or "",
                 api_key=self.openai_api_key,
                 model=self.sparse_model or "",
