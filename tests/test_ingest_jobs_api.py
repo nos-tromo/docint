@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
+import asyncio
+from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Any
 
@@ -10,33 +11,52 @@ import pytest
 from fastapi.testclient import TestClient
 
 from docint.core import api as api_module
+from docint.core.jobs import IngestJobManager, JobRunner
+
+
+def _default_runner(state: Any, push: Any) -> dict[str, Any]:
+    """Deterministic stand-in for the real ingestion pipeline."""
+    push("ingestion_progress", {"message": "working"})
+    return {"empty": False, "resolution": None}
 
 
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Generator[TestClient, None, None]:
-    """A TestClient whose ingest jobs run a deterministic stub pipeline."""
+def make_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Generator[Callable[..., TestClient], None, None]:
+    """Build a TestClient backed by a manager private to this test.
 
-    def _runner(state: Any, push: Any) -> dict[str, Any]:
-        push("ingestion_progress", {"message": "working"})
-        return {"empty": False, "resolution": None}
-
-    monkeypatch.setattr(api_module.job_manager, "_runner", _runner)
+    Each call constructs a fresh :class:`IngestJobManager` and injects it via
+    ``app.dependency_overrides``, so no test can observe jobs left behind by
+    another and none has to reach into the manager's private state to reset
+    it. Pass ``runner`` to control what the stub pipeline does.
+    """
     monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
-    # job_manager is a process-wide singleton (constructed once at module
-    # import), so tests reusing the same (owner, collection) pair would
-    # otherwise see jobs left behind by earlier tests. Start every test from
-    # an empty registry.
-    api_module.job_manager._jobs.clear()
-    api_module.job_manager._subscribers.clear()
-    # Ingest jobs run as a detached ``asyncio.create_task`` meant to outlive the
-    # request that queued them. A bare ``TestClient(app)`` opens a brand-new
-    # throwaway event loop for every single call (see starlette's
-    # ``_portal_factory``), which orphans that task the instant the queuing
-    # request returns — the job then never advances past "queued". Entering
-    # the client as a context manager keeps one portal (and its background
-    # event-loop thread) alive for the whole test, so the worker actually runs.
-    with TestClient(api_module.app) as client:
-        yield client
+    clients: list[Any] = []
+
+    def _make(runner: JobRunner = _default_runner) -> TestClient:
+        manager = IngestJobManager(runner=runner)
+        api_module.app.dependency_overrides[api_module.get_job_manager] = lambda: manager
+        # Ingest jobs run as a detached ``asyncio.create_task`` meant to outlive
+        # the request that queued them. A bare ``TestClient(app)`` opens a
+        # brand-new throwaway event loop for every single call (see starlette's
+        # ``_portal_factory``), which orphans that task the instant the queuing
+        # request returns — the job then never advances past "queued". Entering
+        # the client as a context manager keeps one portal (and its background
+        # event-loop thread) alive for the whole test, so the worker runs.
+        ctx = TestClient(api_module.app)
+        clients.append(ctx)
+        return ctx.__enter__()
+
+    yield _make
+
+    for ctx in clients:
+        ctx.__exit__(None, None, None)
+    api_module.app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def client(make_client: Callable[..., TestClient]) -> TestClient:
+    """A TestClient whose ingest jobs run a deterministic stub pipeline."""
+    return make_client()
 
 
 def _headers(user: str = "alice") -> dict[str, str]:
@@ -62,7 +82,7 @@ def test_finalize_returns_a_job_id(client: TestClient) -> None:
 
 
 def test_finalize_409s_with_the_existing_job_when_already_running(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    make_client: Callable[..., TestClient],
 ) -> None:
     """A second finalize for the same collection 409s, carrying the in-flight job id."""
     import threading
@@ -73,7 +93,7 @@ def test_finalize_409s_with_the_existing_job_when_already_running(
         gate.wait(timeout=5)
         return {"empty": False, "resolution": None}
 
-    monkeypatch.setattr(api_module.job_manager, "_runner", _blocking)
+    client = make_client(runner=_blocking)
     _stage(client, "mydocs")
     first = client.post("/ingest/finalize", json={"collection": "mydocs"}, headers=_headers())
     second = client.post("/ingest/finalize", json={"collection": "mydocs"}, headers=_headers())
@@ -132,7 +152,7 @@ def test_events_route_is_not_shadowed_by_the_job_id_route() -> None:
     pytest.fail("No route matched GET /ingest/jobs/events")
 
 
-def test_delete_409s_while_running(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_delete_409s_while_running(make_client: Callable[..., TestClient]) -> None:
     """`DELETE /ingest/jobs/{job_id}` refuses to dismiss a still-running job."""
     import threading
 
@@ -142,9 +162,26 @@ def test_delete_409s_while_running(client: TestClient, monkeypatch: pytest.Monke
         gate.wait(timeout=5)
         return {"empty": False, "resolution": None}
 
-    monkeypatch.setattr(api_module.job_manager, "_runner", _blocking)
+    client = make_client(runner=_blocking)
     _stage(client, "mydocs")
     job_id = client.post("/ingest/finalize", json={"collection": "mydocs"}, headers=_headers()).json()["job_id"]
 
     assert client.delete(f"/ingest/jobs/{job_id}", headers=_headers()).status_code == 409
     gate.set()
+
+
+def test_job_manager_is_injectable(client: TestClient) -> None:
+    """Endpoints use the injected manager, never the application's own.
+
+    This is what makes per-test isolation possible without reaching into the
+    manager's private state to reset it between tests.
+    """
+    _stage(client, "mydocs")
+    res = client.post("/ingest/finalize", json={"collection": "mydocs"}, headers=_headers())
+    assert res.status_code == 202
+    job_id = res.json()["job_id"]
+    assert client.get(f"/ingest/jobs/{job_id}", headers=_headers()).status_code == 200
+
+    # The application's own manager never saw the job the fixture's did.
+    app_jobs = asyncio.run(api_module.job_manager.list_for_owner("alice"))
+    assert [s.job_id for s in app_jobs] == []
