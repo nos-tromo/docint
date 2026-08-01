@@ -6,9 +6,12 @@ response handling must not drift, because production collections were
 ingested with it.
 """
 
+from unittest.mock import MagicMock
+
 import pytest
 
-from docint.core.rag import RemoteSparseEncoder
+from docint.core import rag as rag_module
+from docint.core.rag import RAG, RemoteSparseEncoder
 
 # `RemoteSparseEncoder` is `@dataclass(slots=True)`, so an instance cannot
 # take on a `_request_json` attribute that shadows the class method (no
@@ -68,3 +71,64 @@ def test_encoder_drops_non_positive_scores(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert indices == [[11, 12]]
     assert values == [[pytest.approx(0.9), pytest.approx(0.4)]]
+
+
+@pytest.fixture()
+def rag_instance() -> RAG:
+    """A RAG built the way tests/test_rag_unit.py builds one (no live Qdrant)."""
+    return RAG(qdrant_collection="test")
+
+
+def _vector_store_kwargs(monkeypatch: pytest.MonkeyPatch, rag: RAG) -> dict[str, object]:
+    """Capture the kwargs RAG passes to QdrantVectorStore."""
+    captured: dict[str, object] = {}
+
+    def _fake_store(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(rag_module, "QdrantVectorStore", _fake_store)
+    rag._vector_store()
+    return captured
+
+
+def test_hybrid_on_wires_remote_encoder_for_docs_and_queries(
+    monkeypatch: pytest.MonkeyPatch,
+    rag_instance: RAG,
+) -> None:
+    """Both sparse callbacks come from the remote encoder — never fastembed."""
+    rag_instance.enable_hybrid = True
+    kwargs = _vector_store_kwargs(monkeypatch, rag_instance)
+
+    assert "fastembed_sparse_model" not in kwargs
+    assert callable(kwargs["sparse_doc_fn"])
+    assert callable(kwargs["sparse_query_fn"])
+    assert kwargs["enable_hybrid"] is True
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openai", "vllm"])
+def test_remote_encoder_used_on_every_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    rag_instance: RAG,
+    provider: str,
+) -> None:
+    """The provider no longer selects the encoder — only ENABLE_HYBRID does."""
+    rag_instance.enable_hybrid = True
+    rag_instance.openai_inference_provider = provider
+    kwargs = _vector_store_kwargs(monkeypatch, rag_instance)
+
+    assert "fastembed_sparse_model" not in kwargs
+    assert callable(kwargs["sparse_doc_fn"])
+
+
+def test_hybrid_off_wires_no_sparse_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+    rag_instance: RAG,
+) -> None:
+    """Dense-only deployments send no sparse kwargs at all."""
+    rag_instance.enable_hybrid = False
+    kwargs = _vector_store_kwargs(monkeypatch, rag_instance)
+
+    assert "fastembed_sparse_model" not in kwargs
+    assert "sparse_doc_fn" not in kwargs
+    assert kwargs["enable_hybrid"] is False

@@ -65,11 +65,11 @@ from docint.utils.env_cfg import (
     load_session_env,
     load_sparse_client_env,
     load_summary_env,
+    resolve_enable_hybrid,
 )
 from docint.utils.translate_client import translate as translate_text
 # isort: on
 
-from fastembed import SparseTextEmbedding
 from llama_index.core import (
     Response,
     SimpleDirectoryReader,
@@ -114,7 +114,6 @@ __all__ = [
     "QueryBundle",
     "ResponseMode",
     "RetrieverQueryEngine",
-    "SparseTextEmbedding",
     "VectorStoreQueryMode",
     "logger",
     "qdrant_models",
@@ -2009,7 +2008,7 @@ class RAG:
     # writes into ``_collection_default`` (or the request ContextVar). MUST stay
     # the first field so its init assignment runs before ``_collection_default``.
     qdrant_collection: str
-    enable_hybrid: bool = field(default=True)
+    enable_hybrid: bool = field(default_factory=resolve_enable_hybrid)
 
     # --- Environment config ---
     host_config: HostConfig = field(default_factory=load_host_env, init=False, repr=False)
@@ -2579,57 +2578,23 @@ class RAG:
 
     @property
     def sparse_model(self) -> str | None:
-        """Returns the configured sparse model id for hybrid retrieval.
+        """Return the configured sparse model id for hybrid retrieval.
+
+        The id is passed through to the remote encoder as the ``model``
+        field; docint no longer resolves it against a local support list,
+        because it no longer runs a local sparse model.
 
         Returns:
-            str | None: The sparse model id or None if not enabled.
+            str | None: The sparse model id, or None when hybrid is off.
 
         Raises:
-            ValueError: If the sparse model is None or not supported.
-            ImportError: If fastembed is not installed when hybrid search is enabled.
+            ValueError: If hybrid is enabled but no sparse model is set.
         """
         if not self.enable_hybrid:
             return None
-
         if self.sparse_model_id is None:
             raise ValueError("sparse_model_id is None")
-
-        if self.openai_inference_provider.lower() == "vllm":
-            return self.sparse_model_id
-
-        try:
-            supported_models = SparseTextEmbedding.list_supported_models()
-        except ImportError as err:
-            raise ImportError("fastembed is not installed, but hybrid search is enabled.") from err
-
-        # Check if the configured ID is directly supported
-        supported_ids = [m["model"] for m in supported_models]
-        chosen = self.sparse_model_id
-        if self.sparse_model_id in supported_ids:
-            chosen = self.sparse_model_id
-        else:
-            # Check if it matches a source HF repo (mapping logic)
-            for model_desc in supported_models:
-                sources = model_desc.get("sources")
-                if sources and sources.get("hf") == self.sparse_model_id:
-                    logger.info(
-                        "Mapped sparse model {} to its source {}",
-                        self.sparse_model_id,
-                        model_desc["model"],
-                    )
-                    chosen = model_desc["model"]
-                    break
-            else:
-                logger.error(
-                    "ValueError: Sparse model {} not supported. Supported: {}",
-                    self.sparse_model_id,
-                    supported_ids,
-                )
-                raise ValueError(f"Sparse model {self.sparse_model_id!r} not supported. Supported: {supported_ids}")
-
-        # Return the canonical fastembed model name.  fastembed will resolve
-        # local files via FASTEMBED_CACHE_PATH (set by env_cfg to HF_HUB_CACHE).
-        return chosen
+        return self.sparse_model_id
 
     @property
     def reranker(self) -> BaseNodePostprocessor:
@@ -2782,6 +2747,24 @@ class RAG:
             )
         return self._qdrant_aclient
 
+    def _build_sparse_encoder(self) -> RemoteSparseEncoder:
+        """Construct the remote sparse encoder from the resolved config.
+
+        Single construction point, shared by the vector-store wiring and
+        the pre-ingest probe, so the two can never drift apart in how
+        they resolve the endpoint.
+
+        Returns:
+            RemoteSparseEncoder: Encoder bound to the configured endpoint.
+        """
+        sparse_config = self.sparse_client_config
+        return RemoteSparseEncoder(
+            api_base=sparse_config.api_base if sparse_config else self.openai_api_base or "",
+            api_key=sparse_config.api_key if sparse_config else self.openai_api_key,
+            model=self.sparse_model or "",
+            timeout=sparse_config.timeout if sparse_config else self.openai_timeout,
+        )
+
     # --- Build pieces ---
     def _vector_store(self) -> QdrantVectorStore:
         """Creates the vector store for document embeddings.
@@ -2802,17 +2785,10 @@ class RAG:
             "aclient": self.qdrant_aclient,
             "enable_hybrid": self.enable_hybrid,
         }
-        if self.enable_hybrid and self.openai_inference_provider.lower() == "vllm":
-            sparse_encoder = RemoteSparseEncoder(
-                api_base=self.openai_api_base or "",
-                api_key=self.openai_api_key,
-                model=self.sparse_model or "",
-                timeout=self.openai_timeout,
-            )
+        if self.enable_hybrid:
+            sparse_encoder = self._build_sparse_encoder()
             vector_store_kwargs["sparse_doc_fn"] = sparse_encoder.encode_texts
             vector_store_kwargs["sparse_query_fn"] = sparse_encoder.encode_texts
-        else:
-            vector_store_kwargs["fastembed_sparse_model"] = self.sparse_model
 
         return QdrantVectorStore(**vector_store_kwargs)
 
