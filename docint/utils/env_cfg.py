@@ -1401,6 +1401,62 @@ def load_rerank_client_env(
 
 
 @dataclass(frozen=True)
+class SparseClientConfig:
+    """Dataclass for the remote sparse-encoder HTTP client."""
+
+    api_base: str
+    api_key: str | None
+    timeout: float
+
+
+def load_sparse_client_env(
+    default_api_base: str,
+    default_api_key: str | None,
+    default_timeout: float,
+) -> "SparseClientConfig":
+    """Load the remote sparse-encoder client configuration.
+
+    docint reaches sparse embedding over HTTP on every provider. The
+    client POSTs to ``{api_base}/pooling`` (``task=token_classify``) and
+    ``{api_base}/tokenize``. Defaults mirror the OpenAI client settings —
+    the full vllm-service router exposes both as LiteLLM pass-throughs
+    against the same base. For the sparse-only deployment shape (CPU
+    container hosted by vllm-service), override with
+    ``SPARSE_API_BASE=http://sparse-only:8000``.
+
+    Args:
+        default_api_base (str): Fallback base URL when ``SPARSE_API_BASE``
+            is unset. Typically the active ``OPENAI_API_BASE``.
+        default_api_key (str | None): Fallback Bearer token when
+            ``SPARSE_API_KEY`` is unset. ``None`` (or empty) disables auth.
+        default_timeout (float): Fallback request timeout in seconds.
+
+    Returns:
+        SparseClientConfig: Resolved configuration.
+
+        - ``api_base``: Base URL; the encoder appends ``/pooling`` and
+          ``/tokenize`` itself.
+        - ``api_key``: Bearer token sent as ``Authorization: Bearer ...``
+          when set; omitted entirely when ``None``. The sparse-only shape
+          requires no auth (trust ``inference-net``); the full router
+          requires the master key.
+        - ``timeout``: Per-request HTTP timeout in seconds.
+    """
+    raw_key = os.getenv("SPARSE_API_KEY")
+    if raw_key is not None and raw_key.strip():
+        api_key: str | None = raw_key.strip()
+    elif default_api_key and default_api_key.strip():
+        api_key = default_api_key.strip()
+    else:
+        api_key = None
+    return SparseClientConfig(
+        api_base=os.getenv("SPARSE_API_BASE", default_api_base).rstrip("/"),
+        api_key=api_key,
+        timeout=float(os.getenv("SPARSE_TIMEOUT", default_timeout)),
+    )
+
+
+@dataclass(frozen=True)
 class OpenAIConfig:
     """Dataclass for OpenAI-compatible API configuration."""
 
