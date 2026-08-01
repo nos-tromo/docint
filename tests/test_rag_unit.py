@@ -5198,11 +5198,10 @@ def test_create_collection_if_missing_probes_and_creates_hybrid_schema(
         "qdrant_collection_exists",
         lambda client, collection_name: False,
     )
-    # Pin sparse_model to a known IDF model so we can also verify the modifier.
     monkeypatch.setattr(
         type(rag),
         "sparse_model",
-        property(lambda self: "Qdrant/bm42-all-minilm-l6-v2-attentions"),
+        property(lambda self: "BAAI/bge-m3"),
     )
 
     class _StubEmbed:
@@ -5228,14 +5227,14 @@ def test_create_collection_if_missing_probes_and_creates_hybrid_schema(
     rag._qdrant_client.create_collection.assert_called_once()
     kwargs = rag._qdrant_client.create_collection.call_args.kwargs
     assert kwargs["collection_name"] == "fresh-collection"
-    # Hybrid path: dense named vector + sparse named vector with IDF modifier.
+    # Hybrid path: dense named vector + sparse named vector. The modifier
+    # lookup consults qdrant_client's own IDF_EMBEDDING_MODELS, which is
+    # always empty now that fastembed (its data source) is no longer a
+    # dependency — so the modifier is always None, matching production.
     assert rag_module.QDRANT_DENSE_VECTOR_NAME in kwargs["vectors_config"]
     assert kwargs["vectors_config"][rag_module.QDRANT_DENSE_VECTOR_NAME].size == 384
     assert rag_module.QDRANT_SPARSE_VECTOR_NAME in kwargs["sparse_vectors_config"]
-    assert (
-        kwargs["sparse_vectors_config"][rag_module.QDRANT_SPARSE_VECTOR_NAME].modifier
-        == rag_module.qdrant_models.Modifier.IDF
-    )
+    assert kwargs["sparse_vectors_config"][rag_module.QDRANT_SPARSE_VECTOR_NAME].modifier is None
 
 
 def test_create_collection_if_missing_uses_configured_dimensions(

@@ -6,6 +6,7 @@ response handling must not drift, because production collections were
 ingested with it.
 """
 
+import importlib.util
 from unittest.mock import MagicMock
 
 import pytest
@@ -209,3 +210,14 @@ def test_probe_targets_the_configured_sparse_endpoint(
     rag_instance.probe_sparse_endpoint()
 
     assert "http://sparse-only:8000/pooling" in seen
+
+
+def test_no_local_model_runtime_is_installed() -> None:
+    """Docint ships no local model runtime — guard against reintroduction.
+
+    fastembed pulls onnxruntime, which is a full local inference engine.
+    Both were removed when sparse encoding moved behind HTTP; this test
+    fails loudly if a dependency bump drags either back in.
+    """
+    assert importlib.util.find_spec("fastembed") is None, "fastembed is back — sparse encoding must stay remote"
+    assert importlib.util.find_spec("onnxruntime") is None, "onnxruntime is back — docint runs no local models"
