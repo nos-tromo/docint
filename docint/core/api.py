@@ -3270,6 +3270,20 @@ def _run_ingest_job(state: IngestJobState, push: PushEvent) -> dict[str, Any]:
 job_manager = IngestJobManager(runner=_run_ingest_job)
 
 
+def get_job_manager() -> IngestJobManager:
+    """Return the ingest job manager the request handlers should use.
+
+    The application's own manager is a module-level instance built once at
+    import. Routing every handler through this dependency lets a test override
+    it with ``app.dependency_overrides`` and supply a manager of its own,
+    instead of mutating the shared instance's private state between tests.
+
+    Returns:
+        IngestJobManager: The manager backing the ``/ingest/jobs*`` endpoints.
+    """
+    return job_manager
+
+
 @app.post("/ingest/upload", tags=["Ingestion"])
 async def ingest_upload(
     request: Request,
@@ -3389,7 +3403,11 @@ async def ingest_upload(
 
 
 @app.post("/ingest/finalize", status_code=202, tags=["Ingestion"])
-async def ingest_finalize(payload: IngestIn, request: Request) -> dict[str, str]:
+async def ingest_finalize(
+    payload: IngestIn,
+    request: Request,
+    jobs: IngestJobManager = Depends(get_job_manager),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, str]:
     """Queue an ingest job over a collection's already-staged upload batches.
 
     The SPA uploads a large selection as several batches to ``/ingest/upload``
@@ -3400,6 +3418,7 @@ async def ingest_finalize(payload: IngestIn, request: Request) -> dict[str, str]
     Args:
         payload (IngestIn): Collection (logical name) and run options.
         request (Request): The incoming request, for principal resolution.
+        jobs (IngestJobManager): The ingest job registry.
 
     Returns:
         dict[str, str]: ``{"job_id": ...}``.
@@ -3420,7 +3439,7 @@ async def ingest_finalize(payload: IngestIn, request: Request) -> dict[str, str]
     # idle, atomically under one lock. A separate active_for() check followed
     # by a separate create() call would be a TOCTOU: two interleaved finalize
     # requests could both observe no in-flight job and both create one.
-    state, created = await job_manager.create_if_idle(
+    state, created = await jobs.create_if_idle(
         owner=principal.effective_owner,
         logical_name=name,
         physical=physical,
@@ -3439,7 +3458,10 @@ async def ingest_finalize(payload: IngestIn, request: Request) -> dict[str, str]
 
 
 @app.get("/ingest/jobs", tags=["Ingestion"])
-async def list_ingest_jobs(request: Request) -> dict[str, list[dict[str, Any]]]:
+async def list_ingest_jobs(
+    request: Request,
+    jobs: IngestJobManager = Depends(get_job_manager),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, list[dict[str, Any]]]:
     """List the caller's ingest jobs, newest first.
 
     Not called by the SPA — reload re-discovery goes through the persisted
@@ -3448,19 +3470,23 @@ async def list_ingest_jobs(request: Request) -> dict[str, list[dict[str, Any]]]:
 
     Args:
         request (Request): The incoming request, for principal resolution.
+        jobs (IngestJobManager): The ingest job registry.
 
     Returns:
         dict[str, list[dict[str, Any]]]: ``{"jobs": [snapshot, ...]}``.
     """
     principal = resolve_principal(request)
-    states = await job_manager.list_for_owner(principal.effective_owner)
+    states = await jobs.list_for_owner(principal.effective_owner)
     return {"jobs": [s.snapshot() for s in states]}
 
 
 # NB: declared BEFORE /ingest/jobs/{job_id}. FastAPI matches routes in
 # declaration order, so the reverse order parses "events" as a job id.
 @app.get("/ingest/jobs/events", tags=["Ingestion"])
-async def ingest_job_events(request: Request) -> StreamingResponse:
+async def ingest_job_events(
+    request: Request,
+    jobs: IngestJobManager = Depends(get_job_manager),  # noqa: B008 — FastAPI dependency marker
+) -> StreamingResponse:
     """Stream SSE events for every job the caller owns, over one connection.
 
     Replays each job's collapsed history on connect, so a client that
@@ -3469,24 +3495,30 @@ async def ingest_job_events(request: Request) -> StreamingResponse:
 
     Args:
         request (Request): The incoming request, for principal resolution.
+        jobs (IngestJobManager): The ingest job registry.
 
     Returns:
         StreamingResponse: ``text/event-stream`` of tagged job frames.
     """
     principal = resolve_principal(request)
     return StreamingResponse(
-        job_manager.subscribe_owner(principal.effective_owner),
+        jobs.subscribe_owner(principal.effective_owner),
         media_type="text/event-stream",
     )
 
 
 @app.get("/ingest/jobs/{job_id}", tags=["Ingestion"])
-async def get_ingest_job(job_id: str, request: Request) -> dict[str, Any]:
+async def get_ingest_job(
+    job_id: str,
+    request: Request,
+    jobs: IngestJobManager = Depends(get_job_manager),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, Any]:
     """Return a point-in-time snapshot of one owned job.
 
     Args:
         job_id (str): Job identifier.
         request (Request): The incoming request, for principal resolution.
+        jobs (IngestJobManager): The ingest job registry.
 
     Returns:
         dict[str, Any]: The job snapshot.
@@ -3496,19 +3528,24 @@ async def get_ingest_job(job_id: str, request: Request) -> dict[str, Any]:
             deliberately indistinguishable so existence never leaks.
     """
     principal = resolve_principal(request)
-    state = await job_manager.get(job_id, principal.effective_owner)
+    state = await jobs.get(job_id, principal.effective_owner)
     if state is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return state.snapshot()
 
 
 @app.delete("/ingest/jobs/{job_id}", tags=["Ingestion"])
-async def delete_ingest_job(job_id: str, request: Request) -> dict[str, bool]:
+async def delete_ingest_job(
+    job_id: str,
+    request: Request,
+    jobs: IngestJobManager = Depends(get_job_manager),  # noqa: B008 — FastAPI dependency marker
+) -> dict[str, bool]:
     """Dismiss a finished job from the registry.
 
     Args:
         job_id (str): Job identifier.
         request (Request): The incoming request, for principal resolution.
+        jobs (IngestJobManager): The ingest job registry.
 
     Returns:
         dict[str, bool]: ``{"ok": True}``.
@@ -3519,12 +3556,12 @@ async def delete_ingest_job(job_id: str, request: Request) -> dict[str, bool]:
             running job would keep writing unobserved.
     """
     principal = resolve_principal(request)
-    state = await job_manager.get(job_id, principal.effective_owner)
+    state = await jobs.get(job_id, principal.effective_owner)
     if state is None:
         raise HTTPException(status_code=404, detail="Job not found")
     if state.status in (JobStatus.QUEUED, JobStatus.RUNNING):
         raise HTTPException(status_code=409, detail="Job is still running")
-    await job_manager.remove(job_id, principal.effective_owner)
+    await jobs.remove(job_id, principal.effective_owner)
     return {"ok": True}
 
 
