@@ -766,3 +766,34 @@ def test_query_similar_images_returns_empty_when_collection_missing() -> None:
     )
 
     assert matches == []
+
+
+def test_query_similar_images_by_text_propagates_the_node_id() -> None:
+    """The retrieved node's id must reach the caller so an image citation is traceable.
+
+    ``node.metadata`` alone carries no id, so without this the source built from a
+    match renders as "Chunk-ID: n/a" and two images cannot be told apart.
+    """
+
+    class OneHitVectorStore:
+        """Vector store stub returning a single identified image node."""
+
+        def query(self, query: Any) -> Any:
+            """Return one node with a distinct node id.
+
+            Args:
+                query: The vector store query (ignored by the stub).
+            """
+            node = SimpleNamespace(
+                node_id="0298c8c6-aaab-559b-bd58-2bb428b853b2",
+                metadata={"image_id": "105cc611", "file_name": "cert.jpg"},
+            )
+            return SimpleNamespace(nodes=[node], similarities=[0.42])
+
+    service, _, _ = _build_service()
+    service.qdrant_client = cast(Any, SimpleNamespace(collection_exists=lambda collection_name: True))
+    service._get_vector_store = cast(Any, lambda collection: OneHitVectorStore())
+
+    matches = service.query_similar_images_by_text("a query", top_k=1, source_collection="coll")
+
+    assert matches[0]["node_id"] == "0298c8c6-aaab-559b-bd58-2bb428b853b2"

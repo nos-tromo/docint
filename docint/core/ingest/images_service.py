@@ -1191,5 +1191,10 @@ class ImageIngestionService:
             payload = dict(getattr(node, "metadata", {}) or {})
             payload["score"] = similarities[i] if i < len(similarities) else None
             payload.setdefault("image_collection", target_collection)
+            # The node id is not part of the payload, but it is what makes an
+            # image citation traceable back to one specific retrieved point.
+            node_id = getattr(node, "node_id", None) or getattr(node, "id_", None)
+            if node_id:
+                payload["node_id"] = str(node_id)
             output.append(payload)
         return output
