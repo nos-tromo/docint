@@ -1,8 +1,11 @@
 export interface Source {
-  // Backend (docint/core/rag.py::_source_from_payload) does not emit a
-  // stable per-source id, so this is optional and only present for
-  // sources that flow through node-id-aware code paths.
+  // Node id of the chunk the source came from (docint/core/rag.py::
+  // _source_from_payload). Optional because payloads that carry no node id
+  // and no chunk id — image matches, synthesized rows — have no identity.
   id?: string
+  // Reader-assigned chunk id, present for readers that mint one (page-level
+  // PDF chunks). Preferred over `id` when displaying a citation identity.
+  chunk_id?: string
   file_hash?: string
   filename: string
   filetype?: string | null

@@ -3480,6 +3480,7 @@ class RAG:
         payload: dict[str, Any],
         score: float | None = None,
         text_value: str | None = None,
+        node_id: str | None = None,
     ) -> dict[str, Any]:
         """Normalize a raw metadata/payload dictionary into a source dictionary.
 
@@ -3488,6 +3489,9 @@ class RAG:
             payload (dict[str, Any]): The raw point payload returned by Qdrant.
             score (float | None): Optional similarity score to include in the source.
             text_value (str | None): Optional pre-extracted text value to use instead of extracting from payload.
+            node_id (str | None): Optional id of the node the payload came from.
+                Becomes the source's ``id``, which is what makes a citation
+                traceable back to one specific chunk.
 
         Returns:
             dict[str, Any]: A normalized source dictionary containing standardized fields for downstream processing.
@@ -3570,6 +3574,15 @@ class RAG:
             "source": source_kind,
             "score": score,
         }
+        # Citation identity. Without it every exported source renders as
+        # "Chunk-ID: n/a" and two chunks of the same page are
+        # indistinguishable, so an answer cannot be traced to its evidence.
+        chunk_id = payload.get("chunk_id")
+        identity = node_id or payload.get("node_id") or chunk_id
+        if identity:
+            src["id"] = str(identity)
+        if chunk_id:
+            src["chunk_id"] = str(chunk_id)
         entities = payload.get("entities") or origin.get("entities")
         relations = payload.get("relations") or origin.get("relations")
         if entities:
@@ -4338,11 +4351,13 @@ class RAG:
 
         text_value = getattr(node, "text", "") or ""
         meta = getattr(node, "metadata", {}) or {}
+        node_id = getattr(node, "node_id", None) or getattr(node, "id_", None)
         return self._source_from_payload(
             collection=self.qdrant_collection,
             payload=meta,
             score=getattr(nws, "score", None),
             text_value=text_value,
+            node_id=str(node_id) if node_id else None,
         )
 
     @staticmethod

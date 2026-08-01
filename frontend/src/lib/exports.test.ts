@@ -50,6 +50,23 @@ describe('chatTranscriptToText', () => {
     expect(text).toContain('second snippet')
   })
 
+  it('renders the chunk id, preferring the payload chunk id over the node id', () => {
+    const meta: ChatFinalEvent = {
+      sources: [
+        { filename: 'doc.pdf', page: 3, id: 'node-1', chunk_id: 'doc-p3-b2-0' },
+        { filename: 'doc.pdf', page: 7, id: 'node-2' },
+        { filename: 'doc.pdf', page: 9 }
+      ],
+      session_id: 's'
+    }
+    const text = chatTranscriptToText([
+      { user: 'Cite please', assistant: 'See refs.', done: true, meta }
+    ])
+    expect(text).toContain('- Chunk ID: doc-p3-b2-0')
+    expect(text).toContain('- Chunk ID: node-2')
+    expect(text).toContain('- Chunk ID: n/a')
+  })
+
   it('does not duplicate body text in the source metadata block', () => {
     const meta: ChatFinalEvent = {
       sources: [

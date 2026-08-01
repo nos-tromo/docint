@@ -115,7 +115,9 @@ function sourceLines(src: Source, index: number, t: Translate = defaultT): strin
     filename: src.filename,
     page: src.page,
     row: src.row,
-    chunk_id: src.id,
+    // Reader-minted chunk id when there is one, else the node id — both
+    // pin the citation to a single chunk.
+    chunk_id: src.chunk_id ?? src.id,
     // Prefer full text over preview_text (which may be truncated).
     text: src.text ?? src.preview_text,
     reference_metadata: src.reference_metadata
