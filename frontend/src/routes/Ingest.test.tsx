@@ -364,4 +364,25 @@ describe('Ingest — interrupted run', () => {
     await waitFor(() => expect(useIngestRunStore.getState().activeJobId).toBeNull())
     expect(screen.queryByText(/interrupted/i)).not.toBeInTheDocument()
   })
+
+  it('clears the queued notice once the job starts running', async () => {
+    // The queued snapshot is served from a cached query with a long
+    // `staleTime`; nothing invalidates it when the job leaves the queue, so
+    // without an active poll the notice outlives the condition it describes.
+    useIngestRunStore.setState({ activeJobId: 'job-1' })
+    knownJobIds.add('job-1')
+    queuedJobIds.add('job-1')
+
+    renderIn(<Ingest />)
+    const notice =
+      'Waiting for a worker slot — this run will start as soon as the current ingest finishes.'
+    await waitFor(() => expect(screen.getByText(notice)).toBeInTheDocument())
+
+    // A worker slot frees up: the server now reports the job as running.
+    queuedJobIds.delete('job-1')
+
+    await waitFor(() => expect(screen.queryByText(notice)).not.toBeInTheDocument(), {
+      timeout: 6000
+    })
+  }, 10000)
 })
