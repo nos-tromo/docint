@@ -103,9 +103,11 @@ The diagram below expands what happens when the UI calls `POST /query` or
 
 ## Request flow: ingesting documents
 
-1. **Client call** — `POST /ingest` or `POST /ingest/upload`
-   (`docint/core/api.py:1126`, `1259`) or the `ingest` CLI
-   (`docint/cli/ingest.py`).
+1. **Client call** — the SPA stages files with `POST /ingest/upload` and
+   then queues one server-owned job with `POST /ingest/finalize`
+   (`docint/core/api.py`, registry in `docint/core/jobs.py`); `POST /ingest`
+   and the `ingest` CLI (`docint/cli/ingest.py`) ingest `DATA_PATH`
+   directly. See `docs/ingestion.md` for the job lifecycle.
 2. **RAG.ingest_docs()** (`docint/core/rag.py`) takes over:
    - Stages source files into the Qdrant sources directory
      (`docint/core/storage/sources.py`).
@@ -175,9 +177,11 @@ replay the complete answer as SSE tokens with a fixed token delay
 (`SIMULATED_STREAM_TOKEN_DELAY_SECONDS`), so the client sees a token-level
 drip feed.
 
-Ingestion via `POST /ingest/upload` (`docint/core/api.py:1259`) is also a
-streaming endpoint, but the stream carries **progress events** (upload,
-processing, done) rather than generated tokens.
+Ingestion streams are also SSE, but carry **progress events** rather than
+generated tokens: `POST /ingest/upload` streams save progress for the bytes
+it is staging, and `GET /ingest/jobs/events` carries the run itself — one
+owner-multiplexed connection, replayed on connect so a reload re-attaches
+mid-run.
 
 ## Configuration surface
 
