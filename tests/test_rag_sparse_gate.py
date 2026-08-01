@@ -12,6 +12,7 @@ import pytest
 
 from docint.core import rag as rag_module
 from docint.core.rag import RAG, RemoteSparseEncoder
+from docint.utils.env_cfg import SparseClientConfig
 
 # `RemoteSparseEncoder` is `@dataclass(slots=True)`, so an instance cannot
 # take on a `_request_json` attribute that shadows the class method (no
@@ -132,3 +133,79 @@ def test_hybrid_off_wires_no_sparse_callbacks(
     assert "fastembed_sparse_model" not in kwargs
     assert "sparse_doc_fn" not in kwargs
     assert kwargs["enable_hybrid"] is False
+
+
+def test_probe_raises_when_sparse_endpoint_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+    rag_instance: RAG,
+) -> None:
+    """An unreachable endpoint fails the job before any batch is written."""
+    rag_instance.enable_hybrid = True
+
+    def _boom(self: RemoteSparseEncoder, url: str, payload: dict[str, object]) -> object:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(rag_module.RemoteSparseEncoder, "_request_json", _boom)
+
+    with pytest.raises(RuntimeError, match="sparse"):
+        rag_instance.probe_sparse_endpoint()
+
+
+def test_probe_is_a_noop_when_hybrid_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    rag_instance: RAG,
+) -> None:
+    """Dense-only ingests must not require a sparse endpoint."""
+    rag_instance.enable_hybrid = False
+
+    def _must_not_run(self: RemoteSparseEncoder, url: str, payload: dict[str, object]) -> object:
+        raise AssertionError("probe must not touch the network when hybrid is off")
+
+    monkeypatch.setattr(rag_module.RemoteSparseEncoder, "_request_json", _must_not_run)
+    rag_instance.probe_sparse_endpoint()
+
+
+def test_probe_passes_when_endpoint_responds(
+    monkeypatch: pytest.MonkeyPatch,
+    rag_instance: RAG,
+) -> None:
+    """A healthy endpoint lets the ingest proceed."""
+    rag_instance.enable_hybrid = True
+
+    def _ok(self: RemoteSparseEncoder, url: str, payload: dict[str, object]) -> object:
+        if url.endswith("/pooling"):
+            return {"data": [{"data": [0.5]}]}
+        return {"tokens": [7]}
+
+    monkeypatch.setattr(rag_module.RemoteSparseEncoder, "_request_json", _ok)
+    rag_instance.probe_sparse_endpoint()
+
+
+def test_probe_targets_the_configured_sparse_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    rag_instance: RAG,
+) -> None:
+    """The probe must use the resolved SPARSE_* config, not some other base.
+
+    Without this, the three tests above would all pass even if the probe
+    built its encoder against the wrong endpoint entirely.
+    """
+    rag_instance.enable_hybrid = True
+    rag_instance.sparse_client_config = SparseClientConfig(
+        api_base="http://sparse-only:8000",
+        api_key=None,
+        timeout=12.0,
+    )
+    seen: list[str] = []
+
+    def _capture(self: RemoteSparseEncoder, url: str, payload: dict[str, object]) -> object:
+        seen.append(url)
+        assert self.timeout == 12.0
+        if url.endswith("/pooling"):
+            return {"data": [{"data": [0.5]}]}
+        return {"tokens": [7]}
+
+    monkeypatch.setattr(rag_module.RemoteSparseEncoder, "_request_json", _capture)
+    rag_instance.probe_sparse_endpoint()
+
+    assert "http://sparse-only:8000/pooling" in seen

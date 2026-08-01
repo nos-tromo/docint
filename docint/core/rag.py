@@ -2765,6 +2765,35 @@ class RAG:
             timeout=sparse_config.timeout if sparse_config else self.openai_timeout,
         )
 
+    def probe_sparse_endpoint(self) -> None:
+        """Verify the sparse endpoint answers before an ingest run starts.
+
+        Sparse encoding is not fail-soft: a transport failure partway
+        through an ingest would write dense-only points into a hybrid
+        collection and corrupt it. Probing once up front converts that
+        into a clean, actionable job failure.
+
+        No-op when hybrid retrieval is disabled.
+
+        Raises:
+            RuntimeError: When hybrid is enabled and the configured sparse
+                endpoint cannot be reached.
+        """
+        if not self.enable_hybrid:
+            return
+
+        encoder = self._build_sparse_encoder()
+        try:
+            encoder.encode_texts(["ping"])
+        except Exception as exc:
+            base = self.sparse_client_config.api_base if self.sparse_client_config else "<unset>"
+            logger.error("Sparse endpoint probe failed against {}: {}", base, exc)
+            raise RuntimeError(
+                f"Hybrid retrieval is enabled but the sparse endpoint at {base} is unreachable: {exc}. "
+                "Point SPARSE_API_BASE at a reachable sparse service (the sparse-only shape listens on "
+                "http://sparse-only:8000), or set ENABLE_HYBRID=false to ingest dense-only."
+            ) from exc
+
     # --- Build pieces ---
     def _vector_store(self) -> QdrantVectorStore:
         """Creates the vector store for document embeddings.
@@ -5938,6 +5967,11 @@ class RAG:
         # batch later fails. A probe failure here surfaces the embedding
         # outage immediately instead of masking it as a zero-node "success".
         self.create_collection_if_missing()
+
+        # Fail before any file preparation, node parsing, or batch work: a
+        # sparse transport failure discovered mid-run would already have
+        # written dense-only points into a hybrid collection.
+        self.probe_sparse_endpoint()
 
         prepared_dir = self._prepare_sources_dir(Path(data_dir) if isinstance(data_dir, str) else data_dir)
         self.data_dir = prepared_dir
