@@ -19,6 +19,17 @@ describe('Citation', () => {
     expect(screen.getByRole('button', { name: /translate/i })).toBeInTheDocument()
   })
 
+  it('does not display the relevance score', () => {
+    const qc = new QueryClient()
+    render(
+      <QueryClientProvider client={qc}>
+        <Citation source={{ id: 's1', filename: 'f.pdf', text: 'Hola', score: 0.842 } as never} />
+      </QueryClientProvider>
+    )
+    expect(screen.queryByText('0.842')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'f.pdf' })).toBeInTheDocument()
+  })
+
   it('caps the metadata value track so unbreakable values cannot overflow the card', async () => {
     // Same regression class as the analysis tables: a plain `1fr` value track
     // is floored at min-content, so an unbreakable URL widens the dl past the

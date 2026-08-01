@@ -20,7 +20,7 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks())
 
 describe('EntityFinding', () => {
-  it('renders score, filetype and reader as pills; drops chunk id and file hash', () => {
+  it('renders filetype and reader as pills; drops score, chunk id and file hash', () => {
     const source: NerSourceRow = {
       chunk_id: 'chunk-42',
       filename: 'paper.pdf',
@@ -50,8 +50,10 @@ describe('EntityFinding', () => {
     expect(screen.getByText('page 7')).toBeInTheDocument()
     // Metadata is a curated pill list.
     const pills = screen.getByTestId('metadata-pills')
-    expect(within(pills).getByText('Score')).toBeInTheDocument()
-    expect(within(pills).getByText('0.840')).toBeInTheDocument()
+    // Retrieval scores are export-only — they carry no meaning for a reader
+    // scanning findings, so the UI drops them.
+    expect(within(pills).queryByText('Score')).not.toBeInTheDocument()
+    expect(within(pills).queryByText('0.840')).not.toBeInTheDocument()
     expect(within(pills).getByText('application/pdf')).toBeInTheDocument()
     expect(within(pills).getByText('core_pdf')).toBeInTheDocument()
     expect(within(pills).getByText(/^Author$/)).toBeInTheDocument()
@@ -62,7 +64,7 @@ describe('EntityFinding', () => {
     expect(screen.getByText('The quick brown')).toBeInTheDocument()
   })
 
-  it('renders matched mentions with score and excludes mismatched types', () => {
+  it('collapses repeated mentions into one counted pill and excludes mismatched types', () => {
     const source: NerSourceRow = {
       chunk_id: 'c1',
       filename: 'a.pdf',
@@ -70,7 +72,7 @@ describe('EntityFinding', () => {
       chunk_text: 'Berlin Berlin Berlin.',
       entities: [
         { text: 'Berlin', type: 'LOC', score: 0.77 },
-        { text: 'Berlin', type: 'LOC', score: 0.81 },
+        { text: 'berlin', type: 'loc', score: 0.81 },
         { text: 'Paris', type: 'LOC', score: 0.5 }
       ]
     }
@@ -87,10 +89,37 @@ describe('EntityFinding', () => {
       </QueryClientProvider>
     )
     const mentions = screen.getByLabelText(/matched mentions/i)
-    expect(within(mentions).getAllByText('Berlin')).toHaveLength(2)
+    // One pill per distinct surface+type, with the occurrence count instead of
+    // a repeated row; the text highlights still mark every occurrence.
+    expect(within(mentions).getAllByText('Berlin')).toHaveLength(1)
+    expect(within(mentions).getByText(/×2/)).toBeInTheDocument()
     expect(within(mentions).queryByText('Paris')).not.toBeInTheDocument()
-    expect(within(mentions).getByText(/0\.770/)).toBeInTheDocument()
-    expect(within(mentions).getByText(/0\.810/)).toBeInTheDocument()
+    // Per-mention confidence scores are gone from the UI.
+    expect(within(mentions).queryByText(/0\.770/)).not.toBeInTheDocument()
+    expect(within(mentions).queryByText(/0\.810/)).not.toBeInTheDocument()
+  })
+
+  it('omits the count for a mention that occurs once', () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <EntityFinding
+          index={1}
+          source={{
+            chunk_id: 'c1',
+            filename: 'a.pdf',
+            chunk_text: 'Berlin.',
+            entities: [{ text: 'Berlin', type: 'LOC', score: 0.77 }]
+          }}
+          highlightTerms={['Berlin']}
+          selectedTypeLower="loc"
+          gridTemplate={GRID}
+        />
+      </QueryClientProvider>
+    )
+    const mentions = screen.getByLabelText(/matched mentions/i)
+    expect(within(mentions).getByText('Berlin')).toBeInTheDocument()
+    expect(within(mentions).queryByText(/×\d/)).not.toBeInTheDocument()
   })
 
   it('renders an Open original link only when collection and file_hash are present', () => {

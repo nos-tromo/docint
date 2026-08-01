@@ -14,8 +14,3 @@ export function sourceLabel(
   }
   return s.filename
 }
-
-export function formatScore(n: number | null | undefined): string {
-  if (n === null || n === undefined) return ''
-  return n.toFixed(3)
-}
