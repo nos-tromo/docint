@@ -2,10 +2,12 @@ import { describe, it, expect } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { DocumentTable } from './DocumentTable'
 import type { DocumentRecord } from '@/api/types'
+import { useUiStore } from '@/stores/ui'
+import userEvent from '@testing-library/user-event'
 
 const DOCS: DocumentRecord[] = [
   {
-    filename: '1760687137_79cf.jpg',
+    filename: 'field_photo_014.jpg',
     file_hash: 'abd4fc7803e1e8d1c7e2b92e8d8fb9d64f4b26b3',
     mimetype: 'image/jpeg',
     page_count: 0,
@@ -14,7 +16,7 @@ const DOCS: DocumentRecord[] = [
     entity_types: ['loc', 'org', 'person']
   },
   {
-    filename: 'afd_postings.csv',
+    filename: 'network_postings.csv',
     file_hash: '05dccacd5843d3f948e2d3cf94e9471ace41207c',
     mimetype: 'text/csv',
     row_count: 138,
@@ -62,7 +64,7 @@ describe('DocumentTable', () => {
     expect(screen.getByText('abd4fc78')).toBeInTheDocument()
     expect(screen.getByText('05dccacd')).toBeInTheDocument()
     expect(
-      screen.getByRole('button', { name: 'Copy hash for 1760687137_79cf.jpg' })
+      screen.getByRole('button', { name: 'Copy hash for field_photo_014.jpg' })
     ).toBeInTheDocument()
   })
 
@@ -77,5 +79,31 @@ describe('DocumentTable', () => {
     render(<DocumentTable docs={[]} collection="mydocs" isFetching={false} />)
     expect(screen.getByText('No documents in this collection yet.')).toBeInTheDocument()
     expect(screen.queryByText('Filename')).not.toBeInTheDocument()
+  })
+})
+
+describe('DocumentTable document preview', () => {
+  it('opens the shared preview dialog for a listed document', async () => {
+    useUiStore.setState({ selectedCollection: 'mydocs', previewModal: null })
+    render(<DocumentTable docs={[DOCS[1]]} collection="mydocs" />)
+
+    await userEvent.click(screen.getByRole('button', { name: /preview/i }))
+
+    expect(useUiStore.getState().previewModal).toEqual({
+      collection: 'mydocs',
+      file_hash: DOCS[1].file_hash,
+      filename: 'network_postings.csv'
+    })
+  })
+
+  it('makes each row a hover group so the action can reveal itself', () => {
+    // HoverIconAction ships opacity-0 + group-hover:opacity-100, so without a
+    // `group` ancestor the control is mounted but permanently invisible to
+    // mouse users (jsdom cannot see that, hence the class assertion).
+    useUiStore.setState({ selectedCollection: 'mydocs', previewModal: null })
+    render(<DocumentTable docs={[DOCS[1]]} collection="mydocs" />)
+
+    const action = screen.getByRole('button', { name: /preview/i })
+    expect(action.closest('.group')).not.toBeNull()
   })
 })
