@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from anyio import to_thread
 from loguru import logger
@@ -67,6 +67,9 @@ class JobStatus(StrEnum):
     FAILED = "failed"
 
 
+TERMINAL_STATUSES: frozenset[JobStatus] = frozenset({JobStatus.COMPLETED, JobStatus.FAILED})
+
+
 @dataclass
 class IngestJobState:
     """Mutable state for one queued, running, or finished ingest job.
@@ -97,8 +100,15 @@ class IngestJobState:
     finished_at: datetime | None = None
     _started_frame: str | None = field(default=None, repr=False)
     _warning_frames: list[str] = field(default_factory=list, repr=False)
+    _dropped_warnings: int = field(default=0, repr=False)
     _progress_frame: str | None = field(default=None, repr=False)
     _terminal_frame: str | None = field(default=None, repr=False)
+
+    # Warnings are the only event class replayed in full, so a run where most
+    # files warn would otherwise grow the history without bound and replay all
+    # of it to every reattaching tab. The earliest are kept: they explain what
+    # started going wrong, and later ones are usually the same cause repeating.
+    MAX_RETAINED_WARNINGS: ClassVar[int] = 100
 
     def record(self, event_name: str, frame: str) -> None:
         """Fold a frame into the collapsed replay history.
@@ -116,7 +126,10 @@ class IngestJobState:
         if event_name == "ingestion_started":
             self._started_frame = frame
         elif event_name == "warning":
-            self._warning_frames.append(frame)
+            if len(self._warning_frames) < self.MAX_RETAINED_WARNINGS:
+                self._warning_frames.append(frame)
+            else:
+                self._dropped_warnings += 1
         elif event_name == "ingestion_progress":
             self._progress_frame = frame
         elif event_name in TERMINAL_EVENTS:
@@ -135,14 +148,22 @@ class IngestJobState:
         """Return the collapsed frames a reattaching client should replay.
 
         Returns:
-            list[str]: ``ingestion_started``, then every ``warning``, then the
-            latest ``ingestion_progress``, then the terminal frame — each
-            omitted if it has not occurred yet.
+            list[str]: ``ingestion_started``, then the retained ``warning``
+            frames (plus a sentinel naming how many were dropped, when the
+            cap was hit), then the latest ``ingestion_progress``, then the
+            terminal frame — each omitted if it has not occurred yet.
         """
         frames: list[str] = []
         if self._started_frame is not None:
             frames.append(self._started_frame)
         frames.extend(self._warning_frames)
+        if self._dropped_warnings:
+            frames.append(
+                format_sse(
+                    "warning",
+                    {"message": f"{self._dropped_warnings} further warnings omitted."},
+                )
+            )
         if self._progress_frame is not None:
             frames.append(self._progress_frame)
         if self._terminal_frame is not None:
@@ -186,9 +207,18 @@ class IngestJobManager:
     history before live-tailing — so a browser that reloads mid-run re-attaches
     and resumes the live view.
 
-    There is no durable storage and no TTL: a job is retained until its owner
-    removes it or the process exits.
+    There is no durable storage: jobs do not survive a process restart. A job
+    is retained until its owner removes it, except that finishing a run evicts
+    that owner's oldest *terminal* jobs beyond
+    :attr:`MAX_TERMINAL_JOBS_PER_OWNER` — a client that never dismisses would
+    otherwise grow the process without bound. Queued and running jobs are
+    never evicted.
     """
+
+    # Finished jobs an owner may accumulate before the oldest are evicted.
+    # A client that never dismisses would otherwise grow the process without
+    # bound; the SPA only ever needs the newest, so this is generous.
+    MAX_TERMINAL_JOBS_PER_OWNER: ClassVar[int] = 50
 
     def __init__(self, runner: JobRunner, concurrency: int | None = None) -> None:
         """Initialize the manager.
@@ -534,6 +564,19 @@ class IngestJobManager:
         Args:
             state (IngestJobState): The job to process.
         """
+        try:
+            await self._run(state)
+        finally:
+            # Both terminal paths (completed and failed) land here, so the
+            # owner's finished-job backlog is trimmed exactly once per run.
+            await self._prune_terminal(state.owner)
+
+    async def _run(self, state: IngestJobState) -> None:
+        """Execute the job body, holding a worker slot for its duration.
+
+        Args:
+            state (IngestJobState): The job to process.
+        """
         async with self._semaphore:
             state.status = JobStatus.RUNNING
             state.started_at = _utcnow()
@@ -616,6 +659,26 @@ class IngestJobManager:
             if state.resolution is not None:
                 terminal["resolution"] = state.resolution
             _emit("ingestion_complete", terminal)
+
+    async def _prune_terminal(self, owner: str) -> None:
+        """Drop an owner's oldest finished jobs beyond the retention cap.
+
+        The registry is in-memory with no durable storage, and a job is
+        otherwise retained until its owner explicitly dismisses it — so a
+        client that never dismisses makes the process grow without bound.
+        Only terminal jobs are eligible: dropping a queued or running one
+        would strand a worker with no way for the owner to observe it.
+
+        Args:
+            owner (str): The principal whose backlog to trim.
+        """
+        async with self._lock:
+            terminal = sorted(
+                (s for s in self._jobs.values() if s.owner == owner and s.status in TERMINAL_STATUSES),
+                key=lambda s: s.finished_at or s.created_at,
+            )
+            for state in terminal[: max(len(terminal) - self.MAX_TERMINAL_JOBS_PER_OWNER, 0)]:
+                del self._jobs[state.job_id]
 
     def _dispatch(self, state: IngestJobState, event_name: str, frame: str) -> None:
         """Record a frame in history and fan it out.

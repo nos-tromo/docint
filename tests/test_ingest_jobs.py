@@ -361,3 +361,108 @@ async def test_remove_refuses_a_running_job() -> None:
     gate.set()
     await _drain(manager, state)
     await manager.stop()
+
+
+def test_warning_history_is_capped_with_a_dropped_count() -> None:
+    """A pathological run must not retain every warning frame forever.
+
+    Warnings are the one event class kept in full for replay, so a run where
+    most files warn grows the history without bound and replays all of it to
+    every reattaching tab.
+    """
+    state = IngestJobState(
+        job_id="j1",
+        owner="alice",
+        logical_name="mydocs",
+        physical="p1",
+        batch_dir=Path("/nonexistent/batch"),
+        hybrid=True,
+        ner=None,
+        hate_speech=None,
+        resolve=False,
+    )
+    overflow = IngestJobState.MAX_RETAINED_WARNINGS + 5
+    for i in range(overflow):
+        state.record("warning", format_sse("warning", {"message": f"skipped file {i}"}))
+
+    history = state.history()
+    assert len(history) == IngestJobState.MAX_RETAINED_WARNINGS + 1
+
+    # The earliest warnings are kept - they explain what started going wrong.
+    assert "skipped file 0" in history[0]
+    # The client is told what it is not seeing rather than silently losing it.
+    assert "5" in history[-1]
+
+
+def test_warning_history_uncapped_below_the_limit() -> None:
+    """A normal run keeps every warning and gains no sentinel frame."""
+    state = IngestJobState(
+        job_id="j1",
+        owner="alice",
+        logical_name="mydocs",
+        physical="p1",
+        batch_dir=Path("/nonexistent/batch"),
+        hybrid=True,
+        ner=None,
+        hate_speech=None,
+        resolve=False,
+    )
+    for i in range(3):
+        state.record("warning", format_sse("warning", {"message": f"skipped file {i}"}))
+
+    assert len(state.history()) == 3
+
+
+@pytest.mark.anyio
+async def test_terminal_jobs_are_capped_per_owner() -> None:
+    """Finished jobs must not accumulate for a client that never dismisses.
+
+    The registry is in-memory and only pruned by an explicit client dismiss,
+    so a long-lived backend otherwise retains every job an owner ever ran.
+    """
+    manager = IngestJobManager(runner=_noop_runner)
+    cap = IngestJobManager.MAX_TERMINAL_JOBS_PER_OWNER
+
+    created = []
+    for i in range(cap + 3):
+        state = await _create(manager, physical=f"p{i}")
+        await _drain(manager, state)
+        created.append(state)
+
+    retained = await manager.list_for_owner("alice")
+    assert len(retained) == cap
+
+    # The oldest terminal jobs are the ones evicted.
+    retained_ids = {s.job_id for s in retained}
+    assert created[0].job_id not in retained_ids
+    assert created[-1].job_id in retained_ids
+
+
+@pytest.mark.anyio
+async def test_eviction_never_drops_an_unfinished_job() -> None:
+    """A still-running job survives eviction regardless of the cap.
+
+    Dropping one would strand a worker writing to Qdrant with no way for the
+    owner to observe it.
+    """
+    import threading
+
+    gate = threading.Event()
+
+    def _hold_one(state: IngestJobState, push: Callable[[str, dict[str, Any]], None]) -> dict[str, Any]:
+        """Block forever on the "held" job; finish every other immediately."""
+        if state.physical == "held":
+            gate.wait(timeout=5)
+        return {"empty": False, "resolution": None}
+
+    manager = IngestJobManager(runner=_hold_one, concurrency=8)
+    cap = IngestJobManager.MAX_TERMINAL_JOBS_PER_OWNER
+
+    in_flight = await _create(manager, physical="held")
+    for i in range(cap + 2):
+        await _drain(manager, await _create(manager, physical=f"p{i}"))
+
+    retained_ids = {s.job_id for s in await manager.list_for_owner("alice")}
+    assert in_flight.job_id in retained_ids
+    assert in_flight.status is not JobStatus.COMPLETED
+    gate.set()
