@@ -21,6 +21,7 @@ import pytest
 from docint.utils.env_cfg import (
     load_embedding_env,
     load_frontend_env,
+    load_image_ingestion_config,
     load_model_env,
     load_resolution_env,
     load_retrieval_env,
@@ -822,3 +823,31 @@ def test_load_ingest_concurrency_falls_back_on_garbage(monkeypatch: pytest.Monke
     from docint.utils.env_cfg import load_ingest_concurrency
 
     assert load_ingest_concurrency() == 1
+
+
+def test_image_rerank_min_score_default() -> None:
+    """The image relevance floor defaults to a value that clears CLIP noise.
+
+    Live calibration put "a relevant image exists" at reranker scores of 0.12-0.90
+    and "nothing relevant exists" at 0.0037 and below, so the default sits between.
+    """
+    import os
+
+    os.environ.pop("IMAGE_RERANK_MIN_SCORE", None)
+
+    cfg = load_image_ingestion_config()
+
+    assert cfg.rerank_min_score == 0.05
+
+
+def test_image_rerank_min_score_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Operators must be able to retune the image relevance floor.
+
+    Args:
+        monkeypatch: Fixture to override environment variables.
+    """
+    monkeypatch.setenv("IMAGE_RERANK_MIN_SCORE", "0.25")
+
+    cfg = load_image_ingestion_config()
+
+    assert cfg.rerank_min_score == 0.25

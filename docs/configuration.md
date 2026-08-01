@@ -260,7 +260,28 @@ Loaded by `load_image_ingestion_config()` (`env_cfg.py:264`).
 | `IMAGE_FAIL_ON_EMBED_ERROR` | `false` | Treat embedding failures as fatal. |
 | `IMAGE_FAIL_ON_TAG_ERROR` | `false` | Treat tagging failures as fatal. |
 | `IMAGE_RETRIEVE_TOP_K` | `5` | Top-K image matches per text query. |
+| `IMAGE_RERANK_MIN_SCORE` | `0.05` | Minimum reranker relevance score for a retrieved image to surface as a source. |
 | `IMAGE_TAGGING_MAX_IMAGE_DIM` | `1024` | Max dimension for images sent to the vision tagging endpoint. |
+
+Image retrieval runs in two stages. CLIP generates candidates, then the reranker
+scores their captions and `IMAGE_RERANK_MIN_SCORE` drops the ones that are merely
+nearest rather than relevant.
+
+The floor is applied to the **reranker** score, not to CLIP similarity, because raw
+CLIP cosine is not comparable across queries — measured on a live collection, an
+unrelated query and a genuinely matching one both land in a ~0.20–0.30 band, so no
+absolute CLIP threshold separates them. Reranker scores do separate: "a relevant
+image exists" measured 0.12–0.90 while "nothing relevant exists" measured 0.0037 and
+below. Raise the floor to make the image lane stricter; set it to `0` to surface every
+CLIP candidate (the pre-gate behavior). If the rerank endpoint is unreachable the lane
+degrades to ungated CLIP matches rather than going silent.
+
+Because the deployed CLIP checkpoint (`openai/clip-vit-base-patch32`) has an
+English-only text tower, queries are translated to English before embedding whenever
+`RESPONSE_LANGUAGE` is not English. The translation reuses the chat model via
+`TRANSLATE_MODEL` and is cached; an outage degrades to embedding the untranslated
+query. Note this keys off the configured locale, not the language actually typed — a
+German query in an English-locale deployment is not translated.
 
 ## NER — `NERConfig`
 
