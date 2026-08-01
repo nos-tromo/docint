@@ -21,6 +21,8 @@ import { useT } from '@/i18n/LanguageContext'
  * never 413 even before the real `max_upload_bytes` is known.
  */
 const FALLBACK_UPLOAD_LIMIT_BYTES = 512 * 1024 * 1024
+/** How often to re-check a job that is still waiting on a worker slot. */
+const QUEUED_POLL_INTERVAL_MS = 2_000
 
 export function Ingest() {
   const t = useT()
@@ -35,7 +37,13 @@ export function Ingest() {
     queryFn: () => getIngestJob(run.activeJobId!),
     enabled: !!run.activeJobId,
     retry: false,
-    staleTime: 30_000
+    staleTime: 30_000,
+    // A queued job emits no SSE frames until a worker slot frees up, so
+    // nothing else would refresh this snapshot — the "waiting for a slot"
+    // notice would outlive the queue by up to `staleTime`. Poll only while
+    // queued; every other status is driven by the event stream.
+    refetchInterval: (query) =>
+      query.state.data?.status === 'queued' ? QUEUED_POLL_INTERVAL_MS : false
   })
   const { data: ingestDefaults } = useIngestDefaults()
   const { data: collections } = useCollections()
