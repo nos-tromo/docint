@@ -976,7 +976,7 @@ def load_model_env(
     default_embed_model: str = "bge-m3",
     default_ner_model: str = "gliner-community/gliner_large-v2.5",
     default_rerank_model: str = "BAAI/bge-reranker-v2-m3",
-    default_sparse_model: str = "Qdrant/all_miniLM_L6_v2_with_attentions",
+    default_sparse_model: str = "BAAI/bge-m3",
     default_text_model: str = "gpt-oss:20b",
     default_vision_model: str = "qwen3.5:9b",
 ) -> ModelConfig:
@@ -999,7 +999,9 @@ def load_model_env(
           tokenization happens on the provider side (e.g. ``openai``).
         - ner_model (str): The NER model identifier.
         - rerank_model (str): The reranker model identifier.
-        - sparse_model (str): The sparse model identifier.
+        - sparse_model (str): The sparse model identifier, served remotely.
+          Always ``BAAI/bge-m3`` regardless of ``INFERENCE_PROVIDER`` — sparse
+          encoding is never local, so there is no per-provider default to pick.
         - text_model (str): The text model identifier.
         - translate_model (str): The translation model identifier. Defaults
           to the resolved ``text_model`` so translation reuses the
@@ -1012,7 +1014,6 @@ def load_model_env(
 
     if inference_provider == "vllm":
         default_embed_model = "BAAI/bge-m3"
-        default_sparse_model = default_embed_model
         default_text_model = "Qwen/Qwen3.5-2B"
         default_vision_model = "Qwen/Qwen3.5-2B"
 
@@ -1033,6 +1034,30 @@ def load_model_env(
         translate_model=os.getenv("TRANSLATE_MODEL", text_model),
         vision_model=os.getenv("VISION_MODEL", default_vision_model),
     )
+
+
+def resolve_enable_hybrid() -> bool:
+    """Decide whether hybrid (dense + sparse) retrieval is enabled.
+
+    Sparse encoding is always remote, so hybrid is only safe where a
+    sparse endpoint actually serves ``/pooling`` and ``/tokenize``. That
+    cannot be inferred from ``SPARSE_API_BASE`` being non-empty, because
+    it inherits ``OPENAI_API_BASE`` and is therefore never empty. Two
+    signals stand in for it: the vLLM provider (whose router exposes both
+    routes as pass-throughs) and an explicitly set ``SPARSE_API_BASE``
+    (the sparse-only deployment shape). An explicit ``ENABLE_HYBRID``
+    overrides both.
+
+    Returns:
+        bool: True when hybrid retrieval should be enabled.
+    """
+    explicit = os.getenv("ENABLE_HYBRID")
+    if explicit is not None and explicit.strip():
+        return explicit.strip().lower() in {"1", "true", "yes", "on"}
+
+    provider = os.getenv("INFERENCE_PROVIDER", "ollama").strip().lower()
+    has_explicit_sparse_base = bool(os.getenv("SPARSE_API_BASE", "").strip())
+    return provider == "vllm" or has_explicit_sparse_base
 
 
 @dataclass(frozen=True)
