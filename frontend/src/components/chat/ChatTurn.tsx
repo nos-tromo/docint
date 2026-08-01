@@ -4,6 +4,7 @@ import { useTheme } from '@infra/ui'
 import { cn } from '@/lib/cn'
 import type { ChatFinalEvent, Source } from '@/api/types'
 import { Citation } from './Citation'
+import { AnswerEntities } from './AnswerEntities'
 import { ValidationBanner } from './ValidationBanner'
 import { GraphDebugPanel } from './GraphDebugPanel'
 import { EntityCandidatesPanel } from './EntityCandidatesPanel'
@@ -110,6 +111,9 @@ export function ChatTurn({
           </div>
         )}
         {turn.meta && <ValidationBanner v={turn.meta} />}
+        {/* The entities summarize what the answer is about, so they sit
+            between the answer and the evidence it rests on. */}
+        <AnswerEntities sources={sources} />
         {sources.length > 0 && (
           <div className="mt-3 space-y-2">
             <div className="text-xs uppercase text-muted-foreground">{t('chat.sources')}</div>
