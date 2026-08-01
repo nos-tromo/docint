@@ -3,6 +3,7 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Citation } from './Citation'
+import { useUiStore } from '@/stores/ui'
 
 describe('Citation', () => {
   it('offers a Translate control when the source has text', async () => {
@@ -80,5 +81,38 @@ describe('Citation', () => {
     await userEvent.click(screen.getByRole('button', { name: 'f.pdf' }))
     const dl = document.querySelector('dl')
     expect(dl?.className).toContain('grid-cols-[auto_minmax(0,1fr)]')
+  })
+
+  it('opens the preview dialog from the header instead of leaving the app', async () => {
+    // The old full-width "Open original" anchor cost a row inside the
+    // expanded panel and navigated away; the preview is now an icon action in
+    // the header row, next to Translate.
+    useUiStore.setState({ selectedCollection: 'docs', previewModal: null })
+    const qc = new QueryClient()
+    render(
+      <QueryClientProvider client={qc}>
+        <Citation source={{ id: 's1', filename: 'f.pdf', file_hash: 'h1' } as never} />
+      </QueryClientProvider>
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: /preview/i }))
+
+    expect(useUiStore.getState().previewModal).toEqual({
+      collection: 'docs',
+      file_hash: 'h1',
+      filename: 'f.pdf'
+    })
+    expect(screen.queryByRole('link', { name: /original/i })).not.toBeInTheDocument()
+  })
+
+  it('omits the preview action when the source has no stored file', () => {
+    useUiStore.setState({ selectedCollection: 'docs', previewModal: null })
+    const qc = new QueryClient()
+    render(
+      <QueryClientProvider client={qc}>
+        <Citation source={{ id: 's1', filename: 'f.pdf' } as never} />
+      </QueryClientProvider>
+    )
+    expect(screen.queryByRole('button', { name: /preview/i })).not.toBeInTheDocument()
   })
 })
