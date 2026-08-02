@@ -15,6 +15,19 @@ and chat. It ships with:
 - an inference backend: any OpenAI-compatible endpoint configured via `.env`
   - vLLM is deployed separately and consumed via one routed base URL
   - local development needs an OpenAI-compatible endpoint you manage yourself
+  - on a non-CUDA dev host, `vllm-service` also ships standalone CPU-only
+    profiles for the services Docint calls remotely: `gliner-only`
+    (NER), `rerank-only`, `clip-only`, and `sparse-only`. Point
+    `NER_API_BASE` / `RERANK_API_BASE` / `CLIP_API_BASE` /
+    `SPARSE_API_BASE` at each dedicated container instead of the full
+    router — see `docs/configuration.md` for the per-service defaults.
+
+> **Re-ingest note:** the sparse model changed from BM42
+> (`Qdrant/all_miniLM_L6_v2_with_attentions`) to `BAAI/bge-m3` for
+> non-vLLM providers. Dev collections created before this change need a
+> **one-time re-ingest** to get bge-m3 sparse vectors — the two models'
+> vectors aren't interchangeable. Production (vLLM) collections already
+> used bge-m3 and are unaffected.
 
 ## Quick Start With Docker
 
