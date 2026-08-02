@@ -194,7 +194,7 @@ sources you do not control.
 
 ## Sparse encoder & hybrid retrieval — `SparseClientConfig`
 
-Loaded by `load_sparse_client_env()` (`env_cfg.py:1423`) and
+Loaded by `load_sparse_client_env()` (`env_cfg.py:1440`) and
 `resolve_enable_hybrid()` (`env_cfg.py:1025`). Sparse embedding is a
 remote HTTP call on every provider — `RemoteSparseEncoder` POSTs to
 `{SPARSE_API_BASE}/pooling` (`task: token_classify`) and

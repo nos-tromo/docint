@@ -1045,13 +1045,30 @@ def resolve_enable_hybrid() -> bool:
     Returns:
         bool: True when hybrid retrieval should be enabled.
     """
+    true_values = {"1", "true", "yes", "on"}
+    false_values = {"0", "false", "no", "off"}
+
     explicit = os.getenv("ENABLE_HYBRID")
     if explicit is not None and explicit.strip():
-        return explicit.strip().lower() in {"1", "true", "yes", "on"}
+        normalized = explicit.strip().lower()
+        if normalized not in true_values and normalized not in false_values:
+            logger.warning(
+                "ENABLE_HYBRID={!r} is not a recognized boolean; treating as false.",
+                explicit,
+            )
+        resolved = normalized in true_values
+        logger.info("Hybrid retrieval resolved to {} (explicit ENABLE_HYBRID={!r}).", resolved, explicit)
+        return resolved
 
     provider = os.getenv("INFERENCE_PROVIDER", "ollama").strip().lower()
     has_explicit_sparse_base = bool(os.getenv("SPARSE_API_BASE", "").strip())
-    return provider == "vllm" or has_explicit_sparse_base
+    resolved = provider == "vllm" or has_explicit_sparse_base
+    if resolved:
+        signal = "INFERENCE_PROVIDER=vllm" if provider == "vllm" else "SPARSE_API_BASE is explicitly set"
+    else:
+        signal = "INFERENCE_PROVIDER != vllm and SPARSE_API_BASE is unset"
+    logger.info("Hybrid retrieval resolved to {} ({}).", resolved, signal)
+    return resolved
 
 
 @dataclass(frozen=True)
