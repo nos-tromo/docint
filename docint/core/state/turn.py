@@ -28,4 +28,13 @@ class Turn(Base):  # type: ignore[misc]
     validation_reason = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.now(UTC), nullable=False)
     conversation = relationship("Conversation", back_populates="turns")
-    citations = relationship("Citation", back_populates="turn", cascade="all, delete-orphan")
+    # Ordered by insertion id: citations are written in ``source_nodes``
+    # order, which is the order the generator numbered them in. Replay reads
+    # the number off that position, so an unordered relationship would hand
+    # the chat window a different numbering than the stored answer used.
+    citations = relationship(
+        "Citation",
+        back_populates="turn",
+        cascade="all, delete-orphan",
+        order_by="Citation.id",
+    )

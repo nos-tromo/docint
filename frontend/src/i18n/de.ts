@@ -90,6 +90,7 @@ export const de: Strings = {
   'chat.no_answer': '(keine Antwort)',
   'chat.error_title': 'Chat-Fehler',
   'chat.sources': 'Quellen',
+  'chat.source_number': 'Quelle {n}',
   'chat.ask_placeholder': 'Etwas fragen…',
   'chat.send': 'Senden',
   'chat.query_mode': 'Abfragemodus',

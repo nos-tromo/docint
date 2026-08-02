@@ -239,6 +239,26 @@ Stop the Docker stack:
 make stop
 ```
 
+## Numbered Chat Citations
+
+Answers refer to their evidence by number ("source 3"), and the chat window's
+source cards carry the matching number. The number is assigned server-side
+before generation: the last node postprocessor stamps `citation_index` onto
+the snippet set the synthesizer renders, so the model reads its number instead
+of counting, and the same value rides the source payload out to the SPA.
+
+Two consequences follow from that, both deliberate:
+
+- **The list can have gaps.** The SPA drops broken-preview duplicates from the
+  card list; the surviving cards keep their original numbers rather than
+  closing the gap, because renumbering would break the link to the answer.
+- **Some cards have no number.** Image matches are retrieved *after*
+  generation, so the answer cannot have cited them and they stay unnumbered.
+
+Conversations replayed from the session DB take their numbers from citation
+row order, which is the order the generator saw. Answers written before this
+feature still contain hand-counted ordinals that may not line up.
+
 ## Server-Side Exports For Large Collections
 
 The React UI streams collection-wide CSVs from the backend so the browser

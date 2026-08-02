@@ -30,6 +30,34 @@ describe('Citation', () => {
     expect(screen.getByRole('button', { name: 'f.pdf' })).toBeInTheDocument()
   })
 
+  it('shows the number the generator cited the source by', () => {
+    // Answers refer to "source 3"; the number comes from the backend
+    // (`citation_index`), never from the card's position — the list is
+    // deduped and image matches are appended after generation, so position
+    // and the model's numbering drift apart.
+    const qc = new QueryClient()
+    render(
+      <QueryClientProvider client={qc}>
+        <Citation source={{ id: 's1', filename: 'f.pdf', text: 'Hola', citation_index: 3 } as never} />
+      </QueryClientProvider>
+    )
+    expect(screen.getByText('3')).toBeInTheDocument()
+    // The label stays the button's whole accessible name.
+    expect(screen.getByRole('button', { name: 'f.pdf' })).toBeInTheDocument()
+  })
+
+  it('leaves a source the generator never saw unnumbered', () => {
+    // Image matches are retrieved after generation, so the answer cannot
+    // have cited them — a number here would invite a lookup that fails.
+    const qc = new QueryClient()
+    render(
+      <QueryClientProvider client={qc}>
+        <Citation source={{ id: 's1', filename: 'shot.png', text: 'Hola' } as never} />
+      </QueryClientProvider>
+    )
+    expect(screen.queryByTitle(/^Source /)).not.toBeInTheDocument()
+  })
+
   it('caps the metadata value track so unbreakable values cannot overflow the card', async () => {
     // Same regression class as the analysis tables: a plain `1fr` value track
     // is floored at min-content, so an unbreakable URL widens the dl past the

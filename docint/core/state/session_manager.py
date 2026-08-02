@@ -7,7 +7,7 @@ import json
 import threading
 import uuid
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC
 from pathlib import Path
@@ -895,60 +895,114 @@ class SessionManager:
                 return []
 
             messages = []
-            for t in conv.turns:
-                # User message
-                messages.append({"role": "user", "content": t.user_text})
+            # Citations persist only a node id; the text is rehydrated from
+            # the collection's store. That lookup is collection-scoped, so
+            # replaying history has to re-bind the conversation's pinned
+            # collection -- the read endpoints take no ``collection`` param,
+            # and without this the lookup resolves against the ambient
+            # collection and silently returns sources with no text.
+            with self._pinned_collection_scope(conv):
+                for t in conv.turns:
+                    # User message
+                    messages.append({"role": "user", "content": t.user_text})
 
-                # Assistant message
-                sources = []
-                for c in t.citations:
-                    src: dict[str, Any] | None = None
-                    if c.node_id:
-                        try:
-                            src = self.rag.get_source_by_node_id(
-                                c.node_id,
-                                score=c.score,
-                            )
-                        except Exception:
-                            src = None
+                    # Assistant message
+                    # Citation rows are ordered by insertion id, which is the
+                    # order the generator numbered them in, so position is the
+                    # number the stored answer's "source 2" refers to.
+                    sources = [
+                        self._rehydrate_citation(c, citation_index=index)
+                        for index, c in enumerate(t.citations, start=1)
+                    ]
 
-                    text_val = ""
-                    if src is None:
-                        if c.node_id:
-                            try:
-                                text_val = self._get_node_text_by_id(c.node_id) or ""
-                            except Exception:
-                                text_val = ""
-                        src = {
-                            "text": text_val,
-                            "preview_text": text_val[:280].strip() if text_val else "",
-                        }
-
-                    src.setdefault("filename", c.filename)
-                    src.setdefault("filetype", c.filetype)
-                    src.setdefault("source", c.source)
-                    src.setdefault("score", c.score)
-                    if c.page is not None:
-                        src.setdefault("page", c.page)
-                    if c.row is not None:
-                        src.setdefault("row", c.row)
-                    src.setdefault("file_hash", c.file_hash)
-                    sources.append(src)
-
-                msg_entry = {
-                    "role": "assistant",
-                    "content": t.model_response,
-                    "sources": sources,
-                }
-                if t.reasoning:
-                    msg_entry["reasoning"] = t.reasoning
-                if t.validation_checked is not None or t.validation_reason is not None:
-                    msg_entry["validation_checked"] = t.validation_checked
-                    msg_entry["validation_mismatch"] = t.validation_mismatch
-                    msg_entry["validation_reason"] = t.validation_reason
-                messages.append(msg_entry)
+                    msg_entry = {
+                        "role": "assistant",
+                        "content": t.model_response,
+                        "sources": sources,
+                    }
+                    if t.reasoning:
+                        msg_entry["reasoning"] = t.reasoning
+                    if t.validation_checked is not None or t.validation_reason is not None:
+                        msg_entry["validation_checked"] = t.validation_checked
+                        msg_entry["validation_mismatch"] = t.validation_mismatch
+                        msg_entry["validation_reason"] = t.validation_reason
+                    messages.append(msg_entry)
 
             return messages
+
+    def _pinned_collection_scope(self, conv: Conversation) -> AbstractContextManager[Any]:
+        """Bind the collection a conversation was pinned to on creation.
+
+        Read paths (history replay, transcript export) carry no request
+        ``collection`` parameter, so the ambient scope is whatever the
+        surrounding request left bound -- usually nothing. Any node-id lookup
+        made there resolves against the wrong (or an empty) collection and
+        yields no text. Re-binding the pin makes those reads resolve in the
+        corpus the turn was actually answered from.
+
+        Args:
+            conv (Conversation): The conversation being read.
+
+        Returns:
+            AbstractContextManager[Any]: The active-collection scope, or a
+            no-op scope for legacy rows with no pin.
+        """
+        collection = str(getattr(conv, "collection_name", "") or "")
+        if not collection:
+            return nullcontext()
+        return cast("AbstractContextManager[Any]", self.rag.collection_scope(collection))
+
+    def _rehydrate_citation(self, c: Citation, *, citation_index: int | None = None) -> dict[str, Any]:
+        """Rebuild a source payload from a persisted citation row.
+
+        The row stores only locators (node id, filename, page/row, score);
+        the chunk text is looked up from the active collection's store. Must
+        be called inside :meth:`_pinned_collection_scope`.
+
+        Args:
+            c (Citation): The persisted citation row.
+            citation_index (int | None): The source's number within its turn,
+                as the generator numbered it. Passed by the caller because it
+                is a property of the row's position, not of the row itself.
+
+        Returns:
+            dict[str, Any]: The normalized source payload, with the chunk text
+            when it could be resolved and empty text when it could not.
+        """
+        node_id = str(c.node_id or "")
+        score = cast("float | None", c.score)
+
+        src: dict[str, Any] | None = None
+        if node_id:
+            try:
+                src = self.rag.get_source_by_node_id(node_id, score=score)
+            except Exception:
+                src = None
+
+        if src is None:
+            text_val = ""
+            if node_id:
+                try:
+                    text_val = self._get_node_text_by_id(node_id) or ""
+                except Exception:
+                    text_val = ""
+            src = {
+                "text": text_val,
+                "preview_text": text_val[:280].strip() if text_val else "",
+            }
+
+        src.setdefault("filename", c.filename)
+        src.setdefault("filetype", c.filetype)
+        src.setdefault("source", c.source)
+        src.setdefault("score", score)
+        if c.page is not None:
+            src.setdefault("page", c.page)
+        if c.row is not None:
+            src.setdefault("row", c.row)
+        src.setdefault("file_hash", c.file_hash)
+        if citation_index is not None:
+            src["citation_index"] = citation_index
+        return src
 
     def delete_session(self, session_id: str, owner: str | None) -> bool:
         """Delete a session the caller owns.
@@ -1016,6 +1070,20 @@ class SessionManager:
         lines = ["# Transcript", f"Session: `{conv_id}`", ""]
         if rolling_summary:
             lines += ["## Rolling Summary", "", rolling_summary, ""]
+        with self._pinned_collection_scope(conv):
+            self._append_transcript_turns(lines, conv)
+        (out_dir / "transcript.md").write_text("\n".join(lines), encoding="utf-8")
+
+    def _append_transcript_turns(self, lines: list[str], conv: Conversation) -> None:
+        """Append one Markdown block per turn, quoting each cited excerpt.
+
+        Excerpt lookup is collection-scoped; call inside
+        :meth:`_pinned_collection_scope`.
+
+        Args:
+            lines (list[str]): Transcript lines accumulated so far, extended in place.
+            conv (Conversation): The conversation being exported.
+        """
         for t in conv.turns:
             lines += [
                 f"## Turn {t.idx}",
@@ -1045,7 +1113,6 @@ class SessionManager:
                         ">\n> " + "\n> ".join(excerpt.splitlines()) + "\n>",
                     ]
             lines += [""]
-        (out_dir / "transcript.md").write_text("\n".join(lines), encoding="utf-8")
 
     def _write_manifest(self, out_dir: Path) -> None:
         """Write a manifest file for the exported conversation data.

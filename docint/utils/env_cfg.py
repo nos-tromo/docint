@@ -1709,22 +1709,34 @@ class ResponseValidationConfig:
     """Dataclass for response validation configuration."""
 
     enabled: bool
+    source_char_budget: int
 
 
 def load_response_validation_env(
     default_enabled: bool = True,
+    default_source_char_budget: int = 48_000,
 ) -> ResponseValidationConfig:
     """Load response-validation configuration from environment variables.
 
     Args:
         default_enabled (bool): Whether response validation is enabled by default.
+        default_source_char_budget (int): Total characters of source text the
+            validator may be shown across all sources of one answer.
 
     Returns:
         ResponseValidationConfig: Parsed response-validation settings.
         - enabled (bool): Whether to run response validation on generated answers.
+        - source_char_budget (int): Total source-text characters shown to the
+          validator. Shared across the sources rather than applied per source,
+          so a single long chunk is not cut off mid-evidence — the validator
+          judging a truncated view reports grounded answers as hallucinated.
     """
     return ResponseValidationConfig(
-        enabled=str(os.getenv("RESPONSE_VALIDATION_ENABLED", default_enabled)).lower() in {"true", "1", "yes"}
+        enabled=str(os.getenv("RESPONSE_VALIDATION_ENABLED", default_enabled)).lower() in {"true", "1", "yes"},
+        source_char_budget=max(
+            0,
+            int(os.getenv("RESPONSE_VALIDATION_SOURCE_BUDGET_CHARS", default_source_char_budget)),
+        ),
     )
 
 

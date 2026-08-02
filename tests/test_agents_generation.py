@@ -1,11 +1,12 @@
 """Tests for :class:`ResultValidationResponseAgent` in the generation module."""
 
+import re
 from typing import Any, cast
 
 import pytest
 from loguru import logger
 
-from docint.agents.generation import MAX_SOURCE_CHARS, ResultValidationResponseAgent
+from docint.agents.generation import ResultValidationResponseAgent
 from docint.agents.types import RetrievalResult, Turn
 
 MARKER = "MARKER-SECRET-1234"
@@ -311,8 +312,15 @@ def test_validation_agent_prompt_includes_reference_metadata() -> None:
         assert expected in prompt, f"missing {expected!r} in validator prompt"
 
 
-def test_validation_agent_prompt_metadata_block_not_truncated() -> None:
-    """Metadata fields must survive even when the text body exceeds the per-source cap."""
+def test_validation_agent_prompt_metadata_block_not_truncated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Metadata fields must survive even when the text body eats the budget.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Environment patcher.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_SOURCE_BUDGET_CHARS", "1200")
     llm = _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}')
     agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
     long_body = "x" * 5000
@@ -335,9 +343,9 @@ def test_validation_agent_prompt_metadata_block_not_truncated() -> None:
     assert "Facebook" in prompt
     assert "deadbeef" in prompt
     assert "Alice" in prompt
-    # Body sliced to MAX_SOURCE_CHARS — exactly that many consecutive x's, no more.
-    assert ("x" * MAX_SOURCE_CHARS) in prompt
-    assert ("x" * (MAX_SOURCE_CHARS + 1)) not in prompt
+    # Body sliced to the budget — exactly that many consecutive x's, no more.
+    assert ("x" * 1200) in prompt
+    assert ("x" * 1201) not in prompt
 
 
 def test_validation_agent_prompt_handles_text_only_source() -> None:
@@ -386,3 +394,131 @@ def test_validation_agent_prompt_includes_metadata_text_when_no_top_level_body()
     assert "Alice" in prompt
     assert "en" in prompt
     assert "spoken segment body" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Source budget
+#
+# The generator sees whole chunks; the validator used to see a fixed 1200
+# characters of each. Anything the answer drew from further in was reported as
+# a hallucination — a false mismatch on a correct, grounded answer.
+# ---------------------------------------------------------------------------
+
+
+def _body_runs(prompt: str, filler: str) -> list[int]:
+    """Return the length of each rendered filler-body run in the prompt.
+
+    Counting bare occurrences would also pick up the letter as it appears in
+    the prompt's own English text; a run of the synthetic filler is
+    unambiguously body text.
+
+    Args:
+        prompt (str): The full validator prompt.
+        filler (str): The single filler character the body is built from.
+
+    Returns:
+        list[int]: Length of every run longer than one character, in order.
+    """
+    return [len(run) for run in re.findall(f"{filler}+", prompt) if len(run) > 1]
+
+
+def _ok_llm() -> _FakeLLM:
+    """Build a fake LLM that validates everything as grounded.
+
+    Returns:
+        _FakeLLM: The canned validator LLM.
+    """
+    return _FakeLLM('{"summary_grounded": true, "sources_relevant": true, "reason":"ok"}')
+
+
+def test_validation_prompt_shows_source_text_past_the_legacy_cap() -> None:
+    """Evidence deep inside a chunk reaches the validator."""
+    llm = _ok_llm()
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
+    body = ("x" * 4000) + MARKER + ("x" * 4000)
+    result = RetrievalResult(answer="a", sources=[{"filename": "doc.pdf", "text": body}])
+
+    agent.finalize(result, Turn(user_input="q"))
+
+    assert llm.last_prompt is not None
+    assert MARKER in llm.last_prompt
+
+
+def test_validation_prompt_source_text_stays_within_the_total_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Many long sources share one bounded budget rather than each getting a cap.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Environment patcher.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_SOURCE_BUDGET_CHARS", "4000")
+    llm = _ok_llm()
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
+    sources = [{"filename": f"doc{i}.pdf", "text": "x" * 10_000} for i in range(4)]
+    result = RetrievalResult(answer="a", sources=cast(Any, sources))
+
+    agent.finalize(result, Turn(user_input="q"))
+
+    assert llm.last_prompt is not None
+    shown = _body_runs(llm.last_prompt, "x")
+    assert shown == [1000, 1000, 1000, 1000]
+
+
+def test_validation_prompt_redistributes_unused_budget_to_long_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A short source leaves its unused share to the long one.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Environment patcher.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_SOURCE_BUDGET_CHARS", "4000")
+    llm = _ok_llm()
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
+    result = RetrievalResult(
+        answer="a",
+        sources=[
+            {"filename": "short.pdf", "text": "y" * 100},
+            {"filename": "long.pdf", "text": "x" * 10_000},
+        ],
+    )
+
+    agent.finalize(result, Turn(user_input="q"))
+
+    assert llm.last_prompt is not None
+    assert _body_runs(llm.last_prompt, "y") == [100]
+    assert _body_runs(llm.last_prompt, "x") == [3900]
+
+
+def test_validation_prompt_marks_truncated_sources_and_warns_the_validator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A trimmed source is labelled, and the prompt says unseen text is not a hallucination.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Environment patcher.
+    """
+    monkeypatch.setenv("RESPONSE_VALIDATION_SOURCE_BUDGET_CHARS", "100")
+    llm = _ok_llm()
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
+    result = RetrievalResult(answer="a", sources=[{"filename": "doc.pdf", "text": "x" * 500}])
+
+    agent.finalize(result, Turn(user_input="q"))
+
+    assert llm.last_prompt is not None
+    prompt = llm.last_prompt
+    assert "400" in prompt, "the hidden character count must be stated"
+    assert "truncat" in prompt.lower()
+
+
+def test_validation_prompt_has_no_truncation_warning_when_everything_fits() -> None:
+    """A fully-shown source set carries no truncation caveat."""
+    llm = _ok_llm()
+    agent = ResultValidationResponseAgent(enabled=True, llm=cast(Any, llm))
+    result = RetrievalResult(answer="a", sources=[{"filename": "doc.pdf", "text": "short body"}])
+
+    agent.finalize(result, Turn(user_input="q"))
+
+    assert llm.last_prompt is not None
+    assert "truncat" not in llm.last_prompt.lower()
