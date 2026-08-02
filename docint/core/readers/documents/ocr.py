@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import base64
 import re
+import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 
 import pypdf
 import pypdfium2
 from loguru import logger
+from openai import APIConnectionError, APIStatusError, APITimeoutError
 from openai import OpenAI as _OpenAI
 from openai.types.chat import ChatCompletionContentPartParam, ChatCompletionMessageParam
 from PIL import Image as PILImage
@@ -98,6 +101,48 @@ class PypdfTextEngine(OCREngine):
         return spans
 
 
+class VisionOCRError(RuntimeError):
+    """A vision OCR call did not produce text.
+
+    Subclasses ``RuntimeError`` so callers that catch the broad type keep
+    working; the two subclasses below carry the distinction that decides
+    whether the whole document should be given up on.
+    """
+
+
+class VisionOCRUnreachable(VisionOCRError):
+    """Nothing came back — a timeout, or the endpoint could not be reached.
+
+    This is the failure the per-document budget exists for: every further
+    page would spend the full timeout for the same nothing.
+    """
+
+
+class VisionOCRRejected(VisionOCRError):
+    """The endpoint answered, with an error status.
+
+    Costs one page, not the document. Measured on the dev stack, these come
+    back in 0.5-1.0s (against 68-117s for a successful page) in bursts that
+    recover within seconds, so the next page is usually fine.
+    """
+
+
+@dataclass
+class VisionOCRStats:
+    """What the vision OCR lane did across one document.
+
+    Attributes:
+        pages_attempted: Pages the engine was asked to read.
+        pages_failed: Pages that reached the engine but produced no text.
+        pages_skipped: Pages not attempted at all because the failure budget
+            had already given up on the document.
+    """
+
+    pages_attempted: int = 0
+    pages_failed: int = 0
+    pages_skipped: int = 0
+
+
 class VisionOCREngine(OCREngine):
     """OCR engine that renders pages to images and uses a vision LLM.
 
@@ -125,6 +170,10 @@ class VisionOCREngine(OCREngine):
     # Consecutive pages that may fail with no response at all before the
     # engine stops calling the endpoint for the rest of the document.
     _MAX_CONSECUTIVE_PAGE_FAILURES: int = 3
+    # Pause before the half-resolution retry. Upstream rejections arrive in
+    # bursts lasting a few seconds; retrying immediately lands inside the same
+    # burst, which is what made a transient blip cost whole pages.
+    _RETRY_BACKOFF_SECONDS: float = 2.0
     _DEFAULT_MAX_RETRIES: int = 1
     _DEFAULT_MAX_IMAGE_DIM: int = 1024
     _EMPTY_RETRY_MAX_IMAGE_DIM: int = 1536
@@ -180,6 +229,7 @@ class VisionOCREngine(OCREngine):
         self._max_tokens = max_tokens if max_tokens is not None else self._DEFAULT_MAX_TOKENS
         self._consecutive_page_failures = 0
         self._disabled = False
+        self.ocr_stats = VisionOCRStats()
 
         # Build a dedicated OpenAI client with the OCR-specific
         # timeout / retry settings so we don't block the pipeline for
@@ -211,12 +261,14 @@ class VisionOCREngine(OCREngine):
         """
         spans: list[OCRSpan] = []
         if self._disabled:
+            self.ocr_stats.pages_skipped += 1
             logger.debug(
                 "Vision OCR disabled after {} consecutive failures; skipping page {}",
                 self._MAX_CONSECUTIVE_PAGE_FAILURES,
                 page_index,
             )
             return spans
+        self.ocr_stats.pages_attempted += 1
         try:
             page = self._pdf[page_index]
             # Render at configured DPI (scale = DPI / 72).
@@ -244,27 +296,36 @@ class VisionOCREngine(OCREngine):
             # that already proved too slow.
             text: str | None = None
             responded = False
+            # ``reachable`` records whether anything ever answered for this
+            # page. Only a page nothing answered for counts toward the
+            # per-document budget -- an endpoint that returns an error is
+            # present, just unhappy, and the next page is usually fine.
+            reachable = False
             try:
                 text = self._call_vision_ocr(img_b64)
                 responded = True
-            except RuntimeError:
-                # On timeout / error, retry once at half resolution.
+            except VisionOCRError as first_error:
+                reachable = isinstance(first_error, VisionOCRRejected)
+                # On timeout / error, retry once at half resolution. Wait
+                # first: upstream rejections arrive in bursts lasting a few
+                # seconds, and an immediate retry lands inside the same one.
                 half_dim = max(self._max_image_dim // 2, 256)
                 logger.info(
                     "Vision OCR retrying page {} at reduced resolution (max {}px)",
                     page_index,
                     half_dim,
                 )
+                time.sleep(self._RETRY_BACKOFF_SECONDS)
                 pil_image = self._cap_image(pil_image, half_dim, page_index)
                 img_b64 = self._encode_jpeg(pil_image)
                 try:
                     text = self._call_vision_ocr(img_b64)
                     responded = True
-                except RuntimeError:
-                    pass  # logged inside _call_vision_ocr
+                except VisionOCRError as retry_error:  # logged inside _call_vision_ocr
+                    reachable = reachable or isinstance(retry_error, VisionOCRRejected)
 
             if not responded:
-                self._note_page_failure(page_index)
+                self._note_page_failure(page_index, reachable=reachable)
                 return spans
 
             self._consecutive_page_failures = 0
@@ -300,7 +361,7 @@ class VisionOCREngine(OCREngine):
                             recovery_b64,
                             prompt_override=recovery_prompt,
                         )
-                    except RuntimeError:
+                    except VisionOCRError:
                         pass  # logged inside _call_vision_ocr
 
             if text and text.strip():
@@ -320,6 +381,9 @@ class VisionOCREngine(OCREngine):
                     page_index,
                 )
             else:
+                # Answered, but with nothing usable — still a page the reader
+                # will not see, so it belongs in the summary.
+                self.ocr_stats.pages_failed += 1
                 logger.warning(
                     "Vision OCR returned empty text for page {} (image {}x{}, payload ~{:.0f} KiB)",
                     page_index,
@@ -328,6 +392,7 @@ class VisionOCREngine(OCREngine):
                     len(img_b64) * 3 / 4 / 1024,
                 )
         except Exception as exc:
+            self.ocr_stats.pages_failed += 1
             logger.warning("Vision OCR failed for page {}: {}", page_index, exc)
         return spans
 
@@ -335,17 +400,30 @@ class VisionOCREngine(OCREngine):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _note_page_failure(self, page_index: int) -> None:
-        """Record a page where no attempt reached the vision endpoint.
+    def _note_page_failure(self, page_index: int, *, reachable: bool) -> None:
+        """Record a page that produced no text.
 
-        Once ``_MAX_CONSECUTIVE_PAGE_FAILURES`` pages in a row fail this way
-        the endpoint is treated as unusable for the rest of the document and
-        the engine stops calling it, rather than spending the full timeout
-        budget on every remaining page.
+        Only a page that nothing answered for counts toward the per-document
+        budget. That budget exists to stop spending a full timeout per page on
+        an endpoint that never answers; an endpoint returning an error status
+        costs about a second and typically recovers within a few, so it must
+        cost its own page and no more.
 
         Args:
             page_index (int): Zero-based number of the page that failed.
+            reachable (bool): Whether the endpoint answered at all for this
+                page, even if only with an error status.
         """
+        self.ocr_stats.pages_failed += 1
+        if reachable:
+            # Do not reset the consecutive counter: an unreachable endpoint
+            # interleaved with rejections is still unreachable.
+            logger.warning(
+                "Vision OCR endpoint rejected page {}; skipping the page and continuing",
+                page_index,
+            )
+            return
+
         self._consecutive_page_failures += 1
         logger.warning(
             "Vision OCR got no response for page {} ({}/{} consecutive failures)",
@@ -466,9 +544,18 @@ class VisionOCREngine(OCREngine):
                 logger.warning("Vision OCR returned refusal-style output; treating as empty text")
                 return ""
             return text
-        except Exception as e:
+        except APIStatusError as e:
+            # The endpoint answered. Costs this page, not the document.
             logger.error("Error during vision OCR inference: {}", e)
-            raise RuntimeError(f"Vision OCR inference failed: {e}") from e
+            raise VisionOCRRejected(f"Vision OCR inference failed: {e}") from e
+        except (APITimeoutError, APIConnectionError) as e:
+            logger.error("Error during vision OCR inference: {}", e)
+            raise VisionOCRUnreachable(f"Vision OCR inference failed: {e}") from e
+        except Exception as e:
+            # Unclassifiable: treat as unreachable so the per-document budget
+            # still protects against a failure mode we have not seen yet.
+            logger.error("Error during vision OCR inference: {}", e)
+            raise VisionOCRUnreachable(f"Vision OCR inference failed: {e}") from e
 
     @classmethod
     def _looks_like_refusal(cls, text: str) -> bool:

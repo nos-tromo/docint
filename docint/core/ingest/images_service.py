@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -33,6 +34,11 @@ from docint.utils.mimetype import get_mimetype
 from docint.utils.openai_cfg import OpenAIPipeline
 
 T = TypeVar("T")
+
+# Pause between image-inference attempts. Upstream vision endpoints reject in
+# bursts lasting a few seconds, so an immediate retry lands inside the same
+# burst; the previous no-delay retry only survived by luck.
+RETRY_BACKOFF_SECONDS: float = 2.0
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -745,12 +751,20 @@ class ImageIngestionService:
         fn: Callable[[], T],
         *,
         attempts: int = 2,
+        backoff_seconds: float = RETRY_BACKOFF_SECONDS,
     ) -> T:
         """Run backend inference with bounded retries.
+
+        Waits between attempts. Upstream vision endpoints reject in bursts
+        lasting a few seconds -- measured on the dev stack, a rejected call
+        returns in 0.5-1.0s against 3.5-17s for a successful one -- so a
+        retry fired immediately lands inside the burst that just rejected it.
 
         Args:
             fn (Callable[[], T]): A callable that performs the inference and returns a result.
             attempts (int): The maximum number of attempts to run the callable before giving up.
+            backoff_seconds (float): Pause between attempts. Not paid after the
+                last one, where it would buy nothing but latency.
 
         Returns:
             T: The result returned by the callable if successful.
@@ -762,6 +776,8 @@ class ImageIngestionService:
             except Exception as exc:
                 last_error = exc
                 logger.warning("Image inference attempt {}/{} failed: {}", attempt, attempts, exc)
+                if attempt < attempts and backoff_seconds > 0:
+                    time.sleep(backoff_seconds)
         if last_error is None:
             raise RuntimeError("Image inference failed without error details.")
         raise last_error

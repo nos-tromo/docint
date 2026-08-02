@@ -211,6 +211,19 @@ page-level PDF pipeline in `docint/core/readers/documents/`.
 | `PIPELINE_VISION_OCR_MAX_TOKENS` | `4096` | Max tokens the vision LLM may generate per OCR call. |
 | `PIPELINE_ARTIFACTS_DIR` | `~/docint/artifacts` (via `PathConfig`) | Root dir for pipeline artifacts. |
 
+The vision OCR lane distinguishes two failure modes, because they deserve
+opposite responses. An endpoint that **never answers** (timeout, connection
+refused) would cost a full `PIPELINE_VISION_OCR_TIMEOUT` on every remaining
+page, so after three consecutive such pages the lane is disabled for the rest
+of the document. An endpoint that **answers with an error status** costs about
+a second and typically recovers within a few, so it costs its own page and
+nothing more — a transient upstream burst must not discard a document.
+
+Both are reported in the pipeline summary as `pages_ocr_failed` (pages that
+produced no text) and `pages_ocr_skipped` (pages not attempted after the lane
+was disabled). Note that `pages_ocr` counts pages that *needed* OCR, not pages
+that got it — check the other two before concluding a document was fully read.
+
 ## Ingestion — `IngestionConfig`
 
 Loaded by `load_ingestion_env()` (`env_cfg.py:365`). Controls chunking
