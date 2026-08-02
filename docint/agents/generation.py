@@ -405,8 +405,15 @@ class ResultValidationResponseAgent(ResponseAgent):
             filename = source.get("filename") or source.get("source_ref") or "Unknown"
             page = source.get("page")
             row = source.get("row")
+            # Prefer the number the generator saw (``citation_index``, stamped
+            # by ``CitationNumberingPostprocessor``) over this loop's own
+            # count: the slice above drops sources past the cap, so
+            # re-enumerating would label the same chunk differently than the
+            # answer does and invite the validator to flag a correct citation.
+            carried = source.get("citation_index")
+            number = carried if isinstance(carried, int) else idx
             header = (
-                f"Source {idx} [{filename} | "
+                f"Source {number} [{filename} | "
                 f"page={page if page is not None else 'n/a'} | "
                 f"row={row if row is not None else 'n/a'}]:"
             )

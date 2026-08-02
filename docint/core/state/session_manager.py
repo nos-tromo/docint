@@ -907,7 +907,13 @@ class SessionManager:
                     messages.append({"role": "user", "content": t.user_text})
 
                     # Assistant message
-                    sources = [self._rehydrate_citation(c) for c in t.citations]
+                    # Citation rows are ordered by insertion id, which is the
+                    # order the generator numbered them in, so position is the
+                    # number the stored answer's "source 2" refers to.
+                    sources = [
+                        self._rehydrate_citation(c, citation_index=index)
+                        for index, c in enumerate(t.citations, start=1)
+                    ]
 
                     msg_entry = {
                         "role": "assistant",
@@ -946,7 +952,7 @@ class SessionManager:
             return nullcontext()
         return cast("AbstractContextManager[Any]", self.rag.collection_scope(collection))
 
-    def _rehydrate_citation(self, c: Citation) -> dict[str, Any]:
+    def _rehydrate_citation(self, c: Citation, *, citation_index: int | None = None) -> dict[str, Any]:
         """Rebuild a source payload from a persisted citation row.
 
         The row stores only locators (node id, filename, page/row, score);
@@ -955,6 +961,9 @@ class SessionManager:
 
         Args:
             c (Citation): The persisted citation row.
+            citation_index (int | None): The source's number within its turn,
+                as the generator numbered it. Passed by the caller because it
+                is a property of the row's position, not of the row itself.
 
         Returns:
             dict[str, Any]: The normalized source payload, with the chunk text
@@ -991,6 +1000,8 @@ class SessionManager:
         if c.row is not None:
             src.setdefault("row", c.row)
         src.setdefault("file_hash", c.file_hash)
+        if citation_index is not None:
+            src["citation_index"] = citation_index
         return src
 
     def delete_session(self, session_id: str, owner: str | None) -> bool:

@@ -358,6 +358,10 @@ QDRANT_SPARSE_VECTOR_NAME = "text-sparse-new"
 # * All readers: ``docint_doc_kind`` — labels the source shape
 #   (``transcript_segment``, ``table_row``, ...) so the LLM frames
 #   citations correctly.
+# * All readers: ``citation_index`` — the snippet's number in this
+#   answer's evidence set, stamped by
+#   :class:`CitationNumberingPostprocessor` so the answer's "source 3"
+#   and the chat window's third card are the same chunk.
 #
 # Explicitly excluded via absence: ``entities`` / ``relations`` (NER
 # output, can exceed 60 KB), per-column row dumps in ``tables.py``
@@ -371,6 +375,7 @@ QDRANT_SPARSE_VECTOR_NAME = "text-sparse-new"
 # to excluded — safer than accidentally reintroducing the overflow.
 LLM_VISIBLE_METADATA_KEYS: frozenset[str] = frozenset(
     {
+        "citation_index",
         "filename",
         "origin",
         "page",
@@ -493,6 +498,9 @@ DEFAULT_GROUNDED_TEXT_QA_PROMPT = (
     "Instructions:\n"
     "- Treat each retrieved snippet as a distinct source chunk; do not blend "
     "claims across chunks unless the overlap is explicit.\n"
+    "- Each snippet is labelled with a `citation_index`. Refer to a snippet "
+    "only by that number, in square brackets (e.g. [3]); never number the "
+    "snippets yourself.\n"
     "- If the current question asks to elaborate on, clarify, or expand on the "
     "prior assistant turn, restate and expand the specific claims from that "
     "prior turn that the user is asking about. Use the retrieved snippets to "
@@ -522,7 +530,9 @@ DEFAULT_GROUNDED_REFINE_PROMPT = (
     "question is an elaboration of the prior assistant turn, you may quote "
     "and expand on the prior turn's claims when the new snippets corroborate "
     "them. If the new context is not useful, return the current answer "
-    "unchanged.\n"
+    "unchanged. Each snippet is labelled with a `citation_index`; refer to a "
+    "snippet only by that number, in square brackets (e.g. [3]), and leave "
+    "the numbers already used in the current answer as they are.\n"
     "Refined grounded answer:"
 )
 DEFAULT_GROUNDED_COLLECTION_SUMMARY_PROMPT = (
@@ -1472,6 +1482,76 @@ class LazyRerankerPostprocessor(BaseNodePostprocessor):
                 nodes as produced by the underlying postprocessor.
         """
         return cast(list[NodeWithScore], self.rag.reranker._postprocess_nodes(nodes, query_bundle))
+
+
+class CitationNumberingPostprocessor(BaseNodePostprocessor):
+    """Number the final snippet set so the answer and the UI agree.
+
+    Answers refer to "source 1", "source 2". Without this the generator is
+    counting the snippets itself — the prompt carries no numbers — so its
+    ordinals are pinned to nothing a reader can click. The frontend dedupes
+    its citation list and the backend appends image sources after generation,
+    so list position and prompt position drift apart.
+
+    Stamping ``citation_index`` here, as the *last* postprocessor, numbers
+    exactly the node set the synthesizer packs into ``context_str``: after
+    reranking has trimmed, parent-context has expanded, and social diversity
+    and link-following have added and dropped nodes. The same number then
+    rides the normalized source out to the chat window
+    (:meth:`RAG._source_from_payload`), so nothing downstream ever recomputes
+    it from a position.
+
+    ``citation_index`` is whitelisted in :data:`LLM_VISIBLE_METADATA_KEYS` so
+    the synthesizer's ``get_content(MetadataMode.LLM)`` rendering carries it
+    into the prompt.
+    """
+
+    @override
+    @classmethod
+    def class_name(cls) -> str:
+        """Return a stable class identifier.
+
+        Returns:
+            str: A string identifier for this postprocessor class, used
+                by LlamaIndex when matching cached configurations.
+        """
+        return "CitationNumberingPostprocessor"
+
+    @override
+    def _postprocess_nodes(
+        self,
+        nodes: list[NodeWithScore],
+        query_bundle: QueryBundle | None = None,
+    ) -> list[NodeWithScore]:
+        """Stamp each node with its 1-based position in the synthesized set.
+
+        The incoming nodes are left untouched. ``ParentContextPostprocessor``
+        emits nodes loaded from the docstore, which caches them across
+        queries; writing a number into one in place would leak this query's
+        numbering into every later query that retrieves the same parent.
+
+        Args:
+            nodes (list[NodeWithScore]): The final node set, in the order the
+                synthesizer will render it.
+            query_bundle (QueryBundle | None): Unused; required by the
+                postprocessor contract.
+
+        Returns:
+            list[NodeWithScore]: Clones carrying ``citation_index``, in the
+                incoming order.
+        """
+        numbered: list[NodeWithScore] = []
+        for index, scored in enumerate(nodes, start=1):
+            clone = scored.node.model_copy(deep=True)
+            clone.metadata["citation_index"] = index
+            # A node that reached us with an exclusion list (the LLM-visible
+            # whitelist applied by ``ParentContextPostprocessor``) predates
+            # the key, but a future postprocessor ordering could hand us one
+            # that names it. Numbering the prompt is the whole point, so it
+            # must never be excluded from the LLM's view.
+            clone.excluded_llm_metadata_keys = [k for k in clone.excluded_llm_metadata_keys if k != "citation_index"]
+            numbered.append(NodeWithScore(node=clone, score=scored.score))
+        return numbered
 
 
 def _vllm_service_root(api_base: str) -> str:
@@ -3583,6 +3663,14 @@ class RAG:
             src["id"] = str(identity)
         if chunk_id:
             src["chunk_id"] = str(chunk_id)
+        # The number the generator saw for this snippet
+        # (``CitationNumberingPostprocessor``). Absent for sources that never
+        # reached the prompt — image matches are retrieved after generation —
+        # so the UI leaves those cards unnumbered rather than implying the
+        # answer could have cited them.
+        citation_index = payload.get("citation_index")
+        if isinstance(citation_index, int):
+            src["citation_index"] = citation_index
         entities = payload.get("entities") or origin.get("entities")
         relations = payload.get("relations") or origin.get("relations")
         if entities:
@@ -4321,6 +4409,9 @@ class RAG:
                 SocialSourceDiversityPostprocessor(diversity_limit=max(1, int(self.social_summary_diversity_limit)))
             )
             node_postprocessors.append(LinkFollowingPostprocessor(rag=self))
+        # Last: numbers the node set as the synthesizer will actually see it,
+        # after every postprocessor above has added, dropped or reordered.
+        node_postprocessors.append(CitationNumberingPostprocessor())
 
         return RetrieverQueryEngine.from_args(
             retriever=self._build_retriever(
