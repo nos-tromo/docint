@@ -2235,7 +2235,6 @@ class RAG:
         self.embed_client_config = load_embed_client_env(
             default_api_base=self.openai_api_base or "",
             default_api_key=self.openai_api_key,
-            default_timeout=self.openai_timeout,
         )
 
         # --- Embedding context budget (separate from chat LLM) ---

@@ -13,7 +13,7 @@ from docint.core.rag import RAG
 @pytest.fixture()
 def _clear_embed_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Remove every EMBED_* var so each test controls its own state."""
-    for name in ("EMBED_API_BASE", "EMBED_API_KEY", "EMBED_TIMEOUT"):
+    for name in ("EMBED_API_BASE", "EMBED_API_KEY"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -46,9 +46,11 @@ def test_embed_model_client_targets_the_embed_endpoint(
     monkeypatch: pytest.MonkeyPatch,
     _clear_embed_env: None,
 ) -> None:
-    """The constructed embedding client must use the embed base, not the chat base."""
+    """The constructed embedding client must use the embed base and key, not the chat ones."""
     monkeypatch.setenv("OPENAI_API_BASE", "http://ollama:11434/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-chat")
     monkeypatch.setenv("EMBED_API_BASE", "http://embed-only:8000/v1")
+    monkeypatch.setenv("EMBED_API_KEY", "sk-embed")
     captured: dict[str, object] = {}
 
     from docint.core import rag as rag_module
@@ -62,3 +64,4 @@ def test_embed_model_client_targets_the_embed_endpoint(
     _ = rag.embed_model
 
     assert captured["api_base"] == "http://embed-only:8000/v1"
+    assert captured["api_key"] == "sk-embed"

@@ -1498,13 +1498,11 @@ class EmbedClientConfig:
 
     api_base: str
     api_key: str | None
-    timeout: float
 
 
 def load_embed_client_env(
     default_api_base: str,
     default_api_key: str | None,
-    default_timeout: float,
 ) -> "EmbedClientConfig":
     """Load the remote dense-embedding client configuration.
 
@@ -1519,12 +1517,18 @@ def load_embed_client_env(
     ``/embeddings`` to it, so it is expected to end in ``/v1``; only a
     trailing slash is stripped.
 
+    There is deliberately no ``timeout`` field here: the embedding
+    request timeout is controlled by the pre-existing
+    ``EMBED_TIMEOUT_SECONDS`` (see ``EmbeddingConfig.timeout_seconds``),
+    not by this client config. Do not add a same-named timeout variable
+    to this function — it would silently shadow the one already wired
+    up.
+
     Args:
         default_api_base (str): Fallback base URL when ``EMBED_API_BASE``
             is unset. Typically the active ``OPENAI_API_BASE``.
         default_api_key (str | None): Fallback Bearer token when
             ``EMBED_API_KEY`` is unset. ``None`` (or empty) disables auth.
-        default_timeout (float): Fallback request timeout in seconds.
 
     Returns:
         EmbedClientConfig: Resolved configuration.
@@ -1539,7 +1543,6 @@ def load_embed_client_env(
     return EmbedClientConfig(
         api_base=os.getenv("EMBED_API_BASE", default_api_base).rstrip("/"),
         api_key=api_key,
-        timeout=float(os.getenv("EMBED_TIMEOUT", default_timeout)),
     )
 
 
