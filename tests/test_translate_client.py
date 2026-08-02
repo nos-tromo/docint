@@ -238,3 +238,72 @@ def test_translate_blank_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     assert res.ok is True
     assert res.translation == ""
     assert calls["n"] == 0
+
+
+def test_translate_target_lang_override_uses_that_locales_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``target_lang`` must select the destination locale's prompt, not the active one.
+
+    CLIP's text tower is English-only, so image retrieval translates *to* English
+    regardless of the operator's ``RESPONSE_LANGUAGE``.
+
+    Args:
+        monkeypatch: Fixture used to patch the pipeline and locale.
+    """
+    monkeypatch.setattr(tc, "load_language_env", lambda: type("_L", (), {"code": "de"})())
+    seen: dict[str, str | None] = {}
+
+    class _FakePipe:
+        """Fake chat pipeline recording the system prompt it was handed."""
+
+        def call_chat(self, prompt: str, system_prompt: str | None = None, model: str | None = None) -> str:
+            """Record the system prompt and echo a canned translation.
+
+            Args:
+                prompt: The source text.
+                system_prompt: The localized translate prompt under test.
+                model: Optional model override (unused by the fake).
+
+            Returns:
+                str: A canned English translation.
+            """
+            seen["system_prompt"] = system_prompt
+            return "Are there documents about AI?"
+
+    monkeypatch.setattr(tc, "_pipeline", lambda: _FakePipe())
+
+    res = tc.translate("Gibt es Dokumente über KI?", target_lang="en")
+
+    assert res.ok is True
+    assert res.target_lang == "en"
+    assert "into English" in (seen["system_prompt"] or "")
+
+
+def test_translate_defaults_to_the_active_locale(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Omitting ``target_lang`` must keep the existing active-locale behavior.
+
+    Args:
+        monkeypatch: Fixture used to patch the pipeline and locale.
+    """
+    monkeypatch.setattr(tc, "load_language_env", lambda: type("_L", (), {"code": "de"})())
+
+    class _FakePipe:
+        """Fake chat pipeline returning a canned German translation."""
+
+        def call_chat(self, prompt: str, system_prompt: str | None = None, model: str | None = None) -> str:
+            """Return a canned translation.
+
+            Args:
+                prompt: The source text.
+                system_prompt: The localized translate prompt.
+                model: Optional model override (unused by the fake).
+
+            Returns:
+                str: A canned German translation.
+            """
+            return "Hallo"
+
+    monkeypatch.setattr(tc, "_pipeline", lambda: _FakePipe())
+
+    res = tc.translate("Hello")
+
+    assert res.target_lang == "de"

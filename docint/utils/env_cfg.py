@@ -667,6 +667,7 @@ class ImageIngestionConfig:
     fail_on_embedding_error: bool
     fail_on_tagging_error: bool
     retrieve_top_k: int
+    rerank_min_score: float = 0.05
     tagging_max_image_dimension: int = 1024
 
 
@@ -680,6 +681,7 @@ def load_image_ingestion_config(
     default_fail_on_embedding_error: bool = False,
     default_fail_on_tagging_error: bool = False,
     default_retrieve_top_k: int = 5,
+    default_rerank_min_score: float = 0.05,
     default_tagging_max_image_dimension: int = 1024,
 ) -> ImageIngestionConfig:
     """Load image ingestion settings from environment variables.
@@ -697,6 +699,10 @@ def load_image_ingestion_config(
         default_fail_on_tagging_error (bool): Fail the entire ingestion if image tagging fails.
             Default False.
         default_retrieve_top_k (int): The number of top image matches to retrieve for a text query. Default is 5.
+        default_rerank_min_score (float): Minimum reranker relevance score an image caption must
+            reach to surface as a source. Raw CLIP cosine similarity is not comparable across
+            queries (unrelated images sit in the same 0.20-0.30 band as relevant ones), so the
+            floor is applied to the reranker's score instead. Default is 0.05.
         default_tagging_max_image_dimension (int): Maximum pixel dimension (width or height) for
             images sent to the vision tagging endpoint. Larger images are down-scaled. Default is 1024.
 
@@ -711,6 +717,7 @@ def load_image_ingestion_config(
         - fail_on_embedding_error (bool): Whether to fail the entire ingestion if image embedding fails.
         - fail_on_tagging_error (bool): Whether to fail the entire ingestion if image tagging fails.
         - retrieve_top_k (int): The number of top image matches to retrieve for a text query.
+        - rerank_min_score (float): Minimum reranker relevance score for an image to surface.
         - tagging_max_image_dimension (int): Maximum pixel dimension (width or height) for
             images sent to the vision tagging endpoint. Larger images are down-scaled.
     """
@@ -730,6 +737,7 @@ def load_image_ingestion_config(
         fail_on_tagging_error=str(os.getenv("IMAGE_FAIL_ON_TAG_ERROR", default_fail_on_tagging_error)).lower()
         in {"1", "true", "yes"},
         retrieve_top_k=int(os.getenv("IMAGE_RETRIEVE_TOP_K", default_retrieve_top_k)),
+        rerank_min_score=float(os.getenv("IMAGE_RERANK_MIN_SCORE", default_rerank_min_score)),
         tagging_max_image_dimension=int(os.getenv("IMAGE_TAGGING_MAX_IMAGE_DIM", default_tagging_max_image_dimension)),
     )
 

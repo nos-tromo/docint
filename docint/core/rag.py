@@ -64,6 +64,7 @@ from docint.utils.env_cfg import (
     load_session_env,
     load_summary_env,
 )
+from docint.utils.translate_client import translate as translate_text
 # isort: on
 
 from fastembed import SparseTextEmbedding
@@ -2849,6 +2850,94 @@ class RAG:
                 collected.append(NodeWithScore(node=TextNode(id_=point_id, text=text, metadata=payload), score=None))
         return collected
 
+    def _image_query_for_clip(self, query: str) -> str:
+        """Render ``query`` in the only language the CLIP text tower understands.
+
+        The deployed CLIP checkpoint (``openai/clip-vit-base-patch32``) has an
+        English-only text tower, so a German query embeds near-degenerately and
+        the nearest images come back essentially at random. Translating first
+        restores the ranking. English deployments skip the round-trip entirely,
+        and a translation outage degrades to the untranslated query rather than
+        dropping the image lane.
+
+        Args:
+            query (str): The user's original query.
+
+        Returns:
+            str: The query to embed with CLIP.
+        """
+        if (self.language_code or "en").lower().startswith("en"):
+            return query
+        result = translate_text(query, target_lang="en")
+        translated = (result.translation or "").strip() if result.ok else ""
+        if not translated:
+            logger.warning("Image query translation unavailable; embedding the untranslated query.")
+            return query
+        return translated
+
+    def _gate_image_sources_by_rerank(
+        self,
+        query: str,
+        sources: list[dict[str, Any]],
+        captions: list[str],
+    ) -> list[dict[str, Any]]:
+        """Keep only the image sources the reranker judges relevant.
+
+        CLIP cosine similarity is not comparable across queries — on the live
+        stack an unrelated query and a matching one both land in a ~0.20-0.30
+        band — so a floor on the raw similarity cannot separate signal from
+        noise. The multilingual reranker scores the *captions* instead, which
+        both yields a separable floor and puts image scores on the same scale
+        as text sources.
+
+        The reranker is fed the original query, not the CLIP translation:
+        bge-reranker-v2-m3 is cross-lingual, so the user's own words are the
+        better relevance signal.
+
+        Args:
+            query (str): The user's original query.
+            sources (list[dict[str, Any]]): Normalized image sources from CLIP.
+            captions (list[str]): Stored caption per source, index-aligned with
+                ``sources``. An empty caption cannot be judged for relevance.
+
+        Returns:
+            list[dict[str, Any]]: Relevant sources, reranked, each carrying the
+            reranker's score. A rerank outage degrades to the CLIP matches.
+        """
+        judgeable = [(i, src) for i, src in enumerate(sources) if captions[i].strip()]
+        if not judgeable:
+            return []
+
+        # Score deliberately left unset: VLLMRerankPostprocessor swallows its own
+        # transport errors and hands the nodes back untouched, so an unset score
+        # coming back is how we tell "reranked" from "silently degraded".
+        nodes = [NodeWithScore(node=TextNode(id_=str(i), text=captions[i]), score=None) for i, _ in judgeable]
+        try:
+            ranked = self.reranker.postprocess_nodes(nodes, QueryBundle(query_str=query))
+        except Exception as exc:
+            logger.warning("Image rerank failed: {}. Falling back to CLIP order.", exc)
+            return [src for _, src in judgeable]
+
+        if all(nws.score is None for nws in ranked):
+            logger.warning("Image rerank returned no scores; surfacing CLIP matches ungated.")
+            return [src for _, src in judgeable]
+
+        floor = float(
+            getattr(
+                getattr(self._image_ingestion_service, "img_ingestion_config", None),
+                "rerank_min_score",
+                0.05,
+            )
+        )
+        by_index = {str(i): src for i, src in judgeable}
+        kept: list[dict[str, Any]] = []
+        for nws in ranked:
+            src = by_index.get(str(getattr(nws.node, "node_id", "") or getattr(nws.node, "id_", "")))
+            if src is None or nws.score is None or float(nws.score) < floor:
+                continue
+            kept.append({**src, "score": float(nws.score)})
+        return kept
+
     def _retrieve_image_sources(
         self,
         query: str,
@@ -2857,6 +2946,10 @@ class RAG:
         metadata_filter_rules: Sequence[Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Retrieve image matches for a text query and normalize them as sources.
+
+        Runs in two stages: CLIP generates candidates from an English rendering
+        of the query, then the reranker gates them on caption relevance so that
+        merely-nearest images do not surface as sources.
 
         Args:
             query (str): The text query to find similar images for.
@@ -2881,7 +2974,7 @@ class RAG:
 
         try:
             matches = self._image_ingestion_service.query_similar_images_by_text(
-                query_text=query,
+                query_text=self._image_query_for_clip(query),
                 top_k=top_k,
                 source_collection=self.qdrant_collection,
             )
@@ -2890,6 +2983,7 @@ class RAG:
             return []
 
         results: list[dict[str, Any]] = []
+        captions: list[str] = []
         seen: set[str] = set()
         for payload in matches:
             if metadata_filter_rules and not matches_metadata_filters(
@@ -2936,6 +3030,15 @@ class RAG:
                 "image_id": image_id or None,
                 "image_collection": payload.get("image_collection"),
             }
+            # Citation identity, mirroring text sources: ``id`` pins the exact
+            # retrieved point, ``chunk_id`` the durable per-image content hash.
+            # Without these an image renders as "Chunk-ID: n/a" and an answer
+            # cannot be traced back to the image it was drawn from.
+            identity = payload.get("node_id") or image_id
+            if identity:
+                src["id"] = str(identity)
+            if image_id:
+                src["chunk_id"] = image_id
             if file_hash:
                 src["file_hash"] = file_hash
                 preview_url = f"/sources/preview?collection={self.qdrant_collection}&file_hash={file_hash}"
@@ -2952,8 +3055,9 @@ class RAG:
             if reference_metadata:
                 src["reference_metadata"] = reference_metadata
             results.append(src)
+            captions.append(text_value or "")
 
-        return results
+        return self._gate_image_sources_by_rerank(query, results, captions)
 
     def _index(self, storage_ctx: StorageContext) -> VectorStoreIndex:
         """Creates the vector store index for document embeddings.

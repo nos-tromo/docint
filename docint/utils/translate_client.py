@@ -57,24 +57,27 @@ def _translate_cached(text: str, target_lang: str, model: str) -> str:
     Raises on transport/model failure so failures are *not* cached (only
     successful translations are).
     """
-    system_prompt = load_localized_prompt("translate", default=_DEFAULT_TRANSLATE_PROMPT)
+    system_prompt = load_localized_prompt("translate", default=_DEFAULT_TRANSLATE_PROMPT, lang=target_lang)
     return _pipeline().call_chat(text, system_prompt=system_prompt, model=model).strip()
 
 
-def translate(text: str) -> TranslateResult:
-    """Translate a snippet into the operator's active locale.
+def translate(text: str, *, target_lang: str | None = None) -> TranslateResult:
+    """Translate a snippet into the operator's active locale, or an explicit one.
 
-    The destination is always the active locale (``RESPONSE_LANGUAGE``) — the
-    locale translate prompt encodes it. A distinct target-language override is
-    deferred (see the design doc §10).
+    The destination defaults to the active locale (``RESPONSE_LANGUAGE``) — the
+    locale translate prompt encodes it. Pass ``target_lang`` when the
+    destination is dictated by a downstream model rather than by the operator:
+    image retrieval translates to English because the CLIP text tower is
+    English-only, whatever locale the UI runs in.
 
     Args:
         text: The source snippet (already held by the caller).
+        target_lang: Destination locale code, overriding ``RESPONSE_LANGUAGE``.
 
     Returns:
         TranslateResult: Fail-soft — never raises.
     """
-    target_lang = load_language_env().code
+    target_lang = target_lang or load_language_env().code
     model = load_model_env().translate_model
     if not text or not text.strip():
         return TranslateResult(ok=True, translation="", model=model, target_lang=target_lang)

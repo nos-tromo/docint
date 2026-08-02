@@ -14,8 +14,14 @@ from loguru import logger
 from docint.utils.env_cfg import load_language_env, load_path_env
 
 
-def load_localized_prompt(name: str, *, default: str, required: bool = False) -> str:
-    """Read ``{name}.txt`` from the active locale's prompt directory.
+def load_localized_prompt(
+    name: str,
+    *,
+    default: str,
+    required: bool = False,
+    lang: str | None = None,
+) -> str:
+    """Read ``{name}.txt`` from a locale's prompt directory.
 
     Args:
         name: Prompt basename (without ``.txt``).
@@ -25,6 +31,10 @@ def load_localized_prompt(name: str, *, default: str, required: bool = False) ->
             language pack is broken.
         required: When True, a missing file raises :class:`FileNotFoundError`
             instead of returning ``default``.
+        lang: Locale code to read from, overriding ``RESPONSE_LANGUAGE``. Used
+            when the destination locale is dictated by a downstream model
+            rather than by the operator — image retrieval translates to
+            English because the CLIP text tower only speaks English.
 
     Returns:
         The prompt text (stripped of trailing whitespace).
@@ -32,7 +42,8 @@ def load_localized_prompt(name: str, *, default: str, required: bool = False) ->
     Raises:
         FileNotFoundError: If the file is missing and ``required`` is True.
     """
-    prompt_path = load_path_env().prompts / load_language_env().code / f"{name}.txt"
+    locale = lang or load_language_env().code
+    prompt_path = load_path_env().prompts / locale / f"{name}.txt"
     try:
         return prompt_path.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
