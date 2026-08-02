@@ -5183,12 +5183,21 @@ def test_create_collection_if_missing_probes_and_creates_hybrid_schema(
 ) -> None:
     """Probes the embed endpoint and creates a hybrid dense+sparse collection.
 
-    Regression: we must NOT instantiate QdrantVectorStore here — its
-    ``__init__`` eagerly loads the fastembed sparse encoder (onnxruntime
-    + tokenizer), which combined with the second store built later by
-    ingest_docs and the GLiNER weights OOM-killed CSV ingests. So this
-    test asserts we hit qdrant_client.create_collection directly with
-    LlamaIndex's named-vector schema.
+    Regression: we must NOT instantiate QdrantVectorStore here — that
+    class is the ingest-time write path, not the schema-creation path
+    (it only creates the Qdrant collection lazily, from ``add()``, the
+    first time nodes are written), so building one in
+    ``create_collection_if_missing`` would not even accomplish this
+    method's purpose. This test pins that separation, asserting we hit
+    ``qdrant_client.create_collection`` directly with LlamaIndex's
+    named-vector schema instead.
+
+    Historical note: this separation originally also sidestepped a
+    fastembed/onnxruntime double-load (the old local sparse encoder)
+    that, combined with the in-process GLiNER weights, OOM-killed CSV
+    ingests. Both fastembed and in-process GLiNER are gone now — sparse
+    encoding and NER are remote HTTP calls — so that specific hazard no
+    longer exists; the separation is kept for the reason above.
     """
     rag = RAG(qdrant_collection="fresh-collection")
     rag._qdrant_client = MagicMock()
