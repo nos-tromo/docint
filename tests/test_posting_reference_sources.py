@@ -84,7 +84,8 @@ def test_retrieve_image_sources_attaches_reference_metadata(monkeypatch: pytest.
     monkeypatch.setattr(rag_module, "qdrant_collection_exists", lambda *_a, **_k: True)
 
     with rag.collection_scope("col"):
-        sources = rag._retrieve_image_sources("banner")
+        nodes = rag._retrieve_image_nodes("banner", top_k=3)
+        sources = [source for source in (rag._source_from_node_with_score(node) for node in nodes) if source]
 
     assert len(sources) == 2
     ref = sources[0]["reference_metadata"]

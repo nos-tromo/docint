@@ -79,6 +79,7 @@ from llama_index.core.postprocessor.types import BaseNodePostprocessor
 from llama_index.core.prompts import PromptTemplate
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.response_synthesizers.type import ResponseMode
+from llama_index.core.retrievers import BaseRetriever
 from llama_index.core.schema import (
     BaseNode,
     Document,
@@ -183,6 +184,24 @@ SUMMARY_CACHE_NAMESPACE = "docint_summary_cache_v1"
 SUMMARY_CACHE_PAYLOAD_KEY = "summary_payload"
 SUMMARY_CACHE_REVISION_KEY = "summary_revision"
 HIDDEN_COLLECTION_SUFFIXES: tuple[str, ...] = ("_images", "_dockv", "_entities")
+
+# Marks a retrieved node as coming from the image lane. Set on the node
+# metadata by ``RAG._retrieve_image_nodes`` and read by
+# ``ImageRelevanceFloorPostprocessor``, which applies a relevance floor to
+# image captions only. Prefixed like the other internal markers so it is
+# excluded from the prompt (it is absent from ``LLM_VISIBLE_METADATA_KEYS``)
+# and ignored by ``_source_from_payload``.
+IMAGE_LANE_METADATA_KEY = "docint_image_lane"
+
+# Fallback for ``IMAGE_RERANK_MIN_SCORE`` when the image service (which owns
+# the loaded config) has not been constructed yet. Mirrors the default in
+# ``env_cfg.load_image_ingestion_config``.
+DEFAULT_IMAGE_RERANK_MIN_SCORE = 0.05
+
+# Fallback for ``IMAGE_RETRIEVE_TOP_K`` under the same condition — how many
+# CLIP candidates the image lane draws before the rerank ranks them against
+# the text hits.
+DEFAULT_IMAGE_RETRIEVE_TOP_K = 5
 
 # Fallback tie-break preamble used when the locale prompt file is absent.
 # The canonical templates live in ``prompts/{en,de}/entity_tiebreak.txt``.
@@ -1483,6 +1502,126 @@ class LazyRerankerPostprocessor(BaseNodePostprocessor):
                 nodes as produced by the underlying postprocessor.
         """
         return cast(list[NodeWithScore], self.rag.reranker._postprocess_nodes(nodes, query_bundle))
+
+
+class MultimodalRetriever(BaseRetriever):
+    """Retrieve text chunks and image captions as one evidence set.
+
+    The image lane used to run after generation, appending its matches to a
+    source list the answer had already been written from — so an image could
+    never be cited, never be numbered, and never take a slot from a weaker
+    text chunk. Fusing here, at the retriever, is what makes an image an
+    ordinary source: everything downstream (rerank, parent context, diversity,
+    numbering, synthesis) sees one list and cannot tell the lanes apart.
+
+    The image lane is called with the user's *original* query. It translates
+    for CLIP itself (``RAG._image_query_for_clip``) because only the CLIP text
+    tower needs English; the reranker downstream is cross-lingual.
+
+    Attributes:
+        text_retriever: The vector/hybrid retriever over the main collection.
+        image_lane: Callable taking the query and returning image-caption
+            nodes. Its failures are absorbed — an image-lane outage degrades
+            the answer to text-only rather than failing the query.
+    """
+
+    def __init__(
+        self,
+        *,
+        text_retriever: Any,
+        image_lane: Callable[[str], list[NodeWithScore]],
+    ) -> None:
+        """Initialize the fused retriever.
+
+        Args:
+            text_retriever (Any): Retriever over the main collection.
+            image_lane (Callable[[str], list[NodeWithScore]]): Image-caption
+                node producer.
+        """
+        self.text_retriever = text_retriever
+        self.image_lane = image_lane
+        super().__init__()
+
+    @override
+    def _retrieve(self, query_bundle: QueryBundle) -> list[NodeWithScore]:
+        """Retrieve both lanes for one query.
+
+        Args:
+            query_bundle (QueryBundle): The query being answered.
+
+        Returns:
+            list[NodeWithScore]: Text hits followed by image-caption hits. The
+                order carries no ranking intent — the reranker downstream
+                scores both lanes on one scale.
+        """
+        nodes: list[NodeWithScore] = list(self.text_retriever.retrieve(query_bundle))
+        try:
+            nodes.extend(self.image_lane(query_bundle.query_str))
+        except Exception as exc:
+            logger.warning("Image lane retrieval failed: {}. Answering from text sources only.", exc)
+        return nodes
+
+
+class ImageRelevanceFloorPostprocessor(BaseNodePostprocessor):
+    """Drop image sources the reranker judged irrelevant.
+
+    Runs immediately after the reranker, so it sees comparable scores. The
+    floor exists because the top-n cut alone cannot protect a sparse
+    collection: with few text chunks competing, a merely-nearest image would
+    take a slot and read as evidence. It sits on the *reranker* score, never
+    on raw CLIP cosine — measured on a live collection, an unrelated query and
+    a matching one both land in a ~0.20-0.30 CLIP band, while reranker scores
+    separate by ~30x (see ``IMAGE_RERANK_MIN_SCORE`` in the docs).
+
+    Text nodes pass through untouched: their relevance is the reranker's and
+    the top-n cut's business, not this floor's.
+
+    Attributes:
+        min_score: The reranker score an image caption must reach.
+    """
+
+    min_score: float = 0.05
+
+    @override
+    @classmethod
+    def class_name(cls) -> str:
+        """Return a stable class identifier."""
+        return "ImageRelevanceFloorPostprocessor"
+
+    @override
+    def _postprocess_nodes(
+        self,
+        nodes: list[NodeWithScore],
+        query_bundle: QueryBundle | None = None,
+    ) -> list[NodeWithScore]:
+        """Apply the floor to image-lane nodes only.
+
+        Args:
+            nodes (list[NodeWithScore]): Reranked nodes from both lanes.
+            query_bundle (QueryBundle | None): Unused; required by the
+                postprocessor contract.
+
+        Returns:
+            list[NodeWithScore]: The input minus sub-floor image nodes.
+        """
+        if not any(node.node.metadata.get(IMAGE_LANE_METADATA_KEY) for node in nodes):
+            return nodes
+        # ``VLLMRerankPostprocessor`` swallows its own transport errors and
+        # returns the nodes untouched, so a wholly unscored set means the
+        # rerank degraded -- not that nothing is relevant. Gating on that would
+        # blank the image lane for as long as the endpoint is down.
+        if all(node.score is None for node in nodes):
+            logger.warning("Rerank returned no scores; surfacing image sources ungated.")
+            return nodes
+
+        kept: list[NodeWithScore] = []
+        for node in nodes:
+            if not node.node.metadata.get(IMAGE_LANE_METADATA_KEY):
+                kept.append(node)
+                continue
+            if node.score is not None and float(node.score) >= self.min_score:
+                kept.append(node)
+        return kept
 
 
 class CitationNumberingPostprocessor(BaseNodePostprocessor):
@@ -2875,90 +3014,63 @@ class RAG:
             return query
         return translated
 
-    def _gate_image_sources_by_rerank(
-        self,
-        query: str,
-        sources: list[dict[str, Any]],
-        captions: list[str],
-    ) -> list[dict[str, Any]]:
-        """Keep only the image sources the reranker judges relevant.
+    def _image_config_value(self, name: str, default: Any) -> Any:
+        """Read one image-lane setting, tolerating an unbuilt image service.
 
-        CLIP cosine similarity is not comparable across queries — on the live
-        stack an unrelated query and a matching one both land in a ~0.20-0.30
-        band — so a floor on the raw similarity cannot separate signal from
-        noise. The multilingual reranker scores the *captions* instead, which
-        both yields a separable floor and puts image scores on the same scale
-        as text sources.
-
-        The reranker is fed the original query, not the CLIP translation:
-        bge-reranker-v2-m3 is cross-lingual, so the user's own words are the
-        better relevance signal.
+        The service owns the loaded ``ImageIngestionConfig``, but it is
+        constructed lazily on first retrieval — and the query engine is built
+        before that.
 
         Args:
-            query (str): The user's original query.
-            sources (list[dict[str, Any]]): Normalized image sources from CLIP.
-            captions (list[str]): Stored caption per source, index-aligned with
-                ``sources``. An empty caption cannot be judged for relevance.
+            name (str): Config field name.
+            default (Any): Value to use when the service is not built yet.
 
         Returns:
-            list[dict[str, Any]]: Relevant sources, reranked, each carrying the
-            reranker's score. A rerank outage degrades to the CLIP matches.
+            Any: The configured value, or ``default``.
         """
-        judgeable = [(i, src) for i, src in enumerate(sources) if captions[i].strip()]
-        if not judgeable:
-            return []
+        config = getattr(self._image_ingestion_service, "img_ingestion_config", None)
+        if config is None:
+            return default
+        return getattr(config, name, default)
 
-        # Score deliberately left unset: VLLMRerankPostprocessor swallows its own
-        # transport errors and hands the nodes back untouched, so an unset score
-        # coming back is how we tell "reranked" from "silently degraded".
-        nodes = [NodeWithScore(node=TextNode(id_=str(i), text=captions[i]), score=None) for i, _ in judgeable]
-        try:
-            ranked = self.reranker.postprocess_nodes(nodes, QueryBundle(query_str=query))
-        except Exception as exc:
-            logger.warning("Image rerank failed: {}. Falling back to CLIP order.", exc)
-            return [src for _, src in judgeable]
+    def _image_relevance_floor(self) -> float:
+        """Return the reranker score an image caption must reach to surface.
 
-        if all(nws.score is None for nws in ranked):
-            logger.warning("Image rerank returned no scores; surfacing CLIP matches ungated.")
-            return [src for _, src in judgeable]
+        Returns:
+            float: ``IMAGE_RERANK_MIN_SCORE``, or its default when the image
+            service has not been constructed yet.
+        """
+        return float(self._image_config_value("rerank_min_score", DEFAULT_IMAGE_RERANK_MIN_SCORE))
 
-        floor = float(
-            getattr(
-                getattr(self._image_ingestion_service, "img_ingestion_config", None),
-                "rerank_min_score",
-                0.05,
-            )
-        )
-        by_index = {str(i): src for i, src in judgeable}
-        kept: list[dict[str, Any]] = []
-        for nws in ranked:
-            src = by_index.get(str(getattr(nws.node, "node_id", "") or getattr(nws.node, "id_", "")))
-            if src is None or nws.score is None or float(nws.score) < floor:
-                continue
-            kept.append({**src, "score": float(nws.score)})
-        return kept
-
-    def _retrieve_image_sources(
+    def _retrieve_image_nodes(
         self,
         query: str,
         *,
-        top_k: int = 3,
+        top_k: int,
         metadata_filter_rules: Sequence[Any] | None = None,
-    ) -> list[dict[str, Any]]:
-        """Retrieve image matches for a text query and normalize them as sources.
+    ) -> list[NodeWithScore]:
+        """Retrieve image captions as retrieval nodes.
 
-        Runs in two stages: CLIP generates candidates from an English rendering
-        of the query, then the reranker gates them on caption relevance so that
-        merely-nearest images do not surface as sources.
+        This is the image half of :class:`MultimodalRetriever`. CLIP generates
+        candidates from an English rendering of the query (its text tower is
+        English-only); the caption becomes the node's body, so the reranker
+        downstream can score images and text chunks on one scale and the
+        generator can cite an image like any other source.
+
+        Relevance is *not* decided here — that is
+        :class:`ImageRelevanceFloorPostprocessor`'s job, after the rerank.
 
         Args:
-            query (str): The text query to find similar images for.
-            top_k (int): The number of top matches to retrieve.
+            query (str): The user's original query, untranslated.
+            top_k (int): How many CLIP candidates to draw.
             metadata_filter_rules (Sequence[Any] | None): Optional raw request
-                filters used to post-filter auxiliary image matches in memory.
+                filters, applied in memory (the companion collection is not
+                queried through the vector-store filter path).
 
         Returns:
-            list[dict[str, Any]]: A list of source dictionaries representing the matched images.
+            list[NodeWithScore]: Caption nodes carrying the image payload as
+            metadata, scored with raw CLIP similarity. Empty on any outage —
+            the lane degrades, it does not fail the query.
         """
         if not query.strip() or not self.qdrant_collection:
             return []
@@ -2982,14 +3094,10 @@ class RAG:
             logger.warning("Image source retrieval failed: {}", exc)
             return []
 
-        results: list[dict[str, Any]] = []
-        captions: list[str] = []
+        nodes: list[NodeWithScore] = []
         seen: set[str] = set()
         for payload in matches:
-            if metadata_filter_rules and not matches_metadata_filters(
-                payload,
-                metadata_filter_rules,
-            ):
+            if metadata_filter_rules and not matches_metadata_filters(payload, metadata_filter_rules):
                 continue
 
             image_id = str(payload.get("image_id") or "").strip()
@@ -2998,66 +3106,48 @@ class RAG:
                     continue
                 seen.add(image_id)
 
-            description = str(payload.get("llm_description") or "").strip()
-            tags_raw = payload.get("llm_tags")
-            tags: list[str] = [str(tag) for tag in tags_raw] if isinstance(tags_raw, list) else []
-            text_value = description
-            if tags:
-                text_value = f"{description}\n\nTags: {', '.join(tags)}" if description else f"Tags: {', '.join(tags)}"
+            caption = RAG._image_caption_text(payload)
+            if not caption:
+                # An uncaptioned image carries no evidence a reader or a
+                # reranker could judge, so it is not a source.
+                continue
 
-            source_path = payload.get("source_path")
-            file_name = (
-                payload.get("file_name")
-                or payload.get("filename")
-                or (Path(source_path).name if isinstance(source_path, str) else None)
-            )
-            file_type = payload.get("mime_type") or payload.get("mimetype")
-            source_kind = payload.get("source_type") or "image"
-            file_hash = payload.get("source_doc_id") or payload.get("file_hash")
-            page_number = payload.get("page_number")
-            try:
-                page_number = int(page_number) if page_number is not None else None
-            except Exception:
-                page_number = None
+            nodes.append(self._image_caption_node(payload, caption))
+        return nodes
 
-            src: dict[str, Any] = {
-                "text": text_value or f"Image match: {image_id or file_name or 'unknown'}",
-                "preview_text": (text_value or "").strip()[:280],
-                "filename": file_name,
-                "filetype": file_type,
-                "source": source_kind,
-                "score": payload.get("score"),
-                "image_id": image_id or None,
-                "image_collection": payload.get("image_collection"),
-            }
-            # Citation identity, mirroring text sources: ``id`` pins the exact
-            # retrieved point, ``chunk_id`` the durable per-image content hash.
-            # Without these an image renders as "Chunk-ID: n/a" and an answer
-            # cannot be traced back to the image it was drawn from.
-            identity = payload.get("node_id") or image_id
-            if identity:
-                src["id"] = str(identity)
-            if image_id:
-                src["chunk_id"] = image_id
-            if file_hash:
-                src["file_hash"] = file_hash
-                preview_url = f"/sources/preview?collection={self.qdrant_collection}&file_hash={file_hash}"
-                src["preview_url"] = preview_url
-                src["document_url"] = preview_url
-            if page_number is not None:
-                src["page"] = page_number
-            bbox = payload.get("bbox")
-            if isinstance(bbox, dict):
-                src["bbox"] = bbox
-            if payload.get("posting_uuid"):
-                src["posting_uuid"] = payload["posting_uuid"]
-            reference_metadata = RAG._extract_reference_metadata(payload)
-            if reference_metadata:
-                src["reference_metadata"] = reference_metadata
-            results.append(src)
-            captions.append(text_value or "")
+    def _image_caption_node(self, payload: dict[str, Any], caption: str) -> NodeWithScore:
+        """Wrap one image payload as a retrieval node.
 
-        return self._gate_image_sources_by_rerank(query, results, captions)
+        Args:
+            payload (dict[str, Any]): The `_images` companion point payload.
+            caption (str): The assembled caption body.
+
+        Returns:
+            NodeWithScore: The caption node, marked as image-lane and scored
+            with the raw CLIP similarity.
+        """
+        raw_score = payload.get("score")
+        metadata = {key: value for key, value in payload.items() if key != "score"}
+        metadata[IMAGE_LANE_METADATA_KEY] = True
+        # Label the shape for the prompt the way every reader does, and give
+        # the model the file name -- the image payload spells it differently
+        # (``source_path`` / ``file_name``) than the whitelist expects.
+        metadata.setdefault("docint_doc_kind", "image")
+        filename = RAG._source_from_payload(collection=self.qdrant_collection, payload=payload).get("filename")
+        if filename:
+            metadata.setdefault("filename", filename)
+
+        node = TextNode(text=caption, metadata=metadata)
+        node_id = str(payload.get("node_id") or payload.get("image_id") or "").strip()
+        if node_id:
+            node.id_ = node_id
+        # The payload is the citation record, not prompt material: an image
+        # point carries ingest paths and caption/tag artefacts. Hide everything
+        # the chat prompt has no use for, independently of whether
+        # ``ParentContextPostprocessor`` (which applies the same whitelist) is
+        # enabled for this collection.
+        node.excluded_llm_metadata_keys = sorted(k for k in metadata if k not in LLM_VISIBLE_METADATA_KEYS)
+        return NodeWithScore(node=node, score=float(raw_score) if isinstance(raw_score, (int, float)) else None)
 
     def _index(self, storage_ctx: StorageContext) -> VectorStoreIndex:
         """Creates the vector store index for document embeddings.
@@ -3681,19 +3771,34 @@ class RAG:
             dict[str, Any]: A normalized source dictionary containing standardized fields for downstream processing.
         """
         origin = payload.get("origin") or {}
+        # ``source_path`` is the image companion's own filename key; the
+        # `_images` payload carries neither ``file_name`` nor ``file_path``.
+        source_path = payload.get("source_path")
         filename = (
-            origin.get("filename") or payload.get("file_name") or payload.get("filename") or payload.get("file_path")
+            origin.get("filename")
+            or payload.get("file_name")
+            or payload.get("filename")
+            or payload.get("file_path")
+            or (Path(source_path).name if isinstance(source_path, str) and source_path else None)
         )
         filetype = (
             origin.get("filetype")
             or origin.get("mimetype")
             or payload.get("filetype")
             or payload.get("mimetype")
+            or payload.get("mime_type")
             or payload.get("file_type")
             or payload.get("file_format")
         )
         source_kind = payload.get("source") or payload.get("source_type") or payload.get("reader")
-        file_hash = origin.get("file_hash") or payload.get("file_hash") or RAG._extract_file_hash(payload)
+        # ``source_doc_id`` is the image companion's link back to the file the
+        # image was extracted from; it is what makes the preview link resolve.
+        file_hash = (
+            origin.get("file_hash")
+            or payload.get("file_hash")
+            or payload.get("source_doc_id")
+            or RAG._extract_file_hash(payload)
+        )
 
         page = (
             payload.get("page")
@@ -3746,6 +3851,10 @@ class RAG:
             row_index = None
 
         resolved_text = text_value if text_value is not None else RAG._extract_payload_text(payload)
+        if not resolved_text:
+            # An image's evidence is its stored caption and tags -- there is no
+            # chunk text on an `_images` point.
+            resolved_text = RAG._image_caption_text(payload)
         preview_url: str | None = None
         if file_hash:
             preview_url = f"/sources/preview?collection={collection}&file_hash={file_hash}"
@@ -3761,7 +3870,9 @@ class RAG:
         # Citation identity. Without it every exported source renders as
         # "Chunk-ID: n/a" and two chunks of the same page are
         # indistinguishable, so an answer cannot be traced to its evidence.
-        chunk_id = payload.get("chunk_id")
+        # An image's durable chunk identity is its content hash (``image_id``);
+        # it plays the same role a reader-minted ``chunk_id`` does for text.
+        chunk_id = payload.get("chunk_id") or payload.get("image_id")
         identity = node_id or payload.get("node_id") or chunk_id
         if identity:
             src["id"] = str(identity)
@@ -3802,7 +3913,37 @@ class RAG:
         posting_uuid = payload.get("posting_uuid")
         if posting_uuid:
             src["posting_uuid"] = posting_uuid
+        # Image-only locators: which point in the `_images` companion this came
+        # from, and where inside the page it sits.
+        image_id = payload.get("image_id")
+        if image_id:
+            src["image_id"] = str(image_id)
+        image_collection = payload.get("image_collection")
+        if image_collection:
+            src["image_collection"] = image_collection
+        bbox = payload.get("bbox")
+        if isinstance(bbox, dict):
+            src["bbox"] = bbox
         return src
+
+    @staticmethod
+    def _image_caption_text(payload: dict[str, Any]) -> str:
+        """Assemble an image's evidence body from its caption and tags.
+
+        Args:
+            payload (dict[str, Any]): An `_images` companion point payload.
+
+        Returns:
+            str: The caption, the caption plus its tags, the tags alone, or an
+            empty string when the image carries neither.
+        """
+        description = str(payload.get("llm_description") or "").strip()
+        tags_raw = payload.get("llm_tags")
+        tags: list[str] = [str(tag) for tag in tags_raw] if isinstance(tags_raw, list) else []
+        if not tags:
+            return description
+        tag_line = f"Tags: {', '.join(tags)}"
+        return f"{description}\n\n{tag_line}" if description else tag_line
 
     def get_source_by_node_id(
         self,
@@ -4414,6 +4555,8 @@ class RAG:
         similarity_top_k: int | None = None,
         vector_store_kwargs: dict[str, Any] | None = None,
         retrieval_options: dict[str, Any] | None = None,
+        metadata_filter_rules: Sequence[Any] | None = None,
+        metadata_filters_active: bool = False,
     ) -> Any:
         """Build a retriever, optionally scoped by metadata filters.
 
@@ -4423,6 +4566,12 @@ class RAG:
             vector_store_kwargs (dict[str, Any] | None): Optional native vector-store query kwargs.
             retrieval_options (dict[str, Any] | None): Optional runtime overrides for retrieval mode,
                 hybrid fusion, and parent-context expansion.
+            metadata_filter_rules (Sequence[Any] | None): Raw request filters,
+                used to post-filter image candidates in memory.
+            metadata_filters_active (bool): Whether this request carries
+                metadata filters at all. Together with ``metadata_filter_rules``
+                it decides whether the image lane can run — see
+                :meth:`_build_image_lane`.
         """
         if self.index is None:
             logger.error("RuntimeError: Index is not initialized.")
@@ -4458,7 +4607,58 @@ class RAG:
             retriever_kwargs["sparse_top_k"] = retrieval_settings["sparse_top_k"]
         if vector_store_kwargs:
             retriever_kwargs["vector_store_kwargs"] = vector_store_kwargs
-        return self.index.as_retriever(**retriever_kwargs)
+        text_retriever = self.index.as_retriever(**retriever_kwargs)
+        image_lane = self._build_image_lane(
+            metadata_filter_rules=metadata_filter_rules,
+            metadata_filters_active=metadata_filters_active,
+        )
+        if image_lane is None:
+            return text_retriever
+        return MultimodalRetriever(text_retriever=text_retriever, image_lane=image_lane)
+
+    def _build_image_lane(
+        self,
+        *,
+        metadata_filter_rules: Sequence[Any] | None,
+        metadata_filters_active: bool,
+    ) -> Callable[[str], list[NodeWithScore]] | None:
+        """Build the image half of the retriever, or decline to.
+
+        The lane stands down when the request carries metadata filters that
+        did not reach the runtime as raw rules: image candidates are filtered
+        in memory, so without the rules the only honest options are unfiltered
+        images or none, and none is the safe one.
+
+        Args:
+            metadata_filter_rules (Sequence[Any] | None): Raw request filters.
+            metadata_filters_active (bool): Whether filters are in play.
+
+        Returns:
+            Callable[[str], list[NodeWithScore]] | None: The lane, or ``None``
+            when images must not participate in this request.
+        """
+        image_filter_rules = metadata_filter_rules if metadata_filters_active else None
+        if metadata_filters_active and not image_filter_rules:
+            return None
+
+        top_k = max(1, int(self._image_config_value("retrieve_top_k", DEFAULT_IMAGE_RETRIEVE_TOP_K)))
+
+        def _lane(query: str) -> list[NodeWithScore]:
+            """Retrieve image caption nodes for ``query``.
+
+            Args:
+                query (str): The user's original query.
+
+            Returns:
+                list[NodeWithScore]: Caption nodes from the image companion.
+            """
+            return self._retrieve_image_nodes(
+                query,
+                top_k=top_k,
+                metadata_filter_rules=image_filter_rules,
+            )
+
+        return _lane
 
     def build_query_engine(
         self,
@@ -4467,6 +4667,8 @@ class RAG:
         streaming: bool = False,
         vector_store_kwargs: dict[str, Any] | None = None,
         retrieval_options: dict[str, Any] | None = None,
+        metadata_filter_rules: Sequence[Any] | None = None,
+        metadata_filters_active: bool = False,
     ) -> RetrieverQueryEngine:
         """Construct a query engine for the current index.
 
@@ -4476,6 +4678,11 @@ class RAG:
             vector_store_kwargs (dict[str, Any] | None): Optional native vector-store query kwargs.
             retrieval_options (dict[str, Any] | None): Optional runtime overrides for retrieval mode,
                 hybrid fusion, and parent-context expansion.
+            metadata_filter_rules (Sequence[Any] | None): Raw request filters,
+                threaded through to the image lane, which post-filters its
+                candidates in memory.
+            metadata_filters_active (bool): Whether this request carries
+                metadata filters at all.
         """
         if self.index is None:
             self.create_index()
@@ -4488,7 +4695,12 @@ class RAG:
             retrieval_options=retrieval_options,
         )
         response_mode = self._resolve_chat_response_mode()
-        node_postprocessors: list[BaseNodePostprocessor] = [LazyRerankerPostprocessor(rag=self)]
+        node_postprocessors: list[BaseNodePostprocessor] = [
+            LazyRerankerPostprocessor(rag=self),
+            # Directly after the rerank, where image captions and text chunks
+            # first carry comparable scores.
+            ImageRelevanceFloorPostprocessor(min_score=self._image_relevance_floor()),
+        ]
         if retrieval_settings["parent_context_enabled"] and self.index is not None:
             usable_tokens, per_hit_floor = self._compute_parent_context_budget(
                 social_table=bool(profile.get("is_social_table")),
@@ -4522,6 +4734,8 @@ class RAG:
                 metadata_filters=metadata_filters,
                 vector_store_kwargs=vector_store_kwargs,
                 retrieval_options=retrieval_options,
+                metadata_filter_rules=metadata_filter_rules,
+                metadata_filters_active=metadata_filters_active,
             ),
             llm=self.post_retrieval_text_model,
             node_postprocessors=node_postprocessors,
@@ -4682,20 +4896,10 @@ class RAG:
             if normalized is not None:
                 sources.append(normalized)
 
-        image_filter_rules = metadata_filter_rules if metadata_filters_active else None
-        if (
-            query.strip()
-            and query != self.summarize_prompt
-            and (not metadata_filters_active or bool(image_filter_rules))
-        ):
-            sources.extend(
-                self._retrieve_image_sources(
-                    query,
-                    top_k=max(1, self.rerank_top_n // 2),
-                    metadata_filter_rules=image_filter_rules,
-                )
-            )
-
+        # Images are not appended here. They retrieve through
+        # ``MultimodalRetriever``, so they are already in ``source_nodes`` --
+        # reranked against the text chunks, seen by the generator, and numbered
+        # like any other source.
         sources = _attach_posting_group(sources)
 
         normalized_resp_text = str(resp_text or "").strip()
@@ -6193,6 +6397,8 @@ class RAG:
                 metadata_filters=metadata_filters,
                 vector_store_kwargs=vector_store_kwargs,
                 retrieval_options=retrieval_options,
+                metadata_filter_rules=metadata_filter_rules,
+                metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
             )
             if metadata_filters is not None or vector_store_kwargs or retrieval_options
             else self.query_engine
@@ -6278,6 +6484,8 @@ class RAG:
                 metadata_filters=metadata_filters,
                 vector_store_kwargs=vector_store_kwargs,
                 retrieval_options=retrieval_options,
+                metadata_filter_rules=metadata_filter_rules,
+                metadata_filters_active=(metadata_filters is not None or bool(vector_store_kwargs)),
             )
             if metadata_filters is not None or vector_store_kwargs or retrieval_options
             else self.query_engine

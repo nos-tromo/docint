@@ -293,6 +293,8 @@ class SessionManager:
             self.rag.build_query_engine(
                 metadata_filters=metadata_filters,
                 vector_store_kwargs=vector_store_kwargs,
+                metadata_filter_rules=metadata_filter_rules,
+                metadata_filters_active=metadata_filters_active,
             )
             if metadata_filters is not None or vector_store_kwargs
             else self.rag.query_engine
@@ -406,6 +408,8 @@ class SessionManager:
             metadata_filters=metadata_filters,
             streaming=True,
             vector_store_kwargs=vector_store_kwargs,
+            metadata_filter_rules=metadata_filter_rules,
+            metadata_filters_active=metadata_filters_active,
         )
 
         # Resolve the session per request (see :meth:`chat`): pure/idempotent,
