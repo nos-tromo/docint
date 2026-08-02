@@ -212,6 +212,48 @@ def test_probe_targets_the_configured_sparse_endpoint(
     assert "http://embed-only:8000/pooling" in seen
 
 
+def test_ingest_docs_probes_sparse_endpoint_before_any_file_work(
+    monkeypatch: pytest.MonkeyPatch,
+    rag_instance: RAG,
+) -> None:
+    """``ingest_docs`` must call the sparse probe before touching any files.
+
+    Pins the ordering documented at the call site in ``rag.py``: collection
+    resolution (``create_collection_if_missing``, stubbed out here) happens
+    first, then the sparse probe, then — only if the probe passes — file
+    staging via ``_prepare_sources_dir``. A sentinel raised by the probe must
+    propagate out of ``ingest_docs`` unchanged, and ``_prepare_sources_dir``
+    must never run.
+
+    Without this test, a future refactor of ``ingest_docs``'s preamble could
+    drop the ``probe_sparse_endpoint()`` call with every other test in the
+    suite still green — the probe tests above only ever call the method
+    directly, never through ``ingest_docs``.
+    """
+    monkeypatch.setattr(RAG, "create_collection_if_missing", lambda self: None)
+
+    class _SentinelError(Exception):
+        """Distinguishes the probe's failure from any other exception."""
+
+    def _raise_sentinel(self: RAG) -> None:
+        raise _SentinelError("sparse probe sentinel")
+
+    monkeypatch.setattr(RAG, "probe_sparse_endpoint", _raise_sentinel)
+
+    prepare_calls: list[object] = []
+
+    def _record_prepare(self: RAG, data_dir: object) -> object:
+        prepare_calls.append(data_dir)
+        return data_dir
+
+    monkeypatch.setattr(RAG, "_prepare_sources_dir", _record_prepare)
+
+    with pytest.raises(_SentinelError, match="sparse probe sentinel"):
+        rag_instance.ingest_docs("/unused/path", build_query_engine=False)
+
+    assert prepare_calls == []
+
+
 def test_no_local_model_runtime_is_installed() -> None:
     """Docint ships no local model runtime — guard against reintroduction.
 
