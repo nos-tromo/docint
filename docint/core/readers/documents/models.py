@@ -155,5 +155,11 @@ class DocumentManifest:
     pages_total: int = 0
     pages_ocr: int = 0
     pages_failed: int = 0
+    # Vision OCR outcomes, distinct from ``pages_ocr`` (which counts pages
+    # that *needed* OCR, not pages that got it). Without these a document
+    # whose vision lane failed or was given up on still reported
+    # ``pages_failed=0``.
+    pages_ocr_failed: int = 0
+    pages_ocr_skipped: int = 0
     status: str = "pending"
     error: str | None = None

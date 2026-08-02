@@ -189,6 +189,14 @@ class DocumentPipelineOrchestrator:
                 page_info.status = "failed"
                 page_info.error = "Text extraction failed"
 
+        # ``pages_ocr`` counts pages that *needed* OCR, not pages that got it,
+        # so without these a document whose vision lane failed or was given up
+        # on still summarized as pages_failed=0.
+        vision_stats = getattr(vision_engine, "ocr_stats", None)
+        if vision_stats is not None:
+            manifest.pages_ocr_failed = vision_stats.pages_failed
+            manifest.pages_ocr_skipped = vision_stats.pages_skipped
+
         if vision_engine is not None and hasattr(vision_engine, "close"):
             vision_engine.close()
 
@@ -309,6 +317,7 @@ class DocumentPipelineOrchestrator:
         logger.info(
             "Pipeline complete | doc_id={} file={} duration_ms={} "
             "pages_total={} pages_ocr={} pages_failed={} "
+            "pages_ocr_failed={} pages_ocr_skipped={} "
             "tables={} images={} chunks={}",
             manifest.doc_id[:12],
             manifest.file_name,
@@ -316,6 +325,8 @@ class DocumentPipelineOrchestrator:
             manifest.pages_total,
             manifest.pages_ocr,
             manifest.pages_failed,
+            manifest.pages_ocr_failed,
+            manifest.pages_ocr_skipped,
             manifest.tables_found,
             manifest.images_found,
             chunks_count,

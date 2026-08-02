@@ -110,6 +110,9 @@ def test_embed_failure_is_skipped_failsoft(monkeypatch: pytest.MonkeyPatch) -> N
     embed = _FailingEmbed([[1.0, 0.0], [0.5, 0.5], [0.0, 1.0]])
     tagger = _FakeTagger()
     svc = _service(monkeypatch, embed, tagger)
+    # The failing frame goes through the retry path, whose backoff is real
+    # time; this test is about fail-soft skipping, not about waiting.
+    monkeypatch.setattr("docint.core.ingest.images_service.time.sleep", lambda _seconds: None)
     records = svc.ingest_keyframe_set(
         [b"f0", b"f1", b"f2"],
         context=IngestContext(source_collection="c"),

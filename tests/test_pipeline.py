@@ -1192,6 +1192,7 @@ class TestOCR:
             patch("docint.core.readers.documents.ocr._OpenAI"),
             patch("docint.core.readers.documents.ocr.load_openai_env"),
             patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+            patch("docint.core.readers.documents.ocr.time.sleep"),
         ):
             mock_pdfium.PdfDocument.return_value = mock_pdf
             pipeline_instance = MagicMock()
@@ -1287,6 +1288,7 @@ class TestOCR:
             patch("docint.core.readers.documents.ocr._OpenAI"),
             patch("docint.core.readers.documents.ocr.load_openai_env"),
             patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+            patch("docint.core.readers.documents.ocr.time.sleep"),
         ):
             mock_pdfium.PdfDocument.return_value = mock_pdf
             pipeline_instance = MagicMock()
@@ -1354,6 +1356,7 @@ class TestOCR:
             patch("docint.core.readers.documents.ocr._OpenAI"),
             patch("docint.core.readers.documents.ocr.load_openai_env"),
             patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+            patch("docint.core.readers.documents.ocr.time.sleep"),
         ):
             mock_pdfium.PdfDocument.return_value = mock_pdf
             pipeline_instance = MagicMock()
@@ -1411,6 +1414,7 @@ class TestOCR:
             patch("docint.core.readers.documents.ocr._OpenAI"),
             patch("docint.core.readers.documents.ocr.load_openai_env"),
             patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+            patch("docint.core.readers.documents.ocr.time.sleep"),
         ):
             mock_pdfium.PdfDocument.return_value = mock_pdf
             pipeline_instance = MagicMock()
@@ -1469,6 +1473,7 @@ class TestOCR:
             patch("docint.core.readers.documents.ocr._OpenAI"),
             patch("docint.core.readers.documents.ocr.load_openai_env"),
             patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+            patch("docint.core.readers.documents.ocr.time.sleep"),
         ):
             mock_pdfium.PdfDocument.return_value = mock_pdf
             pipeline_instance = MagicMock()
@@ -1537,6 +1542,7 @@ class TestOCR:
             patch("docint.core.readers.documents.ocr._OpenAI"),
             patch("docint.core.readers.documents.ocr.load_openai_env"),
             patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+            patch("docint.core.readers.documents.ocr.time.sleep"),
         ):
             mock_pdfium.PdfDocument.return_value = mock_pdf
             pipeline_instance = MagicMock()
@@ -1599,6 +1605,7 @@ class TestOCR:
             patch("docint.core.readers.documents.ocr._OpenAI"),
             patch("docint.core.readers.documents.ocr.load_openai_env"),
             patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+            patch("docint.core.readers.documents.ocr.time.sleep"),
         ):
             mock_pdfium.PdfDocument.return_value = mock_pdf
             pipeline_instance = MagicMock()
@@ -1660,6 +1667,7 @@ class TestOCR:
             patch("docint.core.readers.documents.ocr._OpenAI"),
             patch("docint.core.readers.documents.ocr.load_openai_env"),
             patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+            patch("docint.core.readers.documents.ocr.time.sleep"),
         ):
             mock_pdfium.PdfDocument.return_value = mock_pdf
             pipeline_instance = MagicMock()
@@ -1718,6 +1726,7 @@ class TestOCR:
             patch("docint.core.readers.documents.ocr._OpenAI"),
             patch("docint.core.readers.documents.ocr.load_openai_env"),
             patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+            patch("docint.core.readers.documents.ocr.time.sleep"),
         ):
             mock_pdfium.PdfDocument.return_value = mock_pdf
             pipeline_instance = MagicMock()
@@ -1780,6 +1789,7 @@ class TestOCR:
             patch("docint.core.readers.documents.ocr._OpenAI"),
             patch("docint.core.readers.documents.ocr.load_openai_env"),
             patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+            patch("docint.core.readers.documents.ocr.time.sleep"),
         ):
             mock_pdfium.PdfDocument.return_value = mock_pdf
             pipeline_instance = MagicMock()
@@ -1842,6 +1852,7 @@ class TestOCR:
             patch("docint.core.readers.documents.ocr._OpenAI"),
             patch("docint.core.readers.documents.ocr.load_openai_env"),
             patch("docint.core.readers.documents.ocr.load_model_env") as mock_model_env,
+            patch("docint.core.readers.documents.ocr.time.sleep"),
         ):
             mock_pdfium.PdfDocument.return_value = mock_pdf
             pipeline_instance = MagicMock()
