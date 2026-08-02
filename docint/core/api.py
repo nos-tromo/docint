@@ -60,6 +60,7 @@ from docint.utils.env_cfg import (
     load_path_env,
     load_resolution_env,
     load_response_validation_env,
+    resolve_enable_hybrid,
 )
 from docint.utils.hashing import compute_file_hash
 from docint.utils.logger_cfg import init_logger
@@ -715,7 +716,7 @@ class IngestIn(BaseModel):
     """Request payload triggering ingestion into a named collection."""
 
     collection: str
-    hybrid: bool | None = True
+    hybrid: bool | None = None
     ner: bool | None = None
     hate_speech: bool | None = None
 
@@ -3029,11 +3030,17 @@ def ingest(payload: IngestIn, request: Request) -> dict[str, bool | str]:
             detail="Server storage is not available.",
         )
 
+    # ``payload.hybrid`` is None unless the caller explicitly opted in or out;
+    # None must reach ``ingest_docs`` unchanged so the RAG engine's own
+    # ``resolve_enable_hybrid()`` default decides, rather than always forcing
+    # hybrid on. Calling the same resolver here reports what that resolution
+    # actually produced, for callers that read the response's ``hybrid`` field.
+    resolved_hybrid = payload.hybrid if payload.hybrid is not None else resolve_enable_hybrid()
     try:
         ingest_module.ingest_docs(
             physical,
             data_dir,
-            hybrid=payload.hybrid if payload.hybrid is not None else True,
+            hybrid=payload.hybrid,
         )
     except EmptyIngestionError as exc:
         logger.warning(
@@ -3044,7 +3051,7 @@ def ingest(payload: IngestIn, request: Request) -> dict[str, bool | str]:
             "ok": True,
             "collection": name,
             "data_dir": str(data_dir),
-            "hybrid": payload.hybrid if payload.hybrid is not None else True,
+            "hybrid": resolved_hybrid,
             "empty": True,
         }
     except Exception as exc:
@@ -3055,7 +3062,7 @@ def ingest(payload: IngestIn, request: Request) -> dict[str, bool | str]:
         "ok": True,
         "collection": name,
         "data_dir": str(data_dir),
-        "hybrid": payload.hybrid if payload.hybrid is not None else True,
+        "hybrid": resolved_hybrid,
     }
 
 
@@ -3444,7 +3451,7 @@ async def ingest_finalize(
         logical_name=name,
         physical=physical,
         batch_dir=_resolve_qdrant_src_dir() / physical,
-        hybrid=payload.hybrid if payload.hybrid is not None else True,
+        hybrid=payload.hybrid,
         ner=payload.ner,
         hate_speech=payload.hate_speech,
         resolve=_auto_resolve_requested(payload.ner),

@@ -86,7 +86,7 @@ class IngestJobState:
     logical_name: str
     physical: str
     batch_dir: Path
-    hybrid: bool
+    hybrid: bool | None
     ner: bool | None
     hate_speech: bool | None
     resolve: bool
@@ -244,7 +244,7 @@ class IngestJobManager:
         logical_name: str,
         physical: str,
         batch_dir: Path,
-        hybrid: bool,
+        hybrid: bool | None,
         ner: bool | None,
         hate_speech: bool | None,
         resolve: bool,
@@ -262,7 +262,9 @@ class IngestJobManager:
             logical_name (str): The caller's collection name.
             physical (str): Owner-namespaced Qdrant collection name.
             batch_dir (Path): Directory of staged source files.
-            hybrid (bool): Whether hybrid search is enabled for the run.
+            hybrid (bool | None): Whether hybrid search is enabled for the
+                run; ``None`` keeps the RAG engine's derived default instead
+                of forcing it.
             ner (bool | None): Per-request NER override.
             hate_speech (bool | None): Per-request hate-speech override.
             resolve (bool): Whether entity resolution follows the ingest.
@@ -292,7 +294,7 @@ class IngestJobManager:
         logical_name: str,
         physical: str,
         batch_dir: Path,
-        hybrid: bool,
+        hybrid: bool | None,
         ner: bool | None,
         hate_speech: bool | None,
         resolve: bool,
@@ -317,7 +319,9 @@ class IngestJobManager:
             logical_name (str): The caller's collection name.
             physical (str): Owner-namespaced Qdrant collection name.
             batch_dir (Path): Directory of staged source files.
-            hybrid (bool): Whether hybrid search is enabled for the run.
+            hybrid (bool | None): Whether hybrid search is enabled for the
+                run; ``None`` keeps the RAG engine's derived default instead
+                of forcing it.
             ner (bool | None): Per-request NER override.
             hate_speech (bool | None): Per-request hate-speech override.
             resolve (bool): Whether entity resolution follows the ingest.
@@ -354,7 +358,7 @@ class IngestJobManager:
         logical_name: str,
         physical: str,
         batch_dir: Path,
-        hybrid: bool,
+        hybrid: bool | None,
         ner: bool | None,
         hate_speech: bool | None,
         resolve: bool,
@@ -366,7 +370,9 @@ class IngestJobManager:
             logical_name (str): The caller's collection name.
             physical (str): Owner-namespaced Qdrant collection name.
             batch_dir (Path): Directory of staged source files.
-            hybrid (bool): Whether hybrid search is enabled for the run.
+            hybrid (bool | None): Whether hybrid search is enabled for the
+                run; ``None`` keeps the RAG engine's derived default instead
+                of forcing it.
             ner (bool | None): Per-request NER override.
             hate_speech (bool | None): Per-request hate-speech override.
             resolve (bool): Whether entity resolution follows the ingest.

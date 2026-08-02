@@ -175,6 +175,46 @@ def test_ingest_docs_invokes_rag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert calls.build_query_engine is False
 
 
+def test_ingest_docs_leaves_enable_hybrid_unset_when_hybrid_is_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unspecified ``hybrid`` must not force ``RAG(enable_hybrid=True)``.
+
+    Regression test for the critical defect where every ingest caller's
+    ``hybrid: bool = True`` default always passed an explicit
+    ``enable_hybrid`` kwarg to ``RAG`` — which wins over the
+    ``resolve_enable_hybrid()``-derived ``default_factory`` on
+    ``RAG.enable_hybrid`` — forcing hybrid on even where the resolver
+    derives ``False`` (no sparse endpoint configured), and breaking every
+    ingest on non-vLLM providers (the probe hits a ``/pooling`` route that
+    does not exist). ``hybrid=None`` (the new default) must leave
+    ``enable_hybrid`` out of the call entirely so ``RAG``'s own default
+    decides.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        tmp_path (Path): Temporary directory path for the test.
+    """
+    unset = object()
+    calls = SimpleNamespace(enable_hybrid=unset)
+
+    class DummyRAG:
+        """Dummy RAG class recording whether ``enable_hybrid`` was passed."""
+
+        def __init__(self, qdrant_collection: str, **kwargs: Any) -> None:
+            calls.enable_hybrid = kwargs.get("enable_hybrid", unset)
+
+        def ingest_docs(self, path: Path, **kwargs: Any) -> None:
+            return None
+
+        def unload_models(self) -> None:
+            return None
+
+    monkeypatch.setattr(ingest, "RAG", DummyRAG)
+    ingest.ingest_docs("demo", tmp_path)
+    assert calls.enable_hybrid is unset
+
+
 def _make_pipeline(
     tmp_path: Path, entity_extractor: Callable[[str], tuple[list[dict[str, Any]], list[dict[str, Any]]]]
 ) -> tuple[DocumentIngestionPipeline, list[Any]]:
