@@ -120,9 +120,11 @@ without going through Docker.
    ```
 
    This populates the Hugging Face and Docling caches so the first backend
-   startup does not block on downloads. Sparse (and dense) embedding is a
-   remote call to `vllm-service`, not a local model, so it has no cache
-   to pre-populate here.
+   startup does not block on downloads. Sparse and dense embedding are both
+   remote calls to `vllm-service`, not local models — but dense's *tokenizer*
+   (`BAAI/bge-m3`) is still cached locally here, for accurate token counting
+   during pre-embed re-chunking; without it, that step degrades to a
+   char-ratio heuristic with a warning.
 
 5. **Start the backend:**
 

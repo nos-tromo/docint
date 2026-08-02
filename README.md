@@ -37,12 +37,17 @@ and chat. It ships with:
 > Ollama's quantised GGUF build. Dev collections created before this
 > change need **bge-m3 vectors, which a plain re-ingest will not give
 > them** — for two reasons: file-hash dedup skips any source file
-> already recorded as ingested, and an existing collection keeps the
-> vector schema (dimensions, `modifier=IDF`) it was created with. The
-> fix is the same for both changes — **delete the collection and ingest
-> it again from scratch** covers dense and sparse in one migration, not
-> two. Production (vLLM) collections already used bge-m3 for both and
-> are unaffected.
+> already recorded as ingested, and swapping models mid-collection would
+> leave old and new points computed by different models side by side
+> with no way to tell them apart. The dense dimension itself doesn't
+> change — bge-m3 is 1024-wide both as Ollama's GGUF build and as fp32
+> transformers — so checking the vector width is not a valid way to
+> confirm this migration is unnecessary; the drift is in the numeric
+> values (quantised vs. fp32) and, for sparse, the switch away from BM42
+> entirely. The fix is the same for both changes — **delete the
+> collection and ingest it again from scratch** covers dense and sparse
+> in one migration, not two. Production (vLLM) collections already used
+> bge-m3 for both and are unaffected.
 
 ## Quick Start With Docker
 
