@@ -441,5 +441,4 @@ Loaded by `load_response_validation_env()` (`env_cfg.py:935`).
 - `DOCINT_OFFLINE` — default `1`. When truthy, Docint sets
   `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`,
   `HF_HUB_DISABLE_TELEMETRY=1`, `HF_HUB_DISABLE_SYMLINKS_WARNING=1`, and
-  `KMP_DUPLICATE_LIB_OK=TRUE`. It also points `FASTEMBED_CACHE_PATH` at
-  `HF_HUB_CACHE` when unset. See `set_offline_env()` in `env_cfg.py:12`.
+  `KMP_DUPLICATE_LIB_OK=TRUE`. See `set_offline_env()` in `env_cfg.py:12`.
