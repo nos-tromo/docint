@@ -27,7 +27,7 @@ from docint.core.readers.documents.models import (
     PageText,
 )
 from docint.utils.env_cfg import load_model_env, load_openai_env
-from docint.utils.llm_sanitize import looks_like_no_image_refusal, strip_reasoning
+from docint.utils.llm_sanitize import looks_like_no_image_refusal, squeeze_char_runs, strip_reasoning
 from docint.utils.openai_cfg import OpenAIPipeline
 
 
@@ -540,7 +540,20 @@ class VisionOCREngine(OCREngine):
             if self._looks_like_refusal(text):
                 logger.warning("Vision OCR returned refusal-style output; treating as empty text")
                 return ""
-            return text
+            # Degenerate-repetition guard: a form's dotted fill-in line can
+            # lock the model into repeating the fill character until
+            # ``max_tokens`` — observed live as 65392 dots per page, stored
+            # and embedded as real content. A big squeeze also means the
+            # page burned most of its generation budget on filler, which is
+            # worth surfacing.
+            squeezed = squeeze_char_runs(text)
+            if len(squeezed) < len(text) - 1000:
+                logger.warning(
+                    "Vision OCR output was {} chars of repeated filler; squeezed to {} chars",
+                    len(text),
+                    len(squeezed),
+                )
+            return squeezed
         except APIStatusError as e:
             # The endpoint answered. Costs this page, not the document.
             logger.error("Error during vision OCR inference: {}", e)
