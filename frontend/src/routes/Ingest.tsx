@@ -190,7 +190,6 @@ export function Ingest() {
       // existed.
       createIngestJob({
         collection: run.activeJobCollection ?? run.collection,
-        hybrid: true,
         ner: run.ner,
         hate_speech: run.hate
       }),

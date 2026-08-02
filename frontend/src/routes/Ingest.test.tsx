@@ -329,7 +329,7 @@ describe('Ingest — interrupted run', () => {
 
     const finalizeCall = fetchMock.mock.calls.find((c) => String(c[0]).includes('/ingest/finalize'))!
     const body = JSON.parse((finalizeCall[1] as RequestInit).body as string)
-    expect(body).toEqual({ collection: 'mydocs', hybrid: true, ner: true, hate_speech: false })
+    expect(body).toEqual({ collection: 'mydocs', ner: true, hate_speech: false })
   })
 
   it('re-runs against the job\'s captured collection, not an edited live form field', async () => {

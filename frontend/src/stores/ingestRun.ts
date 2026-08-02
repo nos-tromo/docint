@@ -179,7 +179,6 @@ export const useIngestRunStore = create<IngestRunState>()(
         try {
           const { job_id } = await createIngestJob({
             collection,
-            hybrid: true,
             ner,
             hate_speech: hate
           })
