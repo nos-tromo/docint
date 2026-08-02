@@ -84,6 +84,7 @@ export const en = {
   'chat.no_answer': '(no answer)',
   'chat.error_title': 'Chat error',
   'chat.sources': 'Sources',
+  'chat.source_number': 'Source {n}',
   'chat.ask_placeholder': 'Ask something…',
   'chat.send': 'Send',
   'chat.query_mode': 'Query mode',

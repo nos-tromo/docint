@@ -6,6 +6,12 @@ export interface Source {
   // Reader-assigned chunk id, present for readers that mint one (page-level
   // PDF chunks). Preferred over `id` when displaying a citation identity.
   chunk_id?: string
+  // The number the generator saw this snippet under, stamped server-side
+  // (docint/core/rag.py::CitationNumberingPostprocessor) so the answer's
+  // "source 3" and this card are the same chunk. Never derive it from the
+  // card's position: the list is deduped and image matches are appended
+  // after generation. Absent for sources that never reached the prompt.
+  citation_index?: number
   file_hash?: string
   filename: string
   filetype?: string | null
