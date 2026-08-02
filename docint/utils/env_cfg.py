@@ -1039,7 +1039,7 @@ def resolve_enable_hybrid() -> bool:
     it inherits ``OPENAI_API_BASE`` and is therefore never empty. Two
     signals stand in for it: the vLLM provider (whose router exposes both
     routes as pass-throughs) and an explicitly set ``SPARSE_API_BASE``
-    (the sparse-only deployment shape). An explicit ``ENABLE_HYBRID``
+    (the embed-only deployment shape). An explicit ``ENABLE_HYBRID``
     overrides both.
 
     Returns:
@@ -1456,9 +1456,9 @@ def load_sparse_client_env(
     client POSTs to ``{api_base}/pooling`` (``task=token_classify``) and
     ``{api_base}/tokenize``. Defaults mirror the OpenAI client settings —
     the full vllm-service router exposes both as LiteLLM pass-throughs
-    against the same base. For the sparse-only deployment shape (CPU
+    against the same base. For the embed-only deployment shape (CPU
     container hosted by vllm-service), override with
-    ``SPARSE_API_BASE=http://sparse-only:8000``.
+    ``SPARSE_API_BASE=http://embed-only:8000``.
 
     Args:
         default_api_base (str): Fallback base URL when ``SPARSE_API_BASE``
@@ -1473,7 +1473,7 @@ def load_sparse_client_env(
         - ``api_base``: Base URL; the encoder appends ``/pooling`` and
           ``/tokenize`` itself.
         - ``api_key``: Bearer token sent as ``Authorization: Bearer ...``
-          when set; omitted entirely when ``None``. The sparse-only shape
+          when set; omitted entirely when ``None``. The embed-only shape
           requires no auth (trust ``inference-net``); the full router
           requires the master key.
         - ``timeout``: Per-request HTTP timeout in seconds.

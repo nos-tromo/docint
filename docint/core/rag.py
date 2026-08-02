@@ -1738,7 +1738,7 @@ class RemoteSparseEncoder:
     ``task="token_classify"`` plus ``POST {root}/tokenize`` — against
     either the full vllm-service router (which exposes both as LiteLLM
     pass-throughs to the ``embed`` backend) or the standalone
-    ``sparse-only`` CPU container. The wire format is frozen: production
+    ``embed-only`` CPU container. The wire format is frozen: production
     collections were ingested with it.
     """
 
@@ -2801,8 +2801,8 @@ class RAG:
             logger.error("Sparse endpoint probe failed against {}: {}", base, exc)
             raise RuntimeError(
                 f"Hybrid retrieval is enabled but the sparse endpoint at {base} is unreachable: {exc}. "
-                "Point SPARSE_API_BASE at a reachable sparse service (the sparse-only shape listens on "
-                "http://sparse-only:8000), or set ENABLE_HYBRID=false to ingest dense-only."
+                "Point SPARSE_API_BASE at a reachable sparse service (the embed-only shape listens on "
+                "http://embed-only:8000), or set ENABLE_HYBRID=false to ingest dense-only."
             ) from exc
 
     # --- Build pieces ---

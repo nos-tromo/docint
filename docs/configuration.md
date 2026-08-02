@@ -192,6 +192,18 @@ model. The clamp + control-char scrub closes a narrow set of forged-
 formatting vectors but is not a substitute for reviewing ingest
 sources you do not control.
 
+## Dense embedding client — `EmbedClientConfig`
+
+Loaded by `load_embed_client_env()` (`env_cfg.py:1495`). Dense embeddings
+go through an OpenAI-compatible endpoint on every provider; these knobs
+only need to change on a CPU dev host that wants dense embeddings routed
+to a dedicated container instead of the default OpenAI-style base.
+
+| Variable | Default | Description |
+|---|---|---|
+| `EMBED_API_BASE` | inherits `OPENAI_API_BASE` | Base URL of the dense-embedding endpoint. Consumed by the OpenAI SDK, which appends `/embeddings` to it, so the value **must include `/v1`** (e.g. `http://embed-only:8000/v1`) — omitting it yields a silent 404. For the `embed-only` deployment shape (CPU container, pairs with `gliner-only` / `rerank-only` / `clip-only` for non-CUDA dev; serves dense embedding, sparse weights, and tokenization from one bge-m3 instance), set `EMBED_API_BASE=http://embed-only:8000/v1`. |
+| `EMBED_API_KEY` | inherits `OPENAI_API_KEY` | Bearer token for the dense-embedding endpoint. `embed-only` requires no auth (trust `inference-net`); the full router requires the master key. There is no separate timeout field here — the request timeout is the pre-existing `EMBED_TIMEOUT_SECONDS` (see `EmbeddingConfig` above), not a client-config knob. |
+
 ## Sparse encoder & hybrid retrieval — `SparseClientConfig`
 
 Loaded by `load_sparse_client_env()` (`env_cfg.py:1440`) and
@@ -204,10 +216,10 @@ response shape must not change.
 
 | Variable | Default | Description |
 |---|---|---|
-| `SPARSE_API_BASE` | inherits `OPENAI_API_BASE` | Base URL of the sparse-encoding endpoint. The full vllm-service router exposes `/pooling` and `/tokenize` as LiteLLM pass-throughs against the same base. For the `sparse-only` deployment shape (CPU container, pairs with `gliner-only` / `rerank-only` / `clip-only` for non-CUDA dev), set `SPARSE_API_BASE=http://sparse-only:8000`. |
-| `SPARSE_API_KEY` | inherits `OPENAI_API_KEY` | Bearer token for the sparse endpoint. `sparse-only` requires no auth (trust `inference-net`); the full router requires the master key. |
+| `SPARSE_API_BASE` | inherits `OPENAI_API_BASE` | Base URL of the sparse-encoding endpoint. The full vllm-service router exposes `/pooling` and `/tokenize` as LiteLLM pass-throughs against the same base. For the `embed-only` deployment shape (CPU container, pairs with `gliner-only` / `rerank-only` / `clip-only` for non-CUDA dev), set `SPARSE_API_BASE=http://embed-only:8000`. |
+| `SPARSE_API_KEY` | inherits `OPENAI_API_KEY` | Bearer token for the sparse endpoint. `embed-only` requires no auth (trust `inference-net`); the full router requires the master key. |
 | `SPARSE_TIMEOUT` | inherits `OPENAI_TIMEOUT` | Per-request HTTP timeout in seconds for the sparse endpoint. |
-| `ENABLE_HYBRID` | *unset* (see below) | Explicit override for hybrid (dense + sparse) retrieval; `true`/`1`/`yes`/`on` (case-insensitive) enables it, anything else set disables it. When unset, defaults to **true** if `INFERENCE_PROVIDER=vllm` (the router's `/pooling` and `/tokenize` pass-throughs are always present) **or** `SPARSE_API_BASE` is explicitly set (the `sparse-only` shape); **false** otherwise — `SPARSE_API_BASE` alone can't signal availability since it silently inherits `OPENAI_API_BASE` and is therefore never actually empty. |
+| `ENABLE_HYBRID` | *unset* (see below) | Explicit override for hybrid (dense + sparse) retrieval; `true`/`1`/`yes`/`on` (case-insensitive) enables it, anything else set disables it. When unset, defaults to **true** if `INFERENCE_PROVIDER=vllm` (the router's `/pooling` and `/tokenize` pass-throughs are always present) **or** `SPARSE_API_BASE` is explicitly set (the `embed-only` shape); **false** otherwise — `SPARSE_API_BASE` alone can't signal availability since it silently inherits `OPENAI_API_BASE` and is therefore never actually empty. |
 
 An ingest job calls `RAG.probe_sparse_endpoint()` before its first batch
 when hybrid is enabled, and fails the job cleanly if the sparse endpoint

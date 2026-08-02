@@ -17,23 +17,32 @@ and chat. It ships with:
   - local development needs an OpenAI-compatible endpoint you manage yourself
   - on a non-CUDA dev host, `vllm-service` also ships standalone CPU-only
     profiles for the services Docint calls remotely: `gliner-only`
-    (NER), `rerank-only`, `clip-only`, and `sparse-only`. Point
-    `NER_API_BASE` / `RERANK_API_BASE` / `CLIP_API_BASE` /
-    `SPARSE_API_BASE` at each dedicated container instead of the full
-    router — see `docs/configuration.md` for the per-service defaults.
-    The `sparse-only` shape requires a `vllm-service` release that ships
-    it; until that release is available, run the full stack (or another
-    of the three `*-only` profiles) instead.
+    (NER), `rerank-only`, `clip-only`, and `embed-only` (dense embedding
+    plus sparse weights and tokenization, from one bge-m3 instance).
+    Point `NER_API_BASE` / `RERANK_API_BASE` / `CLIP_API_BASE` /
+    `SPARSE_API_BASE` / `EMBED_API_BASE` at each dedicated container
+    instead of the full router — see `docs/configuration.md` for the
+    per-service defaults. Setting both `EMBED_API_BASE` and
+    `SPARSE_API_BASE` to the same `embed-only` container loads bge-m3
+    once instead of twice, and it replaces Ollama's bge-m3 for dense
+    embeddings too — Ollama then serves chat only. The `embed-only`
+    shape requires a `vllm-service` release that ships it; until that
+    release is available, run the full stack (or another of the three
+    `*-only` profiles) instead.
 
 > **Re-ingest note:** the sparse model changed from BM42
 > (`Qdrant/all_miniLM_L6_v2_with_attentions`) to `BAAI/bge-m3` for
-> non-vLLM providers. Dev collections created before this change need
-> **bge-m3 sparse vectors, which a plain re-ingest will not give them** —
-> for two reasons: file-hash dedup skips any source file already recorded
-> as ingested, and an existing collection keeps the sparse schema
-> (`modifier=IDF`) it was created with. The fix is to **delete the
-> collection and ingest it again from scratch**. Production (vLLM)
-> collections already used bge-m3 and are unaffected.
+> non-vLLM providers, and dense embeddings on the `embed-only` shape now
+> come from that same bge-m3 instance (fp32 transformers) instead of
+> Ollama's quantised GGUF build. Dev collections created before this
+> change need **bge-m3 vectors, which a plain re-ingest will not give
+> them** — for two reasons: file-hash dedup skips any source file
+> already recorded as ingested, and an existing collection keeps the
+> vector schema (dimensions, `modifier=IDF`) it was created with. The
+> fix is the same for both changes — **delete the collection and ingest
+> it again from scratch** covers dense and sparse in one migration, not
+> two. Production (vLLM) collections already used bge-m3 for both and
+> are unaffected.
 
 ## Quick Start With Docker
 

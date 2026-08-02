@@ -2,7 +2,7 @@
 
 Mirrors the RERANK_* contract: each knob falls back to the active
 OpenAI client setting unless explicitly overridden, so the full
-vllm-service router works with no configuration while the sparse-only
+vllm-service router works with no configuration while the embed-only
 CPU shape needs only SPARSE_API_BASE.
 """
 
@@ -28,8 +28,8 @@ def test_sparse_client_inherits_openai_defaults(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_sparse_client_explicit_override_wins(monkeypatch: pytest.MonkeyPatch) -> None:
-    """SPARSE_API_BASE points at the sparse-only container; trailing slash is stripped."""
-    monkeypatch.setenv("SPARSE_API_BASE", "http://sparse-only:8000/")
+    """SPARSE_API_BASE points at the embed-only container; trailing slash is stripped."""
+    monkeypatch.setenv("SPARSE_API_BASE", "http://embed-only:8000/")
     monkeypatch.setenv("SPARSE_TIMEOUT", "45")
     monkeypatch.delenv("SPARSE_API_KEY", raising=False)
 
@@ -39,14 +39,14 @@ def test_sparse_client_explicit_override_wins(monkeypatch: pytest.MonkeyPatch) -
         default_timeout=300.0,
     )
 
-    assert cfg.api_base == "http://sparse-only:8000"
+    assert cfg.api_base == "http://embed-only:8000"
     assert cfg.timeout == 45.0
 
 
 def test_sparse_client_blank_key_disables_auth(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The sparse-only shape has no Bearer gate; a blank default means no header."""
+    """The embed-only shape has no Bearer gate; a blank default means no header."""
     monkeypatch.delenv("SPARSE_API_KEY", raising=False)
-    monkeypatch.setenv("SPARSE_API_BASE", "http://sparse-only:8000")
+    monkeypatch.setenv("SPARSE_API_BASE", "http://embed-only:8000")
 
     cfg = load_sparse_client_env(
         default_api_base="http://vllm-router:4000/v1",
@@ -71,9 +71,9 @@ def test_hybrid_on_for_vllm_without_explicit_base(monkeypatch: pytest.MonkeyPatc
 
 
 def test_hybrid_on_when_sparse_base_set_explicitly(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Dev: pointing at sparse-only opts in, whatever the provider."""
+    """Dev: pointing at embed-only opts in, whatever the provider."""
     monkeypatch.setenv("INFERENCE_PROVIDER", "ollama")
-    monkeypatch.setenv("SPARSE_API_BASE", "http://sparse-only:8000")
+    monkeypatch.setenv("SPARSE_API_BASE", "http://embed-only:8000")
     assert resolve_enable_hybrid() is True
 
 

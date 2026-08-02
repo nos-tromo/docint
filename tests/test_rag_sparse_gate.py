@@ -23,7 +23,7 @@ from docint.utils.env_cfg import SparseClientConfig
 
 def test_encoder_appends_pooling_and_tokenize_to_base(monkeypatch: pytest.MonkeyPatch) -> None:
     """The encoder owns the route suffixes; the config carries only the base."""
-    encoder = RemoteSparseEncoder(api_base="http://sparse-only:8000", model="BAAI/bge-m3")
+    encoder = RemoteSparseEncoder(api_base="http://embed-only:8000", model="BAAI/bge-m3")
     captured: list[tuple[str, dict[str, object]]] = []
 
     def _fake_request(self: RemoteSparseEncoder, url: str, payload: dict[str, object]) -> object:
@@ -36,8 +36,8 @@ def test_encoder_appends_pooling_and_tokenize_to_base(monkeypatch: pytest.Monkey
     indices, values = encoder.encode_texts(["alpha"])
 
     urls = [url for url, _ in captured]
-    assert "http://sparse-only:8000/pooling" in urls
-    assert "http://sparse-only:8000/tokenize" in urls
+    assert "http://embed-only:8000/pooling" in urls
+    assert "http://embed-only:8000/tokenize" in urls
     assert indices == [[42]]
     assert values == [[pytest.approx(0.7)]]
 
@@ -61,7 +61,7 @@ def test_encoder_strips_v1_suffix_for_router_base(monkeypatch: pytest.MonkeyPatc
 
 def test_encoder_drops_non_positive_scores(monkeypatch: pytest.MonkeyPatch) -> None:
     """ReLU zeroes most tokens; those must not enter the sparse vector."""
-    encoder = RemoteSparseEncoder(api_base="http://sparse-only:8000", model="BAAI/bge-m3")
+    encoder = RemoteSparseEncoder(api_base="http://embed-only:8000", model="BAAI/bge-m3")
 
     def _fake_request(self: RemoteSparseEncoder, url: str, payload: dict[str, object]) -> object:
         if url.endswith("/pooling"):
@@ -193,7 +193,7 @@ def test_probe_targets_the_configured_sparse_endpoint(
     """
     rag_instance.enable_hybrid = True
     rag_instance.sparse_client_config = SparseClientConfig(
-        api_base="http://sparse-only:8000",
+        api_base="http://embed-only:8000",
         api_key=None,
         timeout=12.0,
     )
@@ -209,7 +209,7 @@ def test_probe_targets_the_configured_sparse_endpoint(
     monkeypatch.setattr(rag_module.RemoteSparseEncoder, "_request_json", _capture)
     rag_instance.probe_sparse_endpoint()
 
-    assert "http://sparse-only:8000/pooling" in seen
+    assert "http://embed-only:8000/pooling" in seen
 
 
 def test_no_local_model_runtime_is_installed() -> None:
