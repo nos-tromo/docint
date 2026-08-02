@@ -132,13 +132,11 @@ class VisionOCRStats:
     """What the vision OCR lane did across one document.
 
     Attributes:
-        pages_attempted: Pages the engine was asked to read.
         pages_failed: Pages that reached the engine but produced no text.
         pages_skipped: Pages not attempted at all because the failure budget
             had already given up on the document.
     """
 
-    pages_attempted: int = 0
     pages_failed: int = 0
     pages_skipped: int = 0
 
@@ -268,7 +266,6 @@ class VisionOCREngine(OCREngine):
                 page_index,
             )
             return spans
-        self.ocr_stats.pages_attempted += 1
         try:
             page = self._pdf[page_index]
             # Render at configured DPI (scale = DPI / 72).
