@@ -93,6 +93,50 @@ def test_fused_retriever_returns_both_lanes() -> None:
     assert [n.node.node_id for n in out] == ["t1", "point-77"]
 
 
+def test_the_same_image_is_not_retrieved_twice() -> None:
+    """A standalone image file lands in both collections; it is one source.
+
+    ``ImageReader`` writes the caption into the main collection as the
+    document's text *and* into the `_images` companion as the CLIP point. Both
+    lanes can therefore return the same image. Before fusion that produced two
+    citation cards (which the SPA papered over); now it would also spend two
+    numbered slots in the prompt on one piece of evidence.
+    """
+    text_hit = NodeWithScore(
+        node=TextNode(id_="doc-node", text="A site plan.", metadata={"filename": "site-plan.png", "image_id": "img-1"}),
+        score=0.9,
+    )
+    fused = MultimodalRetriever(
+        text_retriever=_TextRetriever([text_hit]),
+        image_lane=lambda query: [_image_node("point-77", 0.28)],
+    )
+
+    out = fused.retrieve(QueryBundle(query_str="site plan"))
+
+    assert [n.node.node_id for n in out] == ["doc-node", "point-77"]
+
+
+def test_the_lane_yields_to_the_document_copy_of_the_same_image() -> None:
+    """The main-collection node wins: it is the one with a docstore entry."""
+    duplicate = NodeWithScore(
+        node=TextNode(
+            id_="doc-node",
+            text="A hand-drawn site plan.",
+            metadata={"filename": "site-plan.png", "image_id": "img-9f2c"},
+        ),
+        score=0.9,
+    )
+    fused = MultimodalRetriever(
+        text_retriever=_TextRetriever([duplicate]),
+        # Same ``image_id`` as IMAGE_PAYLOAD.
+        image_lane=lambda query: [_image_node("point-77", 0.28)],
+    )
+
+    out = fused.retrieve(QueryBundle(query_str="site plan"))
+
+    assert [n.node.node_id for n in out] == ["doc-node"]
+
+
 def test_image_lane_failure_degrades_to_text_only() -> None:
     """A CLIP or companion-collection outage must not fail the whole query."""
 

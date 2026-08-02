@@ -1556,9 +1556,27 @@ class MultimodalRetriever(BaseRetriever):
         """
         nodes: list[NodeWithScore] = list(self.text_retriever.retrieve(query_bundle))
         try:
-            nodes.extend(self.image_lane(query_bundle.query_str))
+            image_nodes = self.image_lane(query_bundle.query_str)
         except Exception as exc:
             logger.warning("Image lane retrieval failed: {}. Answering from text sources only.", exc)
+            return nodes
+
+        # A standalone image file lives in both collections: ``ImageReader``
+        # writes its caption into the main collection as the document's text,
+        # and ``ImageIngestionService`` writes the CLIP point into the
+        # ``_images`` companion. Retrieving both would spend two numbered
+        # source slots on one piece of evidence. The main-collection node wins
+        # -- it is the one with a docstore entry and parent links.
+        already_retrieved = {
+            str(node.node.metadata.get("image_id") or "").strip()
+            for node in nodes
+            if node.node.metadata.get("image_id")
+        }
+        nodes.extend(
+            node
+            for node in image_nodes
+            if str(node.node.metadata.get("image_id") or "").strip() not in already_retrieved
+        )
         return nodes
 
 
@@ -7009,6 +7027,70 @@ class RAG:
 
         return matched_nodes
 
+    def _summary_image_nodes_for_document(self, *, file_hash: str | None, top_k: int) -> list[NodeWithScore]:
+        """Collect a document's stored images as summary evidence.
+
+        A PDF's figures and a clip's keyframes live in the `_images` companion,
+        which the summary's retrieval never touched — so a multimodal document
+        was summarized as if it were text-only. They are scrolled by the
+        document's own hash rather than retrieved by similarity: the summary
+        asks "what is in this document", not "what matches this query".
+
+        Args:
+            file_hash (str | None): The parent document's content hash. Without
+                it nothing ties an image to the document, and the lane declines.
+            top_k (int): Cap on images returned, so a figure-heavy document
+                cannot crowd out its own text evidence.
+
+        Returns:
+            list[NodeWithScore]: Caption nodes, scored ``None`` (unranked
+            evidence, not query matches). Empty on any outage.
+        """
+        if not file_hash or not self.qdrant_collection or top_k <= 0:
+            return []
+        if self._image_ingestion_service is None:
+            self._image_ingestion_service = ImageIngestionService()
+        try:
+            image_collection = self._image_ingestion_service._resolve_collection_name(self.qdrant_collection)
+        except Exception:
+            return []
+        if not image_collection or not qdrant_collection_exists(self.qdrant_client, image_collection):
+            return []
+
+        try:
+            points, _ = self.qdrant_client.scroll(
+                collection_name=image_collection,
+                scroll_filter=qdrant_models.Filter(
+                    should=[
+                        qdrant_models.FieldCondition(
+                            key="source_doc_id", match=qdrant_models.MatchValue(value=file_hash)
+                        ),
+                        qdrant_models.FieldCondition(key="file_hash", match=qdrant_models.MatchValue(value=file_hash)),
+                    ]
+                ),
+                limit=max(1, top_k),
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception as exc:
+            logger.warning("Summary image scroll failed for '{}': {}", image_collection, exc)
+            return []
+
+        nodes: list[NodeWithScore] = []
+        for point in points or []:
+            payload = dict(getattr(point, "payload", {}) or {})
+            caption = RAG._image_caption_text(payload)
+            if not caption:
+                continue
+            point_id = str(getattr(point, "id", "") or "")
+            if point_id:
+                payload.setdefault("node_id", point_id)
+            scored = self._image_caption_node(payload, caption)
+            nodes.append(NodeWithScore(node=scored.node, score=None))
+            if len(nodes) >= top_k:
+                break
+        return nodes
+
     def _retrieve_summary_nodes_for_document(self, *, filename: str, file_hash: str | None) -> list[Any]:
         """Retrieve top evidence nodes for a single document."""
         if self.index is None:
@@ -7195,6 +7277,16 @@ class RAG:
             nodes = self._retrieve_summary_nodes_for_document(
                 filename=filename,
                 file_hash=file_hash,
+            )
+            # A multimodal document's figures and keyframes are evidence too;
+            # they live in the `_images` companion, which the retrieval above
+            # does not see. Capped well below the per-document budget so the
+            # images supplement the document's text rather than replace it.
+            nodes = list(nodes) + list(
+                self._summary_image_nodes_for_document(
+                    file_hash=file_hash,
+                    top_k=max(1, self.summary_per_doc_top_k // 3),
+                )
             )
             candidate_count += len(nodes)
             normalized_sources: list[dict[str, Any]] = []

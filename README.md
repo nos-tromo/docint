@@ -247,17 +247,39 @@ before generation: the last node postprocessor stamps `citation_index` onto
 the snippet set the synthesizer renders, so the model reads its number instead
 of counting, and the same value rides the source payload out to the SPA.
 
-Two consequences follow from that, both deliberate:
-
-- **The list can have gaps.** The SPA drops broken-preview duplicates from the
-  card list; the surviving cards keep their original numbers rather than
-  closing the gap, because renumbering would break the link to the answer.
-- **Some cards have no number.** Image matches are retrieved *after*
-  generation, so the answer cannot have cited them and they stay unnumbered.
+The list can have gaps: the SPA drops broken-preview duplicates from the card
+list, and the surviving cards keep their original numbers rather than closing
+the gap, because renumbering would break the link to the answer.
 
 Conversations replayed from the session DB take their numbers from citation
 row order, which is the order the generator saw. Answers written before this
 feature still contain hand-counted ordinals that may not line up.
+
+## Images As Sources
+
+Images are ordinary sources. A stored image — a standalone file, a figure
+embedded in a PDF, a video keyframe — is retrieved by CLIP, ranked against the
+text chunks by the same reranker on the same scale, shown to the model as part
+of the evidence, numbered like any other citation, and quotable in the
+collection summary alongside its document's text.
+
+What the model sees of an image is its stored caption and tags, written at
+ingest time. No pixels are sent at query time, and no vision call happens on
+the chat path.
+
+Two settings shape the lane:
+
+- `IMAGE_RETRIEVE_TOP_K` (default `5`) — how many CLIP candidates enter the
+  ranking. They then compete with text chunks for the answer's source slots;
+  a query with no relevant imagery spends none of them.
+- `IMAGE_RERANK_MIN_SCORE` (default `0.05`) — the reranker score an image
+  caption must reach. The floor sits on the reranker, never on raw CLIP
+  similarity, which is not comparable across queries: an unrelated query and a
+  matching one both land in the same narrow CLIP band. Raise it if unrelated
+  images still appear; lower it if relevant ones are missing.
+
+If the rerank endpoint is down, images surface ungated rather than vanishing —
+a degraded ranking is more useful than a silently emptied lane.
 
 ## Server-Side Exports For Large Collections
 
