@@ -235,3 +235,41 @@ def looks_like_no_image_refusal(text: str) -> bool:
     if len(normalized) <= _NO_IMAGE_LENGTH_GUARD_CHARS:
         return any(phrase in normalized for phrase in _NO_IMAGE_PHRASES_LENGTH_GUARDED)
     return False
+
+
+# Longest run of one repeated character allowed through ``squeeze_char_runs``.
+# Chosen to keep every legitimate separator (table rules, ASCII dividers,
+# dotted leader lines short enough to be typed by hand) while catching
+# degenerate generation, which overshoots this by orders of magnitude.
+_MAX_CHAR_RUN: int = 20
+
+_CHAR_RUN_PATTERN = re.compile(r"(\S)\1{" + str(_MAX_CHAR_RUN) + ",}")
+
+
+def squeeze_char_runs(text: str, *, max_run: int = _MAX_CHAR_RUN) -> str:
+    """Collapse degenerate character runs to a plausible separator length.
+
+    A vision model transcribing a form's dotted fill-in line can lock into
+    repeating the fill character until ``max_tokens`` cuts it off — observed
+    live as a single run of 65392 dots that went on to become three of a
+    document's five chunks. A human transcriber writes a short leader line;
+    so does this.
+
+    Whitespace runs are exempt: blank-line stretches are page layout, and
+    they are handled by chunking, not by output hygiene.
+
+    Args:
+        text (str): Model output text.
+        max_run (int): Longest run of one repeated non-whitespace character
+            to keep.
+
+    Returns:
+        str: ``text`` with every longer run truncated to ``max_run``.
+    """
+    if not text:
+        return text
+    if max_run == _MAX_CHAR_RUN:
+        pattern = _CHAR_RUN_PATTERN
+    else:
+        pattern = re.compile(r"(\S)\1{" + str(max_run) + ",}")
+    return pattern.sub(lambda match: match.group(1) * max_run, text)
