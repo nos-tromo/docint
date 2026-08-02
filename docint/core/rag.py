@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 from docint.utils.env_cfg import (
     EmbeddingConfig,
     GraphRAGConfig,
+    EmbedClientConfig,
     HostConfig,
     IngestionConfig,
     NERConfig,
@@ -48,6 +49,7 @@ from docint.utils.env_cfg import (
     SessionConfig,
     SparseClientConfig,
     SummaryConfig,
+    load_embed_client_env,
     load_embedding_env,
     load_graphrag_env,
     load_hate_speech_env,
@@ -2142,6 +2144,7 @@ class RAG:
     _post_retrieval_text_model: OpenAI | None = field(default=None, init=False, repr=False)
     _reranker: BaseNodePostprocessor | None = field(default=None, init=False, repr=False)
     sparse_client_config: SparseClientConfig | None = field(default=None, init=False, repr=False)
+    embed_client_config: EmbedClientConfig | None = field(default=None, init=False, repr=False)
     _qdrant_client: QdrantClient | None = field(default=None, init=False, repr=False)
     _qdrant_aclient: AsyncQdrantClient | None = field(default=None, init=False, repr=False)
     _parent_context_support_cache: dict[str, bool] = field(default_factory=dict, init=False, repr=False)
@@ -2223,6 +2226,13 @@ class RAG:
 
         # --- Sparse encoder client config (remote on every provider) ---
         self.sparse_client_config = load_sparse_client_env(
+            default_api_base=self.openai_api_base or "",
+            default_api_key=self.openai_api_key,
+            default_timeout=self.openai_timeout,
+        )
+
+        # --- Dense embedding client config (remote on every provider) ---
+        self.embed_client_config = load_embed_client_env(
             default_api_base=self.openai_api_base or "",
             default_api_key=self.openai_api_key,
             default_timeout=self.openai_timeout,
@@ -2560,8 +2570,8 @@ class RAG:
             logger.info("Initializing embedding model: {}", self.embed_model_id)
 
             embedding_kwargs: dict[str, Any] = {
-                "api_base": self.openai_api_base,
-                "api_key": self.openai_api_key,
+                "api_base": self.embed_client_config.api_base if self.embed_client_config else self.openai_api_base,
+                "api_key": self.embed_client_config.api_key if self.embed_client_config else self.openai_api_key,
                 "embed_batch_size": self.embed_batch_size,
                 "max_retries": self.embed_max_retries,
                 "model_name": self.embed_model_id,
