@@ -6,6 +6,7 @@ import re
 
 from docint.utils.llm_sanitize import (
     looks_like_no_image_refusal,
+    squeeze_char_runs,
     strip_reasoning,
 )
 
@@ -184,3 +185,48 @@ def test_looks_like_no_image_refusal_catches_short_please_provide_phrase() -> No
     short_text = "Please provide the image you would like me to OCR."
 
     assert looks_like_no_image_refusal(short_text)
+
+
+def test_squeeze_char_runs_collapses_a_degenerate_dot_run() -> None:
+    """A repetition loop's output shrinks to a leader-line-sized run.
+
+    Observed live: a vision model transcribing a certificate's dotted
+    fill-in line emitted one unbroken run of 65392 dots (a 16-dot token
+    repeated until ``max_tokens``), which then became three of a
+    document's five chunks.
+    """
+    text = "URKUNDE\n\nLiebe/r:" + "." * 65392
+
+    squeezed = squeeze_char_runs(text)
+
+    assert squeezed == "URKUNDE\n\nLiebe/r:" + "." * 20
+
+
+def test_squeeze_char_runs_leaves_ordinary_text_alone() -> None:
+    """Real prose, ellipses, and short separators pass through unchanged."""
+    text = "Wait... really?\n---\nSection 2.1 covers the gate."
+
+    assert squeeze_char_runs(text) == text
+
+
+def test_squeeze_char_runs_handles_multiple_runs() -> None:
+    """Every oversized run shrinks, not just the first."""
+    text = "Name:" + "." * 50 + "\nDatum:" + "_" * 50
+
+    squeezed = squeeze_char_runs(text)
+
+    assert squeezed == "Name:" + "." * 20 + "\nDatum:" + "_" * 20
+
+
+def test_squeeze_char_runs_keeps_runs_at_the_threshold() -> None:
+    """A run exactly at the cap is untouched."""
+    text = "-" * 20
+
+    assert squeeze_char_runs(text) == text
+
+
+def test_squeeze_char_runs_preserves_newline_runs() -> None:
+    """Blank-line stretches are layout, not degeneration; leave them be."""
+    text = "para one" + "\n" * 30 + "para two"
+
+    assert squeeze_char_runs(text) == text

@@ -250,3 +250,26 @@ def test_image_tagging_does_not_wait_after_the_last_attempt() -> None:
 
     assert result == "ok"
     assert sleep.call_count == 0
+
+
+def test_degenerate_ocr_output_is_squeezed_before_storage() -> None:
+    """A repetition-loop transcription stores as a short leader line.
+
+    The observed 65409-char output (15 real chars + 65392 dots) became
+    three of a document's five chunks and a junk embedding each. The page
+    text the pipeline stores must be the squeezed form.
+    """
+    engine = _build_engine()
+
+    with (
+        patch("docint.core.readers.documents.ocr.load_model_env"),
+        patch.object(engine._vision_client.chat.completions, "create") as create,
+    ):
+        response = MagicMock()
+        response.choices = [MagicMock()]
+        response.choices[0].message.content = "URKUNDE\n\nLiebe/r:" + "." * 65392
+        create.return_value = response
+        spans = engine.ocr_page(0)
+
+    assert len(spans) == 1
+    assert spans[0].text == "URKUNDE\n\nLiebe/r:" + "." * 20
