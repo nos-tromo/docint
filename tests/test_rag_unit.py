@@ -5227,10 +5227,9 @@ def test_create_collection_if_missing_probes_and_creates_hybrid_schema(
     rag._qdrant_client.create_collection.assert_called_once()
     kwargs = rag._qdrant_client.create_collection.call_args.kwargs
     assert kwargs["collection_name"] == "fresh-collection"
-    # Hybrid path: dense named vector + sparse named vector. The modifier
-    # lookup consults qdrant_client's own IDF_EMBEDDING_MODELS, which is
-    # always empty now that fastembed (its data source) is no longer a
-    # dependency — so the modifier is always None, matching production.
+    # Hybrid path: dense named vector + sparse named vector. No IDF
+    # modifier is set — sparse encoding is remote now, so there is no
+    # local fastembed model to look up (see rag.py's create_collection_if_missing).
     assert rag_module.QDRANT_DENSE_VECTOR_NAME in kwargs["vectors_config"]
     assert kwargs["vectors_config"][rag_module.QDRANT_DENSE_VECTOR_NAME].size == 384
     assert rag_module.QDRANT_SPARSE_VECTOR_NAME in kwargs["sparse_vectors_config"]

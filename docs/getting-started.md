@@ -119,8 +119,10 @@ without going through Docker.
    uv run load-models
    ```
 
-   This populates the Hugging Face, Docling, and fastembed caches so the
-   first backend startup does not block on downloads.
+   This populates the Hugging Face and Docling caches so the first backend
+   startup does not block on downloads. Sparse (and dense) embedding is a
+   remote call to `vllm-service`, not a local model, so it has no cache
+   to pre-populate here.
 
 5. **Start the backend:**
 

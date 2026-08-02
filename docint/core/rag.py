@@ -120,7 +120,6 @@ __all__ = [
     "urllib",
 ]
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
-from qdrant_client.qdrant_fastembed import IDF_EMBEDDING_MODELS  # type: ignore[attr-defined]
 
 from docint.core.collection_overview import summarize_document_types
 from docint.core.entities.resolution import (
@@ -346,10 +345,13 @@ def _filter_hate_speech(
 # DEFAULT_SPARSE_VECTOR_NAME so a collection we pre-create has the same
 # named-vector schema the runtime QdrantVectorStore will later upsert
 # into. We replicate the schema here rather than instantiating
-# QdrantVectorStore because its constructor eagerly loads the fastembed
-# sparse encoder (onnxruntime + tokenizer), and doing that twice per
-# ingest pushes the container past the OOM threshold on CSV ingests
-# (see ``create_collection_if_missing``).
+# QdrantVectorStore because that class only creates the Qdrant collection
+# lazily, from its ``add()`` method, the first time nodes are written —
+# building one in ``create_collection_if_missing`` would not pre-create
+# anything for the UI to show before ingestion runs (see that method).
+# Sparse encoding is a remote HTTP call now (``RemoteSparseEncoder``),
+# not a local fastembed model, so there is no local model-loading cost
+# to weigh either way.
 QDRANT_DENSE_VECTOR_NAME = "text-dense"
 QDRANT_SPARSE_VECTOR_NAME = "text-sparse-new"
 
@@ -5798,16 +5800,14 @@ class RAG:
         Implementation note: this calls ``qdrant_client.create_collection``
         directly with the same dense + sparse named-vector schema that
         :class:`QdrantVectorStore` writes — replicating LlamaIndex's
-        defaults rather than instantiating a ``QdrantVectorStore`` to
-        do it. Constructing that class eagerly loads the fastembed
-        sparse encoder (onnxruntime + tokenizer, ~150-200 MB of native
-        memory that resists GC), which in combination with the second
-        ``QdrantVectorStore`` built by ``ingest_docs`` and the in-process
-        GLiNER weights (now removed — NER is a remote service hosted by
-        ``vllm-service``) tripped the kernel OOM killer on CSV ingests.
-        The duplicate-load risk is smaller post-GLiNER, but we still pay
-        the schema-replication cost (defaults pinned to LlamaIndex's
-        constants) to avoid the duplicate native load from fastembed.
+        defaults rather than instantiating a ``QdrantVectorStore`` to do
+        it. That class only creates the Qdrant collection lazily, from
+        its ``add()`` method, the first time nodes are written, so
+        constructing one here would not actually pre-create anything —
+        hence the manual schema replication. NER (GLiNER) and sparse
+        encoding are both remote services now (no in-process model
+        weights), so this is purely about *when* the collection becomes
+        visible, not about avoiding a local model load.
 
         When ``openai_dimensions`` is configured the vector size is taken
         from there; otherwise a single embed probe determines it. Probe
@@ -5839,12 +5839,14 @@ class RAG:
 
         if self.enable_hybrid:
             # Mirrors QdrantVectorStore: dense vector named "text-dense",
-            # sparse vector named "text-sparse-new" with IDF modifier when
-            # the configured sparse model is in qdrant_client's IDF set.
-            sparse_model_name = self.sparse_model
-            modifier = (
-                qdrant_models.Modifier.IDF if sparse_model_name and sparse_model_name in IDF_EMBEDDING_MODELS else None
-            )
+            # sparse vector named "text-sparse-new". No IDF modifier: sparse
+            # encoding is now a remote call (RemoteSparseEncoder) and
+            # fastembed is absent by design (tests/test_rag_sparse_gate.py
+            # asserts it stays uninstalled), so qdrant_client's own
+            # IDF_EMBEDDING_MODELS set — sourced from fastembed's model
+            # registry — degrades to empty. No sparse model, including
+            # bge-m3, can ever match it.
+            modifier = None
             sparse_params = qdrant_models.SparseVectorParams(
                 index=qdrant_models.SparseIndexParams(),
                 modifier=modifier,
@@ -6211,6 +6213,16 @@ class RAG:
             EmptyIngestionError: When no documents/nodes were produced and the
                 target collection did not previously exist. Triggers cleanup of
                 the orphan SQLite KV files; uploaded source files are kept.
+
+        Warning:
+            Unlike :meth:`ingest_docs`, this method does **not** call
+            :meth:`probe_sparse_endpoint` before writing to a hybrid
+            collection — it currently has zero production callers (tests
+            only), so the missing probe has never mattered in practice.
+            It carries the same corruption risk described there: a sparse
+            endpoint that fails partway through would write dense-only
+            points into a hybrid collection. Wiring this method to a real
+            caller MUST add a ``self.probe_sparse_endpoint()`` call first.
         """
         # See ingest_docs: pre-create the Qdrant collection so it stays
         # selectable in the UI even when every embedding batch fails.
