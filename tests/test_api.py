@@ -2309,6 +2309,64 @@ def test_ingest_success(monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp
     assert called.args[0:3] == ("docs", data_dir, False)
 
 
+@pytest.mark.parametrize(
+    ("payload_hybrid", "expected_hybrid"),
+    [
+        (None, None),
+        (True, True),
+        (False, False),
+    ],
+)
+def test_ingest_sync_forwards_hybrid_without_coercion(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+    tmp_path: Path,
+    payload_hybrid: bool | None,
+    expected_hybrid: bool | None,
+) -> None:
+    """The sync ``POST /ingest`` must forward ``hybrid`` to ``ingest_docs`` as-is.
+
+    Regression test for a surface of the critical "ingest forces hybrid on"
+    defect not covered by the CLI-level or ``/ingest/finalize`` tests: this
+    endpoint had its own ``payload.hybrid if payload.hybrid is not None else
+    True`` coercion at the ``ingest_docs`` call site. Every pre-existing
+    ``/ingest`` test passes ``hybrid`` explicitly, so none of them would
+    catch that coercion being reintroduced. Parametrized over all three
+    states so an omitted ``hybrid`` (must reach ``ingest_docs`` as ``None``)
+    is distinguished from an explicit ``False`` (must not be collapsed into
+    ``None`` by an overcorrection either).
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+        client (TestClient): The TestClient instance.
+        tmp_path (Path): The temporary path fixture.
+        payload_hybrid (bool | None): The ``hybrid`` value to send in the
+            request body; ``None`` omits the field entirely.
+        expected_hybrid (bool | None): The value ``ingest_docs`` must
+            receive for the given ``payload_hybrid``.
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(api_module, "_resolve_data_dir", lambda: data_dir)
+
+    recorded: dict[str, Any] = {}
+
+    def fake_ingest(
+        collection: str, path: Any, hybrid: bool | None = None, progress_callback: Any = None, **kwargs: Any
+    ) -> None:
+        recorded["hybrid"] = hybrid
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", fake_ingest)
+
+    payload: dict[str, Any] = {"collection": "docs"}
+    if payload_hybrid is not None:
+        payload["hybrid"] = payload_hybrid
+
+    response = client.post("/ingest", json=payload)
+    assert response.status_code == 200
+    assert recorded["hybrid"] is expected_hybrid
+
+
 def test_sessions_endpoints(client: TestClient) -> None:
     """Test session management endpoints.
 
