@@ -272,13 +272,17 @@ Loaded by `load_image_ingestion_config()` (`env_cfg.py:264`).
 | `IMAGE_CACHE_BY_HASH` | `true` | Cache embeddings keyed by image hash. |
 | `IMAGE_FAIL_ON_EMBED_ERROR` | `false` | Treat embedding failures as fatal. |
 | `IMAGE_FAIL_ON_TAG_ERROR` | `false` | Treat tagging failures as fatal. |
-| `IMAGE_RETRIEVE_TOP_K` | `5` | Top-K image matches per text query. |
+| `IMAGE_RETRIEVE_TOP_K` | `5` | CLIP candidates the image lane contributes to each query's ranking. |
 | `IMAGE_RERANK_MIN_SCORE` | `0.05` | Minimum reranker relevance score for a retrieved image to surface as a source. |
 | `IMAGE_TAGGING_MAX_IMAGE_DIM` | `1024` | Max dimension for images sent to the vision tagging endpoint. |
 
-Image retrieval runs in two stages. CLIP generates candidates, then the reranker
-scores their captions and `IMAGE_RERANK_MIN_SCORE` drops the ones that are merely
-nearest rather than relevant.
+Images retrieve as ordinary sources: `IMAGE_RETRIEVE_TOP_K` CLIP candidates join
+the text hits *before* ranking, so the shared reranker scores both modalities in
+one pass and images compete with text chunks for the answer's source slots. The
+model therefore sees images in its context and can cite them by number.
+`IMAGE_RERANK_MIN_SCORE` then drops the ones that are merely nearest rather than
+relevant — the top-n cut alone cannot protect a sparse collection, where an
+irrelevant image would take a slot for lack of competition.
 
 The floor is applied to the **reranker** score, not to CLIP similarity, because raw
 CLIP cosine is not comparable across queries — measured on a live collection, an

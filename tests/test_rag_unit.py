@@ -116,11 +116,6 @@ def test_normalize_response_data_extracts_sources(
         monkeypatch: The monkeypatch fixture.
     """
     rag = RAG(qdrant_collection="test")
-    monkeypatch.setattr(
-        RAG,
-        "_retrieve_image_sources",
-        lambda self, query, top_k=3, metadata_filter_rules=None: [],
-    )
     node = DummyNode(
         "Example text",
         {
@@ -180,11 +175,6 @@ def test_normalize_response_data_handles_harmony_analysis_channel(
         monkeypatch: The monkeypatch fixture.
     """
     rag = RAG(qdrant_collection="test")
-    monkeypatch.setattr(
-        RAG,
-        "_retrieve_image_sources",
-        lambda self, query, top_k=3, metadata_filter_rules=None: [],
-    )
 
     node = DummyNode(
         "Example text",
@@ -782,29 +772,24 @@ def test_lazy_reranker_class_name_is_stable() -> None:
     assert LazyRerankerPostprocessor.class_name() == "LazyRerankerPostprocessor"
 
 
-def test_normalize_response_data_appends_image_sources(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Image retrieval results should be appended to normalized sources.
+def test_normalize_response_data_normalizes_retrieved_image_nodes() -> None:
+    """Images arrive as retrieved nodes, not as a post-generation append.
 
-    Args:
-        monkeypatch: The monkeypatch fixture.
+    They retrieve through ``MultimodalRetriever``, so by the time normalization
+    runs they are ordinary members of ``source_nodes`` -- which is what lets
+    them be reranked, seen by the generator, and numbered.
     """
     rag = RAG(qdrant_collection="test")
-    monkeypatch.setattr(
-        RAG,
-        "_retrieve_image_sources",
-        lambda self, query, top_k=3, metadata_filter_rules=None: [
-            {
-                "text": "Image shows transformer blocks.",
-                "filename": "attention_is_all_you_need.pdf",
-                "source": "image",
-                "image_id": "img-1",
-                "score": 0.91,
-            }
-        ],
+    node = DummyNode(
+        "Image shows transformer blocks.",
+        {
+            "source_type": "image",
+            "image_id": "img-1",
+            "source_path": "/ingest/attention.png",
+            rag_module.IMAGE_LANE_METADATA_KEY: True,
+        },
     )
-    result = DummyResponse("Answer", [])
+    result = DummyResponse("Answer", [DummyNodeWithScore(node, 0.91)])
 
     normalized = rag._normalize_response_data("transformer diagram", result)
     sources = normalized["sources"]
@@ -812,71 +797,6 @@ def test_normalize_response_data_appends_image_sources(
     assert len(sources) == 1
     assert sources[0]["source"] == "image"
     assert sources[0]["image_id"] == "img-1"
-
-
-def test_normalize_response_data_skips_aux_image_sources_when_filters_active(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Request-scoped metadata filters should be forwarded to image retrieval.
-
-    Args:
-        monkeypatch: The monkeypatch fixture.
-    """
-    rag = RAG(qdrant_collection="test")
-    captured_rules: list[Any] = []
-
-    def _fake_retrieve_image_sources(
-        self: RAG,
-        query: str,
-        top_k: int = 3,
-        metadata_filter_rules: list[dict[str, Any]] | None = None,
-    ) -> list[dict[str, Any]]:
-        _ = self
-        _ = query
-        _ = top_k
-        captured_rules.extend(metadata_filter_rules or [])
-        return [
-            {
-                "text": "Image-only source.",
-                "filename": "img.png",
-                "source": "image",
-            }
-        ]
-
-    monkeypatch.setattr(
-        RAG,
-        "_retrieve_image_sources",
-        _fake_retrieve_image_sources,
-    )
-    result = DummyResponse("Answer", [])
-
-    normalized = rag._normalize_response_data(
-        "transformer diagram",
-        result,
-        metadata_filters_active=True,
-        metadata_filter_rules=[
-            {
-                "field": "mimetype",
-                "operator": "mime_match",
-                "value": "image/*",
-            }
-        ],
-    )
-
-    assert normalized["sources"] == [
-        {
-            "text": "Image-only source.",
-            "filename": "img.png",
-            "source": "image",
-        }
-    ]
-    assert captured_rules == [
-        {
-            "field": "mimetype",
-            "operator": "mime_match",
-            "value": "image/*",
-        }
-    ]
 
 
 def test_normalize_response_data_falls_back_for_empty_model_output(
@@ -888,11 +808,6 @@ def test_normalize_response_data_falls_back_for_empty_model_output(
         monkeypatch: The monkeypatch fixture.
     """
     rag = RAG(qdrant_collection="test")
-    monkeypatch.setattr(
-        RAG,
-        "_retrieve_image_sources",
-        lambda self, query, top_k=3, metadata_filter_rules=None: [],
-    )
 
     # Simulates models that emit only hidden reasoning.
     result = DummyResponse("<think>internal reasoning</think>", [])
@@ -911,11 +826,6 @@ def test_normalize_response_data_falls_back_for_empty_response_sentinel(
         monkeypatch: The monkeypatch fixture.
     """
     rag = RAG(qdrant_collection="test")
-    monkeypatch.setattr(
-        RAG,
-        "_retrieve_image_sources",
-        lambda self, query, top_k=3, metadata_filter_rules=None: [],
-    )
 
     normalized = rag._normalize_response_data("frage", DummyResponse("Empty Response", []))
 
@@ -931,26 +841,24 @@ def test_normalize_response_data_builds_source_backed_answer_when_sources_exist(
         monkeypatch: The monkeypatch fixture.
     """
     rag = RAG(qdrant_collection="test")
-    monkeypatch.setattr(
-        RAG,
-        "_retrieve_image_sources",
-        lambda self, query, top_k=3, metadata_filter_rules=None: [
-            {
-                "text": "Transformer attention diagram.",
-                "filename": "image-3-b65a08ee-0.png",
-                "page": 4,
-                "source": "image",
-            },
-            {
-                "text": "Transformer architecture diagram.",
-                "filename": "image-2-4fd97d25-0.png",
-                "page": 3,
-                "source": "image",
-            },
-        ],
-    )
+    nodes = [
+        DummyNodeWithScore(
+            DummyNode(
+                "Transformer attention diagram.",
+                {"filename": "image-3-b65a08ee-0.png", "page": 4, "source": "image"},
+            ),
+            0.9,
+        ),
+        DummyNodeWithScore(
+            DummyNode(
+                "Transformer architecture diagram.",
+                {"filename": "image-2-4fd97d25-0.png", "page": 3, "source": "image"},
+            ),
+            0.8,
+        ),
+    ]
 
-    normalized = rag._normalize_response_data("frage", DummyResponse("", []))
+    normalized = rag._normalize_response_data("frage", DummyResponse("", nodes))
 
     assert normalized["response"] == (
         "I found 2 matching sources: image-3-b65a08ee-0.png (page 4), image-2-4fd97d25-0.png (page 3)."
@@ -1110,9 +1018,9 @@ def test_retrieve_image_sources_skips_when_image_collection_missing() -> None:
         ),
     )
 
-    sources = rag._retrieve_image_sources("any query", top_k=3)
+    nodes = rag._retrieve_image_nodes("any query", top_k=3)
 
-    assert sources == []
+    assert nodes == []
     assert image_service.called is False
 
 
@@ -1165,10 +1073,11 @@ def test_retrieve_image_sources_shapes_standalone_video_keyframe() -> None:
     rag._image_ingestion_service = cast(Any, DummyImageService())
     rag._qdrant_client = cast(Any, types.SimpleNamespace(collection_exists=lambda collection_name: True))
 
-    sources = rag._retrieve_image_sources("what was on the slide?", top_k=3)
+    nodes = rag._retrieve_image_nodes("what was on the slide?", top_k=3)
 
-    assert len(sources) == 1
-    src = sources[0]
+    assert len(nodes) == 1
+    src = rag._source_from_node_with_score(nodes[0])
+    assert src is not None
     assert src["source"] == "video_keyframe"
     assert src["filename"] == "clip.mp4"
     assert src["file_hash"] == "mediahash-1"
@@ -2670,11 +2579,14 @@ def test_build_query_engine_uses_refine_prompts_for_social_table_collection(
     assert engine is sentinel
     assert captured["response_mode"] == rag_module.ResponseMode.REFINE
     postprocessors = captured["node_postprocessors"]
-    assert len(postprocessors) == 4
-    assert isinstance(postprocessors[1], rag_module.SocialSourceDiversityPostprocessor)
-    assert isinstance(postprocessors[2], rag_module.LinkFollowingPostprocessor)
+    assert len(postprocessors) == 5
+    # The image floor runs directly after the reranker, where image captions
+    # and text chunks first carry comparable scores.
+    assert isinstance(postprocessors[1], rag_module.ImageRelevanceFloorPostprocessor)
+    assert isinstance(postprocessors[2], rag_module.SocialSourceDiversityPostprocessor)
+    assert isinstance(postprocessors[3], rag_module.LinkFollowingPostprocessor)
     # Numbering runs last so it sees the node set the synthesizer will render.
-    assert isinstance(postprocessors[3], rag_module.CitationNumberingPostprocessor)
+    assert isinstance(postprocessors[4], rag_module.CitationNumberingPostprocessor)
     assert "keep each post distinct" in captured["text_qa_template"].template.lower()
 
 
