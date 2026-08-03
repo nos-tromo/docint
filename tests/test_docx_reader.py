@@ -171,7 +171,7 @@ def test_docx_reader_skips_on_conversion_failure(tmp_path: Path, monkeypatch: py
     """Yield nothing (never raw bytes) when docling conversion raises."""
     docx_path = _write_docx(tmp_path / "word_doc.docx")
     reader = DocxReader()
-    monkeypatch.setattr(reader._converter, "convert", _raise_conversion_error)
+    monkeypatch.setattr(reader, "_convert", _raise_conversion_error)
 
     assert reader.load_data(docx_path) == []
 
@@ -180,11 +180,7 @@ def test_docx_reader_falls_back_to_markdown(tmp_path: Path, monkeypatch: pytest.
     """Fall back to Markdown text when Docling-JSON serialization fails."""
     docx_path = _write_docx(tmp_path / "word_doc.docx")
     reader = DocxReader()
-    monkeypatch.setattr(
-        reader._converter,
-        "convert",
-        lambda *_a, **_k: SimpleNamespace(document=_DictlessDoc()),
-    )
+    monkeypatch.setattr(reader, "_convert", lambda *_a, **_k: _DictlessDoc())
 
     docs = reader.load_data(docx_path)
 

@@ -4,26 +4,31 @@ The ingestion pipeline previously had no extractor registered for ``.docx``, so
 ``SimpleDirectoryReader`` fell back to its generic UTF-8 text path and embedded
 the raw ZIP container verbatim (``PK`` headers, ``[Content_Types].xml``,
 ``word/document.xml`` …) — a ``.docx`` *is* a ZIP archive. This reader converts
-the file with a DOCX-scoped docling :class:`DocumentConverter` and emits a single
-``Document`` whose text is a compact, serialized Docling document, so it flows
-through the already-wired :class:`DoclingNodeParser` exactly like a PDF.
+the file with docling's declarative :class:`MsWordDocumentBackend` and emits a
+single ``Document`` whose text is a compact, serialized Docling document, so it
+flows through the already-wired :class:`DoclingNodeParser` exactly like a PDF.
 
-The converter is restricted to :attr:`InputFormat.DOCX`, which resolves to
-docling's pure-XML ``SimplePipeline`` (no layout/OCR models): construction is
-lazy and conversion loads or downloads nothing, keeping the airgapped, CPU-only
-deployment intact.
+The backend is driven directly (via :class:`InputDocument`) rather than through
+``docling.document_converter.DocumentConverter``: the converter module eagerly
+imports the model-backed PDF pipeline (``docling_ibm_models`` → torch), which
+docint deliberately does not ship — all ML inference is remote. The DOCX
+backend is pure XML parsing (python-docx/lxml): conversion loads or downloads
+nothing, keeping the airgapped, CPU-only deployment intact.
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+from docling.backend.abstract_backend import DeclarativeDocumentBackend
+from docling.backend.msword_backend import MsWordDocumentBackend
 from docling.datamodel.base_models import InputFormat
-from docling.document_converter import DocumentConverter
+from docling.datamodel.document import InputDocument
+from docling_core.types.doc import DoclingDocument
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from loguru import logger
@@ -37,9 +42,9 @@ from docint.utils.mimetype import get_mimetype
 class DocxReader(BaseReader):
     """Read a ``.docx`` file and emit a single Docling-JSON :class:`Document`.
 
-    The reader holds one DOCX-scoped :class:`DocumentConverter` (built lazily,
-    no models) and reuses it across files; ingestion reads files sequentially so
-    the shared converter needs no locking. The emitted text is
+    Each file gets its own :class:`MsWordDocumentBackend` (declarative, no
+    models) built through :class:`InputDocument`, which owns validation and
+    hashing. The emitted text is
     ``json.dumps(DoclingDocument.export_to_dict())`` with compact separators so
     the pipeline's ``basic_clean`` pass cannot perturb structural whitespace and
     break JSON validity. If JSON serialization fails the reader degrades to
@@ -47,7 +52,30 @@ class DocxReader(BaseReader):
     falls back to the raw bytes that caused the original bug.
     """
 
-    _converter: DocumentConverter = field(default_factory=lambda: DocumentConverter(allowed_formats=[InputFormat.DOCX]))
+    def _convert(self, file_path: Path) -> DoclingDocument:
+        """Convert one ``.docx`` file to a :class:`DoclingDocument`.
+
+        Mirrors what ``SimplePipeline`` does for declarative backends, without
+        importing ``DocumentConverter`` (whose module pulls in the model-backed
+        PDF pipeline).
+
+        Args:
+            file_path: Path to the ``.docx`` file on disk.
+
+        Returns:
+            DoclingDocument: The parsed document.
+
+        Raises:
+            ValueError: If docling rejects the file as an invalid docx input.
+        """
+        in_doc = InputDocument(
+            path_or_stream=file_path,
+            format=InputFormat.DOCX,
+            backend=MsWordDocumentBackend,
+        )
+        if not in_doc.valid:
+            raise ValueError(f"docling rejected {file_path.name} as an invalid docx input")
+        return cast(DeclarativeDocumentBackend, in_doc._backend).convert()
 
     def _build_document(
         self,
@@ -92,7 +120,7 @@ class DocxReader(BaseReader):
         extra_info = extra_info if isinstance(extra_info, dict) else None
 
         try:
-            document = self._converter.convert(file_path).document
+            document = self._convert(file_path)
         except Exception as exc:
             logger.warning("[DocxReader] docling conversion failed on {}: {}; skipping", file_path, exc)
             return
