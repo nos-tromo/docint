@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import { AppHeader } from '@infra/ui'
 import { Sidebar } from './Sidebar'
+import { PreviewDialog } from '@/components/common/PreviewDialog'
 import { useT } from '@/i18n/LanguageContext'
 import { useWhoami } from '@/hooks/useWhoami'
 import { useVersion } from '@/hooks/useVersion'
@@ -34,6 +35,9 @@ export function Shell({ children }: { children: ReactNode }) {
         <Sidebar />
         <main className="flex-1 min-w-0 overflow-auto">{children}</main>
       </div>
+      {/* One dialog for the whole app: any control can open a document
+          preview through the ui store without owning modal state. */}
+      <PreviewDialog />
     </div>
   )
 }

@@ -192,3 +192,44 @@ describe('Analysis German smoke test', () => {
     expect(screen.getByRole('button', { name: 'Zusammenfassung' })).toBeInTheDocument()
   })
 })
+
+describe('Analysis entity-key resolution', () => {
+  it('canonicalizes a differently-cased key handed over from a chat pill', async () => {
+    // A chat entity pill builds its key from the raw chunk surface, while the
+    // aggregate is merged orthographically. Left unresolved, the findings
+    // query asks for an entity the aggregate does not hold and the dropdown
+    // shows an unrelated one.
+    useAnalysisUiStore.setState({
+      tab: 'ner',
+      nerView: 'table',
+      entity: { key: 'acme::ORG', collection: 'alpha' }
+    })
+    vi.stubGlobal('fetch', mockFetch())
+    renderAnalysis()
+
+    await screen.findByRole('option', { name: /Acme/i })
+    await waitFor(() => {
+      expect(useAnalysisUiStore.getState().entity).toEqual({
+        key: 'Acme::ORG',
+        collection: 'alpha'
+      })
+    })
+    expect(screen.getByLabelText('Entity')).toHaveValue('Acme::ORG')
+  })
+
+  it('leaves a key the aggregate cannot place alone', async () => {
+    useAnalysisUiStore.setState({
+      tab: 'ner',
+      nerView: 'table',
+      entity: { key: 'Nobody::PER', collection: 'alpha' }
+    })
+    vi.stubGlobal('fetch', mockFetch())
+    renderAnalysis()
+
+    await screen.findByRole('option', { name: /Acme/i })
+    expect(useAnalysisUiStore.getState().entity).toEqual({
+      key: 'Nobody::PER',
+      collection: 'alpha'
+    })
+  })
+})

@@ -8,6 +8,7 @@ import { useTranslatable, type TranslationPayload } from '@/hooks/useTranslatabl
 import { TranslateToggle } from '@/components/common/TranslateToggle'
 import { ClampedText } from '@/components/common/ClampedText'
 import { MetadataPills } from '@/components/common/MetadataPills'
+import { SourcePreviewAction } from '@/components/common/SourcePreviewAction'
 import { hateSpeechSnapshot } from '@/lib/reportSnapshots'
 import { useT } from '@/i18n/LanguageContext'
 import type { Strings } from '@/i18n'
@@ -74,7 +75,10 @@ function HateSpeechTableRow({
       <div className="text-xs text-muted-foreground tabular-nums pt-0.5">{index}</div>
       <div className="text-xs font-medium uppercase break-words pt-0.5">{category}</div>
       <div className="min-w-0 space-y-0.5">
-        <div className="break-words">{source}</div>
+        <div className="flex items-start gap-1">
+          <span className="min-w-0 flex-1 break-words">{source}</span>
+          <SourcePreviewAction fileHash={row.file_hash} filename={row.filename} />
+        </div>
         {location && <div className="text-xs text-muted-foreground">{location}</div>}
       </div>
       <div className="min-w-0 space-y-1.5">

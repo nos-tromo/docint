@@ -122,7 +122,7 @@ describe('EntityFinding', () => {
     expect(within(mentions).queryByText(/×\d/)).not.toBeInTheDocument()
   })
 
-  it('renders an Open original link only when collection and file_hash are present', () => {
+  it('opens the shared preview dialog only when collection and file_hash are present', async () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const { rerender } = render(
       <QueryClientProvider client={qc}>
@@ -134,7 +134,16 @@ describe('EntityFinding', () => {
         />
       </QueryClientProvider>
     )
-    expect(screen.getByText(/open original/i)).toBeInTheDocument()
+    // The finding no longer navigates away to the raw file; it opens the same
+    // in-page dialog the chat citations use.
+    expect(screen.queryByText(/open original/i)).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /preview/i }))
+    expect(useUiStore.getState().previewModal).toEqual({
+      collection: 'test-collection',
+      file_hash: 'hash',
+      filename: 'a.pdf'
+    })
+
     rerender(
       <QueryClientProvider client={qc}>
         <EntityFinding
@@ -145,7 +154,7 @@ describe('EntityFinding', () => {
         />
       </QueryClientProvider>
     )
-    expect(screen.queryByText(/open original/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /preview/i })).not.toBeInTheDocument()
   })
 
   it('clamps long chunk text behind a Show more / Show less toggle', async () => {

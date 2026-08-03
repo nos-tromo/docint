@@ -17,6 +17,7 @@ import { csvExportHref } from '@/api/collections'
 import { mimeLabel, shortHash, unitsLabel } from '@/lib/documentFormat'
 import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
+import { SourcePreviewAction } from '@/components/common/SourcePreviewAction'
 
 // Per-column layout hints consumed by the shared grid renderer below.
 declare module '@tanstack/react-table' {
@@ -40,8 +41,14 @@ function buildColumns(t: ReturnType<typeof useT>): ColumnDef<DocumentRecord>[] {
       accessorKey: 'filename',
       header: t('table.col_filename'),
       cell: (c) => (
-        <span className="block truncate font-mono text-[13px]" title={c.getValue<string>()}>
-          {c.getValue<string>()}
+        <span className="flex min-w-0 items-center gap-1">
+          <span className="min-w-0 flex-1 truncate font-mono text-[13px]" title={c.getValue<string>()}>
+            {c.getValue<string>()}
+          </span>
+          <SourcePreviewAction
+            fileHash={c.row.original.file_hash}
+            filename={c.getValue<string>()}
+          />
         </span>
       )
     },
@@ -246,7 +253,7 @@ export function DocumentTable({ docs, isFetching, hasNextPage, onLoadMore, colle
                     role="row"
                     data-index={vRow.index}
                     ref={virtualizer.measureElement}
-                    className="absolute left-0 right-0 grid items-center gap-x-4 border-b border-border/60 px-4 py-2 text-sm hover:bg-white/5"
+                    className="group absolute left-0 right-0 grid items-center gap-x-4 border-b border-border/60 px-4 py-2 text-sm hover:bg-white/5"
                     style={{ gridTemplateColumns: GRID_COLUMNS, transform: `translateY(${vRow.start}px)` }}
                   >
                     {row.getVisibleCells().map((cell) => (

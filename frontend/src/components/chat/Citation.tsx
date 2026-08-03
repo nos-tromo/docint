@@ -1,19 +1,17 @@
 import { useState } from 'react'
 import type { Source } from '@/api/types'
-import { sourcePreviewUrl } from '@/api/ingest'
-import { useUiStore } from '@/stores/ui'
 import { sourceLabel } from '@/lib/sourceLabel'
 import { referenceMetadataItems } from '@/lib/referenceMetadata'
 import { TranslateControl } from '@/components/common/TranslateControl'
+import { SourcePreviewAction } from '@/components/common/SourcePreviewAction'
 import { useT } from '@/i18n/LanguageContext'
 
 export function Citation({ source }: { source: Source }) {
   const t = useT()
   const [open, setOpen] = useState(false)
-  const collection = useUiStore((s) => s.selectedCollection)
   const refMeta = referenceMetadataItems(source.reference_metadata, {}, t)
   return (
-    <div className="rounded-md border border-border bg-muted px-3 py-2 text-sm">
+    <div className="group relative rounded-md border border-border bg-muted px-3 py-2 text-sm">
       <div className="flex items-center gap-2">
         {/* The badge sits outside the disclosure button so the button's
             accessible name stays the source label. */}
@@ -32,6 +30,10 @@ export function Citation({ source }: { source: Source }) {
         >
           <span className="truncate">{sourceLabel(source, t)}</span>
         </button>
+        {/* The preview belongs in the header row, not as its own full-width
+            row inside the expanded panel: it is an action on the source
+            rather than part of its evidence, and it no longer leaves the app. */}
+        <SourcePreviewAction fileHash={source.file_hash} filename={source.filename} />
       </div>
       {open && (
         <div className="mt-2 space-y-2">
@@ -46,16 +48,6 @@ export function Citation({ source }: { source: Source }) {
             </dl>
           )}
           {source.text && <TranslateControl rawText={source.text} />}
-          {collection && source.file_hash && (
-            <a
-              href={sourcePreviewUrl(collection, source.file_hash)}
-              target="_blank"
-              rel="noreferrer"
-              className="text-xs text-blue-400 hover:text-blue-300"
-            >
-              {t('chat.open_original')}
-            </a>
-          )}
         </div>
       )}
     </div>

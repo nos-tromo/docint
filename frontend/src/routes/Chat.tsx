@@ -24,6 +24,7 @@ interface State {
   inflight: boolean
 }
 type Action =
+  | { type: 'reset' }
   | { type: 'set_turns'; turns: ChatTurnData[] }
   | { type: 'start'; user: string }
   | { type: 'token'; token: string }
@@ -32,6 +33,8 @@ type Action =
 
 function reducer(s: State, a: Action): State {
   switch (a.type) {
+    case 'reset':
+      return { turns: [], inflight: false }
     case 'set_turns':
       return { ...s, turns: a.turns }
     case 'start':
@@ -43,24 +46,33 @@ function reducer(s: State, a: Action): State {
           { user: a.user, assistant: '', done: false, meta: null, error: null }
         ]
       }
+    // The three cases below fold into the open turn. A session switch resets
+    // the transcript while a stream is still being torn down, so that turn
+    // can legitimately be gone by the time a late frame lands — fold into
+    // nothing rather than into `undefined`.
     case 'token': {
       const last = s.turns[s.turns.length - 1]
+      if (!last) return s
       const updated = { ...last, assistant: last.assistant + a.token }
       return { ...s, turns: [...s.turns.slice(0, -1), updated] }
     }
     case 'finalize': {
       const last = s.turns[s.turns.length - 1]
+      if (!last) return { ...s, inflight: false }
       const finalText = a.meta.answer ?? a.meta.message ?? last.assistant
       const updated = { ...last, assistant: finalText, done: true, meta: a.meta }
       return { ...s, inflight: false, turns: [...s.turns.slice(0, -1), updated] }
     }
     case 'fail': {
       const last = s.turns[s.turns.length - 1]
+      if (!last) return { ...s, inflight: false }
       const updated = { ...last, done: true, error: a.error ?? null }
       return { ...s, inflight: false, turns: [...s.turns.slice(0, -1), updated] }
     }
   }
 }
+
+export { reducer as chatReducer }
 
 export function Chat() {
   const t = useT()
@@ -84,6 +96,19 @@ export function Chat() {
   useEffect(() => {
     setCurrentSessionId(sessionIdParam)
   }, [sessionIdParam, setCurrentSessionId])
+
+  useEffect(() => {
+    // Both chat routes render the same `Chat` element, so React Router keeps
+    // this component mounted when the session changes — including "New
+    // session", which just drops the `:sessionId` segment. Nothing else
+    // clears the reducer: the history effect only ever writes turns *in*, and
+    // it is disabled for a session-less chat. Without this reset the previous
+    // transcript stayed on screen and starting a new session looked like a
+    // no-op until the user visited another section (which unmounted us).
+    abortRef.current?.abort()
+    abortRef.current = null
+    dispatch({ type: 'reset' })
+  }, [sessionIdParam])
 
   useEffect(() => {
     if (!history.data) return

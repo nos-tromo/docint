@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { Chat } from './Chat'
+import { Chat, chatReducer } from './Chat'
+import type { ChatFinalEvent } from '@/api/types'
 import { useUiStore } from '@/stores/ui'
 import { useChatUiStore } from '@/stores/chatUi'
 
@@ -442,3 +443,75 @@ describe('Chat drafts', () => {
     })
     expect(screen.getByText(/\(context_overflow\)/)).toBeInTheDocument()
   })
+
+describe('Chat session switching', () => {
+  function NavigateButton({ to }: { to: string }) {
+    const navigate = useNavigate()
+    return (
+      <button type="button" onClick={() => navigate(to)}>
+        go
+      </button>
+    )
+  }
+
+  // Both chat routes render the same `Chat` element, so React Router reuses
+  // the component instance across the navigation — local state survives it.
+  // That is what makes the transcript reset a real requirement rather than an
+  // artifact of remounting.
+  function renderChatAt(path: string) {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    return render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={[path]}>
+          <Routes>
+            <Route path="/chat" element={<Chat />} />
+            <Route path="/chat/:sessionId" element={<Chat />} />
+          </Routes>
+          <NavigateButton to="/chat" />
+        </MemoryRouter>
+      </QueryClientProvider>
+    )
+  }
+
+  it('clears the restored transcript when the user starts a new session', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          messages: [
+            { role: 'user', content: 'earlier question' },
+            { role: 'assistant', content: 'earlier answer', sources: [] }
+          ]
+        })
+      })
+    )
+
+    renderChatAt('/chat/sess-old')
+    expect(await screen.findByText('earlier answer')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'go' }))
+
+    await waitFor(() => {
+      expect(screen.queryByText('earlier answer')).not.toBeInTheDocument()
+    })
+  })
+
+  it('ignores stream frames that arrive with no open turn', () => {
+    // The session reset empties the transcript, so a frame from the stream
+    // being torn down has no turn to fold into. Folding into `undefined`
+    // would throw out of the reducer and take the screen down.
+    const empty = { turns: [], inflight: true }
+
+    expect(chatReducer(empty, { type: 'token', token: 'x' })).toEqual(empty)
+    expect(
+      chatReducer(empty, { type: 'finalize', meta: { session_id: 's' } as ChatFinalEvent })
+    ).toEqual({ turns: [], inflight: false })
+    expect(chatReducer(empty, { type: 'fail', error: 'boom' })).toEqual({
+      turns: [],
+      inflight: false
+    })
+  })
+})

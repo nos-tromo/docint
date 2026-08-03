@@ -12,6 +12,7 @@ import { SummaryPanel } from '@/components/analysis/SummaryPanel'
 import { warmCollectionNer } from '@/api/collections'
 import { useConfig } from '@/hooks/useConfig'
 import { resolveGraphTopK } from '@/lib/graphTopK'
+import { entityKey, resolveEntityKey } from '@/lib/entityKey'
 import { ENTITY_MERGE_MODE, type NerEntityRow } from '@/api/types'
 import { cn } from '@/lib/cn'
 import { useT } from '@/i18n/LanguageContext'
@@ -22,8 +23,7 @@ type Tab = (typeof TAB_IDS)[number]
 const NER_VIEW_IDS = ['table', 'graph'] as const
 type NerView = (typeof NER_VIEW_IDS)[number]
 
-const keyOf = (text: string | null | undefined, type: string | null | undefined) =>
-  `${text ?? ''}::${type ?? ''}`
+const keyOf = entityKey
 
 export function Analysis() {
   const t = useT()
@@ -69,6 +69,17 @@ export function Analysis() {
     (key: string | null) => setEntity(key, collection),
     [setEntity, collection]
   )
+
+  // A key can arrive from outside this screen — a chat entity pill, a graph
+  // click — built from a raw chunk surface, while the aggregate here is merged
+  // orthographically. Canonicalize it against the loaded aggregate so the
+  // findings query and the dropdown agree on which entity is selected; a key
+  // the aggregate cannot place is left alone rather than guessed at.
+  useEffect(() => {
+    if (!selectedEntityKey || entities.length === 0) return
+    const canonical = resolveEntityKey(selectedEntityKey, entities)
+    if (canonical && canonical !== selectedEntityKey) setSelectedEntityKey(canonical)
+  }, [entities, selectedEntityKey, setSelectedEntityKey])
 
   // Seed a sensible default selection (the top entity) once the list loads, so
   // the findings panel and dropdown aren't empty on arrival. Scoped to the
