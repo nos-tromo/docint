@@ -44,6 +44,8 @@ export const de: Strings = {
   'common.translate': 'Übersetzen',
   'common.preview_new_tab': 'In neuem Tab öffnen ↗',
   'common.preview_close': 'Vorschau schließen',
+  'common.preview_loading': 'Vorschau wird geladen…',
+  'common.preview_error': 'Die Datei konnte hier nicht geladen werden. Öffnen Sie sie stattdessen in einem neuen Tab.',
   'common.preview_not_inline': 'Dieser Dateityp kann hier nicht angezeigt werden. Öffnen Sie ihn in einem neuen Tab zum Ansehen oder Herunterladen.',
   'common.preview_open': 'Dokument-Vorschau',
   'common.translation': 'Übersetzung',

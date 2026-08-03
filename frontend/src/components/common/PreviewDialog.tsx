@@ -1,36 +1,69 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { sourcePreviewUrl } from '@/api/ingest'
 import { useUiStore } from '@/stores/ui'
 import { useT } from '@/i18n/LanguageContext'
 
-// Types the browser renders in an iframe. Anything else (docx, xlsx, zip …)
-// would be handed to the download manager instead of shown, so those get a
-// new-tab link rather than a frame that appears blank.
-const INLINE_EXTENSIONS = new Set([
-  'pdf',
-  'png',
-  'jpg',
-  'jpeg',
-  'gif',
-  'webp',
-  'svg',
-  'bmp',
-  'txt',
-  'md',
-  'csv',
-  'json',
-  'html'
-])
+// How the dialog renders each type. Frame navigation is only trusted for
+// PDF, where the browser viewer genuinely works inside a subframe. Subframe
+// heuristics differ from tabs everywhere else: Chrome refuses to render
+// application/json in a frame (its JSON viewer is top-level only), renders
+// image documents at natural size without the tab's shrink-to-fit, and hands
+// some text types to the download manager. Those types are rendered by the
+// dialog itself instead.
+const FRAME_EXTENSIONS = new Set(['pdf'])
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'])
+// html is deliberately in the *text* bucket: with same-origin framing now
+// allowed on the preview route, framing an ingested HTML file would execute
+// its scripts against the app origin. Showing the source is safe — and more
+// useful for evidence review anyway.
+const TEXT_EXTENSIONS = new Set(['txt', 'md', 'csv', 'json', 'log', 'html'])
+
+type PreviewKind = 'frame' | 'image' | 'text' | 'none'
 
 /**
- * Whether the browser will render this filename inline in an iframe.
+ * The dialog's rendering strategy for a filename, by extension.
  *
  * @param filename - The source document's filename.
- * @returns True when an iframe preview is worth mounting.
+ * @returns Which renderer the dialog uses for the file.
  */
-export function isInlinePreviewable(filename: string): boolean {
+export function previewKind(filename: string): PreviewKind {
   const ext = filename.split('.').pop()?.toLowerCase() ?? ''
-  return INLINE_EXTENSIONS.has(ext)
+  if (FRAME_EXTENSIONS.has(ext)) return 'frame'
+  if (IMAGE_EXTENSIONS.has(ext)) return 'image'
+  if (TEXT_EXTENSIONS.has(ext)) return 'text'
+  return 'none'
+}
+
+type TextPreviewState = { state: 'loading' | 'error' | 'ready'; text: string }
+
+/**
+ * Fetched body for the text rendering path.
+ *
+ * @param url - The preview URL to fetch, or null when the text path is inactive.
+ * @returns Loading / error / content state for the current url.
+ */
+function useTextPreview(url: string | null): TextPreviewState {
+  const [result, setResult] = useState<TextPreviewState>({ state: 'loading', text: '' })
+
+  useEffect(() => {
+    if (!url) return
+    let cancelled = false
+    setResult({ state: 'loading', text: '' })
+    fetch(url)
+      .then(async (resp) => {
+        if (!resp.ok) throw new Error(String(resp.status))
+        const text = await resp.text()
+        if (!cancelled) setResult({ state: 'ready', text })
+      })
+      .catch(() => {
+        if (!cancelled) setResult({ state: 'error', text: '' })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [url])
+
+  return result
 }
 
 /**
@@ -47,6 +80,10 @@ export function PreviewDialog() {
   const closePreview = useUiStore((s) => s.closePreview)
   const panelRef = useRef<HTMLDivElement | null>(null)
   const openerRef = useRef<HTMLElement | null>(null)
+
+  const kind = modal ? previewKind(modal.filename) : 'none'
+  const url = modal ? sourcePreviewUrl(modal.collection, modal.file_hash) : null
+  const textPreview = useTextPreview(kind === 'text' ? url : null)
 
   useEffect(() => {
     if (!modal) return
@@ -67,10 +104,7 @@ export function PreviewDialog() {
     }
   }, [modal, closePreview])
 
-  if (!modal) return null
-
-  const url = sourcePreviewUrl(modal.collection, modal.file_hash)
-  const inline = isInlinePreviewable(modal.filename)
+  if (!modal || !url) return null
 
   return (
     <div
@@ -108,9 +142,30 @@ export function PreviewDialog() {
             </button>
           </div>
         </div>
-        {inline ? (
+        {kind === 'frame' && (
           <iframe title={modal.filename} src={url} className="h-full w-full flex-1 bg-muted" />
-        ) : (
+        )}
+        {kind === 'image' && (
+          <div className="flex flex-1 items-center justify-center overflow-auto bg-muted p-4">
+            <img src={url} alt={modal.filename} className="max-h-full max-w-full object-contain" />
+          </div>
+        )}
+        {kind === 'text' && textPreview.state === 'loading' && (
+          <div className="flex flex-1 items-center justify-center p-8 text-sm text-muted-foreground">
+            {t('common.preview_loading')}
+          </div>
+        )}
+        {kind === 'text' && textPreview.state === 'error' && (
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-sm text-muted-foreground">
+            <p>{t('common.preview_error')}</p>
+          </div>
+        )}
+        {kind === 'text' && textPreview.state === 'ready' && (
+          <pre className="flex-1 overflow-auto whitespace-pre-wrap break-words bg-muted p-4 text-xs">
+            {textPreview.text}
+          </pre>
+        )}
+        {kind === 'none' && (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-sm text-muted-foreground">
             <p>{t('common.preview_not_inline')}</p>
           </div>
