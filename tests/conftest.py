@@ -3,8 +3,10 @@
 import sys
 import time
 import types
+from collections.abc import Iterator
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -42,6 +44,35 @@ def _install_magic_stub() -> None:
 def pytest_configure() -> None:
     """Configure pytest by installing necessary stubs."""
     _install_magic_stub()
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_hybrid_env() -> Iterator[None]:
+    """Clear the env vars that drive hybrid-retrieval resolution.
+
+    ``docint.utils.env_cfg`` runs ``load_dotenv()`` at import time, so a
+    developer ``.env`` (e.g. ``ENABLE_HYBRID=true`` / ``INFERENCE_PROVIDER=vllm``)
+    leaks into ``os.environ`` and makes every ``RAG()`` resolve
+    ``enable_hybrid=True`` — at which point ``ingest_docs`` runs the real
+    ``probe_sparse_endpoint()`` network call against ``vllm-router``. CI has no
+    ``.env``, so the suite must see the same unset baseline locally. Tests that
+    exercise hybrid behavior opt in explicitly via ``monkeypatch.setenv`` or by
+    setting ``enable_hybrid`` on the instance.
+
+    Uses a private ``MonkeyPatch`` instead of the shared ``monkeypatch``
+    fixture: requesting the shared one here reorders it before every module's
+    own autouse fixtures, so their teardowns would run against still-patched
+    state (this broke ``tests/test_translate_client.py``'s cache-clear
+    teardown).
+
+    Yields:
+        None.
+    """
+    mp = pytest.MonkeyPatch()
+    for name in ("ENABLE_HYBRID", "SPARSE_API_BASE", "INFERENCE_PROVIDER", "SPARSE_MODEL"):
+        mp.delenv(name, raising=False)
+    yield
+    mp.undo()
 
 
 def run_ingest(
