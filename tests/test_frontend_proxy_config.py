@@ -117,3 +117,65 @@ def test_frontend_vite_proxies_translate_endpoint() -> None:
     (order-independent).
     """
     assert "translate" in _vite_api_prefixes()
+
+
+def _nginx_conf() -> str:
+    """Return the rendered frontend nginx config text.
+
+    Returns:
+        str: Contents of ``frontend/nginx/default.conf``.
+    """
+    return (REPO_ROOT / "frontend" / "nginx" / "default.conf").read_text(encoding="utf-8")
+
+
+def test_preview_route_is_framable_by_the_app_itself() -> None:
+    """The in-page preview dialog frames ``/sources/preview`` same-origin.
+
+    The shared security headers say ``X-Frame-Options: DENY`` and
+    ``frame-ancestors 'none'``, which forbid rendering in *any* frame — even
+    the app's own dialog. Observed live: PDF/JSON previews showed the
+    browser's blocked-page icon while a new tab worked, because those headers
+    constrain framing but not top-level navigation. The preview route needs
+    its own location with same-origin framing; everything else keeps DENY.
+    """
+    conf = _nginx_conf()
+    match = re.search(r"location = /sources/preview \{([^}]*)\}", conf)
+    assert match is not None, "dedicated /sources/preview location not found"
+    block = match.group(1)
+    assert "proxy_pass" in block
+    assert "security-headers-framable.conf" in block
+
+
+def test_framable_headers_allow_only_same_origin_framing() -> None:
+    """Same-origin framing only — other sites still cannot embed documents."""
+    headers = (REPO_ROOT / "frontend" / "nginx" / "security-headers-framable.conf").read_text(encoding="utf-8")
+
+    assert 'X-Frame-Options "SAMEORIGIN"' in headers
+    csp_lines = [line for line in headers.splitlines() if "Content-Security-Policy" in line]
+    assert len(csp_lines) == 1
+    assert "frame-ancestors 'self'" in csp_lines[0]
+    assert "frame-ancestors 'none'" not in csp_lines[0]
+
+
+def test_framable_headers_keep_the_rest_of_the_policy() -> None:
+    """Relaxing framing must not silently drop the other protections."""
+    headers = (REPO_ROOT / "frontend" / "nginx" / "security-headers-framable.conf").read_text(encoding="utf-8")
+
+    assert 'X-Content-Type-Options "nosniff"' in headers
+    assert "Referrer-Policy" in headers
+    assert "Permissions-Policy" in headers
+
+
+def test_default_security_headers_still_deny_framing() -> None:
+    """Only the preview route relaxes; the app and API keep DENY."""
+    headers = (REPO_ROOT / "frontend" / "nginx" / "security-headers.conf").read_text(encoding="utf-8")
+
+    assert 'X-Frame-Options "DENY"' in headers
+    assert "frame-ancestors 'none'" in headers
+
+
+def test_frontend_image_ships_the_framable_headers() -> None:
+    """The framable variant must reach the container, or nginx fails to boot."""
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile.frontend").read_text(encoding="utf-8")
+
+    assert "security-headers-framable.conf" in dockerfile
