@@ -41,6 +41,8 @@ export const en = {
   'common.translate': 'Translate',
   'common.preview_new_tab': 'Open in new tab ↗',
   'common.preview_close': 'Close preview',
+  'common.preview_loading': 'Loading preview…',
+  'common.preview_error': 'The file could not be loaded here. Open it in a new tab instead.',
   'common.preview_not_inline': 'This file type cannot be shown here. Open it in a new tab to view or download it.',
   'common.preview_open': 'Preview document',
   'common.translation': 'Translation',
