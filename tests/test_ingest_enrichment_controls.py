@@ -162,6 +162,37 @@ def test_ingest_finalize_forwards_flags(monkeypatch: pytest.MonkeyPatch, client:
     assert recorded.get("hate_speech") is True
 
 
+def test_ingest_finalize_does_not_force_hybrid_when_unspecified(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path
+) -> None:
+    """POST /ingest/finalize with no explicit ``hybrid`` must not force it on.
+
+    Regression test for the critical defect where every ingest caller (this
+    endpoint's ``IngestIn.hybrid`` default plus its ``... if ... is not None
+    else True`` coercions) forced ``hybrid=True`` downstream regardless of
+    ``resolve_enable_hybrid()``'s derived default. On a non-vLLM provider
+    with no ``SPARSE_API_BASE`` set, that forced every ingest to probe a
+    sparse endpoint (``/pooling``) that was never configured, failing every
+    ingest job. An unspecified ``hybrid`` must now propagate as ``None`` all
+    the way to ``ingest_docs`` so the RAG engine's own resolved default
+    decides; an explicit ``hybrid`` must still win.
+    """
+    monkeypatch.setattr(api_module, "_resolve_qdrant_src_dir", lambda: tmp_path)
+    recorded: dict[str, Any] = {}
+
+    def fake_ingest(
+        collection: str, path: Path, hybrid: bool | None = None, progress_callback: Any = None, **kwargs: Any
+    ) -> None:
+        recorded["hybrid"] = hybrid
+
+    monkeypatch.setattr(api_module.ingest_module, "ingest_docs", fake_ingest)
+
+    snapshot = _stage_then_finalize(client, "hybrid-unset-col")
+
+    assert snapshot["status"] == "completed"
+    assert recorded["hybrid"] is None
+
+
 def _stage_then_finalize(
     client: TestClient, collection: str, finalize_body: dict[str, Any] | None = None
 ) -> dict[str, Any]:

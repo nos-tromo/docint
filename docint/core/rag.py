@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 from docint.utils.env_cfg import (
     EmbeddingConfig,
     GraphRAGConfig,
+    EmbedClientConfig,
     HostConfig,
     IngestionConfig,
     NERConfig,
@@ -46,7 +47,9 @@ from docint.utils.env_cfg import (
     RerankClientConfig,
     RetrievalConfig,
     SessionConfig,
+    SparseClientConfig,
     SummaryConfig,
+    load_embed_client_env,
     load_embedding_env,
     load_graphrag_env,
     load_hate_speech_env,
@@ -62,12 +65,13 @@ from docint.utils.env_cfg import (
     load_resolution_env,
     load_retrieval_env,
     load_session_env,
+    load_sparse_client_env,
     load_summary_env,
+    resolve_enable_hybrid,
 )
 from docint.utils.translate_client import translate as translate_text
 # isort: on
 
-from fastembed import SparseTextEmbedding
 from llama_index.core import (
     Response,
     SimpleDirectoryReader,
@@ -112,14 +116,12 @@ __all__ = [
     "QueryBundle",
     "ResponseMode",
     "RetrieverQueryEngine",
-    "SparseTextEmbedding",
     "VectorStoreQueryMode",
     "logger",
     "qdrant_models",
     "urllib",
 ]
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
-from qdrant_client.qdrant_fastembed import IDF_EMBEDDING_MODELS  # type: ignore[attr-defined]
 
 from docint.core.collection_overview import summarize_document_types
 from docint.core.entities.resolution import (
@@ -345,10 +347,13 @@ def _filter_hate_speech(
 # DEFAULT_SPARSE_VECTOR_NAME so a collection we pre-create has the same
 # named-vector schema the runtime QdrantVectorStore will later upsert
 # into. We replicate the schema here rather than instantiating
-# QdrantVectorStore because its constructor eagerly loads the fastembed
-# sparse encoder (onnxruntime + tokenizer), and doing that twice per
-# ingest pushes the container past the OOM threshold on CSV ingests
-# (see ``create_collection_if_missing``).
+# QdrantVectorStore because that class only creates the Qdrant collection
+# lazily, from its ``add()`` method, the first time nodes are written —
+# building one in ``create_collection_if_missing`` would not pre-create
+# anything for the UI to show before ingestion runs (see that method).
+# Sparse encoding is a remote HTTP call now (``RemoteSparseEncoder``),
+# not a local fastembed model, so there is no local model-loading cost
+# to weigh either way.
 QDRANT_DENSE_VECTOR_NAME = "text-dense"
 QDRANT_SPARSE_VECTOR_NAME = "text-sparse-new"
 
@@ -1726,8 +1731,16 @@ def _vllm_service_root(api_base: str) -> str:
 
 
 @dataclass(slots=True)
-class VLLMSparseEncoder:
-    """Adapter that turns vLLM pooling/tokenize responses into Qdrant sparse vectors."""
+class RemoteSparseEncoder:
+    """Adapter that turns remote pooling/tokenize responses into Qdrant sparse vectors.
+
+    Speaks the vLLM pooling protocol — ``POST {root}/pooling`` with
+    ``task="token_classify"`` plus ``POST {root}/tokenize`` — against
+    either the full vllm-service router (which exposes both as LiteLLM
+    pass-throughs to the ``embed`` backend) or the standalone
+    ``embed-only`` CPU container. The wire format is frozen: production
+    collections were ingested with it.
+    """
 
     api_base: str
     model: str
@@ -1999,7 +2012,7 @@ class RAG:
     # writes into ``_collection_default`` (or the request ContextVar). MUST stay
     # the first field so its init assignment runs before ``_collection_default``.
     qdrant_collection: str
-    enable_hybrid: bool = field(default=True)
+    enable_hybrid: bool = field(default_factory=resolve_enable_hybrid)
 
     # --- Environment config ---
     host_config: HostConfig = field(default_factory=load_host_env, init=False, repr=False)
@@ -2130,6 +2143,8 @@ class RAG:
     _text_model: OpenAI | None = field(default=None, init=False, repr=False)
     _post_retrieval_text_model: OpenAI | None = field(default=None, init=False, repr=False)
     _reranker: BaseNodePostprocessor | None = field(default=None, init=False, repr=False)
+    sparse_client_config: SparseClientConfig | None = field(default=None, init=False, repr=False)
+    embed_client_config: EmbedClientConfig | None = field(default=None, init=False, repr=False)
     _qdrant_client: QdrantClient | None = field(default=None, init=False, repr=False)
     _qdrant_aclient: AsyncQdrantClient | None = field(default=None, init=False, repr=False)
     _parent_context_support_cache: dict[str, bool] = field(default_factory=dict, init=False, repr=False)
@@ -2208,6 +2223,19 @@ class RAG:
         self.openai_thinking_enabled = self.openai_config.thinking_enabled
         self.openai_timeout = self.openai_config.timeout
         self.openai_top_p = self.openai_config.top_p
+
+        # --- Sparse encoder client config (remote on every provider) ---
+        self.sparse_client_config = load_sparse_client_env(
+            default_api_base=self.openai_api_base or "",
+            default_api_key=self.openai_api_key,
+            default_timeout=self.openai_timeout,
+        )
+
+        # --- Dense embedding client config (remote on every provider) ---
+        self.embed_client_config = load_embed_client_env(
+            default_api_base=self.openai_api_base or "",
+            default_api_key=self.openai_api_key,
+        )
 
         # --- Embedding context budget (separate from chat LLM) ---
         self.embed_ctx_tokens = self.embedding_config.ctx_tokens
@@ -2541,8 +2569,8 @@ class RAG:
             logger.info("Initializing embedding model: {}", self.embed_model_id)
 
             embedding_kwargs: dict[str, Any] = {
-                "api_base": self.openai_api_base,
-                "api_key": self.openai_api_key,
+                "api_base": self.embed_client_config.api_base if self.embed_client_config else self.openai_api_base,
+                "api_key": self.embed_client_config.api_key if self.embed_client_config else self.openai_api_key,
                 "embed_batch_size": self.embed_batch_size,
                 "max_retries": self.embed_max_retries,
                 "model_name": self.embed_model_id,
@@ -2561,57 +2589,23 @@ class RAG:
 
     @property
     def sparse_model(self) -> str | None:
-        """Returns the configured sparse model id for hybrid retrieval.
+        """Return the configured sparse model id for hybrid retrieval.
+
+        The id is passed through to the remote encoder as the ``model``
+        field; docint no longer resolves it against a local support list,
+        because it no longer runs a local sparse model.
 
         Returns:
-            str | None: The sparse model id or None if not enabled.
+            str | None: The sparse model id, or None when hybrid is off.
 
         Raises:
-            ValueError: If the sparse model is None or not supported.
-            ImportError: If fastembed is not installed when hybrid search is enabled.
+            ValueError: If hybrid is enabled but no sparse model is set.
         """
         if not self.enable_hybrid:
             return None
-
         if self.sparse_model_id is None:
             raise ValueError("sparse_model_id is None")
-
-        if self.openai_inference_provider.lower() == "vllm":
-            return self.sparse_model_id
-
-        try:
-            supported_models = SparseTextEmbedding.list_supported_models()
-        except ImportError as err:
-            raise ImportError("fastembed is not installed, but hybrid search is enabled.") from err
-
-        # Check if the configured ID is directly supported
-        supported_ids = [m["model"] for m in supported_models]
-        chosen = self.sparse_model_id
-        if self.sparse_model_id in supported_ids:
-            chosen = self.sparse_model_id
-        else:
-            # Check if it matches a source HF repo (mapping logic)
-            for model_desc in supported_models:
-                sources = model_desc.get("sources")
-                if sources and sources.get("hf") == self.sparse_model_id:
-                    logger.info(
-                        "Mapped sparse model {} to its source {}",
-                        self.sparse_model_id,
-                        model_desc["model"],
-                    )
-                    chosen = model_desc["model"]
-                    break
-            else:
-                logger.error(
-                    "ValueError: Sparse model {} not supported. Supported: {}",
-                    self.sparse_model_id,
-                    supported_ids,
-                )
-                raise ValueError(f"Sparse model {self.sparse_model_id!r} not supported. Supported: {supported_ids}")
-
-        # Return the canonical fastembed model name.  fastembed will resolve
-        # local files via FASTEMBED_CACHE_PATH (set by env_cfg to HF_HUB_CACHE).
-        return chosen
+        return self.sparse_model_id
 
     @property
     def reranker(self) -> BaseNodePostprocessor:
@@ -2764,6 +2758,53 @@ class RAG:
             )
         return self._qdrant_aclient
 
+    def _build_sparse_encoder(self) -> RemoteSparseEncoder:
+        """Construct the remote sparse encoder from the resolved config.
+
+        Single construction point, shared by the vector-store wiring and
+        the pre-ingest probe, so the two can never drift apart in how
+        they resolve the endpoint.
+
+        Returns:
+            RemoteSparseEncoder: Encoder bound to the configured endpoint.
+        """
+        sparse_config = self.sparse_client_config
+        return RemoteSparseEncoder(
+            api_base=sparse_config.api_base if sparse_config else self.openai_api_base or "",
+            api_key=sparse_config.api_key if sparse_config else self.openai_api_key,
+            model=self.sparse_model or "",
+            timeout=sparse_config.timeout if sparse_config else self.openai_timeout,
+        )
+
+    def probe_sparse_endpoint(self) -> None:
+        """Verify the sparse endpoint answers before an ingest run starts.
+
+        Sparse encoding is not fail-soft: a transport failure partway
+        through an ingest would write dense-only points into a hybrid
+        collection and corrupt it. Probing once up front converts that
+        into a clean, actionable job failure.
+
+        No-op when hybrid retrieval is disabled.
+
+        Raises:
+            RuntimeError: When hybrid is enabled and the configured sparse
+                endpoint cannot be reached.
+        """
+        if not self.enable_hybrid:
+            return
+
+        encoder = self._build_sparse_encoder()
+        try:
+            encoder.encode_texts(["ping"])
+        except Exception as exc:
+            base = self.sparse_client_config.api_base if self.sparse_client_config else "<unset>"
+            logger.error("Sparse endpoint probe failed against {}: {}", base, exc)
+            raise RuntimeError(
+                f"Hybrid retrieval is enabled but the sparse endpoint at {base} is unreachable: {exc}. "
+                "Point SPARSE_API_BASE at a reachable sparse service (the embed-only shape listens on "
+                "http://embed-only:8000), or set ENABLE_HYBRID=false to ingest dense-only."
+            ) from exc
+
     # --- Build pieces ---
     def _vector_store(self) -> QdrantVectorStore:
         """Creates the vector store for document embeddings.
@@ -2784,17 +2825,10 @@ class RAG:
             "aclient": self.qdrant_aclient,
             "enable_hybrid": self.enable_hybrid,
         }
-        if self.enable_hybrid and self.openai_inference_provider.lower() == "vllm":
-            sparse_encoder = VLLMSparseEncoder(
-                api_base=self.openai_api_base or "",
-                api_key=self.openai_api_key,
-                model=self.sparse_model or "",
-                timeout=self.openai_timeout,
-            )
+        if self.enable_hybrid:
+            sparse_encoder = self._build_sparse_encoder()
             vector_store_kwargs["sparse_doc_fn"] = sparse_encoder.encode_texts
             vector_store_kwargs["sparse_query_fn"] = sparse_encoder.encode_texts
-        else:
-            vector_store_kwargs["fastembed_sparse_model"] = self.sparse_model
 
         return QdrantVectorStore(**vector_store_kwargs)
 
@@ -5775,16 +5809,14 @@ class RAG:
         Implementation note: this calls ``qdrant_client.create_collection``
         directly with the same dense + sparse named-vector schema that
         :class:`QdrantVectorStore` writes — replicating LlamaIndex's
-        defaults rather than instantiating a ``QdrantVectorStore`` to
-        do it. Constructing that class eagerly loads the fastembed
-        sparse encoder (onnxruntime + tokenizer, ~150-200 MB of native
-        memory that resists GC), which in combination with the second
-        ``QdrantVectorStore`` built by ``ingest_docs`` and the in-process
-        GLiNER weights (now removed — NER is a remote service hosted by
-        ``vllm-service``) tripped the kernel OOM killer on CSV ingests.
-        The duplicate-load risk is smaller post-GLiNER, but we still pay
-        the schema-replication cost (defaults pinned to LlamaIndex's
-        constants) to avoid the duplicate native load from fastembed.
+        defaults rather than instantiating a ``QdrantVectorStore`` to do
+        it. That class only creates the Qdrant collection lazily, from
+        its ``add()`` method, the first time nodes are written, so
+        constructing one here would not actually pre-create anything —
+        hence the manual schema replication. NER (GLiNER) and sparse
+        encoding are both remote services now (no in-process model
+        weights), so this is purely about *when* the collection becomes
+        visible, not about avoiding a local model load.
 
         When ``openai_dimensions`` is configured the vector size is taken
         from there; otherwise a single embed probe determines it. Probe
@@ -5816,12 +5848,14 @@ class RAG:
 
         if self.enable_hybrid:
             # Mirrors QdrantVectorStore: dense vector named "text-dense",
-            # sparse vector named "text-sparse-new" with IDF modifier when
-            # the configured sparse model is in qdrant_client's IDF set.
-            sparse_model_name = self.sparse_model
-            modifier = (
-                qdrant_models.Modifier.IDF if sparse_model_name and sparse_model_name in IDF_EMBEDDING_MODELS else None
-            )
+            # sparse vector named "text-sparse-new". No IDF modifier: sparse
+            # encoding is now a remote call (RemoteSparseEncoder) and
+            # fastembed is absent by design (tests/test_rag_sparse_gate.py
+            # asserts it stays uninstalled), so qdrant_client's own
+            # IDF_EMBEDDING_MODELS set — sourced from fastembed's model
+            # registry — degrades to empty. No sparse model, including
+            # bge-m3, can ever match it.
+            modifier = None
             sparse_params = qdrant_models.SparseVectorParams(
                 index=qdrant_models.SparseIndexParams(),
                 modifier=modifier,
@@ -5944,6 +5978,11 @@ class RAG:
         # batch later fails. A probe failure here surfaces the embedding
         # outage immediately instead of masking it as a zero-node "success".
         self.create_collection_if_missing()
+
+        # Fail before any file preparation, node parsing, or batch work: a
+        # sparse transport failure discovered mid-run would already have
+        # written dense-only points into a hybrid collection.
+        self.probe_sparse_endpoint()
 
         prepared_dir = self._prepare_sources_dir(Path(data_dir) if isinstance(data_dir, str) else data_dir)
         self.data_dir = prepared_dir
@@ -6183,6 +6222,16 @@ class RAG:
             EmptyIngestionError: When no documents/nodes were produced and the
                 target collection did not previously exist. Triggers cleanup of
                 the orphan SQLite KV files; uploaded source files are kept.
+
+        Warning:
+            Unlike :meth:`ingest_docs`, this method does **not** call
+            :meth:`probe_sparse_endpoint` before writing to a hybrid
+            collection — it currently has zero production callers (tests
+            only), so the missing probe has never mattered in practice.
+            It carries the same corruption risk described there: a sparse
+            endpoint that fails partway through would write dense-only
+            points into a hybrid collection. Wiring this method to a real
+            caller MUST add a ``self.probe_sparse_endpoint()`` call first.
         """
         # See ingest_docs: pre-create the Qdrant collection so it stays
         # selectable in the UI even when every embedding batch fails.

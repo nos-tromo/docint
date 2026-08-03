@@ -107,7 +107,7 @@ controls the vector store query mode used by the query engine:
 |---|---|
 | `auto`    | Default — the engine picks dense or hybrid based on collection capability. |
 | `default` | Pure dense retrieval. |
-| `sparse`  | Sparse-only retrieval using the BM25-style sparse model. |
+| `sparse`  | Sparse-only retrieval using the learned sparse model. |
 | `hybrid`  | Dense + sparse fusion with `RETRIEVAL_HYBRID_ALPHA` as the weight. |
 | `mmr`     | Maximal marginal relevance — dense with redundancy penalty. |
 

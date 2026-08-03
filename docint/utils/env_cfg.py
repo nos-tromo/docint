@@ -27,12 +27,6 @@ def set_offline_env() -> None:
         os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
         os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
-        # Point fastembed at the HF hub cache so it reuses models downloaded
-        # by ``model_cfg.py`` instead of trying to fetch them.
-        if not os.getenv("FASTEMBED_CACHE_PATH"):
-            default_hf_cache = str(Path.home() / ".cache" / "huggingface" / "hub")
-            os.environ["FASTEMBED_CACHE_PATH"] = os.getenv("HF_HUB_CACHE", default_hf_cache)
-
         logger.info("Set Hugging Face libraries to offline mode.")
     else:
         logger.info("Hugging Face libraries are in online mode.")
@@ -976,7 +970,7 @@ def load_model_env(
     default_embed_model: str = "bge-m3",
     default_ner_model: str = "gliner-community/gliner_large-v2.5",
     default_rerank_model: str = "BAAI/bge-reranker-v2-m3",
-    default_sparse_model: str = "Qdrant/all_miniLM_L6_v2_with_attentions",
+    default_sparse_model: str = "BAAI/bge-m3",
     default_text_model: str = "gpt-oss:20b",
     default_vision_model: str = "qwen3.5:9b",
 ) -> ModelConfig:
@@ -999,7 +993,9 @@ def load_model_env(
           tokenization happens on the provider side (e.g. ``openai``).
         - ner_model (str): The NER model identifier.
         - rerank_model (str): The reranker model identifier.
-        - sparse_model (str): The sparse model identifier.
+        - sparse_model (str): The sparse model identifier, served remotely.
+          Always ``BAAI/bge-m3`` regardless of ``INFERENCE_PROVIDER`` — sparse
+          encoding is never local, so there is no per-provider default to pick.
         - text_model (str): The text model identifier.
         - translate_model (str): The translation model identifier. Defaults
           to the resolved ``text_model`` so translation reuses the
@@ -1012,7 +1008,6 @@ def load_model_env(
 
     if inference_provider == "vllm":
         default_embed_model = "BAAI/bge-m3"
-        default_sparse_model = default_embed_model
         default_text_model = "Qwen/Qwen3.5-2B"
         default_vision_model = "Qwen/Qwen3.5-2B"
 
@@ -1033,6 +1028,47 @@ def load_model_env(
         translate_model=os.getenv("TRANSLATE_MODEL", text_model),
         vision_model=os.getenv("VISION_MODEL", default_vision_model),
     )
+
+
+def resolve_enable_hybrid() -> bool:
+    """Decide whether hybrid (dense + sparse) retrieval is enabled.
+
+    Sparse encoding is always remote, so hybrid is only safe where a
+    sparse endpoint actually serves ``/pooling`` and ``/tokenize``. That
+    cannot be inferred from ``SPARSE_API_BASE`` being non-empty, because
+    it inherits ``OPENAI_API_BASE`` and is therefore never empty. Two
+    signals stand in for it: the vLLM provider (whose router exposes both
+    routes as pass-throughs) and an explicitly set ``SPARSE_API_BASE``
+    (the embed-only deployment shape). An explicit ``ENABLE_HYBRID``
+    overrides both.
+
+    Returns:
+        bool: True when hybrid retrieval should be enabled.
+    """
+    true_values = {"1", "true", "yes", "on"}
+    false_values = {"0", "false", "no", "off"}
+
+    explicit = os.getenv("ENABLE_HYBRID")
+    if explicit is not None and explicit.strip():
+        normalized = explicit.strip().lower()
+        if normalized not in true_values and normalized not in false_values:
+            logger.warning(
+                "ENABLE_HYBRID={!r} is not a recognized boolean; treating as false.",
+                explicit,
+            )
+        resolved = normalized in true_values
+        logger.info("Hybrid retrieval resolved to {} (explicit ENABLE_HYBRID={!r}).", resolved, explicit)
+        return resolved
+
+    provider = os.getenv("INFERENCE_PROVIDER", "ollama").strip().lower()
+    has_explicit_sparse_base = bool(os.getenv("SPARSE_API_BASE", "").strip())
+    resolved = provider == "vllm" or has_explicit_sparse_base
+    if resolved:
+        signal = "INFERENCE_PROVIDER=vllm" if provider == "vllm" else "SPARSE_API_BASE is explicitly set"
+    else:
+        signal = "INFERENCE_PROVIDER != vllm and SPARSE_API_BASE is unset"
+    logger.info("Hybrid retrieval resolved to {} ({}).", resolved, signal)
+    return resolved
 
 
 @dataclass(frozen=True)
@@ -1397,6 +1433,116 @@ def load_rerank_client_env(
         api_base=os.getenv("RERANK_API_BASE", default_api_base).rstrip("/"),
         api_key=api_key,
         timeout=float(os.getenv("RERANK_TIMEOUT", default_timeout)),
+    )
+
+
+@dataclass(frozen=True)
+class SparseClientConfig:
+    """Dataclass for the remote sparse-encoder HTTP client."""
+
+    api_base: str
+    api_key: str | None
+    timeout: float
+
+
+def load_sparse_client_env(
+    default_api_base: str,
+    default_api_key: str | None,
+    default_timeout: float,
+) -> "SparseClientConfig":
+    """Load the remote sparse-encoder client configuration.
+
+    docint reaches sparse embedding over HTTP on every provider. The
+    client POSTs to ``{api_base}/pooling`` (``task=token_classify``) and
+    ``{api_base}/tokenize``. Defaults mirror the OpenAI client settings —
+    the full vllm-service router exposes both as LiteLLM pass-throughs
+    against the same base. For the embed-only deployment shape (CPU
+    container hosted by vllm-service), override with
+    ``SPARSE_API_BASE=http://embed-only:8000``.
+
+    Args:
+        default_api_base (str): Fallback base URL when ``SPARSE_API_BASE``
+            is unset. Typically the active ``OPENAI_API_BASE``.
+        default_api_key (str | None): Fallback Bearer token when
+            ``SPARSE_API_KEY`` is unset. ``None`` (or empty) disables auth.
+        default_timeout (float): Fallback request timeout in seconds.
+
+    Returns:
+        SparseClientConfig: Resolved configuration.
+
+        - ``api_base``: Base URL; the encoder appends ``/pooling`` and
+          ``/tokenize`` itself.
+        - ``api_key``: Bearer token sent as ``Authorization: Bearer ...``
+          when set; omitted entirely when ``None``. The embed-only shape
+          requires no auth (trust ``inference-net``); the full router
+          requires the master key.
+        - ``timeout``: Per-request HTTP timeout in seconds.
+    """
+    raw_key = os.getenv("SPARSE_API_KEY")
+    if raw_key is not None and raw_key.strip():
+        api_key: str | None = raw_key.strip()
+    elif default_api_key and default_api_key.strip():
+        api_key = default_api_key.strip()
+    else:
+        api_key = None
+    return SparseClientConfig(
+        api_base=os.getenv("SPARSE_API_BASE", default_api_base).rstrip("/"),
+        api_key=api_key,
+        timeout=float(os.getenv("SPARSE_TIMEOUT", default_timeout)),
+    )
+
+
+@dataclass(frozen=True)
+class EmbedClientConfig:
+    """Dataclass for the remote dense-embedding HTTP client."""
+
+    api_base: str
+    api_key: str | None
+
+
+def load_embed_client_env(
+    default_api_base: str,
+    default_api_key: str | None,
+) -> "EmbedClientConfig":
+    """Load the remote dense-embedding client configuration.
+
+    Dense embeddings go through an OpenAI-compatible endpoint. Defaults
+    mirror the OpenAI client settings, so the full vllm-service router
+    needs no configuration. A CPU dev host points this at the
+    ``embed-only`` container, which serves dense from the same bge-m3
+    instance it uses for sparse — avoiding a second copy of the model
+    alongside Ollama.
+
+    The value is consumed by the OpenAI SDK, which appends
+    ``/embeddings`` to it, so it is expected to end in ``/v1``; only a
+    trailing slash is stripped.
+
+    There is deliberately no ``timeout`` field here: the embedding
+    request timeout is controlled by the pre-existing
+    ``EMBED_TIMEOUT_SECONDS`` (see ``EmbeddingConfig.timeout_seconds``),
+    not by this client config. Do not add a same-named timeout variable
+    to this function — it would silently shadow the one already wired
+    up.
+
+    Args:
+        default_api_base (str): Fallback base URL when ``EMBED_API_BASE``
+            is unset. Typically the active ``OPENAI_API_BASE``.
+        default_api_key (str | None): Fallback Bearer token when
+            ``EMBED_API_KEY`` is unset. ``None`` (or empty) disables auth.
+
+    Returns:
+        EmbedClientConfig: Resolved configuration.
+    """
+    raw_key = os.getenv("EMBED_API_KEY")
+    if raw_key is not None and raw_key.strip():
+        api_key: str | None = raw_key.strip()
+    elif default_api_key and default_api_key.strip():
+        api_key = default_api_key.strip()
+    else:
+        api_key = None
+    return EmbedClientConfig(
+        api_base=os.getenv("EMBED_API_BASE", default_api_base).rstrip("/"),
+        api_key=api_key,
     )
 
 

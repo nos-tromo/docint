@@ -1920,36 +1920,18 @@ def test_chat_rejects_empty_prompt() -> None:
         rag.chat("   ")
 
 
-def test_sparse_model_raises_import_error_when_fastembed_broken(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """sparse_model property re-raises ImportError when list_supported_models raises.
+def test_sparse_model_raises_value_error_when_hybrid_on_but_unset() -> None:
+    """sparse_model raises when hybrid is enabled but no sparse model id is set.
 
-    Args:
-        monkeypatch: The monkeypatch fixture.
+    Sparse encoding is remote on every provider now, so the property no
+    longer consults a local fastembed support list (and can no longer
+    raise ``ImportError`` for one being absent) -- the only failure mode
+    left is a missing model id.
     """
-
-    def broken() -> list[dict[str, str]]:
-        """Simulate a broken SparseTextEmbedding.list_supported_models method.
-
-        Raises:
-            ImportError: Always raised to simulate the absence of fastembed.
-        """
-        raise ImportError("missing")
-
-    monkeypatch.setattr(
-        rag_module.SparseTextEmbedding,
-        "list_supported_models",
-        staticmethod(broken),
-    )
-
     rag = RAG(qdrant_collection="test")
     rag.enable_hybrid = True
-    rag.sparse_model_id = "some-model"
-    # Force a non-vllm provider so the fastembed availability check is not
-    # short-circuited (vllm skips list_supported_models entirely).
-    rag.openai_inference_provider = "ollama"
-    with pytest.raises(ImportError, match="fastembed is not installed"):
+    rag.sparse_model_id = None
+    with pytest.raises(ValueError, match="sparse_model_id is None"):
         _ = rag.sparse_model
 
 
@@ -2119,39 +2101,21 @@ def test_build_ingestion_pipeline_wires_remote_ner_extractor(
     assert rag._image_ingestion_service is not None
 
 
-def test_sparse_model_returns_id_when_directly_supported(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """sparse_model should return the configured ID when fastembed lists it directly.
+def test_sparse_model_returns_id_verbatim_when_hybrid_enabled() -> None:
+    """sparse_model should pass the configured ID straight through.
 
-    The historical name of this test (``test_sparse_model_uses_cached_path``)
-    described a path-resolution behaviour that the current
-    :pyattr:`RAG.sparse_model` no longer performs — fastembed resolves local
-    files via ``FASTEMBED_CACHE_PATH`` (set by env_cfg to ``HF_HUB_CACHE``)
-    rather than via this property. This test pins the canonical-ID return
-    contract instead, which is what callers actually rely on.
-
-    Args:
-        monkeypatch (pytest.MonkeyPatch): The monkeypatch fixture.
+    The historical name of this test (``test_sparse_model_uses_cached_path``,
+    later ``test_sparse_model_returns_id_when_directly_supported``) described
+    behaviour :pyattr:`RAG.sparse_model` no longer performs -- it used to
+    resolve the id against a local fastembed support list, but sparse
+    encoding is now remote on every provider, so the property is a plain
+    pass-through of ``sparse_model_id`` with no local list to consult.
     """
-    monkeypatch.setattr(
-        rag_module.SparseTextEmbedding,
-        "list_supported_models",
-        staticmethod(
-            lambda: [
-                {
-                    "model": "Qdrant/all_miniLM_L6_v2_with_attentions",
-                    "sources": {"hf": "Qdrant/all_miniLM_L6_v2_with_attentions"},
-                }
-            ]
-        ),
-    )
-
     rag = RAG(qdrant_collection="test")
     rag.enable_hybrid = True
-    rag.sparse_model_id = "Qdrant/all_miniLM_L6_v2_with_attentions"
+    rag.sparse_model_id = "BAAI/bge-m3"
 
-    assert rag.sparse_model == "Qdrant/all_miniLM_L6_v2_with_attentions"
+    assert rag.sparse_model == "BAAI/bge-m3"
 
 
 @pytest.mark.parametrize("provider", ["vllm", "ollama", "openai"])
@@ -5219,12 +5183,21 @@ def test_create_collection_if_missing_probes_and_creates_hybrid_schema(
 ) -> None:
     """Probes the embed endpoint and creates a hybrid dense+sparse collection.
 
-    Regression: we must NOT instantiate QdrantVectorStore here — its
-    ``__init__`` eagerly loads the fastembed sparse encoder (onnxruntime
-    + tokenizer), which combined with the second store built later by
-    ingest_docs and the GLiNER weights OOM-killed CSV ingests. So this
-    test asserts we hit qdrant_client.create_collection directly with
-    LlamaIndex's named-vector schema.
+    Regression: we must NOT instantiate QdrantVectorStore here — that
+    class is the ingest-time write path, not the schema-creation path
+    (it only creates the Qdrant collection lazily, from ``add()``, the
+    first time nodes are written), so building one in
+    ``create_collection_if_missing`` would not even accomplish this
+    method's purpose. This test pins that separation, asserting we hit
+    ``qdrant_client.create_collection`` directly with LlamaIndex's
+    named-vector schema instead.
+
+    Historical note: this separation originally also sidestepped a
+    fastembed/onnxruntime double-load (the old local sparse encoder)
+    that, combined with the in-process GLiNER weights, OOM-killed CSV
+    ingests. Both fastembed and in-process GLiNER are gone now — sparse
+    encoding and NER are remote HTTP calls — so that specific hazard no
+    longer exists; the separation is kept for the reason above.
     """
     rag = RAG(qdrant_collection="fresh-collection")
     rag._qdrant_client = MagicMock()
@@ -5234,11 +5207,10 @@ def test_create_collection_if_missing_probes_and_creates_hybrid_schema(
         "qdrant_collection_exists",
         lambda client, collection_name: False,
     )
-    # Pin sparse_model to a known IDF model so we can also verify the modifier.
     monkeypatch.setattr(
         type(rag),
         "sparse_model",
-        property(lambda self: "Qdrant/bm42-all-minilm-l6-v2-attentions"),
+        property(lambda self: "BAAI/bge-m3"),
     )
 
     class _StubEmbed:
@@ -5264,14 +5236,13 @@ def test_create_collection_if_missing_probes_and_creates_hybrid_schema(
     rag._qdrant_client.create_collection.assert_called_once()
     kwargs = rag._qdrant_client.create_collection.call_args.kwargs
     assert kwargs["collection_name"] == "fresh-collection"
-    # Hybrid path: dense named vector + sparse named vector with IDF modifier.
+    # Hybrid path: dense named vector + sparse named vector. No IDF
+    # modifier is set — sparse encoding is remote now, so there is no
+    # local fastembed model to look up (see rag.py's create_collection_if_missing).
     assert rag_module.QDRANT_DENSE_VECTOR_NAME in kwargs["vectors_config"]
     assert kwargs["vectors_config"][rag_module.QDRANT_DENSE_VECTOR_NAME].size == 384
     assert rag_module.QDRANT_SPARSE_VECTOR_NAME in kwargs["sparse_vectors_config"]
-    assert (
-        kwargs["sparse_vectors_config"][rag_module.QDRANT_SPARSE_VECTOR_NAME].modifier
-        == rag_module.qdrant_models.Modifier.IDF
-    )
+    assert kwargs["sparse_vectors_config"][rag_module.QDRANT_SPARSE_VECTOR_NAME].modifier is None
 
 
 def test_create_collection_if_missing_uses_configured_dimensions(
@@ -5796,10 +5767,10 @@ def test_iter_collection_ner_sources_resolved_includes_sibling_aliases(
     assert {s["chunk_id"] for s in ortho_page} == {"c1"}
 
 
-def test_vllm_sparse_encoder_converts_pooling_output(
+def test_remote_sparse_encoder_converts_pooling_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """VLLM sparse encoder should map token scores into Qdrant sparse vectors.
+    """Remote sparse encoder should map token scores into Qdrant sparse vectors.
 
     Args:
         monkeypatch: The monkeypatch fixture.
@@ -5828,7 +5799,7 @@ def test_vllm_sparse_encoder_converts_pooling_output(
 
     monkeypatch.setattr(rag_module.urllib.request, "urlopen", fake_urlopen)
 
-    encoder = rag_module.VLLMSparseEncoder(
+    encoder = rag_module.RemoteSparseEncoder(
         api_base="http://vllm-router:9000/v1",
         api_key="sk-no-key-required",
         model="BAAI/bge-m3",
@@ -5860,6 +5831,7 @@ def test_vector_store_uses_vllm_sparse_functions(
     rag = RAG(qdrant_collection="test")
     rag._qdrant_client = cast(Any, object())
     rag._qdrant_aclient = cast(Any, object())
+    rag.enable_hybrid = True
     rag.openai_inference_provider = "vllm"
     rag.openai_api_base = "http://vllm-router:9000/v1"
     rag.openai_api_key = "sk-no-key-required"

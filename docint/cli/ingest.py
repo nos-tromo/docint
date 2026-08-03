@@ -23,7 +23,7 @@ def get_collection() -> str:
 def ingest_docs(
     qdrant_col: str,
     data_dir: Path,
-    hybrid: bool = True,
+    hybrid: bool | None = None,
     progress_callback: Callable[[str], None] | None = None,
     *,
     ner: bool | None = None,
@@ -34,7 +34,10 @@ def ingest_docs(
     Args:
         qdrant_col (str): Qdrant collection name.
         data_dir (Path): Path to the data directory.
-        hybrid (bool): Whether to enable hybrid search. Defaults to True.
+        hybrid (bool | None): Per-request hybrid-search override; ``None``
+            keeps :func:`docint.utils.env_cfg.resolve_enable_hybrid`'s
+            derived default instead of forcing it on. Passing ``True`` or
+            ``False`` explicitly always wins.
         progress_callback (Callable[[str], None] | None): Optional callback for
             reporting ingestion progress.
         ner (bool | None): Per-request NER override; ``None`` keeps the env
@@ -53,7 +56,9 @@ def ingest_docs(
         The CLI skips query engine creation so that large generation and reranker models
         are not loaded unnecessarily during ingestion jobs.
     """
-    rag = RAG(qdrant_collection=qdrant_col, enable_hybrid=hybrid)
+    rag = (
+        RAG(qdrant_collection=qdrant_col) if hybrid is None else RAG(qdrant_collection=qdrant_col, enable_hybrid=hybrid)
+    )
     try:
         rag.ingest_docs(
             data_dir,

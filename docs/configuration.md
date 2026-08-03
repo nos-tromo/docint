@@ -78,7 +78,7 @@ identifiers, with provider-specific fallbacks.
 |---|---|---|
 | `EMBED_MODEL` | `bge-m3` (ollama) / `BAAI/bge-m3` (vllm) / `text-embedding-3-small` (openai) | Dense text embedding model. |
 | `EMBED_TOKENIZER_REPO` | `BAAI/bge-m3` (ollama / vllm) / `""` (openai) | Hugging Face repository ID of the tokenizer used for offline token counting at ingestion time. Empty string for providers (e.g. `openai`) where the embedding endpoint handles tokenization. Snapshot must be in the HF cache; run `uv run load-models` to populate it. |
-| `SPARSE_MODEL` | `Qdrant/all_miniLM_L6_v2_with_attentions` (ollama) / `BAAI/bge-m3` (vllm) | Sparse retrieval model. |
+| `SPARSE_MODEL` | `BAAI/bge-m3` | Sparse retrieval model. Same value on every provider — sparse encoding is always a remote call (`RemoteSparseEncoder`), so there is no per-provider default to pick. |
 | `TEXT_MODEL` | `gpt-oss:20b` (ollama) / `Qwen/Qwen3.5-2B` (vllm) / `gpt-4o` (openai) | Chat / generation model. |
 | `VISION_MODEL` | `qwen3.5:9b` (ollama) / `Qwen/Qwen3.5-2B` (vllm) / `gpt-4o` (openai) | Vision-OCR model. |
 | `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | Cross-encoder reranker. |
@@ -191,6 +191,45 @@ payloads embedded in ingested CSVs / transcripts will reach the
 model. The clamp + control-char scrub closes a narrow set of forged-
 formatting vectors but is not a substitute for reviewing ingest
 sources you do not control.
+
+## Dense embedding client — `EmbedClientConfig`
+
+Loaded by `load_embed_client_env()` (`env_cfg.py:1495`). Dense embeddings
+go through an OpenAI-compatible endpoint on every provider; these knobs
+only need to change on a CPU dev host that wants dense embeddings routed
+to a dedicated container instead of the default OpenAI-style base.
+
+| Variable | Default | Description |
+|---|---|---|
+| `EMBED_API_BASE` | inherits `OPENAI_API_BASE` | Base URL of the dense-embedding endpoint. Consumed by the OpenAI SDK, which appends `/embeddings` to it, so the value **must include `/v1`** (e.g. `http://embed-only:8000/v1`) — omitting it yields a silent 404. For the `embed-only` deployment shape (CPU container, pairs with `gliner-only` / `rerank-only` / `clip-only` for non-CUDA dev; serves dense embedding, sparse weights, and tokenization from one bge-m3 instance), set `EMBED_API_BASE=http://embed-only:8000/v1`. |
+| `EMBED_API_KEY` | inherits `OPENAI_API_KEY` | Bearer token for the dense-embedding endpoint. `embed-only` requires no auth (trust `inference-net`); the full router requires the master key. |
+
+`EmbedClientConfig` has no timeout field of its own — the dense-embedding
+request timeout is `EMBED_TIMEOUT_SECONDS`, documented under
+[Embedding — `EmbeddingConfig`](#embedding--embeddingconfig) above.
+
+## Sparse encoder & hybrid retrieval — `SparseClientConfig`
+
+Loaded by `load_sparse_client_env()` (`env_cfg.py:1440`) and
+`resolve_enable_hybrid()` (`env_cfg.py:1025`). Sparse embedding is a
+remote HTTP call on every provider — `RemoteSparseEncoder` POSTs to
+`{SPARSE_API_BASE}/pooling` (`task: token_classify`) and
+`{SPARSE_API_BASE}/tokenize`. Its wire format is frozen: production
+collections depend on the exact vectors it produces, so its request/
+response shape must not change.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SPARSE_API_BASE` | inherits `OPENAI_API_BASE` | Base URL of the sparse-encoding endpoint. The full vllm-service router exposes `/pooling` and `/tokenize` as LiteLLM pass-throughs against the same base. For the `embed-only` deployment shape (CPU container, pairs with `gliner-only` / `rerank-only` / `clip-only` for non-CUDA dev), set `SPARSE_API_BASE=http://embed-only:8000`. |
+| `SPARSE_API_KEY` | inherits `OPENAI_API_KEY` | Bearer token for the sparse endpoint. `embed-only` requires no auth (trust `inference-net`); the full router requires the master key. |
+| `SPARSE_TIMEOUT` | inherits `OPENAI_TIMEOUT` | Per-request HTTP timeout in seconds for the sparse endpoint. |
+| `ENABLE_HYBRID` | *unset* (see below) | Explicit override for hybrid (dense + sparse) retrieval; `true`/`1`/`yes`/`on` (case-insensitive) enables it, anything else set disables it. When unset, defaults to **true** if `INFERENCE_PROVIDER=vllm` (the router's `/pooling` and `/tokenize` pass-throughs are always present) **or** `SPARSE_API_BASE` is explicitly set (the `embed-only` shape); **false** otherwise — `SPARSE_API_BASE` alone can't signal availability since it silently inherits `OPENAI_API_BASE` and is therefore never actually empty. |
+
+An ingest job calls `RAG.probe_sparse_endpoint()` before its first batch
+when hybrid is enabled, and fails the job cleanly if the sparse endpoint
+is unreachable — deliberately **not** fail-soft like the reranker,
+because a transport failure partway through an ingest would otherwise
+write dense-only points into a hybrid collection and corrupt it.
 
 ## Pipeline — `PipelineConfig`
 
@@ -418,5 +457,4 @@ Loaded by `load_response_validation_env()` (`env_cfg.py:935`).
 - `DOCINT_OFFLINE` — default `1`. When truthy, Docint sets
   `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`,
   `HF_HUB_DISABLE_TELEMETRY=1`, `HF_HUB_DISABLE_SYMLINKS_WARNING=1`, and
-  `KMP_DUPLICATE_LIB_OK=TRUE`. It also points `FASTEMBED_CACHE_PATH` at
-  `HF_HUB_CACHE` when unset. See `set_offline_env()` in `env_cfg.py:12`.
+  `KMP_DUPLICATE_LIB_OK=TRUE`. See `set_offline_env()` in `env_cfg.py:12`.

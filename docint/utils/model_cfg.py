@@ -103,10 +103,12 @@ def main() -> None:
     # remote GLiNER and CLIP services hosted by vllm-service over HTTP.
     # Model preloading happens in the vllm-service `ner` / `clip` (or
     # `gliner-ner` / `clip-embed`) containers, not here.
+    # Sparse embedding is likewise remote: docint calls the sparse-encoder
+    # HTTP endpoint hosted by vllm-service, so the sparse model is never
+    # downloaded or run locally.
 
     # Hugging Face
     hf_assets: list[tuple[str, str]] = [
-        (model_config.sparse_model, "sparse"),
         (model_config.rerank_model, "rerank"),
     ]
     # Worker-side embedding tokenizer (ships with docint regardless of

@@ -71,7 +71,8 @@ def test_main_treats_vllm_as_remote_provider(tmp_path: Path, monkeypatch: pytest
 
     model_cfg_module.main()
 
-    assert ("sparse", "Qdrant/all_miniLM_L6_v2_with_attentions") in calls
+    # Sparse embedding is remote (vllm-service), so the sparse model is
+    # never downloaded or run locally — no ("sparse", ...) call to assert.
     assert ("rerank", "BAAI/bge-reranker-v2-m3") in calls
     assert ("embedding", "BAAI/bge-m3") in calls
     assert ("text", "Qwen/Qwen3.5-2B") in calls
