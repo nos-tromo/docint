@@ -57,7 +57,10 @@ def _hermetic_hybrid_env() -> Iterator[None]:
     ``probe_sparse_endpoint()`` network call against ``vllm-router``. CI has no
     ``.env``, so the suite must see the same unset baseline locally. Tests that
     exercise hybrid behavior opt in explicitly via ``monkeypatch.setenv`` or by
-    setting ``enable_hybrid`` on the instance.
+    setting ``enable_hybrid`` on the instance. ``EMBED_API_BASE`` leaks the
+    same way (a developer ``.env`` pointing at the ``embed-only`` shape makes
+    the embed backend resolve away from ``openai_api_base``), so it is cleared
+    here too.
 
     Uses a private ``MonkeyPatch`` instead of the shared ``monkeypatch``
     fixture: requesting the shared one here reorders it before every module's
@@ -69,7 +72,13 @@ def _hermetic_hybrid_env() -> Iterator[None]:
         None.
     """
     mp = pytest.MonkeyPatch()
-    for name in ("ENABLE_HYBRID", "SPARSE_API_BASE", "INFERENCE_PROVIDER", "SPARSE_MODEL"):
+    for name in (
+        "ENABLE_HYBRID",
+        "SPARSE_API_BASE",
+        "INFERENCE_PROVIDER",
+        "SPARSE_MODEL",
+        "EMBED_API_BASE",
+    ):
         mp.delenv(name, raising=False)
     yield
     mp.undo()
