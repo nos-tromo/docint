@@ -3593,6 +3593,12 @@ def preview_source(collection: str, file_hash: str, principal: Principal = Depen
     path = _resolve_source_file_path(physical, file_hash)
     if path is None:
         raise HTTPException(status_code=404, detail="File not found")
+    # Browsers refuse to *display* text/markdown and text/csv — they hand both
+    # to the download manager, in a tab and in the preview dialog's iframe
+    # alike. This endpoint exists to show a source, so serve those as plain
+    # text; downloads go through the session-ZIP endpoint.
+    if path.suffix.lower() in {".md", ".csv"}:
+        return FileResponse(path, media_type="text/plain; charset=utf-8")
     return FileResponse(path)
 
 
