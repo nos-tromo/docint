@@ -207,7 +207,7 @@ export function Ingest() {
     <div className="p-8">
       <PageHeader title={t('ingest.title')} caption={t('ingest.caption')} />
       <div className="space-y-6">
-        <Card className="max-w-3xl space-y-4">
+        <Card className="space-y-4">
           <label className="flex flex-col gap-1 text-sm">
             <span className="text-xs uppercase text-muted-foreground">{t('common.collection')}</span>
             <Input
