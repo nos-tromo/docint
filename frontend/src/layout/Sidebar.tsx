@@ -265,6 +265,18 @@ export function Sidebar() {
             {t('common.no_active_collection')}
           </p>
         )}
+        {/* A failed delete is otherwise indistinguishable from the button
+            doing nothing (the collection list renders from the ownership DB
+            and stays intact) — surface the mutation error in the same opaque
+            chip style as the sessions error below. Clears automatically when
+            the next delete attempt starts or succeeds. */}
+        {deleteCollectionMutation.isError && (
+          <p role="alert" className="mt-1.5 rounded-md border border-amber-700 bg-amber-950 px-2 py-2 text-xs text-amber-200">
+            {t('common.delete_collection_error', {
+              name: `"${String(deleteCollectionMutation.variables ?? '')}"`
+            })}
+          </p>
+        )}
       </section>
 
       <section className="flex-1 min-h-0 flex flex-col">

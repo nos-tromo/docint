@@ -27,6 +27,8 @@ export const de: Strings = {
   'common.delete_collection_title': 'Diese Sammlung löschen',
   'common.delete_collection_confirm':
     'Sammlung {label} löschen? Diese Aktion kann nicht rückgängig gemacht werden.',
+  'common.delete_collection_error':
+    'Sammlung {name} konnte nicht gelöscht werden. Prüfen Sie, ob Backend und Vektordatenbank erreichbar sind, und versuchen Sie es erneut.',
   'common.no_active_collection': 'Keine aktive Sammlung — wählen Sie eine aus, um Anfragen zu stellen.',
   'common.sessions': 'Sitzungen',
   'common.new_session': '+ Neu',
