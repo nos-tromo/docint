@@ -27,11 +27,11 @@ describe('Shell', () => {
 
   it('prefers display_name over username in the header user slot', () => {
     renderShell({ username: 'alice', display_name: 'Alice Example' })
-    expect(screen.getByTestId('appheader-user')).toHaveTextContent('Alice Example')
+    expect(screen.getByRole('button', { name: /Alice Example/ })).toBeInTheDocument()
   })
 
   it('falls back to username when display_name is absent', () => {
     renderShell({ username: 'alice', display_name: null })
-    expect(screen.getByTestId('appheader-user')).toHaveTextContent('alice')
+    expect(screen.getByRole('button', { name: /alice/ })).toBeInTheDocument()
   })
 })

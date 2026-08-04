@@ -147,7 +147,7 @@ export function Sidebar() {
   }
 
   return (
-    <aside className="w-72 border-r border-border p-4 flex flex-col gap-4 bg-muted">
+    <div className="flex min-h-0 flex-1 flex-col gap-4">
       <nav className="flex flex-col gap-1">
         {NAV.map(({ to, key }) => {
           // The open chat lives on the server and its id is persisted; the
@@ -164,7 +164,7 @@ export function Sidebar() {
               end={to === '/'}
               className={({ isActive }) =>
                 cn(
-                  'rounded-md px-3 py-2 text-sm hover:bg-accent',
+                  'rounded-md px-3 py-2 text-sm hover:bg-muted',
                   isActive && 'bg-primary/15 text-primary'
                 )
               }
@@ -326,6 +326,6 @@ export function Sidebar() {
           })}
         </ul>
       </section>
-    </aside>
+    </div>
   )
 }
