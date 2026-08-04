@@ -52,6 +52,24 @@ describe('ChatTurn', () => {
     expect(entities.compareDocumentPosition(sources)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
   })
 
+  it('renders the sources as pills matching the entity presentation', () => {
+    const meta = {
+      session_id: 's',
+      sources: [
+        { id: 's1', filename: 'handbook.pdf', page: 26, text: 'first', citation_index: 1 },
+        { id: 's2', filename: 'notes.md', text: 'second', citation_index: 2 }
+      ]
+    } as unknown as ChatFinalEvent
+
+    renderTurn({ user: 'who?', assistant: 'Alice Weber.', done: true, meta })
+
+    const pills = screen.getAllByTestId('source-pill')
+    expect(pills).toHaveLength(2)
+    expect(pills[0]).toHaveTextContent('handbook.pdf · page 26')
+    // Compact by default: no detail card until a pill is clicked.
+    expect(screen.queryByText('first')).not.toBeInTheDocument()
+  })
+
   it('renders no entity row for an answer whose sources carry none', () => {
     const meta = {
       session_id: 's',

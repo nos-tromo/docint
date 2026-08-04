@@ -5,7 +5,7 @@ import { useTheme } from '@infra/ui'
 import { cn } from '@/lib/cn'
 import { streamSummary } from '@/api/analysis'
 import { describeError, streamErrorText } from '@/api/errorMessage'
-import { Citation } from '@/components/chat/Citation'
+import { SourcePills } from '@/components/chat/SourcePills'
 import { ValidationBanner } from '@/components/chat/ValidationBanner'
 import { downloadText } from '@/lib/csv'
 import { summaryToMarkdown } from '@/lib/exports'
@@ -142,14 +142,9 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
         <CoverageBanner d={state.meta.summary_diagnostics} />
       )}
       {state.meta?.sources && state.meta.sources.length > 0 && (
-        <div className="space-y-2">
+        <div className="space-y-1.5">
           <div className="text-xs uppercase text-muted-foreground">{t('analysis.summary_sources')}</div>
-          {state.meta.sources.map((s, i) => (
-            <Citation
-              key={s.id ?? `${s.filename}-${s.page ?? ''}-${s.row ?? ''}-${i}`}
-              source={s}
-            />
-          ))}
+          <SourcePills sources={state.meta.sources} />
         </div>
       )}
     </div>

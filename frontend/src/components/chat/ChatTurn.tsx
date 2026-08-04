@@ -3,7 +3,7 @@ import remarkGfm from 'remark-gfm'
 import { useTheme } from '@infra/ui'
 import { cn } from '@/lib/cn'
 import type { ChatFinalEvent, Source } from '@/api/types'
-import { Citation } from './Citation'
+import { SourcePills } from './SourcePills'
 import { AnswerEntities } from './AnswerEntities'
 import { ValidationBanner } from './ValidationBanner'
 import { GraphDebugPanel } from './GraphDebugPanel'
@@ -115,11 +115,9 @@ export function ChatTurn({
             between the answer and the evidence it rests on. */}
         <AnswerEntities sources={sources} />
         {sources.length > 0 && (
-          <div className="mt-3 space-y-2">
+          <div className="mt-3 space-y-1.5">
             <div className="text-xs uppercase text-muted-foreground">{t('chat.sources')}</div>
-            {sources.map((s, i) => (
-              <Citation key={s.id ?? `${s.filename}-${s.page ?? ''}-${s.row ?? ''}-${i}`} source={s} />
-            ))}
+            <SourcePills sources={sources} />
           </div>
         )}
         {!!turn.meta?.graph_debug && <GraphDebugPanel data={turn.meta.graph_debug} />}

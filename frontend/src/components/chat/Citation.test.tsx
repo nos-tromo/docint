@@ -105,6 +105,18 @@ describe('Citation', () => {
     expect(screen.queryByRole('link', { name: /original/i })).not.toBeInTheDocument()
   })
 
+  it('starts expanded when defaultOpen is set', () => {
+    // SourcePills opens the card from a pill click; landing collapsed would
+    // demand a redundant second click on the card header.
+    const qc = new QueryClient()
+    render(
+      <QueryClientProvider client={qc}>
+        <Citation source={{ id: 's1', filename: 'f.pdf', text: 'Hola mundo' } as never} defaultOpen />
+      </QueryClientProvider>
+    )
+    expect(screen.getByText('Hola mundo')).toBeInTheDocument()
+  })
+
   it('omits the preview action when the source has no stored file', () => {
     useUiStore.setState({ selectedCollection: 'docs', previewModal: null })
     const qc = new QueryClient()

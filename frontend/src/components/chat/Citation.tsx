@@ -6,9 +6,9 @@ import { TranslateControl } from '@/components/common/TranslateControl'
 import { SourcePreviewAction } from '@/components/common/SourcePreviewAction'
 import { useT } from '@/i18n/LanguageContext'
 
-export function Citation({ source }: { source: Source }) {
+export function Citation({ source, defaultOpen = false }: { source: Source; defaultOpen?: boolean }) {
   const t = useT()
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(defaultOpen)
   const refMeta = referenceMetadataItems(source.reference_metadata, {}, t)
   return (
     <div className="group relative rounded-md border border-border bg-muted px-3 py-2 text-sm">
