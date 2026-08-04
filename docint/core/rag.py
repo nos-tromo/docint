@@ -1740,12 +1740,22 @@ class RemoteSparseEncoder:
     pass-throughs to the ``embed`` backend) or the standalone
     ``embed-only`` CPU container. The wire format is frozen: production
     collections were ingested with it.
+
+    Both backends return one ``/pooling`` score per *inner* token — they
+    drop the BOS/EOS positions server-side (vLLM's ``BOSEOSFilter``;
+    verified element-wise in vllm-service#75) — while ``/tokenize``
+    returns the full id list including the specials. The encoder strips
+    the boundary ids with the same conditional semantics before pairing
+    (see ``_strip_boundary_ids``); the ids default to bge-m3's XLM-R
+    values and ``-1`` disables either strip, mirroring ``BOSEOSFilter``.
     """
 
     api_base: str
     model: str
     api_key: str | None = None
     timeout: float = 300.0
+    bos_token_id: int = 0
+    eos_token_id: int = 2
 
     def encode_texts(self, texts: list[str]) -> BatchSparseEncoding:
         """Encode texts as sparse vectors using the configured vLLM service.
@@ -1764,7 +1774,7 @@ class RemoteSparseEncoder:
         sparse_values: list[list[float]] = []
 
         for text, token_scores in zip(texts, score_batches, strict=False):
-            token_ids = self._tokenize(text)
+            token_ids = self._strip_boundary_ids(self._tokenize(text))
             indices, values = self._build_sparse_vector(token_ids, token_scores)
             sparse_indices.append(indices)
             sparse_values.append(values)
@@ -1856,6 +1866,30 @@ class RemoteSparseEncoder:
             raise ValueError("vLLM tokenize response did not contain token ids")
         return token_ids
 
+    def _strip_boundary_ids(self, token_ids: list[int]) -> list[int]:
+        """Drop the BOS/EOS boundary ids the pooling backend never scores.
+
+        Mirrors vLLM's ``BOSEOSFilter`` exactly: the first id is dropped
+        iff it equals ``bos_token_id``, the last iff it equals
+        ``eos_token_id`` — never an unconditional slice. After this the
+        id list aligns one-to-one with the ``/pooling`` scores; the
+        boundary weights the backends discard are NOT reliably zero on
+        the model side (``<s>`` measured at 0.11-0.24), so pairing
+        without the strip shifts every score onto the previous token's
+        id (docint#410).
+
+        Args:
+            token_ids (list[int]): Full ``/tokenize`` id list, specials included.
+
+        Returns:
+            list[int]: The ids the pooling response actually scores.
+        """
+        if token_ids and token_ids[0] == self.bos_token_id:
+            token_ids = token_ids[1:]
+        if token_ids and token_ids[-1] == self.eos_token_id:
+            token_ids = token_ids[:-1]
+        return token_ids
+
     @classmethod
     def _extract_token_ids(cls, payload: Any) -> list[int]:
         """Extract token ids from a vLLM tokenize response payload.
@@ -1942,16 +1976,22 @@ class RemoteSparseEncoder:
                 token IDs are merged by max-score; negative IDs and non-finite or non-positive scores
                 are filtered out; results are sorted by token ID ascending. Both lists are empty if
                 nothing survives filtering.
+
+        Raises:
+            ValueError: When ids and scores differ in length. Zipping
+                misaligned lists writes an off-by-one sparse vector into
+                the collection silently; sparse encoding is not
+                fail-soft, so this refuses instead (docint#410 — the
+                mismatch was previously a debug log).
         """
         if len(token_ids) != len(token_scores):
-            logger.debug(
-                "vLLM sparse token length mismatch: {} token ids vs {} scores",
-                len(token_ids),
-                len(token_scores),
+            raise ValueError(
+                f"vLLM sparse token length mismatch after boundary strip: "
+                f"{len(token_ids)} token ids vs {len(token_scores)} scores"
             )
 
         merged_scores: dict[int, float] = {}
-        for token_id, score in zip(token_ids, token_scores, strict=False):
+        for token_id, score in zip(token_ids, token_scores, strict=True):
             if token_id < 0 or not math.isfinite(score) or score <= 0.0:
                 continue
             existing = merged_scores.get(token_id)

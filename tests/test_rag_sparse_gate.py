@@ -4,6 +4,12 @@ Sparse embedding is remote on every provider. These tests pin the
 selection logic and the frozen wire format; the encoder's request and
 response handling must not drift, because production collections were
 ingested with it.
+
+The pinned contract follows the parity verification in vllm-service#75:
+``/tokenize`` returns the full id list including BOS/EOS, ``/pooling``
+returns one score per inner token (both backends strip the boundary
+positions server-side), and the encoder strips the boundary ids the same
+way before pairing (docint#410).
 """
 
 import importlib.util
@@ -29,7 +35,9 @@ def test_encoder_appends_pooling_and_tokenize_to_base(monkeypatch: pytest.Monkey
     def _fake_request(self: RemoteSparseEncoder, url: str, payload: dict[str, object]) -> object:
         captured.append((url, payload))
         if url.endswith("/pooling"):
-            return {"data": [{"data": [0.0, 0.7, 0.0]}]}
+            # One score per inner token: the backends strip the BOS/EOS
+            # positions server-side (vllm-service#75).
+            return {"data": [{"data": [0.7]}]}
         return {"tokens": [0, 42, 2]}
 
     monkeypatch.setattr(RemoteSparseEncoder, "_request_json", _fake_request)
@@ -65,8 +73,10 @@ def test_encoder_drops_non_positive_scores(monkeypatch: pytest.MonkeyPatch) -> N
 
     def _fake_request(self: RemoteSparseEncoder, url: str, payload: dict[str, object]) -> object:
         if url.endswith("/pooling"):
-            return {"data": [{"data": [0.0, 0.9, 0.0, 0.4]}]}
-        return {"tokens": [0, 11, 2, 12]}
+            # Inner tokens only (BOS/EOS stripped server-side); the
+            # middle token relu'd to zero and must be filtered out.
+            return {"data": [{"data": [0.9, 0.0, 0.4]}]}
+        return {"tokens": [0, 11, 13, 12, 2]}
 
     monkeypatch.setattr(RemoteSparseEncoder, "_request_json", _fake_request)
     indices, values = encoder.encode_texts(["alpha beta"])

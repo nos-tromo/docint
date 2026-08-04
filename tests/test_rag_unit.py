@@ -5772,12 +5772,19 @@ def test_remote_sparse_encoder_converts_pooling_output(
 ) -> None:
     """Remote sparse encoder should map token scores into Qdrant sparse vectors.
 
+    The fixture models the verified wire contract (vllm-service#75): the
+    ``/tokenize`` ids include BOS (0) and EOS (2), while ``/pooling``
+    returns one score per *inner* token only — both backends strip the
+    boundary positions server-side (vLLM's ``BOSEOSFilter``). The encoder
+    must strip the boundary ids the same way before pairing, or every
+    score lands on the previous position's id (docint#410).
+
     Args:
         monkeypatch: The monkeypatch fixture.
     """
     responses: dict[str, dict[str, Any]] = {
-        "http://vllm-router:9000/pooling": {"data": [{"data": [[0.0], [0.5], [0.3], [0.7], [0.0]]}]},
-        "http://vllm-router:9000/tokenize": {"tokens": [101, 10, 20, 10, 102]},
+        "http://vllm-router:9000/pooling": {"data": [{"data": [[0.5], [0.3], [0.7]]}]},
+        "http://vllm-router:9000/tokenize": {"tokens": [0, 10, 20, 10, 2]},
     }
 
     class FakeResponse:
@@ -5810,6 +5817,101 @@ def test_remote_sparse_encoder_converts_pooling_output(
 
     assert indices == [[10, 20]]
     assert values == [[0.7, 0.3]]
+
+
+def _fake_sparse_urlopen(
+    monkeypatch: pytest.MonkeyPatch,
+    responses: dict[str, dict[str, Any]],
+) -> None:
+    """Route the encoder's urlopen calls to canned JSON responses.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        responses: Mapping of full request URL to the JSON payload returned.
+    """
+
+    class FakeResponse:
+        def __init__(self, payload: dict[str, Any]) -> None:
+            self._payload = payload
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(self._payload).encode("utf-8")
+
+    def fake_urlopen(request: Any, timeout: float = 300.0) -> FakeResponse:
+        _ = timeout
+        return FakeResponse(responses[request.full_url])
+
+    monkeypatch.setattr(rag_module.urllib.request, "urlopen", fake_urlopen)
+
+
+def test_remote_sparse_encoder_strips_boundary_ids_conditionally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Boundary ids are dropped iff they match the BOS/EOS ids — not by slicing.
+
+    Mirrors vLLM's ``BOSEOSFilter``: an id list without the special
+    tokens (already-equal arity) must pass through untouched, so an
+    implementation that unconditionally slices ``[1:-1]`` fails here.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    _fake_sparse_urlopen(
+        monkeypatch,
+        {
+            "http://vllm-router:9000/pooling": {"data": [{"data": [[0.4], [0.6]]}]},
+            "http://vllm-router:9000/tokenize": {"tokens": [10, 20]},
+        },
+    )
+
+    encoder = rag_module.RemoteSparseEncoder(
+        api_base="http://vllm-router:9000/v1",
+        api_key="sk-no-key-required",
+        model="BAAI/bge-m3",
+        timeout=30.0,
+    )
+
+    indices, values = encoder.encode_texts(["hello world"])
+
+    assert indices == [[10, 20]]
+    assert values == [[0.4, 0.6]]
+
+
+def test_remote_sparse_encoder_raises_on_id_score_length_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A residual arity mismatch after the boundary strip is an error, not a debug log.
+
+    Zipping misaligned lists writes an off-by-one sparse vector into the
+    collection silently (docint#410); sparse encoding is not fail-soft,
+    so the encoder must refuse instead.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    _fake_sparse_urlopen(
+        monkeypatch,
+        {
+            "http://vllm-router:9000/pooling": {"data": [{"data": [[0.5], [0.3], [0.7], [0.2]]}]},
+            "http://vllm-router:9000/tokenize": {"tokens": [0, 10, 20, 2]},
+        },
+    )
+
+    encoder = rag_module.RemoteSparseEncoder(
+        api_base="http://vllm-router:9000/v1",
+        api_key="sk-no-key-required",
+        model="BAAI/bge-m3",
+        timeout=30.0,
+    )
+
+    with pytest.raises(ValueError, match="mismatch"):
+        encoder.encode_texts(["hello world"])
 
 
 def test_vector_store_uses_vllm_sparse_functions(
