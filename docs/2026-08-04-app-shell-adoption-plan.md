@@ -41,7 +41,11 @@ codeload tarball URL) + vitest.
 
 ---
 
-### Task 1: Bump the `@infra/ui` pin to v0.9.0
+### Task 1: Bump the `@infra/ui` pin to the v0.9.1 candidate
+
+> The pin targets commit `58ae43a…` — the v0.9.1 candidate from infra-ui
+> PR #36 (PageHeader banner-role fix). Repin to the `v0.9.1` tag once that
+> PR merges.
 
 **Files:**
 - Modify: `frontend/package.json:17`
@@ -62,7 +66,7 @@ codeload tarball URL) + vitest.
 to
 
 ```json
-"@infra/ui": "https://codeload.github.com/nos-tromo/infra-ui/tar.gz/v0.9.0",
+"@infra/ui": "https://codeload.github.com/nos-tromo/infra-ui/tar.gz/58ae43a498cffc1058e040b0d2b29e0d07f1d941",
 ```
 
 - [ ] **Step 2: Install and run the existing gates**
