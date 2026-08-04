@@ -88,6 +88,57 @@ class CorePDFPipelineReader:
                 if progress_callback:
                     progress_callback(f"Extracting entities: {i + 1}/{total_nodes} chunks processed")
 
+    def _enrich_nodes(
+        self,
+        nodes: list[BaseNode],
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> None:
+        """Run NER over the embedded nodes and mirror the results onto parents.
+
+        NER runs on the fine children only (flat collections carry no hier
+        type — every node is NERed directly): their texts jointly cover the
+        parent, so extracting from the parent again would double the extractor
+        calls *and* lose entities to GLiNER's long-input truncation. But the
+        coarse parents must not stay bare — ``ParentContextPostprocessor``
+        replaces a retrieved fine chunk with its docstore-loaded parent at
+        query time, and an entity-less parent strips the entities off the
+        normalized source (no entity pills in chat/summary). Each parent
+        therefore receives the concatenation of its children's ``entities`` /
+        ``relations``, in child order.
+
+        Args:
+            nodes (list[BaseNode]): The reader's full node set for one PDF
+                (coarse parents plus fine children, or flat nodes).
+            progress_callback (Callable[[str], None] | None): Optional
+                callback for NER progress updates.
+        """
+        fine_nodes = [n for n in nodes if n.metadata.get("docint_hier_type") == "fine"]
+        self._apply_ner(fine_nodes or nodes, progress_callback=progress_callback)
+        if not fine_nodes:
+            return
+
+        coarse_by_id = {n.node_id: n for n in nodes if n.metadata.get("docint_hier_type") == "coarse"}
+        entities_by_parent: dict[str, list[dict[str, Any]]] = {}
+        relations_by_parent: dict[str, list[dict[str, Any]]] = {}
+        for child in fine_nodes:
+            parent_id = str(child.metadata.get("hier.parent_id") or "")
+            if parent_id not in coarse_by_id:
+                continue
+            entities_by_parent.setdefault(parent_id, []).extend(child.metadata.get("entities") or [])
+            relations_by_parent.setdefault(parent_id, []).extend(child.metadata.get("relations") or [])
+
+        for parent_id, parent in coarse_by_id.items():
+            entities = entities_by_parent.get(parent_id) or []
+            relations = relations_by_parent.get(parent_id) or []
+            if not entities and not relations:
+                continue
+            meta = dict(parent.metadata or {})
+            if entities:
+                meta["entities"] = entities
+            if relations:
+                meta["relations"] = relations
+            parent.metadata = meta
+
     @staticmethod
     def _iter_pdf_files(data_dir: Path) -> list[Path]:
         """Return sorted PDF files under *data_dir*.
@@ -467,11 +518,7 @@ class CorePDFPipelineReader:
                 yield docs, nodes, manifest.doc_id
                 continue
 
-            # Only the embedded (fine) nodes are ever retrieved/cited, so NER
-            # there avoids wasted extractor calls on coarse parents. Flat
-            # (non-hierarchical) collections carry no hier type — NER all.
-            ner_targets = [n for n in nodes if n.metadata.get("docint_hier_type") == "fine"] or nodes
-            self._apply_ner(ner_targets, progress_callback=progress_callback)
+            self._enrich_nodes(nodes, progress_callback=progress_callback)
             emitted_hashes.add(manifest.doc_id)
             if progress_callback:
                 progress_callback(f"Core pipeline indexed {len(nodes)} chunks: {pdf_path.name}")

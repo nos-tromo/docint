@@ -2738,6 +2738,82 @@ def test_parent_context_postprocessor_promotes_parent_nodes() -> None:
     assert processed[0].score == pytest.approx(0.77)
 
 
+def test_parent_context_carries_child_ner_onto_bare_parent() -> None:
+    """Promoting a parent must not strip the matched child's NER metadata.
+
+    Collections ingested while coarse parents were skipped by PDF NER (the
+    ``testingest-1`` entity-pill regression) hold entity-less parents in the
+    docstore. When the postprocessor swaps the enriched fine hit for such a
+    parent, the emitted node must inherit the child's ``entities`` /
+    ``relations`` so sources keep their pills — while staying excluded from
+    the LLM prompt like every non-whitelisted key.
+    """
+    child_entities = [{"text": "Acme Corp", "type": "org", "score": 0.9}]
+    child_relations = [{"source": "Acme Corp", "target": "Berlin", "label": "based_in"}]
+    parent = TextNode(text="Parent context", id_="parent-1", metadata={"filename": "a.txt"})
+    child = TextNode(
+        text="Child match",
+        id_="child-1",
+        metadata={
+            "hier.parent_id": "parent-1",
+            "docint_hier_type": "fine",
+            "entities": child_entities,
+            "relations": child_relations,
+        },
+    )
+
+    postprocessor = rag_module.ParentContextPostprocessor(
+        docstore=types.SimpleNamespace(
+            get_node=lambda node_id, raise_error=False: parent if node_id == "parent-1" else None
+        )
+    )
+
+    processed = postprocessor._postprocess_nodes([NodeWithScore(node=child, score=0.77)])
+
+    assert len(processed) == 1
+    emitted = processed[0].node
+    assert emitted.get_content() == "Parent context"
+    assert emitted.metadata["entities"] == child_entities
+    assert emitted.metadata["relations"] == child_relations
+    assert "entities" in emitted.excluded_llm_metadata_keys
+    assert "relations" in emitted.excluded_llm_metadata_keys
+
+
+def test_parent_context_keeps_parents_own_ner_metadata() -> None:
+    """A parent that already carries NER metadata is not overwritten by the child.
+
+    Freshly-ingested collections mirror the full children union onto the
+    parent at ingest; the query-time carry is only a fallback for legacy
+    parents and must never narrow an already-complete parent down to the
+    single matched child's entities.
+    """
+    parent_entities = [{"text": "Acme Corp", "type": "org"}, {"text": "Beta GmbH", "type": "org"}]
+    parent = TextNode(
+        text="Parent context",
+        id_="parent-1",
+        metadata={"filename": "a.txt", "entities": parent_entities},
+    )
+    child = TextNode(
+        text="Child match",
+        id_="child-1",
+        metadata={
+            "hier.parent_id": "parent-1",
+            "docint_hier_type": "fine",
+            "entities": [{"text": "Acme Corp", "type": "org"}],
+        },
+    )
+
+    postprocessor = rag_module.ParentContextPostprocessor(
+        docstore=types.SimpleNamespace(
+            get_node=lambda node_id, raise_error=False: parent if node_id == "parent-1" else None
+        )
+    )
+
+    processed = postprocessor._postprocess_nodes([NodeWithScore(node=child, score=0.5)])
+
+    assert processed[0].node.metadata["entities"] == parent_entities
+
+
 def _oversize_docstore(**nodes: TextNode) -> Any:
     """Build a ``SimpleNamespace`` docstore returning the given nodes by id.
 
@@ -2807,6 +2883,37 @@ def test_parent_context_windows_oversize_parent() -> None:
     assert result_node.metadata.get("parent_full_chars") == len(parent_text)
     window_chars = result_node.metadata.get("window_chars")
     assert isinstance(window_chars, int) and window_chars > 0
+
+
+def test_parent_context_windowed_emission_carries_child_ner() -> None:
+    """The windowed (budget) path inherits child NER metadata like the full path."""
+    match_sentence = "Der Ablauf der Dinosaurier-Schnitzeljagd beginnt im Garten."
+    parent_text = ("Einleitung. " * 2000) + match_sentence + (" Weitere Hinweise." * 2000)
+    parent = TextNode(text=parent_text, id_="parent-big", metadata={"filename": "guide.md"})
+    child_entities = [{"text": "Garten", "type": "loc", "score": 0.8}]
+    child = TextNode(
+        text=match_sentence,
+        id_="child-big",
+        metadata={
+            "hier.parent_id": "parent-big",
+            "docint_hier_type": "fine",
+            "entities": child_entities,
+        },
+    )
+
+    postprocessor = rag_module.ParentContextPostprocessor(
+        docstore=_oversize_docstore(parent=parent),
+        usable_tokens=2000,
+        per_hit_floor=400,
+        char_token_ratio=3.5,
+        budget_enforced=True,
+    )
+
+    processed = postprocessor._postprocess_nodes([NodeWithScore(node=child, score=0.9)])
+
+    emitted = processed[0].node
+    assert emitted.metadata.get("parent_context_windowed") is True
+    assert emitted.metadata["entities"] == child_entities
 
 
 def test_parent_context_falls_back_on_normalization_mismatch(
