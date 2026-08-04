@@ -8,7 +8,7 @@ authors = [
 requires-python = ">=3.11,<3.12"
 license = "Apache-2.0"
 dependencies = [
-  "cryptography>=49.0.0",
+  "cryptography>=50.0.0",
   # docling-slim = docling WITHOUT the [standard] extra, whose docling-ibm-models
   # dependency drags in torch + the full NVIDIA CUDA stack (~4.5 GB) that this
   # CPU-only, remote-inference image must not ship. The extras docint actually
