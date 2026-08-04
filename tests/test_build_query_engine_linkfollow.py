@@ -38,8 +38,14 @@ def test_link_following_added_for_social_collections(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(rag_module.RAG, "_build_retriever", lambda self, **k: object())
     monkeypatch.setattr(rag_module.RAG, "_build_grounded_text_qa_template", lambda self, **k: None)
     monkeypatch.setattr(rag_module.RAG, "_build_grounded_refine_template", lambda self, **k: None)
-    # post_retrieval_text_model is a @property — patch as a descriptor at class level.
-    monkeypatch.setattr(rag_module.RAG, "post_retrieval_text_model", property(lambda self: None))
+    # post_retrieval_text_model is a @property — patch as a descriptor at class
+    # level. A real (mock) LLM is required: build_query_engine constructs the
+    # response synthesizer eagerly, and a None llm would make llama-index
+    # resolve Settings.llm — a real OpenAI client that fails on keyless CI.
+    from llama_index.core.llms import MockLLM
+
+    fake_llm = MockLLM(max_tokens=8)
+    monkeypatch.setattr(rag_module.RAG, "post_retrieval_text_model", property(lambda self: fake_llm))
 
     rag = rag_module.RAG.__new__(rag_module.RAG)
     # index is a property backed by the _index_cache slot (guarded by _retrieval_cache_lock)

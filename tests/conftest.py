@@ -60,7 +60,9 @@ def _hermetic_hybrid_env() -> Iterator[None]:
     setting ``enable_hybrid`` on the instance. ``EMBED_API_BASE`` leaks the
     same way (a developer ``.env`` pointing at the ``embed-only`` shape makes
     the embed backend resolve away from ``openai_api_base``), so it is cleared
-    here too.
+    here too. ``OPENAI_API_KEY`` likewise: with it leaked, llama-index's
+    ``Settings.llm`` default resolves a real OpenAI client, so a test that
+    accidentally reaches it passes locally but fails on keyless CI.
 
     Uses a private ``MonkeyPatch`` instead of the shared ``monkeypatch``
     fixture: requesting the shared one here reorders it before every module's
@@ -78,6 +80,7 @@ def _hermetic_hybrid_env() -> Iterator[None]:
         "INFERENCE_PROVIDER",
         "SPARSE_MODEL",
         "EMBED_API_BASE",
+        "OPENAI_API_KEY",
     ):
         mp.delenv(name, raising=False)
     yield
