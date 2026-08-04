@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Button, FileList } from '@infra/ui'
+import { Banner, Button, Card, FileList, Input, PageHeader } from '@infra/ui'
 import { useQueryClient, useMutation, useQuery } from '@tanstack/react-query'
 import { useIngestRunStore } from '@/stores/ingestRun'
 import { useIngestJobsStore, selectJobEvents } from '@/stores/ingestJobs'
@@ -204,137 +204,140 @@ export function Ingest() {
   const busy = run.uploading
 
   return (
-    <div className="p-8 max-w-3xl space-y-4">
-      <h1 className="text-2xl font-semibold">{t('ingest.title')}</h1>
+    <div className="p-8">
+      <PageHeader title={t('ingest.title')} caption={t('ingest.caption')} />
+      <div className="grid items-start gap-6 lg:grid-cols-[minmax(22rem,28rem)_1fr]">
+        <Card className="space-y-4">
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="text-xs uppercase text-muted-foreground">{t('common.collection')}</span>
+            <Input
+              list="existing-collections"
+              value={run.collection}
+              onChange={(e) => run.setCollection(e.target.value)}
+              placeholder="my-collection"
+            />
+            <datalist id="existing-collections">
+              {collections?.mine.map((c) => (
+                <option key={c} value={c} />
+              ))}
+            </datalist>
+          </label>
 
-      <label className="flex flex-col gap-1 text-sm max-w-sm">
-        <span className="text-xs uppercase text-muted-foreground">{t('common.collection')}</span>
-        <input
-          list="existing-collections"
-          value={run.collection}
-          onChange={(e) => run.setCollection(e.target.value)}
-          placeholder="my-collection"
-          className="bg-muted border border-border rounded-md px-2 py-1 text-sm"
-        />
-        <datalist id="existing-collections">
-          {collections?.mine.map((c) => (
-            <option key={c} value={c} />
-          ))}
-        </datalist>
-      </label>
-
-      <Dropzone
-        disabled={busy}
-        onFiles={(v) => {
-          setDropError(null)
-          run.addFiles(v)
-        }}
-        onEmpty={() => setDropError(t('ingest.drop_empty'))}
-      />
-
-      <FileList
-        files={run.files}
-        onRemove={(i) => run.removeFile(i)}
-        onClear={() => run.clearFiles()}
-        labels={{
-          files: (n) => t(n === 1 ? 'upload.files_one' : 'upload.files_other', { count: n }),
-          clearAll: t('upload.clear_all'),
-          remove: t('common.remove')
-        }}
-      />
-
-      <fieldset className="space-y-1 text-sm" disabled={busy}>
-        <label className="flex items-center gap-2">
-          <input type="checkbox" checked={run.ner} onChange={(e) => run.setNer(e.target.checked)} />
-          {t('ingest.opt_ner')}
-        </label>
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={run.hate}
-            onChange={(e) => run.setHate(e.target.checked)}
+          <Dropzone
+            disabled={busy}
+            onFiles={(v) => {
+              setDropError(null)
+              run.addFiles(v)
+            }}
+            onEmpty={() => setDropError(t('ingest.drop_empty'))}
           />
-          {t('ingest.opt_hate')}
-        </label>
-      </fieldset>
 
-      <Button
-        variant="primary"
-        onClick={() => void run.start(limitBytes, t)}
-        disabled={busy || !run.collection || run.files.length === 0}
-      >
-        {run.uploading ? t('ingest.busy') : t('ingest.button')}
-      </Button>
+          <FileList
+            files={run.files}
+            onRemove={(i) => run.removeFile(i)}
+            onClear={() => run.clearFiles()}
+            labels={{
+              files: (n) => t(n === 1 ? 'upload.files_one' : 'upload.files_other', { count: n }),
+              clearAll: t('upload.clear_all'),
+              remove: t('common.remove')
+            }}
+          />
 
-      {(dropError || run.error) && (
-        <div className="text-[var(--status-red-fg)] text-sm">{dropError ?? run.error}</div>
-      )}
-      {/* Derived from the merged upload+job log (`status.warnings`), not
-          `run.warnings` (upload leg only) — a job-stream warning (a
-          soft-empty ingest, a failed post-ingest entity resolution) is just
-          as actionable and must not go unreported. */}
-      {status.warnings.length > 0 && (
-        <ul className="text-amber-400 text-sm space-y-1" role="alert">
-          {status.warnings.map((w, i) => (
-            <li key={i}>{w}</li>
-          ))}
-        </ul>
-      )}
+          <fieldset className="space-y-1 text-sm" disabled={busy}>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={run.ner} onChange={(e) => run.setNer(e.target.checked)} />
+              {t('ingest.opt_ner')}
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={run.hate}
+                onChange={(e) => run.setHate(e.target.checked)}
+              />
+              {t('ingest.opt_hate')}
+            </label>
+          </fieldset>
 
-      {queued && !interrupted && (
-        <div className="rounded-md border border-border p-3 text-sm text-muted-foreground" role="status">
-          {t('ingest.job_queued')}
-        </div>
-      )}
-
-      {interrupted && (
-        <div className="rounded-md border border-border p-3 text-sm space-y-2" role="status">
-          <p className="text-muted-foreground">{t('ingest.job_interrupted')}</p>
-          <div className="flex gap-2">
-            <Button
-              variant="primary"
-              disabled={rerunMutation.isPending}
-              onClick={() => rerunMutation.mutate()}
-            >
-              {t('ingest.job_rerun')}
-            </Button>
-            {/* An interrupted, never-going-to-report-progress-again job would
-                otherwise strand this banner forever — `activeJobId` is
-                persisted and nothing else clears it. */}
-            <Button variant="secondary" size="sm" onClick={() => run.dismissActive()}>
-              {t('ingest.dismiss')}
-            </Button>
-          </div>
-        </div>
-      )}
-
-      {streamLost && (
-        <div className="flex items-center gap-3 text-sm text-amber-400" role="alert">
-          <span>{t('ingest.stream_lost')}</span>
-          <button
-            type="button"
-            className="px-2 py-1 rounded-md border border-border"
-            onClick={() => useIngestJobsStore.getState().retryStream()}
+          <Button
+            variant="primary"
+            onClick={() => void run.start(limitBytes, t)}
+            disabled={busy || !run.collection || run.files.length === 0}
           >
-            {t('ingest.reconnect')}
-          </button>
-        </div>
-      )}
+            {run.uploading ? t('ingest.busy') : t('ingest.button')}
+          </Button>
 
-      {status.phase !== 'idle' && (
-        <div className="space-y-2">
-          <IngestionStatus status={status} />
-          {(status.phase === 'complete' || status.phase === 'error') && run.activeJobId && (
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => dismissMutation.mutate(run.activeJobId!)}
-            >
-              {t('ingest.dismiss')}
-            </Button>
+          {(dropError || run.error) && <Banner variant="danger">{dropError ?? run.error}</Banner>}
+        </Card>
+
+        <div className="min-w-0 space-y-4">
+          {/* Derived from the merged upload+job log (`status.warnings`), not
+              `run.warnings` (upload leg only) — a job-stream warning (a
+              soft-empty ingest, a failed post-ingest entity resolution) is just
+              as actionable and must not go unreported. */}
+          {status.warnings.length > 0 && (
+            <ul className="text-sm text-[var(--status-amber-fg)] space-y-1" role="alert">
+              {status.warnings.map((w, i) => (
+                <li key={i}>{w}</li>
+              ))}
+            </ul>
+          )}
+
+          {queued && !interrupted && (
+            <Card className="text-sm text-muted-foreground" role="status">
+              {t('ingest.job_queued')}
+            </Card>
+          )}
+
+          {interrupted && (
+            <Card className="text-sm space-y-2" role="status">
+              <p className="text-muted-foreground">{t('ingest.job_interrupted')}</p>
+              <div className="flex gap-2">
+                <Button
+                  variant="primary"
+                  disabled={rerunMutation.isPending}
+                  onClick={() => rerunMutation.mutate()}
+                >
+                  {t('ingest.job_rerun')}
+                </Button>
+                {/* An interrupted, never-going-to-report-progress-again job would
+                    otherwise strand this banner forever — `activeJobId` is
+                    persisted and nothing else clears it. */}
+                <Button variant="secondary" size="sm" onClick={() => run.dismissActive()}>
+                  {t('ingest.dismiss')}
+                </Button>
+              </div>
+            </Card>
+          )}
+
+          {streamLost && (
+            <div className="flex items-center gap-3 text-sm text-[var(--status-amber-fg)]" role="alert">
+              <span>{t('ingest.stream_lost')}</span>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => useIngestJobsStore.getState().retryStream()}
+              >
+                {t('ingest.reconnect')}
+              </Button>
+            </div>
+          )}
+
+          {status.phase !== 'idle' && (
+            <div className="space-y-2">
+              <IngestionStatus status={status} />
+              {(status.phase === 'complete' || status.phase === 'error') && run.activeJobId && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => dismissMutation.mutate(run.activeJobId!)}
+                >
+                  {t('ingest.dismiss')}
+                </Button>
+              )}
+            </div>
           )}
         </div>
-      )}
+      </div>
     </div>
   )
 }

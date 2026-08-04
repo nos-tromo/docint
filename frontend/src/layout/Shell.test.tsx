@@ -19,7 +19,7 @@ function renderShell(whoami?: { username: string; display_name: string | null })
 }
 
 describe('Shell', () => {
-  it('renders a single header (AppHeader title) and the main slot', () => {
+  it('renders a single header (AppShell title) and the main slot', () => {
     renderShell()
     expect(screen.getByText('docint')).toBeInTheDocument()
     expect(screen.getByText('main content')).toBeInTheDocument()
@@ -27,11 +27,11 @@ describe('Shell', () => {
 
   it('prefers display_name over username in the header user slot', () => {
     renderShell({ username: 'alice', display_name: 'Alice Example' })
-    expect(screen.getByTestId('appheader-user')).toHaveTextContent('Alice Example')
+    expect(screen.getByRole('button', { name: /Alice Example/ })).toBeInTheDocument()
   })
 
   it('falls back to username when display_name is absent', () => {
     renderShell({ username: 'alice', display_name: null })
-    expect(screen.getByTestId('appheader-user')).toHaveTextContent('alice')
+    expect(screen.getByRole('button', { name: /alice/ })).toBeInTheDocument()
   })
 })

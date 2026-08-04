@@ -1,6 +1,6 @@
 import { useEffect, useReducer, useRef } from 'react'
 import { useParams } from 'react-router-dom'
-import { Button } from '@infra/ui'
+import { Button, PageHeader } from '@infra/ui'
 import { streamQuery } from '@/api/chat'
 import { ApiError } from '@/api/client'
 import { describeError, streamErrorText } from '@/api/errorMessage'
@@ -223,7 +223,7 @@ export function Chat() {
     <div className="p-8 grid grid-cols-[1fr_22rem] gap-6 h-full">
       <section className="flex flex-col h-full">
         <div className="flex items-center justify-between mb-4">
-          <h1 className="text-2xl font-semibold">{t('chat.title')}</h1>
+          <PageHeader title={t('chat.title')} className="mb-0" />
           {state.turns.length > 0 && (
             <button
               type="button"

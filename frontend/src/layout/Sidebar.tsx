@@ -147,7 +147,7 @@ export function Sidebar() {
   }
 
   return (
-    <aside className="w-72 border-r border-border p-4 flex flex-col gap-4 bg-muted">
+    <div className="flex min-h-0 flex-1 flex-col gap-4">
       <nav className="flex flex-col gap-1">
         {NAV.map(({ to, key }) => {
           // The open chat lives on the server and its id is persisted; the
@@ -211,7 +211,7 @@ export function Sidebar() {
           )}
           <select
             aria-label={t('common.select_collection_aria')}
-            className="min-w-0 flex-1 cursor-pointer bg-muted text-sm text-foreground outline-hidden"
+            className="min-w-0 flex-1 cursor-pointer bg-transparent text-sm text-foreground outline-hidden"
             value={selectedIndex >= 0 ? String(selectedIndex) : ''}
             onChange={(e) => onSelectCollection(entries[Number(e.target.value)])}
           >
@@ -326,6 +326,6 @@ export function Sidebar() {
           })}
         </ul>
       </section>
-    </aside>
+    </div>
   )
 }

@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { PageHeader } from '@infra/ui'
 import { useDocumentsPages, useDocumentsSummary } from '@/hooks/useDocuments'
 import { useUiStore } from '@/stores/ui'
 import { DocumentTable } from '@/components/inspector/DocumentTable'
@@ -17,10 +18,11 @@ export function Inspector() {
   )
   return (
     <div className="p-8 space-y-6">
-      <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-semibold">{t('inspector.title')}</h1>
-        <SessionZipButton />
-      </div>
+      <PageHeader
+        title={t('inspector.title')}
+        caption={t('inspector.caption')}
+        actions={<SessionZipButton />}
+      />
       {!collection ? (
         <div className="text-sm text-muted-foreground">{t('inspector.select_collection')}</div>
       ) : query.isLoading ? (

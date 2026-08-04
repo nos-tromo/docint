@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo } from 'react'
+import { PageHeader } from '@infra/ui'
 import { useHateSpeechPages, useNerGraph, useNerSources, useNerStats } from '@/hooks/useNer'
 import { useReportDedupeKeys } from '@/hooks/useReports'
 import { useReportStore } from '@/stores/report'
@@ -145,7 +146,7 @@ export function Analysis() {
 
   return (
     <div className="p-8 space-y-4">
-      <h1 className="text-2xl font-semibold">{t('analysis.title')}</h1>
+      <PageHeader title={t('analysis.title')} caption={t('analysis.caption')} />
       <nav className="flex gap-2 border-b border-border">
         {TAB_IDS.map((id) => (
           <button

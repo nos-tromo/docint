@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { AppHeader } from '@infra/ui'
+import { AppShell } from '@infra/ui'
 import { Sidebar } from './Sidebar'
 import { PreviewDialog } from '@/components/common/PreviewDialog'
 import { useT } from '@/i18n/LanguageContext'
@@ -13,8 +13,8 @@ export function Shell({ children }: { children: ReactNode }) {
   const { data: whoami } = useWhoami()
   const { data: version } = useVersion()
   return (
-    <div className="min-h-screen flex flex-col bg-background text-foreground">
-      <AppHeader
+    <>
+      <AppShell
         title="docint"
         // The backend's trusted-header principal (X-Auth-User) is resolved
         // server-side and echoed back via the authenticated GET /whoami —
@@ -30,14 +30,14 @@ export function Shell({ children }: { children: ReactNode }) {
           light: t('appHeader.theme_light'),
           dark: t('appHeader.theme_dark')
         }}
-      />
-      <div className="flex flex-1 min-h-0">
-        <Sidebar />
-        <main className="flex-1 min-w-0 overflow-auto">{children}</main>
-      </div>
+        signOutLabel={t('appHeader.sign_out')}
+        sidebar={<Sidebar />}
+      >
+        {children}
+      </AppShell>
       {/* One dialog for the whole app: any control can open a document
           preview through the ui store without owning modal state. */}
       <PreviewDialog />
-    </div>
+    </>
   )
 }

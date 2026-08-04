@@ -11,6 +11,7 @@ export const de: Strings = {
 
   // AppHeader (Portal-Link + Theme-Umschalter)
   'appHeader.home': 'Übersicht',
+  'appHeader.sign_out': 'Abmelden',
   'appHeader.theme_system': 'System',
   'appHeader.theme_light': 'Hell',
   'appHeader.theme_dark': 'Dunkel',
@@ -143,6 +144,7 @@ export const de: Strings = {
 
   // ingest
   'ingest.title': 'Datenimport',
+  'ingest.caption': 'Dokumente hochladen und indexieren',
   'ingest.drop_empty': 'Nichts hinzugefügt — dieser Ablagevorgang enthielt keine Dateien.',
   'ingest.button': 'Importieren',
   'ingest.busy': 'Wird importiert…',
@@ -191,6 +193,7 @@ export const de: Strings = {
 
   // entities (Analysis: NER tab + components)
   'analysis.title': 'Analyse',
+  'analysis.caption': 'Entitäten und Relationen',
   'analysis.tab_ner': 'Entitäten',
   'analysis.tab_hate': 'Hatespeech',
   'analysis.tab_summary': 'Zusammenfassung',
@@ -259,6 +262,7 @@ export const de: Strings = {
 
   // report
   'report.title': 'Berichte',
+  'report.caption': 'Kuratierte Ergebnisse und Exporte',
   'report.untitled_title': 'Unbenannter Bericht',
   'report.create_error': 'Bericht konnte nicht erstellt werden.',
   'report.load_error': 'Berichte konnten nicht geladen werden.',
@@ -315,6 +319,7 @@ export const de: Strings = {
 
   // dashboard
   'dashboard.title': 'Dashboard',
+  'dashboard.caption': 'Korpus- und Systemübersicht',
   'dashboard.kpi_backend': 'Backend',
   'dashboard.kpi_collections': 'Sammlungen',
   'dashboard.status_online': 'online',
@@ -331,6 +336,7 @@ export const de: Strings = {
 
   // inspector route wrapper
   'inspector.title': 'Dokumente',
+  'inspector.caption': 'Indexierte Dokumente durchsuchen',
   'inspector.select_collection': 'Wählen Sie eine Sammlung aus.',
 
   // reference-metadata field labels (shared by chat citations, entity
