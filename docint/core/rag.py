@@ -7606,12 +7606,37 @@ class RAG:
             "summary_diagnostics": diagnostics,
         }
 
+    @staticmethod
+    def _number_summary_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Stamp 1-based ``citation_index`` on summary sources in display order.
+
+        Chat sources are numbered by :class:`CitationNumberingPostprocessor`
+        inside the query engine's postprocessor chain; the summary paths
+        retrieve through bare retrievers and build their source dicts by hand,
+        so the field never exists and the SPA's shared citation badge (which is
+        conditional on it) stays hidden. Numbers are assigned (and overwritten)
+        in list order so they always match what the panel displays.
+
+        Args:
+            sources (list[dict[str, Any]]): Summary source dicts, in display order.
+
+        Returns:
+            list[dict[str, Any]]: The same list, with ``citation_index`` stamped.
+        """
+        for index, source in enumerate(sources, start=1):
+            if isinstance(source, dict):
+                source["citation_index"] = index
+        return sources
+
     def _prepare_collection_summary_context(self) -> dict[str, Any]:
         """Prepare summary context for the active collection."""
         profile = self._infer_collection_profile()
         if self.social_summary_enabled and bool(profile.get("is_social_table")):
-            return self._prepare_social_summary_context()
-        return self._prepare_document_summary_context()
+            context = self._prepare_social_summary_context()
+        else:
+            context = self._prepare_document_summary_context()
+        self._number_summary_sources(context.get("sources") or [])
+        return context
 
     def _summary_kv_store(
         self,
@@ -7790,6 +7815,9 @@ class RAG:
         sources = payload.get("sources")
         if not isinstance(sources, list):
             sources = cast(list[dict[str, Any]], [])
+        # Payloads cached before summary numbering shipped lack the field;
+        # stamping at read time spares a forced refresh.
+        self._number_summary_sources(sources)
         summary_diagnostics = payload.get("summary_diagnostics")
         if not isinstance(summary_diagnostics, dict):
             summary_diagnostics = cast(dict[str, Any], {})

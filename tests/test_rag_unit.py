@@ -3365,6 +3365,145 @@ def test_summarize_collection_uses_post_coverage_for_social_rows(
     assert "author=Bob" in llm.prompts[0]
 
 
+def test_summarize_collection_numbers_document_sources_sequentially(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Document-path summary sources carry 1-based ``citation_index`` in display order.
+
+    Chat sources get their number from ``CitationNumberingPostprocessor``; the
+    summary path bypasses the query-engine postprocessors, so it must stamp the
+    number itself for the SPA's shared Citation badge to render.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag._post_retrieval_text_model = cast(Any, _FakeSummaryLLM("Collection summary"))
+
+    docs = [
+        {"filename": "a.pdf", "file_hash": "ha", "node_count": 9},
+        {"filename": "b.pdf", "file_hash": "hb", "node_count": 7},
+    ]
+    nodes_by_file = {
+        "a.pdf": [_summary_node(text="A key finding", filename="a.pdf", file_hash="ha")],
+        "b.pdf": [_summary_node(text="B key finding", filename="b.pdf", file_hash="hb")],
+    }
+
+    monkeypatch.setattr(
+        RAG,
+        "_infer_collection_profile",
+        lambda self: {"is_social_table": False, "coverage_unit": "documents"},
+    )
+    monkeypatch.setattr(RAG, "_summary_document_targets", lambda self: docs)
+    monkeypatch.setattr(
+        RAG,
+        "_retrieve_summary_nodes_for_document",
+        lambda self, **kwargs: nodes_by_file.get(str(kwargs["filename"]), []),
+    )
+    monkeypatch.setattr(
+        RAG,
+        "_summary_kv_store",
+        lambda self, collection=None, allow_create=True: None,
+    )
+
+    summary = rag.summarize_collection()
+
+    assert [s["citation_index"] for s in summary["sources"]] == [1, 2]
+
+
+def test_summarize_collection_numbers_social_sources_sequentially(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Social-path summary sources carry 1-based ``citation_index`` in display order.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="test")
+    rag._post_retrieval_text_model = cast(Any, _FakeSummaryLLM("Social summary"))
+    rag.social_summary_diversity_limit = 1
+
+    monkeypatch.setattr(
+        RAG,
+        "_summary_kv_store",
+        lambda self, collection=None, allow_create=True: None,
+    )
+    monkeypatch.setattr(
+        RAG,
+        "_infer_collection_profile",
+        lambda self: {"is_social_table": True, "coverage_unit": "posts"},
+    )
+    monkeypatch.setattr(
+        RAG,
+        "_retrieve_social_summary_nodes",
+        lambda self: [
+            _social_summary_node(
+                text="Alice says the launch moved to Friday.",
+                filename="social.csv",
+                file_hash="hash-social",
+                text_id="p1",
+                author="Alice",
+                author_id="a1",
+                timestamp="2026-01-02T10:00:00Z",
+                row=1,
+            ),
+            _social_summary_node(
+                text="Bob says the launch is still Thursday.",
+                filename="social.csv",
+                file_hash="hash-social",
+                text_id="p2",
+                author="Bob",
+                author_id="b1",
+                timestamp="2026-01-02T11:00:00Z",
+                row=2,
+            ),
+        ],
+    )
+    monkeypatch.setattr(RAG, "_count_social_coverage_units", lambda self, unit: 5)
+
+    summary = rag.summarize_collection()
+
+    assert [s["citation_index"] for s in summary["sources"]] == [1, 2]
+
+
+def test_cached_summary_sources_gain_citation_numbers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cached summary payload written before numbering shipped gets numbered on load.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    rag = RAG(qdrant_collection="test")
+
+    class _FakeKV:
+        def get(self, key: str, collection: str) -> dict[str, Any]:
+            return {
+                "revision": 1,
+                "prompt_fingerprint": "fp",
+                "response": "Cached summary",
+                "sources": [
+                    {"filename": "a.pdf", "text": "A"},
+                    {"filename": "b.pdf", "text": "B"},
+                ],
+                "summary_diagnostics": {},
+            }
+
+    monkeypatch.setattr(
+        RAG,
+        "_summary_kv_store",
+        lambda self, collection=None, allow_create=True: _FakeKV(),
+    )
+    monkeypatch.setattr(RAG, "_get_summary_revision", lambda self, *a, **k: 1)
+    monkeypatch.setattr(RAG, "_summary_prompt_fingerprint", lambda self: "fp")
+
+    payload = rag._load_cached_collection_summary(refresh=False)
+
+    assert payload is not None
+    assert payload["response"] == "Cached summary"
+    assert [s["citation_index"] for s in payload["sources"]] == [1, 2]
+
+
 def test_merge_summary_sources_deduplicates_and_preserves_doc_coverage() -> None:
     """_merge_summary_sources deduplicates by filename while preserving doc coverage.
 
