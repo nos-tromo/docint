@@ -97,6 +97,7 @@ export const en = {
   'chat.entity_open_analysis': 'Show in Analysis',
   'chat.sources': 'Sources',
   'chat.source_number': 'Source {n}',
+  'chat.source_toggle_details': 'Show source details',
   'chat.ask_placeholder': 'Ask something…',
   'chat.send': 'Send',
   'chat.query_mode': 'Query mode',

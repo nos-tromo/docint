@@ -103,6 +103,7 @@ export const de: Strings = {
   'chat.entity_open_analysis': 'In Analyse anzeigen',
   'chat.sources': 'Quellen',
   'chat.source_number': 'Quelle {n}',
+  'chat.source_toggle_details': 'Quellendetails anzeigen',
   'chat.ask_placeholder': 'Etwas fragen…',
   'chat.send': 'Senden',
   'chat.query_mode': 'Abfragemodus',
