@@ -364,6 +364,88 @@ def test_build_query_engine_uses_post_retrieval_text_model(
     assert captured["llm"] is rag._post_retrieval_text_model
 
 
+def test_streaming_synthesizer_yields_token_deltas() -> None:
+    """The chat synthesizer must yield the answer as multiple token deltas.
+
+    llama-index 0.14's ``Refine`` streaming path buffers the whole LLM stream
+    inside ``DefaultRefineProgram.stream_call`` and re-emits it as a single
+    chunk after generation completes — which is why chat answers appeared all
+    at once while summaries (which call ``stream_complete`` directly) stream.
+    The docint synthesizer must hand back the LLM's live token generator.
+    """
+    from llama_index.core.llms import MockLLM
+
+    synth = rag_module.StreamingCompactAndRefine(llm=MockLLM(max_tokens=8), streaming=True)
+
+    resp = synth.get_response("What is the topic?", ["some context"])
+
+    assert not isinstance(resp, str)
+    chunks = [str(c) for c in cast("Any", resp)]
+    assert len(chunks) > 1
+    assert "".join(chunks).strip()
+
+
+def test_build_response_synthesizer_selects_streaming_class_by_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_build_response_synthesizer`` returns the streaming class for the resolved mode.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    from llama_index.core.llms import MockLLM
+    from llama_index.core.response_synthesizers.type import ResponseMode
+
+    rag = RAG(qdrant_collection="test")
+    rag._post_retrieval_text_model = cast(Any, MockLLM(max_tokens=8))
+
+    monkeypatch.setattr(RAG, "_resolve_chat_response_mode", lambda self: ResponseMode.COMPACT)
+    compact = rag._build_response_synthesizer(streaming=True, social_table=False)
+    assert isinstance(compact, rag_module.StreamingCompactAndRefine)
+
+    monkeypatch.setattr(RAG, "_resolve_chat_response_mode", lambda self: ResponseMode.REFINE)
+    refine = rag._build_response_synthesizer(streaming=False, social_table=False)
+    assert isinstance(refine, rag_module.StreamingRefine)
+    assert not isinstance(refine, rag_module.StreamingCompactAndRefine)
+
+
+def test_build_query_engine_passes_streaming_synthesizer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``build_query_engine`` hands ``from_args`` a docint streaming synthesizer.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    from llama_index.core.llms import MockLLM
+
+    rag = RAG(qdrant_collection="test")
+    rag._post_retrieval_text_model = cast(Any, MockLLM(max_tokens=8))
+    rag._reranker = cast(Any, object())
+    rag.index = cast(
+        Any,
+        types.SimpleNamespace(
+            docstore=object(),
+            as_retriever=lambda **kwargs: {"retriever_kwargs": kwargs},
+        ),
+    )
+    monkeypatch.setattr(RAG, "list_documents", lambda self: [])
+    monkeypatch.setattr(RAG, "_sample_collection_payloads", lambda self, limit=128: [])
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        rag_module.RetrieverQueryEngine,
+        "from_args",
+        staticmethod(lambda **kwargs: captured.update(kwargs) or kwargs),
+    )
+
+    rag.build_query_engine(streaming=True)
+
+    synth = captured["response_synthesizer"]
+    assert isinstance(synth, rag_module.StreamingCompactAndRefine)
+    assert synth._streaming is True
+
+
 def test_build_query_engine_does_not_materialize_reranker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2541,7 +2623,11 @@ def test_build_query_engine_uses_refine_prompts_for_social_table_collection(
     engine = rag.build_query_engine()
 
     assert engine is sentinel
-    assert captured["response_mode"] == rag_module.ResponseMode.REFINE
+    # Refine mode now surfaces as the docint streaming Refine subclass handed
+    # to from_args (response_mode/templates are baked into the synthesizer).
+    synthesizer = captured["response_synthesizer"]
+    assert isinstance(synthesizer, rag_module.StreamingRefine)
+    assert not isinstance(synthesizer, rag_module.StreamingCompactAndRefine)
     postprocessors = captured["node_postprocessors"]
     assert len(postprocessors) == 5
     # The image floor runs directly after the reranker, where image captions
@@ -2551,7 +2637,8 @@ def test_build_query_engine_uses_refine_prompts_for_social_table_collection(
     assert isinstance(postprocessors[3], rag_module.LinkFollowingPostprocessor)
     # Numbering runs last so it sees the node set the synthesizer will render.
     assert isinstance(postprocessors[4], rag_module.CitationNumberingPostprocessor)
-    assert "keep each post distinct" in captured["text_qa_template"].template.lower()
+    qa_template = cast(Any, synthesizer._text_qa_template)
+    assert "keep each post distinct" in qa_template.template.lower()
 
 
 def test_build_query_engine_uses_hybrid_retrieval_by_default_when_enabled(

@@ -82,6 +82,7 @@ from llama_index.core.embeddings import BaseEmbedding
 from llama_index.core.postprocessor.types import BaseNodePostprocessor
 from llama_index.core.prompts import PromptTemplate
 from llama_index.core.query_engine import RetrieverQueryEngine
+from llama_index.core.response_synthesizers import BaseSynthesizer, CompactAndRefine, Refine
 from llama_index.core.response_synthesizers.type import ResponseMode
 from llama_index.core.retrievers import BaseRetriever
 from llama_index.core.schema import (
@@ -1715,6 +1716,62 @@ class CitationNumberingPostprocessor(BaseNodePostprocessor):
             clone.excluded_llm_metadata_keys = [k for k in clone.excluded_llm_metadata_keys if k != "citation_index"]
             numbered.append(NodeWithScore(node=clone, score=scored.score))
         return numbered
+
+
+class _StreamingRefineMixin:
+    """Restore true token streaming to llama-index's ``Refine`` synthesizers.
+
+    llama-index 0.14's ``Refine._update_response`` streaming path routes
+    through ``DefaultRefineProgram.stream_call``, which consumes the entire
+    LLM token stream before yielding one complete answer (and
+    ``_get_attribute_from_object_generator`` drains whatever a program yields
+    before emitting), so ``response_gen`` produces the whole answer as a
+    single chunk only after generation finishes. Chat answers then appear all
+    at once with time-to-first-token equal to full generation, while the
+    summary path — which calls ``stream_complete`` directly — streams.
+
+    In the plain-text case (no structured answer filtering, no output class)
+    this mixin hands the LLM's live token generator straight back to the
+    refine loop, which already supports ``Generator`` responses: a further
+    refine pass materializes it via ``get_response_text`` and the final one is
+    returned as ``response_gen``.
+    """
+
+    def _update_response(
+        self,
+        program: Any,
+        program_kwargs: dict[str, Any],
+        response_kwargs: dict[str, Any],
+    ) -> Any:
+        """Stream plain-text answers directly; defer to upstream otherwise.
+
+        Args:
+            program (Any): The refine program built for the current prompt.
+            program_kwargs (dict[str, Any]): Prompt variables for this chunk.
+            response_kwargs (dict[str, Any]): Extra LLM kwargs from the caller.
+
+        Returns:
+            Any: A live token generator in the plain-text streaming case,
+                otherwise whatever the upstream implementation produces.
+        """
+        prompt = getattr(program, "_prompt", None)
+        plain_text_streaming = (
+            self._streaming  # type: ignore[attr-defined]
+            and not self._structured_answer_filtering  # type: ignore[attr-defined]
+            and self._output_cls is None  # type: ignore[attr-defined]
+            and prompt is not None
+        )
+        if not plain_text_streaming:
+            return super()._update_response(program, program_kwargs, response_kwargs)  # type: ignore[misc]
+        return self._llm.stream(prompt, **program_kwargs, **response_kwargs)  # type: ignore[attr-defined]
+
+
+class StreamingRefine(_StreamingRefineMixin, Refine):
+    """``Refine`` that streams plain-text answers token by token."""
+
+
+class StreamingCompactAndRefine(_StreamingRefineMixin, CompactAndRefine):
+    """``CompactAndRefine`` that streams plain-text answers token by token."""
 
 
 def _vllm_service_root(api_base: str) -> str:
@@ -4786,7 +4843,6 @@ class RAG:
         retrieval_settings = self._resolve_runtime_retrieval_settings(
             retrieval_options=retrieval_options,
         )
-        response_mode = self._resolve_chat_response_mode()
         node_postprocessors: list[BaseNodePostprocessor] = [
             LazyRerankerPostprocessor(rag=self),
             # Directly after the rerank, where image captions and text chunks
@@ -4831,10 +4887,38 @@ class RAG:
             ),
             llm=self.post_retrieval_text_model,
             node_postprocessors=node_postprocessors,
+            response_synthesizer=self._build_response_synthesizer(
+                streaming=streaming,
+                social_table=bool(profile.get("is_social_table")),
+            ),
+        )
+
+    def _build_response_synthesizer(self, *, streaming: bool, social_table: bool) -> BaseSynthesizer:
+        """Build the chat/query response synthesizer for the resolved mode.
+
+        Constructed explicitly (rather than through ``from_args``'s
+        ``response_mode``/``streaming`` knobs) so the docint streaming
+        subclasses are used — upstream ``Refine`` buffers the whole answer in
+        streaming mode (see :class:`_StreamingRefineMixin`). ``prompt_helper``
+        is left to :class:`BaseSynthesizer`, which resolves it from the LLM
+        metadata exactly like llama-index's synthesizer factory.
+
+        Args:
+            streaming (bool): Whether the synthesizer should stream tokens.
+            social_table (bool): Whether the active collection is a social
+                table, selecting the social prompt variants.
+
+        Returns:
+            BaseSynthesizer: A :class:`StreamingCompactAndRefine` for compact
+                mode, else a :class:`StreamingRefine`.
+        """
+        response_mode = self._resolve_chat_response_mode()
+        synthesizer_cls = StreamingCompactAndRefine if response_mode == ResponseMode.COMPACT else StreamingRefine
+        return synthesizer_cls(
+            llm=self.post_retrieval_text_model,
             streaming=streaming,
-            response_mode=response_mode,
-            text_qa_template=self._build_grounded_text_qa_template(social_table=bool(profile.get("is_social_table"))),
-            refine_template=self._build_grounded_refine_template(social_table=bool(profile.get("is_social_table"))),
+            text_qa_template=self._build_grounded_text_qa_template(social_table=social_table),
+            refine_template=self._build_grounded_refine_template(social_table=social_table),
         )
 
     def _source_from_node_with_score(self, nws: Any) -> dict[str, Any] | None:
