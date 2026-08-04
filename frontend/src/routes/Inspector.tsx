@@ -18,10 +18,11 @@ export function Inspector() {
   )
   return (
     <div className="p-8 space-y-6">
-      <div className="flex justify-between items-center">
-        <PageHeader title={t('inspector.title')} caption={t('inspector.caption')} />
-        <SessionZipButton />
-      </div>
+      <PageHeader
+        title={t('inspector.title')}
+        caption={t('inspector.caption')}
+        actions={<SessionZipButton />}
+      />
       {!collection ? (
         <div className="text-sm text-muted-foreground">{t('inspector.select_collection')}</div>
       ) : query.isLoading ? (

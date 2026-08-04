@@ -19,7 +19,7 @@ function renderShell(whoami?: { username: string; display_name: string | null })
 }
 
 describe('Shell', () => {
-  it('renders a single header (AppHeader title) and the main slot', () => {
+  it('renders a single header (AppShell title) and the main slot', () => {
     renderShell()
     expect(screen.getByText('docint')).toBeInTheDocument()
     expect(screen.getByText('main content')).toBeInTheDocument()

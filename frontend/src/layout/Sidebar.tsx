@@ -164,7 +164,7 @@ export function Sidebar() {
               end={to === '/'}
               className={({ isActive }) =>
                 cn(
-                  'rounded-md px-3 py-2 text-sm hover:bg-muted',
+                  'rounded-md px-3 py-2 text-sm hover:bg-accent',
                   isActive && 'bg-primary/15 text-primary'
                 )
               }
@@ -211,7 +211,7 @@ export function Sidebar() {
           )}
           <select
             aria-label={t('common.select_collection_aria')}
-            className="min-w-0 flex-1 cursor-pointer bg-muted text-sm text-foreground outline-hidden"
+            className="min-w-0 flex-1 cursor-pointer bg-transparent text-sm text-foreground outline-hidden"
             value={selectedIndex >= 0 ? String(selectedIndex) : ''}
             onChange={(e) => onSelectCollection(entries[Number(e.target.value)])}
           >

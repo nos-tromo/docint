@@ -223,7 +223,7 @@ export function Chat() {
     <div className="p-8 grid grid-cols-[1fr_22rem] gap-6 h-full">
       <section className="flex flex-col h-full">
         <div className="flex items-center justify-between mb-4">
-          <PageHeader title={t('chat.title')} />
+          <PageHeader title={t('chat.title')} className="mb-0" />
           {state.turns.length > 0 && (
             <button
               type="button"
