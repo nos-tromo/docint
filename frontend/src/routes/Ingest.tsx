@@ -206,8 +206,8 @@ export function Ingest() {
   return (
     <div className="p-8">
       <PageHeader title={t('ingest.title')} caption={t('ingest.caption')} />
-      <div className="grid items-start gap-6 lg:grid-cols-[minmax(22rem,1fr)_minmax(0,1fr)]">
-        <Card className="space-y-4">
+      <div className="space-y-6">
+        <Card className="max-w-3xl space-y-4">
           <label className="flex flex-col gap-1 text-sm">
             <span className="text-xs uppercase text-muted-foreground">{t('common.collection')}</span>
             <Input
