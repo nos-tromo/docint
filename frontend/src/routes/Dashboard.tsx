@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { PageHeader } from '@infra/ui'
+import { PageHeader, Card } from '@infra/ui'
 import { useCollections } from '@/hooks/useCollections'
 import { useDocumentsCount } from '@/hooks/useDocuments'
 import { useNerStats } from '@/hooks/useNer'
@@ -30,7 +30,7 @@ export function Dashboard() {
     <div className="p-8 space-y-6">
       <PageHeader title={t('dashboard.title')} caption={t('dashboard.caption')} />
 
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <KpiCard
           label={t('dashboard.kpi_backend')}
           value={
@@ -62,9 +62,9 @@ export function Dashboard() {
         />
       </div>
 
-      <section className="rounded-lg border border-border bg-muted p-4">
+      <Card>
         <header className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-medium">{t('dashboard.top_entities')}</h2>
+          <h2 className="text-lg font-semibold text-primary">{t('dashboard.top_entities')}</h2>
           <div className="flex items-center gap-3 text-sm">
             <label className="flex items-center gap-2">
               {t('dashboard.top_k_label')}
@@ -94,20 +94,21 @@ export function Dashboard() {
         ) : (
           <TopEntitiesChart data={stats.data?.top_entities ?? []} />
         )}
-      </section>
+      </Card>
 
-      <section className="rounded-lg border border-border bg-muted p-4">
-        <h2 className="text-lg font-medium mb-3">{t('dashboard.recent_sessions')}</h2>
-        {!collection ? (
-          <div className="text-sm text-muted-foreground">{t('common.select_collection_to_see_chats')}</div>
-        ) : (
-          <ul className="space-y-1 text-sm">
-            {sessionsData?.sessions.slice(0, 10).map((s) => (
-              <li key={s.id}>{s.title?.trim() || s.id.slice(0, 8)}</li>
-            ))}
-          </ul>
-        )}
-      </section>
+      <Card title={t('dashboard.recent_sessions')}>
+        <div className="mt-3">
+          {!collection ? (
+            <div className="text-sm text-muted-foreground">{t('common.select_collection_to_see_chats')}</div>
+          ) : (
+            <ul className="space-y-1 text-sm">
+              {sessionsData?.sessions.slice(0, 10).map((s) => (
+                <li key={s.id}>{s.title?.trim() || s.id.slice(0, 8)}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </Card>
     </div>
   )
 }
