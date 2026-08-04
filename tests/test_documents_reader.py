@@ -170,3 +170,85 @@ def test_build_nodes_coarse_excluded_from_vector_set(tmp_path: Path) -> None:
     # _docstore_batch_for_persist's non-vector-candidate path); fine children do.
     assert coarse and all(id(c) not in vector_ids for c in coarse)
     assert fine and all(id(f) in vector_ids for f in fine)
+
+
+def _counting_extractor() -> Any:
+    """Return a stub extractor tagging each text with its own third word.
+
+    The per-text entity makes union assertions possible: a coarse parent's
+    aggregated list must contain exactly its children's distinct markers.
+    """
+
+    def _extract(text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        marker = text.split()[2]
+        return (
+            [{"text": marker, "type": "org", "score": 0.9}],
+            [{"source": marker, "target": "hub", "label": "linked"}],
+        )
+
+    return _extract
+
+
+def test_enrich_nodes_mirrors_child_entities_onto_coarse_parents(tmp_path: Path) -> None:
+    """Coarse parents must carry the union of their children's NER results.
+
+    ``ParentContextPostprocessor`` replaces a retrieved fine chunk with its
+    docstore-loaded coarse parent at query time, so an entity-less parent
+    strips the answer's entity pills (the ``testingest-1`` regression). The
+    reader must therefore mirror the children's entities/relations onto each
+    parent rather than skipping coarse nodes entirely.
+
+    Args:
+        tmp_path (Path): Temporary directory path for the test.
+    """
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+
+    parser = HierarchicalNodeParser(coarse_chunk_size=100_000, fine_chunk_size=1024, fine_chunk_overlap=0)
+    _docs, nodes = CorePDFPipelineReader._build_nodes(
+        file_path=pdf_path,
+        doc_id="hashZ",
+        pipeline_version="2.0.0",
+        chunks=[_long_pdf_chunk()],
+        hierarchical_node_parser=parser,
+    )
+
+    reader = CorePDFPipelineReader(data_dir=tmp_path, entity_extractor=_counting_extractor())
+    reader._enrich_nodes(nodes)
+
+    coarse = [n for n in nodes if n.metadata.get("docint_hier_type") == "coarse"]
+    fine = [n for n in nodes if n.metadata.get("docint_hier_type") == "fine"]
+    assert coarse and len(fine) > 1
+
+    for f in fine:
+        assert f.metadata["entities"], "fine children keep their own NER results"
+
+    for c in coarse:
+        children = [f for f in fine if f.metadata["hier.parent_id"] == c.node_id]
+        child_markers = [f.metadata["entities"][0]["text"] for f in children]
+        parent_markers = [e["text"] for e in c.metadata["entities"]]
+        assert parent_markers == child_markers, "parent carries its children's entities, in child order"
+        assert [r["source"] for r in c.metadata["relations"]] == child_markers
+
+
+def test_enrich_nodes_flat_collection_ners_every_node(tmp_path: Path) -> None:
+    """Without hierarchy every node is NERed directly (legacy flat shape).
+
+    Args:
+        tmp_path (Path): Temporary directory path for the test.
+    """
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+
+    chunks = [{"chunk_id": "c1", "text": "Some flat chunk content here.", "page_range": [0]}]
+    _docs, nodes = CorePDFPipelineReader._build_nodes(
+        file_path=pdf_path,
+        doc_id="hashF",
+        pipeline_version="2.0.0",
+        chunks=chunks,
+    )
+
+    reader = CorePDFPipelineReader(data_dir=tmp_path, entity_extractor=_counting_extractor())
+    reader._enrich_nodes(nodes)
+
+    assert nodes and all(n.metadata.get("entities") for n in nodes)

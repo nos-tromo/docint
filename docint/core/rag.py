@@ -1079,7 +1079,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
         return parent_text[start:end]
 
     @staticmethod
-    def _emit_with_llm_exclusion(source: BaseNode) -> TextNode:
+    def _emit_with_llm_exclusion(source: BaseNode, ner_fallback: BaseNode | None = None) -> TextNode:
         r"""Clone *source* into a ``TextNode`` whose LLM view hides noisy metadata.
 
         The synthesiser splices each emitted node into the chat prompt
@@ -1102,6 +1102,14 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
         Args:
             source: The node to emit — a docstore-loaded parent, a
                 windowed ``TextNode``, or a retrieved sub-node.
+            ner_fallback: The retrieved sub-node whose ``entities`` /
+                ``relations`` backfill the clone when *source* carries
+                none. Parents ingested while PDF NER skipped coarse nodes
+                sit entity-less in the docstore; without the carry,
+                promoting such a parent strips the entity pills off the
+                answer's sources. A parent that has its own NER metadata
+                (fresh ingests mirror the full children union) always
+                wins over the single matched child's slice.
 
         Returns:
             A fresh ``TextNode`` preserving the original ``node_id`` and
@@ -1113,6 +1121,12 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
         # cached parent node, and mutating its nested dicts in place would
         # leak policy into every future query that touches the same parent.
         metadata = copy.deepcopy(dict(source.metadata or {}))
+
+        if ner_fallback is not None:
+            fallback_meta = ner_fallback.metadata or {}
+            for key in ("entities", "relations"):
+                if not metadata.get(key) and fallback_meta.get(key):
+                    metadata[key] = copy.deepcopy(fallback_meta[key])
 
         # Narrow ``origin`` to a known-safe sub-key set so a future reader
         # that adds deployment-internal paths / tenant IDs / usernames to
@@ -1174,7 +1188,11 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
         budget_exhausted_hits = 0
         parent_hits = 0
 
-        def _emit(base_node: BaseNode, score: float | None) -> NodeWithScore:
+        def _emit(
+            base_node: BaseNode,
+            score: float | None,
+            ner_fallback: BaseNode | None = None,
+        ) -> NodeWithScore:
             """Wrap *base_node* in a ``NodeWithScore`` with LLM-view exclusions applied.
 
             Hides non-whitelisted metadata from the chat prompt while
@@ -1186,12 +1204,18 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
                     docstore-loaded parent, or windowed clone).
                 score: The retrieval score to attach; may be ``None``
                     when the caller has no score.
+                ner_fallback: The retrieved sub-node backfilling
+                    ``entities`` / ``relations`` when *base_node* carries
+                    none (see :meth:`_emit_with_llm_exclusion`).
 
             Returns:
                 A ``NodeWithScore`` whose underlying node hides noisy
                 metadata from ``get_content(MetadataMode.LLM)``.
             """
-            return NodeWithScore(node=self._emit_with_llm_exclusion(base_node), score=score)
+            return NodeWithScore(
+                node=self._emit_with_llm_exclusion(base_node, ner_fallback=ner_fallback),
+                score=score,
+            )
 
         def _llm_tokens(base_node: BaseNode) -> int:
             """Estimate the token cost of *base_node*'s rendered LLM payload.
@@ -1232,7 +1256,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
 
             # Legacy / unbounded path.
             if not budget_enforced:
-                expanded.append(_emit(parent_node, node.score))
+                expanded.append(_emit(parent_node, node.score, ner_fallback=node.node))
                 continue
 
             # Budget exhausted by earlier hits — emit the sub-node so the hit
@@ -1247,7 +1271,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
 
             parent_tokens = _llm_tokens(parent_node)
             if parent_tokens <= remaining_tokens:
-                expanded.append(_emit(parent_node, node.score))
+                expanded.append(_emit(parent_node, node.score, ner_fallback=node.node))
                 remaining_tokens -= parent_tokens
                 continue
 
@@ -1283,7 +1307,7 @@ class ParentContextPostprocessor(BaseNodePostprocessor):
                     "window_chars": len(windowed_text),
                 },
             )
-            windowed_emit = _emit(windowed_node, node.score)
+            windowed_emit = _emit(windowed_node, node.score, ner_fallback=node.node)
             # Render once — the LLM payload is what both the log line and
             # the budget debit need, so compute it here and reuse.
             windowed_llm_payload = windowed_emit.node.get_content(metadata_mode=MetadataMode.LLM)
