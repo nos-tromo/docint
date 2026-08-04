@@ -9,6 +9,7 @@ export const en = {
 
   // AppHeader (portal link + theme toggle)
   'appHeader.home': 'Apps',
+  'appHeader.sign_out': 'Sign out',
   'appHeader.theme_system': 'system',
   'appHeader.theme_light': 'light',
   'appHeader.theme_dark': 'dark',
@@ -135,6 +136,7 @@ export const en = {
 
   // ingest
   'ingest.title': 'Ingest',
+  'ingest.caption': 'Upload and index documents',
   'ingest.drop_empty': 'Nothing to add — that drop contained no files.',
   'ingest.button': 'Ingest',
   'ingest.busy': 'Ingesting…',
@@ -182,6 +184,7 @@ export const en = {
 
   // entities (Analysis: NER tab + components)
   'analysis.title': 'Analysis',
+  'analysis.caption': 'Entities and relations',
   'analysis.tab_ner': 'Entities',
   'analysis.tab_hate': 'Hate speech',
   'analysis.tab_summary': 'Summary',
@@ -249,6 +252,7 @@ export const en = {
 
   // report
   'report.title': 'Reports',
+  'report.caption': 'Curated findings and exports',
   'report.untitled_title': 'Untitled report',
   'report.create_error': 'Couldn’t create the report — is the backend reachable?',
   'report.load_error': 'Failed to load reports.',
@@ -305,6 +309,7 @@ export const en = {
 
   // dashboard
   'dashboard.title': 'Dashboard',
+  'dashboard.caption': 'Corpus and system overview',
   'dashboard.kpi_backend': 'Backend',
   'dashboard.kpi_collections': 'Collections',
   'dashboard.status_online': 'online',
@@ -321,6 +326,7 @@ export const en = {
 
   // inspector route wrapper
   'inspector.title': 'Documents',
+  'inspector.caption': 'Browse indexed documents',
   'inspector.select_collection': 'Select a collection.',
 
   // reference-metadata field labels (shared by chat citations, entity
