@@ -241,6 +241,42 @@ describe('Sidebar collection selection', () => {
     expect(useUiStore.getState().currentSessionId).toBe('sess-old')
   })
 
+  it('surfaces an error and keeps the selection when deleting a collection fails', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = typeof input === 'string' ? input : input.toString()
+      if (init?.method === 'DELETE' && path.includes('/collections/alpha')) {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({ detail: 'Request failed.' }),
+          text: async () => '{"detail":"Request failed."}'
+        }
+      }
+      if (path.includes('/collections/list')) {
+        return { ok: true, status: 200, json: async () => ['alpha'], text: async () => '["alpha"]' }
+      }
+      if (path.includes('/sessions/list')) {
+        return { ok: true, status: 200, json: async () => ({ sessions: [] }), text: async () => '{"sessions":[]}' }
+      }
+      return { ok: true, status: 200, json: async () => null, text: async () => 'null' }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('confirm', () => true)
+    useUiStore.setState({ selectedCollection: 'alpha', currentSessionId: 'sess-old' })
+
+    renderSidebar()
+
+    const del = await screen.findByLabelText(/delete collection alpha/i)
+    await userEvent.click(del)
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/alpha/)
+    expect(alert).toHaveTextContent(/could not be deleted|konnte nicht gelöscht/i)
+    // The collection still exists server-side — the selection must survive.
+    expect(useUiStore.getState().selectedCollection).toBe('alpha')
+    expect(useUiStore.getState().currentSessionId).toBe('sess-old')
+  })
+
   it('clears selection and the open chat after deleting the active collection', async () => {
     const fetchMock = mockFetch({
       '/collections/list': ['alpha'],
