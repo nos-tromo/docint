@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Button, FileList } from '@infra/ui'
+import { Button, FileList, PageHeader } from '@infra/ui'
 import { useQueryClient, useMutation, useQuery } from '@tanstack/react-query'
 import { useIngestRunStore } from '@/stores/ingestRun'
 import { useIngestJobsStore, selectJobEvents } from '@/stores/ingestJobs'
@@ -205,7 +205,7 @@ export function Ingest() {
 
   return (
     <div className="p-8 max-w-3xl space-y-4">
-      <h1 className="text-2xl font-semibold">{t('ingest.title')}</h1>
+      <PageHeader title={t('ingest.title')} caption={t('ingest.caption')} />
 
       <label className="flex flex-col gap-1 text-sm max-w-sm">
         <span className="text-xs uppercase text-muted-foreground">{t('common.collection')}</span>

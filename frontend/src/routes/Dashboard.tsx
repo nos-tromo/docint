@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { PageHeader } from '@infra/ui'
 import { useCollections } from '@/hooks/useCollections'
 import { useDocumentsCount } from '@/hooks/useDocuments'
 import { useNerStats } from '@/hooks/useNer'
@@ -27,7 +28,7 @@ export function Dashboard() {
 
   return (
     <div className="p-8 space-y-6">
-      <h1 className="text-2xl font-semibold">{t('dashboard.title')}</h1>
+      <PageHeader title={t('dashboard.title')} caption={t('dashboard.caption')} />
 
       <div className="grid grid-cols-4 gap-4">
         <KpiCard
