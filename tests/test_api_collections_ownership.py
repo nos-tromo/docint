@@ -74,6 +74,10 @@ class _OwnRAG:
         self._sessions = _SpySessions()
         self._backfilled = False
 
+    def probe_qdrant(self) -> bool:
+        """Satisfy the lifespan startup probe without touching the network."""
+        return True
+
     def list_collections(self) -> list[str]:
         return sorted(self.existing)
 

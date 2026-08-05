@@ -85,7 +85,13 @@ allowed_origins = load_host_env().cors_allowed_origins.split(",")
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Close every open ingest-job subscriber stream on shutdown.
+    """Probe Qdrant on startup; close ingest-job subscriber streams on shutdown.
+
+    Qdrant is contacted lazily, so without the startup probe a mis-wired
+    deployment (backend not on data-net, data-plane stack down) surfaces
+    only at the first ingest or query. The probe logs a loud, actionable
+    error but never blocks startup — Qdrant may come up after the backend,
+    and the SQLite-backed endpoints work without it.
 
     ``GET /ingest/jobs/events`` never terminates on its own — each connection
     idles on a ping loop until the client disconnects. Without this, uvicorn's
@@ -100,8 +106,9 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
             lifespan protocol).
 
     Yields:
-        None: Startup is a no-op; only shutdown does anything.
+        None: Control while the application serves requests.
     """
+    await to_thread.run_sync(rag.probe_qdrant)
     yield
     await job_manager.stop()
 

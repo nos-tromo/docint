@@ -357,6 +357,10 @@ def _filter_hate_speech(
 # to weigh either way.
 QDRANT_DENSE_VECTOR_NAME = "text-dense"
 QDRANT_SPARSE_VECTOR_NAME = "text-sparse-new"
+# Startup reachability probe against Qdrant's /readyz. Kept short: the probe
+# only exists to make a mis-wired deployment visible in the logs immediately,
+# and a DNS/connect failure resolves well within this bound.
+QDRANT_PROBE_TIMEOUT_S = 5.0
 
 # Metadata keys that stay visible to the chat LLM when the synthesizer
 # renders ``node.get_content(MetadataMode.LLM)``. Everything *not* in this
@@ -2896,6 +2900,47 @@ class RAG:
             model=self.sparse_model or "",
             timeout=sparse_config.timeout if sparse_config else self.openai_timeout,
         )
+
+    def probe_qdrant(self) -> bool:
+        """Check that Qdrant answers at the configured host.
+
+        Qdrant is otherwise contacted lazily, so a mis-wired deployment
+        (backend not on data-net, data-plane stack down) would surface only
+        at the first ingest or query. Called once at application startup to
+        log a loud, actionable error instead. Never raises: Qdrant may
+        legitimately come up after the backend, and the SQLite-backed
+        endpoints still work without it.
+
+        Returns:
+            bool: ``True`` when Qdrant's readiness endpoint answered with a
+                2xx status, ``False`` otherwise.
+        """
+        if not self.qdrant_host:
+            logger.error("QDRANT_HOST is unset; ingest and query will fail until it is configured.")
+            return False
+        url = f"{self.qdrant_host.rstrip('/')}/readyz"
+        try:
+            with urllib.request.urlopen(url, timeout=QDRANT_PROBE_TIMEOUT_S) as response:
+                status = int(response.status)
+        except Exception as exc:
+            logger.error(
+                "Qdrant is unreachable at {}: {}. Check that the data-plane stack is running "
+                "and that this container shares the data-net network with a container "
+                "aliased 'qdrant' (or point QDRANT_HOST elsewhere). Ingest and query will "
+                "fail until it is reachable.",
+                self.qdrant_host,
+                exc,
+            )
+            return False
+        if not 200 <= status < 300:
+            logger.error(
+                "Qdrant readiness probe at {} returned HTTP {}; ingest and query may fail.",
+                url,
+                status,
+            )
+            return False
+        logger.info("Qdrant reachable at {}", self.qdrant_host)
+        return True
 
     def probe_sparse_endpoint(self) -> None:
         """Verify the sparse endpoint answers before an ingest run starts.

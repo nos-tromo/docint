@@ -41,6 +41,10 @@ class _ReportRAG:
         self._com = CollectionOwnerManager(rag=cast(Any, self))
         self._com._SessionMaker = sessionmaker(bind=engine)
 
+    def probe_qdrant(self) -> bool:
+        """Satisfy the lifespan startup probe without touching the network."""
+        return True
+
     def ensure_report_manager(self) -> ReportManager:
         return self._rm
 
