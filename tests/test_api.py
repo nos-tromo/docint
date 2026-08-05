@@ -119,6 +119,14 @@ class _DummyOwners:
 class DummyRAG:
     """Dummy Retrieval-Augmented Generation (RAG) class for testing purposes."""
 
+    def probe_qdrant(self) -> bool:
+        """Satisfy the lifespan startup probe without touching the network.
+
+        Returns:
+            bool: Always ``True`` — the stand-in is always "reachable".
+        """
+        return True
+
     def __init__(self) -> None:
         """Initialize the DummyRAG instance."""
         self.qdrant_collection = "alpha"

@@ -85,7 +85,13 @@ allowed_origins = load_host_env().cors_allowed_origins.split(",")
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Close every open ingest-job subscriber stream on shutdown.
+    """Probe Qdrant on startup; close ingest-job subscriber streams on shutdown.
+
+    Qdrant is contacted lazily, so without the startup probe a mis-wired
+    deployment (backend not on data-net, data-plane stack down) surfaces
+    only at the first ingest or query. The probe logs a loud, actionable
+    error but never blocks startup — Qdrant may come up after the backend,
+    and the SQLite-backed endpoints work without it.
 
     ``GET /ingest/jobs/events`` never terminates on its own — each connection
     idles on a ping loop until the client disconnects. Without this, uvicorn's
@@ -100,8 +106,9 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
             lifespan protocol).
 
     Yields:
-        None: Startup is a no-op; only shutdown does anything.
+        None: Control while the application serves requests.
     """
+    await to_thread.run_sync(rag.probe_qdrant)
     yield
     await job_manager.stop()
 
@@ -799,6 +806,13 @@ class VersionOut(BaseModel):
     version: str
 
 
+class HealthOut(BaseModel):
+    """Dependency status report (currently: Qdrant reachability)."""
+
+    status: str
+    qdrant: bool
+
+
 class WhoamiOut(BaseModel):
     """The resolved calling identity, for the SPA header."""
 
@@ -941,6 +955,24 @@ def get_ingest_defaults() -> dict[str, bool]:
 def get_version() -> VersionOut:
     """Return the running app version (unauthenticated, no principal)."""
     return VersionOut(version=__version__)
+
+
+@app.get("/health", response_model=HealthOut, tags=["Meta"])
+async def get_health() -> HealthOut:
+    """Report dependency status, re-running the Qdrant probe on demand.
+
+    Unauthenticated like ``/version`` so `make health` and the container
+    tooling can call it without a principal. Always HTTP 200 — the Docker
+    healthcheck watches ``/version`` (backend liveness), while this endpoint
+    reports whether the vector store is usable *right now*, not just at the
+    startup probe.
+
+    Returns:
+        HealthOut: ``status="ok"`` when Qdrant answered its readiness
+            endpoint, ``status="degraded"`` otherwise.
+    """
+    qdrant_ok = await to_thread.run_sync(rag.probe_qdrant)
+    return HealthOut(status="ok" if qdrant_ok else "degraded", qdrant=qdrant_ok)
 
 
 @app.get("/whoami", response_model=WhoamiOut, tags=["Meta"])
