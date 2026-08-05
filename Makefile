@@ -16,7 +16,7 @@ NETWORKS := inference-net data-net edge-net
 VOLUMES  := docling-cache huggingface-cache ollama-cache sessions-storage source-preview-cache
 include make/common.mk
 
-.PHONY: help resolve
+.PHONY: help resolve health
 
 help:
 	@echo "docint — build-host helpers."
@@ -31,10 +31,26 @@ help:
 	@echo "  make dev        build, then up-dev"
 	@echo "  make stop       stop docint containers"
 	@echo "  make down       stop + remove containers (never touches data-plane state)"
+	@echo "  make health     check backend dependency status (Qdrant reachability); chain as 'make up health'"
 	@echo "  make resolve    merge duplicate/similar entities (COLLECTION=<name> optional)"
 	@echo "  make pre-commit run pre-commit hooks (ruff + pyrefly)"
 	@echo "  make verify     pre-push gate: pre-commit + frontend lint/build; mirrors CI's lint gate"
 	@echo "  make test       run the test suite"
+
+# Dependency status report, printed on the build host's terminal. `up`/`up-dev`
+# are detached, so the backend's own startup probe log never reaches stdout;
+# this asks the running backend via GET /health (which re-runs the Qdrant
+# probe on demand). Runs inside the backend container because the production
+# shape publishes no host ports. Exits 0 either way — a Qdrant outage is a
+# warning, not a failed `up` (the backend deliberately serves without it).
+# Chain it: `make up health` / `make up-dev health`.
+health:
+	@$(COMPOSE) exec -T backend python3 -c "\
+	import json, urllib.request; \
+	d = json.load(urllib.request.urlopen('http://localhost:8000/health', timeout=15)); \
+	print('docint health: ' + d['status']); \
+	d['qdrant'] or print('WARNING: Qdrant is unreachable — ingest and query will fail until the data-plane stack is up on data-net.')" \
+	|| echo "docint health: UNKNOWN — backend not answering /health (backend down, or image predates the endpoint)."
 
 # Resolve duplicate / semantically-similar entities for a collection into
 # durable canonicals (see CLAUDE.md). Runs the `resolve` CLI in a one-off

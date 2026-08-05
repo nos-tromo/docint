@@ -9,7 +9,6 @@ SQLite-backed endpoints still work without it.
 """
 
 import urllib.error
-from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -114,3 +113,51 @@ def test_lifespan_startup_survives_unreachable_qdrant(
     with TestClient(api_module.app) as client:
         response = client.get("/version")
         assert response.status_code == 200
+
+
+def test_health_reports_ok_when_qdrant_reachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """/health re-runs the probe on demand and reports it healthy."""
+    from docint.core import api as api_module
+
+    monkeypatch.setattr(rag_module.RAG, "probe_qdrant", lambda self: True)
+
+    with TestClient(api_module.app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "qdrant": True}
+
+
+def test_health_reports_degraded_when_qdrant_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dead Qdrant degrades /health but keeps it HTTP 200.
+
+    The Docker healthcheck watches /version; /health is a status report,
+    so a vector-store outage must not flap the container.
+    """
+    from docint.core import api as api_module
+
+    monkeypatch.setattr(rag_module.RAG, "probe_qdrant", lambda self: False)
+
+    with TestClient(api_module.app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "degraded", "qdrant": False}
+
+
+def test_health_is_unauthenticated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/health needs no principal, like /version — the Makefile curls it."""
+    from docint.core import api as api_module
+
+    monkeypatch.delenv("DOCINT_AUTH_HEADER", raising=False)
+    monkeypatch.delenv("DOCINT_DEFAULT_IDENTITY", raising=False)
+    monkeypatch.setattr(rag_module.RAG, "probe_qdrant", lambda self: True)
+
+    with TestClient(api_module.app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200

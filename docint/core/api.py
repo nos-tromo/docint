@@ -806,6 +806,13 @@ class VersionOut(BaseModel):
     version: str
 
 
+class HealthOut(BaseModel):
+    """Dependency status report (currently: Qdrant reachability)."""
+
+    status: str
+    qdrant: bool
+
+
 class WhoamiOut(BaseModel):
     """The resolved calling identity, for the SPA header."""
 
@@ -948,6 +955,24 @@ def get_ingest_defaults() -> dict[str, bool]:
 def get_version() -> VersionOut:
     """Return the running app version (unauthenticated, no principal)."""
     return VersionOut(version=__version__)
+
+
+@app.get("/health", response_model=HealthOut, tags=["Meta"])
+async def get_health() -> HealthOut:
+    """Report dependency status, re-running the Qdrant probe on demand.
+
+    Unauthenticated like ``/version`` so `make health` and the container
+    tooling can call it without a principal. Always HTTP 200 — the Docker
+    healthcheck watches ``/version`` (backend liveness), while this endpoint
+    reports whether the vector store is usable *right now*, not just at the
+    startup probe.
+
+    Returns:
+        HealthOut: ``status="ok"`` when Qdrant answered its readiness
+            endpoint, ``status="degraded"`` otherwise.
+    """
+    qdrant_ok = await to_thread.run_sync(rag.probe_qdrant)
+    return HealthOut(status="ok" if qdrant_ok else "degraded", qdrant=qdrant_ok)
 
 
 @app.get("/whoami", response_model=WhoamiOut, tags=["Meta"])
