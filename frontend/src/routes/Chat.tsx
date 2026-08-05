@@ -221,7 +221,12 @@ export function Chat() {
 
   return (
     <div className="p-8 grid grid-cols-[1fr_22rem] gap-6 h-full">
-      <section className="flex flex-col h-full">
+      {/* min-h-0 on the section (grid item) and the messages list (flex
+          item) lets them shrink below their content, so the list scrolls
+          internally instead of the section outgrowing h-full — which made
+          the whole page scroll and pushed the composer flush against the
+          viewport bottom, past the p-8 padding box. */}
+      <section className="flex flex-col h-full min-h-0">
         <div className="flex items-center justify-between mb-4">
           <PageHeader title={t('chat.title')} className="mb-0" />
           {state.turns.length > 0 && (
@@ -239,7 +244,7 @@ export function Chat() {
             </button>
           )}
         </div>
-        <div className="flex-1 overflow-auto space-y-6 pr-2">
+        <div className="flex-1 min-h-0 overflow-auto space-y-6 pr-2">
           {state.turns.map((t, i) => (
             <ChatTurn
               key={i}

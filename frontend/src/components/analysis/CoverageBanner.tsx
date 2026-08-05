@@ -10,8 +10,8 @@ export function CoverageBanner({ d }: { d: SummaryDiagnostics }) {
   const targetPct = Math.round((d.coverage_target ?? 0) * 100)
   const tone =
     ratioPct >= targetPct
-      ? 'border-emerald-700 bg-emerald-950 text-emerald-200'
-      : 'border-amber-700 bg-amber-950 text-amber-200'
+      ? 'border-[var(--status-emerald-border)] bg-[var(--status-emerald-surface)] text-[var(--status-emerald-strong)]'
+      : 'border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] text-[var(--status-amber-strong)]'
 
   return (
     <div className={cn('rounded-md border px-3 py-2 text-xs', tone)}>

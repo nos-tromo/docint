@@ -16,7 +16,7 @@ function resolveSpec(v: ValidationFields, t: ReturnType<typeof useT>): BannerSpe
   const reason = v.validation_reason ?? undefined
   if (v.validation_checked === true && v.validation_mismatch === true) {
     return {
-      tone: 'border-amber-700 bg-amber-950 text-amber-200',
+      tone: 'border-[var(--status-amber-border)] bg-[var(--status-amber-surface)] text-[var(--status-amber-strong)]',
       icon: '⚠',
       title: t('chat.validation_mismatch_title'),
       detail: reason ?? t('chat.validation_mismatch_default_detail')
@@ -24,7 +24,7 @@ function resolveSpec(v: ValidationFields, t: ReturnType<typeof useT>): BannerSpe
   }
   if (v.validation_checked === true) {
     return {
-      tone: 'border-emerald-700 bg-emerald-950 text-emerald-200',
+      tone: 'border-[var(--status-emerald-border)] bg-[var(--status-emerald-surface)] text-[var(--status-emerald-strong)]',
       icon: '✓',
       title: t('chat.validation_passed_title'),
       detail: reason ?? undefined

@@ -25,8 +25,7 @@
   --font-mono: var(--app-font);
 
   /* Status-tone foreground colors for IngestionStatus (text/icon rendered
-     directly on the theme-reactive `bg-muted` panel, not inside a
-     self-contained fixed-dark chip like ValidationBanner). Values below are
+     directly on the theme-reactive `bg-muted` panel). Values below are
      the LIGHT-theme set, each measured >=4.5:1 (WCAG AA) against
      `--color-muted` at hsl(240 5% 96%): sky ~5.5:1, amber ~5.5:1,
      emerald ~5.5:1, red ~6.0:1. Dark-theme values (also >=4.5:1 against
@@ -37,6 +36,19 @@
   --status-amber-fg: hsl(38 92% 28%);
   --status-emerald-fg: hsl(152 70% 26%);
   --status-red-fg: hsl(0 70% 42%);
+
+  /* Status-tone banner chips (ValidationBanner, CoverageBanner): a tinted
+     surface + border + on-surface text per tone, theme-reactive like the
+     -fg set above. Light = Tailwind's -50 surface / -300 border / the
+     matching -fg text tone (surfaces are lighter than --color-muted, so
+     the -fg contrast margins above hold a fortiori). Dark = the -950
+     surface / -700 border / -200 text the banners previously hardcoded. */
+  --status-amber-surface: hsl(48 100% 96%);
+  --status-amber-border: hsl(46 96% 65%);
+  --status-amber-strong: hsl(38 92% 28%);
+  --status-emerald-surface: hsl(152 81% 96%);
+  --status-emerald-border: hsl(156 72% 67%);
+  --status-emerald-strong: hsl(152 70% 26%);
 }
 
 :root[data-theme='dark'] {
@@ -45,6 +57,12 @@
   --status-amber-fg: hsl(38 92% 55%);
   --status-emerald-fg: hsl(152 70% 55%);
   --status-red-fg: hsl(0 70% 68%);
+  --status-amber-surface: hsl(21 92% 14%);
+  --status-amber-border: hsl(26 90% 37%);
+  --status-amber-strong: hsl(48 97% 77%);
+  --status-emerald-surface: hsl(164 91% 9%);
+  --status-emerald-border: hsl(163 94% 24%);
+  --status-emerald-strong: hsl(156 72% 80%);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -54,6 +72,12 @@
     --status-amber-fg: hsl(38 92% 55%);
     --status-emerald-fg: hsl(152 70% 55%);
     --status-red-fg: hsl(0 70% 68%);
+    --status-amber-surface: hsl(21 92% 14%);
+    --status-amber-border: hsl(26 90% 37%);
+    --status-amber-strong: hsl(48 97% 77%);
+    --status-emerald-surface: hsl(164 91% 9%);
+    --status-emerald-border: hsl(163 94% 24%);
+    --status-emerald-strong: hsl(156 72% 80%);
   }
 }
 

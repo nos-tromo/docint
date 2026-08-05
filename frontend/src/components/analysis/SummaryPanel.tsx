@@ -1,7 +1,7 @@
 import { useReducer } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { useTheme } from '@infra/ui'
+import { Button, useTheme } from '@infra/ui'
 import { cn } from '@/lib/cn'
 import { streamSummary } from '@/api/analysis'
 import { describeError, streamErrorText } from '@/api/errorMessage'
@@ -88,26 +88,16 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
   return (
     <div className="space-y-3">
       <div className="flex gap-2">
-        <button
-          type="button"
-          onClick={() => generate(false)}
-          disabled={state.busy}
-          className="px-3 py-1 rounded-md bg-foreground text-background disabled:opacity-50"
-        >
+        <Button variant="primary" onClick={() => generate(false)} disabled={state.busy}>
           {state.busy ? t('analysis.summary_generating') : t('analysis.summary_generate')}
-        </button>
-        <button
-          type="button"
-          onClick={() => generate(true)}
-          disabled={state.busy}
-          className="px-3 py-1 rounded-md border border-border"
-        >
+        </Button>
+        <Button variant="secondary" onClick={() => generate(true)} disabled={state.busy}>
           {t('analysis.summary_refresh')}
-        </button>
+        </Button>
         {state.text && (
           <div className="ml-auto flex items-center gap-2">
-            <button
-              type="button"
+            <Button
+              variant="secondary"
               onClick={() =>
                 downloadText(
                   'summary.md',
@@ -115,10 +105,9 @@ export function SummaryPanel({ reportDedupeKeys }: { reportDedupeKeys?: Set<stri
                   'text/markdown;charset=utf-8'
                 )
               }
-              className="px-3 py-1 rounded-md border border-border"
             >
               {t('analysis.summary_download_md')}
-            </button>
+            </Button>
             {reportItem && reportDedupeKeys && <AddToReportButton item={reportItem} inReport={inReport} />}
           </div>
         )}
