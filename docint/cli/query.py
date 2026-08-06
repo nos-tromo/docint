@@ -613,7 +613,7 @@ def export_summary(rag: RAG, *, output_path: Path) -> None:
         output_path (Path): Results directory.
     """
     logger.info("Generating collection summary...")
-    data = rag.summarize_collection()
+    data = rag.build_tree_summary()
     summary = str(data.get("response") or data.get("answer") or "")
     sources = [src for src in data.get("sources", []) if isinstance(src, dict)]
     summary_diagnostics = data.get("summary_diagnostics")

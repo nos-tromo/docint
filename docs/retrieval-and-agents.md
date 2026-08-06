@@ -94,7 +94,7 @@ the contextual understanding agent.
 - **NER queries** — `get_collection_ner()`,
   `run_entity_occurrence_query()`,
   `run_multi_entity_occurrence_query()`.
-- **Summarisation** — `summarize_collection()` drives
+- **Summarisation** — `build_tree_summary()` drives
   `/summarize` with the knobs from
   [`SummaryConfig`](configuration.md#summarisation--summaryconfig).
 
@@ -157,8 +157,8 @@ context in the final prompt. It is enabled by
 
 `SocialSourceDiversityPostprocessor` caps the number of consecutive
 chunks returned from the same social/table row source, defaulting to
-`2` per bucket via `SUMMARY_SOCIAL_DIVERSITY_LIMIT`. It keeps
-summaries and row-heavy collections balanced across documents.
+`2` per bucket. It keeps row-heavy collections balanced across
+documents in the chat/retrieval path.
 
 `CustomImageSourcePostprocessor` filters and reranks image-vector
 matches when the active collection carries an image sibling

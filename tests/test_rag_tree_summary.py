@@ -328,6 +328,24 @@ def test_cached_collection_summary_roundtrip(rag_with_fake_collection: RAG) -> N
     assert [s.get("chunk_id") for s in cached["sources"]] == [s.get("chunk_id") for s in built["sources"]]
 
 
+def test_build_tree_summary_revision_bump_invalidates_cache(rag_with_fake_collection: RAG) -> None:
+    """Bumping the summary revision invalidates a previously cached tree summary.
+
+    ``_bump_summary_revision`` / ``_load_cached_collection_summary`` are
+    shared cache/revision machinery retained from the now-removed sampling
+    summarizer; this exercises them against ``build_tree_summary``, its
+    map-reduce successor.
+    """
+    rag = rag_with_fake_collection
+
+    rag.build_tree_summary()
+    assert rag.cached_collection_summary() is not None
+
+    rag._bump_summary_revision()
+
+    assert rag.cached_collection_summary() is None
+
+
 def test_fingerprint_includes_map_prompt(rag_with_fake_collection: RAG) -> None:
     """Mutating rag.summary_map_prompt changes _summary_prompt_fingerprint()."""
     rag = rag_with_fake_collection
@@ -340,11 +358,19 @@ def test_fingerprint_includes_map_prompt(rag_with_fake_collection: RAG) -> None:
 
 
 def test_cached_collection_summary_requires_selected_collection() -> None:
-    """cached_collection_summary() raises the same guard summarize_collection() uses."""
+    """cached_collection_summary() raises the same guard build_tree_summary() uses."""
     rag = RAG(qdrant_collection="")
 
     with pytest.raises(ValueError, match="No collection selected"):
         rag.cached_collection_summary()
+
+
+def test_build_tree_summary_requires_collection() -> None:
+    """build_tree_summary() raises ValueError if no collection is selected."""
+    rag = RAG(qdrant_collection="")
+
+    with pytest.raises(ValueError, match="No collection selected"):
+        rag.build_tree_summary()
 
 
 def test_build_tree_summary_sources_follow_evidence_order_despite_retrieve_reordering(tmp_path: Path) -> None:
@@ -378,8 +404,7 @@ def test_build_tree_summary_empty_collection(tmp_path: Path) -> None:
     assert diag["total_documents"] == 0
     assert diag["covered_documents"] == 0
     # No units exist to derive a kind from; "documents" is the sensible
-    # default (matching what summarize_collection reports for an empty
-    # document collection) rather than the meaningless "units" a bare
-    # `else` branch would fall through to.
+    # default for an empty document collection, rather than the meaningless
+    # "units" a bare `else` branch would fall through to.
     assert diag["coverage_unit"] == "documents"
     assert diag["partial"] is False

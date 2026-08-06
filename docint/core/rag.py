@@ -512,12 +512,6 @@ DEFAULT_SUMMARIZE_PROMPT = (
     "topics, document types, and notable findings. Focus on text bodies, not "
     "metadata. Limit the response to 15 sentences."
 )
-DEFAULT_SOCIAL_SUMMARIZE_PROMPT = (
-    "Summarize the social or row-based collection using only the cited posts or "
-    "rows. Keep posts distinct, use metadata such as network, author, and "
-    "timestamp when it helps prevent blending separate claims, and call out "
-    "conflicts or uncertainty explicitly."
-)
 DEFAULT_RETRIEVAL_REWRITE_PROMPT = (
     "Rewrite the user's latest message into a standalone retrieval query "
     "suitable for vector search.\n\n"
@@ -2393,12 +2387,7 @@ class RAG:
     graphrag_min_edge_weight: int = field(default=1, init=False)
     graphrag_max_neighbors: int = field(default=6, init=False)
     summary_coverage_target: float = field(default=0.70, init=False)
-    summary_max_docs: int = field(default=30, init=False)
-    summary_per_doc_top_k: int = field(default=4, init=False)
     summary_final_source_cap: int = field(default=24, init=False)
-    social_summary_enabled: bool = field(default=True, init=False)
-    social_summary_candidate_pool: int = field(default=48, init=False)
-    social_summary_diversity_limit: int = field(default=2, init=False)
 
     # --- Session config ---
     session_store: str = field(default="", init=False)
@@ -2420,7 +2409,6 @@ class RAG:
     language_code: str = field(default="en", init=False)
     prompt_dir: Path | None = field(default=None, init=False)
     summarize_prompt_path: Path | None = field(default=None, init=False)
-    summarize_social_prompt_path: Path | None = field(default=None, init=False)
     conversation_summary_prompt_path: Path | None = field(default=None, init=False)
     rewrite_retrieval_prompt_path: Path | None = field(default=None, init=False)
     grounded_text_qa_prompt_path: Path | None = field(default=None, init=False)
@@ -2429,7 +2417,6 @@ class RAG:
     summary_map_prompt_path: Path | None = field(default=None, init=False)
     summary_fold_prompt_path: Path | None = field(default=None, init=False)
     summarize_prompt: str = field(default="", init=False)
-    summarize_social_prompt: str = field(default="", init=False)
     conversation_summary_prompt: str = field(default="", init=False)
     rewrite_retrieval_prompt: str = field(default="", init=False)
     grounded_text_qa_prompt: str = field(default="", init=False)
@@ -2608,7 +2595,6 @@ class RAG:
         ## --- Load prompts ---
         if self.prompt_dir:
             self.summarize_prompt_path = self.prompt_dir / "summarize.txt"
-            self.summarize_social_prompt_path = self.prompt_dir / "summarize_social.txt"
             self.conversation_summary_prompt_path = self.prompt_dir / "conversation_summary.txt"
             self.rewrite_retrieval_prompt_path = self.prompt_dir / "rewrite_retrieval.txt"
             self.grounded_text_qa_prompt_path = self.prompt_dir / "grounded_qa.txt"
@@ -2623,10 +2609,6 @@ class RAG:
             self.summarize_prompt_path,
             default=DEFAULT_SUMMARIZE_PROMPT,
             required=True,
-        )
-        self.summarize_social_prompt = self._load_prompt_text(
-            self.summarize_social_prompt_path,
-            default=DEFAULT_SOCIAL_SUMMARIZE_PROMPT,
         )
         self.conversation_summary_prompt = self._load_prompt_text(
             self.conversation_summary_prompt_path,
@@ -2680,12 +2662,7 @@ class RAG:
 
         # --- Summary config ---
         self.summary_coverage_target = self.summary_config.coverage_target
-        self.summary_max_docs = self.summary_config.max_docs
-        self.summary_per_doc_top_k = self.summary_config.per_doc_top_k
         self.summary_final_source_cap = self.summary_config.final_source_cap
-        self.social_summary_enabled = self.summary_config.social_chunking_enabled
-        self.social_summary_candidate_pool = self.summary_config.social_candidate_pool
-        self.social_summary_diversity_limit = self.summary_config.social_diversity_limit
 
     # --- Active collection (stateless, per-request) ---
     # NOTE: ``qdrant_collection`` is exposed as a property, but it is attached
@@ -5173,9 +5150,11 @@ class RAG:
                 )
             )
         if bool(profile.get("is_social_table")):
-            node_postprocessors.append(
-                SocialSourceDiversityPostprocessor(diversity_limit=max(1, int(self.social_summary_diversity_limit)))
-            )
+            # Uses the postprocessor's own default diversity_limit — this
+            # knob used to be sourced from the (now-deleted) sampling
+            # summarizer's social config, but this call site is on the
+            # chat/retrieval path, not the summarizer.
+            node_postprocessors.append(SocialSourceDiversityPostprocessor())
             node_postprocessors.append(LinkFollowingPostprocessor(rag=self))
         # Last: numbers the node set as the synthesizer will actually see it,
         # after every postprocessor above has added, dropped or reordered.
@@ -7374,138 +7353,6 @@ class RAG:
         expanded_query, _ = self.expand_query_with_graph_with_debug(query)
         return expanded_query
 
-    def _summary_document_targets(self) -> list[dict[str, Any]]:
-        """Return capped document targets ordered by descending node count."""
-        documents = self.list_documents()
-        documents.sort(
-            key=lambda item: (
-                -int(item.get("node_count", 0) or 0),
-                str(item.get("filename") or "").lower(),
-            )
-        )
-        return documents[: self.summary_max_docs]
-
-    def _summary_source_matches_document(
-        self,
-        source: dict[str, Any],
-        *,
-        filename: str,
-        file_hash: str | None,
-    ) -> bool:
-        """Check whether a normalized source belongs to a document target."""
-        if file_hash and str(source.get("file_hash") or "") == file_hash:
-            return True
-
-        src_filename = str(source.get("filename") or "").strip()
-        if not src_filename:
-            return False
-
-        if src_filename == filename:
-            return True
-
-        try:
-            return Path(src_filename).name == Path(filename).name
-        except Exception:
-            return src_filename.lower() == filename.lower()
-
-    def _summary_document_filters(self, *, filename: str, file_hash: str | None) -> MetadataFilters:
-        """Build metadata filters that scope retrieval to one document."""
-        filters: list[MetadataFilter | MetadataFilters] = [
-            MetadataFilter(key="filename", value=filename, operator=FilterOperator.EQ),
-            MetadataFilter(key="file_name", value=filename, operator=FilterOperator.EQ),
-            MetadataFilter(key="file_path", value=filename, operator=FilterOperator.EQ),
-        ]
-        if file_hash:
-            filters.append(MetadataFilter(key="file_hash", value=file_hash, operator=FilterOperator.EQ))
-        return MetadataFilters(filters=filters, condition=FilterCondition.OR)
-
-    def _summary_payload_fallback_nodes(self, *, filename: str, file_hash: str | None) -> list[NodeWithScore]:
-        """Build synthetic summary nodes by scrolling stored payloads.
-
-        This fallback bypasses query embeddings entirely, so summary generation
-        can still proceed when the embedding backend returns invalid values.
-
-        Args:
-            filename (str): Target document filename.
-            file_hash (str | None): Optional file hash for precise scoping.
-
-        Returns:
-            list[NodeWithScore]: Synthetic node hits derived from stored payloads.
-        """
-        if not self.qdrant_collection:
-            return []
-
-        top_k = max(1, self.summary_per_doc_top_k)
-        matched_nodes: list[NodeWithScore] = []
-        offset = None
-        scroll_filter = None
-        if file_hash:
-            scroll_filter = qdrant_models.Filter(
-                must=[
-                    qdrant_models.FieldCondition(
-                        key="file_hash",
-                        match=qdrant_models.MatchValue(value=file_hash),
-                    )
-                ]
-            )
-
-        while len(matched_nodes) < top_k:
-            try:
-                points, offset = self.qdrant_client.scroll(
-                    collection_name=self.qdrant_collection,
-                    limit=128,
-                    offset=offset,
-                    scroll_filter=scroll_filter,
-                    with_payload=True,
-                    with_vectors=False,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Payload fallback summary retrieval failed for '{}': {}",
-                    filename,
-                    exc,
-                )
-                break
-
-            if not points:
-                break
-
-            for index, point in enumerate(points, start=len(matched_nodes) + 1):
-                payload = getattr(point, "payload", None)
-                if not isinstance(payload, dict):
-                    continue
-                source = self._source_from_payload(
-                    collection=self.qdrant_collection,
-                    payload=payload,
-                )
-                if not self._summary_source_matches_document(
-                    source,
-                    filename=filename,
-                    file_hash=file_hash,
-                ):
-                    continue
-
-                node_id = str(
-                    payload.get("node_id")
-                    or payload.get("id_")
-                    or getattr(point, "id", "")
-                    or f"summary-fallback-{index}"
-                )
-                text_value = str(source.get("text") or source.get("preview_text") or "")
-                synthetic_node = TextNode(
-                    text=text_value,
-                    id_=node_id,
-                    metadata=dict(payload),
-                )
-                matched_nodes.append(NodeWithScore(node=synthetic_node, score=0.0))
-                if len(matched_nodes) >= top_k:
-                    break
-
-            if offset is None:
-                break
-
-        return matched_nodes
-
     def _summary_image_nodes_for_document(self, *, file_hash: str | None, top_k: int) -> list[NodeWithScore]:
         """Collect a document's stored images as summary evidence.
 
@@ -7651,141 +7498,6 @@ class RAG:
 
         return chunks
 
-    def _retrieve_summary_nodes_for_document(self, *, filename: str, file_hash: str | None) -> list[Any]:
-        """Retrieve top evidence nodes for a single document."""
-        if self.index is None:
-            self.create_index()
-        if self.index is None:
-            return []
-
-        query = f"Extract factual highlights and notable findings from '{filename}'. Focus on substantive content."
-        top_k = max(1, self.summary_per_doc_top_k)
-        try:
-            retriever = self.index.as_retriever(
-                similarity_top_k=top_k,
-                filters=self._summary_document_filters(filename=filename, file_hash=file_hash),
-            )
-            nodes = retriever.retrieve(query)
-            if isinstance(nodes, list):
-                return nodes[:top_k]
-        except Exception as exc:
-            logger.warning(
-                "Filtered summary retrieval failed for '{}': {}",
-                filename,
-                exc,
-            )
-
-        try:
-            fallback_retriever = self.index.as_retriever(similarity_top_k=top_k * 2)
-            fallback_nodes = fallback_retriever.retrieve(query)
-            if not isinstance(fallback_nodes, list):
-                return []
-            matched_nodes: list[Any] = []
-            for nws in fallback_nodes:
-                source = self._source_from_node_with_score(nws)
-                if source is None:
-                    continue
-                if self._summary_source_matches_document(source, filename=filename, file_hash=file_hash):
-                    matched_nodes.append(nws)
-                if len(matched_nodes) >= top_k:
-                    break
-            return matched_nodes
-        except Exception as exc:
-            logger.warning("Fallback summary retrieval failed for '{}': {}", filename, exc)
-            return self._summary_payload_fallback_nodes(
-                filename=filename,
-                file_hash=file_hash,
-            )
-
-    def _summary_source_key(self, source: dict[str, Any]) -> str:
-        """Build a deterministic deduplication key for summary sources.
-
-        Args:
-            source (dict[str, Any]): A normalized source dictionary.
-
-        Returns:
-            str: A string key that uniquely identifies the source for deduplication purposes.
-        """
-        reference_metadata = source.get("reference_metadata")
-        text_id = ""
-        if isinstance(reference_metadata, dict):
-            text_id = str(reference_metadata.get("text_id") or "").strip()
-        if text_id:
-            return f"text_id||{text_id}"
-        return "||".join(
-            [
-                str(source.get("file_hash") or ""),
-                str(source.get("filename") or ""),
-                str(source.get("page") or ""),
-                str(source.get("row") or ""),
-                str(source.get("preview_text") or source.get("text") or ""),
-            ]
-        )
-
-    def _summary_document_brief(self, *, filename: str, sources: list[dict[str, Any]]) -> str:
-        """Build one compact, evidence-first brief for a document.
-
-        Args:
-            filename (str): The name of the document.
-            sources (list[dict[str, Any]]): A list of normalized source dictionaries associated with the document.
-
-        Returns:
-            str: A formatted string brief that includes key points and evidence snippets from the sources.
-        """
-        snippets: list[str] = []
-        for source in sources:
-            raw_text = str(source.get("preview_text") or source.get("text") or "").strip()
-            if not raw_text:
-                continue
-            compact = re.sub(r"\s+", " ", raw_text)
-            snippets.append(compact[:240])
-            if len(snippets) >= 2:
-                break
-
-        if not snippets:
-            return f"- Document: {filename}\n  - Evidence: (none)"
-
-        evidence_lines = "\n".join(f"  - Evidence {idx}: {snippet}" for idx, snippet in enumerate(snippets, start=1))
-        key_points = " ; ".join(snippets)
-        return f"- Document: {filename}\n  - Key points: {key_points}\n{evidence_lines}"
-
-    def _merge_summary_sources(self, per_doc_sources: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
-        """Merge per-document evidence and guarantee broad document coverage.
-
-        Args:
-            per_doc_sources (dict[str, list[dict[str, Any]]]): Document ID -> source list.
-
-        Returns:
-            list[dict[str, Any]]: Merged sources prioritizing one per document, then filling the
-                remaining slots with additional evidence.
-        """
-        merged: list[dict[str, Any]] = []
-        seen: set[str] = set()
-
-        # Ensure at least one source per covered document.
-        for sources in per_doc_sources.values():
-            if not sources:
-                continue
-            key = self._summary_source_key(sources[0])
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(sources[0])
-            if len(merged) >= self.summary_final_source_cap:
-                return merged
-
-        # Fill remaining slots with additional evidence snippets.
-        for sources in per_doc_sources.values():
-            for source in sources[1:]:
-                key = self._summary_source_key(source)
-                if key in seen:
-                    continue
-                seen.add(key)
-                merged.append(source)
-                if len(merged) >= self.summary_final_source_cap:
-                    return merged
-        return merged
-
     def _build_summary_synthesis_prompt(
         self,
         *,
@@ -7819,264 +7531,6 @@ class RAG:
             evidence_block=evidence_block,
         )
 
-    def _prepare_document_summary_context(self) -> dict[str, Any]:
-        """Prepare document-level summary context for standard collections."""
-        targets = self._summary_document_targets()
-        target_filenames = [str(doc.get("filename") or "") for doc in targets if doc.get("filename")]
-        per_doc_sources: dict[str, list[dict[str, Any]]] = {}
-        briefs: list[str] = []
-        candidate_count = 0
-        deduped_count = 0
-
-        for doc in targets:
-            filename = str(doc.get("filename") or "").strip()
-            if not filename:
-                continue
-            file_hash_raw = doc.get("file_hash")
-            file_hash = str(file_hash_raw).strip() if file_hash_raw else None
-            nodes = self._retrieve_summary_nodes_for_document(
-                filename=filename,
-                file_hash=file_hash,
-            )
-            # A multimodal document's figures and keyframes are evidence too;
-            # they live in the `_images` companion, which the retrieval above
-            # does not see. Capped well below the per-document budget so the
-            # images supplement the document's text rather than replace it.
-            nodes = list(nodes) + list(
-                self._summary_image_nodes_for_document(
-                    file_hash=file_hash,
-                    top_k=max(1, self.summary_per_doc_top_k // 3),
-                )
-            )
-            candidate_count += len(nodes)
-            normalized_sources: list[dict[str, Any]] = []
-            seen_doc_keys: set[str] = set()
-            for nws in nodes:
-                source = self._source_from_node_with_score(nws)
-                if source is None:
-                    continue
-                if not self._summary_source_matches_document(source, filename=filename, file_hash=file_hash):
-                    continue
-                key = self._summary_source_key(source)
-                if key in seen_doc_keys:
-                    continue
-                seen_doc_keys.add(key)
-                normalized_sources.append(source)
-                if len(normalized_sources) >= self.summary_per_doc_top_k:
-                    break
-
-            if normalized_sources:
-                deduped_count += len(normalized_sources)
-                per_doc_sources[filename] = normalized_sources
-                briefs.append(
-                    self._summary_document_brief(
-                        filename=filename,
-                        sources=normalized_sources,
-                    )
-                )
-
-        covered_filenames = list(per_doc_sources.keys())
-        uncovered = [filename for filename in target_filenames if filename not in per_doc_sources]
-        total_documents = len(target_filenames)
-        covered_documents = len(covered_filenames)
-        coverage_ratio = covered_documents / total_documents if total_documents > 0 else 0.0
-        diagnostics = {
-            "total_documents": total_documents,
-            "covered_documents": covered_documents,
-            "coverage_ratio": round(coverage_ratio, 4),
-            "uncovered_documents": uncovered,
-            "coverage_target": self.summary_coverage_target,
-            "coverage_unit": "documents",
-            "candidate_count": candidate_count,
-            "deduped_count": deduped_count,
-            "sampled_count": len(self._merge_summary_sources(per_doc_sources)),
-        }
-        merged_sources = self._merge_summary_sources(per_doc_sources)
-
-        return {
-            "synthesis_prompt": self._build_summary_synthesis_prompt(
-                briefs=briefs,
-                diagnostics=diagnostics,
-                style_prompt=self.summarize_prompt,
-            ),
-            "sources": merged_sources,
-            "summary_diagnostics": diagnostics,
-        }
-
-    def _retrieve_social_summary_nodes(self) -> list[Any]:
-        """Retrieve a larger candidate pool for social/table-heavy summaries."""
-        if self.index is None:
-            self.create_index()
-        if self.index is None:
-            return []
-
-        query = (
-            "Identify representative posts or rows, recurring themes, concrete "
-            "claims, disagreements, and notable outliers across this collection."
-        )
-        top_k = max(
-            1,
-            int(
-                max(
-                    self.social_summary_candidate_pool,
-                    self.summary_final_source_cap,
-                )
-            ),
-        )
-        try:
-            retriever = self.index.as_retriever(similarity_top_k=top_k)
-            nodes = retriever.retrieve(query)
-            if isinstance(nodes, list):
-                return nodes[:top_k]
-        except Exception as exc:
-            logger.warning("Social summary retrieval failed: {}", exc)
-        return []
-
-    def _select_social_summary_sources(
-        self,
-        candidates: list[dict[str, Any]],
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Deduplicate and diversify candidate social/table sources."""
-        deduped: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for source in candidates:
-            identity = self._source_post_key(source)
-            if identity and identity in seen:
-                continue
-            if identity:
-                seen.add(identity)
-            deduped.append(source)
-
-        bucket_counts: dict[str, int] = defaultdict(int)
-        sampled: list[dict[str, Any]] = []
-        limit = max(1, int(self.social_summary_diversity_limit))
-        for source in deduped:
-            bucket = self._source_diversity_bucket(source)
-            if bucket_counts[bucket] >= limit:
-                continue
-            bucket_counts[bucket] += 1
-            sampled.append(source)
-            if len(sampled) >= self.summary_final_source_cap:
-                break
-        return deduped, sampled
-
-    def _count_social_coverage_units(self, coverage_unit: str) -> int:
-        """Count total social coverage units across the active collection."""
-        if not self.qdrant_collection:
-            return 0
-        seen: set[str] = set()
-        offset = None
-        while True:
-            try:
-                points, offset = self.qdrant_client.scroll(
-                    collection_name=self.qdrant_collection,
-                    limit=256,
-                    offset=offset,
-                    with_payload=True,
-                    with_vectors=False,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Failed to count social coverage units for '{}': {}",
-                    self.qdrant_collection,
-                    exc,
-                )
-                break
-            if not points:
-                break
-            for point in points:
-                payload = getattr(point, "payload", None)
-                if not isinstance(payload, dict) or not self._is_social_payload(payload):
-                    continue
-                source = self._source_from_payload(
-                    collection=self.qdrant_collection,
-                    payload=payload,
-                )
-                if coverage_unit == "posts":
-                    key = self._source_post_key(source)
-                else:
-                    key = self._summary_source_key(source)
-                if key:
-                    seen.add(key)
-            if offset is None:
-                break
-        return len(seen)
-
-    def _build_social_summary_briefs(
-        self,
-        sources: list[dict[str, Any]],
-    ) -> list[str]:
-        """Build source-preserving evidence briefs for row-level social summaries."""
-        briefs: list[str] = []
-        for index, source in enumerate(sources, start=1):
-            reference_metadata = source.get("reference_metadata")
-            ref: dict[str, Any] = reference_metadata if isinstance(reference_metadata, dict) else {}
-            metadata_bits = [
-                f"network={ref.get('network')}" if ref.get("network") else "",
-                f"type={ref.get('type')}" if ref.get("type") else "",
-                f"author={ref.get('author') or ref.get('author_id')}"
-                if (ref.get("author") or ref.get("author_id"))
-                else "",
-                f"timestamp={ref.get('timestamp')}" if ref.get("timestamp") else "",
-                f"row={source.get('row')}" if source.get("row") is not None else "",
-            ]
-            metadata_line = ", ".join(bit for bit in metadata_bits if bit) or "metadata=n/a"
-            raw_text = str(source.get("text") or source.get("preview_text") or "").strip()
-            compact = re.sub(r"\s+", " ", raw_text)[:280] if raw_text else "(no text)"
-            briefs.append(f"- Source {index}: {metadata_line}\n  - Evidence: {compact}")
-        return briefs
-
-    def _prepare_social_summary_context(self) -> dict[str, Any]:
-        """Prepare chunk/post-level summary context for social/table collections."""
-        candidate_nodes = self._retrieve_social_summary_nodes()
-        candidate_sources: list[dict[str, Any]] = []
-        for nws in candidate_nodes:
-            source = self._source_from_node_with_score(nws)
-            if source is None:
-                continue
-            if str(source.get("source") or "") != "table":
-                continue
-            candidate_sources.append(source)
-
-        if not candidate_sources:
-            for payload in self._sample_collection_payloads(limit=self.social_summary_candidate_pool):
-                if not self._is_social_payload(payload):
-                    continue
-                candidate_sources.append(
-                    self._source_from_payload(
-                        collection=self.qdrant_collection,
-                        payload=payload,
-                    )
-                )
-
-        deduped_sources, sampled_sources = self._select_social_summary_sources(candidate_sources)
-        coverage_unit = self._coverage_unit_for_sources(sampled_sources or deduped_sources or candidate_sources)
-        total_units = self._count_social_coverage_units(coverage_unit)
-        covered_units = len(sampled_sources)
-        coverage_ratio = covered_units / total_units if total_units > 0 else 0.0
-        diagnostics = {
-            "total_documents": total_units,
-            "covered_documents": covered_units,
-            "coverage_ratio": round(coverage_ratio, 4),
-            "uncovered_documents": cast(list[str], []),
-            "coverage_target": self.summary_coverage_target,
-            "coverage_unit": coverage_unit,
-            "candidate_count": len(candidate_sources),
-            "deduped_count": len(deduped_sources),
-            "sampled_count": len(sampled_sources),
-        }
-
-        briefs = self._build_social_summary_briefs(sampled_sources)
-        return {
-            "synthesis_prompt": self._build_summary_synthesis_prompt(
-                briefs=briefs,
-                diagnostics=diagnostics,
-                style_prompt=self.summarize_social_prompt,
-            ),
-            "sources": sampled_sources,
-            "summary_diagnostics": diagnostics,
-        }
-
     @staticmethod
     def _number_summary_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Stamp 1-based ``citation_index`` on summary sources in display order.
@@ -8098,16 +7552,6 @@ class RAG:
             if isinstance(source, dict):
                 source["citation_index"] = index
         return sources
-
-    def _prepare_collection_summary_context(self) -> dict[str, Any]:
-        """Prepare summary context for the active collection."""
-        profile = self._infer_collection_profile()
-        if self.social_summary_enabled and bool(profile.get("is_social_table")):
-            context = self._prepare_social_summary_context()
-        else:
-            context = self._prepare_document_summary_context()
-        self._number_summary_sources(context.get("sources") or [])
-        return context
 
     def _summary_kv_store(
         self,
@@ -8154,16 +7598,10 @@ class RAG:
         """
         payload = {
             "summarize_prompt": self.summarize_prompt,
-            "summarize_social_prompt": self.summarize_social_prompt,
-            "summary_coverage_target": self.summary_coverage_target,
-            "summary_max_docs": self.summary_max_docs,
-            "summary_per_doc_top_k": self.summary_per_doc_top_k,
-            "summary_final_source_cap": self.summary_final_source_cap,
-            "social_summary_enabled": self.social_summary_enabled,
-            "social_summary_candidate_pool": self.social_summary_candidate_pool,
-            "social_summary_diversity_limit": self.social_summary_diversity_limit,
             "summary_map_prompt": self.summary_map_prompt,
             "summary_fold_prompt": self.summary_fold_prompt,
+            "summary_coverage_target": self.summary_coverage_target,
+            "summary_final_source_cap": self.summary_final_source_cap,
             "summary_map_window_tokens": self.summary_config.map_window_tokens,
             "summary_reduce_fanin": self.summary_config.reduce_fanin,
         }
@@ -8346,133 +7784,6 @@ class RAG:
         except Exception as exc:
             logger.warning("Failed to store cached collection summary: {}", exc)
 
-    def summarize_collection(self, refresh: bool = False) -> dict[str, Any]:
-        """Generate a coverage-aware summary for the selected collection.
-
-        Args:
-            refresh (bool): If ``True``, bypass cached summary payloads.
-
-        Returns:
-            dict[str, Any]: Summary payload with normalized sources and diagnostics.
-
-        Raises:
-            ValueError: If no collection is selected.
-        """
-        if not self.qdrant_collection:
-            raise ValueError("No collection selected.")
-
-        cached_payload = self._load_cached_collection_summary(refresh=refresh)
-        if cached_payload is not None:
-            return cached_payload
-
-        context = self._prepare_collection_summary_context()
-        diagnostics = context["summary_diagnostics"]
-        covered_documents = int(diagnostics.get("covered_documents", 0) or 0)
-        total_documents = int(diagnostics.get("total_documents", 0) or 0)
-
-        if total_documents == 0:
-            summary_text = "No documents available in the selected collection."
-        elif covered_documents == 0:
-            summary_text = "Unable to extract grounded evidence from the selected collection."
-        else:
-            completion = self.post_retrieval_text_model.complete(context["synthesis_prompt"])
-            summary_text = str(getattr(completion, "text", "") or "").strip()
-
-        payload = {
-            "query": self.summarize_prompt,
-            "reasoning": None,
-            "response": summary_text,
-            "sources": context["sources"],
-            "summary_diagnostics": diagnostics,
-        }
-        self._store_cached_collection_summary(payload)
-        return payload
-
-    def stream_summarize_collection(self, refresh: bool = False) -> Any:
-        """Generate a streaming summary of the currently selected collection.
-
-        Args:
-            refresh (bool): If ``True``, bypass cached summary payloads.
-
-        Yields:
-            str | dict: Chunks of text, followed by a dict with metadata.
-
-        Raises:
-            ValueError: If no collection is selected.
-        """
-        if not self.qdrant_collection:
-            raise ValueError("No collection selected.")
-
-        cached_payload = self._load_cached_collection_summary(refresh=refresh)
-        if cached_payload is not None:
-            full_text = str(cached_payload.get("response") or "")
-            if full_text:
-                yield full_text
-            yield cached_payload
-            return
-
-        context = self._prepare_collection_summary_context()
-        diagnostics = context["summary_diagnostics"]
-        covered_documents = int(diagnostics.get("covered_documents", 0) or 0)
-        total_documents = int(diagnostics.get("total_documents", 0) or 0)
-
-        if total_documents == 0:
-            full_text = "No documents available in the selected collection."
-            payload = {
-                "query": self.summarize_prompt,
-                "reasoning": None,
-                "response": full_text,
-                "sources": context["sources"],
-                "summary_diagnostics": diagnostics,
-            }
-            self._store_cached_collection_summary(payload)
-            yield full_text
-            yield payload
-            return
-
-        if covered_documents == 0:
-            full_text = "Unable to extract grounded evidence from the selected collection."
-            payload = {
-                "query": self.summarize_prompt,
-                "reasoning": None,
-                "response": full_text,
-                "sources": context["sources"],
-                "summary_diagnostics": diagnostics,
-            }
-            self._store_cached_collection_summary(payload)
-            yield full_text
-            yield payload
-            return
-
-        full_text = ""
-        running_text = ""
-        for chunk in self.post_retrieval_text_model.stream_complete(context["synthesis_prompt"]):
-            delta = getattr(chunk, "delta", None)
-            if isinstance(delta, str) and delta:
-                token = delta
-                running_text += token
-            else:
-                text_value = str(getattr(chunk, "text", "") or "")
-                if text_value.startswith(running_text):
-                    token = text_value[len(running_text) :]
-                else:
-                    token = text_value
-                running_text = text_value
-            if not token:
-                continue
-            full_text += token
-            yield token
-
-        payload = {
-            "query": self.summarize_prompt,
-            "reasoning": None,
-            "response": full_text,
-            "sources": context["sources"],
-            "summary_diagnostics": diagnostics,
-        }
-        self._store_cached_collection_summary(payload)
-        yield payload
-
     def build_tree_summary(self, progress: Callable[[int, int], None] | None = None) -> dict[str, Any]:
         """Build the map-reduce ("tree") summary for the currently scoped collection.
 
@@ -8485,9 +7796,7 @@ class RAG:
         summaries into one final synthesis call. On a complete
         (non-partial), non-empty build the result is persisted via
         :meth:`_store_cached_collection_summary` and the map cache is pruned
-        of any unit that no longer exists. Mirrors
-        :meth:`summarize_collection`'s payload shape so callers can swap
-        summarizers transparently.
+        of any unit that no longer exists.
 
         Args:
             progress: Optional callback invoked ``(processed, total)`` after
@@ -8496,7 +7805,7 @@ class RAG:
 
         Returns:
             dict[str, Any]: ``{"query", "reasoning", "response", "sources",
-            "summary_diagnostics"}``, matching :meth:`summarize_collection`.
+            "summary_diagnostics"}``.
 
         Raises:
             ValueError: If no collection is selected.
@@ -8511,8 +7820,8 @@ class RAG:
             coverage_unit = "posts"
         elif not kinds or kinds == {"document"}:
             # An empty collection has no units to derive a kind from; default
-            # to "documents" — the unit `summarize_collection` reports for an
-            # empty document collection — rather than the meaningless "units".
+            # to "documents" — the conventional unit for an empty document
+            # collection — rather than the meaningless "units".
             coverage_unit = "documents"
         else:
             coverage_unit = "units"

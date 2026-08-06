@@ -2135,12 +2135,7 @@ class SummaryConfig:
     """Dataclass for collection summarization precision settings."""
 
     coverage_target: float
-    max_docs: int
-    per_doc_top_k: int
     final_source_cap: int
-    social_chunking_enabled: bool
-    social_candidate_pool: int
-    social_diversity_limit: int
     on_ingest: bool
     map_window_tokens: int
     reduce_fanin: int
@@ -2149,12 +2144,7 @@ class SummaryConfig:
 
 def load_summary_env(
     default_coverage_target: float = 0.70,
-    default_max_docs: int = 30,
-    default_per_doc_top_k: int = 4,
     default_final_source_cap: int = 24,
-    default_social_chunking_enabled: bool = True,
-    default_social_candidate_pool: int = 48,
-    default_social_diversity_limit: int = 2,
     default_on_ingest: bool = True,
     default_map_window_tokens: int = 3000,
     default_reduce_fanin: int = 10,
@@ -2164,14 +2154,7 @@ def load_summary_env(
 
     Args:
         default_coverage_target (float): Target minimum document coverage ratio.
-        default_max_docs (int): Maximum number of documents sampled for summary.
-        default_per_doc_top_k (int): Maximum evidence chunks retrieved per document.
         default_final_source_cap (int): Maximum number of merged summary sources.
-        default_social_chunking_enabled (bool): Whether row-heavy social/table collections use
-            chunk/post-level summarization.
-        default_social_candidate_pool (int): Candidate retrieval depth for social/table summaries.
-        default_social_diversity_limit (int): Max sources per diversity bucket during
-            social/table summaries.
         default_on_ingest (bool): Whether a collection summary rebuild is triggered
             automatically at the end of an ingest job.
         default_map_window_tokens (int): Target token budget per map-stage window when
@@ -2184,16 +2167,8 @@ def load_summary_env(
     Returns:
         SummaryConfig: Parsed summary precision settings.
         - coverage_target (float): Target minimum document coverage ratio; clamped to [0.0, 1.0].
-        - max_docs (int): Maximum number of documents to sample for summarization.
-        - per_doc_top_k (int): Maximum number of evidence chunks to retrieve per document.
         - final_source_cap (int): Maximum number of merged sources to include in the final
             summary answer, to keep it concise and focused.
-        - social_chunking_enabled (bool): Whether row-heavy social/table
-          collections should use chunk/post-level summarization.
-        - social_candidate_pool (int): Candidate retrieval depth for social/table
-          collection summaries.
-        - social_diversity_limit (int): Maximum number of sources retained per
-          diversity bucket during social/table collection summaries.
         - on_ingest (bool): Whether a collection summary rebuild runs automatically
           at the end of an ingest job.
         - map_window_tokens (int): Target token budget per map-stage window; clamped
@@ -2207,34 +2182,7 @@ def load_summary_env(
     target = min(1.0, max(0.0, raw_target))
     return SummaryConfig(
         coverage_target=target,
-        max_docs=max(1, int(os.getenv("SUMMARY_MAX_DOCS", default_max_docs))),
-        per_doc_top_k=max(1, int(os.getenv("SUMMARY_PER_DOC_TOP_K", default_per_doc_top_k))),
         final_source_cap=max(1, int(os.getenv("SUMMARY_FINAL_SOURCE_CAP", default_final_source_cap))),
-        social_chunking_enabled=str(
-            os.getenv(
-                "SUMMARY_SOCIAL_CHUNKING_ENABLED",
-                default_social_chunking_enabled,
-            )
-        ).lower()
-        in {"true", "1", "yes"},
-        social_candidate_pool=max(
-            1,
-            int(
-                os.getenv(
-                    "SUMMARY_SOCIAL_CANDIDATE_POOL",
-                    default_social_candidate_pool,
-                )
-            ),
-        ),
-        social_diversity_limit=max(
-            1,
-            int(
-                os.getenv(
-                    "SUMMARY_SOCIAL_DIVERSITY_LIMIT",
-                    default_social_diversity_limit,
-                )
-            ),
-        ),
         on_ingest=str(os.getenv("SUMMARY_ON_INGEST", default_on_ingest)).lower() in {"true", "1", "yes"},
         map_window_tokens=max(100, int(os.getenv("SUMMARY_MAP_WINDOW_TOKENS", default_map_window_tokens))),
         reduce_fanin=max(2, int(os.getenv("SUMMARY_REDUCE_FANIN", default_reduce_fanin))),

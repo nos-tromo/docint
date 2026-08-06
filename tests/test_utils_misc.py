@@ -113,22 +113,12 @@ def test_load_summary_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch (pytest.MonkeyPatch): Fixture to clear environment variables.
     """
     monkeypatch.delenv("SUMMARY_COVERAGE_TARGET", raising=False)
-    monkeypatch.delenv("SUMMARY_MAX_DOCS", raising=False)
-    monkeypatch.delenv("SUMMARY_PER_DOC_TOP_K", raising=False)
     monkeypatch.delenv("SUMMARY_FINAL_SOURCE_CAP", raising=False)
-    monkeypatch.delenv("SUMMARY_SOCIAL_CHUNKING_ENABLED", raising=False)
-    monkeypatch.delenv("SUMMARY_SOCIAL_CANDIDATE_POOL", raising=False)
-    monkeypatch.delenv("SUMMARY_SOCIAL_DIVERSITY_LIMIT", raising=False)
 
     cfg = load_summary_env()
 
     assert cfg.coverage_target == 0.70
-    assert cfg.max_docs == 30
-    assert cfg.per_doc_top_k == 4
     assert cfg.final_source_cap == 24
-    assert cfg.social_chunking_enabled is True
-    assert cfg.social_candidate_pool == 48
-    assert cfg.social_diversity_limit == 2
 
 
 def test_load_summary_env_clamps_and_parses(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -138,22 +128,12 @@ def test_load_summary_env_clamps_and_parses(monkeypatch: pytest.MonkeyPatch) -> 
         monkeypatch (pytest.MonkeyPatch): Fixture to set environment variables.
     """
     monkeypatch.setenv("SUMMARY_COVERAGE_TARGET", "1.5")
-    monkeypatch.setenv("SUMMARY_MAX_DOCS", "12")
-    monkeypatch.setenv("SUMMARY_PER_DOC_TOP_K", "6")
     monkeypatch.setenv("SUMMARY_FINAL_SOURCE_CAP", "10")
-    monkeypatch.setenv("SUMMARY_SOCIAL_CHUNKING_ENABLED", "false")
-    monkeypatch.setenv("SUMMARY_SOCIAL_CANDIDATE_POOL", "64")
-    monkeypatch.setenv("SUMMARY_SOCIAL_DIVERSITY_LIMIT", "3")
 
     cfg = load_summary_env()
 
     assert cfg.coverage_target == 1.0
-    assert cfg.max_docs == 12
-    assert cfg.per_doc_top_k == 6
     assert cfg.final_source_cap == 10
-    assert cfg.social_chunking_enabled is False
-    assert cfg.social_candidate_pool == 64
-    assert cfg.social_diversity_limit == 3
 
 
 def test_load_frontend_env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

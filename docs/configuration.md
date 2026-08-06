@@ -390,12 +390,11 @@ Loaded by `load_summary_env()` (`env_cfg.py:1145`).
 | Variable | Default | Description |
 |---|---|---|
 | `SUMMARY_COVERAGE_TARGET` | `0.70` | Target document coverage ratio for summaries (clamped to `[0.0, 1.0]`). |
-| `SUMMARY_MAX_DOCS` | `30` | Max documents sampled. |
-| `SUMMARY_PER_DOC_TOP_K` | `4` | Max evidence chunks per document. |
 | `SUMMARY_FINAL_SOURCE_CAP` | `24` | Max merged sources in the final answer. |
-| `SUMMARY_SOCIAL_CHUNKING_ENABLED` | `true` | Use row-level summarisation for social/table collections. |
-| `SUMMARY_SOCIAL_CANDIDATE_POOL` | `48` | Candidate retrieval depth for social summaries. |
-| `SUMMARY_SOCIAL_DIVERSITY_LIMIT` | `2` | Max sources retained per diversity bucket. |
+| `SUMMARY_ON_INGEST` | `true` | Whether a collection summary rebuild runs automatically at the end of an ingest job. |
+| `SUMMARY_MAP_WINDOW_TOKENS` | `3000` | Target token budget per map-stage window (clamped to a minimum of `100`). |
+| `SUMMARY_REDUCE_FANIN` | `10` | Max map-stage summaries merged per reduce-stage call (clamped to a minimum of `2`). |
+| `SUMMARY_MAX_LLM_CALLS` | `500` | Upper bound on total LLM calls per tree-summary rebuild (clamped to a minimum of `1`). |
 
 ## Sessions — `SessionConfig`
 

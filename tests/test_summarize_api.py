@@ -212,9 +212,7 @@ def test_summarize_stream_route_removed(client: TestClient) -> None:
     assert res.status_code in (404, 405)
 
 
-def test_summarize_queue_requires_explicit_collection(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_summarize_queue_requires_explicit_collection(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Queuing a build without an explicit ``collection`` 400s.
 
     ``_resolve_request_collection`` falls back to the process-default active
