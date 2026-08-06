@@ -346,6 +346,13 @@ failed — has no degraded fallback: the first view builds one, live, in the
 background. `SUMMARY_ON_INGEST` (default `true`) also triggers a rebuild as
 the last stage of every ingest job.
 
+That post-ingest rebuild is fail-soft: if it raises (an LLM outage, for
+example), the ingest job does not fail — it surfaces a `warning` event
+("Collection summary generation failed.") on the same job and finishes
+normally, with its documents fully ingested and retrievable. The collection
+is simply left without a cached summary, so the next Summary view falls into
+the `202` build-in-background path described above.
+
 ## Server-Side Exports For Large Collections
 
 The React UI streams collection-wide CSVs from the backend so the browser

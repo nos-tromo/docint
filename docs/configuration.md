@@ -391,7 +391,7 @@ Loaded by `load_summary_env()` (`env_cfg.py:2145`).
 |---|---|---|
 | `SUMMARY_COVERAGE_TARGET` | `0.70` | Target document coverage ratio for summaries (clamped to `[0.0, 1.0]`). |
 | `SUMMARY_FINAL_SOURCE_CAP` | `24` | Max merged sources in the final answer. |
-| `SUMMARY_ON_INGEST` | `true` | Whether a collection summary rebuild runs automatically at the end of an ingest job. |
+| `SUMMARY_ON_INGEST` | `true` | Whether a collection summary rebuild runs automatically at the end of an ingest job. Fail-soft: an exception from the rebuild (e.g. an LLM outage) is caught, logged, and reported to the client as a `warning` SSE event (`"Collection summary generation failed."`) — the ingest job still completes normally and its documents are ingested and retrievable regardless. |
 | `SUMMARY_MAP_WINDOW_TOKENS` | `3000` | Target token budget per map-stage window (clamped to a minimum of `100`). |
 | `SUMMARY_REDUCE_FANIN` | `10` | Max map-stage summaries merged per reduce-stage call (clamped to a minimum of `2`). |
 | `SUMMARY_MAX_LLM_CALLS` | `500` | Upper bound on total LLM calls (map + intra-unit fold) a single tree-summary rebuild may issue, as a runaway-cost guard (clamped to a minimum of `1`). The reduce/synthesis calls that fold unit summaries down to one answer are never blocked by this cap. A rebuild that hits it mid-map is marked `partial` in `summary_diagnostics` and is never persisted as *the* cached summary. |
