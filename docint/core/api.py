@@ -109,6 +109,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         None: Control while the application serves requests.
     """
     await to_thread.run_sync(rag.probe_qdrant)
+    await to_thread.run_sync(rag.reconcile_quantization)
     yield
     await job_manager.stop()
 

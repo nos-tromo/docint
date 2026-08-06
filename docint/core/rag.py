@@ -362,6 +362,30 @@ QDRANT_SPARSE_VECTOR_NAME = "text-sparse-new"
 # and a DNS/connect failure resolves well within this bound.
 QDRANT_PROBE_TIMEOUT_S = 5.0
 
+
+def _quantization_matches(
+    current: object,
+    target: qdrant_models.TurboQuantization,
+) -> bool:
+    """Return whether *current* already equals the target TurboQuant config.
+
+    A live server may report ``always_ram=False`` where the target carries
+    ``None`` (unset), so those two are treated as equal.
+
+    Args:
+        current: The collection's live quantization config.
+        target: The TurboQuant config resolved from the environment.
+
+    Returns:
+        True when *current* is a TurboQuant config with the same bit width
+        and effective RAM-pinning as *target*.
+    """
+    if not isinstance(current, qdrant_models.TurboQuantization):
+        return False
+    return current.turbo.bits == target.turbo.bits and bool(current.turbo.always_ram) == bool(
+        target.turbo.always_ram
+    )
+
 # Metadata keys that stay visible to the chat LLM when the synthesizer
 # renders ``node.get_content(MetadataMode.LLM)``. Everything *not* in this
 # set is added to each emitted node's ``excluded_llm_metadata_keys`` so
@@ -2941,6 +2965,52 @@ class RAG:
             return False
         logger.info("Qdrant reachable at {}", self.qdrant_host)
         return True
+
+    def reconcile_quantization(self) -> int:
+        """Best-effort upgrade of existing collections to the configured quantization.
+
+        Runs once at application startup, after :meth:`probe_qdrant`. Add-only:
+        when quantization is disabled (``QDRANT_QUANTIZATION=none``) this is a
+        no-op — it never strips quantization from a collection, and a
+        deliberately configured non-TurboQuant family is never overwritten.
+        Collections without dense vector params are skipped. Every failure is
+        logged and swallowed; startup must never block on this.
+
+        Returns:
+            int: Number of collections whose quantization config was updated.
+        """
+        target = build_quantization_config()
+        if target is None:
+            return 0
+        updated = 0
+        try:
+            collections = self.qdrant_client.get_collections().collections
+        except Exception as exc:
+            logger.warning("Quantization reconcile skipped; could not list collections: {}", exc)
+            return 0
+        for entry in collections:
+            name = getattr(entry, "name", None)
+            if not name:
+                continue
+            try:
+                info = self.qdrant_client.get_collection(name)
+                params = getattr(getattr(info, "config", None), "params", None)
+                if not getattr(params, "vectors", None):
+                    continue
+                current = getattr(info.config, "quantization_config", None)
+                if current is not None:
+                    if not isinstance(current, qdrant_models.TurboQuantization):
+                        # A different quantization family was configured
+                        # deliberately; do not overwrite it from a startup pass.
+                        continue
+                    if _quantization_matches(current, target):
+                        continue
+                self.qdrant_client.update_collection(collection_name=name, quantization_config=target)
+                updated += 1
+                logger.info("Enabled TurboQuant quantization on collection '{}'.", name)
+            except Exception as exc:
+                logger.warning("Quantization reconcile failed for collection '{}': {}", name, exc)
+        return updated
 
     def probe_sparse_endpoint(self) -> None:
         """Verify the sparse endpoint answers before an ingest run starts.
