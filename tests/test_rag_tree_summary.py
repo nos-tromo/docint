@@ -88,15 +88,20 @@ class _FakeQdrant:
     evidence (covered separately by ``test_summary_image_evidence.py``).
     """
 
-    def __init__(self, points: list[Any]) -> None:
+    def __init__(self, points: list[Any], *, reverse_retrieve: bool = False) -> None:
         """Store the fixed point set.
 
         Args:
             points: Points the main-collection scroll returns.
+            reverse_retrieve: When ``True``, ``retrieve()`` returns matching
+                points in the reverse of the requested id order — Qdrant's
+                real ``retrieve()`` makes no ordering promise at all, and
+                this flag exists to prove callers do not rely on one.
         """
         self._points = points
         self._by_id = {str(p.id): p for p in points}
         self.retrieve_calls: list[list[str]] = []
+        self._reverse_retrieve = reverse_retrieve
 
     def collection_exists(self, collection_name: str) -> bool:
         """Report no companion collections as present.
@@ -145,7 +150,12 @@ class _FakeQdrant:
         with_payload: bool = True,
         with_vectors: bool = False,
     ) -> list[Any]:
-        """Return the stored points matching ``ids``, in no particular order.
+        """Return the stored points matching ``ids``.
+
+        Real Qdrant makes no promise that the response is ordered like the
+        requested ``ids``; when ``reverse_retrieve`` is set this stub
+        deliberately returns matches in the opposite order to catch callers
+        that assume otherwise.
 
         Args:
             collection_name: Collection being retrieved from (ignored).
@@ -158,7 +168,8 @@ class _FakeQdrant:
         """
         str_ids = [str(i) for i in ids]
         self.retrieve_calls.append(str_ids)
-        return [self._by_id[i] for i in str_ids if i in self._by_id]
+        matched = [self._by_id[i] for i in str_ids if i in self._by_id]
+        return list(reversed(matched)) if self._reverse_retrieve else matched
 
 
 def _two_document_points() -> list[Any]:
@@ -189,9 +200,14 @@ def _two_document_points() -> list[Any]:
     ]
 
 
-@pytest.fixture
-def rag_with_fake_collection(tmp_path: Path) -> RAG:
-    """Build a ``RAG`` wired to a fake two-document Qdrant collection.
+def _build_rag(
+    tmp_path: Path,
+    *,
+    points: list[Any],
+    collection: str = "tree-summary-fixture",
+    reverse_retrieve: bool = False,
+) -> RAG:
+    """Build a ``RAG`` wired to a fake Qdrant collection over ``points``.
 
     Mirrors the construction style of ``test_summary_image_evidence.py``: a
     bare ``RAG(qdrant_collection=...)`` with its Qdrant client and image
@@ -202,12 +218,15 @@ def rag_with_fake_collection(tmp_path: Path) -> RAG:
 
     Args:
         tmp_path: Pytest's per-test temporary directory.
+        points: Points the fake Qdrant client's scroll/retrieve serve.
+        collection: The (logical == physical here) collection name.
+        reverse_retrieve: Forwarded to ``_FakeQdrant`` — see its docstring.
 
     Returns:
-        RAG: A ready-to-use instance with two synthetic documents.
+        RAG: A ready-to-use instance.
     """
-    rag = RAG(qdrant_collection="tree-summary-fixture")
-    rag._qdrant_client = cast(Any, _FakeQdrant(_two_document_points()))
+    rag = RAG(qdrant_collection=collection)
+    rag._qdrant_client = cast(Any, _FakeQdrant(points, reverse_retrieve=reverse_retrieve))
     rag._qdrant_src_dir = tmp_path
     rag._post_retrieval_text_model = cast(Any, _StubTextModel())
     # Deterministic, locale-independent map/fold prompts (see the module
@@ -222,6 +241,19 @@ def rag_with_fake_collection(tmp_path: Path) -> RAG:
         ),
     )
     return rag
+
+
+@pytest.fixture
+def rag_with_fake_collection(tmp_path: Path) -> RAG:
+    """Build a ``RAG`` wired to a fake two-document Qdrant collection.
+
+    Args:
+        tmp_path: Pytest's per-test temporary directory.
+
+    Returns:
+        RAG: A ready-to-use instance with two synthetic documents.
+    """
+    return _build_rag(tmp_path, points=_two_document_points())
 
 
 def test_build_tree_summary_end_to_end(rag_with_fake_collection: RAG) -> None:
@@ -313,3 +345,41 @@ def test_cached_collection_summary_requires_selected_collection() -> None:
 
     with pytest.raises(ValueError, match="No collection selected"):
         rag.cached_collection_summary()
+
+
+def test_build_tree_summary_sources_follow_evidence_order_despite_retrieve_reordering(tmp_path: Path) -> None:
+    """Sources are ordered by covered-unit evidence order, not retrieve()'s response order.
+
+    Qdrant's ``retrieve()`` does not promise its response is ordered like the
+    requested ids — the same invariant ``_fetch_unit_chunks`` already guards
+    against by re-indexing before use. The fake client here is configured to
+    return points in the *reverse* of the requested order, which would have
+    swapped ``doc-one``/``doc-two`` and misnumbered their citations under the
+    naive "append points as retrieve() returns them" implementation.
+    """
+    rag = _build_rag(tmp_path, points=_two_document_points(), reverse_retrieve=True)
+
+    payload = rag.build_tree_summary()
+
+    sources = payload["sources"]
+    assert [source.get("filename") for source in sources] == ["doc-one.txt", "doc-two.txt"]
+    assert [source.get("citation_index") for source in sources] == [1, 2]
+
+
+def test_build_tree_summary_empty_collection(tmp_path: Path) -> None:
+    """An empty collection yields the sampling path's "no documents" message and coverage_unit."""
+    rag = _build_rag(tmp_path, points=[])
+
+    payload = rag.build_tree_summary()
+
+    assert payload["response"] == "No documents available in the selected collection."
+    assert payload["sources"] == []
+    diag = payload["summary_diagnostics"]
+    assert diag["total_documents"] == 0
+    assert diag["covered_documents"] == 0
+    # No units exist to derive a kind from; "documents" is the sensible
+    # default (matching what summarize_collection reports for an empty
+    # document collection) rather than the meaningless "units" a bare
+    # `else` branch would fall through to.
+    assert diag["coverage_unit"] == "documents"
+    assert diag["partial"] is False

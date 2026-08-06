@@ -8507,10 +8507,13 @@ class RAG:
         units = partition_units(self._iter_collection_points())
         total_units = len(units)
         kinds = {unit.kind for unit in units}
-        if kinds == {"document"}:
-            coverage_unit = "documents"
-        elif kinds == {"social_bucket"}:
+        if kinds == {"social_bucket"}:
             coverage_unit = "posts"
+        elif not kinds or kinds == {"document"}:
+            # An empty collection has no units to derive a kind from; default
+            # to "documents" — the unit `summarize_collection` reports for an
+            # empty document collection — rather than the meaningless "units".
+            coverage_unit = "documents"
         else:
             coverage_unit = "units"
 
@@ -8592,6 +8595,13 @@ class RAG:
                 for evidence_id in unit_result.evidence_ids:
                     if evidence_id not in evidence_ids:
                         evidence_ids.append(evidence_id)
+
+            # Qdrant's retrieve() does not promise the response is ordered
+            # like the requested ids (the same reason _fetch_unit_chunks
+            # re-orders by member_ids above) — so results are indexed by id
+            # first and then emitted by walking evidence_ids in covered-unit
+            # order, not in whatever order retrieve() happened to return them.
+            payload_by_id: dict[str, Any] = {}
             for batch in chunk_nodes(evidence_ids, 200):
                 try:
                     points = self.qdrant_client.retrieve(
@@ -8608,17 +8618,20 @@ class RAG:
                     )
                     continue
                 for point in points or []:
-                    payload = getattr(point, "payload", None)
-                    if not isinstance(payload, dict):
-                        continue
-                    sources.append(
-                        self._source_from_payload(
-                            collection=self.qdrant_collection,
-                            payload=payload,
-                        )
+                    point_id = str(getattr(point, "id", "") or "")
+                    if point_id:
+                        payload_by_id[point_id] = getattr(point, "payload", None)
+
+            for evidence_id in evidence_ids:
+                payload = payload_by_id.get(evidence_id)
+                if not isinstance(payload, dict):
+                    continue
+                sources.append(
+                    self._source_from_payload(
+                        collection=self.qdrant_collection,
+                        payload=payload,
                     )
-                    if len(sources) >= self.summary_final_source_cap:
-                        break
+                )
                 if len(sources) >= self.summary_final_source_cap:
                     break
             self._number_summary_sources(sources)
